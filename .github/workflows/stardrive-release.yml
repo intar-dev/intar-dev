@@ -126,26 +126,65 @@ jobs:
         working-directory: ${{ env.STARDRIVE_DIR }}
         run: go test ./...
 
-      - name: Create local release tag
+      - name: Build release artifacts
+        working-directory: ${{ env.STARDRIVE_DIR }}
         env:
-          TAG: ${{ steps.next.outputs.tag }}
+          VERSION: ${{ steps.next.outputs.version }}
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "Release ${TAG}"
+          dist_dir="${PWD}/dist"
+          mkdir -p "${dist_dir}"
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          workdir: ${{ env.STARDRIVE_DIR }}
-          args: release --clean --skip=publish
-        env:
-          GORELEASER_CURRENT_TAG: ${{ steps.next.outputs.version_tag }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          build_date="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          ldflags="-s -w"
+          ldflags="${ldflags} -X github.com/intar-dev/stardrive/internal/buildinfo.Version=${VERSION}"
+          ldflags="${ldflags} -X github.com/intar-dev/stardrive/internal/buildinfo.Commit=${GITHUB_SHA}"
+          ldflags="${ldflags} -X github.com/intar-dev/stardrive/internal/buildinfo.Date=${build_date}"
+
+          build_archive() {
+            local goos="$1"
+            local goarch="$2"
+            local format="$3"
+            local archive="${PROJECT_ID}_${VERSION}_${goos}_${goarch}"
+            local binary="${PROJECT_ID}"
+            local workdir
+
+            if [ "${goos}" = "windows" ]; then
+              binary="${binary}.exe"
+            fi
+
+            workdir="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+              go build -trimpath -ldflags "${ldflags}" -o "${workdir}/${binary}" .
+
+            case "${format}" in
+              tar.gz)
+                tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" "${binary}"
+                ;;
+              zip)
+                (cd "${workdir}" && zip -q "${dist_dir}/${archive}.zip" "${binary}")
+                ;;
+              *)
+                echo "Unsupported archive format: ${format}" >&2
+                exit 1
+                ;;
+            esac
+
+            rm -rf "${workdir}"
+          }
+
+          build_archive linux amd64 tar.gz
+          build_archive linux arm64 tar.gz
+          build_archive darwin amd64 tar.gz
+          build_archive darwin arm64 tar.gz
+          build_archive windows amd64 zip
+          build_archive windows arm64 zip
+
+          (
+            cd "${dist_dir}"
+            sha256sum "${PROJECT_ID}_${VERSION}_"* > "${PROJECT_ID}_${VERSION}_checksums.txt"
+          )
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
