@@ -33,8 +33,7 @@ func NewClient(ctx context.Context, siteURL, clientID, clientSecret string) (*Cl
 
 	slog.Debug("authenticating with Infisical", "site_url", siteURL)
 	sdk := infisicalsdk.NewInfisicalClient(ctx, infisicalsdk.Config{
-		SiteUrl:          siteURL,
-		AutoTokenRefresh: true,
+		SiteUrl: siteURL,
 	})
 	if _, err := sdk.Auth().UniversalAuthLogin(strings.TrimSpace(clientID), strings.TrimSpace(clientSecret)); err != nil {
 		return nil, fmt.Errorf("infisical universal auth login: %w", err)
