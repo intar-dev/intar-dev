@@ -21,7 +21,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  PROJECT_ID: stardrive
   STARDRIVE_DIR: projects/stardrive
+  TAG_PREFIX: stardrive/
 
 jobs:
   release:
@@ -48,16 +50,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          latest_tag="$(git tag --list 'v*' --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+          latest_project_tag="$(git tag --list "${TAG_PREFIX}v*" --sort=-v:refname | awk -v prefix="${TAG_PREFIX}" '
+            index($0, prefix "v") == 1 && $0 ~ /^.+\/v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }
+          ')"
+          previous_tag=""
 
-          if [ -z "${latest_tag}" ] && [ -f "Formula/stardrive.rb" ]; then
-            latest_tag="$(sed -n 's/^[[:space:]]*version "\([0-9][0-9.]*\)".*/v\1/p' Formula/stardrive.rb | head -n 1)"
+          if [ -n "${latest_project_tag}" ]; then
+            latest_version_tag="${latest_project_tag#"${TAG_PREFIX}"}"
+            previous_tag="${latest_project_tag}"
+          elif [ -f "Formula/stardrive.rb" ]; then
+            latest_version_tag="$(sed -n 's/^[[:space:]]*version "\([0-9][0-9.]*\)".*/v\1/p' Formula/stardrive.rb | head -n 1)"
+
+            if [ -n "${latest_version_tag}" ] && git rev-parse --verify --quiet "refs/tags/${latest_version_tag}" >/dev/null; then
+              previous_tag="${latest_version_tag}"
+            fi
+          else
+            latest_version_tag=""
           fi
 
-          if [ -z "${latest_tag}" ]; then
-            next_tag="v0.1.0"
+          if [ -z "${latest_version_tag}" ]; then
+            next_version_tag="v0.1.0"
           else
-            version="${latest_tag#v}"
+            version="${latest_version_tag#v}"
             IFS='.' read -r major minor patch <<<"${version}"
 
             case "${BUMP}" in
@@ -79,26 +93,23 @@ jobs:
                 ;;
             esac
 
-            next_tag="v${major}.${minor}.${patch}"
+            next_version_tag="v${major}.${minor}.${patch}"
           fi
 
-          echo "tag=${next_tag}" >> "${GITHUB_OUTPUT}"
+          next_version="${next_version_tag#v}"
+          next_tag="${TAG_PREFIX}${next_version_tag}"
 
-      - name: Create annotated tag
-        env:
-          TAG: ${{ steps.next.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          if git rev-parse "${TAG}" >/dev/null 2>&1; then
-            echo "Tag ${TAG} already exists." >&2
+          if git rev-parse --verify --quiet "refs/tags/${next_tag}" >/dev/null; then
+            echo "Tag ${next_tag} already exists." >&2
             exit 1
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
+          {
+            echo "tag=${next_tag}"
+            echo "version=${next_version}"
+            echo "version_tag=${next_version_tag}"
+            echo "previous_tag=${previous_tag}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -115,19 +126,45 @@ jobs:
         working-directory: ${{ env.STARDRIVE_DIR }}
         run: go test ./...
 
+      - name: Create local release tag
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
           workdir: ${{ env.STARDRIVE_DIR }}
-          args: release --clean
+          args: release --clean --skip=publish
         env:
+          GORELEASER_CURRENT_TAG: ${{ steps.next.outputs.version_tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.next.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ format('{0} {1}', env.PROJECT_ID, steps.next.outputs.version_tag) }}
+          generate_release_notes: true
+          previous_tag: ${{ steps.next.outputs.previous_tag }}
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.STARDRIVE_DIR }}/dist/${{ env.PROJECT_ID }}_${{ steps.next.outputs.version }}_*
 
       - name: Update Homebrew formula
         env:
           TAG: ${{ steps.next.outputs.tag }}
+          VERSION: ${{ steps.next.outputs.version }}
+          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
         run: |
           set -euo pipefail
 
@@ -136,7 +173,7 @@ jobs:
 
           ./projects/stardrive/scripts/update-homebrew-formula.sh \
             --tag "${TAG}" \
-            --checksums "${STARDRIVE_DIR}/dist/stardrive_${TAG#v}_checksums.txt" \
+            --checksums "${STARDRIVE_DIR}/dist/stardrive_${VERSION}_checksums.txt" \
             --repo "${GITHUB_REPOSITORY}"
 
           if git diff --quiet --exit-code -- Formula/stardrive.rb; then
@@ -146,5 +183,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/stardrive.rb
-          git commit -m "chore(homebrew): update formula for ${TAG}"
+          git commit -m "chore(homebrew): update stardrive formula for ${VERSION_TAG}"
           git push origin HEAD:main

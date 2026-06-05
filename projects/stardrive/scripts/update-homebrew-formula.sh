@@ -14,7 +14,7 @@ checksums=""
 usage() {
   cat <<'EOF'
 Usage:
-  projects/stardrive/scripts/update-homebrew-formula.sh --tag v0.1.0 --checksums projects/stardrive/dist/stardrive_0.1.0_checksums.txt
+  projects/stardrive/scripts/update-homebrew-formula.sh --tag stardrive/v0.1.0 --checksums projects/stardrive/dist/stardrive_0.1.0_checksums.txt
 EOF
 }
 
@@ -70,7 +70,14 @@ if [[ ! -f "$checksums" ]]; then
   exit 1
 fi
 
-version="${tag#v}"
+version_tag="${tag##*/}"
+if [[ ! "$version_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "tag must end with a semantic version like v0.1.0: $tag" >&2
+  exit 1
+fi
+
+version="${version_tag#v}"
+download_tag="${tag//\//%2F}"
 darwin_arm64_archive="stardrive_${version}_darwin_arm64.tar.gz"
 darwin_amd64_archive="stardrive_${version}_darwin_amd64.tar.gz"
 linux_arm64_archive="stardrive_${version}_linux_arm64.tar.gz"
@@ -104,24 +111,24 @@ class Stardrive < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/${release_repo}/releases/download/${tag}/${darwin_arm64_archive}"
+      url "https://github.com/${release_repo}/releases/download/${download_tag}/${darwin_arm64_archive}"
       sha256 "${darwin_arm64_sha}"
     end
 
     on_intel do
-      url "https://github.com/${release_repo}/releases/download/${tag}/${darwin_amd64_archive}"
+      url "https://github.com/${release_repo}/releases/download/${download_tag}/${darwin_amd64_archive}"
       sha256 "${darwin_amd64_sha}"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/${release_repo}/releases/download/${tag}/${linux_arm64_archive}"
+      url "https://github.com/${release_repo}/releases/download/${download_tag}/${linux_arm64_archive}"
       sha256 "${linux_arm64_sha}"
     end
 
     on_intel do
-      url "https://github.com/${release_repo}/releases/download/${tag}/${linux_amd64_archive}"
+      url "https://github.com/${release_repo}/releases/download/${download_tag}/${linux_amd64_archive}"
       sha256 "${linux_amd64_sha}"
     end
   end
