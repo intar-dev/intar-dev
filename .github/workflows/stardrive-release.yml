@@ -37,7 +37,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: namespacelabs/nscloud-checkout-action@v9
         with:
           fetch-depth: 0
 
@@ -101,18 +101,22 @@ jobs:
           git push origin "${TAG}"
 
       - name: Set up Go
-        uses: actions/setup-go@v6.4.0
+        uses: actions/setup-go@v6
         with:
           go-version-file: ${{ env.STARDRIVE_DIR }}/go.mod
-          cache: true
-          cache-dependency-path: ${{ env.STARDRIVE_DIR }}/go.sum
+          cache: false
+
+      - name: Set up Namespace Go cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: go
 
       - name: Run tests
         working-directory: ${{ env.STARDRIVE_DIR }}
         run: go test ./...
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7.2.1
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
