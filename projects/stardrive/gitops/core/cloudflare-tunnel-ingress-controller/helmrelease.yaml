@@ -1,0 +1,28 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudflare-tunnel-ingress-controller
+  namespace: cloudflare-tunnel
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: cloudflare-tunnel-ingress-controller
+      version: 0.0.23
+      sourceRef:
+        kind: HelmRepository
+        name: cloudflare-tunnel-ingress-controller
+        namespace: cloudflare-tunnel
+  values:
+    cloudflare:
+      secretRef:
+        name: cloudflare-tunnel-credentials
+        accountIDKey: cloudflare-account-id
+        tunnelNameKey: cloudflare-tunnel-name
+        apiTokenKey: api-token
+    ingressClass:
+      name: cloudflare-tunnel
+      isDefaultClass: false
+    dnsCommentTemplate: "managed by stardrive"
+    cloudflared:
+      replicaCount: 2

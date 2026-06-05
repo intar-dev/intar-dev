@@ -1,0 +1,41 @@
+name: Stardrive Validate
+run-name: "${{ github.event_name == 'pull_request' && format('Stardrive validate PR #{0}', github.event.pull_request.number) || format('Stardrive validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/stardrive-ci.yml"
+      - ".github/workflows/stardrive-release.yml"
+      - "Formula/stardrive.rb"
+      - "projects/stardrive/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/stardrive-ci.yml"
+      - ".github/workflows/stardrive-release.yml"
+      - "Formula/stardrive.rb"
+      - "projects/stardrive/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run stardrive tests
+    runs-on: intar-dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: projects/stardrive/go.mod
+          cache: true
+          cache-dependency-path: projects/stardrive/go.sum
+
+      - name: Run tests
+        working-directory: projects/stardrive
+        run: go test ./...

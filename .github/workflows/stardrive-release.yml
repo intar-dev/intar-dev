@@ -1,0 +1,146 @@
+name: Stardrive Release
+run-name: "${{ format('Stardrive release {0} from {1}', inputs.bump, github.ref_name) }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version increment for the next release tag
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stardrive-release
+  cancel-in-progress: false
+
+env:
+  STARDRIVE_DIR: projects/stardrive
+
+jobs:
+  release:
+    name: Tag and publish stardrive release
+    runs-on: intar-dev
+
+    steps:
+      - name: Ensure the workflow runs from main
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "This workflow must be run from main, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Determine next release tag
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          latest_tag="$(git tag --list 'v*' --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+
+          if [ -z "${latest_tag}" ] && [ -f "Formula/stardrive.rb" ]; then
+            latest_tag="$(sed -n 's/^[[:space:]]*version "\([0-9][0-9.]*\)".*/v\1/p' Formula/stardrive.rb | head -n 1)"
+          fi
+
+          if [ -z "${latest_tag}" ]; then
+            next_tag="v0.1.0"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<<"${version}"
+
+            case "${BUMP}" in
+              patch)
+                patch=$((patch + 1))
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              *)
+                echo "Unsupported bump: ${BUMP}" >&2
+                exit 1
+                ;;
+            esac
+
+            next_tag="v${major}.${minor}.${patch}"
+          fi
+
+          echo "tag=${next_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create annotated tag
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: ${{ env.STARDRIVE_DIR }}/go.mod
+          cache: true
+          cache-dependency-path: ${{ env.STARDRIVE_DIR }}/go.sum
+
+      - name: Run tests
+        working-directory: ${{ env.STARDRIVE_DIR }}
+        run: go test ./...
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7.2.1
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          workdir: ${{ env.STARDRIVE_DIR }}
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin main
+          git checkout -B main origin/main
+
+          ./projects/stardrive/scripts/update-homebrew-formula.sh \
+            --tag "${TAG}" \
+            --checksums "${STARDRIVE_DIR}/dist/stardrive_${TAG#v}_checksums.txt" \
+            --repo "${GITHUB_REPOSITORY}"
+
+          if git diff --quiet --exit-code -- Formula/stardrive.rb; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/stardrive.rb
+          git commit -m "chore(homebrew): update formula for ${TAG}"
+          git push origin HEAD:main

@@ -1,0 +1,46 @@
+version: 2
+
+project_name: stardrive
+
+builds:
+  - id: stardrive
+    main: .
+    binary: stardrive
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/intar-dev/stardrive/internal/buildinfo.Version={{ .Version }}
+        -X github.com/intar-dev/stardrive/internal/buildinfo.Commit={{ .Commit }}
+        -X github.com/intar-dev/stardrive/internal/buildinfo.Date={{ .Date }}
+
+archives:
+  - id: stardrive
+    ids:
+      - stardrive
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - none*
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+changelog:
+  use: github-native
+
+release:
+  draft: false
