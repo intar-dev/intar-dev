@@ -23,7 +23,7 @@ permissions:
 jobs:
   test:
     name: Run stardrive tests
-    runs-on: intar-dev
+    runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Checkout

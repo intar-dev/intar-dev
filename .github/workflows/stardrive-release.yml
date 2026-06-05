@@ -26,7 +26,7 @@ env:
 jobs:
   release:
     name: Tag and publish stardrive release
-    runs-on: intar-dev
+    runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Ensure the workflow runs from main
