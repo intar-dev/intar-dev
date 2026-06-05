@@ -1,29 +1,29 @@
 class Stardrive < Formula
   desc "Manage Hetzner-hosted Talos clusters with Infisical-backed GitOps"
   homepage "https://github.com/intar-dev/intar-dev/tree/main/projects/stardrive"
-  version "0.1.6"
+  version "0.1.7"
 
   on_macos do
     on_arm do
-      url "https://github.com/intar-dev/intar-dev/releases/download/v0.1.6/stardrive_0.1.6_darwin_arm64.tar.gz"
-      sha256 "0ed9f82f7c20238b87364b9b33a34a61c1b3e59f504f7657b23480a1acb6291d"
+      url "https://github.com/intar-dev/intar-dev/releases/download/stardrive%2Fv0.1.7/stardrive_0.1.7_darwin_arm64.tar.gz"
+      sha256 "d880ca91ef811da7e23ce5040ef4a5c1818dc98e4e13e949b6b7d1f427fbbf2f"
     end
 
     on_intel do
-      url "https://github.com/intar-dev/intar-dev/releases/download/v0.1.6/stardrive_0.1.6_darwin_amd64.tar.gz"
-      sha256 "c1a7a4136f4cc74a83fc74a4dfb88c53d39d6788abdbe9943a653dbae39a1d61"
+      url "https://github.com/intar-dev/intar-dev/releases/download/stardrive%2Fv0.1.7/stardrive_0.1.7_darwin_amd64.tar.gz"
+      sha256 "816c5fc612e613d158ad10f3c57f63050e937a5b3fc6aa9a0e8abfff7407f028"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/intar-dev/intar-dev/releases/download/v0.1.6/stardrive_0.1.6_linux_arm64.tar.gz"
-      sha256 "5fa33b1ba4af2c5ab5d14ed6a9078834463f10673b4ca6a92c28ad9510656bc3"
+      url "https://github.com/intar-dev/intar-dev/releases/download/stardrive%2Fv0.1.7/stardrive_0.1.7_linux_arm64.tar.gz"
+      sha256 "db52984537aa470c0947fc43cbc0f0e6523f3996e70c128bfe623a437fa11756"
     end
 
     on_intel do
-      url "https://github.com/intar-dev/intar-dev/releases/download/v0.1.6/stardrive_0.1.6_linux_amd64.tar.gz"
-      sha256 "f0e5a6123ea89daecb395860bfc6a112e2385a94c3fea95b6aa597df02b0c76e"
+      url "https://github.com/intar-dev/intar-dev/releases/download/stardrive%2Fv0.1.7/stardrive_0.1.7_linux_amd64.tar.gz"
+      sha256 "0589fc6afdce4c9cddbb14593b2b2576c6f6f2c202915d3861e1f4f128648c79"
     end
   end
 
