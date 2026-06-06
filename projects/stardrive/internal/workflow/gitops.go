@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -59,8 +60,15 @@ func (a *App) GitOpsPublish(ctx context.Context, req GitOpsPublishRequest) error
 		return err
 	}
 	defer cleanupRendered()
+	clusterGitOpsRoot, err := clusterGitOpsDir(req.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if err := syncRenderedGitOpsSource(renderedRoot, clusterGitOpsRoot); err != nil {
+		return err
+	}
 	artifactPath := filepath.Join(artifactDir, "gitops.tgz")
-	if err := archiveDirectoryAsTarGz(renderedRoot, artifactPath); err != nil {
+	if err := archiveDirectoryAsTarGz(clusterGitOpsRoot, artifactPath); err != nil {
 		return err
 	}
 	artifactTag, err := gitOpsArtifactTag(artifactPath)
@@ -109,7 +117,7 @@ func (a *App) GitOpsPublish(ctx context.Context, req GitOpsPublishRequest) error
 	}
 	_ = a.applyFluxBootstrapOCI(ctx, cfg, kubeconfigPath, runtime)
 
-	a.Printf("Published %s to oci://%s/%s:%s\n", a.opts.Paths.GitOpsDir, cfg.EffectiveRegistryAddress(), gitOpsRepository(cfg), artifactTag)
+	a.Printf("Published %s to oci://%s/%s:%s\n", clusterGitOpsRoot, cfg.EffectiveRegistryAddress(), gitOpsRepository(cfg), artifactTag)
 	return nil
 }
 
@@ -241,6 +249,163 @@ func renderGitOpsSource(sourceRoot string, cfg *config.Config) (string, func(), 
 	}
 
 	return renderedRoot, cleanup, nil
+}
+
+func clusterGitOpsDir(configPath string) (string, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return "", fmt.Errorf("config path is required")
+	}
+	return filepath.Join(filepath.Dir(configPath), "gitops"), nil
+}
+
+func syncRenderedGitOpsSource(renderedRoot, targetRoot string) error {
+	renderedRoot = strings.TrimSpace(renderedRoot)
+	targetRoot = strings.TrimSpace(targetRoot)
+	if renderedRoot == "" {
+		return fmt.Errorf("rendered gitops directory is required")
+	}
+	if targetRoot == "" {
+		return fmt.Errorf("target gitops directory is required")
+	}
+	if err := ensureDirectory(renderedRoot); err != nil {
+		return err
+	}
+
+	targetExists := true
+	if err := ensureDirectory(targetRoot); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		targetExists = false
+	}
+	if !targetExists {
+		return copyDirectoryContents(renderedRoot, targetRoot)
+	}
+
+	empty, err := isDirectoryEmpty(targetRoot)
+	if err != nil {
+		return err
+	}
+	if empty {
+		return copyDirectoryContents(renderedRoot, targetRoot)
+	}
+
+	if err := replaceGitOpsPath(renderedRoot, targetRoot, "core"); err != nil {
+		return err
+	}
+	if err := replaceGitOpsPath(renderedRoot, targetRoot, "kustomization.yaml"); err != nil {
+		return err
+	}
+	return copyGitOpsDefaultsIfMissing(renderedRoot, targetRoot, "apps")
+}
+
+func replaceGitOpsPath(sourceRoot, targetRoot, relative string) error {
+	sourcePath := filepath.Join(sourceRoot, relative)
+	if _, err := os.Stat(sourcePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat gitops source %s: %w", sourcePath, err)
+	}
+	targetPath := filepath.Join(targetRoot, relative)
+	if err := os.RemoveAll(targetPath); err != nil {
+		return fmt.Errorf("remove gitops target %s: %w", targetPath, err)
+	}
+	return copyPath(sourcePath, targetPath)
+}
+
+func copyGitOpsDefaultsIfMissing(sourceRoot, targetRoot, relative string) error {
+	sourcePath := filepath.Join(sourceRoot, relative)
+	if _, err := os.Stat(sourcePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat gitops source %s: %w", sourcePath, err)
+	}
+	return filepath.Walk(sourcePath, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		childRelative, err := filepath.Rel(sourcePath, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(targetRoot, relative, childRelative)
+		if childRelative == "." {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		if _, err := os.Stat(targetPath); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat gitops target %s: %w", targetPath, err)
+		}
+		return copyFile(path, targetPath, info.Mode())
+	})
+}
+
+func copyDirectoryContents(sourceRoot, targetRoot string) error {
+	if err := os.MkdirAll(targetRoot, 0o755); err != nil {
+		return fmt.Errorf("create gitops target dir %s: %w", targetRoot, err)
+	}
+	return filepath.Walk(sourceRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		targetPath := filepath.Join(targetRoot, relative)
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		return copyFile(path, targetPath, info.Mode())
+	})
+}
+
+func copyPath(sourcePath, targetPath string) error {
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", sourcePath, err)
+	}
+	if info.IsDir() {
+		return copyDirectoryContents(sourcePath, targetPath)
+	}
+	return copyFile(sourcePath, targetPath, info.Mode())
+}
+
+func ensureDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat directory %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	return nil
+}
+
+func isDirectoryEmpty(path string) (bool, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open directory %s: %w", path, err)
+	}
+	defer dir.Close()
+	_, err = dir.Readdirnames(1)
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return true, nil
+	}
+	return false, fmt.Errorf("read directory %s: %w", path, err)
 }
 
 func renderTemplateFile(sourcePath, targetPath string, data gitOpsTemplateData) error {
