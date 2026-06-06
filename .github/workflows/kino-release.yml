@@ -184,10 +184,15 @@ jobs:
 
           echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install cross
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cross
+          tool: cargo-zigbuild
 
       - name: Build release artifacts
         working-directory: ${{ env.KINO_DIR }}
@@ -203,10 +208,11 @@ jobs:
             local arch="$1"
             local target="$2"
             local archive="${PROJECT_ID}_${VERSION}_linux_${arch}"
-            local binary="target/${target}/release/${PROJECT_ID}"
+            local target_dir="${PWD}/target/${target}"
+            local binary="${target_dir}/${target}/release/${PROJECT_ID}"
             local workdir
 
-            cross build --locked --release -p "${PROJECT_ID}" --target "${target}"
+            CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p "${PROJECT_ID}" --target "${target}"
 
             file "${binary}"
             if readelf -d "${binary}" | grep -q "NEEDED"; then
