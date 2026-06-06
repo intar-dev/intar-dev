@@ -1,0 +1,253 @@
+name: Kino Release
+run-name: "${{ format('Kino release {0} from {1}', inputs.bump, github.ref_name) }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version increment for the next release tag
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kino-release
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: kino
+  KINO_DIR: projects/kino
+  CARGO_MANIFEST: projects/kino/crates/kino/Cargo.toml
+  TAG_PREFIX: kino/
+
+jobs:
+  release:
+    name: Tag and publish kino release
+    runs-on: namespace-profile-intar-dev
+
+    steps:
+      - name: Ensure the workflow runs from main
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "This workflow must be run from main, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          fetch-depth: 0
+
+      - name: Determine next release tag
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          latest_project_tag="$(git tag --list "${TAG_PREFIX}v*" --sort=-v:refname | awk -v prefix="${TAG_PREFIX}" '
+            index($0, prefix "v") == 1 && $0 ~ /^.+\/v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }
+          ')"
+          previous_tag=""
+
+          if [ -n "${latest_project_tag}" ]; then
+            latest_version_tag="${latest_project_tag#"${TAG_PREFIX}"}"
+            previous_tag="${latest_project_tag}"
+          else
+            cargo_version="$(sed -n 's/^version = "\([0-9][0-9.]*\)".*/\1/p' "${CARGO_MANIFEST}" | head -n 1)"
+
+            if [ -n "${cargo_version}" ]; then
+              latest_version_tag="v${cargo_version}"
+            else
+              latest_version_tag=""
+            fi
+          fi
+
+          if [ -z "${latest_version_tag}" ]; then
+            next_version_tag="v0.1.0"
+          else
+            version="${latest_version_tag#v}"
+            IFS='.' read -r major minor patch <<<"${version}"
+
+            case "${BUMP}" in
+              patch)
+                patch=$((patch + 1))
+                ;;
+              minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+              major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+              *)
+                echo "Unsupported bump: ${BUMP}" >&2
+                exit 1
+                ;;
+            esac
+
+            next_version_tag="v${major}.${minor}.${patch}"
+          fi
+
+          next_version="${next_version_tag#v}"
+          next_tag="${TAG_PREFIX}${next_version_tag}"
+
+          if git rev-parse --verify --quiet "refs/tags/${next_tag}" >/dev/null; then
+            echo "Tag ${next_tag} already exists." >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${next_tag}"
+            echo "version=${next_version}"
+            echo "version_tag=${next_version_tag}"
+            echo "previous_tag=${previous_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Set up Namespace Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Apply release version
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          manifest = pathlib.Path(os.environ["CARGO_MANIFEST"])
+          version = os.environ["VERSION"]
+          text = manifest.read_text()
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(f"failed to update package version in {manifest}")
+          manifest.write_text(updated)
+          PY
+
+          cargo update --manifest-path "${KINO_DIR}/Cargo.toml" -p kino --precise "${VERSION}"
+
+      - name: Run checks
+        working-directory: ${{ env.KINO_DIR }}
+        run: just verify
+
+      - name: Commit release version
+        id: version_commit
+        env:
+          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet --exit-code -- "${CARGO_MANIFEST}" "${KINO_DIR}/Cargo.lock"; then
+            release_sha="$(git rev-parse HEAD)"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "${CARGO_MANIFEST}" "${KINO_DIR}/Cargo.lock"
+            git commit -m "chore(projects/kino): release ${VERSION_TAG}"
+            git push origin HEAD:main
+            release_sha="$(git rev-parse HEAD)"
+          fi
+
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build release artifacts
+        working-directory: ${{ env.KINO_DIR }}
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          dist_dir="${PWD}/dist"
+          mkdir -p "${dist_dir}"
+
+          build_archive() {
+            local arch="$1"
+            local target="$2"
+            local archive="${PROJECT_ID}_${VERSION}_linux_${arch}"
+            local binary="target/${target}/release/${PROJECT_ID}"
+            local workdir
+
+            cross build --locked --release -p "${PROJECT_ID}" --target "${target}"
+
+            file "${binary}"
+            if readelf -d "${binary}" | grep -q "NEEDED"; then
+              echo "Binary has dynamic library dependencies:" >&2
+              readelf -d "${binary}" >&2
+              exit 1
+            fi
+
+            workdir="$(mktemp -d)"
+            cp "${binary}" "${workdir}/${PROJECT_ID}"
+            chmod +x "${workdir}/${PROJECT_ID}"
+            tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" "${PROJECT_ID}"
+            rm -rf "${workdir}"
+          }
+
+          build_archive amd64 x86_64-unknown-linux-musl
+          build_archive arm64 aarch64-unknown-linux-musl
+
+          (
+            cd "${dist_dir}"
+            sha256sum "${PROJECT_ID}_${VERSION}_"* > "${PROJECT_ID}_${VERSION}_checksums.txt"
+          )
+
+      - name: Create release tag
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+          RELEASE_SHA: ${{ steps.version_commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          git tag "${TAG}" "${RELEASE_SHA}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.next.outputs.tag }}
+          target_commitish: ${{ steps.version_commit.outputs.sha }}
+          name: ${{ format('{0} {1}', env.PROJECT_ID, steps.next.outputs.version_tag) }}
+          generate_release_notes: true
+          previous_tag: ${{ steps.next.outputs.previous_tag }}
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.KINO_DIR }}/dist/${{ env.PROJECT_ID }}_${{ steps.next.outputs.version }}_*

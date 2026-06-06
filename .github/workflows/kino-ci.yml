@@ -1,0 +1,69 @@
+name: Kino Validate
+run-name: "${{ github.event_name == 'pull_request' && format('Kino validate PR #{0}', github.event.pull_request.number) || format('Kino validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/kino-ci.yml"
+      - ".github/workflows/kino-release.yml"
+      - "projects/kino/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/kino-ci.yml"
+      - ".github/workflows/kino-release.yml"
+      - "projects/kino/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Run kino checks
+    runs-on: namespace-profile-intar-dev
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Namespace caches
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: |
+            apt
+            rust
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run checks
+        working-directory: projects/kino
+        run: just verify
+
+      - name: Install protobuf tools
+        if: github.event_name == 'pull_request'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Run Docker smoke tests
+        if: github.event_name == 'pull_request'
+        working-directory: projects/kino
+        run: just docker-smoke
+
+      - name: Print container logs on failure
+        if: failure() && github.event_name == 'pull_request'
+        run: |
+          docker logs kino-k0s-ci || true
+          docker logs kino-ssh-recording-ci || true
