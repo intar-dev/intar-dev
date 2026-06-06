@@ -29,6 +29,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
 
       - name: Set up Namespace caches
         uses: namespacelabs/nscloud-cache-action@v1
