@@ -75,8 +75,15 @@ func (c *Client) Close() error {
 	return c.raw.Close()
 }
 
+func (c *Client) targetContext(ctx context.Context) context.Context {
+	if c == nil || c.targetNode == "" {
+		return ctx
+	}
+	return talosclient.WithNode(ctx, c.targetNode)
+}
+
 func (c *Client) Kubeconfig(ctx context.Context) ([]byte, error) {
-	data, err := c.raw.Kubeconfig(ctx)
+	data, err := c.raw.Kubeconfig(c.targetContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("request kubeconfig: %w", err)
 	}
@@ -84,7 +91,7 @@ func (c *Client) Kubeconfig(ctx context.Context) ([]byte, error) {
 }
 
 func (c *Client) Version(ctx context.Context) (*machineapi.VersionResponse, error) {
-	resp, err := c.raw.Version(ctx)
+	resp, err := c.raw.Version(c.targetContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("request Talos version: %w", err)
 	}
@@ -92,7 +99,7 @@ func (c *Client) Version(ctx context.Context) (*machineapi.VersionResponse, erro
 }
 
 func (c *Client) ApplyConfig(ctx context.Context, config []byte, mode machineapi.ApplyConfigurationRequest_Mode) error {
-	_, err := c.raw.ApplyConfiguration(ctx, &machineapi.ApplyConfigurationRequest{
+	_, err := c.raw.ApplyConfiguration(c.targetContext(ctx), &machineapi.ApplyConfigurationRequest{
 		Data: config,
 		Mode: mode,
 	})
@@ -103,21 +110,21 @@ func (c *Client) ApplyConfig(ctx context.Context, config []byte, mode machineapi
 }
 
 func (c *Client) Bootstrap(ctx context.Context) error {
-	if err := c.raw.Bootstrap(ctx, &machineapi.BootstrapRequest{}); err != nil {
+	if err := c.raw.Bootstrap(c.targetContext(ctx), &machineapi.BootstrapRequest{}); err != nil {
 		return fmt.Errorf("bootstrap Talos node: %w", err)
 	}
 	return nil
 }
 
 func (c *Client) Upgrade(ctx context.Context, image string, force bool) error {
-	if _, err := c.raw.Upgrade(ctx, image, false, force); err != nil {
+	if _, err := c.raw.Upgrade(c.targetContext(ctx), image, false, force); err != nil {
 		return fmt.Errorf("upgrade Talos node: %w", err)
 	}
 	return nil
 }
 
 func (c *Client) Reset(ctx context.Context, graceful, reboot bool) error {
-	if err := c.raw.Reset(ctx, graceful, reboot); err != nil {
+	if err := c.raw.Reset(c.targetContext(ctx), graceful, reboot); err != nil {
 		return fmt.Errorf("reset Talos node: %w", err)
 	}
 	return nil

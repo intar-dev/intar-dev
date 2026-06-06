@@ -369,6 +369,49 @@ func (a *App) kubectlEnv(kubeconfigPath string) map[string]string {
 	return map[string]string{"KUBECONFIG": kubeconfigPath}
 }
 
+func (a *App) ciliumEnv(kubeconfigPath string) (map[string]string, error) {
+	env, err := a.commandStateEnv()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(kubeconfigPath) != "" {
+		env["KUBECONFIG"] = kubeconfigPath
+	}
+	return env, nil
+}
+
+func (a *App) commandStateEnv() (map[string]string, error) {
+	baseDir := filepath.Join(a.opts.Paths.StateDir, "command-home")
+	cacheDir := filepath.Join(baseDir, "cache")
+	configDir := filepath.Join(baseDir, "config")
+	dataDir := filepath.Join(baseDir, "data")
+
+	for _, dir := range []string{
+		baseDir,
+		cacheDir,
+		configDir,
+		dataDir,
+		filepath.Join(baseDir, "Library", "Caches"),
+		filepath.Join(cacheDir, "helm"),
+		filepath.Join(configDir, "helm"),
+		filepath.Join(dataDir, "helm"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("prepare command state directory %s: %w", dir, err)
+		}
+	}
+
+	env := map[string]string{}
+	env["HOME"] = baseDir
+	env["XDG_CACHE_HOME"] = cacheDir
+	env["XDG_CONFIG_HOME"] = configDir
+	env["XDG_DATA_HOME"] = dataDir
+	env["HELM_CACHE_HOME"] = filepath.Join(cacheDir, "helm")
+	env["HELM_CONFIG_HOME"] = filepath.Join(configDir, "helm")
+	env["HELM_DATA_HOME"] = filepath.Join(dataDir, "helm")
+	return env, nil
+}
+
 func joinCSV(values []string) string {
 	return strings.Join(uniqueNonEmpty(values), ",")
 }

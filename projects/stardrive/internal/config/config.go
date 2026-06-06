@@ -26,8 +26,6 @@ const (
 	DefaultPrivateNetworkCIDR = "10.42.0.0/24"
 	DefaultNodeNameserverA    = "1.1.1.1"
 	DefaultNodeNameserverB    = "1.0.0.1"
-	DefaultK8sRegistryMirrorA = "https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images"
-	DefaultK8sRegistryMirrorB = "https://us-west1-docker.pkg.dev/v2/k8s-artifacts-prod/images"
 	DefaultStorageClassName   = "storagebox-rwx"
 	DefaultStorageShareName   = "stardrive"
 	DefaultRegistryNamespace  = "registry"
@@ -438,9 +436,6 @@ func (c *Config) KubernetesRegistryMirrors() []string {
 	if c != nil {
 		values = trimStringSlice(c.Cluster.KubernetesRegistryMirrors)
 	}
-	if len(values) == 0 {
-		return defaultKubernetesRegistryMirrors()
-	}
 	return append([]string(nil), values...)
 }
 
@@ -563,10 +558,6 @@ func trimStringSlice(values []string) []string {
 
 func defaultNodeNameservers() []string {
 	return []string{DefaultNodeNameserverA, DefaultNodeNameserverB}
-}
-
-func defaultKubernetesRegistryMirrors() []string {
-	return []string{DefaultK8sRegistryMirrorA, DefaultK8sRegistryMirrorB}
 }
 
 func validateHTTPURL(value string) error {

@@ -145,8 +145,8 @@ func TestApplyDefaultsReadsEnv(t *testing.T) {
 	if !slices.Equal(cfg.Cluster.NodeNameservers, []string{DefaultNodeNameserverA, DefaultNodeNameserverB}) {
 		t.Fatalf("unexpected default node nameservers: %#v", cfg.Cluster.NodeNameservers)
 	}
-	if !slices.Equal(cfg.Cluster.KubernetesRegistryMirrors, []string{DefaultK8sRegistryMirrorA, DefaultK8sRegistryMirrorB}) {
-		t.Fatalf("unexpected default Kubernetes registry mirrors: %#v", cfg.Cluster.KubernetesRegistryMirrors)
+	if len(cfg.Cluster.KubernetesRegistryMirrors) != 0 {
+		t.Fatalf("expected no default Kubernetes registry mirrors, got %#v", cfg.Cluster.KubernetesRegistryMirrors)
 	}
 	if cfg.Storage.StorageBoxPlan != "BX11" {
 		t.Fatalf("unexpected storage box plan: %q", cfg.Storage.StorageBoxPlan)

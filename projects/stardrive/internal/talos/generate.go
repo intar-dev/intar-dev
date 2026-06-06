@@ -3,6 +3,7 @@ package talos
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const kubernetesRegistryHost = "registry.k8s.io"
+const (
+	kubernetesRegistryHost = "registry.k8s.io"
+)
 
 type GenConfigResult struct {
 	ControlPlane []byte
@@ -139,6 +142,10 @@ func GenerateConfig(ctx context.Context, params GenConfigParams) (*GenConfigResu
 	if err != nil {
 		return nil, fmt.Errorf("inject Kubernetes registry mirror in control-plane config: %w", err)
 	}
+	controlPlane, err = enableImageCache(controlPlane)
+	if err != nil {
+		return nil, fmt.Errorf("enable image cache in control-plane config: %w", err)
+	}
 
 	workerConfig, err := input.Config(machine.TypeWorker)
 	if err != nil {
@@ -155,6 +162,10 @@ func GenerateConfig(ctx context.Context, params GenConfigParams) (*GenConfigResu
 	worker, err = injectKubernetesRegistryMirror(worker, params.KubernetesRegistryMirrors)
 	if err != nil {
 		return nil, fmt.Errorf("inject Kubernetes registry mirror in worker config: %w", err)
+	}
+	worker, err = enableImageCache(worker)
+	if err != nil {
+		return nil, fmt.Errorf("enable image cache in worker config: %w", err)
 	}
 
 	clientConfig, err := input.Talosconfig()
@@ -206,11 +217,16 @@ func injectKubernetesRegistryMirror(configYAML []byte, endpoints []string) ([]by
 	machineMap := nestedStringMap(document, "machine")
 	registriesMap := nestedStringMap(machineMap, "registries")
 	mirrorsMap := nestedStringMap(registriesMap, "mirrors")
-	mirrorsMap[kubernetesRegistryHost] = map[string]any{
-		"endpoints":    append([]string(nil), endpoints...),
-		"overridePath": true,
-		"skipFallback": true,
+	registryMirror := map[string]any{
+		"endpoints": append([]string(nil), endpoints...),
 	}
+	if registryMirrorNeedsOverridePath(endpoints) {
+		registryMirror["overridePath"] = true
+	}
+	if !registryMirrorUsesDefaultEndpoint(endpoints) {
+		registryMirror["skipFallback"] = true
+	}
+	mirrorsMap[kubernetesRegistryHost] = registryMirror
 
 	data, err := yaml.Marshal(document)
 	if err != nil {
@@ -218,6 +234,49 @@ func injectKubernetesRegistryMirror(configYAML []byte, endpoints []string) ([]by
 	}
 
 	return data, nil
+}
+
+func enableImageCache(configYAML []byte) ([]byte, error) {
+	var document map[string]any
+	if err := yaml.Unmarshal(configYAML, &document); err != nil {
+		return nil, fmt.Errorf("decode generated config: %w", err)
+	}
+
+	machineMap := nestedStringMap(document, "machine")
+	featuresMap := nestedStringMap(machineMap, "features")
+	imageCacheMap := nestedStringMap(featuresMap, "imageCache")
+	imageCacheMap["localEnabled"] = true
+
+	data, err := yaml.Marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("encode generated config: %w", err)
+	}
+
+	return data, nil
+}
+
+func registryMirrorNeedsOverridePath(endpoints []string) bool {
+	for _, endpoint := range endpoints {
+		parsed, err := url.Parse(strings.TrimSpace(endpoint))
+		if err != nil {
+			continue
+		}
+		if strings.Trim(parsed.EscapedPath(), "/") != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func registryMirrorUsesDefaultEndpoint(endpoints []string) bool {
+	if len(endpoints) != 1 {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(endpoints[0]))
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == kubernetesRegistryHost && strings.Trim(parsed.EscapedPath(), "/") == ""
 }
 
 func nestedStringMap(parent map[string]any, key string) map[string]any {

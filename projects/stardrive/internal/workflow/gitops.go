@@ -272,14 +272,10 @@ func syncRenderedGitOpsSource(renderedRoot, targetRoot string) error {
 		return err
 	}
 
-	targetExists := true
 	if err := ensureDirectory(targetRoot); err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		targetExists = false
-	}
-	if !targetExists {
 		return copyDirectoryContents(renderedRoot, targetRoot)
 	}
 

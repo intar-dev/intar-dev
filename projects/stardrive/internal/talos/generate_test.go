@@ -20,7 +20,7 @@ func TestGenerateConfigUsesSeparateTalosEndpoints(t *testing.T) {
 		TalosEndpoints:            []string{"49.13.128.157", "49.13.142.173"},
 		TalosVersion:              "v1.13.3",
 		KubernetesVersion:         "1.36.1",
-		KubernetesRegistryMirrors: []string{"https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images"},
+		KubernetesRegistryMirrors: []string{"https://registry.k8s.io"},
 		SecretsYAML:               secretsYAML,
 		ControlPlaneTaints:        false,
 	})
@@ -39,6 +39,8 @@ func TestGenerateConfigUsesSeparateTalosEndpoints(t *testing.T) {
 	assertProxyDisabled(t, result.Worker, "worker")
 	assertKubernetesRegistryMirror(t, result.ControlPlane, "control-plane")
 	assertKubernetesRegistryMirror(t, result.Worker, "worker")
+	assertImageCacheEnabled(t, result.ControlPlane, "control-plane")
+	assertImageCacheEnabled(t, result.Worker, "worker")
 }
 
 func assertProxyDisabled(t *testing.T, configYAML []byte, kind string) {
@@ -91,13 +93,38 @@ func assertKubernetesRegistryMirror(t *testing.T, configYAML []byte, kind string
 		t.Fatalf("%s config is missing registry.k8s.io mirror:\n%s", kind, configYAML)
 	}
 	endpoints, ok := registryMirror["endpoints"].([]any)
-	if !ok || len(endpoints) != 1 || endpoints[0] != "https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images" {
+	if !ok || len(endpoints) != 1 || endpoints[0] != "https://registry.k8s.io" {
 		t.Fatalf("%s config has unexpected registry.k8s.io endpoints: %#v", kind, registryMirror["endpoints"])
 	}
-	if registryMirror["overridePath"] != true {
-		t.Fatalf("%s config should set registry mirror overridePath=true: %#v", kind, registryMirror)
+	if _, ok := registryMirror["overridePath"]; ok {
+		t.Fatalf("%s config should not set registry mirror overridePath for registry.k8s.io: %#v", kind, registryMirror)
 	}
-	if registryMirror["skipFallback"] != true {
-		t.Fatalf("%s config should set registry mirror skipFallback=true: %#v", kind, registryMirror)
+	if _, ok := registryMirror["skipFallback"]; ok {
+		t.Fatalf("%s config should not set registry mirror skipFallback for registry.k8s.io: %#v", kind, registryMirror)
+	}
+}
+
+func assertImageCacheEnabled(t *testing.T, configYAML []byte, kind string) {
+	t.Helper()
+
+	var document map[string]any
+	if err := yaml.Unmarshal(configYAML, &document); err != nil {
+		t.Fatalf("failed to decode %s config: %v", kind, err)
+	}
+
+	machineMap, ok := document["machine"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine section:\n%s", kind, configYAML)
+	}
+	featuresMap, ok := machineMap["features"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine.features section:\n%s", kind, configYAML)
+	}
+	imageCacheMap, ok := featuresMap["imageCache"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine.features.imageCache section:\n%s", kind, configYAML)
+	}
+	if imageCacheMap["localEnabled"] != true {
+		t.Fatalf("%s config should set imageCache.localEnabled=true: %#v", kind, imageCacheMap)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -51,7 +52,8 @@ const (
 	resourceImageIDKey       = "stardrive.dev-image-id"
 	resourceRepositoryPrefix = "gitops"
 	hetznerUserDataByteLimit = 32 * 1024
-	gatewayAPIVersion        = "v1.5.1"
+	gatewayAPIVersion        = "v1.4.1"
+	talosHCloudCachedAsset   = "hcloud-amd64.raw.zst"
 )
 
 type inlineManifest struct {
@@ -139,14 +141,11 @@ func slicesClone(data []byte) []byte {
 
 func (a *App) ensureHetznerTalosImage(ctx context.Context, cfg *config.Config, hzClient *hetzner.Client, infClient *infisical.Client, _ storageBoxSecrets) (runtimeSecrets, error) {
 	current, _ := a.loadRuntimeSecrets(ctx, cfg)
-	expectedBootImageURL, err := talos.BuildFactoryDiskImageURL(cfg.Cluster.TalosVersion, cfg.Cluster.TalosSchematic, "hcloud-amd64.raw.xz")
-	if err != nil {
-		return runtimeSecrets{}, err
-	}
+	expectedBootImageSource := talosBootImageSource(cfg)
 	expectedInstallerImage := installerImageForVersion(cfg.Cluster.TalosVersion, cfg.Cluster.TalosSchematic)
 
 	if current.BootImageID > 0 && strings.TrimSpace(current.InstallerImage) != "" &&
-		strings.TrimSpace(current.BootImageURL) == expectedBootImageURL &&
+		strings.TrimSpace(current.BootImageURL) == expectedBootImageSource &&
 		strings.TrimSpace(current.InstallerImage) == expectedInstallerImage {
 		return current, nil
 	}
@@ -166,7 +165,7 @@ func (a *App) ensureHetznerTalosImage(ctx context.Context, cfg *config.Config, h
 			continue
 		}
 		current.BootImageID = image.ID
-		current.BootImageURL = expectedBootImageURL
+		current.BootImageURL = expectedBootImageSource
 		current.InstallerImage = expectedInstallerImage
 		current.Repository = gitOpsRepository(cfg)
 		current.RegistryAddress = cfg.EffectiveRegistryAddress()
@@ -182,7 +181,7 @@ func (a *App) ensureHetznerTalosImage(ctx context.Context, cfg *config.Config, h
 		return current, nil
 	}
 
-	artifactReader, compression, cleanup, err := a.openRemoteTalosDiskArtifact(ctx, expectedBootImageURL)
+	artifactReader, compression, cleanup, err := a.openCachedTalosDiskArtifact(ctx, cfg)
 	if err != nil {
 		return runtimeSecrets{}, err
 	}
@@ -199,7 +198,7 @@ func (a *App) ensureHetznerTalosImage(ctx context.Context, cfg *config.Config, h
 	}
 
 	current.BootImageID = available.ID
-	current.BootImageURL = expectedBootImageURL
+	current.BootImageURL = expectedBootImageSource
 	current.InstallerImage = expectedInstallerImage
 	current.RegistryAddress = cfg.EffectiveRegistryAddress()
 	current.Repository = gitOpsRepository(cfg)
@@ -213,6 +212,218 @@ func (a *App) ensureHetznerTalosImage(ctx context.Context, cfg *config.Config, h
 		return runtimeSecrets{}, err
 	}
 	return current, nil
+}
+
+func (a *App) openCachedTalosDiskArtifact(ctx context.Context, cfg *config.Config) (io.ReadCloser, hcloudimages.Compression, func(), error) {
+	artifactPath, err := a.ensureCachedTalosDiskArtifact(ctx, cfg)
+	if err != nil {
+		return nil, hcloudimages.CompressionNone, nil, err
+	}
+	compression, err := imageCompressionForPath(artifactPath)
+	if err != nil {
+		return nil, hcloudimages.CompressionNone, nil, err
+	}
+	artifactReader, err := os.Open(artifactPath)
+	if err != nil {
+		return nil, hcloudimages.CompressionNone, nil, fmt.Errorf("open cached Talos disk artifact %s: %w", artifactPath, err)
+	}
+	a.logInfo("streaming cached Talos boot image", "path", artifactPath, "compression", compression)
+	return artifactReader, compression, func() { _ = artifactReader.Close() }, nil
+}
+
+func (a *App) ensureCachedTalosDiskArtifact(ctx context.Context, cfg *config.Config) (string, error) {
+	if !usesDefaultTalosSchematic(cfg) {
+		return "", fmt.Errorf("cached Talos HCloud images currently support only the default Talos schematic; custom schematic %q cannot be reproduced locally yet", cfg.Cluster.TalosSchematic)
+	}
+
+	imageRoot, err := filepath.Abs(filepath.Join(a.clusterStateDir(cfg.Cluster.Name), "talos-images", talosImageIdentity(cfg)))
+	if err != nil {
+		return "", fmt.Errorf("resolve Talos image state path: %w", err)
+	}
+	outputDir := filepath.Join(imageRoot, "out")
+	artifactPath := filepath.Join(outputDir, talosHCloudCachedAsset)
+	if info, err := os.Stat(artifactPath); err == nil && info.Size() > 0 {
+		return artifactPath, nil
+	}
+
+	cachePath := filepath.Join(imageRoot, "image-cache.oci")
+	layerCachePath, err := filepath.Abs(filepath.Join(a.opts.Paths.StateDir, "talos-image-layers"))
+	if err != nil {
+		return "", fmt.Errorf("resolve Talos image layer cache path: %w", err)
+	}
+	for _, dir := range []string{imageRoot, outputDir, layerCachePath} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("prepare Talos image directory %s: %w", dir, err)
+		}
+	}
+
+	imageList, err := a.talosImageCacheImages(ctx, cfg)
+	if err != nil {
+		return "", err
+	}
+	a.logInfo("building Talos Kubernetes image cache", "cluster", cfg.Cluster.Name, "images", len(nonEmptyLines(imageList)), "path", cachePath)
+	env, err := a.commandStateEnv()
+	if err != nil {
+		return "", err
+	}
+	if err := a.runCommand(ctx, env, imageList, "talosctl", "image", "cache-create",
+		"--image-cache-path", cachePath,
+		"--image-layer-cache-path", layerCachePath,
+		"--platform", "linux/amd64",
+		"--images=-",
+		"--force",
+	); err != nil {
+		return "", fmt.Errorf("build Talos image cache: %w", err)
+	}
+
+	if err := os.RemoveAll(outputDir); err != nil {
+		return "", fmt.Errorf("reset Talos image output directory %s: %w", outputDir, err)
+	}
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
+		return "", fmt.Errorf("prepare Talos image output directory %s: %w", outputDir, err)
+	}
+
+	imagerImage := "ghcr.io/siderolabs/imager:" + talosReleaseVersion(cfg.Cluster.TalosVersion)
+	a.logInfo("building cached Talos HCloud image", "cluster", cfg.Cluster.Name, "image", imagerImage, "output", outputDir)
+	if err := a.runCommand(ctx, nil, nil, "docker", "run", "--rm", "--privileged",
+		"-v", "/dev:/dev",
+		"-v", outputDir+":/out",
+		"-v", cachePath+":/image-cache.oci:ro",
+		imagerImage,
+		"--arch", "amd64",
+		"--image-cache", "/image-cache.oci",
+		"--output", "/out",
+		"hcloud",
+	); err != nil {
+		return "", fmt.Errorf("build cached Talos HCloud image: %w", err)
+	}
+
+	if info, err := os.Stat(artifactPath); err != nil {
+		return "", fmt.Errorf("cached Talos HCloud image %s was not created: %w", artifactPath, err)
+	} else if info.Size() == 0 {
+		return "", fmt.Errorf("cached Talos HCloud image %s is empty", artifactPath)
+	}
+	return artifactPath, nil
+}
+
+func (a *App) talosKubernetesBundleImages(ctx context.Context, cfg *config.Config) ([]byte, error) {
+	env, err := a.commandStateEnv()
+	if err != nil {
+		return nil, err
+	}
+	version := talosKubernetesBundleVersion(cfg.Cluster.KubernetesVersion)
+	out, err := a.captureCommand(ctx, env, nil, "talosctl", "image", "k8s-bundle", "--k8s-version", version)
+	if err != nil {
+		return nil, fmt.Errorf("list Talos Kubernetes image bundle for %s: %w", version, err)
+	}
+	out = bytes.TrimSpace(out)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("Talos Kubernetes image bundle for %s is empty", version)
+	}
+	return append(out, '\n'), nil
+}
+
+func (a *App) talosImageCacheImages(ctx context.Context, cfg *config.Config) ([]byte, error) {
+	kubernetesImages, err := a.talosKubernetesBundleImages(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	images := nonEmptyLines(kubernetesImages)
+
+	smbImages, err := a.smbDriverImageCacheImages(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	images = append(images, smbImages...)
+
+	return imageListBytes(images), nil
+}
+
+func (a *App) smbDriverImageCacheImages(ctx context.Context, cfg *config.Config) ([]string, error) {
+	var images []string
+	for _, manifestURL := range smbDriverManifestURLs(cfg) {
+		data, err := downloadText(ctx, manifestURL)
+		if err != nil {
+			return nil, fmt.Errorf("download SMB CSI manifest %s: %w", manifestURL, err)
+		}
+		extracted, err := imageReferencesFromYAML(data)
+		if err != nil {
+			return nil, fmt.Errorf("extract images from SMB CSI manifest %s: %w", manifestURL, err)
+		}
+		images = append(images, extracted...)
+	}
+	return uniqueSortedStrings(images), nil
+}
+
+func downloadText(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(url), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func imageReferencesFromYAML(data []byte) ([]string, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var images []string
+	for {
+		var document yaml.Node
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		collectImageReferences(&document, &images)
+	}
+	return uniqueSortedStrings(images), nil
+}
+
+func collectImageReferences(node *yaml.Node, images *[]string) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i]
+			value := node.Content[i+1]
+			if key.Kind == yaml.ScalarNode && key.Value == "image" && value.Kind == yaml.ScalarNode {
+				image := strings.TrimSpace(value.Value)
+				if image != "" {
+					*images = append(*images, image)
+				}
+				continue
+			}
+			collectImageReferences(value, images)
+		}
+		return
+	}
+	for _, child := range node.Content {
+		collectImageReferences(child, images)
+	}
+}
+
+func imageListBytes(images []string) []byte {
+	images = uniqueSortedStrings(images)
+	if len(images) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(images, "\n") + "\n")
+}
+
+func uniqueSortedStrings(values []string) []string {
+	values = uniqueNonEmpty(values)
+	slices.Sort(values)
+	return values
 }
 
 func (a *App) openRemoteTalosDiskArtifact(ctx context.Context, artifactURL string) (io.ReadCloser, hcloudimages.Compression, func(), error) {
@@ -254,11 +465,51 @@ func imageCompressionForPath(path string) (hcloudimages.Compression, error) {
 
 func talosImageIdentity(cfg *config.Config) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
-		"hcloud-amd64.raw.xz",
-		strings.TrimSpace(cfg.Cluster.TalosVersion),
+		"image-cache-v2",
+		talosHCloudCachedAsset,
+		talosReleaseVersion(cfg.Cluster.TalosVersion),
 		strings.TrimSpace(cfg.Cluster.TalosSchematic),
+		talosKubernetesBundleVersion(cfg.Cluster.KubernetesVersion),
+		effectiveSMBDriverVersion(cfg),
 	}, "|")))
 	return hex.EncodeToString(sum[:])
+}
+
+func talosBootImageSource(cfg *config.Config) string {
+	return "image-cache:" + talosHCloudCachedAsset + ":" + talosImageIdentity(cfg)
+}
+
+func talosKubernetesBundleVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+func talosReleaseVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+func usesDefaultTalosSchematic(cfg *config.Config) bool {
+	schematic := strings.TrimSpace(cfg.Cluster.TalosSchematic)
+	return schematic == "" || schematic == talos.DefaultFactorySchematic
+}
+
+func nonEmptyLines(data []byte) []string {
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 func (a *App) ensureHetznerNetworking(ctx context.Context, cfg *config.Config, hzClient *hetzner.Client, infClient *infisical.Client) (runtimeSecrets, error) {
@@ -586,7 +837,10 @@ func (a *App) installCilium(ctx context.Context, cfg *config.Config, kubeconfigP
 	if err != nil {
 		return err
 	}
-	env := a.kubectlEnv(kubeconfigPath)
+	env, err := a.ciliumEnv(kubeconfigPath)
+	if err != nil {
+		return err
+	}
 	if err := a.installGatewayAPICRDs(ctx, kubeconfigPath); err != nil {
 		return err
 	}
@@ -612,23 +866,36 @@ func (a *App) installCilium(ctx context.Context, cfg *config.Config, kubeconfigP
 
 func (a *App) installGatewayAPICRDs(ctx context.Context, kubeconfigPath string) error {
 	env := a.kubectlEnv(kubeconfigPath)
-	url := fmt.Sprintf("https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/standard-install.yaml", gatewayAPIVersion)
-	if err := a.runCommand(ctx, env, nil, "kubectl", "apply", "--server-side", "-f", url); err != nil {
-		return fmt.Errorf("install Gateway API CRDs: %w", err)
+	for _, url := range gatewayAPICRDURLs() {
+		if err := a.runCommand(ctx, env, nil, "kubectl", "apply", "--server-side", "-f", url); err != nil {
+			return fmt.Errorf("install Gateway API CRDs from %s: %w", url, err)
+		}
 	}
-	for _, crd := range []string{
+	for _, crd := range gatewayAPICRDNames() {
+		if err := a.runCommand(ctx, env, nil, "kubectl", "wait", "--for=condition=Established", "crd/"+crd, "--timeout=5m"); err != nil {
+			return fmt.Errorf("wait for Gateway API CRD %s: %w", crd, err)
+		}
+	}
+	return nil
+}
+
+func gatewayAPICRDURLs() []string {
+	return []string{
+		fmt.Sprintf("https://github.com/kubernetes-sigs/gateway-api/releases/download/%s/standard-install.yaml", gatewayAPIVersion),
+		fmt.Sprintf("https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/%s/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml", gatewayAPIVersion),
+	}
+}
+
+func gatewayAPICRDNames() []string {
+	return []string{
 		"gatewayclasses.gateway.networking.k8s.io",
 		"gateways.gateway.networking.k8s.io",
 		"httproutes.gateway.networking.k8s.io",
 		"referencegrants.gateway.networking.k8s.io",
 		"grpcroutes.gateway.networking.k8s.io",
 		"backendtlspolicies.gateway.networking.k8s.io",
-	} {
-		if err := a.runCommand(ctx, env, nil, "kubectl", "wait", "--for=condition=Established", "crd/"+crd, "--timeout=5m"); err != nil {
-			return fmt.Errorf("wait for Gateway API CRD %s: %w", crd, err)
-		}
+		"tlsroutes.gateway.networking.k8s.io",
 	}
-	return nil
 }
 
 func talosCiliumInstallFlags() []string {
@@ -1138,10 +1405,7 @@ func manifestList(manifests []inlineManifest) []map[string]any {
 }
 
 func smbDriverManifestURLs(cfg *config.Config) []string {
-	version := strings.TrimSpace(cfg.Storage.SMBDriverVersion)
-	if version == "" {
-		version = config.DefaultSMBDriverVersion
-	}
+	version := effectiveSMBDriverVersion(cfg)
 	base := fmt.Sprintf("https://raw.githubusercontent.com/kubernetes-csi/csi-driver-smb/%s/deploy/%s", version, version)
 	return []string{
 		base + "/rbac-csi-smb.yaml",
@@ -1149,6 +1413,14 @@ func smbDriverManifestURLs(cfg *config.Config) []string {
 		base + "/csi-smb-controller.yaml",
 		base + "/csi-smb-node.yaml",
 	}
+}
+
+func effectiveSMBDriverVersion(cfg *config.Config) string {
+	version := strings.TrimSpace(cfg.Storage.SMBDriverVersion)
+	if version == "" {
+		return config.DefaultSMBDriverVersion
+	}
+	return version
 }
 
 func hetznerCCMManifestURL() string {

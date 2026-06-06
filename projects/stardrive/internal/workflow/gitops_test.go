@@ -143,3 +143,23 @@ func TestSyncRenderedGitOpsSourceCopiesBundleToClusterDirectory(t *testing.T) {
 		t.Fatalf("expected missing bundled apps README to be copied: %v", err)
 	}
 }
+
+func TestSyncRenderedGitOpsSourceCreatesMissingTargetDirectory(t *testing.T) {
+	t.Parallel()
+
+	sourceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "core"), 0o755); err != nil {
+		t.Fatalf("mkdir source core: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "core", "namespace.yaml"), []byte("kind: Namespace\n"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	targetRoot := filepath.Join(t.TempDir(), "cluster", "gitops")
+	if err := syncRenderedGitOpsSource(sourceRoot, targetRoot); err != nil {
+		t.Fatalf("sync rendered gitops source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetRoot, "core", "namespace.yaml")); err != nil {
+		t.Fatalf("expected source file to be copied into missing target directory: %v", err)
+	}
+}
