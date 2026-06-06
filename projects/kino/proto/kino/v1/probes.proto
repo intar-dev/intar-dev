@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package kino.v1;
+
+enum ProbeKind {
+  PROBE_KIND_UNSPECIFIED = 0;
+  PROBE_KIND_FILE_EXISTS = 1;
+  PROBE_KIND_FILE_REGEX_CAPTURE = 2;
+  PROBE_KIND_PORT_OPEN = 3;
+  PROBE_KIND_K8S_POD_STATE = 4;
+  PROBE_KIND_COMMAND_JSON_PATH = 5;
+  PROBE_KIND_SERVICE = 6;
+}
+
+enum ProbeStatus {
+  PROBE_STATUS_UNKNOWN = 0;
+  PROBE_STATUS_PASS = 1;
+  PROBE_STATUS_FAIL = 2;
+}
+
+message ProbesSnapshotV1 {
+  uint64 generated_at_unix_ms = 1;
+  repeated ProbeSnapshot probes = 2;
+}
+
+message ProbeSnapshot {
+  string id = 1;
+  ProbeKind kind = 2;
+  ProbeStatus status = 3;
+  uint64 every_seconds = 4;
+  uint64 last_attempt_unix_ms = 5;
+  uint64 last_success_unix_ms = 6;
+  uint64 last_duration_ms = 7;
+  string error = 8;
+
+  oneof value {
+    FileExistsValue file_exists = 20;
+    FileRegexCaptureValue file_regex_capture = 21;
+    PortOpenValue port_open = 22;
+    K8sPodStateValue k8s_pod_state = 23;
+    CommandJsonPathValue command_json_path = 24;
+    ServiceValue service = 25;
+  }
+}
+
+message FileExistsValue {
+  string path = 1;
+  bool exists = 2;
+}
+
+message FileRegexCaptureValue {
+  string path = 1;
+  string pattern = 2;
+  bool matched = 3;
+  string full_match = 4;
+  repeated string captures = 5;
+  string file_content = 6;
+}
+
+message PortOpenValue {
+  string host = 1;
+  uint32 port = 2;
+  string protocol = 3;
+  bool open = 4;
+  string detail = 5;
+}
+
+message K8sPodStateValue {
+  string namespace = 1;
+  string selector = 2;
+  string desired_state = 3;
+  uint32 matched_pods = 4;
+  repeated string matching_pod_names = 5;
+  bool state_satisfied = 6;
+}
+
+message CommandJsonPathValue {
+  repeated string argv = 1;
+  string json_path = 2;
+  string expected_json = 3;
+  bool matched = 4;
+  repeated string matched_values = 5;
+  string stdout = 6;
+  string stderr = 7;
+  int32 exit_code = 8;
+}
+
+message ServiceValue {
+  string service = 1;
+  string desired_state = 2;
+  string actual_state = 3;
+  bool state_satisfied = 4;
+}

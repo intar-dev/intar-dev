@@ -1,0 +1,19 @@
+[Unit]
+Description=Kino probe service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/kino --config /etc/kino/kino.hcl
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
