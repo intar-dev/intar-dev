@@ -1,0 +1,30 @@
+admin_bind = "127.0.0.1:8081"
+ssh_bind = "0.0.0.0:2222"
+database_path = "/var/lib/stargate/routes.sqlite3"
+host_key_path = "/var/lib/stargate/host_key"
+target_key_path = "/var/lib/stargate/target_key"
+ssh_binary = "/usr/bin/ssh"
+ssh_keyscan_binary = "/usr/bin/ssh-keyscan"
+state_dir = "/var/lib/stargate"
+
+[web]
+bind = "127.0.0.1:8080"
+public_base_url = "https://ws.intar.app"
+public_ssh_host = "ssh.intar.app"
+public_ssh_port = 22
+allowed_origins = ["https://ws.intar.app"]
+
+[admin_auth]
+assertion_header = "x-stargate-admin-assertion"
+audience = "stargate-admin"
+issuer = "https://admin.intar.app"
+jwks_url = "https://admin.intar.app/.well-known/jwks.json"
+
+[terminal_tokens]
+issuer = "stargate"
+audience = "stargate-terminal"
+hs256_secret = "replace-me"
+
+[trace]
+filter = "info,stargate=debug"
+json = true

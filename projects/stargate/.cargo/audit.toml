@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # Temporary waiver:
+    # - `russh` pulls an unfixed RSA advisory transitively.
+    # - `jsonwebtoken` also pulls the same unfixed RSA advisory transitively.
+    # Stargate runtime policy rejects RSA route keys and production JWT validation is intended
+    # to use EdDSA assertions only.
+    "RUSTSEC-2023-0071",
+]

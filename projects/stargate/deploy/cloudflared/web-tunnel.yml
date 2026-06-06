@@ -1,0 +1,7 @@
+tunnel: stargate-web
+credentials-file: /etc/cloudflared/stargate-web.json
+
+ingress:
+  - hostname: ws.intar.app
+    service: http://127.0.0.1:8080
+  - service: http_status:404

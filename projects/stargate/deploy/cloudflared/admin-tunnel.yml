@@ -1,0 +1,7 @@
+tunnel: stargate-admin
+credentials-file: /etc/cloudflared/stargate-admin.json
+
+ingress:
+  - hostname: admin.intar.app
+    service: http://127.0.0.1:8081
+  - service: http_status:404
