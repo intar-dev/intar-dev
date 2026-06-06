@@ -37,8 +37,8 @@ func TestTalosCiliumInstallFlagsMatchTalosRequirements(t *testing.T) {
 func TestGatewayAPICRDVersionIsPinned(t *testing.T) {
 	t.Parallel()
 
-	if gatewayAPIVersion != "v1.4.1" {
-		t.Fatalf("expected pinned Gateway API version v1.4.1, got %q", gatewayAPIVersion)
+	if gatewayAPIVersion != "v1.5.1" {
+		t.Fatalf("expected pinned Gateway API version v1.5.1, got %q", gatewayAPIVersion)
 	}
 }
 

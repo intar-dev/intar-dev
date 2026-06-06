@@ -18,8 +18,8 @@ func TestGenerateConfigUsesSeparateTalosEndpoints(t *testing.T) {
 		ClusterName:        "intar",
 		Endpoint:           "cluster.intar.app",
 		TalosEndpoints:     []string{"49.13.128.157", "49.13.142.173"},
-		TalosVersion:       "v1.12.6",
-		KubernetesVersion:  "1.35.3",
+		TalosVersion:       "v1.13.3",
+		KubernetesVersion:  "1.36.1",
 		SecretsYAML:        secretsYAML,
 		ControlPlaneTaints: false,
 	})

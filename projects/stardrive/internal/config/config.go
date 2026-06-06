@@ -17,10 +17,11 @@ import (
 const (
 	RoleControlPlane = "control-plane"
 
-	DefaultCiliumVersion      = "v1.19.1"
-	DefaultFluxVersion        = "v2.7.3"
-	DefaultHetznerCCMVersion  = "v1.26.0"
+	DefaultCiliumVersion      = "v1.19.4"
+	DefaultFluxVersion        = "v2.8.8"
+	DefaultHetznerCCMVersion  = "v1.31.1"
 	DefaultSMBDriverVersion   = "v1.20.1"
+	DefaultRegistryImage      = "registry:3.1.1"
 	DefaultPrivateNetworkCIDR = "10.42.0.0/24"
 	DefaultNodeNameserverA    = "1.1.1.1"
 	DefaultNodeNameserverB    = "1.0.0.1"

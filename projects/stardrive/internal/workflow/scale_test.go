@@ -69,10 +69,10 @@ func TestInjectBootstrapManifestsAddsProviderAndSMBManifests(t *testing.T) {
 	base := []byte(`machine:
   install:
     disk: /dev/sda
-    image: ghcr.io/siderolabs/installer:v1.12.6
+    image: ghcr.io/siderolabs/installer:v1.13.3
 `)
 
-	rendered, err := injectBootstrapManifests(base, cfg, "ghcr.io/siderolabs/installer:v1.12.6")
+	rendered, err := injectBootstrapManifests(base, cfg, "ghcr.io/siderolabs/installer:v1.13.3")
 	if err != nil {
 		t.Fatalf("inject bootstrap manifests: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestInjectBootstrapManifestsAddsProviderAndSMBManifests(t *testing.T) {
 
 	machine := document["machine"].(map[string]any)
 	install := machine["install"].(map[string]any)
-	if install["image"] != "ghcr.io/siderolabs/installer:v1.12.6" {
+	if install["image"] != "ghcr.io/siderolabs/installer:v1.13.3" {
 		t.Fatalf("expected install.image to be preserved, got %#v", install["image"])
 	}
 	if install["disk"] != "/dev/sda" {
@@ -151,6 +151,9 @@ func TestBootstrapInlineManifestsUseRootSMBShareAndRegistrySubdirectory(t *testi
 	}
 
 	registryManifest := manifests[3].Contents
+	if !strings.Contains(registryManifest, "image: "+config.DefaultRegistryImage) {
+		t.Fatalf("expected registry image %s in manifest: %s", config.DefaultRegistryImage, registryManifest)
+	}
 	if !strings.Contains(registryManifest, "REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY") {
 		t.Fatalf("expected registry root directory env var: %s", registryManifest)
 	}
@@ -192,8 +195,8 @@ func workflowTestConfig(count int) *config.Config {
 		Cluster: config.ClusterConfig{
 			Name:               "test",
 			NodeCount:          count,
-			TalosVersion:       "v1.12.6",
-			KubernetesVersion:  "1.34.2",
+			TalosVersion:       "v1.13.3",
+			KubernetesVersion:  "1.36.1",
 			ACMEEmail:          "platform@example.com",
 			ControlPlaneTaints: false,
 		},

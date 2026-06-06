@@ -51,7 +51,7 @@ const (
 	resourceImageIDKey       = "stardrive.dev-image-id"
 	resourceRepositoryPrefix = "gitops"
 	hetznerUserDataByteLimit = 32 * 1024
-	gatewayAPIVersion        = "v1.4.1"
+	gatewayAPIVersion        = "v1.5.1"
 )
 
 type inlineManifest struct {
@@ -1011,7 +1011,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: registry
-          image: registry:2.8.3
+          image: %s
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -1066,7 +1066,7 @@ spec:
     - name: registry
       port: %d
       targetPort: registry
-`, cfg.RegistryServiceName(), cfg.RegistryNamespace(), cfg.RegistryServiceName(), cfg.RegistryServiceName(), registryRootDirectory, cfg.Storage.RegistryPort, registryPVCName, registryTLSSecret, cfg.RegistryServiceName(), cfg.RegistryNamespace(), cfg.RegistryServiceName(), cfg.Storage.RegistryPort)
+`, cfg.RegistryServiceName(), cfg.RegistryNamespace(), cfg.RegistryServiceName(), cfg.RegistryServiceName(), config.DefaultRegistryImage, registryRootDirectory, cfg.Storage.RegistryPort, registryPVCName, registryTLSSecret, cfg.RegistryServiceName(), cfg.RegistryNamespace(), cfg.RegistryServiceName(), cfg.Storage.RegistryPort)
 
 	return []inlineManifest{
 		{Name: "hcloud-secret", Contents: providerSecretManifest},

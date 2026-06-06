@@ -35,8 +35,8 @@ func TestValidateRequiresOddHetznerControlPlanes(t *testing.T) {
 		Cluster: ClusterConfig{
 			Name:              "prod",
 			NodeCount:         3,
-			TalosVersion:      "v1.12.6",
-			KubernetesVersion: "1.35.3",
+			TalosVersion:      "v1.13.3",
+			KubernetesVersion: "1.36.1",
 			ACMEEmail:         "platform@example.com",
 		},
 		Nodes: []NodeConfig{
@@ -176,8 +176,8 @@ func TestLoadPreservesExplicitFalseManageNodeRecords(t *testing.T) {
 cluster:
   name: prod
   nodeCount: 3
-  talosVersion: v1.12.6
-  kubernetesVersion: 1.35.3
+  talosVersion: v1.13.3
+  kubernetesVersion: 1.36.1
   acmeEmail: platform@example.com
 nodes:
   - name: cp-1
