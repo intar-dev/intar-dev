@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+
+	"github.com/intar-dev/stardrive/internal/config"
 )
 
 func TestGenerateStorageBoxPasswordMeetsPolicy(t *testing.T) {
@@ -70,5 +72,33 @@ func TestInfraSecretsFromValuesPrefersStoredValues(t *testing.T) {
 	}
 	if secrets.CloudflareTunnelName != "stored-tunnel" {
 		t.Fatalf("expected stored Cloudflare tunnel name, got %q", secrets.CloudflareTunnelName)
+	}
+}
+
+func TestRenderTalosConfigForNodeSetsNodeNameservers(t *testing.T) {
+	rendered, err := renderTalosConfigForNode([]byte(`
+machine:
+  network: {}
+  install:
+    disk: /dev/sda
+`), config.NodeConfig{
+		Name:        " control-plane-01 ",
+		InstallDisk: " /dev/nvme0n1 ",
+	}, []string{config.DefaultNodeNameserverA, config.DefaultNodeNameserverB})
+	if err != nil {
+		t.Fatalf("renderTalosConfigForNode returned error: %v", err)
+	}
+
+	output := string(rendered)
+	for _, want := range []string{
+		"hostname: control-plane-01",
+		"nameservers:",
+		"- 1.1.1.1",
+		"- 1.0.0.1",
+		"disk: /dev/nvme0n1",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("rendered Talos config missing %q:\n%s", want, output)
+		}
 	}
 }

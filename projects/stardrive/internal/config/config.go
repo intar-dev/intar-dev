@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,8 @@ const (
 	DefaultHetznerCCMVersion  = "v1.26.0"
 	DefaultSMBDriverVersion   = "v1.20.1"
 	DefaultPrivateNetworkCIDR = "10.42.0.0/24"
+	DefaultNodeNameserverA    = "1.1.1.1"
+	DefaultNodeNameserverB    = "1.0.0.1"
 	DefaultStorageClassName   = "storagebox-rwx"
 	DefaultStorageShareName   = "stardrive"
 	DefaultRegistryNamespace  = "registry"
@@ -81,15 +84,16 @@ type Config struct {
 }
 
 type ClusterConfig struct {
-	Name               string `yaml:"name"`
-	NodeCount          int    `yaml:"nodeCount"`
-	TalosVersion       string `yaml:"talosVersion"`
-	KubernetesVersion  string `yaml:"kubernetesVersion"`
-	TalosSchematic     string `yaml:"talosSchematic"`
-	ACMEEmail          string `yaml:"acmeEmail,omitempty"`
-	ControlPlaneTaints bool   `yaml:"controlPlaneTaints"`
-	CiliumVersion      string `yaml:"ciliumVersion,omitempty"`
-	FluxVersion        string `yaml:"fluxVersion,omitempty"`
+	Name               string   `yaml:"name"`
+	NodeCount          int      `yaml:"nodeCount"`
+	NodeNameservers    []string `yaml:"nodeNameservers,omitempty"`
+	TalosVersion       string   `yaml:"talosVersion"`
+	KubernetesVersion  string   `yaml:"kubernetesVersion"`
+	TalosSchematic     string   `yaml:"talosSchematic"`
+	ACMEEmail          string   `yaml:"acmeEmail,omitempty"`
+	ControlPlaneTaints bool     `yaml:"controlPlaneTaints"`
+	CiliumVersion      string   `yaml:"ciliumVersion,omitempty"`
+	FluxVersion        string   `yaml:"fluxVersion,omitempty"`
 }
 
 type NodeConfig struct {
@@ -224,6 +228,7 @@ func (c *Config) ApplyDefaults() {
 	c.Cluster.ACMEEmail = defaultString(strings.TrimSpace(c.Cluster.ACMEEmail), os.Getenv(EnvACMEEmail))
 	c.Cluster.CiliumVersion = strings.TrimSpace(c.Cluster.CiliumVersion)
 	c.Cluster.FluxVersion = strings.TrimSpace(c.Cluster.FluxVersion)
+	c.Cluster.NodeNameservers = c.NodeNameservers()
 	if c.Cluster.NodeCount == 0 {
 		if len(c.Nodes) > 0 {
 			c.Cluster.NodeCount = len(c.Nodes)
@@ -374,6 +379,12 @@ func (c *Config) Validate() error {
 		seenPrivateIPs[node.PrivateIPv4] = struct{}{}
 	}
 
+	for i, nameserver := range c.NodeNameservers() {
+		if _, err := netip.ParseAddr(nameserver); err != nil {
+			return fmt.Errorf("cluster.nodeNameservers[%d] must be an IP address: %q", i, nameserver)
+		}
+	}
+
 	return nil
 }
 
@@ -398,6 +409,17 @@ func (c *Config) NodeNames() []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+func (c *Config) NodeNameservers() []string {
+	values := []string(nil)
+	if c != nil {
+		values = trimStringSlice(c.Cluster.NodeNameservers)
+	}
+	if len(values) == 0 {
+		return defaultNodeNameservers()
+	}
+	return append([]string(nil), values...)
 }
 
 func (c *Config) EffectiveCiliumVersion() string {
@@ -515,6 +537,10 @@ func trimStringSlice(values []string) []string {
 		return nil
 	}
 	return trimmed
+}
+
+func defaultNodeNameservers() []string {
+	return []string{DefaultNodeNameserverA, DefaultNodeNameserverB}
 }
 
 func defaultString(value, fallback string) string {

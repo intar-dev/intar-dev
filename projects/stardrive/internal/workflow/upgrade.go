@@ -91,7 +91,7 @@ func (a *App) UpgradeKubernetes(ctx context.Context, req UpgradeKubernetesReques
 	}
 
 	for _, node := range cfg.Nodes {
-		rendered, err := renderTalosConfigForNode(accessSecrets.ControlPlaneConfigYAML, node)
+		rendered, err := renderTalosConfigForNode(accessSecrets.ControlPlaneConfigYAML, node, cfg.NodeNameservers())
 		if err != nil {
 			return err
 		}

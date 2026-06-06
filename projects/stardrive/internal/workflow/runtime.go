@@ -721,7 +721,7 @@ func extractTarGzBinary(archivePath, binaryName, outputPath string) error {
 	return fmt.Errorf("binary %s not found in %s", binaryName, archivePath)
 }
 
-func renderTalosConfigForNode(base []byte, node config.NodeConfig) ([]byte, error) {
+func renderTalosConfigForNode(base []byte, node config.NodeConfig, nameservers []string) ([]byte, error) {
 	var document map[string]any
 	if err := yaml.Unmarshal(base, &document); err != nil {
 		return nil, fmt.Errorf("parse Talos config: %w", err)
@@ -729,6 +729,9 @@ func renderTalosConfigForNode(base []byte, node config.NodeConfig) ([]byte, erro
 	machineSection := ensureConfigMap(document, "machine")
 	networkSection := ensureConfigMap(machineSection, "network")
 	networkSection["hostname"] = strings.TrimSpace(node.Name)
+	if len(nameservers) > 0 {
+		networkSection["nameservers"] = append([]string(nil), nameservers...)
+	}
 
 	installDisk := strings.TrimSpace(node.InstallDisk)
 	if installDisk == "" {

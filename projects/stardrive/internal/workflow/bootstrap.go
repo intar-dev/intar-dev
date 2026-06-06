@@ -912,7 +912,7 @@ func (a *App) generateBootstrapTalosAssets(ctx context.Context, cfg *config.Conf
 
 	rendered := make(map[string][]byte, len(cfg.Nodes))
 	for _, node := range cfg.Nodes {
-		configBytes, err := renderTalosConfigForNode(accessSecrets.ControlPlaneConfigYAML, node)
+		configBytes, err := renderTalosConfigForNode(accessSecrets.ControlPlaneConfigYAML, node, cfg.NodeNameservers())
 		if err != nil {
 			return clusterAccessSecrets{}, nil, err
 		}

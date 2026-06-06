@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -141,6 +142,9 @@ func TestApplyDefaultsReadsEnv(t *testing.T) {
 	if cfg.Hetzner.PrivateNetworkCIDR != "10.99.0.0/24" {
 		t.Fatalf("unexpected default network CIDR: %q", cfg.Hetzner.PrivateNetworkCIDR)
 	}
+	if !slices.Equal(cfg.Cluster.NodeNameservers, []string{DefaultNodeNameserverA, DefaultNodeNameserverB}) {
+		t.Fatalf("unexpected default node nameservers: %#v", cfg.Cluster.NodeNameservers)
+	}
 	if cfg.Storage.StorageBoxPlan != "BX11" {
 		t.Fatalf("unexpected storage box plan: %q", cfg.Storage.StorageBoxPlan)
 	}
@@ -149,6 +153,19 @@ func TestApplyDefaultsReadsEnv(t *testing.T) {
 	}
 	if cfg.Storage.StorageClassName != DefaultStorageClassName {
 		t.Fatalf("unexpected default storage class: %q", cfg.Storage.StorageClassName)
+	}
+}
+
+func TestApplyDefaultsTrimsCustomNodeNameservers(t *testing.T) {
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			NodeNameservers: []string{" 9.9.9.9 ", "", "149.112.112.112 "},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	if !slices.Equal(cfg.Cluster.NodeNameservers, []string{"9.9.9.9", "149.112.112.112"}) {
+		t.Fatalf("unexpected node nameservers: %#v", cfg.Cluster.NodeNameservers)
 	}
 }
 
