@@ -145,6 +145,9 @@ func TestApplyDefaultsReadsEnv(t *testing.T) {
 	if !slices.Equal(cfg.Cluster.NodeNameservers, []string{DefaultNodeNameserverA, DefaultNodeNameserverB}) {
 		t.Fatalf("unexpected default node nameservers: %#v", cfg.Cluster.NodeNameservers)
 	}
+	if !slices.Equal(cfg.Cluster.KubernetesRegistryMirrors, []string{DefaultK8sRegistryMirrorA, DefaultK8sRegistryMirrorB}) {
+		t.Fatalf("unexpected default Kubernetes registry mirrors: %#v", cfg.Cluster.KubernetesRegistryMirrors)
+	}
 	if cfg.Storage.StorageBoxPlan != "BX11" {
 		t.Fatalf("unexpected storage box plan: %q", cfg.Storage.StorageBoxPlan)
 	}
@@ -166,6 +169,62 @@ func TestApplyDefaultsTrimsCustomNodeNameservers(t *testing.T) {
 
 	if !slices.Equal(cfg.Cluster.NodeNameservers, []string{"9.9.9.9", "149.112.112.112"}) {
 		t.Fatalf("unexpected node nameservers: %#v", cfg.Cluster.NodeNameservers)
+	}
+}
+
+func TestApplyDefaultsTrimsCustomKubernetesRegistryMirrors(t *testing.T) {
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			KubernetesRegistryMirrors: []string{" https://mirror.example.com/v2/k8s ", "", "https://backup.example.com/v2/k8s "},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	if !slices.Equal(cfg.Cluster.KubernetesRegistryMirrors, []string{"https://mirror.example.com/v2/k8s", "https://backup.example.com/v2/k8s"}) {
+		t.Fatalf("unexpected Kubernetes registry mirrors: %#v", cfg.Cluster.KubernetesRegistryMirrors)
+	}
+}
+
+func TestValidateRejectsInvalidKubernetesRegistryMirror(t *testing.T) {
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			Name:                      "prod",
+			NodeCount:                 3,
+			TalosVersion:              "v1.13.3",
+			KubernetesVersion:         "1.36.1",
+			ACMEEmail:                 "platform@example.com",
+			KubernetesRegistryMirrors: []string{"registry.invalid/path"},
+		},
+		Nodes: []NodeConfig{
+			{Name: "cp-1", ServerID: 1, Role: RoleControlPlane, PrivateIPv4: "10.42.0.10"},
+			{Name: "cp-2", ServerID: 2, Role: RoleControlPlane, PrivateIPv4: "10.42.0.11"},
+			{Name: "cp-3", ServerID: 3, Role: RoleControlPlane, PrivateIPv4: "10.42.0.12"},
+		},
+		DNS: DNSConfig{
+			Provider:    "cloudflare",
+			Zone:        "example.com",
+			APIHostname: "api.example.com",
+		},
+		Hetzner: HetznerConfig{
+			ServerType:         "cax11",
+			Location:           "fsn1",
+			PrivateNetworkCIDR: DefaultPrivateNetworkCIDR,
+		},
+		Storage: StorageConfig{
+			StorageBoxPlan:     "BX11",
+			StorageBoxLocation: "fsn1",
+		},
+		Infisical: InfisicalConfig{
+			SiteURL:     "https://eu.infisical.com",
+			ProjectID:   "project-id",
+			ProjectSlug: "project-slug",
+			Environment: "prod",
+			PathRoot:    "/stardrive",
+		},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error")
 	}
 }
 

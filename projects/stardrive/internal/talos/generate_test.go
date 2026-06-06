@@ -15,13 +15,14 @@ func TestGenerateConfigUsesSeparateTalosEndpoints(t *testing.T) {
 	}
 
 	result, err := GenerateConfig(context.Background(), GenConfigParams{
-		ClusterName:        "intar",
-		Endpoint:           "cluster.intar.app",
-		TalosEndpoints:     []string{"49.13.128.157", "49.13.142.173"},
-		TalosVersion:       "v1.13.3",
-		KubernetesVersion:  "1.36.1",
-		SecretsYAML:        secretsYAML,
-		ControlPlaneTaints: false,
+		ClusterName:               "intar",
+		Endpoint:                  "cluster.intar.app",
+		TalosEndpoints:            []string{"49.13.128.157", "49.13.142.173"},
+		TalosVersion:              "v1.13.3",
+		KubernetesVersion:         "1.36.1",
+		KubernetesRegistryMirrors: []string{"https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images"},
+		SecretsYAML:               secretsYAML,
+		ControlPlaneTaints:        false,
 	})
 	if err != nil {
 		t.Fatalf("GenerateConfig() error = %v", err)
@@ -36,6 +37,8 @@ func TestGenerateConfigUsesSeparateTalosEndpoints(t *testing.T) {
 	}
 	assertProxyDisabled(t, result.ControlPlane, "control-plane")
 	assertProxyDisabled(t, result.Worker, "worker")
+	assertKubernetesRegistryMirror(t, result.ControlPlane, "control-plane")
+	assertKubernetesRegistryMirror(t, result.Worker, "worker")
 }
 
 func assertProxyDisabled(t *testing.T, configYAML []byte, kind string) {
@@ -60,5 +63,41 @@ func assertProxyDisabled(t *testing.T, configYAML []byte, kind string) {
 	}
 	if _, ok := proxyMap["image"]; ok {
 		t.Fatalf("%s config should not keep kube-proxy image when proxy is disabled:\n%s", kind, configYAML)
+	}
+}
+
+func assertKubernetesRegistryMirror(t *testing.T, configYAML []byte, kind string) {
+	t.Helper()
+
+	var document map[string]any
+	if err := yaml.Unmarshal(configYAML, &document); err != nil {
+		t.Fatalf("failed to decode %s config: %v", kind, err)
+	}
+
+	machineMap, ok := document["machine"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine section:\n%s", kind, configYAML)
+	}
+	registriesMap, ok := machineMap["registries"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine.registries section:\n%s", kind, configYAML)
+	}
+	mirrorsMap, ok := registriesMap["mirrors"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing machine.registries.mirrors section:\n%s", kind, configYAML)
+	}
+	registryMirror, ok := mirrorsMap[kubernetesRegistryHost].(map[string]any)
+	if !ok {
+		t.Fatalf("%s config is missing registry.k8s.io mirror:\n%s", kind, configYAML)
+	}
+	endpoints, ok := registryMirror["endpoints"].([]any)
+	if !ok || len(endpoints) != 1 || endpoints[0] != "https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images" {
+		t.Fatalf("%s config has unexpected registry.k8s.io endpoints: %#v", kind, registryMirror["endpoints"])
+	}
+	if registryMirror["overridePath"] != true {
+		t.Fatalf("%s config should set registry mirror overridePath=true: %#v", kind, registryMirror)
+	}
+	if registryMirror["skipFallback"] != true {
+		t.Fatalf("%s config should set registry mirror skipFallback=true: %#v", kind, registryMirror)
 	}
 }

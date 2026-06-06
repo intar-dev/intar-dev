@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,6 +26,8 @@ const (
 	DefaultPrivateNetworkCIDR = "10.42.0.0/24"
 	DefaultNodeNameserverA    = "1.1.1.1"
 	DefaultNodeNameserverB    = "1.0.0.1"
+	DefaultK8sRegistryMirrorA = "https://europe-west4-docker.pkg.dev/v2/k8s-artifacts-prod/images"
+	DefaultK8sRegistryMirrorB = "https://us-west1-docker.pkg.dev/v2/k8s-artifacts-prod/images"
 	DefaultStorageClassName   = "storagebox-rwx"
 	DefaultStorageShareName   = "stardrive"
 	DefaultRegistryNamespace  = "registry"
@@ -85,16 +88,17 @@ type Config struct {
 }
 
 type ClusterConfig struct {
-	Name               string   `yaml:"name"`
-	NodeCount          int      `yaml:"nodeCount"`
-	NodeNameservers    []string `yaml:"nodeNameservers,omitempty"`
-	TalosVersion       string   `yaml:"talosVersion"`
-	KubernetesVersion  string   `yaml:"kubernetesVersion"`
-	TalosSchematic     string   `yaml:"talosSchematic"`
-	ACMEEmail          string   `yaml:"acmeEmail,omitempty"`
-	ControlPlaneTaints bool     `yaml:"controlPlaneTaints"`
-	CiliumVersion      string   `yaml:"ciliumVersion,omitempty"`
-	FluxVersion        string   `yaml:"fluxVersion,omitempty"`
+	Name                      string   `yaml:"name"`
+	NodeCount                 int      `yaml:"nodeCount"`
+	NodeNameservers           []string `yaml:"nodeNameservers,omitempty"`
+	KubernetesRegistryMirrors []string `yaml:"kubernetesRegistryMirrors,omitempty"`
+	TalosVersion              string   `yaml:"talosVersion"`
+	KubernetesVersion         string   `yaml:"kubernetesVersion"`
+	TalosSchematic            string   `yaml:"talosSchematic"`
+	ACMEEmail                 string   `yaml:"acmeEmail,omitempty"`
+	ControlPlaneTaints        bool     `yaml:"controlPlaneTaints"`
+	CiliumVersion             string   `yaml:"ciliumVersion,omitempty"`
+	FluxVersion               string   `yaml:"fluxVersion,omitempty"`
 }
 
 type NodeConfig struct {
@@ -230,6 +234,7 @@ func (c *Config) ApplyDefaults() {
 	c.Cluster.CiliumVersion = strings.TrimSpace(c.Cluster.CiliumVersion)
 	c.Cluster.FluxVersion = strings.TrimSpace(c.Cluster.FluxVersion)
 	c.Cluster.NodeNameservers = c.NodeNameservers()
+	c.Cluster.KubernetesRegistryMirrors = c.KubernetesRegistryMirrors()
 	if c.Cluster.NodeCount == 0 {
 		if len(c.Nodes) > 0 {
 			c.Cluster.NodeCount = len(c.Nodes)
@@ -385,6 +390,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("cluster.nodeNameservers[%d] must be an IP address: %q", i, nameserver)
 		}
 	}
+	for i, endpoint := range c.KubernetesRegistryMirrors() {
+		if err := validateHTTPURL(endpoint); err != nil {
+			return fmt.Errorf("cluster.kubernetesRegistryMirrors[%d] must be an HTTP(S) URL: %q", i, endpoint)
+		}
+	}
 
 	return nil
 }
@@ -419,6 +429,17 @@ func (c *Config) NodeNameservers() []string {
 	}
 	if len(values) == 0 {
 		return defaultNodeNameservers()
+	}
+	return append([]string(nil), values...)
+}
+
+func (c *Config) KubernetesRegistryMirrors() []string {
+	values := []string(nil)
+	if c != nil {
+		values = trimStringSlice(c.Cluster.KubernetesRegistryMirrors)
+	}
+	if len(values) == 0 {
+		return defaultKubernetesRegistryMirrors()
 	}
 	return append([]string(nil), values...)
 }
@@ -542,6 +563,24 @@ func trimStringSlice(values []string) []string {
 
 func defaultNodeNameservers() []string {
 	return []string{DefaultNodeNameserverA, DefaultNodeNameserverB}
+}
+
+func defaultKubernetesRegistryMirrors() []string {
+	return []string{DefaultK8sRegistryMirrorA, DefaultK8sRegistryMirrorB}
+}
+
+func validateHTTPURL(value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("host is required")
+	}
+	return nil
 }
 
 func defaultString(value, fallback string) string {

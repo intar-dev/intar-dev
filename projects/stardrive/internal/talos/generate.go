@@ -15,6 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const kubernetesRegistryHost = "registry.k8s.io"
+
 type GenConfigResult struct {
 	ControlPlane []byte
 	Worker       []byte
@@ -31,6 +33,7 @@ type GenConfigParams struct {
 	InstallDisk                 string
 	ControlPlaneTaints          bool
 	KubernetesAPIServerCertSANs []string
+	KubernetesRegistryMirrors   []string
 	SecretsYAML                 []byte
 }
 
@@ -132,6 +135,10 @@ func GenerateConfig(ctx context.Context, params GenConfigParams) (*GenConfigResu
 	if err != nil {
 		return nil, fmt.Errorf("disable kube-proxy in control-plane config: %w", err)
 	}
+	controlPlane, err = injectKubernetesRegistryMirror(controlPlane, params.KubernetesRegistryMirrors)
+	if err != nil {
+		return nil, fmt.Errorf("inject Kubernetes registry mirror in control-plane config: %w", err)
+	}
 
 	workerConfig, err := input.Config(machine.TypeWorker)
 	if err != nil {
@@ -144,6 +151,10 @@ func GenerateConfig(ctx context.Context, params GenConfigParams) (*GenConfigResu
 	worker, err = disableKubeProxy(worker)
 	if err != nil {
 		return nil, fmt.Errorf("disable kube-proxy in worker config: %w", err)
+	}
+	worker, err = injectKubernetesRegistryMirror(worker, params.KubernetesRegistryMirrors)
+	if err != nil {
+		return nil, fmt.Errorf("inject Kubernetes registry mirror in worker config: %w", err)
 	}
 
 	clientConfig, err := input.Talosconfig()
@@ -171,6 +182,34 @@ func disableKubeProxy(configYAML []byte) ([]byte, error) {
 	clusterMap := nestedStringMap(document, "cluster")
 	clusterMap["proxy"] = map[string]any{
 		"disabled": true,
+	}
+
+	data, err := yaml.Marshal(document)
+	if err != nil {
+		return nil, fmt.Errorf("encode generated config: %w", err)
+	}
+
+	return data, nil
+}
+
+func injectKubernetesRegistryMirror(configYAML []byte, endpoints []string) ([]byte, error) {
+	endpoints = trimStringSlice(endpoints)
+	if len(endpoints) == 0 {
+		return configYAML, nil
+	}
+
+	var document map[string]any
+	if err := yaml.Unmarshal(configYAML, &document); err != nil {
+		return nil, fmt.Errorf("decode generated config: %w", err)
+	}
+
+	machineMap := nestedStringMap(document, "machine")
+	registriesMap := nestedStringMap(machineMap, "registries")
+	mirrorsMap := nestedStringMap(registriesMap, "mirrors")
+	mirrorsMap[kubernetesRegistryHost] = map[string]any{
+		"endpoints":    append([]string(nil), endpoints...),
+		"overridePath": true,
+		"skipFallback": true,
 	}
 
 	data, err := yaml.Marshal(document)

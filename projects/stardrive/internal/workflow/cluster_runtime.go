@@ -89,6 +89,7 @@ func (a *App) regenerateTalosAssets(ctx context.Context, cfg *config.Config, inf
 		KubernetesVersion:           cfg.Cluster.KubernetesVersion,
 		ControlPlaneTaints:          cfg.Cluster.ControlPlaneTaints,
 		KubernetesAPIServerCertSANs: uniqueNonEmpty(sans),
+		KubernetesRegistryMirrors:   cfg.KubernetesRegistryMirrors(),
 		SecretsYAML:                 secretsYAML,
 	})
 	if err != nil {
