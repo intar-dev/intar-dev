@@ -166,6 +166,28 @@ func (c *Client) DeleteSecrets(ctx context.Context, projectID, environment, path
 	return nil
 }
 
+func (c *Client) DeleteSecretPath(ctx context.Context, projectID, environment, path string) error {
+	path = normalizeSecretPath(path)
+	if path == "" || path == "/" {
+		return nil
+	}
+	if err := c.DeleteSecrets(ctx, projectID, environment, path); err != nil {
+		return err
+	}
+
+	parentPath, folderName := splitSecretPath(path)
+	_, err := c.sdk.Folders().Delete(infisicalsdk.DeleteFolderOptions{
+		ProjectID:   strings.TrimSpace(projectID),
+		Environment: strings.TrimSpace(environment),
+		Path:        parentPath,
+		FolderName:  folderName,
+	})
+	if err != nil && !IsNotFound(err) {
+		return fmt.Errorf("delete infisical folder %s: %w", path, err)
+	}
+	return nil
+}
+
 func (c *Client) EnsureSecretPath(ctx context.Context, projectID, environment, path string) error {
 	path = normalizeSecretPath(path)
 	if path == "" || path == "/" {
@@ -231,4 +253,17 @@ func normalizeSecretPath(path string) string {
 		path = "/" + path
 	}
 	return strings.TrimRight(path, "/")
+}
+
+func splitSecretPath(path string) (string, string) {
+	path = normalizeSecretPath(path)
+	if path == "" || path == "/" {
+		return "/", ""
+	}
+	trimmed := strings.Trim(path, "/")
+	index := strings.LastIndex(trimmed, "/")
+	if index < 0 {
+		return "/", trimmed
+	}
+	return "/" + trimmed[:index], trimmed[index+1:]
 }

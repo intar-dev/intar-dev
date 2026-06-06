@@ -199,6 +199,46 @@ func (a *App) saveConfig(cfgPath string, cfg *config.Config) error {
 	return config.Save(cfgPath, &copy)
 }
 
+func deleteClusterInfisicalPaths(ctx context.Context, cfg *config.Config, infClient *infisical.Client) (int, error) {
+	if cfg == nil {
+		return 0, fmt.Errorf("config is required")
+	}
+	if infClient == nil {
+		return 0, fmt.Errorf("infisical client is required")
+	}
+
+	paths := cfg.Secrets()
+	clusterPaths := []string{
+		paths.ClusterBootstrap,
+		paths.ClusterAccess,
+		paths.ClusterRuntime,
+	}
+	deleted := 0
+	for _, path := range clusterPaths {
+		if err := infClient.DeleteSecretPath(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, path); err != nil && !infisical.IsNotFound(err) {
+			return deleted, err
+		}
+		deleted++
+	}
+	clusterRootPath := parentSecretPath(paths.ClusterBootstrap)
+	if err := infClient.DeleteSecretPath(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, clusterRootPath); err != nil && !infisical.IsNotFound(err) {
+		return deleted, err
+	}
+	return deleted + 1, nil
+}
+
+func parentSecretPath(path string) string {
+	path = strings.TrimRight(strings.TrimSpace(path), "/")
+	if path == "" || path == "/" {
+		return "/"
+	}
+	index := strings.LastIndex(path, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return path[:index]
+}
+
 func (a *App) clusterStateDir(cluster string) string {
 	return filepath.Join(a.opts.Paths.StateDir, "clusters", names.Slugify(cluster))
 }

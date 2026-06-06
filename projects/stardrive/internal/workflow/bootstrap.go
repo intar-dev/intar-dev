@@ -129,6 +129,10 @@ func (a *App) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 
 	if err := a.runPhase(op, "seed-infisical", func() (any, error) {
 		paths := cfg.Secrets()
+		resetPaths, err := deleteClusterInfisicalPaths(ctx, cfg, infClient)
+		if err != nil {
+			return nil, err
+		}
 		if err := infClient.EnsureSecretPath(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, paths.OperatorShared); err != nil {
 			return nil, err
 		}
@@ -149,7 +153,7 @@ func (a *App) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 		}); err != nil {
 			return nil, err
 		}
-		return nil, nil
+		return map[string]int{"resetPaths": resetPaths}, nil
 	}); err != nil {
 		return err
 	}

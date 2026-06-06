@@ -38,3 +38,14 @@ func TestBootstrapSecretsUsesOperatorSharedPath(t *testing.T) {
 		t.Fatalf("cfg.Secrets().OperatorShared = %q, want %q", got, "/stardrive/operator/shared")
 	}
 }
+
+func TestParentSecretPath(t *testing.T) {
+	t.Parallel()
+
+	if got := parentSecretPath("/stardrive/clusters/intar/bootstrap"); got != "/stardrive/clusters/intar" {
+		t.Fatalf("parentSecretPath() = %q", got)
+	}
+	if got := parentSecretPath("/stardrive"); got != "/" {
+		t.Fatalf("parentSecretPath(root child) = %q", got)
+	}
+}

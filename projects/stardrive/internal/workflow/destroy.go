@@ -267,17 +267,13 @@ func (a *App) Destroy(ctx context.Context, req DestroyRequest) error {
 	}
 
 	if err := a.runPhase(op, "delete-infisical", func() (any, error) {
-		for _, path := range []string{
-			cfg.Secrets().ClusterBootstrap,
-			cfg.Secrets().ClusterAccess,
-			cfg.Secrets().ClusterRuntime,
-		} {
-			if err := infClient.DeleteSecrets(ctx, cfg.Infisical.ProjectID, cfg.Infisical.Environment, path); err != nil && !infisical.IsNotFound(err) {
-				return nil, err
-			}
+		deleted, err := deleteClusterInfisicalPaths(ctx, cfg, infClient)
+		if err != nil && !infisical.IsNotFound(err) {
+			return nil, err
 		}
-
-		return nil, nil
+		return map[string]int{
+			"paths": deleted,
+		}, nil
 	}); err != nil {
 		return err
 	}
