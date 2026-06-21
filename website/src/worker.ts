@@ -1,9 +1,7 @@
-import astroWorker from "@astrojs/cloudflare/entrypoints/server";
+import { handle } from "@astrojs/cloudflare/handler";
 import { handleAgentBootstrap, handleAgentConnect } from "@/control-plane/auth";
 import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifacts";
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
-
-const astro = astroWorker as ExportedHandler<Cloudflare.Env>;
 
 export default {
   async fetch(request, env, ctx) {
@@ -24,21 +22,8 @@ export default {
       }
     }
 
-    if (typeof astro.fetch !== "function") {
-      return jsonResponse({ error: "astro fetch handler is unavailable" }, 500);
-    }
-
-    return astro.fetch(request, env, ctx);
+    return handle(request, env, ctx);
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 
 export { HostRuntimeDO };
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-    },
-  });
-}

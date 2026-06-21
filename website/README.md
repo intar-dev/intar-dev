@@ -21,6 +21,7 @@ Run from `website/`:
 bun dev
 bun run build
 bunx wrangler d1 migrations apply DB --local --config wrangler.jsonc
+bunx wrangler deploy --config dist/server/wrangler.json
 ```
 
 ## Worker configuration
