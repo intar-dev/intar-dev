@@ -1,0 +1,54 @@
+name: Agent Validate
+run-name: "${{ github.event_name == 'pull_request' && format('Agent validate PR #{0}', github.event.pull_request.number) || format('Agent validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/agent-ci.yml"
+      - ".github/workflows/agent-release.yml"
+      - "projects/agent/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/agent-ci.yml"
+      - ".github/workflows/agent-release.yml"
+      - "projects/agent/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Run agent checks
+    runs-on: namespace-profile-intar-dev
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Set up Namespace caches
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: |
+            apt
+            rust
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run checks
+        working-directory: projects/agent
+        run: just verify
