@@ -1,0 +1,19 @@
+---
+import "../styles/global.css";
+import App from "../components/app/App";
+import { THEME_BOOTSTRAP_SCRIPT } from "../components/app/theme";
+---
+
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<script is:inline set:html={THEME_BOOTSTRAP_SCRIPT}></script>
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="viewport" content="width=device-width" />
+		<meta name="generator" content={Astro.generator} />
+		<title>intar.dev</title>
+	</head>
+	<body>
+		<App client:only="react" />
+	</body>
+</html>

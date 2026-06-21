@@ -1,0 +1,1 @@
+ALTER TABLE `scenario_runs` ADD `solved_at` integer;

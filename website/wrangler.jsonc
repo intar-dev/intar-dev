@@ -1,0 +1,92 @@
+{
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "name": "intar-dev",
+  "main": "src/worker.ts",
+  "vars": {
+    "BETTER_AUTH_APP_NAME": "intar.dev",
+    "BETTER_AUTH_URL": "https://intar.dev",
+    "AGENT_JWT_ISSUER": "intar-agent-bridge",
+    "AGENT_JWT_AUDIENCE": "agent-connect",
+    "STARGATE_ROUTE_TTL_SECONDS": "14400",
+    "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
+    "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
+    "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
+  },
+  "vpc_services": [
+    {
+      "binding": "STARGATE_ADMIN_SERVICE",
+      "service_id": "019cfe24-0643-7f91-baa3-cd890fdb8af4",
+    },
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+  },
+  "routes": [
+    {
+      "pattern": "intar.dev",
+      "custom_domain": true,
+    },
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "11e7e922-cf7b-4001-964e-e93af25167f9",
+      "database_name": "app",
+      "migrations_dir": "drizzle",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "VM_RUN_ARTIFACTS_BUCKET",
+      "bucket_name": "intar-dev-vm-run-artifacts",
+      "jurisdiction": "eu",
+    },
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "ALLOWLIST",
+      "id": "44c2cb3f79034c3fbc98065693c8fa9a",
+    },
+    {
+      "binding": "SESSION",
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HOST_RUNTIME",
+        "class_name": "HostRuntimeDO",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentBridgeDO"],
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "ScenarioWorkflowDO",
+        "ScenarioWorkflowSchedulerDO",
+      ],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["HostRuntimeDO"],
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": [
+        "AgentBridgeDO",
+        "ScenarioWorkflowDO",
+        "ScenarioWorkflowSchedulerDO",
+      ],
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}
