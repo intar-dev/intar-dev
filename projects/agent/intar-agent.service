@@ -1,0 +1,26 @@
+[Unit]
+Description=intar-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=intar-agent
+Group=intar-agent
+SupplementaryGroups=kvm netdev
+ExecStart=/usr/local/bin/intar-agent --config /etc/intar-agent/config.toml
+# Keep Cloud Hypervisor child processes alive across agent restarts so the
+# replacement agent instance can reattach to tracked VMs.
+KillMode=process
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+Environment=XDG_CACHE_HOME=/var/cache/intar-agent
+Environment=XDG_STATE_HOME=/var/cache/intar-agent/state
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

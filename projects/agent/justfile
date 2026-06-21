@@ -1,0 +1,120 @@
+install-intar-agent:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	VM_SSH="${VM_SSH:-}"
+	CONFIG="${CONFIG:-}"
+	SERVICE_FILE="intar-agent.service"
+
+	if [[ -z "$VM_SSH" ]]; then
+	  echo "set VM_SSH to the deployment target, e.g. VM_SSH=root@203.0.113.10" >&2
+	  exit 1
+	fi
+	if [[ -z "$CONFIG" ]]; then
+	  if [[ -f "config.vm.local.toml" ]]; then
+	    CONFIG="config.vm.local.toml"
+	  else
+	    CONFIG="config.vm.toml"
+	  fi
+	fi
+
+	if [[ ! -f "$CONFIG" ]]; then
+	  echo "missing config: $CONFIG" >&2
+	  exit 1
+	fi
+	if [[ ! -f "$SERVICE_FILE" ]]; then
+	  echo "missing service file: $SERVICE_FILE" >&2
+	  exit 1
+	fi
+
+	REMOTE_ARCH="$(ssh "$VM_SSH" 'uname -m')"
+	case "$REMOTE_ARCH" in
+	  x86_64|amd64)
+	    TARGET="x86_64-unknown-linux-gnu"
+	    ;;
+	  aarch64|arm64)
+	    TARGET="aarch64-unknown-linux-gnu"
+	    ;;
+	  *)
+	    echo "unsupported remote architecture: $REMOTE_ARCH" >&2
+	    exit 1
+	    ;;
+	esac
+
+	if cargo --list | grep -qE '^[[:space:]]*zigbuild([[:space:]]|$)'; then
+	  cargo zigbuild --release -p intar-agent --target "$TARGET"
+	else
+	  cargo build --release -p intar-agent --target "$TARGET"
+	fi
+
+	BIN="target/$TARGET/release/intar-agent"
+	if [[ ! -f "$BIN" ]]; then
+	  echo "missing binary after build: $BIN" >&2
+	  exit 1
+	fi
+
+	scp "$BIN" "$VM_SSH:/tmp/intar-agent.bin"
+	scp "$CONFIG" "$VM_SSH:/tmp/intar-agent-config.toml"
+	scp "$SERVICE_FILE" "$VM_SSH:/tmp/intar-agent.service"
+
+	ssh "$VM_SSH" 'sudo bash -se' <<'EOF'
+	set -euo pipefail
+
+	if ! getent group intar-agent >/dev/null 2>&1; then
+	  groupadd --system intar-agent
+	fi
+	if ! getent group kvm >/dev/null 2>&1; then
+	  groupadd --system kvm
+	fi
+	if ! getent group netdev >/dev/null 2>&1; then
+	  groupadd --system netdev
+	fi
+
+	if ! id -u intar-agent >/dev/null 2>&1; then
+	  useradd \
+	    --system \
+	    --gid intar-agent \
+	    --no-create-home \
+	    --shell /usr/sbin/nologin \
+	    intar-agent
+	fi
+
+	install -d -m 0755 /usr/local/bin
+	install -m 0755 /tmp/intar-agent.bin /usr/local/bin/intar-agent
+
+	install -d -m 0750 -o root -g intar-agent /etc/intar-agent
+	if [[ -f /etc/intar-agent/config.toml ]] && systemctl is-active --quiet intar-agent.service; then
+	  echo "intar-agent is already running; preserving existing /etc/intar-agent/config.toml"
+	else
+	  install -m 0640 -o root -g intar-agent /tmp/intar-agent-config.toml /etc/intar-agent/config.toml
+	fi
+
+	install -d -m 0755 -o intar-agent -g intar-agent /var/cache/intar-agent
+	install -d -m 0750 -o root -g intar-agent /var/cache/intar-agent/boot
+
+	install -m 0644 /tmp/intar-agent.service /etc/systemd/system/intar-agent.service
+	systemctl daemon-reload
+	systemctl enable --now intar-agent.service
+	systemctl restart intar-agent.service
+	systemctl --no-pager --full status intar-agent.service
+
+	rm -f /tmp/intar-agent.bin /tmp/intar-agent-config.toml /tmp/intar-agent.service
+	EOF
+
+check:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	if ! command -v cargo-nextest >/dev/null 2>&1; then
+	  echo "cargo-nextest is required (install with: cargo install cargo-nextest)" >&2
+	  exit 1
+	fi
+
+	cargo fmt --all
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo nextest run --workspace --all-targets --all-features
+
+verify:
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	cargo nextest run --workspace --all-targets --all-features
