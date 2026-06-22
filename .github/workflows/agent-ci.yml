@@ -30,7 +30,8 @@ jobs:
       - name: Install Rust toolchain
         working-directory: projects/agent
         run: |
-          rustup toolchain install --profile minimal --component rustfmt,clippy
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt clippy
           rustup show active-toolchain
 
       - name: Set up Namespace caches
