@@ -8,7 +8,7 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.96"
 
 [workspace.dependencies]
 anyhow = "=1.0.102"
@@ -20,18 +20,18 @@ dirs = "=6.0.0"
 fatfs = "=0.3.6"
 futures-util = "=0.3.32"
 fs2 = "=0.4.3"
-getrandom = "=0.4.2"
-prost = "=0.14.3"
-prost-build = "=0.14.3"
+getrandom = "=0.4.3"
+prost = "=0.14.4"
+prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
-reqwest = { version = "=0.13.3", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 rustls = { version = "=0.23.40", default-features = false, features = ["ring", "std", "tls12"] }
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.149"
+serde_json = "=1.0.150"
 sha2 = "=0.11.0"
 tempfile = "=3.27.0"
-time = { version = "=0.3.47", features = ["formatting"] }
+time = { version = "=0.3.51", features = ["formatting"] }
 tokio = { version = "=1.52.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.2"
