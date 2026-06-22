@@ -5,10 +5,10 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use russh::{
-    ChannelId, ChannelMsg, CryptoVec, Preferred, cipher, client, compression, kex,
+    ChannelId, ChannelMsg, Preferred, cipher, client, compression, kex,
     keys::{
         PrivateKeyWithHashAlg,
-        ssh_key::{Algorithm as SshAlgorithm, EcdsaCurve, rand_core::OsRng},
+        ssh_key::{Algorithm as SshAlgorithm, EcdsaCurve},
     },
     mac,
     server::{self, Auth, Msg, Server as _, Session},
@@ -168,13 +168,14 @@ impl Harness {
         let target_addr = free_addr();
         let allowed_origin = "https://stargate.example.test".to_owned();
 
+        let mut rng = russh::keys::key::safe_rng();
         let public_host_key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let public_host_public = public_host_key.public_key().clone();
         let profile_client_key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let target_key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let target_key_path = temp_dir.path().join("target_id");
         std::fs::write(
             &target_key_path,
@@ -225,7 +226,7 @@ impl Harness {
         });
 
         let target_host_key =
-            russh::keys::PrivateKey::random(&mut OsRng, russh::keys::ssh_key::Algorithm::Ed25519)?;
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let target_host_public = target_host_key.public_key().to_openssh()?;
         let target_server = TestTargetServer {
             allowed_username: "ubuntu".to_owned(),
@@ -675,10 +676,7 @@ impl server::Handler for TestTargetServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        session.data(
-            channel,
-            CryptoVec::from("shell ready\n".as_bytes().to_vec()),
-        )?;
+        session.data(channel, "shell ready\n")?;
         Ok(())
     }
 
@@ -690,7 +688,7 @@ impl server::Handler for TestTargetServer {
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         let response = format!("exec:{}\n", std::str::from_utf8(data)?);
-        session.data(channel, CryptoVec::from(response.into_bytes()))?;
+        session.data(channel, response.into_bytes())?;
         session.exit_status_request(channel, 0)?;
         session.close(channel)?;
         Ok(())
@@ -702,7 +700,7 @@ impl server::Handler for TestTargetServer {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.data(channel, CryptoVec::from(data.to_vec()))?;
+        session.data(channel, data.to_vec())?;
         Ok(())
     }
 }

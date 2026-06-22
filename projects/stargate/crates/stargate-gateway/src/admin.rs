@@ -134,12 +134,11 @@ enum NativeAuthSession {
 }
 
 fn generate_native_client_keypair() -> std::result::Result<(String, String), GatewayHttpError> {
-    let private_key = russh::keys::PrivateKey::random(
-        &mut russh::keys::ssh_key::rand_core::OsRng,
-        russh::keys::ssh_key::Algorithm::Ed25519,
-    )
-    .map_err(StargateError::from)
-    .map_err(GatewayHttpError)?;
+    let mut rng = russh::keys::key::safe_rng();
+    let private_key =
+        russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)
+            .map_err(StargateError::from)
+            .map_err(GatewayHttpError)?;
     let public_key = private_key
         .public_key()
         .to_openssh()

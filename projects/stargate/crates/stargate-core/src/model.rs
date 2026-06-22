@@ -242,7 +242,7 @@ fn validate_username(username: &str, max_len: usize, field: &str) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use russh::keys::ssh_key::{Algorithm, rand_core::OsRng};
+    use russh::keys::ssh_key::Algorithm;
     use time::OffsetDateTime;
 
     use super::{
@@ -264,8 +264,9 @@ mod tests {
 
     #[test]
     fn terminal_session_request_accepts_valid_payload() {
+        let mut rng = russh::keys::key::safe_rng();
         let target_host_key =
-            russh::keys::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("host key");
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
 
         let request = IssueTerminalSessionRequest {
             route_username: "run-01-worker".to_owned(),
@@ -286,8 +287,9 @@ mod tests {
 
     #[test]
     fn terminal_session_request_rejects_invalid_target_ip() {
+        let mut rng = russh::keys::key::safe_rng();
         let target_host_key =
-            russh::keys::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("host key");
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
 
         let request = IssueTerminalSessionRequest {
             route_username: "run-01-worker".to_owned(),
@@ -306,8 +308,9 @@ mod tests {
 
     #[test]
     fn terminal_session_request_deduplicates_authorized_client_keys() {
+        let mut rng = russh::keys::key::safe_rng();
         let client_key =
-            russh::keys::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("client key");
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("client key");
         let client_key_openssh = client_key.public_key().to_openssh().expect("client");
 
         let request = IssueTerminalSessionRequest {

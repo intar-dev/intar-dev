@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, time::D
 
 use anyhow::Context;
 use russh::{
-    ChannelId, CryptoVec, MethodKind, MethodSet, Preferred, cipher, compression, kex,
+    ChannelId, MethodKind, MethodSet, Preferred, cipher, compression, kex,
     keys::ssh_key::Algorithm,
     mac,
     server::{self, Auth, Msg, Server as _, Session},
@@ -361,7 +361,7 @@ impl SshConnection {
 
 fn server_config() -> russh::server::Config {
     let mut config = russh::server::Config {
-        server_id: russh::SshId::Standard("SSH-2.0-Stargate".to_owned()),
+        server_id: russh::SshId::Standard("SSH-2.0-Stargate".into()),
         methods: MethodSet::from(&[MethodKind::PublicKey][..]),
         auth_rejection_time: Duration::from_millis(500),
         auth_rejection_time_initial: Some(Duration::from_millis(500)),
@@ -390,12 +390,10 @@ async fn forward_bridge_events(
     while let Some(event) = events.recv().await {
         match event {
             BridgeEvent::Stdout(data) => {
-                let _ = handle.data(channel, CryptoVec::from(data)).await;
+                let _ = handle.data(channel, data).await;
             }
             BridgeEvent::Stderr(data) => {
-                let _ = handle
-                    .extended_data(channel, 1, CryptoVec::from(data))
-                    .await;
+                let _ = handle.extended_data(channel, 1, data).await;
             }
             BridgeEvent::Exit(exit_status) => {
                 let _ = handle.exit_status_request(channel, exit_status).await;

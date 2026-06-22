@@ -88,7 +88,7 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
             async move { run_public_ssh_server(public_ssh_gateway, ssh_bind, host_key).await },
         );
 
-    let _ = sd_notify::notify(true, &[NotifyState::Ready]);
+    let _ = sd_notify::notify(&[NotifyState::Ready]);
 
     tokio::select! {
         result = async {
@@ -101,7 +101,7 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
             if let Err(error) = signal {
                 tracing::warn!(error = %error, "failed to listen for ctrl-c");
             }
-            let _ = sd_notify::notify(true, &[NotifyState::Stopping]);
+            let _ = sd_notify::notify(&[NotifyState::Stopping]);
             Ok(())
         }
     }
@@ -268,10 +268,8 @@ async fn load_or_create_host_key(
         }
         key
     } else {
-        let key = russh::keys::PrivateKey::random(
-            &mut russh::keys::ssh_key::rand_core::OsRng,
-            algorithm.clone(),
-        )?;
+        let mut rng = russh::keys::key::safe_rng();
+        let key = russh::keys::PrivateKey::random(&mut rng, algorithm.clone())?;
         let contents = key.to_openssh(russh::keys::ssh_key::LineEnding::LF)?;
         tokio::fs::write(path, contents)
             .await
