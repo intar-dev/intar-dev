@@ -25,6 +25,8 @@ var (
 	talosVersionPattern = regexp.MustCompile(`^v?(\d+)\.(\d+)(?:\.(\d+))?$`)
 )
 
+const defaultResolverHTTPTimeout = 20 * time.Second
+
 type ReleaseResolver struct {
 	httpClient             *http.Client
 	supportedTalosMinor    string
@@ -34,7 +36,7 @@ type ReleaseResolver struct {
 
 func NewReleaseResolver() *ReleaseResolver {
 	return &ReleaseResolver{
-		httpClient:             &http.Client{Timeout: 20 * time.Second},
+		httpClient:             &http.Client{Timeout: defaultResolverHTTPTimeout},
 		talosReleasesURLFmt:    defaultTalosReleasesURL,
 		kubernetesStableURLFmt: defaultKubernetesStableURLFormat,
 	}
@@ -181,7 +183,7 @@ func (r *ReleaseResolver) SupportedKubernetesPatches(ctx context.Context, talosV
 func (r *ReleaseResolver) LatestKubernetesPatch(ctx context.Context, minor string) (string, error) {
 	minor = strings.TrimSpace(strings.TrimPrefix(minor, "v"))
 	if minor == "" {
-		return "", fmt.Errorf("Kubernetes minor version is required")
+		return "", fmt.Errorf("kubernetes minor version is required")
 	}
 
 	version, err := r.getText(ctx, fmt.Sprintf(r.kubernetesStableURLFmt, minor))
@@ -234,7 +236,7 @@ func (r *ReleaseResolver) getJSON(ctx context.Context, rawURL string, out any) e
 
 	client := r.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultResolverHTTPTimeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -258,7 +260,7 @@ func (r *ReleaseResolver) getText(ctx context.Context, rawURL string) (string, e
 
 	client := r.httpClient
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: defaultResolverHTTPTimeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -291,5 +293,5 @@ func supportedTalosMinor() (string, error) {
 		}
 		return minor, nil
 	}
-	return "", fmt.Errorf("Talos machinery dependency not found in build info")
+	return "", fmt.Errorf("talos machinery dependency not found in build info")
 }

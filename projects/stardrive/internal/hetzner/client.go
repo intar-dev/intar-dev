@@ -123,7 +123,7 @@ type StorageBox struct {
 func NewClient(creds Credentials) (*Client, error) {
 	token := strings.TrimSpace(creds.Token)
 	if token == "" {
-		return nil, fmt.Errorf("Hetzner token is required")
+		return nil, fmt.Errorf("hetzner token is required")
 	}
 
 	cloud := hcloud.NewClient(hcloud.WithToken(token))
@@ -883,7 +883,7 @@ func (c *Client) DeleteImage(ctx context.Context, id int64) error {
 }
 
 func (c *Client) ListStorageBoxes(ctx context.Context) ([]StorageBox, error) {
-	resp, err := c.doStorageRequest(ctx, http.MethodGet, "/storage_boxes", nil, nil)
+	resp, err := c.doStorageRequest(ctx, http.MethodGet, "/storage_boxes", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -921,7 +921,7 @@ func (c *Client) CreateStorageBox(ctx context.Context, name, plan, location, pas
 		"location":         strings.TrimSpace(location),
 		"password":         password,
 	}
-	resp, err := c.doStorageRequest(ctx, http.MethodPost, "/storage_boxes", body, nil)
+	resp, err := c.doStorageRequest(ctx, http.MethodPost, "/storage_boxes", body)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +981,7 @@ func (c *Client) ResetStorageBoxPassword(ctx context.Context, id int64, password
 	}
 	resp, err := c.doStorageRequest(ctx, http.MethodPost, "/storage_boxes/"+strconv.FormatInt(id, 10)+"/actions/reset_password", map[string]any{
 		"password": password,
-	}, nil)
+	})
 	if err != nil {
 		return err
 	}
@@ -995,7 +995,7 @@ func (c *Client) UpdateStorageBoxAccessSettings(ctx context.Context, id int64, s
 	}
 	resp, err := c.doStorageRequest(ctx, http.MethodPost, "/storage_boxes/"+strconv.FormatInt(id, 10)+"/actions/update_access_settings", map[string]any{
 		"samba_enabled": sambaEnabled,
-	}, nil)
+	})
 	if err != nil {
 		return err
 	}
@@ -1004,7 +1004,7 @@ func (c *Client) UpdateStorageBoxAccessSettings(ctx context.Context, id int64, s
 }
 
 func (c *Client) DeleteStorageBox(ctx context.Context, id int64) error {
-	resp, err := c.doStorageRequest(ctx, http.MethodDelete, "/storage_boxes/"+strconv.FormatInt(id, 10), nil, nil)
+	resp, err := c.doStorageRequest(ctx, http.MethodDelete, "/storage_boxes/"+strconv.FormatInt(id, 10), nil)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -1102,11 +1102,8 @@ func (c *Client) waitForAction(ctx context.Context, action *hcloud.Action) error
 	}
 }
 
-func (c *Client) doStorageRequest(ctx context.Context, method, requestPath string, body any, query url.Values) (*http.Response, error) {
+func (c *Client) doStorageRequest(ctx context.Context, method, requestPath string, body any) (*http.Response, error) {
 	fullURL := storageAPIBaseURL + requestPath
-	if len(query) > 0 {
-		fullURL += "?" + query.Encode()
-	}
 
 	var reader io.Reader
 	if body != nil {
@@ -1180,8 +1177,6 @@ func fromHCloudServer(server *hcloud.Server) *Server {
 	}
 	if server.Location != nil {
 		out.Location = server.Location.Name
-	} else if server.Datacenter != nil && server.Datacenter.Location != nil {
-		out.Location = server.Datacenter.Location.Name
 	}
 	if server.Image != nil {
 		out.ImageID = server.Image.ID

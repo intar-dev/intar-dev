@@ -298,7 +298,7 @@ func (a *App) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 		if err != nil {
 			return nil, err
 		}
-		client, err := talos.NewClient(first, accessSecrets.TalosconfigYAML)
+		client, err := talos.NewClient(ctx, first, accessSecrets.TalosconfigYAML)
 		if err != nil {
 			return nil, err
 		}
@@ -399,7 +399,7 @@ func (a *App) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 		if err := a.applyFluxBootstrapOCI(ctx, cfg, kubeconfigPath, runtime); err != nil {
 			return nil, err
 		}
-		return nil, a.waitForFluxBootstrapOCI(ctx, cfg, kubeconfigPath)
+		return nil, a.waitForFluxBootstrapOCI(ctx, kubeconfigPath)
 	}); err != nil {
 		return err
 	}
@@ -419,7 +419,7 @@ func (a *App) Bootstrap(ctx context.Context, req BootstrapRequest) error {
 			return nil, err
 		}
 		defer cleanup()
-		if err := a.waitForDeferredFluxBootstrapOCI(ctx, cfg, kubeconfigPath); err != nil {
+		if err := a.waitForDeferredFluxBootstrapOCI(ctx, kubeconfigPath); err != nil {
 			return nil, err
 		}
 		if err := a.waitForKubernetesNodes(ctx, cfg, kubeconfigPath); err != nil {

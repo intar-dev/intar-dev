@@ -116,16 +116,16 @@ func (a *App) regenerateTalosAssets(ctx context.Context, cfg *config.Config, inf
 		}
 	}
 
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talos-secrets.yaml", secrets.TalosSecretsYAML, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talos-secrets.yaml", secrets.TalosSecretsYAML); err != nil {
 		return clusterAccessSecrets{}, err
 	}
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "controlplane.yaml", secrets.ControlPlaneConfigYAML, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "controlplane.yaml", secrets.ControlPlaneConfigYAML); err != nil {
 		return clusterAccessSecrets{}, err
 	}
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "worker.yaml", secrets.WorkerConfigYAML, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "worker.yaml", secrets.WorkerConfigYAML); err != nil {
 		return clusterAccessSecrets{}, err
 	}
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talosconfig", secrets.TalosconfigYAML, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talosconfig", secrets.TalosconfigYAML); err != nil {
 		return clusterAccessSecrets{}, err
 	}
 
@@ -318,7 +318,7 @@ func (a *App) talosKubernetesBundleImages(ctx context.Context, cfg *config.Confi
 	}
 	out = bytes.TrimSpace(out)
 	if len(out) == 0 {
-		return nil, fmt.Errorf("Talos Kubernetes image bundle for %s is empty", version)
+		return nil, fmt.Errorf("talos Kubernetes image bundle for %s is empty", version)
 	}
 	return append(out, '\n'), nil
 }
@@ -424,30 +424,6 @@ func uniqueSortedStrings(values []string) []string {
 	values = uniqueNonEmpty(values)
 	slices.Sort(values)
 	return values
-}
-
-func (a *App) openRemoteTalosDiskArtifact(ctx context.Context, artifactURL string) (io.ReadCloser, hcloudimages.Compression, func(), error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(artifactURL), nil)
-	if err != nil {
-		return nil, hcloudimages.CompressionNone, nil, fmt.Errorf("build Talos image request: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, hcloudimages.CompressionNone, nil, fmt.Errorf("download Talos disk artifact %s: %w", artifactURL, err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		return nil, hcloudimages.CompressionNone, nil, fmt.Errorf("download Talos disk artifact %s: unexpected status %s", artifactURL, resp.Status)
-	}
-
-	compression, err := imageCompressionForPath(artifactURL)
-	if err != nil {
-		resp.Body.Close()
-		return nil, hcloudimages.CompressionNone, nil, err
-	}
-	a.logInfo("streaming Talos boot image from Image Factory", "url", artifactURL, "compression", compression)
-	return resp.Body, compression, func() { _ = resp.Body.Close() }, nil
 }
 
 func imageCompressionForPath(path string) (hcloudimages.Compression, error) {
@@ -664,7 +640,7 @@ func (a *App) ensureClusterServers(ctx context.Context, cfg *config.Config, hzCl
 func (a *App) waitForTalosSecure(ctx context.Context, nodeAddress string, talosconfig []byte) error {
 	a.logInfo("waiting for Talos secure API", "node", nodeAddress, "timeout", time.Until(deadlineOrNow(ctx)).String())
 	return waitFor(ctx, 5*time.Second, func(ctx context.Context) error {
-		client, err := talos.NewClient(nodeAddress, talosconfig)
+		client, err := talos.NewClient(ctx, nodeAddress, talosconfig)
 		if err != nil {
 			return err
 		}
@@ -720,7 +696,7 @@ func (a *App) reconcileExistingServer(ctx context.Context, cfg *config.Config, h
 }
 
 func (a *App) fetchKubeconfig(ctx context.Context, nodeAddress string, talosconfig []byte) ([]byte, error) {
-	client, err := talos.NewClient(nodeAddress, talosconfig)
+	client, err := talos.NewClient(ctx, nodeAddress, talosconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -767,7 +743,7 @@ func (a *App) persistKubeconfig(ctx context.Context, cfg *config.Config, infClie
 	}); err != nil {
 		return err
 	}
-	return a.writeLocalStateFile(cfg.Cluster.Name, "kubeconfig", kubeconfig, 0o600)
+	return a.writeLocalStateFile(cfg.Cluster.Name, "kubeconfig", kubeconfig)
 }
 
 func (a *App) verifyTalosHealth(ctx context.Context, cfg *config.Config, talosconfig []byte) error {
@@ -847,7 +823,7 @@ func (a *App) installCilium(ctx context.Context, cfg *config.Config, kubeconfigP
 	statusCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	installMode := "install"
-	if _, err := a.probeCommand(statusCtx, env, nil, ciliumBinary, "status", "--wait-duration", "30s"); err == nil {
+	if err := a.probeCommand(statusCtx, env, nil, ciliumBinary, "status", "--wait-duration", "30s"); err == nil {
 		installMode = "upgrade"
 		a.logInfo("reconciling existing Cilium installation", "cluster", cfg.Cluster.Name, "version", cfg.EffectiveCiliumVersion())
 	} else {
@@ -971,7 +947,7 @@ func (a *App) applyFluxBootstrapOCI(ctx context.Context, cfg *config.Config, kub
 	return a.runCommand(ctx, a.kubectlEnv(kubeconfigPath), a.fluxOCIBootstrapManifestWithCA(cfg, runtime.RegistryCACertPEM, runtime.GitOpsArtifactTag), "kubectl", "apply", "-f", "-")
 }
 
-func (a *App) waitForFluxBootstrapOCI(ctx context.Context, cfg *config.Config, kubeconfigPath string) error {
+func (a *App) waitForFluxBootstrapOCI(ctx context.Context, kubeconfigPath string) error {
 	env := a.kubectlEnv(kubeconfigPath)
 	if err := a.runCommand(ctx, env, nil, "kubectl", "wait", "--namespace", fluxNamespace, "--for=condition=Ready", "ocirepository/"+fluxOCIRepositoryName, "--timeout=10m"); err != nil {
 		return err
@@ -984,7 +960,7 @@ func (a *App) waitForFluxBootstrapOCI(ctx context.Context, cfg *config.Config, k
 	return nil
 }
 
-func (a *App) waitForDeferredFluxBootstrapOCI(ctx context.Context, cfg *config.Config, kubeconfigPath string) error {
+func (a *App) waitForDeferredFluxBootstrapOCI(ctx context.Context, kubeconfigPath string) error {
 	env := a.kubectlEnv(kubeconfigPath)
 	for _, name := range []string{fluxIssuerKustomizationName, fluxClusterSecretsKustomizationName, fluxPublicEdgeKustomizationName, fluxCloudflareTunnelKustomizationName, fluxAppsKustomizationName} {
 		if err := a.runCommand(ctx, env, nil, "kubectl", "wait", "--namespace", fluxNamespace, "--for=condition=Ready", "kustomization/"+name, "--timeout=15m"); err != nil {
@@ -1020,7 +996,7 @@ func (a *App) publicEdgeStatus(ctx context.Context, cfg *config.Config, kubeconf
 	check := func(args ...string) bool {
 		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_, err := a.probeCommand(waitCtx, env, nil, "kubectl", args...)
+		err := a.probeCommand(waitCtx, env, nil, "kubectl", args...)
 		return err == nil
 	}
 	certReady := check("wait", "--namespace", publicEdgeNamespace, "--for=condition=Ready", "certificate/"+publicWildcardCertName, "--timeout=5s")
@@ -1051,7 +1027,11 @@ func (a *App) probePublicEdge(ctx context.Context, cfg *config.Config) error {
 }
 
 func (a *App) probePublicEdgeNode(ctx context.Context, hostname, ip string) error {
-	httpResp, err := publicEdgeHTTPClient(hostname, ip, 80, false).Do(mustNewHTTPRequest(ctx, http.MethodGet, "http://"+hostname+"/"))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+hostname+"/", nil)
+	if err != nil {
+		return fmt.Errorf("probe public edge HTTP on %s: build request: %w", ip, err)
+	}
+	httpResp, err := publicEdgeHTTPClient(hostname, ip, 80, false).Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("probe public edge HTTP on %s: %w", ip, err)
 	}
@@ -1064,7 +1044,11 @@ func (a *App) probePublicEdgeNode(ctx context.Context, hostname, ip string) erro
 		return fmt.Errorf("probe public edge HTTP on %s: unexpected redirect location %q", ip, location)
 	}
 
-	httpsResp, err := publicEdgeHTTPClient(hostname, ip, 443, true).Do(mustNewHTTPRequest(ctx, http.MethodGet, "https://"+hostname+"/"))
+	httpsReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+hostname+"/", nil)
+	if err != nil {
+		return fmt.Errorf("probe public edge HTTPS on %s: build request: %w", ip, err)
+	}
+	httpsResp, err := publicEdgeHTTPClient(hostname, ip, 443, true).Do(httpsReq)
 	if err != nil {
 		return fmt.Errorf("probe public edge HTTPS on %s: %w", ip, err)
 	}
@@ -1109,19 +1093,6 @@ func publicEdgeHTTPClient(hostname, ip string, port int, useTLS bool) *http.Clie
 			return http.ErrUseLastResponse
 		},
 	}
-}
-
-func mustNewHTTPRequest(ctx context.Context, method, url string) *http.Request {
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
-	if err != nil {
-		panic(err)
-	}
-	return req
-}
-
-func (a *App) deleteFluxBootstrapResources(ctx context.Context, cfg *config.Config, kubeconfigPath string) error {
-	_ = a.runCommand(ctx, a.kubectlEnv(kubeconfigPath), a.fluxOCIBootstrapManifest(cfg), "kubectl", "delete", "--ignore-not-found=true", "-f", "-")
-	return nil
 }
 
 func (a *App) waitForKubernetesNodes(ctx context.Context, cfg *config.Config, kubeconfigPath string) error {
@@ -1388,20 +1359,6 @@ func renderInlineManifestBundle(manifests []inlineManifest) []byte {
 		builder.WriteByte('\n')
 	}
 	return []byte(builder.String())
-}
-
-func manifestList(manifests []inlineManifest) []map[string]any {
-	out := make([]map[string]any, 0, len(manifests))
-	for _, manifest := range manifests {
-		if strings.TrimSpace(manifest.Name) == "" || strings.TrimSpace(manifest.Contents) == "" {
-			continue
-		}
-		out = append(out, map[string]any{
-			"name":     manifest.Name,
-			"contents": strings.TrimSpace(manifest.Contents),
-		})
-	}
-	return out
 }
 
 func smbDriverManifestURLs(cfg *config.Config) []string {

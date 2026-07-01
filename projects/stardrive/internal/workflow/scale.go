@@ -167,7 +167,7 @@ func (a *App) Scale(ctx context.Context, req ScaleRequest) error {
 			var kubeconfigPath string
 			var cleanup func()
 			if len(strings.TrimSpace(string(kubeconfig))) > 0 {
-				kubeconfigPath, cleanup, err = a.writeTempFile("stardrive-scale-kubeconfig-*.yaml", kubeconfig, 0o600)
+				kubeconfigPath, cleanup, err = a.writeTempFile("stardrive-scale-kubeconfig-*.yaml", kubeconfig)
 				if err != nil {
 					return nil, err
 				}
@@ -200,7 +200,7 @@ func (a *App) Scale(ctx context.Context, req ScaleRequest) error {
 					}
 				}
 				if len(access.TalosconfigYAML) > 0 && nodeIP != "" {
-					client, clientErr := talos.NewClient(nodeIP, access.TalosconfigYAML)
+					client, clientErr := talos.NewClient(ctx, nodeIP, access.TalosconfigYAML)
 					if clientErr == nil {
 						_ = client.Reset(ctx, true, true)
 						_ = client.Close()

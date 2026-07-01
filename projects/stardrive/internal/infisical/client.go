@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	infisicalsdk "github.com/infisical/go-sdk"
 	sdkerrors "github.com/infisical/go-sdk/packages/errors"
 )
+
+const defaultHTTPTimeout = 30 * time.Second
 
 type Client struct {
 	sdk            infisicalsdk.InfisicalClientInterface
@@ -43,7 +46,7 @@ func NewClient(ctx context.Context, siteURL, clientID, clientSecret string) (*Cl
 	return &Client{
 		sdk:        sdk,
 		siteURL:    siteURL,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 		getAccessToken: func() string {
 			return sdk.Auth().GetAccessToken()
 		},
@@ -120,7 +123,7 @@ func (c *Client) SetSecrets(ctx context.Context, projectID, environment, path st
 
 func (c *Client) GetSecrets(ctx context.Context, projectID, environment, path string) (map[string]string, error) {
 	slog.Debug("listing Infisical secrets", "project_id", strings.TrimSpace(projectID), "environment", strings.TrimSpace(environment), "path", normalizeSecretPath(path))
-	list, err := c.sdk.Secrets().List(infisicalsdk.ListSecretsOptions{
+	list, err := c.sdk.Secrets().ListSecrets(infisicalsdk.ListSecretsOptions{
 		ProjectID:              strings.TrimSpace(projectID),
 		Environment:            strings.TrimSpace(environment),
 		SecretPath:             normalizeSecretPath(path),
@@ -130,8 +133,8 @@ func (c *Client) GetSecrets(ctx context.Context, projectID, environment, path st
 		return nil, fmt.Errorf("list infisical secrets in %s: %w", path, err)
 	}
 
-	out := make(map[string]string, len(list))
-	for _, secret := range list {
+	out := make(map[string]string, len(list.Secrets))
+	for _, secret := range list.Secrets {
 		out[secret.SecretKey] = secret.SecretValue
 	}
 	return out, nil

@@ -76,8 +76,20 @@ func (a *App) runPhase(op *operation.Operation, phase string, fn func() (any, er
 			"duration", time.Since(startedAt).String(),
 			"error", err,
 		)
-		_ = op.FailPhase(phase, err)
-		_ = a.store.Save(op)
+		if failErr := op.FailPhase(phase, err); failErr != nil {
+			a.logError("failed to record phase failure",
+				"operation", op.ID,
+				"phase", phase,
+				"error", failErr,
+			)
+		}
+		if saveErr := a.store.Save(op); saveErr != nil {
+			a.logError("failed to persist operation state after phase failure",
+				"operation", op.ID,
+				"phase", phase,
+				"error", saveErr,
+			)
+		}
 		return err
 	}
 	if err := op.CompletePhase(phase, data); err != nil {
@@ -91,15 +103,6 @@ func (a *App) runPhase(op *operation.Operation, phase string, fn func() (any, er
 		"duration", time.Since(startedAt).String(),
 	)
 	return a.store.Save(op)
-}
-
-func (a *App) ensureBinary(name string) (string, error) {
-	path, err := exec.LookPath(strings.TrimSpace(name))
-	if err != nil {
-		return "", fmt.Errorf("required binary %q not found in PATH", name)
-	}
-	a.logDebug("resolved binary", "name", name, "path", path)
-	return path, nil
 }
 
 func (a *App) runCommand(ctx context.Context, env map[string]string, input []byte, name string, args ...string) error {
@@ -184,7 +187,7 @@ func (a *App) captureCommand(ctx context.Context, env map[string]string, input [
 	return out, nil
 }
 
-func (a *App) probeCommand(ctx context.Context, env map[string]string, input []byte, name string, args ...string) ([]byte, error) {
+func (a *App) probeCommand(ctx context.Context, env map[string]string, input []byte, name string, args ...string) error {
 	startedAt := time.Now()
 	a.logDebug("probing command",
 		"command", formatCommand(name, args...),
@@ -211,13 +214,13 @@ func (a *App) probeCommand(ctx context.Context, env map[string]string, input []b
 			"error", err,
 			"detail", detail,
 		)
-		return nil, err
+		return err
 	}
 	a.logDebug("command probe succeeded",
 		"command", formatCommand(name, args...),
 		"duration", time.Since(startedAt).String(),
 	)
-	return stdoutBuf.Bytes(), nil
+	return nil
 }
 
 func withEnv(base []string, extra map[string]string) []string {
@@ -278,7 +281,7 @@ func formatCommand(name string, args ...string) string {
 	return strings.Join(parts, " ")
 }
 
-func (a *App) writeTempFile(prefix string, data []byte, mode os.FileMode) (string, func(), error) {
+func (a *App) writeTempFile(prefix string, data []byte) (string, func(), error) {
 	file, err := os.CreateTemp("", prefix)
 	if err != nil {
 		return "", nil, err
@@ -288,7 +291,7 @@ func (a *App) writeTempFile(prefix string, data []byte, mode os.FileMode) (strin
 		os.Remove(file.Name())
 		return "", nil, err
 	}
-	if err := file.Chmod(mode); err != nil {
+	if err := file.Chmod(0o600); err != nil {
 		file.Close()
 		os.Remove(file.Name())
 		return "", nil, err
@@ -348,18 +351,11 @@ func ensureClusterAccessSecrets(existing clusterAccessSecrets, requireKubeconfig
 	return loaded, nil
 }
 
-func (a *App) writeTempTalosconfig(secrets clusterAccessSecrets) (string, func(), error) {
-	if len(bytes.TrimSpace(secrets.TalosconfigYAML)) == 0 {
-		return "", nil, fmt.Errorf("talosconfig is missing")
-	}
-	return a.writeTempFile("stardrive-talosconfig-*.yaml", secrets.TalosconfigYAML, 0o600)
-}
-
 func (a *App) writeTempKubeconfig(secrets clusterAccessSecrets) (string, func(), error) {
 	if len(bytes.TrimSpace(secrets.KubeconfigYAML)) == 0 {
 		return "", nil, fmt.Errorf("kubeconfig is missing")
 	}
-	return a.writeTempFile("stardrive-kubeconfig-*.yaml", secrets.KubeconfigYAML, 0o600)
+	return a.writeTempFile("stardrive-kubeconfig-*.yaml", secrets.KubeconfigYAML)
 }
 
 func (a *App) kubectlEnv(kubeconfigPath string) map[string]string {
@@ -446,30 +442,6 @@ func controlPlaneIPs(cfg *config.Config) []string {
 	return uniqueNonEmpty(ips)
 }
 
-func controlPlaneHealthIPs(cfg *config.Config) []string {
-	if cfg == nil {
-		return nil
-	}
-	ips := make([]string, 0, len(cfg.Nodes))
-	for _, node := range cfg.ControlPlaneNodes() {
-		switch {
-		case node.PrivateIPv4 != "":
-			ips = append(ips, node.PrivateIPv4)
-		case node.PublicIPv4 != "":
-			ips = append(ips, node.PublicIPv4)
-		}
-	}
-	return uniqueNonEmpty(ips)
-}
-
-func firstControlPlaneIP(cfg *config.Config) string {
-	ips := controlPlaneIPs(cfg)
-	if len(ips) == 0 {
-		return ""
-	}
-	return ips[0]
-}
-
 func (a *App) firstReachableControlPlaneIP(ctx context.Context, cfg *config.Config, talosconfig []byte) (string, error) {
 	endpoints := controlPlaneIPs(cfg)
 	if len(endpoints) == 0 {
@@ -481,7 +453,7 @@ func (a *App) firstReachableControlPlaneIP(ctx context.Context, cfg *config.Conf
 	failures := make([]string, 0, len(endpoints))
 	for _, endpoint := range endpoints {
 		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		client, err := talos.NewClient(endpoint, talosconfig)
+		client, err := talos.NewClient(ctx, endpoint, talosconfig)
 		if err != nil {
 			cancel()
 			failures = append(failures, fmt.Sprintf("%s: %v", endpoint, err))
@@ -624,27 +596,6 @@ func orasCLIAssetBase(version string) (string, error) {
 		return "", fmt.Errorf("unsupported architecture for ORAS CLI bootstrap: %s", goarch)
 	}
 	return fmt.Sprintf("oras_%s_%s_%s", strings.TrimPrefix(strings.TrimSpace(version), "v"), goos, goarch), nil
-}
-
-func fetchText(ctx context.Context, rawURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("GET %s returned %s: %s", rawURL, resp.Status, strings.TrimSpace(string(body)))
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 func downloadFile(ctx context.Context, rawURL, outputPath string) error {
@@ -811,30 +762,6 @@ func fluxInstallURL(version string) string {
 		version = config.DefaultFluxVersion
 	}
 	return fmt.Sprintf("https://github.com/fluxcd/flux2/releases/download/%s/install.yaml", version)
-}
-
-func (a *App) bootstrapRuntimeState(cfg *config.Config) (clusterAccessSecrets, string, string, error) {
-	stateDir := a.clusterStateDir(cfg.Cluster.Name)
-	access := clusterAccessSecrets{}
-	talosconfigPath := filepath.Join(stateDir, "talosconfig")
-	kubeconfigPath := filepath.Join(stateDir, "kubeconfig")
-
-	if data, err := os.ReadFile(filepath.Join(stateDir, "talos-secrets.yaml")); err == nil {
-		access.TalosSecretsYAML = data
-	}
-	if data, err := os.ReadFile(filepath.Join(stateDir, "controlplane.yaml")); err == nil {
-		access.ControlPlaneConfigYAML = data
-	}
-	if data, err := os.ReadFile(filepath.Join(stateDir, "worker.yaml")); err == nil {
-		access.WorkerConfigYAML = data
-	}
-	if data, err := os.ReadFile(talosconfigPath); err == nil {
-		access.TalosconfigYAML = data
-	}
-	if data, err := os.ReadFile(kubeconfigPath); err == nil {
-		access.KubeconfigYAML = data
-	}
-	return access, talosconfigPath, kubeconfigPath, nil
 }
 
 func waitFor(ctx context.Context, interval time.Duration, check func(context.Context) error) error {

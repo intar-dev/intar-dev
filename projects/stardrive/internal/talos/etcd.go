@@ -2,6 +2,7 @@ package talos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,19 +26,23 @@ func (c *Client) EtcdSnapshot(ctx context.Context, outputPath string) error {
 	if err != nil {
 		return fmt.Errorf("create snapshot output file: %w", err)
 	}
-	defer outputFile.Close()
 
 	for {
 		chunk, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
+			_ = outputFile.Close()
 			return fmt.Errorf("read etcd snapshot stream: %w", err)
 		}
 		if _, err := outputFile.Write(chunk.GetBytes()); err != nil {
+			_ = outputFile.Close()
 			return fmt.Errorf("write snapshot output file: %w", err)
 		}
+	}
+	if err := outputFile.Close(); err != nil {
+		return fmt.Errorf("close snapshot output file: %w", err)
 	}
 	return nil
 }

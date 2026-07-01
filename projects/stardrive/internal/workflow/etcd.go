@@ -74,7 +74,7 @@ func (a *App) talosClientFromInfisical(ctx context.Context, cfgPath string) (*co
 		return nil, nil, nil, fmt.Errorf("first control-plane node has no resolved public IPv4")
 	}
 
-	talosClient, err := talos.NewClient(controlPlanes[0].PublicIPv4, talosconfigBytes)
+	talosClient, err := talos.NewClient(ctx, controlPlanes[0].PublicIPv4, talosconfigBytes)
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, err

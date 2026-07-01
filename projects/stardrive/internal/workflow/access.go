@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/intar-dev/stardrive/internal/config"
+	"github.com/intar-dev/stardrive/internal/fs"
 )
 
 func (a *App) Access(ctx context.Context, req AccessRequest) error {
@@ -43,16 +44,16 @@ func (a *App) Access(ctx context.Context, req AccessRequest) error {
 
 	talosPath := filepath.Join(outDir, "talosconfig")
 	kubePath := filepath.Join(outDir, "kubeconfig")
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talosconfig", talosconfig, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "talosconfig", talosconfig); err != nil {
 		return err
 	}
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "kubeconfig", kubeconfig, 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "kubeconfig", kubeconfig); err != nil {
 		return err
 	}
-	if err := os.WriteFile(talosPath, talosconfig, 0o600); err != nil {
+	if err := fs.WriteFileAtomic(talosPath, talosconfig, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", talosPath, err)
 	}
-	if err := os.WriteFile(kubePath, kubeconfig, 0o600); err != nil {
+	if err := fs.WriteFileAtomic(kubePath, kubeconfig, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", kubePath, err)
 	}
 

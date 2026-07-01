@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +84,7 @@ func (a *App) GitOpsPublish(ctx context.Context, req GitOpsPublishRequest) error
 	if err != nil {
 		return err
 	}
-	caPath, caCleanup, err := a.writeTempFile("stardrive-registry-ca-*.crt", []byte(runtime.RegistryCACertPEM), 0o600)
+	caPath, caCleanup, err := a.writeTempFile("stardrive-registry-ca-*.crt", []byte(runtime.RegistryCACertPEM))
 	if err != nil {
 		return err
 	}
@@ -155,11 +154,9 @@ func archiveDirectoryAsTarGz(root, outputPath string) error {
 	defer file.Close()
 
 	gzWriter := gzip.NewWriter(file)
-	defer gzWriter.Close()
 	tarWriter := tar.NewWriter(gzWriter)
-	defer tarWriter.Close()
 
-	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -193,6 +190,21 @@ func archiveDirectoryAsTarGz(root, outputPath string) error {
 		_, err = io.Copy(tarWriter, source)
 		return err
 	})
+	if walkErr != nil {
+		_ = tarWriter.Close()
+		_ = gzWriter.Close()
+		return walkErr
+	}
+	if err := tarWriter.Close(); err != nil {
+		return fmt.Errorf("finalize tar archive %s: %w", outputPath, err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		return fmt.Errorf("finalize gzip archive %s: %w", outputPath, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", outputPath, err)
+	}
+	return nil
 }
 
 type gitOpsTemplateData struct {
@@ -443,10 +455,12 @@ func copyFile(sourcePath, targetPath string, mode os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("create %s: %w", targetPath, err)
 	}
-	defer target.Close()
-
 	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
 		return fmt.Errorf("copy %s to %s: %w", sourcePath, targetPath, err)
+	}
+	if err := target.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", targetPath, err)
 	}
 	return nil
 }
@@ -500,9 +514,4 @@ func freeTCPPort() (int, error) {
 		return 0, fmt.Errorf("unexpected listener address type %T", listener.Addr())
 	}
 	return addr.Port, nil
-}
-
-func prettyJSON(value any) string {
-	data, _ := json.Marshal(value)
-	return string(data)
 }

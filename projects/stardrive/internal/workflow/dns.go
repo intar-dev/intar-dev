@@ -85,7 +85,7 @@ func syncClusterDNS(ctx context.Context, cfg *config.Config, token string) error
 
 func syncClusterReverseDNS(ctx context.Context, cfg *config.Config, hzClient *hetzner.Client) error {
 	if hzClient == nil {
-		return fmt.Errorf("Hetzner client is required")
+		return fmt.Errorf("hetzner client is required")
 	}
 	if cfg == nil || !cfg.DNS.ManageNodeRecords {
 		return nil

@@ -53,9 +53,6 @@ type BootstrapUniversalAuthParams struct {
 }
 
 func BootstrapUniversalAuth(ctx context.Context, params BootstrapUniversalAuthParams) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := validateBootstrapUniversalAuthParams(&params); err != nil {
 		return err
 	}
@@ -315,7 +312,10 @@ func waitForClusterSecretStoreReady(ctx context.Context, kubeClient ctrlclient.C
 		}
 		converted := make([]metav1.Condition, 0, len(conditions))
 		for _, item := range conditions {
-			data, _ := item.(map[string]any)
+			data, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
 			condition := metav1.Condition{}
 			condition.Type, _, _ = unstructured.NestedString(data, "type")
 			statusValue, _, _ := unstructured.NestedString(data, "status")

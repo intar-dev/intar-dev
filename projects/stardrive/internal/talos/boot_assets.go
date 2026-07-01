@@ -15,7 +15,7 @@ type BootAssets struct {
 func NormalizeVersion(version string) (string, error) {
 	version = strings.TrimSpace(version)
 	if version == "" {
-		return "", fmt.Errorf("Talos version is required")
+		return "", fmt.Errorf("talos version is required")
 	}
 	if !strings.HasPrefix(version, "v") {
 		version = "v" + version
@@ -38,7 +38,7 @@ func BuildFactoryDiskImageURL(version, schematic, asset string) (string, error) 
 	}
 	asset = strings.TrimSpace(asset)
 	if asset == "" {
-		return "", fmt.Errorf("Talos image asset is required")
+		return "", fmt.Errorf("talos image asset is required")
 	}
 	return fmt.Sprintf("https://factory.talos.dev/image/%s/%s/%s", EffectiveSchematic(schematic), version, asset), nil
 }

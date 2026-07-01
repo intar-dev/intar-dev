@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -358,5 +359,74 @@ func TestEffectiveRegistryAddress(t *testing.T) {
 
 	if got := cfg.EffectiveRegistryAddress(); got != "oci-registry.registry-system.svc.cluster.local:5001" {
 		t.Fatalf("unexpected registry address: %s", got)
+	}
+}
+
+func TestNormalizeRolePreservesNonEmptyRoles(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty defaults to control-plane", input: "", want: RoleControlPlane},
+		{name: "blank defaults to control-plane", input: "   ", want: RoleControlPlane},
+		{name: "control-plane passes through", input: "control-plane", want: RoleControlPlane},
+		{name: "slugifies formatting", input: "Control Plane", want: RoleControlPlane},
+		{name: "worker is preserved for validation to reject", input: "worker", want: "worker"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeRole(tt.input); got != tt.want {
+				t.Fatalf("normalizeRole(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsWorkerRole(t *testing.T) {
+	cfg := &Config{
+		Cluster: ClusterConfig{
+			Name:              "prod",
+			NodeCount:         3,
+			TalosVersion:      "v1.13.3",
+			KubernetesVersion: "1.36.1",
+			ACMEEmail:         "platform@example.com",
+		},
+		Nodes: []NodeConfig{
+			{Name: "cp-1", ServerID: 1, Role: RoleControlPlane, PrivateIPv4: "10.42.0.10"},
+			{Name: "cp-2", ServerID: 2, Role: RoleControlPlane, PrivateIPv4: "10.42.0.11"},
+			{Name: "w-1", ServerID: 3, Role: "worker", PrivateIPv4: "10.42.0.12"},
+		},
+		DNS: DNSConfig{
+			Provider:    "cloudflare",
+			Zone:        "example.com",
+			APIHostname: "api.example.com",
+		},
+		Hetzner: HetznerConfig{
+			ServerType:         "cax11",
+			Location:           "fsn1",
+			PrivateNetworkCIDR: DefaultPrivateNetworkCIDR,
+		},
+		Storage: StorageConfig{
+			StorageBoxPlan:     "BX11",
+			StorageBoxLocation: "fsn1",
+		},
+		Infisical: InfisicalConfig{
+			SiteURL:     "https://eu.infisical.com",
+			ProjectID:   "project-id",
+			ProjectSlug: "project-slug",
+			Environment: "prod",
+			PathRoot:    "/stardrive",
+		},
+	}
+
+	cfg.ApplyDefaults()
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("expected validation error for worker role")
+	}
+	if !strings.Contains(err.Error(), "role must be control-plane") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

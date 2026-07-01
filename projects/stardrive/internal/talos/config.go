@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	defaultOSDisk        = "/dev/sda"
-	talosAPIDefaultPort  = "50000"
-	kubernetesAPIPort    = "6443"
+	defaultOSDisk       = "/dev/sda"
+	talosAPIDefaultPort = "50000"
+	kubernetesAPIPort   = "6443"
 )
 
 func normalizeTalosEndpoint(endpoint string) (dialEndpoint string, target string, err error) {

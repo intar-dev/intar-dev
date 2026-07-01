@@ -58,7 +58,10 @@ func NewRootCommand() *cobra.Command {
 	}
 	cmd.SetVersionTemplate("{{printf \"%s\\n\" .Version}}")
 
-	wd, _ := os.Getwd()
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "."
+	}
 	cmd.PersistentFlags().StringVar(&opts.Paths.ClustersDir, "clusters-dir", filepath.Join(wd, "clusters"), "Directory containing cluster config YAML files")
 	cmd.PersistentFlags().StringVar(&opts.Paths.StateDir, "state-dir", filepath.Join(wd, ".stardrive"), "Directory for operation journals and local state")
 	cmd.PersistentFlags().StringVar(&opts.Paths.GitOpsDir, "gitops-dir", filepath.Join(wd, "gitops"), "Directory containing the local GitOps catalog")

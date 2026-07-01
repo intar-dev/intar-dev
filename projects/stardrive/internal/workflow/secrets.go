@@ -114,7 +114,7 @@ func (a *App) loadInfraSecrets(ctx context.Context, cfg *config.Config) (infraSe
 
 	infra := infraSecretsFromValues(values)
 	if infra.Hetzner.Token == "" {
-		return infraSecrets{}, fmt.Errorf("Hetzner token is missing from Infisical path %s", cfg.Secrets().OperatorShared)
+		return infraSecrets{}, fmt.Errorf("hetzner token is missing from Infisical path %s", cfg.Secrets().OperatorShared)
 	}
 	return infra, nil
 }
@@ -243,8 +243,8 @@ func (a *App) clusterStateDir(cluster string) string {
 	return filepath.Join(a.opts.Paths.StateDir, "clusters", names.Slugify(cluster))
 }
 
-func (a *App) writeLocalStateFile(cluster, name string, data []byte, mode os.FileMode) error {
-	return fs.WriteFileAtomic(filepath.Join(a.clusterStateDir(cluster), name), data, mode)
+func (a *App) writeLocalStateFile(cluster, name string, data []byte) error {
+	return fs.WriteFileAtomic(filepath.Join(a.clusterStateDir(cluster), name), data, 0o600)
 }
 
 func defaultSecret(primary, fallback string) string {

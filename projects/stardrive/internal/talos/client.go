@@ -3,6 +3,7 @@ package talos
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -19,7 +20,7 @@ type Client struct {
 	raw        *talosclient.Client
 }
 
-func NewClient(endpoint string, talosconfig []byte) (*Client, error) {
+func NewClient(ctx context.Context, endpoint string, talosconfig []byte) (*Client, error) {
 	dialEndpoint, targetNode, err := normalizeTalosEndpoint(endpoint)
 	if err != nil {
 		return nil, err
@@ -30,7 +31,7 @@ func NewClient(endpoint string, talosconfig []byte) (*Client, error) {
 	}
 
 	raw, err := talosclient.New(
-		context.Background(),
+		ctx,
 		talosclient.WithConfig(cfg),
 		talosclient.WithEndpoints(dialEndpoint),
 		talosclient.WithDefaultGRPCDialOptions(),
@@ -45,14 +46,14 @@ func NewClient(endpoint string, talosconfig []byte) (*Client, error) {
 	}, nil
 }
 
-func NewInsecureClient(endpoint string) (*Client, error) {
+func NewInsecureClient(ctx context.Context, endpoint string) (*Client, error) {
 	dialEndpoint, targetNode, err := normalizeTalosEndpoint(endpoint)
 	if err != nil {
 		return nil, err
 	}
 
 	raw, err := talosclient.New(
-		context.Background(),
+		ctx,
 		talosclient.WithEndpoints(dialEndpoint),
 		talosclient.WithTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}), //nolint:gosec
 		talosclient.WithDefaultGRPCDialOptions(),
@@ -117,7 +118,9 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 }
 
 func (c *Client) Upgrade(ctx context.Context, image string, force bool) error {
-	if _, err := c.raw.Upgrade(c.targetContext(ctx), image, false, force); err != nil {
+	// The suggested LifecycleClient replacement is a streaming RPC with different
+	// semantics; stay on the stable call until the migration is done deliberately.
+	if _, err := c.raw.Upgrade(c.targetContext(ctx), image, false, force); err != nil { //nolint:staticcheck
 		return fmt.Errorf("upgrade Talos node: %w", err)
 	}
 	return nil
@@ -144,9 +147,9 @@ func (c *Client) HealthCheck(ctx context.Context, waitTimeout time.Duration, con
 		if err == nil {
 			continue
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
-		return fmt.Errorf("Talos health check failed: %w", err)
+		return fmt.Errorf("talos health check failed: %w", err)
 	}
 }

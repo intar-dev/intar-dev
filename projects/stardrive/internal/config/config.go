@@ -524,7 +524,7 @@ func normalizeRole(role string) string {
 	if role == "" {
 		return RoleControlPlane
 	}
-	return RoleControlPlane
+	return role
 }
 
 func normalizeSecretPath(path string) string {

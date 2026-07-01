@@ -39,7 +39,7 @@ func (a *App) UpgradeTalos(ctx context.Context, req UpgradeTalosRequest) error {
 	}
 
 	for _, node := range cfg.Nodes {
-		client, err := talos.NewClient(node.PublicIPv4, accessSecrets.TalosconfigYAML)
+		client, err := talos.NewClient(ctx, node.PublicIPv4, accessSecrets.TalosconfigYAML)
 		if err != nil {
 			return err
 		}
@@ -95,7 +95,7 @@ func (a *App) UpgradeKubernetes(ctx context.Context, req UpgradeKubernetesReques
 		if err != nil {
 			return err
 		}
-		client, err := talos.NewClient(node.PublicIPv4, accessSecrets.TalosconfigYAML)
+		client, err := talos.NewClient(ctx, node.PublicIPv4, accessSecrets.TalosconfigYAML)
 		if err != nil {
 			return err
 		}

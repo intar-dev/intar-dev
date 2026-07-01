@@ -44,7 +44,7 @@ func (a *App) ensureRegistryTLSMaterial(ctx context.Context, cfg *config.Config,
 		}
 	}
 
-	if err := a.writeLocalStateFile(cfg.Cluster.Name, "registry-ca.crt", []byte(runtime.RegistryCACertPEM), 0o600); err != nil {
+	if err := a.writeLocalStateFile(cfg.Cluster.Name, "registry-ca.crt", []byte(runtime.RegistryCACertPEM)); err != nil {
 		return runtimeSecrets{}, err
 	}
 	return runtime, nil

@@ -11,9 +11,13 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
-const apiBaseURL = "https://api.cloudflare.com/client/v4"
+const (
+	apiBaseURL         = "https://api.cloudflare.com/client/v4"
+	defaultHTTPTimeout = 30 * time.Second
+)
 
 var zoneIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 
@@ -38,7 +42,7 @@ type DNSRecord struct {
 func New(token string) *Client {
 	return &Client{
 		token:      strings.TrimSpace(token),
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
 
