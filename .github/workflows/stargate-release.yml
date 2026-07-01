@@ -29,7 +29,7 @@ env:
 jobs:
   release:
     name: Tag and publish stargate release
-    runs-on: namespace-profile-intar-dev
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Ensure the workflow runs from main
@@ -40,7 +40,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -120,10 +120,10 @@ jobs:
           rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           rustup show active-toolchain
 
-      - name: Set up Namespace Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          cache: rust
+          workspaces: ${{ env.STARGATE_DIR }}
 
       - name: Install just
         uses: taiki-e/install-action@v2

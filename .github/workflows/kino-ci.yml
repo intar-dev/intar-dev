@@ -21,11 +21,11 @@ permissions:
 jobs:
   verify:
     name: Run kino checks
-    runs-on: namespace-profile-intar-dev
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         working-directory: projects/kino
@@ -34,12 +34,10 @@ jobs:
           rustup component add rustfmt clippy
           rustup show active-toolchain
 
-      - name: Set up Namespace caches
-        uses: namespacelabs/nscloud-cache-action@v1
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          cache: |
-            apt
-            rust
+          workspaces: projects/kino
 
       - name: Install just
         uses: taiki-e/install-action@v2

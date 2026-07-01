@@ -27,14 +27,14 @@ env:
 jobs:
   build-deploy:
     name: Build and deploy website
-    runs-on: namespace-profile-intar-dev
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: ${{ env.WEBSITE_DIR }}
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
 
       - name: Set up Node
         uses: actions/setup-node@v6

@@ -28,7 +28,7 @@ env:
 jobs:
   release:
     name: Tag and publish stardrive release
-    runs-on: namespace-profile-intar-dev
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Ensure the workflow runs from main
@@ -39,7 +39,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -115,12 +115,8 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: ${{ env.STARDRIVE_DIR }}/go.mod
-          cache: false
-
-      - name: Set up Namespace Go cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: go
+          cache: true
+          cache-dependency-path: ${{ env.STARDRIVE_DIR }}/go.sum
 
       - name: Run tests
         working-directory: ${{ env.STARDRIVE_DIR }}

@@ -23,22 +23,18 @@ permissions:
 jobs:
   test:
     name: Run stardrive tests
-    runs-on: namespace-profile-intar-dev
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: projects/stardrive/go.mod
-          cache: false
-
-      - name: Set up Namespace Go cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: go
+          cache: true
+          cache-dependency-path: projects/stardrive/go.sum
 
       - name: Run tests
         working-directory: projects/stardrive
