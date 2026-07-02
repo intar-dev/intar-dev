@@ -27,13 +27,12 @@ interface NativeSshDialogButtonProps {
 
 interface NativeTerminalSessionResponse {
   native: {
-    authMode: "profile_keys" | "issued_key";
+    authMode: "profile_keys";
     authorizedKeyCount: number;
     host: string;
     port: number;
     username: string;
     command: string;
-    privateKey?: string;
     publicHostKeyOpenssh?: string;
     publicHostKeyFingerprintSha256?: string;
     knownHostsLine?: string;
@@ -42,7 +41,7 @@ interface NativeTerminalSessionResponse {
   expiresAt?: number;
 }
 
-type CopyTarget = "command" | "knownHosts" | "privateKey" | null;
+type CopyTarget = "command" | "knownHosts" | null;
 
 export function NativeSshDialogButton({
   vmName,
@@ -83,8 +82,7 @@ export function NativeSshDialogButton({
         !response.ok ||
         !body ||
         !body.native ||
-        (body.native.authMode !== "profile_keys" &&
-          body.native.authMode !== "issued_key") ||
+        body.native.authMode !== "profile_keys" ||
         typeof body.native.authorizedKeyCount !== "number" ||
         typeof body.native.host !== "string" ||
         typeof body.native.port !== "number" ||
@@ -95,18 +93,6 @@ export function NativeSshDialogButton({
           body?.error ??
             `Failed to create native SSH session (${response.status})`,
         );
-      }
-
-      if (
-        body.native.authMode === "issued_key" &&
-        (typeof body.routeUsername !== "string" ||
-          typeof body.expiresAt !== "number" ||
-          typeof body.native.privateKey !== "string" ||
-          typeof body.native.publicHostKeyOpenssh !== "string" ||
-          typeof body.native.publicHostKeyFingerprintSha256 !== "string" ||
-          typeof body.native.knownHostsLine !== "string")
-      ) {
-        throw new Error("stargate SSH session is missing credentials");
       }
 
       const session: NativeTerminalSessionResponse = {
@@ -160,9 +146,8 @@ export function NativeSshDialogButton({
         <DialogHeader>
           <DialogTitle>Native SSH for {vmName}</DialogTitle>
           <DialogDescription>
-            {session?.native.authMode === "profile_keys"
-              ? "This route accepts one of the Ed25519 keys saved on your profile. Use your own local SSH identity and connect through Stargate."
-              : "No saved profile keys were available, so Intar issued a temporary route key. Your SSH client should trust Stargate&apos;s public host key shown below."}
+            This route accepts one of the Ed25519 keys saved on your profile.
+            Use your own local SSH identity and connect through Stargate.
           </DialogDescription>
         </DialogHeader>
 
@@ -178,20 +163,14 @@ export function NativeSshDialogButton({
         ) : session ? (
           <div className="space-y-4">
             <div
-              className={`grid gap-3 rounded-lg border px-4 py-3 text-sm ${
-                session.native.authMode === "profile_keys"
-                  ? "bg-primary/5 sm:grid-cols-4"
-                  : "bg-muted/30 sm:grid-cols-4"
-              }`}
+              className="grid gap-3 rounded-lg border bg-primary/5 px-4 py-3 text-sm sm:grid-cols-4"
             >
               <div>
                 <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
                   Access mode
                 </p>
                 <p className="mt-1 font-medium">
-                  {session.native.authMode === "profile_keys"
-                    ? "Profile key route"
-                    : "Issued key route"}
+                  Profile key route
                 </p>
               </div>
               {session.routeUsername ? (
@@ -254,17 +233,6 @@ export function NativeSshDialogButton({
               }
             />
 
-            {session.native.authMode === "issued_key" ? (
-              <CopyableTextBlock
-                label="Private key"
-                value={session.native.privateKey ?? ""}
-                copied={copied === "privateKey"}
-                onCopy={() =>
-                  copyText(session.native.privateKey ?? "", "privateKey")
-                }
-                rows={10}
-              />
-            ) : null}
           </div>
         ) : null}
       </DialogContent>

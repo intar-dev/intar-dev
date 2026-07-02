@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VmReportV1",
+  "type": "object",
+  "properties": {
+    "archive": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VmArchiveStateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "desired_version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "host_id": {
+      "type": "string"
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VmNetworkStateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observed_at_unix_ms": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "phase": {
+      "$ref": "#/$defs/VmPhase"
+    },
+    "probes": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/VmProbeSnapshotV1"
+      }
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "ssh_host_keys_openssh": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "vm_name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "host_id",
+    "run_id",
+    "vm_name",
+    "observed_at_unix_ms",
+    "phase"
+  ],
+  "$defs": {
+    "ProbePhase": {
+      "type": "string",
+      "enum": [
+        "boot",
+        "scenario"
+      ]
+    },
+    "VmArchivePhase": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pending",
+        "uploading",
+        "complete",
+        "failed"
+      ]
+    },
+    "VmArchiveStateV1": {
+      "type": "object",
+      "properties": {
+        "artifact_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/VmArchivePhase"
+        }
+      },
+      "required": [
+        "phase",
+        "artifact_count"
+      ]
+    },
+    "VmNetworkStateV1": {
+      "type": "object",
+      "properties": {
+        "bridge_name": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "guest_cidr": {
+          "type": "string"
+        },
+        "guest_ip": {
+          "type": "string"
+        },
+        "ssh_host_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "bridge_name",
+        "guest_ip",
+        "guest_cidr",
+        "gateway"
+      ]
+    },
+    "VmPhase": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "pulling_image",
+        "creating_disks",
+        "booting",
+        "running",
+        "ready",
+        "solved",
+        "stopping",
+        "stopped",
+        "failed",
+        "absent"
+      ]
+    },
+    "VmProbeSnapshotV1": {
+      "type": "object",
+      "properties": {
+        "checked_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/ProbePhase"
+        },
+        "status": {
+          "$ref": "#/$defs/VmProbeStatus"
+        },
+        "value": true
+      },
+      "required": [
+        "id",
+        "phase",
+        "status",
+        "checked_at_unix_ms"
+      ]
+    },
+    "VmProbeStatus": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "pass",
+        "fail"
+      ]
+    }
+  }
+}

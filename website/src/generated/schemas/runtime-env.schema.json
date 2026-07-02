@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RuntimeEnv",
+  "type": "object",
+  "properties": {
+    "dns_servers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "gateway": {
+      "type": "string"
+    },
+    "guest_ip_cidr": {
+      "type": "string"
+    },
+    "kino_host_ready_port": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "kino_vsock_cid": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "kino_vsock_port": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "ssh_authorized_keys_openssh": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "vm_hostname": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "ssh_authorized_keys_openssh",
+    "kino_vsock_cid",
+    "kino_vsock_port",
+    "kino_host_ready_port",
+    "vm_hostname",
+    "guest_ip_cidr",
+    "gateway",
+    "dns_servers"
+  ]
+}

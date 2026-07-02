@@ -2,9 +2,9 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts } from "@/db/schema";
+import { agentHosts, hostActualState } from "@/db/schema";
+import type { HostStateReportV1 } from "@/generated/bridge";
 import {
-  buildHostRuntimeState,
   buildStoredBridgeStatus,
   jsonResponse,
   loadHostForUser,
@@ -14,6 +14,14 @@ import {
 } from "@/lib/agent-bridge";
 
 export const prerender = false;
+
+interface HostActualStateSummary {
+  appliedDesiredVersion: number;
+  observedAt: number;
+  capacity: HostStateReportV1["capacity"];
+  capabilities: HostStateReportV1["capabilities"];
+  cachedImages: HostStateReportV1["cached_images"];
+}
 
 export const GET: APIRoute = async ({ request, params }) => {
   const authz = await requireAdminUserContext(request);
@@ -31,6 +39,7 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "host not found" }, { status: 404 });
   }
 
+  const actualState = await loadHostActualStateSummary(host.id);
   return jsonResponse({
     host: {
       id: host.id,
@@ -41,12 +50,8 @@ export const GET: APIRoute = async ({ request, params }) => {
       updatedAt: host.updated_at,
       hostInfo: parseHostInfo(host.host_info_json),
       inventory: parseInventory(host.inventory_json),
-      runtime: buildHostRuntimeState(host),
+      actualState,
       status: buildStoredBridgeStatus(host),
-      statusError:
-        host.last_ping_success === false
-          ? (host.last_ping_error ?? "last ping failed")
-          : null,
     },
   });
 };
@@ -76,3 +81,27 @@ export const DELETE: APIRoute = async ({ request, params }) => {
 
   return jsonResponse({ ok: true, hostId });
 };
+
+async function loadHostActualStateSummary(
+  hostId: string,
+): Promise<HostActualStateSummary | null> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      appliedDesiredVersion: hostActualState.appliedDesiredVersion,
+      observedAt: hostActualState.observedAt,
+      reportJson: hostActualState.reportJson,
+    })
+    .from(hostActualState)
+    .where(eq(hostActualState.hostId, hostId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    appliedDesiredVersion: row.appliedDesiredVersion,
+    observedAt: row.observedAt,
+    capacity: row.reportJson.capacity,
+    capabilities: row.reportJson.capabilities,
+    cachedImages: row.reportJson.cached_images,
+  };
+}

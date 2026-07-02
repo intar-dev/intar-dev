@@ -96,6 +96,7 @@ interface ScenarioRunVmRecord {
     host: string | null;
     port: number;
     username: string;
+    hostKeyOpenssh: string | null;
     checkedAt: number | null;
   };
 }

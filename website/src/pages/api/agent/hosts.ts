@@ -2,9 +2,14 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentBootstrapTokens, agentHosts, hostRpcCalls, scenarioRuns } from "@/db/schema";
 import {
-  buildHostRuntimeState,
+  agentBootstrapTokens,
+  agentHosts,
+  hostActualState,
+  scenarioRuns,
+} from "@/db/schema";
+import type { HostStateReportV1 } from "@/generated/bridge";
+import {
   buildStoredBridgeStatus,
   jsonResponse,
   loadHostForUser,
@@ -22,6 +27,14 @@ const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 interface CreateHostBody {
   name?: string;
   hostId?: string;
+}
+
+interface HostActualStateSummary {
+  appliedDesiredVersion: number;
+  observedAt: number;
+  capacity: HostStateReportV1["capacity"];
+  capabilities: HostStateReportV1["capabilities"];
+  cachedImages: HostStateReportV1["cached_images"];
 }
 
 export const prerender = false;
@@ -48,18 +61,9 @@ export const GET: APIRoute = async ({ request }) => {
       active_session_id: agentHosts.activeSessionId,
       last_client_hello_at: agentHosts.lastClientHelloAt,
       last_server_hello_at: agentHosts.lastServerHelloAt,
-      server_next_seq: agentHosts.serverNextSeq,
-      server_acked_seq: agentHosts.serverAckedSeq,
-      host_next_seq: agentHosts.hostNextSeq,
-      host_acked_seq: agentHosts.hostAckedSeq,
       agent_version: agentHosts.agentVersion,
       host_info_json: agentHosts.hostInfoJson,
       inventory_json: agentHosts.inventoryJson,
-      runtime_state_json: agentHosts.runtimeStateJson,
-      last_ping_at: agentHosts.lastPingAt,
-      last_ping_rtt_ms: agentHosts.lastPingRttMs,
-      last_ping_success: agentHosts.lastPingSuccess,
-      last_ping_error: agentHosts.lastPingError,
       created_at: agentHosts.createdAt,
       updated_at: agentHosts.updatedAt,
     })
@@ -69,34 +73,21 @@ export const GET: APIRoute = async ({ request }) => {
 
   const output = await Promise.all(
     hosts.map(async (host) => {
-      const [recentCalls, recentRuns] = await Promise.all([
-        db
-          .select({
-            callId: hostRpcCalls.callId,
-            method: hostRpcCalls.method,
-            status: hostRpcCalls.status,
-            createdAt: hostRpcCalls.createdAt,
-            updatedAt: hostRpcCalls.updatedAt,
-          })
-          .from(hostRpcCalls)
-          .where(eq(hostRpcCalls.hostId, host.id))
-          .orderBy(desc(hostRpcCalls.createdAt))
-          .limit(5),
-        db
-          .select({
-            runId: scenarioRuns.runId,
-            scenarioId: scenarioRuns.scenarioId,
-            state: scenarioRuns.state,
-            createdAt: scenarioRuns.createdAt,
-            updatedAt: scenarioRuns.updatedAt,
-          })
-          .from(scenarioRuns)
-          .where(eq(scenarioRuns.hostId, host.id))
-          .orderBy(desc(scenarioRuns.createdAt))
-          .limit(5),
-      ]);
+      const recentRuns = await db
+        .select({
+          runId: scenarioRuns.runId,
+          scenarioId: scenarioRuns.scenarioId,
+          state: scenarioRuns.state,
+          createdAt: scenarioRuns.createdAt,
+          updatedAt: scenarioRuns.updatedAt,
+        })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.hostId, host.id))
+        .orderBy(desc(scenarioRuns.createdAt))
+        .limit(5);
 
-      return serializeHost(host, recentCalls, recentRuns);
+      const actualState = await loadHostActualStateSummary(host.id);
+      return serializeHost(host, recentRuns, actualState);
     }),
   );
 
@@ -204,13 +195,6 @@ export const POST: APIRoute = async ({ request, url }) => {
 
 function serializeHost(
   host: AgentHostRow,
-  recentCalls: Array<{
-    callId: string;
-    method: string;
-    status: string;
-    createdAt: number;
-    updatedAt: number;
-  }>,
   recentRuns: Array<{
     runId: string;
     scenarioId: string;
@@ -218,6 +202,7 @@ function serializeHost(
     createdAt: number;
     updatedAt: number;
   }>,
+  actualState: HostActualStateSummary | null,
 ) {
   return {
     id: host.id,
@@ -228,14 +213,33 @@ function serializeHost(
     updatedAt: host.updated_at,
     hostInfo: parseHostInfo(host.host_info_json),
     inventory: parseInventory(host.inventory_json),
-    runtime: buildHostRuntimeState(host),
+    actualState,
     status: buildStoredBridgeStatus(host),
-    statusError:
-      host.last_ping_success === false
-        ? (host.last_ping_error ?? "last ping failed")
-        : null,
-    recentCalls,
     recentRuns,
+  };
+}
+
+async function loadHostActualStateSummary(
+  hostId: string,
+): Promise<HostActualStateSummary | null> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      appliedDesiredVersion: hostActualState.appliedDesiredVersion,
+      observedAt: hostActualState.observedAt,
+      reportJson: hostActualState.reportJson,
+    })
+    .from(hostActualState)
+    .where(eq(hostActualState.hostId, hostId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    appliedDesiredVersion: row.appliedDesiredVersion,
+    observedAt: row.observedAt,
+    capacity: row.reportJson.capacity,
+    capabilities: row.reportJson.capabilities,
+    cachedImages: row.reportJson.cached_images,
   };
 }
 

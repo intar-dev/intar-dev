@@ -62,6 +62,7 @@ describe("host runtime boot probe gating", () => {
           host: "bridge.example.test",
           port: 2222,
           username: "ubuntu",
+          hostKeyOpenssh: null,
           checkedAt: 123,
         },
       }),

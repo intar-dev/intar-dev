@@ -1,0 +1,59 @@
+name: Stardrive
+run-name: "${{ github.event_name == 'pull_request' && format('Stardrive validate PR #{0}', github.event.pull_request.number) || format('Stardrive validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/stardrive.yml"
+      - "stardrive/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/stardrive.yml"
+      - "stardrive/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: stardrive/go.mod
+          cache: true
+          cache-dependency-path: stardrive/go.sum
+
+      - name: Run tests
+        working-directory: stardrive
+        run: go test ./...
+
+  lint:
+    name: Go lint
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: stardrive/go.mod
+          cache: true
+          cache-dependency-path: stardrive/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: stardrive

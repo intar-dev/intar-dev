@@ -5,43 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1773687481348,
-      "tag": "0000_furry_the_spike",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1773878376782,
-      "tag": "0001_black_blackheart",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1773879295958,
-      "tag": "0002_empty_penance",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1774053382846,
-      "tag": "0003_noisy_plazm",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1774187342781,
-      "tag": "0004_married_marvel_boy",
-      "breakpoints": true
-    },
-    {
-      "idx": 5,
-      "version": "6",
-      "when": 1775515662154,
-      "tag": "0005_lying_toad",
+      "when": 1782977172141,
+      "tag": "0000_oval_sasquatch",
       "breakpoints": true
     }
   ]

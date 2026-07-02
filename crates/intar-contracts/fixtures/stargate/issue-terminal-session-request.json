@@ -1,0 +1,19 @@
+{
+  "route_username": "run-01-worker",
+  "target_username": "user",
+  "target_ip": "10.77.0.2",
+  "target_port": 22,
+  "target_host_key_openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeHostKeyForContractTestsOnly",
+  "target_private_key_openssh": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-contract-fixture-only\n-----END OPENSSH PRIVATE KEY-----\n",
+  "authorized_client_public_keys_openssh": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeClientKeyForContractTestsOnly user@example"
+  ],
+  "route_expires_at": 1800000000,
+  "mode": "browser",
+  "metadata": {
+    "host_id": "host-01",
+    "run_id": "run-01",
+    "vm_id": "worker",
+    "user_id": "user-01"
+  }
+}

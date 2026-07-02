@@ -1,0 +1,409 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HostStateReportV1",
+  "type": "object",
+  "properties": {
+    "applied_desired_version": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "cached_images": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/CachedImageStateV1"
+      }
+    },
+    "capabilities": {
+      "$ref": "#/$defs/HostCapabilitiesV1"
+    },
+    "capacity": {
+      "$ref": "#/$defs/HostCapacityV1"
+    },
+    "host_id": {
+      "type": "string"
+    },
+    "observed_at_unix_ms": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "vms": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/VmActualStateV1"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "host_id",
+    "observed_at_unix_ms",
+    "applied_desired_version",
+    "capacity",
+    "capabilities"
+  ],
+  "$defs": {
+    "CachedImageStateV1": {
+      "type": "object",
+      "properties": {
+        "bytes_on_disk": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_key": {
+          "$ref": "#/$defs/ImageKey"
+        },
+        "image_sha256": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/ImageCachePhase"
+        },
+        "updated_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "image_key",
+        "image_sha256",
+        "phase",
+        "updated_at_unix_ms"
+      ]
+    },
+    "HostCapabilitiesV1": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/ImageArchitecture"
+        },
+        "supports_kvm": {
+          "type": "boolean"
+        },
+        "supports_nftables": {
+          "type": "boolean"
+        },
+        "supports_reflink": {
+          "type": "boolean"
+        },
+        "supports_vsock": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "arch",
+        "supports_kvm",
+        "supports_vsock",
+        "supports_reflink",
+        "supports_nftables"
+      ]
+    },
+    "HostCapacityV1": {
+      "type": "object",
+      "properties": {
+        "cpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "disk_available_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "disk_total_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_available_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "memory_total_mib": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "cpu_count",
+        "memory_total_mib",
+        "memory_available_mib",
+        "disk_total_mib",
+        "disk_available_mib"
+      ]
+    },
+    "ImageArchitecture": {
+      "type": "string",
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    "ImageCachePhase": {
+      "type": "string",
+      "enum": [
+        "missing",
+        "queued",
+        "downloading",
+        "ready",
+        "failed"
+      ]
+    },
+    "ImageKey": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/ImageArchitecture"
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "vm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario",
+        "vm",
+        "arch"
+      ]
+    },
+    "ProbePhase": {
+      "type": "string",
+      "enum": [
+        "boot",
+        "scenario"
+      ]
+    },
+    "VmActualStateV1": {
+      "type": "object",
+      "properties": {
+        "archive": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmArchiveStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "desired_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmNetworkStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/VmPhase"
+        },
+        "probes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VmProbeSnapshotV1"
+          }
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "ssh_host_keys_openssh": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "updated_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "vm_name",
+        "phase",
+        "updated_at_unix_ms"
+      ]
+    },
+    "VmArchivePhase": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pending",
+        "uploading",
+        "complete",
+        "failed"
+      ]
+    },
+    "VmArchiveStateV1": {
+      "type": "object",
+      "properties": {
+        "artifact_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/VmArchivePhase"
+        }
+      },
+      "required": [
+        "phase",
+        "artifact_count"
+      ]
+    },
+    "VmNetworkStateV1": {
+      "type": "object",
+      "properties": {
+        "bridge_name": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "guest_cidr": {
+          "type": "string"
+        },
+        "guest_ip": {
+          "type": "string"
+        },
+        "ssh_host_port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "bridge_name",
+        "guest_ip",
+        "guest_cidr",
+        "gateway"
+      ]
+    },
+    "VmPhase": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "pulling_image",
+        "creating_disks",
+        "booting",
+        "running",
+        "ready",
+        "solved",
+        "stopping",
+        "stopped",
+        "failed",
+        "absent"
+      ]
+    },
+    "VmProbeSnapshotV1": {
+      "type": "object",
+      "properties": {
+        "checked_at_unix_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/ProbePhase"
+        },
+        "status": {
+          "$ref": "#/$defs/VmProbeStatus"
+        },
+        "value": true
+      },
+      "required": [
+        "id",
+        "phase",
+        "status",
+        "checked_at_unix_ms"
+      ]
+    },
+    "VmProbeStatus": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "pass",
+        "fail"
+      ]
+    }
+  }
+}

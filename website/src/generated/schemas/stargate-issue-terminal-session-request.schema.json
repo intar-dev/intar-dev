@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IssueTerminalSessionRequest",
+  "type": "object",
+  "properties": {
+    "authorized_client_public_keys_openssh": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "$ref": "#/$defs/RouteMetadata",
+      "default": {
+        "host_id": null,
+        "run_id": null,
+        "user_id": null,
+        "vm_id": null
+      }
+    },
+    "mode": {
+      "$ref": "#/$defs/TerminalSessionMode"
+    },
+    "route_expires_at": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "route_username": {
+      "type": "string"
+    },
+    "target_host_key_openssh": {
+      "type": "string"
+    },
+    "target_ip": {
+      "type": "string"
+    },
+    "target_port": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "target_private_key_openssh": {
+      "type": "string"
+    },
+    "target_username": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "route_username",
+    "target_username",
+    "target_ip",
+    "target_port",
+    "target_host_key_openssh",
+    "target_private_key_openssh",
+    "route_expires_at",
+    "mode"
+  ],
+  "$defs": {
+    "RouteMetadata": {
+      "type": "object",
+      "properties": {
+        "host_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TerminalSessionMode": {
+      "type": "string",
+      "enum": [
+        "browser",
+        "native"
+      ]
+    }
+  }
+}

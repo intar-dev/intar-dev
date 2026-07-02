@@ -1,0 +1,222 @@
+name: Release
+run-name: "${{ format('{0} release {1} from {2}', inputs.project, inputs.bump, github.ref_name) }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Rust project to release
+        required: true
+        type: choice
+        options:
+          - intar-agent
+          - kino
+          - stargate
+      bump:
+        description: Semantic version increment
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Bump, tag, and build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Ensure main
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "This workflow must run from main, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve project
+        id: project
+        env:
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          case "${PROJECT}" in
+            intar-agent)
+              manifest="crates/intar-agent/Cargo.toml"
+              package="intar-agent"
+              binary="intar-agent"
+              tag_prefix="agent/"
+              ;;
+            kino)
+              manifest="crates/kino/Cargo.toml"
+              package="kino"
+              binary="kino"
+              tag_prefix="kino/"
+              ;;
+            stargate)
+              manifest="crates/stargate-gateway/Cargo.toml"
+              package="stargate-gateway"
+              binary="stargate"
+              tag_prefix="stargate/"
+              ;;
+            *)
+              echo "unsupported project: ${PROJECT}" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "manifest=${manifest}"
+            echo "package=${package}"
+            echo "binary=${binary}"
+            echo "tag_prefix=${tag_prefix}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Determine next release tag
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+          MANIFEST: ${{ steps.project.outputs.manifest }}
+          TAG_PREFIX: ${{ steps.project.outputs.tag_prefix }}
+        run: |
+          set -euo pipefail
+          latest_project_tag="$(git tag --list "${TAG_PREFIX}v*" --sort=-v:refname | awk -v prefix="${TAG_PREFIX}" 'index($0, prefix "v") == 1 && $0 ~ /^.+\/v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+          if [ -n "${latest_project_tag}" ]; then
+            latest_version_tag="${latest_project_tag#"${TAG_PREFIX}"}"
+          else
+            cargo_version="$(sed -n 's/^version = "\([0-9][0-9.]*\)".*/\1/p' "${MANIFEST}" | head -n 1)"
+            latest_version_tag="v${cargo_version:-0.0.0}"
+          fi
+          version="${latest_version_tag#v}"
+          IFS='.' read -r major minor patch <<<"${version}"
+          case "${BUMP}" in
+            patch) patch=$((patch + 1)) ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+          esac
+          next_version="v${major}.${minor}.${patch}"
+          next_tag="${TAG_PREFIX}${next_version}"
+          if git rev-parse --verify --quiet "refs/tags/${next_tag}" >/dev/null; then
+            echo "Tag ${next_tag} already exists." >&2
+            exit 1
+          fi
+          {
+            echo "version=${next_version#v}"
+            echo "version_tag=${next_version}"
+            echo "tag=${next_tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt clippy
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          rustup show active-toolchain
+
+      - name: Install tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-zigbuild
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Apply release version
+        env:
+          MANIFEST: ${{ steps.project.outputs.manifest }}
+          VERSION: ${{ steps.next.outputs.version }}
+          PACKAGE: ${{ steps.project.outputs.package }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          manifest = pathlib.Path(os.environ["MANIFEST"])
+          version = os.environ["VERSION"]
+          text = manifest.read_text()
+          updated, count = re.subn(r'(?m)^version = "[^"]+"', f'version = "{version}"', text, count=1)
+          if count != 1:
+              raise SystemExit(f"failed to update package version in {manifest}")
+          manifest.write_text(updated)
+          PY
+          cargo update -p "${PACKAGE}" --precise "${VERSION}"
+
+      - name: Run checks
+        run: just verify
+
+      - name: Commit release version
+        id: version_commit
+        env:
+          MANIFEST: ${{ steps.project.outputs.manifest }}
+          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet --exit-code -- "${MANIFEST}" Cargo.lock; then
+            release_sha="$(git rev-parse HEAD)"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "${MANIFEST}" Cargo.lock
+            git commit -m "chore(${PROJECT}): release ${VERSION_TAG}"
+            git push origin HEAD:main
+            release_sha="$(git rev-parse HEAD)"
+          fi
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release artifacts
+        env:
+          PACKAGE: ${{ steps.project.outputs.package }}
+          BINARY: ${{ steps.project.outputs.binary }}
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          dist_dir="${PWD}/dist"
+          mkdir -p "${dist_dir}"
+          build_archive() {
+            local arch="$1"
+            local target="$2"
+            local archive="${BINARY}_${VERSION}_linux_${arch}"
+            local target_dir="${PWD}/target/${target}"
+            local binary="${target_dir}/${target}/release/${BINARY}"
+            local workdir
+            CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p "${PACKAGE}" --bin "${BINARY}" --target "${target}"
+            file "${binary}"
+            workdir="$(mktemp -d)"
+            cp "${binary}" "${workdir}/${BINARY}"
+            chmod +x "${workdir}/${BINARY}"
+            tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" "${BINARY}"
+            rm -rf "${workdir}"
+          }
+          build_archive amd64 x86_64-unknown-linux-musl
+          build_archive arm64 aarch64-unknown-linux-musl
+          cd "${dist_dir}"
+          sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.next.outputs.tag }}
+          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
+          RELEASE_SHA: ${{ steps.version_commit.outputs.sha }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          git tag -a "${TAG}" "${RELEASE_SHA}" -m "${PROJECT} ${VERSION_TAG}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" dist/* --target "${RELEASE_SHA}" --title "${PROJECT} ${VERSION_TAG}" --notes "Release ${VERSION_TAG}."

@@ -16,6 +16,7 @@ declare global {
       DB: D1Database;
       ALLOWLIST: KVNamespace;
       HOST_RUNTIME: DurableObjectNamespace;
+      VM_IMAGE_REGISTRY_BUCKET: R2Bucket;
       VM_RUN_ARTIFACTS_BUCKET: R2Bucket;
       STARGATE_ADMIN_SERVICE: Fetcher;
       AGENT_JWT_AUDIENCE?: string;
@@ -28,11 +29,12 @@ declare global {
       GITHUB_CLIENT_SECRET: string;
       STARGATE_ADMIN_BASE_URL?: string;
       STARGATE_ROUTE_TTL_SECONDS?: string;
-      STARGATE_TARGET_PUBLIC_KEY_OPENSSH: string;
       STARGATE_ADMIN_AUTH_HEADER?: string;
       STARGATE_ADMIN_AUTH_ISSUER: string;
       STARGATE_ADMIN_AUTH_AUDIENCE: string;
       STARGATE_ADMIN_AUTH_SECRET: string;
+      SCENARIO_RUN_KEY_ENCRYPTION_SECRET: string;
+      REGISTRY_PUBLISH_TOKEN: string;
     }
   }
 }

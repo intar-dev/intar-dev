@@ -1,2 +1,8 @@
 .env
 .stardrive/
+target/
+.gocache/
+.tmp/
+.work/
+dist/
+config.vm.local.toml

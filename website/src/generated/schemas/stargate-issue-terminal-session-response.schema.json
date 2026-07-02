@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IssueTerminalSessionResponse",
+  "type": "object",
+  "properties": {
+    "browser": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BrowserTerminalSession"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expires_at": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "native": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeTerminalSession"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "route_username": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "route_username",
+    "expires_at"
+  ],
+  "$defs": {
+    "BrowserTerminalSession": {
+      "type": "object",
+      "properties": {
+        "websocket_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "websocket_url"
+      ]
+    },
+    "NativeTerminalAuthMode": {
+      "type": "string",
+      "enum": [
+        "profile_keys"
+      ]
+    },
+    "NativeTerminalSession": {
+      "type": "object",
+      "properties": {
+        "auth_mode": {
+          "$ref": "#/$defs/NativeTerminalAuthMode"
+        },
+        "authorized_key_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "command": {
+          "type": "string"
+        },
+        "known_hosts_line": {
+          "type": "string"
+        },
+        "public_host_key_fingerprint_sha256": {
+          "type": "string"
+        },
+        "public_host_key_openssh": {
+          "type": "string"
+        },
+        "ssh_host": {
+          "type": "string"
+        },
+        "ssh_port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "auth_mode",
+        "authorized_key_count",
+        "ssh_host",
+        "ssh_port",
+        "username",
+        "public_host_key_openssh",
+        "public_host_key_fingerprint_sha256",
+        "known_hosts_line",
+        "command"
+      ]
+    }
+  }
+}

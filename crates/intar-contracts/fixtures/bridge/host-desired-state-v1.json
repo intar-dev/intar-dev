@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "host_id": "host-alpha",
+  "version": 42,
+  "generated_at_unix_ms": 1762041600000,
+  "cached_images": [
+    {
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "webserver",
+        "arch": "x86_64"
+      },
+      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19"
+    }
+  ],
+  "vms": [
+    {
+      "run_id": "run-20260702-a",
+      "vm_name": "webserver",
+      "desired_phase": "running",
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "webserver",
+        "arch": "x86_64"
+      },
+      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "resources": {
+        "cpu_count": 1,
+        "memory_mib": 512,
+        "disk_mib": 4096
+      },
+      "ssh_authorized_keys_openssh": [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example"
+      ],
+      "lease_expires_at_unix_ms": 1762045200000
+    }
+  ]
+}

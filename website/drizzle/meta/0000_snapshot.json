@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e85d06fa-58aa-4dd6-9ea4-ed2840e91a04",
+  "id": "0f389587-4f8c-4f70-a4d4-e1bc8c9cd157",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "account": {
@@ -307,38 +307,6 @@
           "notNull": false,
           "autoincrement": false
         },
-        "server_next_seq": {
-          "name": "server_next_seq",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
-        "server_acked_seq": {
-          "name": "server_acked_seq",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "host_next_seq": {
-          "name": "host_next_seq",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        },
-        "host_acked_seq": {
-          "name": "host_acked_seq",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "agent_version": {
           "name": "agent_version",
           "type": "text",
@@ -355,41 +323,6 @@
         },
         "inventory_json": {
           "name": "inventory_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "runtime_state_json": {
-          "name": "runtime_state_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_ping_at": {
-          "name": "last_ping_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_ping_rtt_ms": {
-          "name": "last_ping_rtt_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_ping_success": {
-          "name": "last_ping_success",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "last_ping_error": {
-          "name": "last_ping_error",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -448,249 +381,35 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "agent_ping_audit": {
-      "name": "agent_ping_audit",
+    "host_actual_state": {
+      "name": "host_actual_state",
       "columns": {
-        "id": {
-          "name": "id",
+        "host_id": {
+          "name": "host_id",
           "type": "text",
           "primaryKey": true,
           "notNull": true,
           "autoincrement": false
         },
-        "host_id": {
-          "name": "host_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "requested_by_user_id": {
-          "name": "requested_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "requested_at": {
-          "name": "requested_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        },
-        "success": {
-          "name": "success",
+        "applied_desired_version": {
+          "name": "applied_desired_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "rtt_ms": {
-          "name": "rtt_ms",
+        "observed_at": {
+          "name": "observed_at",
           "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "error": {
-          "name": "error",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "agent_ping_audit_host_idx": {
-          "name": "agent_ping_audit_host_idx",
-          "columns": [
-            "host_id"
-          ],
-          "isUnique": false
-        },
-        "agent_ping_audit_user_idx": {
-          "name": "agent_ping_audit_user_idx",
-          "columns": [
-            "requested_by_user_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "agent_ping_audit_host_id_agent_hosts_id_fk": {
-          "name": "agent_ping_audit_host_id_agent_hosts_id_fk",
-          "tableFrom": "agent_ping_audit",
-          "tableTo": "agent_hosts",
-          "columnsFrom": [
-            "host_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "agent_ping_audit_requested_by_user_id_user_id_fk": {
-          "name": "agent_ping_audit_requested_by_user_id_user_id_fk",
-          "tableFrom": "agent_ping_audit",
-          "tableTo": "user",
-          "columnsFrom": [
-            "requested_by_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "host_rpc_calls": {
-      "name": "host_rpc_calls",
-      "columns": {
-        "call_id": {
-          "name": "call_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "host_id": {
-          "name": "host_id",
-          "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "run_id": {
-          "name": "run_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "vm_id": {
-          "name": "vm_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "direction": {
-          "name": "direction",
+        "report_json": {
+          "name": "report_json",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "method": {
-          "name": "method",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "idempotency_key": {
-          "name": "idempotency_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "request_message_id": {
-          "name": "request_message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "response_message_id": {
-          "name": "response_message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "request_json": {
-          "name": "request_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "response_json": {
-          "name": "response_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "error_json": {
-          "name": "error_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "request_acked_at": {
-          "name": "request_acked_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "response_acked_at": {
-          "name": "response_acked_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "started_at": {
-          "name": "started_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "finished_at": {
-          "name": "finished_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "deadline_at": {
-          "name": "deadline_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         },
         "created_at": {
@@ -711,44 +430,25 @@
         }
       },
       "indexes": {
-        "host_rpc_calls_host_idempotency_uidx": {
-          "name": "host_rpc_calls_host_idempotency_uidx",
+        "host_actual_state_applied_version_idx": {
+          "name": "host_actual_state_applied_version_idx",
           "columns": [
-            "host_id",
-            "idempotency_key"
-          ],
-          "isUnique": true
-        },
-        "host_rpc_calls_host_status_idx": {
-          "name": "host_rpc_calls_host_status_idx",
-          "columns": [
-            "host_id",
-            "status",
-            "created_at"
+            "applied_desired_version"
           ],
           "isUnique": false
         },
-        "host_rpc_calls_run_idx": {
-          "name": "host_rpc_calls_run_idx",
+        "host_actual_state_observed_idx": {
+          "name": "host_actual_state_observed_idx",
           "columns": [
-            "run_id",
-            "created_at"
-          ],
-          "isUnique": false
-        },
-        "host_rpc_calls_vm_idx": {
-          "name": "host_rpc_calls_vm_idx",
-          "columns": [
-            "vm_id",
-            "created_at"
+            "observed_at"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "host_rpc_calls_host_id_agent_hosts_id_fk": {
-          "name": "host_rpc_calls_host_id_agent_hosts_id_fk",
-          "tableFrom": "host_rpc_calls",
+        "host_actual_state_host_id_agent_hosts_id_fk": {
+          "name": "host_actual_state_host_id_agent_hosts_id_fk",
+          "tableFrom": "host_actual_state",
           "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
@@ -758,124 +458,34 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        },
-        "host_rpc_calls_user_id_user_id_fk": {
-          "name": "host_rpc_calls_user_id_user_id_fk",
-          "tableFrom": "host_rpc_calls",
-          "tableTo": "user",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "host_rpc_envelopes": {
-      "name": "host_rpc_envelopes",
+    "host_desired_state": {
+      "name": "host_desired_state",
       "columns": {
-        "id": {
-          "name": "id",
+        "host_id": {
+          "name": "host_id",
           "type": "text",
           "primaryKey": true,
           "notNull": true,
           "autoincrement": false
         },
-        "host_id": {
-          "name": "host_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "direction": {
-          "name": "direction",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "seq": {
-          "name": "seq",
+        "version": {
+          "name": "version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "message_id": {
-          "name": "message_id",
+        "doc_json": {
+          "name": "doc_json",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "call_id": {
-          "name": "call_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "method": {
-          "name": "method",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "payload_json": {
-          "name": "payload_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "occurred_at": {
-          "name": "occurred_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "applied_at": {
-          "name": "applied_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "acked_at": {
-          "name": "acked_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         },
         "created_at": {
@@ -885,49 +495,29 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         }
       },
       "indexes": {
-        "host_rpc_envelopes_host_direction_seq_uidx": {
-          "name": "host_rpc_envelopes_host_direction_seq_uidx",
+        "host_desired_state_version_idx": {
+          "name": "host_desired_state_version_idx",
           "columns": [
-            "host_id",
-            "direction",
-            "seq"
-          ],
-          "isUnique": true
-        },
-        "host_rpc_envelopes_host_direction_message_uidx": {
-          "name": "host_rpc_envelopes_host_direction_message_uidx",
-          "columns": [
-            "host_id",
-            "direction",
-            "message_id"
-          ],
-          "isUnique": true
-        },
-        "host_rpc_envelopes_host_direction_idx": {
-          "name": "host_rpc_envelopes_host_direction_idx",
-          "columns": [
-            "host_id",
-            "direction",
-            "seq"
-          ],
-          "isUnique": false
-        },
-        "host_rpc_envelopes_call_idx": {
-          "name": "host_rpc_envelopes_call_idx",
-          "columns": [
-            "call_id",
-            "seq"
+            "version"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "host_rpc_envelopes_host_id_agent_hosts_id_fk": {
-          "name": "host_rpc_envelopes_host_id_agent_hosts_id_fk",
-          "tableFrom": "host_rpc_envelopes",
+        "host_desired_state_host_id_agent_hosts_id_fk": {
+          "name": "host_desired_state_host_id_agent_hosts_id_fk",
+          "tableFrom": "host_desired_state",
           "tableTo": "agent_hosts",
           "columnsFrom": [
             "host_id"
@@ -936,19 +526,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "host_rpc_envelopes_call_id_host_rpc_calls_call_id_fk": {
-          "name": "host_rpc_envelopes_call_id_host_rpc_calls_call_id_fk",
-          "tableFrom": "host_rpc_envelopes",
-          "tableTo": "host_rpc_calls",
-          "columnsFrom": [
-            "call_id"
-          ],
-          "columnsTo": [
-            "call_id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -1066,6 +643,52 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "jwks": {
+      "name": "jwks",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "public_key": {
+          "name": "public_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "private_key": {
+          "name": "private_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "member": {
       "name": "member",
       "columns": {
@@ -1164,36 +787,22 @@
           "notNull": true,
           "autoincrement": false
         },
-        "access_token": {
-          "name": "access_token",
+        "token": {
+          "name": "token",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "refresh_token": {
-          "name": "refresh_token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "access_token_expires_at": {
-          "name": "access_token_expires_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "refresh_token_expires_at": {
-          "name": "refresh_token_expires_at",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         },
         "client_id": {
           "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "session_id": {
+          "name": "session_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -1206,40 +815,48 @@
           "notNull": false,
           "autoincrement": false
         },
-        "scopes": {
-          "name": "scopes",
+        "reference_id": {
+          "name": "reference_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
+          "autoincrement": false
+        },
+        "refresh_id": {
+          "name": "refresh_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
           "autoincrement": false
         },
         "created_at": {
           "name": "created_at",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         }
       },
       "indexes": {
-        "oauth_access_token_access_token_unique": {
-          "name": "oauth_access_token_access_token_unique",
+        "oauth_access_token_token_unique": {
+          "name": "oauth_access_token_token_unique",
           "columns": [
-            "access_token"
-          ],
-          "isUnique": true
-        },
-        "oauth_access_token_refresh_token_unique": {
-          "name": "oauth_access_token_refresh_token_unique",
-          "columns": [
-            "refresh_token"
+            "token"
           ],
           "isUnique": true
         },
@@ -1250,19 +867,40 @@
           ],
           "isUnique": false
         },
+        "oauthAccessToken_sessionId_idx": {
+          "name": "oauthAccessToken_sessionId_idx",
+          "columns": [
+            "session_id"
+          ],
+          "isUnique": false
+        },
         "oauthAccessToken_userId_idx": {
           "name": "oauthAccessToken_userId_idx",
           "columns": [
             "user_id"
           ],
           "isUnique": false
+        },
+        "oauthAccessToken_referenceId_idx": {
+          "name": "oauthAccessToken_referenceId_idx",
+          "columns": [
+            "reference_id"
+          ],
+          "isUnique": false
+        },
+        "oauthAccessToken_refreshId_idx": {
+          "name": "oauthAccessToken_refreshId_idx",
+          "columns": [
+            "refresh_id"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
-        "oauth_access_token_client_id_oauth_application_client_id_fk": {
-          "name": "oauth_access_token_client_id_oauth_application_client_id_fk",
+        "oauth_access_token_client_id_oauth_client_client_id_fk": {
+          "name": "oauth_access_token_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_access_token",
-          "tableTo": "oauth_application",
+          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
@@ -1270,6 +908,19 @@
             "client_id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "oauth_access_token_session_id_session_id_fk": {
+          "name": "oauth_access_token_session_id_session_id_fk",
+          "tableFrom": "oauth_access_token",
+          "tableTo": "session",
+          "columnsFrom": [
+            "session_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "oauth_access_token_user_id_user_id_fk": {
@@ -1284,14 +935,27 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
+        },
+        "oauth_access_token_refresh_id_oauth_refresh_token_id_fk": {
+          "name": "oauth_access_token_refresh_id_oauth_refresh_token_id_fk",
+          "tableFrom": "oauth_access_token",
+          "tableTo": "oauth_refresh_token",
+          "columnsFrom": [
+            "refresh_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "oauth_application": {
-      "name": "oauth_application",
+    "oauth_client": {
+      "name": "oauth_client",
       "columns": {
         "id": {
           "name": "id",
@@ -1300,32 +964,11 @@
           "notNull": true,
           "autoincrement": false
         },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "icon": {
-          "name": "icon",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "metadata": {
-          "name": "metadata",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "client_id": {
           "name": "client_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "client_secret": {
@@ -1335,27 +978,41 @@
           "notNull": false,
           "autoincrement": false
         },
-        "redirect_urls": {
-          "name": "redirect_urls",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "type": {
-          "name": "type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "disabled": {
           "name": "disabled",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false,
           "default": false
+        },
+        "skip_consent": {
+          "name": "skip_consent",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "enable_end_session": {
+          "name": "enable_end_session",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "subject_type": {
+          "name": "subject_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "user_id": {
           "name": "user_id",
@@ -1368,37 +1025,181 @@
           "name": "created_at",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         },
         "updated_at": {
           "name": "updated_at",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "uri": {
+          "name": "uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "icon": {
+          "name": "icon",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "contacts": {
+          "name": "contacts",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "tos": {
+          "name": "tos",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "policy": {
+          "name": "policy",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "software_id": {
+          "name": "software_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "software_version": {
+          "name": "software_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "software_statement": {
+          "name": "software_statement",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "redirect_uris": {
+          "name": "redirect_uris",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "post_logout_redirect_uris": {
+          "name": "post_logout_redirect_uris",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "token_endpoint_auth_method": {
+          "name": "token_endpoint_auth_method",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "grant_types": {
+          "name": "grant_types",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "response_types": {
+          "name": "response_types",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "public": {
+          "name": "public",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "require_pkce": {
+          "name": "require_pkce",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": true
+        },
+        "reference_id": {
+          "name": "reference_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
         }
       },
       "indexes": {
-        "oauth_application_client_id_unique": {
-          "name": "oauth_application_client_id_unique",
+        "oauth_client_client_id_unique": {
+          "name": "oauth_client_client_id_unique",
           "columns": [
             "client_id"
           ],
           "isUnique": true
         },
-        "oauthApplication_userId_idx": {
-          "name": "oauthApplication_userId_idx",
+        "oauthClient_userId_idx": {
+          "name": "oauthClient_userId_idx",
           "columns": [
             "user_id"
+          ],
+          "isUnique": false
+        },
+        "oauthClient_referenceId_idx": {
+          "name": "oauthClient_referenceId_idx",
+          "columns": [
+            "reference_id"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "oauth_application_user_id_user_id_fk": {
-          "name": "oauth_application_user_id_user_id_fk",
-          "tableFrom": "oauth_application",
+        "oauth_client_user_id_user_id_fk": {
+          "name": "oauth_client_user_id_user_id_fk",
+          "tableFrom": "oauth_client",
           "tableTo": "user",
           "columnsFrom": [
             "user_id"
@@ -1428,7 +1229,7 @@
           "name": "client_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "user_id": {
@@ -1438,33 +1239,35 @@
           "notNull": false,
           "autoincrement": false
         },
+        "reference_id": {
+          "name": "reference_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "scopes": {
           "name": "scopes",
           "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "created_at": {
           "name": "created_at",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         },
         "updated_at": {
           "name": "updated_at",
           "type": "integer",
           "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "consent_given": {
-          "name": "consent_given",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         }
       },
       "indexes": {
@@ -1481,13 +1284,20 @@
             "user_id"
           ],
           "isUnique": false
+        },
+        "oauthConsent_referenceId_idx": {
+          "name": "oauthConsent_referenceId_idx",
+          "columns": [
+            "reference_id"
+          ],
+          "isUnique": false
         }
       },
       "foreignKeys": {
-        "oauth_consent_client_id_oauth_application_client_id_fk": {
-          "name": "oauth_consent_client_id_oauth_application_client_id_fk",
+        "oauth_consent_client_id_oauth_client_client_id_fk": {
+          "name": "oauth_consent_client_id_oauth_client_client_id_fk",
           "tableFrom": "oauth_consent",
-          "tableTo": "oauth_application",
+          "tableTo": "oauth_client",
           "columnsFrom": [
             "client_id"
           ],
@@ -1500,6 +1310,170 @@
         "oauth_consent_user_id_user_id_fk": {
           "name": "oauth_consent_user_id_user_id_fk",
           "tableFrom": "oauth_consent",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "oauth_refresh_token": {
+      "name": "oauth_refresh_token",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "token": {
+          "name": "token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "client_id": {
+          "name": "client_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "reference_id": {
+          "name": "reference_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "revoked": {
+          "name": "revoked",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "auth_time": {
+          "name": "auth_time",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "oauth_refresh_token_token_unique": {
+          "name": "oauth_refresh_token_token_unique",
+          "columns": [
+            "token"
+          ],
+          "isUnique": true
+        },
+        "oauthRefreshToken_clientId_idx": {
+          "name": "oauthRefreshToken_clientId_idx",
+          "columns": [
+            "client_id"
+          ],
+          "isUnique": false
+        },
+        "oauthRefreshToken_sessionId_idx": {
+          "name": "oauthRefreshToken_sessionId_idx",
+          "columns": [
+            "session_id"
+          ],
+          "isUnique": false
+        },
+        "oauthRefreshToken_userId_idx": {
+          "name": "oauthRefreshToken_userId_idx",
+          "columns": [
+            "user_id"
+          ],
+          "isUnique": false
+        },
+        "oauthRefreshToken_referenceId_idx": {
+          "name": "oauthRefreshToken_referenceId_idx",
+          "columns": [
+            "reference_id"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "oauth_refresh_token_client_id_oauth_client_client_id_fk": {
+          "name": "oauth_refresh_token_client_id_oauth_client_client_id_fk",
+          "tableFrom": "oauth_refresh_token",
+          "tableTo": "oauth_client",
+          "columnsFrom": [
+            "client_id"
+          ],
+          "columnsTo": [
+            "client_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "oauth_refresh_token_session_id_session_id_fk": {
+          "name": "oauth_refresh_token_session_id_session_id_fk",
+          "tableFrom": "oauth_refresh_token",
+          "tableTo": "session",
+          "columnsFrom": [
+            "session_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "oauth_refresh_token_user_id_user_id_fk": {
+          "name": "oauth_refresh_token_user_id_user_id_fk",
+          "tableFrom": "oauth_refresh_token",
           "tableTo": "user",
           "columnsFrom": [
             "user_id"
@@ -1897,8 +1871,8 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "scenario_run_upload_leases": {
-      "name": "scenario_run_upload_leases",
+    "scenario_run_ssh_keys": {
+      "name": "scenario_run_ssh_keys",
       "columns": {
         "id": {
           "name": "id",
@@ -1921,32 +1895,32 @@
           "notNull": true,
           "autoincrement": false
         },
-        "host_id": {
-          "name": "host_id",
+        "runtime_vm_name": {
+          "name": "runtime_vm_name",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "token_hash": {
-          "name": "token_hash",
+        "public_key_openssh": {
+          "name": "public_key_openssh",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "integer",
+        "private_key_ciphertext_b64": {
+          "name": "private_key_ciphertext_b64",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
-        "completed_at": {
-          "name": "completed_at",
-          "type": "integer",
+        "private_key_iv_b64": {
+          "name": "private_key_iv_b64",
+          "type": "text",
           "primaryKey": false,
-          "notNull": false,
+          "notNull": true,
           "autoincrement": false
         },
         "created_at": {
@@ -1956,63 +1930,36 @@
           "notNull": true,
           "autoincrement": false,
           "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
         }
       },
       "indexes": {
-        "scenario_run_upload_leases_vm_uidx": {
-          "name": "scenario_run_upload_leases_vm_uidx",
+        "scenario_run_ssh_keys_run_vm_uidx": {
+          "name": "scenario_run_ssh_keys_run_vm_uidx",
           "columns": [
+            "run_id",
             "vm_id"
           ],
           "isUnique": true
         },
-        "scenario_run_upload_leases_host_idx": {
-          "name": "scenario_run_upload_leases_host_idx",
+        "scenario_run_ssh_keys_run_runtime_idx": {
+          "name": "scenario_run_ssh_keys_run_runtime_idx",
           "columns": [
-            "host_id",
-            "expires_at"
-          ],
-          "isUnique": false
-        },
-        "scenario_run_upload_leases_token_idx": {
-          "name": "scenario_run_upload_leases_token_idx",
-          "columns": [
-            "token_hash"
+            "run_id",
+            "runtime_vm_name"
           ],
           "isUnique": false
         }
       },
       "foreignKeys": {
-        "scenario_run_upload_leases_run_id_scenario_runs_run_id_fk": {
-          "name": "scenario_run_upload_leases_run_id_scenario_runs_run_id_fk",
-          "tableFrom": "scenario_run_upload_leases",
+        "scenario_run_ssh_keys_run_id_scenario_runs_run_id_fk": {
+          "name": "scenario_run_ssh_keys_run_id_scenario_runs_run_id_fk",
+          "tableFrom": "scenario_run_ssh_keys",
           "tableTo": "scenario_runs",
           "columnsFrom": [
             "run_id"
           ],
           "columnsTo": [
             "run_id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "scenario_run_upload_leases_host_id_agent_hosts_id_fk": {
-          "name": "scenario_run_upload_leases_host_id_agent_hosts_id_fk",
-          "tableFrom": "scenario_run_upload_leases",
-          "tableTo": "agent_hosts",
-          "columnsFrom": [
-            "host_id"
-          ],
-          "columnsTo": [
-            "id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -2139,6 +2086,13 @@
         },
         "delete_requested_at": {
           "name": "delete_requested_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "solved_at": {
+          "name": "solved_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
@@ -2470,6 +2424,112 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "user_ssh_keys": {
+      "name": "user_ssh_keys",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "label": {
+          "name": "label",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "key_type": {
+          "name": "key_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "comment": {
+          "name": "comment",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "public_key_openssh": {
+          "name": "public_key_openssh",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "fingerprint_sha256": {
+          "name": "fingerprint_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(cast(unixepoch('subsecond') * 1000 as integer))"
+        }
+      },
+      "indexes": {
+        "user_ssh_keys_user_idx": {
+          "name": "user_ssh_keys_user_idx",
+          "columns": [
+            "user_id",
+            "created_at"
+          ],
+          "isUnique": false
+        },
+        "user_ssh_keys_user_fingerprint_uidx": {
+          "name": "user_ssh_keys_user_fingerprint_uidx",
+          "columns": [
+            "user_id",
+            "fingerprint_sha256"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "user_ssh_keys_user_id_user_id_fk": {
+          "name": "user_ssh_keys_user_id_user_id_fk",
+          "tableFrom": "user_ssh_keys",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "verification": {
       "name": "verification",
       "columns": {
@@ -2673,6 +2733,20 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "image_key_json": {
+          "name": "image_key_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "image_sha256": {
+          "name": "image_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "cpu": {

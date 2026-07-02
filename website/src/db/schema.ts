@@ -1,5 +1,13 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
+import type { HostDesiredStateV1, HostStateReportV1 } from "@/generated/bridge";
+import type { ImageKey } from "@/generated/catalog";
 
 const nowMsDefault = sql`(cast(unixepoch('subsecond') * 1000 as integer))`;
 const jsonText = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
@@ -190,7 +198,9 @@ export const agentHosts = sqliteTable(
       .default(true)
       .notNull(),
     disabled: integer("disabled", { mode: "boolean" }).default(false).notNull(),
-    connected: integer("connected", { mode: "boolean" }).default(false).notNull(),
+    connected: integer("connected", { mode: "boolean" })
+      .default(false)
+      .notNull(),
     connectedAt: integer("connected_at"),
     disconnectedAt: integer("disconnected_at"),
     lastHeartbeatAt: integer("last_heartbeat_at"),
@@ -198,26 +208,49 @@ export const agentHosts = sqliteTable(
     activeSessionId: text("active_session_id"),
     lastClientHelloAt: integer("last_client_hello_at"),
     lastServerHelloAt: integer("last_server_hello_at"),
-    serverNextSeq: integer("server_next_seq").default(1).notNull(),
-    serverAckedSeq: integer("server_acked_seq").default(0).notNull(),
-    hostNextSeq: integer("host_next_seq").default(1).notNull(),
-    hostAckedSeq: integer("host_acked_seq").default(0).notNull(),
-    serverTransportId: text("server_transport_id"),
-    hostTransportId: text("host_transport_id"),
     agentVersion: text("agent_version"),
     hostInfoJson: text("host_info_json"),
     inventoryJson: text("inventory_json"),
-    runtimeStateJson: text("runtime_state_json"),
-    lastPingAt: integer("last_ping_at"),
-    lastPingRttMs: integer("last_ping_rtt_ms"),
-    lastPingSuccess: integer("last_ping_success", { mode: "boolean" }),
-    lastPingError: text("last_ping_error"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
     index("agent_hosts_user_idx").on(table.userId),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
+  ],
+);
+
+export const hostDesiredState = sqliteTable(
+  "host_desired_state",
+  {
+    hostId: text("host_id")
+      .primaryKey()
+      .references(() => agentHosts.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    docJson: jsonText<HostDesiredStateV1>("doc_json").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [index("host_desired_state_version_idx").on(table.version)],
+);
+
+export const hostActualState = sqliteTable(
+  "host_actual_state",
+  {
+    hostId: text("host_id")
+      .primaryKey()
+      .references(() => agentHosts.id, { onDelete: "cascade" }),
+    appliedDesiredVersion: integer("applied_desired_version").notNull(),
+    observedAt: integer("observed_at").notNull(),
+    reportJson: jsonText<HostStateReportV1>("report_json").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    index("host_actual_state_applied_version_idx").on(
+      table.appliedDesiredVersion,
+    ),
+    index("host_actual_state_observed_idx").on(table.observedAt),
   ],
 );
 
@@ -236,136 +269,6 @@ export const agentBootstrapTokens = sqliteTable(
   (table) => [
     index("agent_bootstrap_tokens_host_idx").on(table.hostId),
     index("agent_bootstrap_tokens_hash_idx").on(table.tokenHash),
-  ],
-);
-
-export const agentPingAudit = sqliteTable(
-  "agent_ping_audit",
-  {
-    id: text("id").primaryKey(),
-    hostId: text("host_id")
-      .notNull()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    requestedByUserId: text("requested_by_user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    requestedAt: integer("requested_at").default(nowMsDefault).notNull(),
-    success: integer("success", { mode: "boolean" }).notNull(),
-    rttMs: integer("rtt_ms"),
-    error: text("error"),
-  },
-  (table) => [
-    index("agent_ping_audit_host_idx").on(table.hostId),
-    index("agent_ping_audit_user_idx").on(table.requestedByUserId),
-  ],
-);
-
-export const hostRpcCalls = sqliteTable(
-  "host_rpc_calls",
-  {
-    callId: text("call_id").primaryKey(),
-    hostId: text("host_id")
-      .notNull()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
-    runId: text("run_id"),
-    vmId: text("vm_id"),
-    direction: text("direction").notNull(),
-    method: text("method").notNull(),
-    status: text("status").notNull(),
-    idempotencyKey: text("idempotency_key"),
-    requestMessageId: text("request_message_id"),
-    responseMessageId: text("response_message_id"),
-    requestJson: text("request_json").notNull(),
-    responseJson: text("response_json"),
-    errorJson: text("error_json"),
-    requestAckedAt: integer("request_acked_at"),
-    responseAckedAt: integer("response_acked_at"),
-    startedAt: integer("started_at"),
-    finishedAt: integer("finished_at"),
-    deadlineAt: integer("deadline_at"),
-    expiresAt: integer("expires_at"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("host_rpc_calls_host_idempotency_uidx").on(
-      table.hostId,
-      table.idempotencyKey,
-    ),
-    index("host_rpc_calls_host_status_idx").on(table.hostId, table.status, table.createdAt),
-    index("host_rpc_calls_run_idx").on(table.runId, table.createdAt),
-    index("host_rpc_calls_vm_idx").on(table.vmId, table.createdAt),
-  ],
-);
-
-export const hostRpcEnvelopes = sqliteTable(
-  "host_rpc_envelopes",
-  {
-    id: text("id").primaryKey(),
-    hostId: text("host_id")
-      .notNull()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    direction: text("direction").notNull(),
-    seq: integer("seq").notNull(),
-    sessionId: text("session_id"),
-    messageId: text("message_id").notNull(),
-    callId: text("call_id").references(() => hostRpcCalls.callId, {
-      onDelete: "set null",
-    }),
-    kind: text("kind").notNull(),
-    method: text("method").notNull(),
-    payloadJson: text("payload_json").notNull(),
-    occurredAt: integer("occurred_at").notNull(),
-    appliedAt: integer("applied_at"),
-    ackedAt: integer("acked_at"),
-    expiresAt: integer("expires_at"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("host_rpc_envelopes_host_direction_seq_uidx").on(
-      table.hostId,
-      table.direction,
-      table.seq,
-    ),
-    uniqueIndex("host_rpc_envelopes_host_direction_message_uidx").on(
-      table.hostId,
-      table.direction,
-      table.messageId,
-    ),
-    index("host_rpc_envelopes_host_direction_idx").on(
-      table.hostId,
-      table.direction,
-      table.seq,
-    ),
-    index("host_rpc_envelopes_call_idx").on(table.callId, table.seq),
-  ],
-);
-
-export const hostRpcReceipts = sqliteTable(
-  "host_rpc_receipts",
-  {
-    id: text("id").primaryKey(),
-    hostId: text("host_id")
-      .notNull()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    transportId: text("transport_id").notNull(),
-    messageId: text("message_id").notNull(),
-    callId: text("call_id"),
-    kind: text("kind").notNull(),
-    method: text("method").notNull(),
-    payloadJson: text("payload_json").notNull(),
-    receivedAt: integer("received_at").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("host_rpc_receipts_host_transport_message_uidx").on(
-      table.hostId,
-      table.transportId,
-      table.messageId,
-    ),
-    index("host_rpc_receipts_host_expiry_idx").on(table.hostId, table.expiresAt),
   ],
 );
 
@@ -402,8 +305,38 @@ export const scenarioRuns = sqliteTable(
   },
   (table) => [
     uniqueIndex("scenario_runs_active_key_uidx").on(table.activeKey),
-    index("scenario_runs_user_scenario_idx").on(table.userId, table.scenarioId, table.createdAt),
+    index("scenario_runs_user_scenario_idx").on(
+      table.userId,
+      table.scenarioId,
+      table.createdAt,
+    ),
     index("scenario_runs_host_idx").on(table.hostId, table.createdAt),
+  ],
+);
+
+export const scenarioRunSshKeys = sqliteTable(
+  "scenario_run_ssh_keys",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => scenarioRuns.runId, { onDelete: "cascade" }),
+    vmId: text("vm_id").notNull(),
+    runtimeVmName: text("runtime_vm_name").notNull(),
+    publicKeyOpenssh: text("public_key_openssh").notNull(),
+    privateKeyCiphertextB64: text("private_key_ciphertext_b64").notNull(),
+    privateKeyIvB64: text("private_key_iv_b64").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_run_ssh_keys_run_vm_uidx").on(
+      table.runId,
+      table.vmId,
+    ),
+    index("scenario_run_ssh_keys_run_runtime_idx").on(
+      table.runId,
+      table.runtimeVmName,
+    ),
   ],
 );
 
@@ -459,8 +392,15 @@ export const scenarioRunArtifacts = sqliteTable(
     uploadedAt: integer("uploaded_at"),
   },
   (table) => [
-    uniqueIndex("scenario_run_artifacts_vm_ordinal_uidx").on(table.vmId, table.ordinal),
-    index("scenario_run_artifacts_run_idx").on(table.runId, table.vmId, table.ordinal),
+    uniqueIndex("scenario_run_artifacts_vm_ordinal_uidx").on(
+      table.vmId,
+      table.ordinal,
+    ),
+    index("scenario_run_artifacts_run_idx").on(
+      table.runId,
+      table.vmId,
+      table.ordinal,
+    ),
     index("scenario_run_artifacts_r2_key_idx").on(table.r2Key),
   ],
 );
@@ -476,30 +416,6 @@ export const scenarioRunArtifactUploads = sqliteTable(
   },
 );
 
-export const scenarioRunUploadLeases = sqliteTable(
-  "scenario_run_upload_leases",
-  {
-    id: text("id").primaryKey(),
-    runId: text("run_id")
-      .notNull()
-      .references(() => scenarioRuns.runId, { onDelete: "cascade" }),
-    vmId: text("vm_id").notNull(),
-    hostId: text("host_id")
-      .notNull()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    tokenHash: text("token_hash").notNull(),
-    expiresAt: integer("expires_at").notNull(),
-    completedAt: integer("completed_at"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("scenario_run_upload_leases_vm_uidx").on(table.vmId),
-    index("scenario_run_upload_leases_host_idx").on(table.hostId, table.expiresAt),
-    index("scenario_run_upload_leases_token_idx").on(table.tokenHash),
-  ],
-);
-
 export const vmScenarios = sqliteTable(
   "vm_scenarios",
   {
@@ -510,7 +426,9 @@ export const vmScenarios = sqliteTable(
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
-  (table) => [index("vm_scenarios_enabled_idx").on(table.enabled, table.enabledAt)],
+  (table) => [
+    index("vm_scenarios_enabled_idx").on(table.enabled, table.enabledAt),
+  ],
 );
 
 export const vmScenarioVms = sqliteTable(
@@ -523,13 +441,21 @@ export const vmScenarioVms = sqliteTable(
     ordinal: integer("ordinal").notNull(),
     vmName: text("vm_name").notNull(),
     image: text("image").notNull(),
+    imageKeyJson: jsonText<ImageKey>("image_key_json"),
+    imageSha256: text("image_sha256"),
     cpu: integer("cpu").notNull(),
     memoryMib: integer("memory_mib").notNull(),
     diskMib: integer("disk_mib").notNull(),
   },
   (table) => [
-    uniqueIndex("vm_scenario_vms_scenario_ordinal_uidx").on(table.scenarioId, table.ordinal),
-    uniqueIndex("vm_scenario_vms_scenario_name_uidx").on(table.scenarioId, table.vmName),
+    uniqueIndex("vm_scenario_vms_scenario_ordinal_uidx").on(
+      table.scenarioId,
+      table.ordinal,
+    ),
+    uniqueIndex("vm_scenario_vms_scenario_name_uidx").on(
+      table.scenarioId,
+      table.vmName,
+    ),
     index("vm_scenario_vms_scenario_idx").on(table.scenarioId, table.ordinal),
   ],
 );
@@ -550,8 +476,15 @@ export const vmScenarioProbes = sqliteTable(
     phase: text("phase").default("scenario").notNull(),
   },
   (table) => [
-    uniqueIndex("vm_scenario_probes_vm_ordinal_uidx").on(table.scenarioVmId, table.ordinal),
-    index("vm_scenario_probes_scenario_idx").on(table.scenarioId, table.scenarioVmId, table.ordinal),
+    uniqueIndex("vm_scenario_probes_vm_ordinal_uidx").on(
+      table.scenarioVmId,
+      table.ordinal,
+    ),
+    index("vm_scenario_probes_scenario_idx").on(
+      table.scenarioId,
+      table.scenarioVmId,
+      table.ordinal,
+    ),
   ],
 );
 
@@ -590,7 +523,9 @@ export const oauthClient = sqliteTable(
     responseTypes: jsonText<string[]>("response_types"),
     public: integer("public", { mode: "boolean" }).default(false).notNull(),
     type: text("type"),
-    requirePKCE: integer("require_pkce", { mode: "boolean" }).default(true).notNull(),
+    requirePKCE: integer("require_pkce", { mode: "boolean" })
+      .default(true)
+      .notNull(),
     referenceId: text("reference_id"),
     metadata: jsonText<Record<string, unknown>>("metadata"),
   },

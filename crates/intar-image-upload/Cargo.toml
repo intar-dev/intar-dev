@@ -1,0 +1,20 @@
+[package]
+name = "intar-image-upload"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+intar-contracts = { path = "../intar-contracts" }
+reqwest = { workspace = true, features = ["blocking", "json", "multipart", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

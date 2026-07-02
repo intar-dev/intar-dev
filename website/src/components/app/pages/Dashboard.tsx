@@ -30,22 +30,6 @@ interface AgentHostApi {
   updatedAt: number;
   hostInfo: AgentHostInfo | null;
   status: AgentBridgeStatus | null;
-  statusError: string | null;
-}
-
-interface AgentCommandSubmitResponse {
-  callId: string;
-  status: "queued" | "sent" | "request_acked" | "running" | "succeeded" | "failed" | "timed_out";
-  deadlineAt: number | null;
-  response: unknown;
-  error: unknown;
-  requestAckedAt: number | null;
-  startedAt: number | null;
-  finishedAt: number | null;
-}
-
-interface AgentCommandPollResponse {
-  call: AgentCommandSubmitResponse;
 }
 
 interface VmStatus {
@@ -456,17 +440,6 @@ function ProbeRows(props: { probes: VmProbe[] }) {
   );
 }
 
-const SUBMIT_RETRY_ATTEMPTS = 3;
-const SUBMIT_RETRY_BASE_MS = 300;
-const POLL_RETRY_ATTEMPTS = 3;
-const POLL_RETRY_BASE_MS = 250;
-const POLL_INTERVAL_INITIAL_MS = 1_000;
-const POLL_INTERVAL_MAX_MS = 5_000;
-const VM_DELETE_POLL_MAX_MS = 35 * 60 * 1000;
-const COMMAND_POLL_MAX_MS = 5 * 60 * 1000;
-const VM_DELETE_DEADLINE_GRACE_MS = 5 * 60 * 1000;
-const COMMAND_DEADLINE_GRACE_MS = 2 * 60 * 1000;
-const POLL_MAX_TRANSIENT_ERRORS = 8;
 const SCENARIO_RUNS_PAGE_SIZE = 6;
 const SCENARIO_RUN_PAGE_LINKS = 5;
 
@@ -490,126 +463,6 @@ function buildVisiblePages(currentPage: number, totalPages: number) {
   return Array.from(
     { length: SCENARIO_RUN_PAGE_LINKS },
     (_, index) => start + index,
-  );
-}
-
-class AgentCommandRequestError extends Error {
-  readonly status: number | null;
-  readonly transient: boolean;
-
-  constructor(
-    message: string,
-    options?: { status?: number | null; transient?: boolean },
-  ) {
-    super(message);
-    this.name = "AgentCommandRequestError";
-    this.status = options?.status ?? null;
-    this.transient = options?.transient ?? false;
-  }
-}
-
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-const jitteredDelay = (ms: number) => {
-  const jitter = Math.floor(Math.random() * Math.max(1, Math.round(ms * 0.2)));
-  return ms + jitter;
-};
-
-const isTransientHttpStatus = (status: number) =>
-  status === 408 ||
-  status === 425 ||
-  status === 429 ||
-  status === 500 ||
-  status === 502 ||
-  status === 503 ||
-  status === 504;
-
-function formatCommandFailure(error: unknown): string {
-  if (typeof error === "string" && error.trim()) {
-    return error.trim();
-  }
-  if (typeof error !== "object" || error === null || Array.isArray(error)) {
-    return "command failed";
-  }
-  const payload = error as {
-    message?: unknown;
-    reason?: unknown;
-    code?: unknown;
-  };
-  const reason =
-    typeof payload.reason === "string" ? payload.reason.trim() : "";
-  const message =
-    typeof payload.message === "string" ? payload.message.trim() : "";
-  if (reason === "queue_timeout") {
-    return message || "command timed out before execution started";
-  }
-  if (reason === "execution_timeout") {
-    return message || "command timed out during execution";
-  }
-  if (message) return message;
-  if (typeof payload.code === "string" && payload.code.trim()) {
-    return `command failed (${payload.code.trim()})`;
-  }
-  return "command failed";
-}
-
-async function fetchJsonWithRetry<TBody>(
-  input: RequestInfo | URL,
-  init: RequestInit,
-  options: { attempts: number; baseDelayMs: number; context: string },
-): Promise<{ response: Response; body: TBody | { error?: string } | null }> {
-  let lastError: AgentCommandRequestError | null = null;
-
-  for (let attempt = 0; attempt < options.attempts; attempt += 1) {
-    try {
-      const response = await fetch(input, init);
-      const body = (await response.json().catch(() => null)) as
-        | TBody
-        | { error?: string }
-        | null;
-      if (response.ok) {
-        return { response, body };
-      }
-
-      const message =
-        (body as { error?: string } | null)?.error ??
-        `${options.context} failed (${response.status})`;
-      const transient = isTransientHttpStatus(response.status);
-      const failure = new AgentCommandRequestError(message, {
-        status: response.status,
-        transient,
-      });
-
-      if (!transient || attempt + 1 >= options.attempts) {
-        throw failure;
-      }
-      lastError = failure;
-      await sleep(jitteredDelay(options.baseDelayMs * Math.pow(2, attempt)));
-    } catch (error) {
-      const failure =
-        error instanceof AgentCommandRequestError
-          ? error
-          : new AgentCommandRequestError(
-              error instanceof Error
-                ? error.message
-                : `${options.context} failed`,
-              { status: null, transient: true },
-            );
-
-      if (!failure.transient || attempt + 1 >= options.attempts) {
-        throw failure;
-      }
-      lastError = failure;
-      await sleep(jitteredDelay(options.baseDelayMs * Math.pow(2, attempt)));
-    }
-  }
-
-  throw (
-    lastError ??
-    new AgentCommandRequestError(`${options.context} failed`, {
-      transient: true,
-    })
   );
 }
 
@@ -697,15 +550,6 @@ export function Dashboard() {
     launchableScenarios.find((scenario) => scenario.enabled)?.scenarioId ??
     launchableScenarios[0]?.scenarioId ??
     "";
-
-  const ping = useMutation({
-    mutationFn: async (hostId: string) => {
-      await runAgentCommand(hostId, "host.ping");
-    },
-    onSuccess: (_result, hostId) => {
-      void Promise.all([hosts.refetch(), refreshRunList(hostId)]);
-    },
-  });
 
   const deleteHost = useMutation({
     mutationFn: async (hostId: string) => {
@@ -902,129 +746,8 @@ export function Dashboard() {
     };
   }
 
-  const runAgentCommand = async <T,>(
-    hostId: string,
-    method: "host.ping" | "vm.list" | "vm.destroy",
-    request: Record<string, unknown> = {},
-    options?: {
-      runId?: string | null;
-      vmId?: string | null;
-    },
-  ): Promise<T> => {
-    const { body: submitBody } = await fetchJsonWithRetry<{
-      call: AgentCommandSubmitResponse;
-    }>(
-      `/api/agent/hosts/${encodeURIComponent(hostId)}/rpc`,
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          method,
-          request,
-          runId: options?.runId ?? null,
-          vmId: options?.vmId ?? null,
-        }),
-      },
-      {
-        attempts: SUBMIT_RETRY_ATTEMPTS,
-        baseDelayMs: SUBMIT_RETRY_BASE_MS,
-        context: "RPC submit",
-      },
-    );
-
-    if (
-      !submitBody ||
-      typeof (submitBody as { call?: AgentCommandSubmitResponse } | null)?.call
-        ?.callId !== "string"
-    ) {
-      throw new Error("RPC submit response missing callId");
-    }
-
-    const submitData = (submitBody as { call: AgentCommandSubmitResponse }).call;
-    const commandId = submitData.callId;
-    const defaultTimeoutMs =
-      method === "vm.destroy" ? 30 * 60 * 1000 : 3 * 60 * 1000;
-    const graceMs =
-      method === "vm.destroy"
-        ? VM_DELETE_DEADLINE_GRACE_MS
-        : COMMAND_DEADLINE_GRACE_MS;
-    const maxPollMs =
-      method === "vm.destroy" ? VM_DELETE_POLL_MAX_MS : COMMAND_POLL_MAX_MS;
-    const deadlineAt =
-      typeof submitData.deadlineAt === "number"
-        ? submitData.deadlineAt
-        : Date.now() + defaultTimeoutMs;
-    const hardDeadlineAt = Math.min(
-      Date.now() + maxPollMs,
-      deadlineAt + graceMs,
-    );
-
-    let pollIntervalMs = POLL_INTERVAL_INITIAL_MS;
-    let transientPollErrors = 0;
-
-    while (Date.now() <= hardDeadlineAt) {
-      await sleep(jitteredDelay(pollIntervalMs));
-
-      let pollBody: AgentCommandPollResponse | null = null;
-      try {
-        const { body } = await fetchJsonWithRetry<AgentCommandPollResponse>(
-          `/api/agent/hosts/${encodeURIComponent(hostId)}/rpc/${encodeURIComponent(commandId)}`,
-          {
-            method: "GET",
-            credentials: "include",
-          },
-          {
-            attempts: POLL_RETRY_ATTEMPTS,
-            baseDelayMs: POLL_RETRY_BASE_MS,
-            context: "RPC poll",
-          },
-        );
-
-        pollBody = body as AgentCommandPollResponse | null;
-      } catch (error) {
-        if (error instanceof AgentCommandRequestError && error.transient) {
-          transientPollErrors += 1;
-          if (transientPollErrors > POLL_MAX_TRANSIENT_ERRORS) {
-            throw new Error(
-              "Command polling failed due to repeated transient errors",
-            );
-          }
-          pollIntervalMs = Math.min(
-            POLL_INTERVAL_MAX_MS,
-            Math.floor(pollIntervalMs * 1.5),
-          );
-          continue;
-        }
-        throw error;
-      }
-
-      transientPollErrors = 0;
-      const command = pollBody?.call;
-      if (!command)
-        throw new Error("RPC poll response missing call payload");
-
-      if (command.status === "succeeded") {
-        return command.response as T;
-      }
-      if (command.status === "failed" || command.status === "timed_out") {
-        throw new Error(formatCommandFailure(command.error));
-      }
-
-      pollIntervalMs = Math.min(
-        POLL_INTERVAL_MAX_MS,
-        Math.floor(pollIntervalMs * 1.25),
-      );
-    }
-
-    throw new Error("command polling exceeded timeout window");
-  };
-
   const refreshVmList = async (hostId: string) => {
     setVmError(null);
-    await runAgentCommand(hostId, "vm.list");
     const state = await loadHostState(hostId);
     setHostViewById((current) => ({ ...current, [hostId]: state.host }));
     setVmListByHost((current) => ({ ...current, [hostId]: state.liveVms }));
@@ -1203,24 +926,32 @@ export function Dashboard() {
     }
   };
 
-  const handleDeleteVm = async (
+  const handleDestroyRun = async (
     hostId: string,
     runId: string,
-    vmId: string,
     vmName: string,
   ) => {
-    const busyKey = `${hostId}:delete:${vmId}`;
+    const busyKey = `${hostId}:destroy-run:${runId}`;
     setVmBusyKey(busyKey);
     setVmError(null);
     setVmNotice(null);
     try {
-      await runAgentCommand(
-        hostId,
-        "vm.destroy",
-        { run_id: runId, name: vmName },
-        { runId, vmId },
+      const response = await fetch(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
+        {
+          method: "POST",
+          credentials: "include",
+        },
       );
-      setVmNotice(`Deleted VM ${vmName}`);
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(
+          body?.error ?? `Failed to request teardown (${response.status})`,
+        );
+      }
+      setVmNotice(`Teardown requested for ${vmName}`);
       setExpandedActiveVms((current) => {
         const next = { ...current };
         delete next[`${hostId}:${vmName}`];
@@ -1231,10 +962,10 @@ export function Dashboard() {
           ? null
           : current,
       );
-      await Promise.all([refreshVmList(hostId), refreshRunList(hostId)]);
+      await Promise.all([hosts.refetch(), refreshRunList(hostId)]);
     } catch (error) {
       setVmError(
-        error instanceof Error ? error.message : "failed to delete VM",
+        error instanceof Error ? error.message : "failed to request teardown",
       );
     } finally {
       setVmBusyKey((current) => (current === busyKey ? null : current));
@@ -1437,14 +1168,6 @@ export function Dashboard() {
             </AlertDescription>
           </Alert>
         ) : null}
-        {ping.error ? (
-          <Alert variant="destructive">
-            <AlertTitle>Ping failed</AlertTitle>
-            <AlertDescription>
-              {ping.error instanceof Error ? ping.error.message : "Ping failed"}
-            </AlertDescription>
-          </Alert>
-        ) : null}
         {deleteHost.error ? (
           <Alert variant="destructive">
             <AlertTitle>Host deletion failed</AlertTitle>
@@ -1533,10 +1256,10 @@ export function Dashboard() {
                       }}
                       onDelete={() => {
                         if (!vm.run_id) return;
-                        void handleDeleteVm(host.id, vm.run_id, vm.id, vm.name);
+                        void handleDestroyRun(host.id, vm.run_id, vm.name);
                       }}
                       isDeleting={
-                        vmBusyKey === `${host.id}:delete:${vm.id}`
+                        vmBusyKey === `${host.id}:destroy-run:${vm.run_id}`
                       }
                     />
                   );
@@ -1733,12 +1456,6 @@ export function Dashboard() {
                             <Badge variant="outline">
                               {hostRuns.length} archived
                             </Badge>
-                            {host.status?.lastPingRttMs !== null &&
-                            host.status?.lastPingRttMs !== undefined ? (
-                              <Badge variant="outline">
-                                {host.status.lastPingRttMs} ms RTT
-                              </Badge>
-                            ) : null}
                           </div>
                         </div>
                         <div className="flex flex-wrap gap-2">
@@ -1769,18 +1486,6 @@ export function Dashboard() {
                           </Button>
                           <Button
                             size="sm"
-                            variant="outline"
-                            onClick={() => ping.mutate(host.id)}
-                            disabled={
-                              host.disabled ||
-                              ping.isPending ||
-                              deleteHost.isPending
-                            }
-                          >
-                            Ping
-                          </Button>
-                          <Button
-                            size="sm"
                             variant="destructive"
                             onClick={() => {
                               if (
@@ -1793,7 +1498,7 @@ export function Dashboard() {
                               }
                               deleteHost.mutate(host.id);
                             }}
-                            disabled={isDeletingThisHost || ping.isPending}
+                            disabled={isDeletingThisHost}
                           >
                             {isDeletingThisHost ? "Deleting..." : "Delete"}
                           </Button>
@@ -1806,7 +1511,11 @@ export function Dashboard() {
                         <HostMetric
                           label="Heartbeat"
                           value={formatTimestamp(host.status?.lastHeartbeatAt)}
-                          detail={`Ping ${formatTimestamp(host.status?.lastPingAt)}`}
+                          detail={
+                            host.status?.connected
+                              ? "Connected via bridge"
+                              : "No fresh bridge heartbeat"
+                          }
                         />
                         <HostMetric
                           label="Network"
@@ -1837,11 +1546,6 @@ export function Dashboard() {
                           value={`${hostVms.length} live`}
                           detail={`${hostRuns.length} archived`}
                         />
-                        {host.statusError ? (
-                          <div className="rounded-2xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive sm:col-span-2 2xl:col-span-3">
-                            {host.statusError}
-                          </div>
-                        ) : null}
                       </div>
 
                       <div className="xl:border-l xl:border-border/70 xl:pl-6">
@@ -2048,7 +1752,7 @@ function LiveScenarioRunCard(props: {
             onClick={props.onDelete}
             disabled={!props.vmItem.run_id || props.isDeleting}
           >
-            {props.isDeleting ? "Deleting..." : "Delete VM"}
+            {props.isDeleting ? "Requesting..." : "Teardown run"}
           </Button>
         </div>
       </div>

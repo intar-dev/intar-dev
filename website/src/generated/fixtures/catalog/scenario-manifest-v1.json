@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "scenario_id": "broken-nginx",
+  "name": "Broken nginx",
+  "description": "Repair the nginx service.",
+  "vms": [
+    {
+      "name": "web",
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "web",
+        "arch": "x86_64"
+      },
+      "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cpu_count": 2,
+      "memory_mib": 2048,
+      "disk_mib": 8192,
+      "probes": [
+        {
+          "id": "nginx_service_running",
+          "phase": "scenario",
+          "kind": "service",
+          "display_name": "nginx is running"
+        }
+      ]
+    }
+  ]
+}

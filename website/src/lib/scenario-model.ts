@@ -1,3 +1,5 @@
+import type { ImageKey } from "@/generated/catalog";
+
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
 
 export interface ScenarioProbeRecord {
@@ -14,6 +16,8 @@ export interface ScenarioVmRecord {
   ordinal: number;
   name: string;
   image: string;
+  imageKey: ImageKey | null;
+  imageSha256: string | null;
   cpu: number;
   memoryMib: number;
   diskMib: number;
@@ -47,6 +51,8 @@ export interface ScenarioLaunchSpec {
   scenarioVmName: string;
   runtimeVmNamePrefix: string;
   image: string;
+  imageKey: ImageKey | null;
+  imageSha256: string | null;
   hostname: string;
   resources: {
     vcpus: number;
@@ -119,6 +125,8 @@ export function buildScenarioLaunchSpecs(input: {
       scenarioVmName,
       runtimeVmNamePrefix: slugify(`${scenarioSlug}-${scenarioVmName}`),
       image: vm.image.trim(),
+      imageKey: vm.imageKey,
+      imageSha256: vm.imageSha256,
       hostname: scenarioVmName,
       resources: {
         vcpus: vm.cpu,

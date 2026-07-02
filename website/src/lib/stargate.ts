@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { createAppId } from "@/lib/id";
+import type { IssueTerminalSessionResponse as StargateApiTerminalSessionResponse } from "@/generated/stargate";
 
 const DEFAULT_ASSERTION_HEADER = "cf-access-jwt-assertion";
 const DEFAULT_ROUTE_TTL_SECONDS = 4 * 60 * 60;
@@ -21,6 +22,8 @@ export interface IssueStargateTerminalSessionInput {
   targetUsername: string;
   targetHost: string;
   targetPort: number;
+  targetHostKeyOpenssh: string;
+  targetPrivateKeyOpenssh: string;
   expiresAt: Date;
   mode: StargateTerminalSessionMode;
   authorizedClientPublicKeysOpenssh?: string[];
@@ -45,12 +48,11 @@ export interface NativeTerminalSessionResult {
   routeUsername: string;
   expiresAt: number;
   native: {
-    authMode: "profile_keys" | "issued_key";
+    authMode: "profile_keys";
     authorizedKeyCount: number;
     host: string;
     port: number;
     username: string;
-    privateKey?: string;
     publicHostKeyOpenssh: string;
     publicHostKeyFingerprintSha256: string;
     knownHostsLine: string;
@@ -86,6 +88,8 @@ export async function issueStargateTerminalSession(
       target_username: input.targetUsername,
       target_ip: input.targetHost,
       target_port: input.targetPort,
+      target_host_key_openssh: input.targetHostKeyOpenssh,
+      target_private_key_openssh: input.targetPrivateKeyOpenssh,
       authorized_client_public_keys_openssh:
         input.authorizedClientPublicKeysOpenssh ?? [],
       route_expires_at: Math.floor(input.expiresAt.getTime() / 1000),
@@ -103,25 +107,7 @@ export async function issueStargateTerminalSession(
     throw new Error(`stargate terminal session create failed (${response.status})`);
   }
 
-  const body = (await response.json()) as {
-    route_username?: string;
-    expires_at?: number;
-    browser?: {
-      websocket_url?: string;
-    };
-    native?: {
-      auth_mode?: "profile_keys" | "issued_key";
-      authorized_key_count?: number;
-      ssh_host?: string;
-      ssh_port?: number;
-      username?: string;
-      private_key_openssh?: string;
-      public_host_key_openssh?: string;
-      public_host_key_fingerprint_sha256?: string;
-      known_hosts_line?: string;
-      command?: string;
-    };
-  };
+  const body = (await response.json()) as Partial<StargateApiTerminalSessionResponse>;
 
   if (typeof body.route_username !== "string" || typeof body.expires_at !== "number") {
     throw new Error("invalid stargate terminal session response");
@@ -141,8 +127,7 @@ export async function issueStargateTerminalSession(
   }
 
   if (
-    (body.native?.auth_mode !== "profile_keys" &&
-      body.native?.auth_mode !== "issued_key") ||
+    body.native?.auth_mode !== "profile_keys" ||
     typeof body.native?.authorized_key_count !== "number" ||
     typeof body.native?.ssh_host !== "string" ||
     typeof body.native?.ssh_port !== "number" ||
@@ -154,45 +139,21 @@ export async function issueStargateTerminalSession(
   ) {
     throw new Error("invalid stargate native terminal response");
   }
-  if (
-    body.native.auth_mode === "issued_key" &&
-    typeof body.native.private_key_openssh !== "string"
-  ) {
-    throw new Error("invalid stargate issued-key terminal response");
-  }
-
-  const native =
-    typeof body.native.private_key_openssh === "string"
-      ? {
-          authMode: body.native.auth_mode,
-          authorizedKeyCount: body.native.authorized_key_count,
-          host: body.native.ssh_host,
-          port: body.native.ssh_port,
-          username: body.native.username,
-          privateKey: body.native.private_key_openssh,
-          publicHostKeyOpenssh: body.native.public_host_key_openssh,
-          publicHostKeyFingerprintSha256:
-            body.native.public_host_key_fingerprint_sha256,
-          knownHostsLine: body.native.known_hosts_line,
-          command: body.native.command,
-        }
-      : {
-          authMode: body.native.auth_mode,
-          authorizedKeyCount: body.native.authorized_key_count,
-          host: body.native.ssh_host,
-          port: body.native.ssh_port,
-          username: body.native.username,
-          publicHostKeyOpenssh: body.native.public_host_key_openssh,
-          publicHostKeyFingerprintSha256:
-            body.native.public_host_key_fingerprint_sha256,
-          knownHostsLine: body.native.known_hosts_line,
-          command: body.native.command,
-        };
-
   return {
     routeUsername: body.route_username,
     expiresAt: body.expires_at * 1000,
-    native,
+    native: {
+      authMode: body.native.auth_mode,
+      authorizedKeyCount: body.native.authorized_key_count,
+      host: body.native.ssh_host,
+      port: body.native.ssh_port,
+      username: body.native.username,
+      publicHostKeyOpenssh: body.native.public_host_key_openssh,
+      publicHostKeyFingerprintSha256:
+        body.native.public_host_key_fingerprint_sha256,
+      knownHostsLine: body.native.known_hosts_line,
+      command: body.native.command,
+    },
   };
 }
 

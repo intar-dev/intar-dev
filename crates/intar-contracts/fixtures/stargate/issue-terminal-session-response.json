@@ -1,0 +1,7 @@
+{
+  "route_username": "run-01-worker",
+  "expires_at": 1800000000,
+  "browser": {
+    "websocket_url": "wss://stargate.example.test/v1/terminal/ws?token=fake"
+  }
+}

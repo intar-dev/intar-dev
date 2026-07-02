@@ -1,4 +1,5 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
+import type { ImageKey } from "@/generated/catalog";
 
 export type RunPhase =
   | "queued"
@@ -47,11 +48,14 @@ export interface TerminalTarget {
   host: string | null;
   port: number;
   username: string;
+  hostKeyOpenssh: string | null;
   checkedAt: number | null;
 }
 
 export interface RunVmProvisioningSpec {
   image: string | null;
+  imageKey: ImageKey | null;
+  imageSha256: string | null;
   resources: {
     vcpus: number;
     memoryMib: number;
@@ -201,6 +205,8 @@ export function buildInitialVmState(input: {
     vmCreatedAt: null,
     provisioning: {
       image: null,
+      imageKey: null,
+      imageSha256: null,
       resources: null,
       leaseDurationSeconds: null,
       groupName: null,
@@ -586,6 +592,7 @@ function defaultTerminalTarget(): TerminalTarget {
     host: null,
     port: 22,
     username: "ubuntu",
+    hostKeyOpenssh: null,
     checkedAt: null,
   };
 }

@@ -39,6 +39,11 @@
   ],
   "r2_buckets": [
     {
+      "binding": "VM_IMAGE_REGISTRY_BUCKET",
+      "bucket_name": "intar-dev-vm-image-registry",
+      "jurisdiction": "eu",
+    },
+    {
       "binding": "VM_RUN_ARTIFACTS_BUCKET",
       "bucket_name": "intar-dev-vm-run-artifacts",
       "jurisdiction": "eu",
@@ -48,9 +53,6 @@
     {
       "binding": "ALLOWLIST",
       "id": "44c2cb3f79034c3fbc98065693c8fa9a",
-    },
-    {
-      "binding": "SESSION",
     },
   ],
   "durable_objects": {

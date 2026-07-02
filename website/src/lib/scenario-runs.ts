@@ -6,10 +6,16 @@ import {
   scenarioRunArtifacts,
   scenarioRuns,
   agentHosts,
-  hostRpcCalls,
 } from "@/db/schema";
 import { parseHostInfo, parseInventory } from "@/lib/agent-bridge";
-import { createServerRpcCalls, tryWakeHostRuntime } from "@/lib/host-rpc";
+import {
+  desiredVmFromRunVm,
+  markDesiredVmAbsent,
+  upsertDesiredCachedImage,
+  upsertDesiredVm,
+} from "@/lib/desired-state";
+import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import {
   buildScenarioLaunchSpecs,
@@ -44,6 +50,11 @@ import {
   type BrowserTerminalSessionResult,
   type NativeTerminalSessionResult,
 } from "@/lib/stargate";
+import {
+  generateScenarioRunSshKeyDraft,
+  insertScenarioRunSshKeyDrafts,
+  loadScenarioRunSshKey,
+} from "@/lib/scenario-run-ssh-keys";
 import { listUserAuthorizedSshKeysForNativeRoutes } from "@/lib/user-ssh-keys";
 
 export interface ScenarioCatalogEntry {
@@ -107,15 +118,9 @@ export interface ScenarioRunRecord extends RunStateDocument {
 
 const HOST_HEARTBEAT_TTL_MS = 90_000;
 
-interface ProvisionedVmLaunch {
-  vmId: string;
-  launchRequest: Record<string, unknown>;
-}
-
 type ScenarioRouteType =
   | "browser"
-  | "native_profile_keys"
-  | "native_issued_key";
+  | "native_profile_keys";
 
 export type ScenarioTerminalSessionResult =
   | BrowserTerminalSessionResult
@@ -254,26 +259,21 @@ export async function destroyScenarioRunForUser(params: {
       currentPhase: row.state.phase,
     });
 
-    const destroyCalls = row.state.vms
-      .filter((vm) => destroyableVmIds.has(vm.id))
-      .map((vm) => ({
+    const destroyableVms = row.state.vms.filter((vm) =>
+      destroyableVmIds.has(vm.id),
+    );
+    if (destroyableVms.length) {
+      await markRunVmsAbsentInDesiredState({
         hostId: row.hostId,
-        userId: row.userId,
         runId: row.runId,
-        vmId: vm.id,
-        method: "vm.destroy" as const,
-        request: {
-          run_id: row.runId,
-          name: vm.runtimeVmName,
-        },
-        idempotencyKey: `${row.runId}:${vm.id}:destroy`,
-      }));
-    if (destroyCalls.length) {
-      await createServerRpcCalls(destroyCalls);
+        vms: destroyableVms,
+        nowUnixMs: acceptedAt,
+      });
     }
   }
 
   await revokeScenarioRunRoutes(row).catch(() => undefined);
+  await tryWakeHostRuntime(row.hostId);
 
   return {
     accepted: true,
@@ -334,7 +334,8 @@ export async function createScenarioSshSessionForUser(params: {
       ? vm.terminalTarget.port
       : 0;
   const targetUsername = vm.terminalTarget.username?.trim() || "ubuntu";
-  if (!host || !port) {
+  const targetHostKeyOpenssh = vm.terminalTarget.hostKeyOpenssh?.trim() ?? "";
+  if (!host || !port || !targetHostKeyOpenssh) {
     throw appError(
       409,
       "scenario_shell_not_ready",
@@ -347,23 +348,34 @@ export async function createScenarioSshSessionForUser(params: {
     requestedMode === "native"
       ? await listUserAuthorizedSshKeysForNativeRoutes(params.userId)
       : [];
+  if (requestedMode === "native" && profileKeys.length === 0) {
+    throw appError(
+      409,
+      "scenario_native_ssh_key_required",
+      "add an SSH key to your profile before opening a native SSH route",
+    );
+  }
   const routeType =
     requestedMode === "browser"
       ? "browser"
-      : profileKeys.length > 0
-        ? "native_profile_keys"
-        : "native_issued_key";
+      : "native_profile_keys";
   const routeUsername = buildRunVmRouteUsername(
     row.runId,
     row.state.vms,
     vm.id,
     routeType,
   );
+  const targetKey = await loadScenarioRunSshKey({
+    runId: row.runId,
+    vmId: vm.id,
+  });
   return issueStargateTerminalSession({
     routeUsername,
     targetUsername,
     targetHost: host,
     targetPort: port,
+    targetHostKeyOpenssh,
+    targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
     expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
     mode: requestedMode,
     authorizedClientPublicKeysOpenssh: profileKeys.map(
@@ -453,12 +465,27 @@ async function startScenarioRunInternal(params: {
       provisioning: {
         ...vm.provisioning,
         image: spec.image,
+        imageKey: spec.imageKey,
+        imageSha256: spec.imageSha256,
         resources: spec.resources,
         leaseDurationSeconds: spec.leaseDurationSeconds,
         status: "pending",
       },
     } satisfies RunVmStateDocument;
   });
+  const sshKeyDrafts = runVmStates.map((vm) =>
+    generateScenarioRunSshKeyDraft({
+      runId,
+      vmId: vm.id,
+      runtimeVmName: vm.runtimeVmName,
+    }),
+  );
+  const sshAuthorizedKeysByVmId = new Map(
+    sshKeyDrafts.map((draft) => [
+      draft.vmId,
+      [draft.publicKeyOpenssh],
+    ]),
+  );
 
   const initial = buildInitialRunState({
     vms: runVmStates.map((vm) => ({
@@ -479,30 +506,19 @@ async function startScenarioRunInternal(params: {
     vms: runVmStates,
   });
 
-  const provisionedLaunches = await provisionRunLaunches({
-    runId,
-    vms: state.vms,
-  });
-  const provisionedByVmId = new Map(
-    provisionedLaunches.map((launch) => [launch.vmId, launch]),
-  );
   const provisionedState = recomputeRunState({
     ...state,
-    vms: state.vms.map((vm) => {
-      const launch = provisionedByVmId.get(vm.id);
-      if (!launch) {
-        return vm;
-      }
-
-      return {
-        ...vm,
-        provisioning: {
-          ...vm.provisioning,
-          status: "queued",
-          error: null,
-        },
-      } satisfies RunVmStateDocument;
-    }),
+    vms: state.vms.map(
+      (vm) =>
+        ({
+          ...vm,
+          provisioning: {
+            ...vm.provisioning,
+            status: "queued",
+            error: null,
+          },
+        }) satisfies RunVmStateDocument,
+    ),
   });
 
   const db = drizzle(env.DB);
@@ -532,22 +548,17 @@ async function startScenarioRunInternal(params: {
       createdAt,
       updatedAt: createdAt,
     });
-
-    await createServerRpcCalls(
-      provisionedLaunches.map((launch) => ({
-        hostId,
-        userId: params.userId,
-        runId,
-        vmId: launch.vmId,
-        method: "vm.launch" as const,
-        request: launch.launchRequest,
-        idempotencyKey: `${runId}:${launch.vmId}:launch`,
-      })),
-    );
+    await insertScenarioRunSshKeyDrafts(sshKeyDrafts, createdAt);
+    await upsertRunVmsIntoDesiredState({
+      hostId,
+      runId,
+      vms: provisionedState.vms,
+      nowUnixMs: createdAt,
+      sshAuthorizedKeysByVmId,
+    });
   } catch (error) {
     await Promise.allSettled([
       db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId)),
-      db.delete(hostRpcCalls).where(eq(hostRpcCalls.runId, runId)),
     ]);
     throw error;
   }
@@ -757,65 +768,69 @@ function deterministicRuntimeVmName(prefix: string, runId: string, index: number
   return `${prefix}-${runId.slice(0, 6)}-${index + 1}`.slice(0, 63);
 }
 
-async function provisionRunLaunches(input: {
+async function upsertRunVmsIntoDesiredState(input: {
+  hostId: string;
   runId: string;
   vms: RunVmStateDocument[];
-}): Promise<ProvisionedVmLaunch[]> {
-  const provisioned: ProvisionedVmLaunch[] = [];
-
-  for (const vm of input.vms) {
-    const launchRequest = buildVmLaunchRequest(input.runId, vm);
-    if (!launchRequest) {
+  nowUnixMs: number;
+  sshAuthorizedKeysByVmId: Map<string, string[]>;
+}): Promise<void> {
+  const desiredVms = input.vms.map((vm) => {
+    const desiredVm = desiredVmFromRunVm({
+      runId: input.runId,
+      vm,
+      nowUnixMs: input.nowUnixMs,
+      sshAuthorizedKeysOpenssh: input.sshAuthorizedKeysByVmId.get(vm.id) ?? [],
+    });
+    if (!desiredVm) {
       throw appError(
         500,
-        "scenario_vm_launch_invalid",
-        `missing launch data for ${vm.runtimeVmName}`,
+        "scenario_vm_desired_state_invalid",
+        `missing desired-state image metadata for ${vm.runtimeVmName}`,
       );
     }
+    return desiredVm;
+  });
 
-    provisioned.push({
-      vmId: vm.id,
-      launchRequest,
-    });
-  }
-
-  return provisioned;
+  await mutateStoredHostDesiredState(
+    drizzle(env.DB),
+    input.hostId,
+    input.nowUnixMs,
+    (draft) => {
+      for (const desiredVm of desiredVms) {
+        upsertDesiredCachedImage(draft, {
+          image_key: desiredVm.image_key,
+          image_sha256: desiredVm.image_sha256,
+        });
+        upsertDesiredVm(draft, desiredVm);
+      }
+    },
+  );
 }
 
-function buildVmLaunchRequest(
-  runId: string,
-  vm: RunVmStateDocument,
-): Record<string, unknown> | null {
-  const image = vm.provisioning.image?.trim() ?? "";
-  const resources = vm.provisioning.resources;
-  const leaseDurationSeconds = vm.provisioning.leaseDurationSeconds;
-  if (!image || !resources || typeof leaseDurationSeconds !== "number") {
-    return null;
+async function markRunVmsAbsentInDesiredState(input: {
+  hostId: string;
+  runId: string;
+  vms: RunVmStateDocument[];
+  nowUnixMs: number;
+}): Promise<void> {
+  if (!input.vms.length) {
+    return;
   }
 
-  return {
-    name: vm.runtimeVmName,
-    run_id: runId,
-    image,
-    resources: {
-      vcpus: resources.vcpus,
-      memory_mib: resources.memoryMib,
-      disk_mib: resources.diskMib,
+  await mutateStoredHostDesiredState(
+    drizzle(env.DB),
+    input.hostId,
+    input.nowUnixMs,
+    (draft) => {
+      for (const vm of input.vms) {
+        markDesiredVmAbsent(draft, {
+          runId: input.runId,
+          vmName: vm.runtimeVmName,
+        });
+      }
     },
-    hostname: vm.hostname,
-    lease_duration_seconds: leaseDurationSeconds,
-    runtime: {
-      stargate_target_public_key_openssh: requiredStargateTargetPublicKey(),
-    },
-  };
-}
-
-function requiredStargateTargetPublicKey(): string {
-  const trimmed = env.STARGATE_TARGET_PUBLIC_KEY_OPENSSH?.trim();
-  if (!trimmed) {
-    throw new Error("STARGATE_TARGET_PUBLIC_KEY_OPENSSH is required");
-  }
-  return trimmed;
+  );
 }
 
 function buildRunVmRouteUsername(
@@ -861,8 +876,6 @@ function routeSuffixForType(routeType: ScenarioRouteType): string {
       return "web";
     case "native_profile_keys":
       return "ssh-profile";
-    case "native_issued_key":
-      return "ssh-issued";
   }
 }
 
@@ -878,12 +891,6 @@ async function revokeScenarioRunRoutes(row: {
         row.state.vms,
         vm.id,
         "native_profile_keys",
-      ),
-      buildRunVmRouteUsername(
-        row.runId,
-        row.state.vms,
-        vm.id,
-        "native_issued_key",
       ),
     ]),
   );

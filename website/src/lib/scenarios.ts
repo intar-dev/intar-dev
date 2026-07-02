@@ -103,6 +103,11 @@ export async function loadScenario(
       ordinal: vm.ordinal,
       name: vm.vmName,
       image: vm.image,
+      imageKey: vm.imageKeyJson ?? null,
+      imageSha256:
+        typeof vm.imageSha256 === "string" && vm.imageSha256.trim()
+          ? vm.imageSha256.trim()
+          : null,
       cpu: vm.cpu,
       memoryMib: vm.memoryMib,
       diskMib: vm.diskMib,

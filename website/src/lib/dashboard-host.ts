@@ -3,6 +3,7 @@ import { asc, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { scenarioRunArtifacts } from "@/db/schema";
 import { parseInventory, type AgentHostRow } from "@/lib/agent-bridge";
+import { matchesInventoryVmIdentity } from "@/lib/run-lifecycle";
 import { listHostRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 
 export interface DashboardVmProbeState {
@@ -127,7 +128,11 @@ export async function loadDashboardHostRuns(params: {
         .filter((vm) => vm.phase !== "archived" && vm.phase !== "completed")
         .map((vm) => {
           const inventoryVm = inventoryVms.find((candidate) =>
-            matchesInventoryVm(candidate, run.id, vm.runtimeVmName),
+            matchesInventoryVmIdentity({
+              value: candidate,
+              runId: run.id,
+              runtimeVmName: vm.runtimeVmName,
+            }),
           );
           const probeState = buildProbeState(run, vm, inventoryVm);
           const terminalReady = hasVmTerminalReady(vm);
@@ -479,16 +484,6 @@ function deriveUploadStatus(
 
 function isArchivePhase(phase: ScenarioRunRecord["phase"]) {
   return phase === "archiving" || phase === "completed" || phase === "failed";
-}
-
-function matchesInventoryVm(
-  value: Record<string, unknown>,
-  runId: string,
-  runtimeVmName: string,
-) {
-  const candidateRunId = readString(value.run_id) ?? readString(value.runId);
-  const candidateName = readString(value.name) ?? readString(value.vm_name);
-  return candidateRunId === runId || candidateName === runtimeVmName;
 }
 
 function hasVmTerminalReady(vm: ScenarioRunRecord["vms"][number]) {

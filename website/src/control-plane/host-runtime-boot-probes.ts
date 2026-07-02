@@ -1,42 +1,15 @@
-import {
-  canAdvanceVmPhase,
-  decorateVmState,
-  type RunVmStateDocument,
-} from "@/lib/run-state";
+import { decorateVmState, type RunVmStateDocument } from "@/lib/run-state";
+import { deriveVmPhase } from "@/lib/run-lifecycle";
 
 export function applyProbePhaseHeuristics(
   vm: RunVmStateDocument,
   collectionError?: string | null,
 ): RunVmStateDocument {
-  const bootGateSatisfied = bootProbesPassing(vm);
-  const scenarioPassing = vm.scenarioProbes.length
-    ? vm.scenarioProbes.every((probe) => isPassingProbe(probe.status))
-    : false;
-
-  let phase = vm.phase;
-  let detail = vm.phaseDetail;
-
-  if (collectionError && canAdvanceVmPhase(phase, "booting")) {
-    phase = "booting";
-    detail = collectionError;
-  }
-
-  if (scenarioPassing && canAdvanceVmPhase(phase, "solved")) {
-    phase = "solved";
-    detail = "All scenario probes are passing.";
-  } else if (bootGateSatisfied && canAdvanceVmPhase(phase, "ready")) {
-    phase = "ready";
-    detail = hasTerminalEndpoint(vm.terminalTarget)
-      ? "Boot probes passed. Shell target is ready."
-      : "Boot probes passed. Waiting for shell target.";
-  } else if (canAdvanceVmPhase(phase, "booting")) {
-    phase = phase === "queued" || phase === "launching" ? "booting" : phase;
-  }
-
+  const { phase, phaseDetail } = deriveVmPhase({ vm, collectionError });
   return decorateVmState({
     ...vm,
     phase,
-    phaseDetail: detail,
+    phaseDetail,
   });
 }
 
@@ -77,8 +50,4 @@ function isPassingProbe(status: string): boolean {
     normalized === "ok" ||
     normalized === "succeeded"
   );
-}
-
-function hasTerminalEndpoint(target: RunVmStateDocument["terminalTarget"]): boolean {
-  return Boolean(target.host && target.port > 0);
 }

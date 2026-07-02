@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "host_id": "host-alpha",
+  "observed_at_unix_ms": 1762041660000,
+  "applied_desired_version": 42,
+  "capacity": {
+    "cpu_count": 8,
+    "memory_total_mib": 32768,
+    "memory_available_mib": 24576,
+    "disk_total_mib": 524288,
+    "disk_available_mib": 400000
+  },
+  "capabilities": {
+    "arch": "x86_64",
+    "supports_kvm": true,
+    "supports_vsock": true,
+    "supports_reflink": true,
+    "supports_nftables": true
+  },
+  "cached_images": [
+    {
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "webserver",
+        "arch": "x86_64"
+      },
+      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "phase": "ready",
+      "bytes_on_disk": 922746880,
+      "updated_at_unix_ms": 1762041640000
+    }
+  ],
+  "vms": [
+    {
+      "run_id": "run-20260702-a",
+      "vm_name": "webserver",
+      "desired_version": 42,
+      "phase": "ready",
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "webserver",
+        "arch": "x86_64"
+      },
+      "image_sha256": "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
+      "network": {
+        "bridge_name": "intar-run-a",
+        "guest_ip": "10.77.0.2",
+        "guest_cidr": "10.77.0.2/28",
+        "gateway": "10.77.0.1",
+        "ssh_host_port": 22001
+      },
+      "ssh_host_keys_openssh": [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey webserver"
+      ],
+      "probes": [
+        {
+          "id": "nginx-running",
+          "phase": "scenario",
+          "status": "fail",
+          "checked_at_unix_ms": 1762041655000,
+          "message": "nginx is stopped",
+          "value": {
+            "service": "nginx",
+            "desired_state": "running",
+            "actual_state": "inactive"
+          }
+        }
+      ],
+      "archive": {
+        "phase": "none",
+        "artifact_count": 0
+      },
+      "updated_at_unix_ms": 1762041660000
+    }
+  ]
+}

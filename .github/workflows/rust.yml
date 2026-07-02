@@ -1,0 +1,107 @@
+name: Rust
+run-name: "${{ github.event_name == 'pull_request' && format('Rust validate PR #{0}', github.event.pull_request.number) || format('Rust validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/rust.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "justfile"
+      - "crates/**"
+      - "website/src/generated/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rust.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "justfile"
+      - "crates/**"
+      - "website/src/generated/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Workspace checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt clippy
+          rustup show active-toolchain
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Install just and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+
+      - name: Run workspace checks
+        run: just verify
+
+      - name: Check generated contracts
+        run: just check-generated-contracts
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      - name: Install Zig and cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Compile kino guest
+        run: just build-kino-guest
+
+  kino-smoke:
+    name: Kino Docker smoke
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt clippy
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run smoke tests
+        run: just docker-smoke

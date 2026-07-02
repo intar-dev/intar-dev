@@ -1,0 +1,85 @@
+name: Images
+run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || format('Image validate {0}', github.ref_name) }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/images.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "crates/kino/**"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-image-*/**"
+      - "base-images.hcl"
+      - "builder.*.hcl"
+      - "scenarios/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/images.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "crates/kino/**"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-image-*/**"
+      - "base-images.hcl"
+      - "builder.*.hcl"
+      - "scenarios/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    name: Validate and build images
+    runs-on: [self-hosted, linux, x64, kvm]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup target add x86_64-unknown-linux-musl
+          rustup show active-toolchain
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Install just and cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-zigbuild
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
+      - name: Build kino guest
+        run: just build-kino-guest
+
+      - name: Validate scenario definitions
+        run: just validate-images
+
+      - name: Render image build inputs
+        run: just render-images "" builder.gha.amd64.hcl
+
+      - name: Install Packer
+        if: github.event_name != 'pull_request'
+        uses: hashicorp/setup-packer@v3
+
+      - name: Build and upload images
+        if: github.event_name != 'pull_request'
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: just build-images "" builder.gha.amd64.hcl

@@ -4,10 +4,9 @@ import {
   agentHosts,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
-  scenarioRunUploadLeases,
   scenarioRuns,
 } from "@/db/schema";
-import { requireVerifiedAgentRequest, sha256Hex } from "@/control-plane/auth";
+import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
   RUN_PHASE_ORDER,
   recomputeRunState,
@@ -39,16 +38,6 @@ interface UploadedPartRecord {
   etag: string;
 }
 
-interface UploadLeaseRow {
-  id: string;
-  runId: string;
-  vmId: string;
-  hostId: string;
-  tokenHash: string;
-  expiresAt: number;
-  completedAt: number | null;
-}
-
 interface ResolvedRunVm {
   runId: string;
   hostId: string;
@@ -73,8 +62,6 @@ interface SourceArtifactState {
   uploadedAt: number | null;
 }
 
-const UPLOAD_LEASE_TTL_MS = 30 * 60 * 1000;
-
 export async function handleAgentRunArtifactRequest(
   request: Request,
   env: Cloudflare.Env,
@@ -87,45 +74,70 @@ export async function handleAgentRunArtifactRequest(
   }
 
   const multipartBeginMatch = pathname.match(
-    /^\/agent\/runs\/([^/]+)\/artifacts\/(\d+)\/multipart-begin$/,
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/artifacts\/(\d+)\/multipart-begin$/,
   );
   if (multipartBeginMatch) {
+    const runId = decodePathSegment(multipartBeginMatch[1] ?? "");
+    const vmName = decodePathSegment(multipartBeginMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
     return handleMultipartBegin(
       request,
       env,
-      multipartBeginMatch[1] ?? "",
-      Number(multipartBeginMatch[2] ?? "0"),
+      runId,
+      vmName,
+      Number(multipartBeginMatch[3] ?? "0"),
     );
   }
 
   const partMatch = pathname.match(
-    /^\/agent\/runs\/([^/]+)\/artifacts\/(\d+)\/parts\/(\d+)$/,
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/artifacts\/(\d+)\/parts\/(\d+)$/,
   );
   if (partMatch) {
+    const runId = decodePathSegment(partMatch[1] ?? "");
+    const vmName = decodePathSegment(partMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
     return handleMultipartPart(
       request,
       env,
-      partMatch[1] ?? "",
-      Number(partMatch[2] ?? "0"),
+      runId,
+      vmName,
       Number(partMatch[3] ?? "0"),
+      Number(partMatch[4] ?? "0"),
     );
   }
 
   const artifactCompleteMatch = pathname.match(
-    /^\/agent\/runs\/([^/]+)\/artifacts\/(\d+)\/complete$/,
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/artifacts\/(\d+)\/complete$/,
   );
   if (artifactCompleteMatch) {
+    const runId = decodePathSegment(artifactCompleteMatch[1] ?? "");
+    const vmName = decodePathSegment(artifactCompleteMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
     return handleArtifactComplete(
       request,
       env,
-      artifactCompleteMatch[1] ?? "",
-      Number(artifactCompleteMatch[2] ?? "0"),
+      runId,
+      vmName,
+      Number(artifactCompleteMatch[3] ?? "0"),
     );
   }
 
-  const runCompleteMatch = pathname.match(/^\/agent\/runs\/([^/]+)\/complete$/);
+  const runCompleteMatch = pathname.match(
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/complete$/,
+  );
   if (runCompleteMatch) {
-    return handleRunComplete(request, env, runCompleteMatch[1] ?? "");
+    const runId = decodePathSegment(runCompleteMatch[1] ?? "");
+    const vmName = decodePathSegment(runCompleteMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
+    return handleRunComplete(request, env, runId, vmName);
   }
 
   return null;
@@ -173,12 +185,19 @@ async function handleBeginRunUpload(
     return jsonResponse({ error: "run VM not found" }, 404);
   }
 
-  const existingArtifacts = await loadArtifactStatesForRunVm(db, runVm.runId, runVm.vmId);
+  const existingArtifacts = await loadArtifactStatesForRunVm(
+    db,
+    runVm.runId,
+    runVm.vmId,
+  );
   const now = Date.now();
 
   for (const artifact of artifacts) {
-    const existing = existingArtifacts.find((candidate) => candidate.ordinal === artifact.ordinal);
-    const artifactId = existing?.id ?? artifactIdFor(runVm.vmId, artifact.ordinal);
+    const existing = existingArtifacts.find(
+      (candidate) => candidate.ordinal === artifact.ordinal,
+    );
+    const artifactId =
+      existing?.id ?? artifactIdFor(runVm.vmId, artifact.ordinal);
     const r2Key =
       existing?.r2Key ??
       buildArtifactObjectKey({
@@ -198,7 +217,9 @@ async function handleBeginRunUpload(
         existing.sha256 === artifact.sha256;
       if (!matches) {
         return jsonResponse(
-          { error: `artifact ${artifact.ordinal} metadata does not match existing upload` },
+          {
+            error: `artifact ${artifact.ordinal} metadata does not match existing upload`,
+          },
           409,
         );
       }
@@ -222,60 +243,29 @@ async function handleBeginRunUpload(
     });
   }
 
-  const leaseToken = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
-  const tokenHash = await sha256Hex(leaseToken);
-  await db
-    .insert(scenarioRunUploadLeases)
-    .values({
-      id: `lease:${runVm.vmId}`,
-      runId: runVm.runId,
-      vmId: runVm.vmId,
-      hostId: runVm.hostId,
-      tokenHash,
-      expiresAt: now + UPLOAD_LEASE_TTL_MS,
-      completedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: scenarioRunUploadLeases.vmId,
-      set: {
-        runId: runVm.runId,
-        hostId: runVm.hostId,
-        tokenHash,
-        expiresAt: now + UPLOAD_LEASE_TTL_MS,
-        completedAt: null,
-        updatedAt: now,
-      },
-    });
-
   await transitionRunVmToArchiving(db, runVm.runId, runVm.vmId, now);
 
-  return jsonResponse({ runId: runVm.runId, leaseToken });
+  return jsonResponse({ runId: runVm.runId, vmName: runVm.runtimeVmName });
 }
 
 async function handleMultipartBegin(
   request: Request,
   env: Cloudflare.Env,
   runId: string,
+  vmName: string,
   ordinal: number,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) {
-    return verified.response;
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  if (!resolved.ok) {
+    return resolved.response;
   }
 
-  const lease = await requireRunUploadLease(request, env, verified.agent.hostId, runId);
-  if (!lease.ok) {
-    return lease.response;
-  }
-
-  const db = drizzle(env.DB);
-  const artifact = await loadArtifactForRunVm(db, runId, lease.lease.vmId, ordinal);
+  const { db, runVm } = resolved;
+  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
@@ -294,7 +284,7 @@ async function handleMultipartBegin(
     await markArtifactUploaded({
       db,
       runId,
-      vmId: lease.lease.vmId,
+      vmId: runVm.vmId,
       artifact,
       uploadedAt: now,
     });
@@ -352,6 +342,7 @@ async function handleMultipartPart(
   request: Request,
   env: Cloudflare.Env,
   runId: string,
+  vmName: string,
   ordinal: number,
   partNumber: number,
 ): Promise<Response> {
@@ -362,18 +353,13 @@ async function handleMultipartPart(
     return jsonResponse({ error: "request body is required" }, 400);
   }
 
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) {
-    return verified.response;
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  if (!resolved.ok) {
+    return resolved.response;
   }
 
-  const lease = await requireRunUploadLease(request, env, verified.agent.hostId, runId);
-  if (!lease.ok) {
-    return lease.response;
-  }
-
-  const db = drizzle(env.DB);
-  const artifact = await loadArtifactForRunVm(db, runId, lease.lease.vmId, ordinal);
+  const { db, runVm } = resolved;
+  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
@@ -425,24 +411,20 @@ async function handleArtifactComplete(
   request: Request,
   env: Cloudflare.Env,
   runId: string,
+  vmName: string,
   ordinal: number,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) {
-    return verified.response;
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  if (!resolved.ok) {
+    return resolved.response;
   }
 
-  const lease = await requireRunUploadLease(request, env, verified.agent.hostId, runId);
-  if (!lease.ok) {
-    return lease.response;
-  }
-
-  const db = drizzle(env.DB);
-  const artifact = await loadArtifactForRunVm(db, runId, lease.lease.vmId, ordinal);
+  const { db, runVm } = resolved;
+  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
@@ -460,7 +442,7 @@ async function handleArtifactComplete(
     await markArtifactUploaded({
       db,
       runId,
-      vmId: lease.lease.vmId,
+      vmId: runVm.vmId,
       artifact,
       uploadedAt: now,
     });
@@ -494,7 +476,7 @@ async function handleArtifactComplete(
   await markArtifactUploaded({
     db,
     runId,
-    vmId: lease.lease.vmId,
+    vmId: runVm.vmId,
     artifact,
     uploadedAt: now,
   });
@@ -506,23 +488,19 @@ async function handleRunComplete(
   request: Request,
   env: Cloudflare.Env,
   runId: string,
+  vmName: string,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const verified = await requireVerifiedAgentRequest(request, env);
-  if (!verified.ok) {
-    return verified.response;
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  if (!resolved.ok) {
+    return resolved.response;
   }
 
-  const lease = await requireRunUploadLease(request, env, verified.agent.hostId, runId);
-  if (!lease.ok) {
-    return lease.response;
-  }
-
-  const db = drizzle(env.DB);
-  const artifacts = await loadArtifactStatesForRunVm(db, runId, lease.lease.vmId);
+  const { db, runVm } = resolved;
+  const artifacts = await loadArtifactStatesForRunVm(db, runId, runVm.vmId);
   if (artifacts.some((artifact) => artifact.uploadStatus !== "uploaded")) {
     return jsonResponse(
       { error: "all artifacts must be uploaded before completing the run" },
@@ -531,15 +509,7 @@ async function handleRunComplete(
   }
 
   const now = Date.now();
-  await db
-    .update(scenarioRunUploadLeases)
-    .set({
-      completedAt: now,
-      updatedAt: now,
-    })
-    .where(eq(scenarioRunUploadLeases.id, lease.lease.id));
-
-  await transitionRunVmToCompleted(db, runId, lease.lease.vmId, now);
+  await transitionRunVmToCompleted(db, runId, runVm.vmId, now);
 
   return jsonResponse({ ok: true });
 }
@@ -600,7 +570,9 @@ async function markArtifactUploaded(input: {
       }
 
       const replayArtifacts = [
-        ...vm.replayArtifacts.filter((artifact) => artifact.id !== input.artifact.id),
+        ...vm.replayArtifacts.filter(
+          (artifact) => artifact.id !== input.artifact.id,
+        ),
         replayArtifact,
       ];
       return {
@@ -620,63 +592,37 @@ async function markArtifactUploaded(input: {
     .where(eq(scenarioRuns.runId, input.runId));
 }
 
-async function requireRunUploadLease(
+async function requireVerifiedRunVm(
   request: Request,
   env: Cloudflare.Env,
-  hostId: string,
   runId: string,
-): Promise<{ ok: true; lease: UploadLeaseRow } | { ok: false; response: Response }> {
-  const leaseToken = request.headers.get("x-run-upload-lease")?.trim() ?? "";
-  if (!leaseToken) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "missing upload lease" }, 401),
-    };
+  vmName: string,
+): Promise<
+  | { ok: true; db: ReturnType<typeof drizzle>; runVm: ResolvedRunVm }
+  | { ok: false; response: Response }
+> {
+  const verified = await requireVerifiedAgentRequest(request, env);
+  if (!verified.ok) {
+    return verified;
   }
-
   const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      id: scenarioRunUploadLeases.id,
-      runId: scenarioRunUploadLeases.runId,
-      vmId: scenarioRunUploadLeases.vmId,
-      hostId: scenarioRunUploadLeases.hostId,
-      tokenHash: scenarioRunUploadLeases.tokenHash,
-      expiresAt: scenarioRunUploadLeases.expiresAt,
-      completedAt: scenarioRunUploadLeases.completedAt,
-    })
-    .from(scenarioRunUploadLeases)
-    .where(
-      and(
-        eq(scenarioRunUploadLeases.runId, runId),
-        eq(scenarioRunUploadLeases.hostId, hostId),
-      ),
-    )
-    .limit(1);
-
-  const lease = rows[0] ?? null;
-  if (!lease) {
+  const runVm = await resolveRunVm({
+    db,
+    runId,
+    vmName,
+    hostId: verified.agent.hostId,
+  });
+  if (!runVm) {
     return {
       ok: false,
-      response: jsonResponse({ error: "upload lease not found" }, 404),
-    };
-  }
-  if (lease.completedAt !== null || lease.expiresAt <= Date.now()) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "upload lease expired" }, 401),
-    };
-  }
-  if ((await sha256Hex(leaseToken)) !== lease.tokenHash) {
-    return {
-      ok: false,
-      response: jsonResponse({ error: "invalid upload lease" }, 401),
+      response: jsonResponse({ error: "run VM not found" }, 404),
     };
   }
 
   return {
     ok: true,
-    lease,
+    db,
+    runVm,
   };
 }
 
@@ -697,7 +643,10 @@ async function resolveRunVm(input: {
     .from(scenarioRuns)
     .innerJoin(agentHosts, eq(agentHosts.id, scenarioRuns.hostId))
     .where(
-      and(eq(scenarioRuns.runId, input.runId), eq(scenarioRuns.hostId, input.hostId)),
+      and(
+        eq(scenarioRuns.runId, input.runId),
+        eq(scenarioRuns.hostId, input.hostId),
+      ),
     )
     .limit(1);
   const row = rows[0];
@@ -706,7 +655,9 @@ async function resolveRunVm(input: {
   }
 
   const state = parseRunState(row.stateJson);
-  const vm = state.vms.find((candidate) => candidate.runtimeVmName === input.vmName);
+  const vm = state.vms.find(
+    (candidate) => candidate.runtimeVmName === input.vmName,
+  );
   if (!vm) {
     return null;
   }
@@ -753,7 +704,10 @@ async function loadArtifactStatesForRunVm(
     })
     .from(scenarioRunArtifacts)
     .where(
-      and(eq(scenarioRunArtifacts.runId, runId), eq(scenarioRunArtifacts.vmId, vmId)),
+      and(
+        eq(scenarioRunArtifacts.runId, runId),
+        eq(scenarioRunArtifacts.vmId, vmId),
+      ),
     )
     .orderBy(scenarioRunArtifacts.ordinal);
 
@@ -783,10 +737,16 @@ async function transitionRunVmToArchiving(
     ),
   });
 
-  await persistStoredRunLifecycle(db, runId, run, {
-    ...nextState,
-    phase: deriveArchiveRunPhase(nextState.vms),
-  }, now);
+  await persistStoredRunLifecycle(
+    db,
+    runId,
+    run,
+    {
+      ...nextState,
+      phase: deriveArchiveRunPhase(nextState.vms),
+    },
+    now,
+  );
 }
 
 async function transitionRunVmToCompleted(
@@ -815,7 +775,9 @@ async function transitionRunVmToCompleted(
   const nextPhase =
     nextState.phase === "failed"
       ? "failed"
-      : nextState.vms.every((vm) => vm.phase === "completed" || vm.phase === "failed")
+      : nextState.vms.every(
+            (vm) => vm.phase === "completed" || vm.phase === "failed",
+          )
         ? "completed"
         : deriveArchiveRunPhase(nextState.vms);
 
@@ -893,16 +855,21 @@ async function persistStoredRunLifecycle(
       state: nextPhase,
       stateRank: RUN_PHASE_ORDER[nextPhase],
       stateJson: JSON.stringify(nextState),
-      activeKey: nextPhase === "completed" || nextPhase === "failed" ? null : run.activeKey,
+      activeKey:
+        nextPhase === "completed" || nextPhase === "failed"
+          ? null
+          : run.activeKey,
       solvedAt,
-      completedAt: nextPhase === "completed" ? run.completedAt ?? now : null,
-      failedAt: nextPhase === "failed" ? run.failedAt ?? now : null,
+      completedAt: nextPhase === "completed" ? (run.completedAt ?? now) : null,
+      failedAt: nextPhase === "failed" ? (run.failedAt ?? now) : null,
       updatedAt: now,
     })
     .where(eq(scenarioRuns.runId, runId));
 }
 
-function deriveArchiveRunPhase(vms: RunStateDocument["vms"]): RunStateDocument["phase"] {
+function deriveArchiveRunPhase(
+  vms: RunStateDocument["vms"],
+): RunStateDocument["phase"] {
   if (vms.some((vm) => vm.phase === "failed")) {
     return "failed";
   }
@@ -1030,6 +997,7 @@ function parseRunState(raw: string): RunStateDocument {
         host: null,
         port: 22,
         username: "ubuntu",
+        hostKeyOpenssh: null,
         checkedAt: null,
       },
       vms: [],
@@ -1064,6 +1032,14 @@ function buildArtifactObjectKey(input: {
 
 function sanitizeObjectKeySegment(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
+}
+
+function decodePathSegment(value: string): string | null {
+  try {
+    return decodeURIComponent(value).trim();
+  } catch {
+    return null;
+  }
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

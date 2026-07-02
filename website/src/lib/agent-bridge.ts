@@ -11,8 +11,6 @@ export interface AgentBridgeStatus {
   hostId: string;
   connected: boolean;
   lastHeartbeatAt: string | null;
-  lastPingAt: string | null;
-  lastPingRttMs: number | null;
   agentVersion: string | null;
   activeSessionId: string | null;
   inventoryVmCount: number;
@@ -39,14 +37,6 @@ export interface AgentInventorySnapshot {
   vms?: unknown[];
 }
 
-export interface AgentHostRuntimeState {
-  activeSessionId: string | null;
-  serverNextSeq: number;
-  serverAckedSeq: number;
-  hostNextSeq: number;
-  hostAckedSeq: number;
-}
-
 export interface AgentHostRow {
   id: string;
   user_id: string;
@@ -62,14 +52,6 @@ export interface AgentHostRow {
   agent_version: string | null;
   host_info_json: string | null;
   inventory_json: string | null;
-  server_next_seq: number;
-  server_acked_seq: number;
-  host_next_seq: number;
-  host_acked_seq: number;
-  last_ping_at: number | null;
-  last_ping_rtt_ms: number | null;
-  last_ping_success: boolean | null;
-  last_ping_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -189,14 +171,6 @@ export async function loadHostForUser(
       agent_version: agentHosts.agentVersion,
       host_info_json: agentHosts.hostInfoJson,
       inventory_json: agentHosts.inventoryJson,
-      server_next_seq: agentHosts.serverNextSeq,
-      server_acked_seq: agentHosts.serverAckedSeq,
-      host_next_seq: agentHosts.hostNextSeq,
-      host_acked_seq: agentHosts.hostAckedSeq,
-      last_ping_at: agentHosts.lastPingAt,
-      last_ping_rtt_ms: agentHosts.lastPingRttMs,
-      last_ping_success: agentHosts.lastPingSuccess,
-      last_ping_error: agentHosts.lastPingError,
       created_at: agentHosts.createdAt,
       updated_at: agentHosts.updatedAt,
     })
@@ -234,29 +208,12 @@ export function buildStoredBridgeStatus(host: AgentHostRow): AgentBridgeStatus {
       typeof host.last_heartbeat_at === "number"
         ? new Date(host.last_heartbeat_at).toISOString()
         : null,
-    lastPingAt:
-      typeof host.last_ping_at === "number"
-        ? new Date(host.last_ping_at).toISOString()
-        : null,
-    lastPingRttMs: host.last_ping_rtt_ms,
     agentVersion: host.agent_version,
     activeSessionId: host.active_session_id,
     inventoryVmCount: Array.isArray(inventory?.vms) ? inventory.vms.length : 0,
     hostInfo,
   };
 }
-
-export function buildHostRuntimeState(host: AgentHostRow): AgentHostRuntimeState {
-  return {
-    activeSessionId: host.active_session_id,
-    serverNextSeq: host.server_next_seq,
-    serverAckedSeq: host.server_acked_seq,
-    hostNextSeq: host.host_next_seq,
-    hostAckedSeq: host.host_acked_seq,
-  };
-}
-
-export const buildRuntimeSummary = buildHostRuntimeState;
 
 function parseJsonObject(value: string | null): Record<string, unknown> | null {
   if (!value) {
