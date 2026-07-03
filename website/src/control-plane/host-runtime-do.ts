@@ -639,18 +639,22 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     if (
       !activeSocket &&
       !undeliveredDesired &&
-      !lag.lagging &&
       typeof nextLeaseExpiry !== "number" &&
       desiredState.builds.length === 0
     ) {
+      // A lagging applied version alone does not keep the alarm armed:
+      // without a socket there is nothing to re-push to, and connect/wake
+      // re-arm the alarm.
       return null;
     }
 
     const candidates = [now + HOST_BUILD_MAINTENANCE_INTERVAL_MS];
     if (typeof nextLeaseExpiry === "number") {
-      candidates.push(Math.max(now, nextLeaseExpiry));
+      // Overdue selection is strict (`expiry < now`), so aim one tick past
+      // the expiry to avoid a no-op alarm fire exactly on the boundary.
+      candidates.push(Math.max(now + 1, nextLeaseExpiry + 1));
     }
-    if (lag.lagging) {
+    if (lag.lagging && activeSocket) {
       candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
     }
     return Math.min(...candidates);

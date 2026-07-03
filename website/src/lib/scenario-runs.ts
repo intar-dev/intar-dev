@@ -359,53 +359,49 @@ export async function expireOverdueRunLeases(
 
   for (const lease of overdue) {
     const row = await loadRunRow(lease.runId);
-    if (!row || row.hostId !== hostId) {
-      continue;
-    }
-    if (row.completedAt !== null || row.failedAt !== null) {
-      continue;
-    }
-
     const expiredVmNames = new Set(lease.vmNames);
-    const expiredVms = row.state.vms.filter((vm) =>
-      expiredVmNames.has(vm.runtimeVmName),
-    );
-    if (!expiredVms.length) {
-      continue;
+    if (
+      row &&
+      row.hostId === hostId &&
+      row.completedAt === null &&
+      row.failedAt === null &&
+      row.state.vms.some((vm) => expiredVmNames.has(vm.runtimeVmName))
+    ) {
+      const next = recomputeRunState({
+        ...row.state,
+        phase: "failed",
+        phaseDetail: "The run lease expired before teardown completed.",
+        vms: row.state.vms.map((vm) =>
+          expiredVmNames.has(vm.runtimeVmName)
+            ? {
+                ...vm,
+                phase: "failed",
+                phaseDetail: "The run lease expired.",
+                terminalPhase: "failed",
+                terminalReason: "The run lease expired.",
+              }
+            : vm,
+        ),
+      });
+
+      await updateRunState(row.runId, {
+        state: next,
+        activeKey: row.activeKey,
+        deleteRequestedAt: row.deleteRequestedAt,
+        solvedAt: row.solvedAt,
+        currentPhase: row.state.phase,
+      });
     }
 
-    const next = recomputeRunState({
-      ...row.state,
-      phase: "failed",
-      phaseDetail: "The run lease expired before teardown completed.",
-      vms: row.state.vms.map((vm) =>
-        expiredVmNames.has(vm.runtimeVmName)
-          ? {
-              ...vm,
-              phase: "failed",
-              phaseDetail: "The run lease expired.",
-              terminalPhase: "failed",
-              terminalReason: "The run lease expired.",
-            }
-          : vm,
-      ),
+    // Clear the expired VMs from the desired doc even when the run row is
+    // missing, on another host, or already terminal: a leftover overdue lease
+    // re-arms the host alarm immediately and leaves the VM running forever.
+    await mutateStoredHostDesiredState(db, hostId, nowUnixMs, (draft) => {
+      for (const vmName of lease.vmNames) {
+        markDesiredVmAbsent(draft, { runId: lease.runId, vmName });
+      }
     });
-
-    await updateRunState(row.runId, {
-      state: next,
-      activeKey: row.activeKey,
-      deleteRequestedAt: row.deleteRequestedAt,
-      solvedAt: row.solvedAt,
-      currentPhase: row.state.phase,
-    });
-    await markRunVmsAbsentInDesiredState({
-      hostId,
-      runId: row.runId,
-      vms: expiredVms,
-      nowUnixMs,
-      db,
-    });
-    expiredRunIds.push(row.runId);
+    expiredRunIds.push(lease.runId);
   }
 
   if (expiredRunIds.length && options?.wakeHostRuntime !== false) {
@@ -735,7 +731,7 @@ async function assertScenarioLaunchHostForUser(
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
-      actualObservedAt: hostActualState.observedAt,
+      actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
@@ -774,7 +770,7 @@ async function assertScenarioLaunchHostForUser(
       Date.now(),
       HOST_HEARTBEAT_TTL_MS,
     ) ||
-    hostHealth(host.actualObservedAt ?? null, Date.now()) !== "healthy"
+    hostHealth(host.actualReportedAt ?? null, Date.now()) !== "healthy"
   ) {
     throw appError(
       409,
@@ -1242,7 +1238,7 @@ async function selectScenarioHost(
       lastInventoryAt: agentHosts.lastInventoryAt,
       hostInfoJson: agentHosts.hostInfoJson,
       inventoryJson: agentHosts.inventoryJson,
-      actualObservedAt: hostActualState.observedAt,
+      actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
@@ -1286,7 +1282,7 @@ async function selectScenarioHost(
           },
           now,
           HOST_HEARTBEAT_TTL_MS,
-        ) && hostHealth(row.actualObservedAt ?? null, now) === "healthy",
+        ) && hostHealth(row.actualReportedAt ?? null, now) === "healthy",
     );
 
   if (!candidates.length) {

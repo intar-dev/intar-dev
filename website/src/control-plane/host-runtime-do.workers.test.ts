@@ -280,20 +280,28 @@ describe("HostRuntimeDO workers integration", () => {
     await seedEnabledScenario(drizzle(env.DB), now);
 
     sendBridge(ws, stateReport(hostId, {
-      observedAt: now - 60_001,
+      observedAt: now,
       appliedDesiredVersion: 0,
       cachedImages: [{
         image_key: testImageKey,
         image_sha256: "2".repeat(64),
         phase: "ready",
-        updated_at_unix_ms: now - 60_001,
+        updated_at_unix_ms: now,
       }],
     }));
     await waitForHostActualState(
       drizzle(env.DB),
       hostId,
-      (row) => row.observedAt === now - 60_001,
+      (row) => row.observedAt === now,
     );
+
+    // Health derives from the server-set receipt time, not the
+    // agent-reported observation clock; backdate it to simulate a host
+    // whose last report landed over 60s ago.
+    await drizzle(env.DB)
+      .update(hostActualState)
+      .set({ updatedAt: now - 60_001 })
+      .where(eq(hostActualState.hostId, hostId));
 
     await expect(
       startScenarioRunForUser({

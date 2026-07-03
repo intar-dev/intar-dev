@@ -104,6 +104,7 @@ async function loadHostActualStateSummary(
     .select({
       appliedDesiredVersion: hostActualState.appliedDesiredVersion,
       observedAt: hostActualState.observedAt,
+      reportedAt: hostActualState.updatedAt,
       reportJson: hostActualState.reportJson,
     })
     .from(hostActualState)
@@ -114,7 +115,7 @@ async function loadHostActualStateSummary(
   return {
     appliedDesiredVersion: row.appliedDesiredVersion,
     observedAt: row.observedAt,
-    health: hostHealth(row.observedAt, Date.now()),
+    health: hostHealth(row.reportedAt, Date.now()),
     capacity: row.reportJson.capacity,
     capabilities: row.reportJson.capabilities,
     cachedImages: row.reportJson.cached_images,

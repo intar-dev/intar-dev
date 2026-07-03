@@ -453,7 +453,7 @@ async fn evict_cache_if_needed(cache: &ImageCacheConfig, db: &Db, cache_root: &P
         match tokio::fs::metadata(&raw_path).await {
             Ok(metadata) => entries.push(CacheEntry {
                 sha: row.image_sha256.clone(),
-                bytes: metadata.len(),
+                bytes: file_allocated_bytes(&metadata),
                 last_accessed_at_ms: row.last_accessed_at_ms,
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -480,7 +480,7 @@ async fn evict_cache_if_needed(cache: &ImageCacheConfig, db: &Db, cache_root: &P
         let marker_path = raw_cache_marker_path_for_key(cache_root, &row.image_key, sha);
         let bytes = tokio::fs::metadata(&raw_path)
             .await
-            .map(|metadata| metadata.len())
+            .map(|metadata| file_allocated_bytes(&metadata))
             .unwrap_or(0);
         remove_raw_cache_entry(&raw_path, &marker_path).await?;
         db.delete_image_cache_access(sha.clone()).await?;
@@ -585,7 +585,7 @@ async fn artifact_cache_bytes(cache_root: &Path) -> Result<u64> {
             .await
             .with_context(|| format!("failed to stat {}", entry.path().display()))?;
         if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
+            total = total.saturating_add(file_allocated_bytes(&metadata));
         }
     }
     Ok(total)
@@ -626,6 +626,13 @@ async fn evict_unreferenced_artifacts(
         if !metadata.is_file() {
             continue;
         }
+        // A concurrent VM create downloads kernel/initrd before its access
+        // row is written, so an artifact absent from the retained set may
+        // simply be brand new. Only sweep artifacts old enough that any
+        // in-flight create referencing them has long since recorded itself.
+        if artifact_within_eviction_grace(&metadata) {
+            continue;
+        }
         tokio::fs::remove_file(&path)
             .await
             .with_context(|| format!("failed to remove artifact {}", path.display()))?;
@@ -640,12 +647,42 @@ async fn evict_unreferenced_artifacts(
     Ok(())
 }
 
+const ARTIFACT_EVICTION_GRACE: Duration = Duration::from_secs(15 * 60);
+
+fn artifact_within_eviction_grace(metadata: &std::fs::Metadata) -> bool {
+    let Ok(modified) = metadata.modified() else {
+        // Without a modification time we cannot prove the artifact is old;
+        // keep it rather than risk deleting a freshly downloaded one.
+        return true;
+    };
+    match SystemTime::now().duration_since(modified) {
+        Ok(age) => age < ARTIFACT_EVICTION_GRACE,
+        // Modified in the future (clock adjustment): treat as fresh.
+        Err(_) => true,
+    }
+}
+
 fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+/// Bytes a cache file actually occupies on disk. Raw images are written
+/// sparsely, so their logical length vastly overstates disk usage; budgeting
+/// on it would evict far below the operator's real `max_bytes`.
+fn file_allocated_bytes(metadata: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.blocks().saturating_mul(512)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.len()
+    }
 }
 
 async fn ensure_cached_raw_entry(
@@ -1591,6 +1628,51 @@ mod tests {
             select_evictions(&entries, &HashSet::new(), 100),
             vec!["a".repeat(64), "c".repeat(64)]
         );
+    }
+
+    #[tokio::test]
+    async fn evict_unreferenced_artifacts_respects_refcounts_and_grace() -> Result<()> {
+        let cache_root = tempfile::tempdir()?;
+        let artifact_dir = cache_root.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_dir)?;
+
+        let retained_sha = "a".repeat(64);
+        let unreferenced_sha = "b".repeat(64);
+        let fresh_sha = "c".repeat(64);
+        let old_mtime = SystemTime::now() - ARTIFACT_EVICTION_GRACE - Duration::from_secs(60);
+        for (sha, mtime) in [
+            (&retained_sha, Some(old_mtime)),
+            (&unreferenced_sha, Some(old_mtime)),
+            // Fresh unreferenced artifact: an in-flight VM create may have
+            // just downloaded it before recording its access row.
+            (&fresh_sha, None),
+        ] {
+            let path = artifact_dir.join(sha);
+            std::fs::write(&path, b"artifact")?;
+            if let Some(mtime) = mtime {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&path)?
+                    .set_modified(mtime)?;
+            }
+        }
+
+        let retained = HashSet::from([retained_sha.clone()]);
+        evict_unreferenced_artifacts(cache_root.path(), &retained).await?;
+
+        assert!(
+            artifact_dir.join(&retained_sha).exists(),
+            "artifact referenced by a retained raw entry must never be evicted"
+        );
+        assert!(
+            !artifact_dir.join(&unreferenced_sha).exists(),
+            "old artifact with no retained raw reference must be evicted"
+        );
+        assert!(
+            artifact_dir.join(&fresh_sha).exists(),
+            "artifact inside the eviction grace window must be kept"
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -79,7 +79,7 @@ describe("build scheduler", () => {
           },
           {
             lastClientHelloAt: now,
-            stateObservedAt: now - 1,
+            stateReportedAt: now - 1,
           },
         ),
       ],
@@ -588,7 +588,7 @@ function builderCandidateRow(
     arch?: "x86_64" | "aarch64";
     activeSessionId?: string | null;
     lastClientHelloAt?: number | null;
-    stateObservedAt?: number | null;
+    stateReportedAt?: number | null;
   } = {},
 ) {
   const lastClientHelloAt = options.lastClientHelloAt ?? 1_762_041_660_000;
@@ -601,7 +601,7 @@ function builderCandidateRow(
         ? `v5:${hostId}`
         : options.activeSessionId,
     lastClientHelloAt,
-    stateObservedAt: options.stateObservedAt ?? lastClientHelloAt,
+    stateReportedAt: options.stateReportedAt ?? lastClientHelloAt,
     disabled: false,
     reportJson: {
       capabilities: { arch: options.arch ?? "x86_64" },

@@ -555,7 +555,7 @@ async function loadBuilderCandidates(
         activeSessionId: agentHosts.activeSessionId,
         lastClientHelloAt: agentHosts.lastClientHelloAt,
         disabled: agentHosts.disabled,
-        stateObservedAt: hostActualState.observedAt,
+        stateReportedAt: hostActualState.updatedAt,
         reportJson: hostActualState.reportJson,
       })
       .from(agentHosts)
@@ -586,10 +586,10 @@ async function loadBuilderCandidates(
         host.connected &&
         host.activeSessionId &&
         host.reportJson &&
-        typeof host.stateObservedAt === "number" &&
+        typeof host.stateReportedAt === "number" &&
         typeof host.lastClientHelloAt === "number" &&
-        host.stateObservedAt >= host.lastClientHelloAt &&
-        hostHealth(host.stateObservedAt, nowUnixMs) === "healthy",
+        host.stateReportedAt >= host.lastClientHelloAt &&
+        hostHealth(host.stateReportedAt, nowUnixMs) === "healthy",
     ),
     disabled: Boolean(host.disabled),
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,
