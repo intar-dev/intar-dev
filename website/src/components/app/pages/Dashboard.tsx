@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AgentBridgeStatus, AgentHostInfo } from "@/lib/agent-bridge";
+import type { HostHealth } from "@/lib/host-health";
 import { isScenarioLaunchHost } from "@/lib/scenario-hosts";
 
 interface AgentHostApi {
@@ -33,6 +34,11 @@ interface AgentHostApi {
   updatedAt: number;
   hostInfo: AgentHostInfo | null;
   status: AgentBridgeStatus | null;
+  actualState: {
+    appliedDesiredVersion: number;
+    observedAt: number;
+    health: HostHealth;
+  } | null;
 }
 
 interface VmStatus {
@@ -1449,6 +1455,11 @@ export function Dashboard() {
                             >
                               {host.status?.connected ? "Online" : "Offline"}
                             </Badge>
+                            {host.actualState?.health === "degraded" ? (
+                              <Badge variant="destructive">Degraded</Badge>
+                            ) : host.actualState?.health === "unknown" ? (
+                              <Badge variant="outline">Unknown health</Badge>
+                            ) : null}
                             {host.disabled ? (
                               <Badge variant="destructive">Disabled</Badge>
                             ) : null}
@@ -1518,7 +1529,9 @@ export function Dashboard() {
                           label="Heartbeat"
                           value={formatTimestamp(host.status?.lastHeartbeatAt)}
                           detail={
-                            host.status?.connected
+                            host.actualState?.health === "degraded"
+                              ? "No state report for over 60 seconds"
+                              : host.status?.connected
                               ? "Connected via bridge"
                               : "No fresh bridge heartbeat"
                           }

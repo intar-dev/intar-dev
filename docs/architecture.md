@@ -129,6 +129,30 @@ VM networking is isolated per run:
   host egress IPv4 address.
 - Guest-to-host input is dropped; control traffic uses vsock.
 
+## Mothballed Host Rotation
+
+`stardrive/` and other mothballed VM hosts are retained for maintenance, not as
+implicit capacity for the desired-state runtime. Safe rotation is a drain-first
+operation:
+
+- Disable scenario scheduling on the host before changing cluster membership or
+  host identity.
+- Wait for desired VMs and image build assignments to leave the host's desired
+  state, then confirm actual state reports no live VMs or active builds.
+- Preserve local agent state until every VM has either archived successfully or
+  been intentionally abandoned; reflink root disks depend on their cached base
+  image while the local VM exists.
+- Rotate one host at a time so run bridges, Stargate routes, and host-reported SSH
+  keys remain attributable during teardown and artifact upload.
+
+If those conditions cannot be proven, treat rotation as destructive maintenance
+and expect active runs on that host to fail.
+
+The local `infrastructure/cluster/.env` file is gitignored and must stay
+untracked. It may contain root credentials for mothballed Talos infrastructure;
+the operator should rotate those credentials before reusing or retiring that
+cluster state.
+
 ## Terminal Access
 
 The Worker creates an Ed25519 keypair for each `(run, vm)` launch. The public key is

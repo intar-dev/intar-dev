@@ -41,3 +41,7 @@ refresh_interval_minutes = 15
 # Optional HTTP basic auth used for local/dev registries. Production agents use bridge JWT auth.
 # username = ""
 # password = ""
+
+[image_cache]
+# Optional maximum bytes for raw image and direct-boot artifact cache. Omit for unbounded.
+# max_bytes = 53687091200

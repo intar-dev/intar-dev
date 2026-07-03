@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::HashSet;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +14,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{BridgeConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo};
+use crate::config::{
+    BridgeConfig, ImageCacheConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo,
+};
+use crate::db::{Db, ImageCacheAccessRow};
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 2;
 const RAW_CACHE_MARKER_VERSION: u8 = 1;
@@ -36,11 +40,22 @@ struct RegistryImageBoot {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CachedImage {
+    pub image_key: String,
+    pub image_sha256: String,
     pub raw_path: PathBuf,
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
+    pub kernel_sha256: String,
+    pub initrd_sha256: String,
     pub cmdline: String,
     pub virtual_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CacheEntry {
+    pub sha: String,
+    pub bytes: u64,
+    pub last_accessed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -49,6 +64,40 @@ struct RawCacheMarker {
     image_key: String,
     image_sha256: String,
     image_virtual_size_bytes: u64,
+}
+
+pub fn select_evictions(
+    entries: &[CacheEntry],
+    protected: &HashSet<String>,
+    max_bytes: u64,
+) -> Vec<String> {
+    let total = entries
+        .iter()
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+    if total <= max_bytes {
+        return Vec::new();
+    }
+
+    let mut candidates = entries
+        .iter()
+        .filter(|entry| !protected.contains(&entry.sha))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.last_accessed_at_ms
+            .cmp(&right.last_accessed_at_ms)
+            .then_with(|| left.sha.cmp(&right.sha))
+    });
+
+    let mut evicted = Vec::new();
+    let mut remaining = total;
+    for entry in candidates {
+        if remaining <= max_bytes {
+            break;
+        }
+        evicted.push(entry.sha.clone());
+        remaining = remaining.saturating_sub(entry.bytes);
+    }
+    evicted
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +122,12 @@ struct RegistryIndexImageBoot {
     cmdline: String,
 }
 
-pub fn spawn_warm_cache_with_bridge(registry: ImageRegistryConfig, bridge: BridgeConfig) {
+pub fn spawn_warm_cache_with_bridge(
+    registry: ImageRegistryConfig,
+    bridge: BridgeConfig,
+    cache: ImageCacheConfig,
+    db: Db,
+) {
     tokio::spawn(async move {
         let cache_root = match default_cache_root() {
             Ok(path) => path,
@@ -91,7 +145,15 @@ pub fn spawn_warm_cache_with_bridge(registry: ImageRegistryConfig, bridge: Bridg
             "starting image registry cache worker"
         );
 
-        run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client).await;
+        run_cache_refresh_cycle(
+            &registry,
+            Some(&bridge),
+            &cache,
+            Some(&db),
+            &cache_root,
+            &client,
+        )
+        .await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(
             registry.refresh_interval_minutes.saturating_mul(60),
@@ -100,7 +162,15 @@ pub fn spawn_warm_cache_with_bridge(registry: ImageRegistryConfig, bridge: Bridg
         interval.tick().await;
         loop {
             interval.tick().await;
-            run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client).await;
+            run_cache_refresh_cycle(
+                &registry,
+                Some(&bridge),
+                &cache,
+                Some(&db),
+                &cache_root,
+                &client,
+            )
+            .await;
         }
     });
 }
@@ -201,6 +271,8 @@ pub(crate) fn verified_cached_raw_image_metadata(
 async fn run_cache_refresh_cycle(
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
+    cache: &ImageCacheConfig,
+    db: Option<&Db>,
     cache_root: &Path,
     client: &reqwest::Client,
 ) {
@@ -237,6 +309,7 @@ async fn run_cache_refresh_cycle(
         let cache_root = cache_root.to_path_buf();
         let registry = registry.clone();
         let bridge = bridge.cloned();
+        let db = db.cloned();
         let sem = Arc::clone(&sem);
         handles.push(tokio::spawn(async move {
             let span = tracing::info_span!(
@@ -254,7 +327,14 @@ async fn run_cache_refresh_cycle(
             match ensure_cached_raw_entry(&image, &registry, bridge.as_ref(), &cache_root, &client)
                 .await
             {
-                Ok(path) => info!(path = %path.display(), "cache ready"),
+                Ok(path) => {
+                    if let Some(db) = db.as_ref()
+                        && let Err(error) = touch_cached_image_access(db, &image).await
+                    {
+                        warn!(error = %error, image = %image.image_key, "failed to update image cache access metadata");
+                    }
+                    info!(path = %path.display(), "cache ready");
+                }
                 Err(e) => error!("failed to cache image: {e}"),
             }
         }));
@@ -265,6 +345,11 @@ async fn run_cache_refresh_cycle(
     }
 
     info!("image cache refresh finished");
+    if let Some(db) = db
+        && let Err(error) = evict_cache_if_needed(cache, db, cache_root).await
+    {
+        warn!(error = %error, cache_root = %cache_root.display(), "image cache eviction failed");
+    }
 }
 
 #[cfg(test)]
@@ -318,12 +403,249 @@ pub async fn ensure_cached_image(
     .await?;
 
     Ok(CachedImage {
+        image_key: image.image_key,
+        image_sha256: image.image_sha256,
         raw_path,
         kernel_path,
         initrd_path,
+        kernel_sha256: image.boot.kernel_sha256,
+        initrd_sha256: image.boot.initrd_sha256,
         cmdline: image.boot.cmdline,
         virtual_size_bytes: image.image_virtual_size_bytes,
     })
+}
+
+pub async fn touch_cached_image(db: &Db, image: &CachedImage) -> Result<()> {
+    db.touch_image_cache_entry(ImageCacheAccessRow {
+        image_key: image.image_key.clone(),
+        image_sha256: image.image_sha256.clone(),
+        kernel_sha256: image.kernel_sha256.clone(),
+        initrd_sha256: image.initrd_sha256.clone(),
+        raw_bytes: i64::try_from(image.virtual_size_bytes)
+            .context("cached image virtual size exceeds sqlite INTEGER range")?,
+        last_accessed_at_ms: now_unix_ms(),
+    })
+    .await
+}
+
+async fn touch_cached_image_access(db: &Db, image: &RegistryImageRecord) -> Result<()> {
+    db.touch_image_cache_entry(ImageCacheAccessRow {
+        image_key: image.image_key.clone(),
+        image_sha256: image.image_sha256.clone(),
+        kernel_sha256: image.boot.kernel_sha256.clone(),
+        initrd_sha256: image.boot.initrd_sha256.clone(),
+        raw_bytes: i64::try_from(image.image_virtual_size_bytes)
+            .context("cached image virtual size exceeds sqlite INTEGER range")?,
+        last_accessed_at_ms: now_unix_ms(),
+    })
+    .await
+}
+
+async fn evict_cache_if_needed(cache: &ImageCacheConfig, db: &Db, cache_root: &Path) -> Result<()> {
+    let Some(max_bytes) = cache.max_bytes else {
+        return Ok(());
+    };
+
+    let access_rows = db.load_image_cache_access().await?;
+    let mut entries = Vec::new();
+    for row in &access_rows {
+        let raw_path = cached_raw_image_path_for_key(cache_root, &row.image_key, &row.image_sha256);
+        match tokio::fs::metadata(&raw_path).await {
+            Ok(metadata) => entries.push(CacheEntry {
+                sha: row.image_sha256.clone(),
+                bytes: metadata.len(),
+                last_accessed_at_ms: row.last_accessed_at_ms,
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                db.delete_image_cache_access(row.image_sha256.clone())
+                    .await?;
+            }
+            Err(error) => {
+                warn!(path = %raw_path.display(), error = %error, "failed to stat raw cache entry during eviction");
+            }
+        }
+    }
+
+    let protected = protected_image_shas(db).await;
+    let artifact_bytes = artifact_cache_bytes(cache_root).await?;
+    let raw_budget = max_bytes.saturating_sub(artifact_bytes);
+    let evictions = select_evictions(&entries, &protected, raw_budget);
+    let evicted = evictions.iter().cloned().collect::<HashSet<_>>();
+
+    for sha in &evictions {
+        let Some(row) = access_rows.iter().find(|row| row.image_sha256 == *sha) else {
+            continue;
+        };
+        let raw_path = cached_raw_image_path_for_key(cache_root, &row.image_key, sha);
+        let marker_path = raw_cache_marker_path_for_key(cache_root, &row.image_key, sha);
+        let bytes = tokio::fs::metadata(&raw_path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        remove_raw_cache_entry(&raw_path, &marker_path).await?;
+        db.delete_image_cache_access(sha.clone()).await?;
+        info!(
+            image = %row.image_key,
+            sha = %sha,
+            bytes,
+            reason = "lru_over_budget",
+            "evicted raw image cache entry"
+        );
+    }
+
+    let retained_artifacts = access_rows
+        .iter()
+        .filter(|row| !evicted.contains(&row.image_sha256))
+        .flat_map(|row| [row.kernel_sha256.clone(), row.initrd_sha256.clone()])
+        .collect::<HashSet<_>>();
+    evict_unreferenced_artifacts(cache_root, &retained_artifacts).await?;
+
+    let remaining_raw = entries
+        .iter()
+        .filter(|entry| !evicted.contains(&entry.sha))
+        .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+    let remaining_artifacts = artifact_cache_bytes(cache_root).await?;
+    let remaining = remaining_raw.saturating_add(remaining_artifacts);
+    if remaining > max_bytes {
+        warn!(
+            cache_root = %cache_root.display(),
+            max_bytes,
+            remaining_bytes = remaining,
+            protected_count = protected.len(),
+            "image cache remains over budget because no more unprotected entries are evictable"
+        );
+    }
+
+    Ok(())
+}
+
+async fn protected_image_shas(db: &Db) -> HashSet<String> {
+    let mut protected = HashSet::new();
+    match db.load_local_vm_image_shas().await {
+        Ok(shas) => {
+            protected.extend(shas);
+        }
+        Err(error) => {
+            warn!(error = %error, "failed to load local vm image refs for cache protection");
+        }
+    }
+
+    let desired_row = match db.load_desired_state().await {
+        Ok(Some(row)) => row,
+        Ok(None) => return protected,
+        Err(error) => {
+            warn!(error = %error, "failed to load desired state for cache protection");
+            return protected;
+        }
+    };
+    let desired = match serde_json::from_str::<intar_contracts::bridge::HostDesiredStateV1>(
+        &desired_row.doc_json,
+    ) {
+        Ok(desired) => desired,
+        Err(error) => {
+            warn!(error = %error, "failed to parse desired state for cache protection");
+            return protected;
+        }
+    };
+
+    for image in desired.cached_images {
+        protected.insert(image.image_sha256);
+    }
+    for vm in desired.vms {
+        if vm.desired_phase == intar_contracts::bridge::DesiredVmPhase::Running {
+            protected.insert(vm.image_sha256);
+        }
+    }
+    protected
+}
+
+async fn artifact_cache_bytes(cache_root: &Path) -> Result<u64> {
+    let artifact_dir = cache_root.join("artifacts");
+    let mut total = 0_u64;
+    let mut entries = match tokio::fs::read_dir(&artifact_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read artifact cache dir {}",
+                    artifact_dir.display()
+                )
+            });
+        }
+    };
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .context("failed to iterate artifact cache dir")?
+    {
+        let metadata = entry
+            .metadata()
+            .await
+            .with_context(|| format!("failed to stat {}", entry.path().display()))?;
+        if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
+async fn evict_unreferenced_artifacts(
+    cache_root: &Path,
+    retained_artifacts: &HashSet<String>,
+) -> Result<()> {
+    let artifact_dir = cache_root.join("artifacts");
+    let mut entries = match tokio::fs::read_dir(&artifact_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to read artifact cache dir {}",
+                    artifact_dir.display()
+                )
+            });
+        }
+    };
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .context("failed to iterate artifact cache dir")?
+    {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if retained_artifacts.contains(&file_name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .await
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if !metadata.is_file() {
+            continue;
+        }
+        tokio::fs::remove_file(&path)
+            .await
+            .with_context(|| format!("failed to remove artifact {}", path.display()))?;
+        info!(
+            sha = %file_name,
+            bytes = metadata.len(),
+            reason = "unreferenced_artifact",
+            "evicted image cache artifact"
+        );
+    }
+
+    Ok(())
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 async fn ensure_cached_raw_entry(
@@ -1197,6 +1519,78 @@ mod tests {
             },
             download_url: "/agent/registry/images/ubuntu/sha".to_string(),
         }
+    }
+
+    #[test]
+    fn select_evictions_keeps_under_budget_cache() {
+        let entries = vec![
+            CacheEntry {
+                sha: "a".repeat(64),
+                bytes: 100,
+                last_accessed_at_ms: 10,
+            },
+            CacheEntry {
+                sha: "b".repeat(64),
+                bytes: 200,
+                last_accessed_at_ms: 20,
+            },
+        ];
+
+        assert!(select_evictions(&entries, &HashSet::new(), 300).is_empty());
+    }
+
+    #[test]
+    fn select_evictions_skips_protected_entries() {
+        let protected_sha = "a".repeat(64);
+        let entries = vec![
+            CacheEntry {
+                sha: protected_sha.clone(),
+                bytes: 300,
+                last_accessed_at_ms: 10,
+            },
+            CacheEntry {
+                sha: "b".repeat(64),
+                bytes: 200,
+                last_accessed_at_ms: 20,
+            },
+            CacheEntry {
+                sha: "c".repeat(64),
+                bytes: 200,
+                last_accessed_at_ms: 30,
+            },
+        ];
+        let protected = HashSet::from([protected_sha.clone()]);
+
+        assert_eq!(
+            select_evictions(&entries, &protected, 300),
+            vec!["b".repeat(64), "c".repeat(64)]
+        );
+    }
+
+    #[test]
+    fn select_evictions_uses_oldest_access_then_sha() {
+        let entries = vec![
+            CacheEntry {
+                sha: "c".repeat(64),
+                bytes: 100,
+                last_accessed_at_ms: 10,
+            },
+            CacheEntry {
+                sha: "a".repeat(64),
+                bytes: 100,
+                last_accessed_at_ms: 10,
+            },
+            CacheEntry {
+                sha: "b".repeat(64),
+                bytes: 100,
+                last_accessed_at_ms: 20,
+            },
+        ];
+
+        assert_eq!(
+            select_evictions(&entries, &HashSet::new(), 100),
+            vec!["a".repeat(64), "c".repeat(64)]
+        );
     }
 
     #[tokio::test]

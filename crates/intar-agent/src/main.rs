@@ -62,8 +62,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    image_cache::spawn_warm_cache_with_bridge(cfg.image_registry.clone(), cfg.bridge.clone());
-
     let bind: SocketAddr = cfg
         .server
         .bind
@@ -73,6 +71,12 @@ async fn main() -> Result<()> {
     let (db, persisted) = db::Db::open()
         .await
         .context("failed to open sqlite db for persisted vm state")?;
+    image_cache::spawn_warm_cache_with_bridge(
+        cfg.image_registry.clone(),
+        cfg.bridge.clone(),
+        cfg.image_cache.clone(),
+        db.clone(),
+    );
     let vm = vm::VmManager::new(&cfg, db.clone(), persisted);
     vm.ensure_host_networking()
         .await

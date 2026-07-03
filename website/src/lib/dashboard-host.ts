@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { asc, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { scenarioRunArtifacts } from "@/db/schema";
+import { scenarioRunArtifacts, scenarioRunSshKeys } from "@/db/schema";
 import { parseInventory, type AgentHostRow } from "@/lib/agent-bridge";
 import { matchesInventoryVmIdentity } from "@/lib/run-lifecycle";
 import { listHostRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
@@ -58,6 +58,7 @@ export interface DashboardVmStatus {
   scenario_meta: DashboardVmScenarioMeta | null;
   details: {
     guest_ip: string | null;
+    ssh_authorized_key_openssh: string | null;
   } | null;
 }
 
@@ -121,6 +122,9 @@ export async function loadDashboardHostRuns(params: {
 
   const liveRuns = runs.filter((run) => !isArchivePhase(run.phase));
   const archivedRuns = runs.filter((run) => isArchivePhase(run.phase));
+  const sshKeysByRunVmId = await loadScenarioRunPublicKeys(
+    liveRuns.map((run) => run.id),
+  );
 
   return {
     liveVms: liveRuns.flatMap((run) =>
@@ -172,6 +176,8 @@ export async function loadDashboardHostRuns(params: {
                 readString(readRecord(inventoryVm?.details)?.guest_ip) ??
                 readString(readRecord(inventoryVm?.details)?.guestIp) ??
                 null,
+              ssh_authorized_key_openssh:
+                sshKeysByRunVmId.get(runVmKey(run.id, vm.id)) ?? null,
             },
           } satisfies DashboardVmStatus;
         }),
@@ -182,6 +188,33 @@ export async function loadDashboardHostRuns(params: {
       runs: archivedRuns,
     }),
   };
+}
+
+async function loadScenarioRunPublicKeys(
+  runIds: string[],
+): Promise<Map<string, string>> {
+  if (!runIds.length) {
+    return new Map();
+  }
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      runId: scenarioRunSshKeys.runId,
+      vmId: scenarioRunSshKeys.vmId,
+      publicKeyOpenssh: scenarioRunSshKeys.publicKeyOpenssh,
+    })
+    .from(scenarioRunSshKeys)
+    .where(inArray(scenarioRunSshKeys.runId, runIds));
+  return new Map(
+    rows.map((row) => [
+      runVmKey(row.runId, row.vmId),
+      row.publicKeyOpenssh,
+    ]),
+  );
+}
+
+function runVmKey(runId: string, vmId: string): string {
+  return `${runId}\0${vmId}`;
 }
 
 async function hydrateArchivedRuns(params: {

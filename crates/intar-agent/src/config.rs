@@ -18,6 +18,7 @@ pub struct AgentConfig {
     pub ssh_access: SshAccessConfig,
     pub vm_defaults: VmDefaultsConfig,
     pub image_registry: ImageRegistryConfig,
+    pub image_cache: ImageCacheConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -153,6 +154,13 @@ impl Default for ImageRegistryConfig {
             refresh_interval_minutes: 15,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct ImageCacheConfig {
+    /// Maximum bytes for raw image and direct-boot artifact cache, or unbounded.
+    pub max_bytes: Option<u64>,
 }
 
 pub fn redact_url_userinfo(url: &str) -> String {
@@ -360,6 +368,12 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         );
     }
 
+    if cfg.image_cache.max_bytes == Some(0) {
+        anyhow::bail!(
+            "config value image_cache.max_bytes must be >= 1 when set\n\nExample config:\n{EXAMPLE_TOML}"
+        );
+    }
+
     Ok(cfg)
 }
 
@@ -470,6 +484,52 @@ refresh_interval_minutes = 7
         assert_eq!(cfg.image_registry.username.as_deref(), Some("demo"));
         assert_eq!(cfg.image_registry.password.as_deref(), Some("secret"));
         assert_eq!(cfg.image_registry.refresh_interval_minutes, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn load_parses_image_cache_limit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[image_registry]
+url = "https://example.com/images"
+[image_cache]
+max_bytes = 53687091200
+"#,
+        )?;
+
+        let cfg = load(&path)?;
+        assert_eq!(cfg.image_cache.max_bytes, Some(53_687_091_200));
+        Ok(())
+    }
+
+    #[test]
+    fn load_rejects_zero_image_cache_limit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[image_registry]
+url = "https://example.com/images"
+[image_cache]
+max_bytes = 0
+"#,
+        )?;
+
+        match load(&path) {
+            Ok(_) => anyhow::bail!("expected zero cache limit to fail"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("image_cache.max_bytes must be >= 1"),
+                    "unexpected error message: {message}"
+                );
+            }
+        }
         Ok(())
     }
 

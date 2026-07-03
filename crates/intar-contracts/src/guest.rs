@@ -17,6 +17,8 @@ pub const ENV_VM_HOSTNAME: &str = "INTAR_VM_HOSTNAME";
 pub const ENV_GUEST_IP_CIDR: &str = "INTAR_GUEST_IP_CIDR";
 pub const ENV_GATEWAY: &str = "INTAR_GATEWAY";
 pub const ENV_DNS_SERVERS: &str = "INTAR_DNS_SERVERS";
+pub const ENV_PEER_PREFIX: &str = "INTAR_PEER_";
+pub const ENV_PEER_SUFFIX: &str = "_IP";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,11 +31,12 @@ pub struct RuntimeEnv {
     pub guest_ip_cidr: String,
     pub gateway: String,
     pub dns_servers: Vec<String>,
+    pub peer_guest_ips: BTreeMap<String, String>,
 }
 
 impl RuntimeEnv {
     pub fn render(&self) -> String {
-        [
+        let mut lines = [
             render_line(
                 ENV_SSH_AUTHORIZED_KEYS_B64,
                 &BASE64_STANDARD.encode(self.ssh_authorized_keys_openssh.join("\n")),
@@ -49,7 +52,14 @@ impl RuntimeEnv {
             render_line(ENV_GATEWAY, &self.gateway),
             render_line(ENV_DNS_SERVERS, &self.dns_servers.join(" ")),
         ]
-        .join("")
+        .into_iter()
+        .collect::<Vec<_>>();
+        lines.extend(
+            self.peer_guest_ips
+                .iter()
+                .map(|(peer_name, ip)| render_line(&peer_env_key(peer_name), ip)),
+        );
+        lines.join("")
     }
 
     pub fn parse(raw: &str) -> Result<Self, RuntimeEnvParseError> {
@@ -66,6 +76,7 @@ impl RuntimeEnv {
                 .split_whitespace()
                 .map(ToOwned::to_owned)
                 .collect(),
+            peer_guest_ips: parse_peer_guest_ips(&values),
         })
     }
 }
@@ -81,6 +92,20 @@ pub enum RuntimeEnvParseError {
 
 fn render_line(key: &str, value: &str) -> String {
     format!("{key}={}\n", shell_single_quoted(value))
+}
+
+fn peer_env_key(peer_name: &str) -> String {
+    let suffix = peer_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{ENV_PEER_PREFIX}{suffix}{ENV_PEER_SUFFIX}")
 }
 
 fn shell_single_quoted(raw: &str) -> String {
@@ -145,6 +170,18 @@ fn parse_authorized_keys(
         .collect())
 }
 
+fn parse_peer_guest_ips(values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    values
+        .iter()
+        .filter_map(|(key, value)| {
+            let peer = key
+                .strip_prefix(ENV_PEER_PREFIX)?
+                .strip_suffix(ENV_PEER_SUFFIX)?;
+            Some((peer.to_ascii_lowercase(), value.clone()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,11 +200,13 @@ mod tests {
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),
             dns_servers: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
+            peer_guest_ips: BTreeMap::from([("db".to_owned(), "10.200.0.3".to_owned())]),
         };
 
         let rendered = env.render();
         assert!(rendered.contains("INTAR_SSH_AUTHORIZED_KEYS_B64='"));
         assert!(rendered.contains("KINO_HOST_READY_PORT='18081'"));
+        assert!(rendered.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
         assert_eq!(RuntimeEnv::parse(&rendered), Ok(env));
     }
 }

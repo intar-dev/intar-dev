@@ -194,6 +194,96 @@ describe("run lifecycle", () => {
     expect(next.vms[0]?.terminalPhase).toBe("ready");
   });
 
+  it("ignores older reports after a newer vm report was accepted", () => {
+    const current = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        observedAt: 2_000,
+      }),
+    });
+    const stale = applyVmReportToRunState({
+      runId: "run-a",
+      current,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "failed",
+        error: "old failure",
+        observedAt: 1_999,
+      }),
+    });
+
+    expect(stale.vms[0]?.phase).toBe("ready");
+    expect(stale.vms[0]?.runtimeObservedAt).toBe(2_000);
+    expect(stale.phase).toBe("active_full");
+  });
+
+  it("keeps duplicate reports idempotent", () => {
+    const report = vmReport({
+      runId: "run-a",
+      vmName: "webserver",
+      phase: "ready",
+      observedAt: 2_000,
+    });
+    const current = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report,
+    });
+    const duplicate = applyVmReportToRunState({
+      runId: "run-a",
+      current,
+      report,
+    });
+
+    expect(duplicate).toEqual(current);
+  });
+
+  it("rejects phase regression attempts from later reports", () => {
+    const solved = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "solved",
+        observedAt: 2_000,
+      }),
+    });
+    const regressed = applyVmReportToRunState({
+      runId: "run-a",
+      current: solved,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        observedAt: 2_001,
+      }),
+    });
+
+    expect(regressed.vms[0]?.phase).toBe("solved");
+    expect(regressed.vms[0]?.runtimeObservedAt).toBe(2_001);
+  });
+
+  it("ignores reports for unknown vm names", () => {
+    const current = initialRunState();
+    const next = applyVmReportToRunState({
+      runId: "run-a",
+      current,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "database",
+        phase: "ready",
+      }),
+    });
+
+    expect(next).toEqual(current);
+  });
+
   it("derives solved from scenario probes even when the report phase is only running", () => {
     const baseVm = initialRunState().vms[0];
     if (!baseVm) {
@@ -277,6 +367,7 @@ function vmReport(input: {
   sshHostKeysOpenssh?: string[];
   probes?: VmReportV1["probes"];
   error?: string | null;
+  observedAt?: number;
 }): VmReportV1 {
   return {
     schema_version: 1,
@@ -284,7 +375,7 @@ function vmReport(input: {
     run_id: input.runId,
     vm_name: input.vmName,
     desired_version: 42,
-    observed_at_unix_ms: 1_762_041_660_000,
+    observed_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
     phase: input.phase,
     network: input.network ?? null,
     ssh_host_keys_openssh: input.sshHostKeysOpenssh ?? [],

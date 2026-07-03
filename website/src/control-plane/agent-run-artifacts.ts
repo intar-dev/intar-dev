@@ -182,7 +182,7 @@ async function handleBeginRunUpload(
     hostId: verified.agent.hostId,
   });
   if (!runVm) {
-    return jsonResponse({ error: "run VM not found" }, 404);
+    return runPurgedResponse();
   }
 
   const existingArtifacts = await loadArtifactStatesForRunVm(
@@ -615,7 +615,7 @@ async function requireVerifiedRunVm(
   if (!runVm) {
     return {
       ok: false,
-      response: jsonResponse({ error: "run VM not found" }, 404),
+      response: runPurgedResponse(),
     };
   }
 
@@ -1049,4 +1049,11 @@ function jsonResponse(body: unknown, status = 200): Response {
       "content-type": "application/json; charset=utf-8",
     },
   });
+}
+
+function runPurgedResponse(): Response {
+  return jsonResponse(
+    { code: "run_purged", error: "run VM not found" },
+    410,
+  );
 }

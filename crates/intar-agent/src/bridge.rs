@@ -525,11 +525,22 @@ async fn reconcile_desired_vm(
                 vsock_cid: kino_vsock_cid(desired.version, desired_vm),
                 vsock_port: Some(DEFAULT_KINO_VSOCK_PORT),
             }),
+            peer_vm_names: desired_peer_vm_names(desired, desired_vm),
         },
     })
     .await
     .map(|_| ())
     .map_err(|error| anyhow::anyhow!("{}", error.message))
+}
+
+fn desired_peer_vm_names(desired: &HostDesiredStateV1, desired_vm: &DesiredVmV1) -> Vec<String> {
+    desired
+        .vms
+        .iter()
+        .filter(|vm| vm.desired_phase == DesiredVmPhase::Running)
+        .filter(|vm| vm.run_id == desired_vm.run_id && vm.vm_name != desired_vm.vm_name)
+        .map(|vm| vm.vm_name.clone())
+        .collect()
 }
 
 async fn delete_vm_if_present(vm: &VmManager, vm_name: &str) {

@@ -165,6 +165,13 @@ function applyReportedVmState(input: {
     return input.vm;
   }
 
+  if (
+    typeof input.vm.runtimeObservedAt === "number" &&
+    input.report.updated_at_unix_ms < input.vm.runtimeObservedAt
+  ) {
+    return input.vm;
+  }
+
   const withProbes = applyProbeSnapshotToVm(input.vm, {
     probes: input.report.probes.map((probe) => ({
       id: probe.id,
@@ -198,6 +205,7 @@ function applyReportedVmState(input: {
       : withProbes.terminalObservedAt,
     terminalTarget,
     runtimeState: input.report.phase,
+    runtimeObservedAt: input.report.updated_at_unix_ms,
     vmCreatedAt:
       withProbes.vmCreatedAt ??
       (derived.phase === "queued" ? null : input.report.updated_at_unix_ms),

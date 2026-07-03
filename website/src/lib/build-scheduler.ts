@@ -23,6 +23,7 @@ import {
 import { removeDesiredBuild, upsertDesiredBuild } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { hostHealth } from "@/lib/host-health";
 import { createAppId } from "@/lib/id";
 
 export async function queueImageBuildsFromBundle(
@@ -149,7 +150,7 @@ export async function assignQueuedImageBuilds(
 ): Promise<Array<{ buildId: string; hostId: string }>> {
   const [queuedBuilds, builders] = await Promise.all([
     loadQueuedBuildRows(db),
-    loadBuilderCandidates(db),
+    loadBuilderCandidates(db, nowUnixMs),
   ]);
   const assigned: Array<{ buildId: string; hostId: string }> = [];
   const activeCounts = new Map(
@@ -543,6 +544,7 @@ async function removeDesiredBuildsFromHost(
 
 async function loadBuilderCandidates(
   db: DrizzleD1Database,
+  nowUnixMs: number,
 ): Promise<BuilderCandidate[]> {
   const [hosts, activeBuilds] = await Promise.all([
     db
@@ -553,7 +555,7 @@ async function loadBuilderCandidates(
         activeSessionId: agentHosts.activeSessionId,
         lastClientHelloAt: agentHosts.lastClientHelloAt,
         disabled: agentHosts.disabled,
-        stateUpdatedAt: hostActualState.updatedAt,
+        stateObservedAt: hostActualState.observedAt,
         reportJson: hostActualState.reportJson,
       })
       .from(agentHosts)
@@ -584,9 +586,10 @@ async function loadBuilderCandidates(
         host.connected &&
         host.activeSessionId &&
         host.reportJson &&
-        typeof host.stateUpdatedAt === "number" &&
+        typeof host.stateObservedAt === "number" &&
         typeof host.lastClientHelloAt === "number" &&
-        host.stateUpdatedAt >= host.lastClientHelloAt,
+        host.stateObservedAt >= host.lastClientHelloAt &&
+        hostHealth(host.stateObservedAt, nowUnixMs) === "healthy",
     ),
     disabled: Boolean(host.disabled),
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,

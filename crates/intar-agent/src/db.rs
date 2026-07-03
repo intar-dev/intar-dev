@@ -12,6 +12,8 @@ use tracing::{error, info, warn};
 pub struct VmRow {
     pub name: String,
     pub state: String,
+    pub image_key: Option<String>,
+    pub image_sha256: Option<String>,
     pub created_at_s: i64,
     pub updated_at_s: i64,
     pub running_at_s: Option<i64>,
@@ -73,6 +75,16 @@ pub struct DesiredStateRow {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageCacheAccessRow {
+    pub image_key: String,
+    pub image_sha256: String,
+    pub kernel_sha256: String,
+    pub initrd_sha256: String,
+    pub raw_bytes: i64,
+    pub last_accessed_at_ms: i64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Db {
     tx: mpsc::Sender<Op>,
@@ -120,6 +132,20 @@ enum Op {
     },
     UpsertDesiredState {
         row: Box<DesiredStateRow>,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    TouchImageCacheEntry {
+        row: Box<ImageCacheAccessRow>,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    LoadImageCacheAccess {
+        resp: oneshot::Sender<Result<Vec<ImageCacheAccessRow>>>,
+    },
+    LoadLocalVmImageShas {
+        resp: oneshot::Sender<Result<Vec<String>>>,
+    },
+    DeleteImageCacheAccess {
+        image_sha256: String,
         resp: oneshot::Sender<Result<()>>,
     },
 }
@@ -350,6 +376,60 @@ impl Db {
             .await
             .context("db thread dropped desired state upsert response")?
     }
+
+    pub async fn touch_image_cache_entry(&self, row: ImageCacheAccessRow) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
+        self.tx
+            .send(Op::TouchImageCacheEntry {
+                row: Box::new(row),
+                resp: resp_tx,
+            })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped image cache touch response")?
+    }
+
+    pub async fn load_image_cache_access(&self) -> Result<Vec<ImageCacheAccessRow>> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<ImageCacheAccessRow>>>();
+        self.tx
+            .send(Op::LoadImageCacheAccess { resp: resp_tx })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped image cache access response")?
+    }
+
+    pub async fn load_local_vm_image_shas(&self) -> Result<Vec<String>> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<Vec<String>>>();
+        self.tx
+            .send(Op::LoadLocalVmImageShas { resp: resp_tx })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped local vm image sha load response")?
+    }
+
+    pub async fn delete_image_cache_access(&self, image_sha256: String) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
+        self.tx
+            .send(Op::DeleteImageCacheAccess {
+                image_sha256,
+                resp: resp_tx,
+            })
+            .await
+            .context("db channel closed")?;
+
+        resp_rx
+            .await
+            .context("db thread dropped image cache delete response")?
+    }
 }
 
 fn db_thread_main(
@@ -437,6 +517,18 @@ fn db_thread_main(
             Op::UpsertDesiredState { row, resp } => {
                 let _ = resp.send(upsert_desired_state(&conn, &row));
             }
+            Op::TouchImageCacheEntry { row, resp } => {
+                let _ = resp.send(touch_image_cache_entry(&conn, &row));
+            }
+            Op::LoadImageCacheAccess { resp } => {
+                let _ = resp.send(load_image_cache_access(&conn));
+            }
+            Op::LoadLocalVmImageShas { resp } => {
+                let _ = resp.send(load_local_vm_image_shas(&conn));
+            }
+            Op::DeleteImageCacheAccess { image_sha256, resp } => {
+                let _ = resp.send(delete_image_cache_access(&conn, &image_sha256));
+            }
         }
     }
 }
@@ -487,6 +579,8 @@ fn ensure_baseline_schema(conn: &Connection) -> Result<()> {
 fn schema_is_compatible(conn: &Connection) -> Result<bool> {
     let requirements = [
         ("vms", "name"),
+        ("vms", "image_key"),
+        ("vms", "image_sha256"),
         ("vms", "spool_dir"),
         ("vms", "ssh_public_port"),
         ("vms", "ssh_host_keys_openssh_json"),
@@ -530,6 +624,8 @@ fn load_all_vms(conn: &Connection) -> Result<Vec<VmRow>> {
 SELECT
   name,
   state,
+  image_key,
+  image_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -564,29 +660,31 @@ ORDER BY created_at_s ASC;
             Ok(VmRow {
                 name: row.get(0)?,
                 state: row.get(1)?,
-                created_at_s: row.get(2)?,
-                updated_at_s: row.get(3)?,
-                running_at_s: row.get(4)?,
-                error: row.get(5)?,
-                root_disk_path: row.get(6)?,
-                seed_disk_path: row.get(7)?,
-                mac: row.get(8)?,
-                lease_duration_seconds: row.get(9)?,
-                guest_ip: row.get(10)?,
-                guest_ip_cidr: row.get(11)?,
-                gateway: row.get(12)?,
-                bridge_name: row.get(13)?,
-                ssh_public_port: row.get(14)?,
-                tap_name: row.get(15)?,
-                ch_socket_path: row.get(16)?,
-                ch_pid: row.get(17)?,
-                kino_vsock_cid: row.get(18)?,
-                kino_vsock_port: row.get(19)?,
-                kino_vsock_path: row.get(20)?,
-                ssh_host_keys_openssh_json: row.get(21)?,
-                run_id: row.get(22)?,
-                recording_disk_path: row.get(23)?,
-                spool_dir: row.get(24)?,
+                image_key: row.get(2)?,
+                image_sha256: row.get(3)?,
+                created_at_s: row.get(4)?,
+                updated_at_s: row.get(5)?,
+                running_at_s: row.get(6)?,
+                error: row.get(7)?,
+                root_disk_path: row.get(8)?,
+                seed_disk_path: row.get(9)?,
+                mac: row.get(10)?,
+                lease_duration_seconds: row.get(11)?,
+                guest_ip: row.get(12)?,
+                guest_ip_cidr: row.get(13)?,
+                gateway: row.get(14)?,
+                bridge_name: row.get(15)?,
+                ssh_public_port: row.get(16)?,
+                tap_name: row.get(17)?,
+                ch_socket_path: row.get(18)?,
+                ch_pid: row.get(19)?,
+                kino_vsock_cid: row.get(20)?,
+                kino_vsock_port: row.get(21)?,
+                kino_vsock_path: row.get(22)?,
+                ssh_host_keys_openssh_json: row.get(23)?,
+                run_id: row.get(24)?,
+                recording_disk_path: row.get(25)?,
+                spool_dir: row.get(26)?,
             })
         })
         .context("query load_all_vms")?;
@@ -601,6 +699,8 @@ fn upsert_vm(conn: &Connection, row: &VmRow) -> Result<()> {
 INSERT INTO vms (
   name,
   state,
+  image_key,
+  image_sha256,
   created_at_s,
   updated_at_s,
   running_at_s,
@@ -625,10 +725,12 @@ INSERT INTO vms (
   recording_disk_path,
   spool_dir
 ) VALUES (
-  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
 )
 ON CONFLICT(name) DO UPDATE SET
   state = excluded.state,
+  image_key = excluded.image_key,
+  image_sha256 = excluded.image_sha256,
   created_at_s = excluded.created_at_s,
   updated_at_s = excluded.updated_at_s,
   running_at_s = excluded.running_at_s,
@@ -656,6 +758,8 @@ ON CONFLICT(name) DO UPDATE SET
         params![
             row.name,
             row.state,
+            row.image_key,
+            row.image_sha256,
             row.created_at_s,
             row.updated_at_s,
             row.running_at_s,
@@ -992,10 +1096,99 @@ ON CONFLICT(id) DO UPDATE SET
     Ok(())
 }
 
+fn touch_image_cache_entry(conn: &Connection, row: &ImageCacheAccessRow) -> Result<()> {
+    conn.execute(
+        r#"
+INSERT INTO image_cache_access (
+  image_sha256,
+  image_key,
+  kernel_sha256,
+  initrd_sha256,
+  raw_bytes,
+  last_accessed_at_ms
+) VALUES (
+  ?1, ?2, ?3, ?4, ?5, ?6
+)
+ON CONFLICT(image_sha256) DO UPDATE SET
+  image_key = excluded.image_key,
+  kernel_sha256 = excluded.kernel_sha256,
+  initrd_sha256 = excluded.initrd_sha256,
+  raw_bytes = excluded.raw_bytes,
+  last_accessed_at_ms = excluded.last_accessed_at_ms;
+"#,
+        params![
+            row.image_sha256,
+            row.image_key,
+            row.kernel_sha256,
+            row.initrd_sha256,
+            row.raw_bytes,
+            row.last_accessed_at_ms,
+        ],
+    )
+    .context("touch image cache entry")?;
+    Ok(())
+}
+
+fn load_image_cache_access(conn: &Connection) -> Result<Vec<ImageCacheAccessRow>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+SELECT image_key, image_sha256, kernel_sha256, initrd_sha256, raw_bytes, last_accessed_at_ms
+FROM image_cache_access
+ORDER BY last_accessed_at_ms ASC, image_sha256 ASC;
+"#,
+        )
+        .context("prepare load_image_cache_access")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ImageCacheAccessRow {
+                image_key: row.get(0)?,
+                image_sha256: row.get(1)?,
+                kernel_sha256: row.get(2)?,
+                initrd_sha256: row.get(3)?,
+                raw_bytes: row.get(4)?,
+                last_accessed_at_ms: row.get(5)?,
+            })
+        })
+        .context("query image_cache_access")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect image_cache_access")
+}
+
+fn load_local_vm_image_shas(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+SELECT DISTINCT image_sha256
+FROM vms
+WHERE image_sha256 IS NOT NULL
+  AND image_sha256 <> ''
+ORDER BY image_sha256 ASC;
+"#,
+        )
+        .context("prepare load local vm image sha query")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query local vm image shas")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect local vm image shas")
+}
+
+fn delete_image_cache_access(conn: &Connection, image_sha256: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM image_cache_access WHERE image_sha256 = ?1;",
+        params![image_sha256],
+    )
+    .context("delete image cache access")?;
+    Ok(())
+}
+
 const BASELINE_SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS vms (
   name TEXT PRIMARY KEY,
   state TEXT NOT NULL,
+  image_key TEXT,
+  image_sha256 TEXT,
   created_at_s INTEGER NOT NULL,
   updated_at_s INTEGER NOT NULL,
   running_at_s INTEGER,
@@ -1067,6 +1260,18 @@ CREATE TABLE IF NOT EXISTS desired_state (
   updated_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS image_cache_access (
+  image_sha256 TEXT PRIMARY KEY,
+  image_key TEXT NOT NULL,
+  kernel_sha256 TEXT NOT NULL,
+  initrd_sha256 TEXT NOT NULL,
+  raw_bytes INTEGER NOT NULL,
+  last_accessed_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_cache_access_lru
+  ON image_cache_access(last_accessed_at_ms);
+
 "#;
 
 #[cfg(test)]
@@ -1085,9 +1290,12 @@ mod tests {
     fn upsert_vm_persists_row_with_ssh_public_port() {
         let path = test_db_path();
         let conn = open_prepared_connection(&path).expect("open db");
+        let image_sha = "1".repeat(64);
         let row = VmRow {
             name: "vm-1".to_string(),
             state: "running".to_string(),
+            image_key: Some("ubuntu".to_string()),
+            image_sha256: Some(image_sha.clone()),
             created_at_s: 100,
             updated_at_s: 200,
             running_at_s: Some(150),
@@ -1118,6 +1326,8 @@ mod tests {
         let rows = load_all_vms(&conn).expect("load vms");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "vm-1");
+        assert_eq!(rows[0].image_key.as_deref(), Some("ubuntu"));
+        assert_eq!(rows[0].image_sha256.as_deref(), Some(image_sha.as_str()));
         assert_eq!(rows[0].ssh_public_port, Some(22001));
         assert_eq!(rows[0].guest_ip_cidr.as_deref(), Some("10.200.0.2/28"));
         assert_eq!(rows[0].gateway.as_deref(), Some("10.200.0.1"));
@@ -1127,6 +1337,53 @@ mod tests {
             Some(r#"["ssh-ed25519 AAAAHOST host"]"#)
         );
         assert_eq!(rows[0].spool_dir.as_deref(), Some("/tmp/spool"));
+        assert_eq!(
+            load_local_vm_image_shas(&conn).expect("load vm image shas"),
+            vec![image_sha]
+        );
+    }
+
+    #[test]
+    fn image_cache_access_round_trips_and_orders_by_lru() {
+        let path = test_db_path();
+        let conn = open_prepared_connection(&path).expect("open db");
+        touch_image_cache_entry(
+            &conn,
+            &ImageCacheAccessRow {
+                image_key: "ubuntu".to_string(),
+                image_sha256: "b".repeat(64),
+                kernel_sha256: "c".repeat(64),
+                initrd_sha256: "d".repeat(64),
+                raw_bytes: 2048,
+                last_accessed_at_ms: 20,
+            },
+        )
+        .expect("touch newer");
+        touch_image_cache_entry(
+            &conn,
+            &ImageCacheAccessRow {
+                image_key: "debian".to_string(),
+                image_sha256: "a".repeat(64),
+                kernel_sha256: "e".repeat(64),
+                initrd_sha256: "f".repeat(64),
+                raw_bytes: 1024,
+                last_accessed_at_ms: 10,
+            },
+        )
+        .expect("touch older");
+
+        let rows = load_image_cache_access(&conn).expect("load cache access");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.image_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["debian", "ubuntu"]
+        );
+
+        delete_image_cache_access(&conn, &"a".repeat(64)).expect("delete access");
+        let rows = load_image_cache_access(&conn).expect("reload cache access");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].image_key, "ubuntu");
     }
 
     #[test]

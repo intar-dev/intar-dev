@@ -32,6 +32,7 @@ import {
   maintainHostBuildAssignments,
   recordHostBuildReports,
 } from "@/lib/build-scheduler";
+import { expireOverdueRunLeases } from "@/lib/scenario-runs";
 import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
@@ -39,6 +40,7 @@ import {
 import type { BridgeMessageV5, HostDesiredStateV1 } from "@/generated/bridge";
 
 const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
+const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
 
 interface SocketAttachment {
   hostId: string;
@@ -47,6 +49,7 @@ interface SocketAttachment {
   helloReceived: boolean;
   bridgeProtocol: "v5" | null;
   lastDesiredVersionSent: number | null;
+  lastDesiredDispatchAtMs: number | null;
 }
 
 export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
@@ -151,6 +154,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       helloReceived: false,
       bridgeProtocol: null,
       lastDesiredVersionSent: null,
+      lastDesiredDispatchAtMs: null,
     } satisfies SocketAttachment);
 
     await this.scheduleNextAlarm(hostId);
@@ -273,6 +277,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         message.last_applied_desired_version === desiredState.version
           ? desiredState.version
           : null,
+      lastDesiredDispatchAtMs: null,
     };
     ws.serializeAttachment(nextAttachment);
 
@@ -339,6 +344,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws.serializeAttachment({
       ...attachment,
       lastDesiredVersionSent: state.version,
+      lastDesiredDispatchAtMs: Date.now(),
     });
   }
 
@@ -451,14 +457,27 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   }
 
   private async reconcileHost(hostId: string): Promise<void> {
-    await maintainHostBuildAssignments(drizzle(this.env.DB), hostId, Date.now());
+    const now = Date.now();
+    const db = drizzle(this.env.DB);
+    await maintainHostBuildAssignments(db, hostId, now);
+    await expireOverdueRunLeases(hostId, now, {
+      db,
+      wakeHostRuntime: false,
+    });
 
     const activeSocket = await this.findActiveSocket(hostId);
     if (activeSocket?.attachment.bridgeProtocol === "v5") {
+      const lag = await this.loadDesiredVersionLag(hostId, now);
+      const shouldRepushLaggingVersion =
+        lag.lagging &&
+        (activeSocket.attachment.lastDesiredDispatchAtMs === null ||
+          now - activeSocket.attachment.lastDesiredDispatchAtMs >
+            DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
       await this.dispatchBridgeDesiredStateIfNeeded(
         hostId,
         activeSocket.socket,
         activeSocket.attachment,
+        { force: shouldRepushLaggingVersion },
       );
     }
 
@@ -469,6 +488,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     hostId: string,
     ws: WebSocket,
     attachment: SocketAttachment,
+    options?: { force?: boolean },
   ): Promise<void> {
     if (
       attachment.bridgeProtocol !== "v5" ||
@@ -488,7 +508,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       hostId,
       Date.now(),
     );
-    if (attachment.lastDesiredVersionSent === desiredState.version) {
+    if (!options?.force && attachment.lastDesiredVersionSent === desiredState.version) {
       return;
     }
 
@@ -599,8 +619,41 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     await this.ctx.storage.setAlarm(next);
   }
 
-  private async computeNextAlarm(_hostId: string): Promise<number | null> {
-    return Date.now() + HOST_BUILD_MAINTENANCE_INTERVAL_MS;
+  private async computeNextAlarm(hostId: string): Promise<number | null> {
+    const now = Date.now();
+    const activeSocket = await this.findActiveSocket(hostId);
+    const desiredState = await loadOrCreateHostDesiredState(
+      drizzle(this.env.DB),
+      hostId,
+      now,
+    );
+    const lag = await this.loadDesiredVersionLag(hostId, now, desiredState);
+    const undeliveredDesired = activeSocket
+      ? activeSocket.attachment.lastDesiredVersionSent !== desiredState.version
+      : false;
+    const nextLeaseExpiry = desiredState.vms
+      .filter((vm) => vm.desired_phase === "running")
+      .map((vm) => vm.lease_expires_at_unix_ms)
+      .sort((left, right) => left - right)[0];
+
+    if (
+      !activeSocket &&
+      !undeliveredDesired &&
+      !lag.lagging &&
+      typeof nextLeaseExpiry !== "number" &&
+      desiredState.builds.length === 0
+    ) {
+      return null;
+    }
+
+    const candidates = [now + HOST_BUILD_MAINTENANCE_INTERVAL_MS];
+    if (typeof nextLeaseExpiry === "number") {
+      candidates.push(Math.max(now, nextLeaseExpiry));
+    }
+    if (lag.lagging) {
+      candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
+    }
+    return Math.min(...candidates);
   }
 
   private async handleSocketClosed(ws: WebSocket): Promise<void> {
@@ -732,10 +785,39 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           parsed.lastDesiredVersionSent >= 0
             ? Math.floor(parsed.lastDesiredVersionSent)
             : null,
+        lastDesiredDispatchAtMs:
+          typeof parsed.lastDesiredDispatchAtMs === "number" &&
+          Number.isFinite(parsed.lastDesiredDispatchAtMs) &&
+          parsed.lastDesiredDispatchAtMs >= 0
+            ? Math.floor(parsed.lastDesiredDispatchAtMs)
+            : null,
       };
     } catch {
       return null;
     }
+  }
+
+  private async loadDesiredVersionLag(
+    hostId: string,
+    nowUnixMs: number,
+    desiredState?: HostDesiredStateV1,
+  ): Promise<{ lagging: boolean; desiredVersion: number; appliedVersion: number | null }> {
+    const db = drizzle(this.env.DB);
+    const desired =
+      desiredState ?? (await loadOrCreateHostDesiredState(db, hostId, nowUnixMs));
+    const rows = await db
+      .select({
+        appliedDesiredVersion: hostActualState.appliedDesiredVersion,
+      })
+      .from(hostActualState)
+      .where(eq(hostActualState.hostId, hostId))
+      .limit(1);
+    const appliedVersion = rows[0]?.appliedDesiredVersion ?? null;
+    return {
+      lagging: appliedVersion !== null && appliedVersion < desired.version,
+      desiredVersion: desired.version,
+      appliedVersion,
+    };
   }
 
   private async loadKnownHostId(): Promise<string | null> {

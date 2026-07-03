@@ -16,12 +16,14 @@ import {
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
+import { hostHealth, type HostHealth } from "@/lib/host-health";
 
 export const prerender = false;
 
 interface HostActualStateSummary {
   appliedDesiredVersion: number;
   observedAt: number;
+  health: HostHealth;
   capacity: HostStateReportV1["capacity"];
   capabilities: HostStateReportV1["capabilities"];
   cachedImages: HostStateReportV1["cached_images"];
@@ -112,6 +114,7 @@ async function loadHostActualStateSummary(
   return {
     appliedDesiredVersion: row.appliedDesiredVersion,
     observedAt: row.observedAt,
+    health: hostHealth(row.observedAt, Date.now()),
     capacity: row.reportJson.capacity,
     capabilities: row.reportJson.capabilities,
     cachedImages: row.reportJson.cached_images,

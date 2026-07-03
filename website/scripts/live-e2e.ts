@@ -81,6 +81,7 @@ interface HostRunsResponse {
     run_id: string | null;
     details: {
       guest_ip: string | null;
+      ssh_authorized_key_openssh?: string | null;
     } | null;
   }>;
 }
@@ -193,6 +194,13 @@ interface BrowserTerminalSessionResponse {
   };
 }
 
+interface VerifiedTerminalSession {
+  runId: string;
+  vmId: string;
+  runtimeVmName: string;
+  websocketUrl: string;
+}
+
 class HttpError extends Error {
   readonly status: number;
   readonly body: unknown;
@@ -222,6 +230,7 @@ async function runLiveE2e(options: Options): Promise<void> {
     ),
   );
   const runIdsToTeardown: string[] = [];
+  const terminalSessionsByRunId = new Map<string, VerifiedTerminalSession[]>();
   let mainError: unknown = null;
 
   try {
@@ -280,6 +289,16 @@ async function runLiveE2e(options: Options): Promise<void> {
       options.waitReadyMs,
       options.pollMs,
     );
+    const primarySameRunPeerIpsByVmName =
+      !options.skipTerminalProbe && readyRun.vms.length > 1
+        ? await waitForSameRunPeerIps({
+            client,
+            hostId: host.id,
+            run: readyRun,
+            timeoutMs: options.waitReadyMs,
+            pollMs: options.pollMs,
+          })
+        : new Map<string, string[]>();
     const readyElapsedMs = Date.now() - startedAt;
     if (readyElapsedMs > options.warmStartBudgetMs) {
       throw new Error(
@@ -289,9 +308,17 @@ async function runLiveE2e(options: Options): Promise<void> {
     logStep(`terminal ready in ${readyElapsedMs}ms`);
 
     await verifyRunContentGating(client, readyRun);
+    await verifyDistinctVmTerminalKeys({
+      client,
+      hostId: host.id,
+      run: readyRun,
+      timeoutMs: options.waitReadyMs,
+      pollMs: options.pollMs,
+    });
 
     let primaryForbiddenIps = options.forbiddenIps;
     let secondaryReadyRun: ScenarioRun | null = null;
+    let secondarySameRunPeerIpsByVmName = new Map<string, string[]>();
     let secondaryForbiddenIps = options.forbiddenIps;
     if (options.crossRunScenarioId) {
       if (options.crossRunScenarioId === options.scenarioId) {
@@ -314,6 +341,23 @@ async function runLiveE2e(options: Options): Promise<void> {
         options.waitReadyMs,
         options.pollMs,
       );
+      await verifyDistinctVmTerminalKeys({
+        client,
+        hostId: host.id,
+        run: secondaryReadyRun,
+        timeoutMs: options.waitReadyMs,
+        pollMs: options.pollMs,
+      });
+      secondarySameRunPeerIpsByVmName =
+        !options.skipTerminalProbe && secondaryReadyRun.vms.length > 1
+          ? await waitForSameRunPeerIps({
+              client,
+              hostId: host.id,
+              run: secondaryReadyRun,
+              timeoutMs: options.waitReadyMs,
+              pollMs: options.pollMs,
+            })
+          : new Map<string, string[]>();
       const crossRunIps = await waitForCrossRunGuestIps({
         client,
         hostId: host.id,
@@ -335,18 +379,26 @@ async function runLiveE2e(options: Options): Promise<void> {
       );
     }
 
-    await verifyTerminalSessions(
-      client,
-      readyRun,
-      options,
-      primaryForbiddenIps,
-    );
-    if (secondaryReadyRun) {
+    terminalSessionsByRunId.set(
+      readyRun.id,
       await verifyTerminalSessions(
         client,
-        secondaryReadyRun,
+        readyRun,
         options,
-        secondaryForbiddenIps,
+        primaryForbiddenIps,
+        primarySameRunPeerIpsByVmName,
+      ),
+    );
+    if (secondaryReadyRun) {
+      terminalSessionsByRunId.set(
+        secondaryReadyRun.id,
+        await verifyTerminalSessions(
+          client,
+          secondaryReadyRun,
+          options,
+          secondaryForbiddenIps,
+          secondarySameRunPeerIpsByVmName,
+        ),
       );
     }
     logStep("terminal routes and isolation probes verified");
@@ -358,7 +410,12 @@ async function runLiveE2e(options: Options): Promise<void> {
       let teardownFailure: unknown = null;
       try {
         for (const teardownRunId of [...runIdsToTeardown].reverse()) {
-          await teardownAndVerify(client, teardownRunId, options);
+          await teardownAndVerify(
+            client,
+            teardownRunId,
+            options,
+            terminalSessionsByRunId.get(teardownRunId) ?? [],
+          );
         }
       } catch (teardownError) {
         if (!mainError) {
@@ -1050,7 +1107,9 @@ async function verifyTerminalSessions(
   run: ScenarioRun,
   options: Options,
   forbiddenIps: string[],
-): Promise<void> {
+  sameRunPeerIpsByVmName: Map<string, string[]>,
+): Promise<VerifiedTerminalSession[]> {
+  const sessions: VerifiedTerminalSession[] = [];
   for (const vm of [...run.vms].sort(
     (left, right) => left.ordinal - right.ordinal,
   )) {
@@ -1069,6 +1128,12 @@ async function verifyTerminalSessions(
         `browser terminal session missing websocket URL for ${vm.runtimeVmName}`,
       );
     }
+    sessions.push({
+      runId: run.id,
+      vmId: vm.id,
+      runtimeVmName: vm.runtimeVmName,
+      websocketUrl: session.browser.websocketUrl,
+    });
     if (options.skipTerminalProbe) {
       logStep(`terminal probe skipped for ${vm.runtimeVmName}`);
       continue;
@@ -1079,11 +1144,60 @@ async function verifyTerminalSessions(
       origin: new URL(options.baseUrl).origin,
       marker,
       forbiddenIps,
+      sameRunPeerIps: sameRunPeerIpsByVmName.get(vm.runtimeVmName) ?? [],
       timeoutMs: options.terminalProbeTimeoutMs,
     });
-    assertTerminalProbeOutput(output, marker, forbiddenIps);
+    assertTerminalProbeOutput(
+      output,
+      marker,
+      forbiddenIps,
+      sameRunPeerIpsByVmName.get(vm.runtimeVmName) ?? [],
+    );
     logStep(`terminal probe passed for ${vm.runtimeVmName}`);
   }
+  return sessions;
+}
+
+async function verifyDistinctVmTerminalKeys(input: {
+  client: ApiClient;
+  hostId: string;
+  run: ScenarioRun;
+  timeoutMs: number;
+  pollMs: number;
+}): Promise<void> {
+  if (input.run.vms.length < 2) {
+    return;
+  }
+  const expectedVmNames = input.run.vms.map((vm) => vm.runtimeVmName);
+  const deadline = Date.now() + input.timeoutMs;
+  let lastDetail = "host runs not checked yet";
+
+  while (Date.now() <= deadline) {
+    const response = await input.client.json<HostRunsResponse>(
+      `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
+    );
+    const keysByVmName = sshAuthorizedKeyMapForRun(response, input.run.id);
+    const missing = expectedVmNames.filter((name) => !keysByVmName.has(name));
+    if (!missing.length) {
+      const keys = expectedVmNames.map((name) => keysByVmName.get(name) ?? "");
+      const uniqueKeys = new Set(keys);
+      if (uniqueKeys.size !== keys.length) {
+        throw new Error(
+          `same run reused SSH authorized keys across VMs: ${[...keysByVmName.keys()].join(",")}`,
+        );
+      }
+      logStep(
+        `distinct per-VM terminal keys verified for ${input.run.id}: ${expectedVmNames.join(",")}`,
+      );
+      return;
+    }
+    lastDetail = `missing=${missing.join(",") || "none"} seen=${[
+      ...keysByVmName.keys(),
+    ].join(",")}`;
+    await sleep(input.pollMs);
+  }
+
+  throw new Error(`timed out waiting for per-VM terminal keys: ${lastDetail}`);
 }
 
 async function runTerminalProbe(input: {
@@ -1091,6 +1205,7 @@ async function runTerminalProbe(input: {
   origin: string;
   marker: string;
   forbiddenIps: string[];
+  sameRunPeerIps: string[];
   timeoutMs: number;
 }): Promise<string> {
   type HeaderWebSocket = new (
@@ -1152,7 +1267,11 @@ async function runTerminalProbe(input: {
             opened = true;
             websocket.send(
               new TextEncoder().encode(
-                terminalProbeCommand(input.marker, input.forbiddenIps),
+                terminalProbeCommand(
+                  input.marker,
+                  input.forbiddenIps,
+                  input.sameRunPeerIps,
+                ),
               ),
             );
           } else if (control?.type === "error") {
@@ -1186,7 +1305,11 @@ async function runTerminalProbe(input: {
   });
 }
 
-function terminalProbeCommand(marker: string, forbiddenIps: string[]): string {
+function terminalProbeCommand(
+  marker: string,
+  forbiddenIps: string[],
+  sameRunPeerIps: string[],
+): string {
   const lines = [
     `printf '\\n${marker}_BEGIN\\n'`,
     "if command -v curl >/dev/null 2>&1; then",
@@ -1210,6 +1333,14 @@ function terminalProbeCommand(marker: string, forbiddenIps: string[]): string {
     );
   });
 
+  sameRunPeerIps.forEach((ip, index) => {
+    const variable = `peer_ip_${index}`;
+    lines.push(`${variable}=${shellQuote(ip)}`);
+    lines.push(
+      `timeout 4 bash -lc ":</dev/tcp/\${${variable}}/22" >/dev/null 2>&1 && echo "${marker}:peer_${index}=reachable" || echo "${marker}:peer_${index}=blocked"`,
+    );
+  });
+
   lines.push(`printf '${marker}_END\\n'`);
   return `${lines.join("\n")}\n`;
 }
@@ -1218,6 +1349,7 @@ function assertTerminalProbeOutput(
   output: string,
   marker: string,
   forbiddenIps: string[],
+  sameRunPeerIps: string[],
 ): void {
   if (!output.includes(`${marker}:metadata=blocked`)) {
     throw new Error(
@@ -1233,6 +1365,13 @@ function assertTerminalProbeOutput(
     if (!output.includes(`${marker}:forbidden_${index}=blocked`)) {
       throw new Error(
         `forbidden IP ${ip} was reachable or not conclusively blocked`,
+      );
+    }
+  });
+  sameRunPeerIps.forEach((ip, index) => {
+    if (!output.includes(`${marker}:peer_${index}=reachable`)) {
+      throw new Error(
+        `same-run peer IP ${ip} was not reachable or probe output was incomplete`,
       );
     }
   });
@@ -1268,6 +1407,47 @@ async function waitForCrossRunGuestIps(input: {
   throw new Error(`timed out waiting for cross-run guest IPs: ${lastDetail}`);
 }
 
+async function waitForSameRunPeerIps(input: {
+  client: ApiClient;
+  hostId: string;
+  run: ScenarioRun;
+  timeoutMs: number;
+  pollMs: number;
+}): Promise<Map<string, string[]>> {
+  const expectedVmNames = input.run.vms.map((vm) => vm.runtimeVmName);
+  const deadline = Date.now() + input.timeoutMs;
+  let lastDetail = "host runs not checked yet";
+
+  while (Date.now() <= deadline) {
+    const response = await input.client.json<HostRunsResponse>(
+      `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
+    );
+    const guestIpByVmName = guestIpMapForRun(response, input.run.id);
+    const missing = expectedVmNames.filter((name) => !guestIpByVmName.has(name));
+    if (!missing.length) {
+      const peersByVm = sameRunPeerIpsByVmName(input.run, guestIpByVmName);
+      const peerCount = [...peersByVm.values()].reduce(
+        (sum, peers) => sum + peers.length,
+        0,
+      );
+      logStep(
+        `same-run guest IPs ${[...guestIpByVmName.entries()]
+          .map(([name, ip]) => `${name}=${ip}`)
+          .join(",")} peer_checks=${peerCount}`,
+      );
+      return peersByVm;
+    }
+    lastDetail = `missing=${missing.join(",") || "none"} seen=${[
+      ...guestIpByVmName.entries(),
+    ]
+      .map(([name, ip]) => `${name}=${ip}`)
+      .join(",")}`;
+    await sleep(input.pollMs);
+  }
+
+  throw new Error(`timed out waiting for same-run guest IPs: ${lastDetail}`);
+}
+
 function guestIpsForRun(response: HostRunsResponse, runId: string): string[] {
   return unique(
     response.liveVms
@@ -1277,10 +1457,56 @@ function guestIpsForRun(response: HostRunsResponse, runId: string): string[] {
   );
 }
 
+function guestIpMapForRun(
+  response: HostRunsResponse,
+  runId: string,
+): Map<string, string> {
+  const values = new Map<string, string>();
+  for (const vm of response.liveVms) {
+    const guestIp = vm.details?.guest_ip?.trim();
+    if (vm.run_id === runId && guestIp) {
+      values.set(vm.name, guestIp);
+    }
+  }
+  return values;
+}
+
+function sshAuthorizedKeyMapForRun(
+  response: HostRunsResponse,
+  runId: string,
+): Map<string, string> {
+  const values = new Map<string, string>();
+  for (const vm of response.liveVms) {
+    const publicKey = vm.details?.ssh_authorized_key_openssh?.trim();
+    if (vm.run_id === runId && publicKey) {
+      values.set(vm.name, publicKey);
+    }
+  }
+  return values;
+}
+
+function sameRunPeerIpsByVmName(
+  run: ScenarioRun,
+  guestIpByVmName: Map<string, string>,
+): Map<string, string[]> {
+  const peers = new Map<string, string[]>();
+  for (const vm of run.vms) {
+    peers.set(
+      vm.runtimeVmName,
+      run.vms
+        .filter((other) => other.id !== vm.id)
+        .map((other) => guestIpByVmName.get(other.runtimeVmName))
+        .filter((ip): ip is string => typeof ip === "string" && ip.length > 0),
+    );
+  }
+  return peers;
+}
+
 async function teardownAndVerify(
   client: ApiClient,
   runId: string,
   options: Options,
+  terminalSessions: VerifiedTerminalSession[],
 ): Promise<void> {
   await client.json(
     `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
@@ -1302,7 +1528,132 @@ async function teardownAndVerify(
   if (artifacts[0]) {
     await assertArtifactReadable(client, completed.id, artifacts[0]);
   }
+  await assertTerminalSessionsRevoked(
+    client,
+    completed,
+    terminalSessions,
+    options,
+  );
   logStep(`teardown complete with ${artifacts.length} artifact(s)`);
+}
+
+async function assertTerminalSessionsRevoked(
+  client: ApiClient,
+  run: ScenarioRun,
+  terminalSessions: VerifiedTerminalSession[],
+  options: Options,
+): Promise<void> {
+  await assertFreshTerminalSessionsRejected(client, run);
+  if (terminalSessions.length) {
+    await Promise.all(
+      terminalSessions.map((session) =>
+        assertOldTerminalWebSocketRejected(session, options),
+      ),
+    );
+  }
+  logStep(`terminal session revocation verified for ${run.id}`);
+}
+
+async function assertFreshTerminalSessionsRejected(
+  client: ApiClient,
+  run: ScenarioRun,
+): Promise<void> {
+  for (const vm of run.vms) {
+    const response = await client.raw(
+      `/api/scenarios/runs/${encodeURIComponent(run.id)}/ssh`,
+      {
+        method: "POST",
+        json: {
+          vmId: vm.id,
+          mode: "browser",
+        },
+      },
+    );
+    if (response.ok) {
+      throw new Error(
+        `fresh terminal session was issued after teardown for ${vm.runtimeVmName}`,
+      );
+    }
+    if (response.status < 400 || response.status >= 500) {
+      const body = await parseResponseBody(response);
+      throw new HttpError(
+        `fresh terminal session rejection used unexpected status for ${vm.runtimeVmName}`,
+        response.status,
+        body,
+      );
+    }
+  }
+}
+
+async function assertOldTerminalWebSocketRejected(
+  session: VerifiedTerminalSession,
+  options: Options,
+): Promise<void> {
+  type HeaderWebSocket = new (
+    url: string,
+    options?: { headers?: Record<string, string> },
+  ) => WebSocket;
+  const WebSocketWithHeaders =
+    globalThis.WebSocket as unknown as HeaderWebSocket;
+  const websocket = new WebSocketWithHeaders(session.websocketUrl, {
+    headers: { origin: new URL(options.baseUrl).origin },
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `old terminal websocket stayed open after teardown for ${session.runtimeVmName}`,
+          ),
+        ),
+      );
+    }, Math.min(2_000, options.terminalProbeTimeoutMs));
+
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      websocket.removeEventListener("open", handleOpen);
+      websocket.removeEventListener("message", handleMessage);
+      websocket.removeEventListener("error", handleError);
+      websocket.removeEventListener("close", handleClose);
+      try {
+        websocket.close();
+      } catch {
+        // Best-effort close only.
+      }
+      complete();
+    };
+
+    const handleOpen = () => {
+      websocket.send(JSON.stringify({ type: "open", cols: 80, rows: 24 }));
+    };
+    const handleMessage = (event: MessageEvent<unknown>) => {
+      if (typeof event.data === "string") {
+        const control = parseControlMessage(event.data);
+        if (control?.type === "error") {
+          finish(resolve);
+          return;
+        }
+      }
+      finish(() =>
+        reject(
+          new Error(
+            `old terminal websocket accepted traffic after teardown for ${session.runtimeVmName}`,
+          ),
+        ),
+      );
+    };
+    const handleError = () => finish(resolve);
+    const handleClose = () => finish(resolve);
+
+    websocket.addEventListener("open", handleOpen);
+    websocket.addEventListener("message", handleMessage);
+    websocket.addEventListener("error", handleError);
+    websocket.addEventListener("close", handleClose);
+  });
 }
 
 function collectArtifacts(run: ScenarioRun): RunArtifact[] {
@@ -1619,7 +1970,7 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
   const baseUrl = last(values, "base-url") ?? env.INTAR_LIVE_BASE_URL ?? "";
   const cookie = last(values, "cookie") ?? env.INTAR_LIVE_COOKIE ?? "";
   const scenarioId =
-    last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "broken-nginx";
+    last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "pair-ping";
   const crossRunScenarioId =
     last(values, "cross-run-scenario") ??
     env.INTAR_LIVE_CROSS_RUN_SCENARIO_ID ??
@@ -1756,7 +2107,7 @@ Required unless skipped:
   --manifest PATH                Builder manifest JSON. Repeat for multi-VM scenarios.
 
 Useful options:
-  --scenario ID                  Scenario to start. Defaults to broken-nginx.
+  --scenario ID                  Scenario to start. Defaults to pair-ping.
   --cross-run-scenario ID        Optional second scenario for cross-run isolation.
   --host HOST_ID                 Pin the run to a specific host.
   --build-rev REV                Wait for admin image build rows for this bundle revision.

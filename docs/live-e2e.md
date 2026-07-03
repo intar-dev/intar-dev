@@ -58,10 +58,10 @@ but it will skip registry publish and log upload:
 
 ```sh
 intar-builder doctor --config /etc/intar-builder/config.toml
-just bundle-images broken-nginx builder.sample.amd64.hcl local-e2e true
+just bundle-images pair-ping builder.sample.amd64.hcl local-e2e true
 intar-builder run-once \
   --config /etc/intar-builder/config.toml \
-  --scenario broken-nginx \
+  --scenario pair-ping \
   --bundle dist/bundles/local-e2e.tar.gz
 ```
 
@@ -128,10 +128,10 @@ the Linux/KVM builder host, keep the `qemu`, `builder`, and `jobs` sections from
 
 ```sh
 intar-builder doctor --config /etc/intar-builder/config.toml
-just bundle-images broken-nginx builder.sample.amd64.hcl local-e2e true
+just bundle-images pair-ping builder.sample.amd64.hcl local-e2e true
 intar-builder run-once \
   --config /etc/intar-builder/config.toml \
-  --scenario broken-nginx \
+  --scenario pair-ping \
   --bundle dist/bundles/local-e2e.tar.gz
 ```
 
@@ -177,7 +177,7 @@ Use environment variables so shell history does not capture the cookie or token.
 export INTAR_LIVE_BASE_URL="https://intar.dev"
 export INTAR_LIVE_COOKIE="better-auth.session_token=..."
 export INTAR_IMAGE_PUBLISH_TOKEN="..."
-export INTAR_LIVE_MANIFESTS="$PWD/dist/broken-nginx-webserver-amd64.raw.zst.manifest.json"
+export INTAR_LIVE_MANIFESTS="$PWD/dist/pair-ping-web-amd64.raw.zst.manifest.json,$PWD/dist/pair-ping-db-amd64.raw.zst.manifest.json"
 
 just live-e2e
 ```
@@ -221,16 +221,21 @@ The harness fails unless all of these are true:
 - The host reports the published image as cache `ready`.
 - The host reports KVM, vsock, nftables, and reflink support, with an
   architecture matching the required images.
-- A run starts and reaches terminal-ready inside the warm-start budget.
+- The two-VM `pair-ping` run starts and reaches terminal-ready inside the
+  warm-start budget.
 - Run payloads redact unrevealed hint bodies and solution markdown.
 - Skip-ahead hint reveal attempts are rejected without mutating reveal state.
 - The next hint reveal returns only that hint body and keeps later hints gated.
 - The solution body appears only after the explicit solution reveal endpoint.
 - A pre-solve solution reveal marks the run as solution-assisted.
 - Each VM has a reported SSH host key and gets a browser Stargate route.
+- VMs in the same run have distinct generated terminal public keys.
 - Guest terminal probes cannot reach link-local metadata or the host gateway.
+- Same-run peer VM IPs are reachable over TCP port 22.
 - Optional cross-run guest IPs are unreachable over TCP port 22.
 - Teardown reaches `completed`.
+- Fresh terminal session creation and old browser terminal websocket URLs are
+  rejected after teardown.
 - At least one archived artifact is readable from the Worker/R2 artifact route.
 
 The default warm-start budget is `10000` milliseconds. Override only when

@@ -65,6 +65,8 @@ pub struct CreateScenarioVmRuntime {
     pub ssh_authorized_keys_openssh: Vec<String>,
     pub network: Option<CreateScenarioVmRuntimeNetwork>,
     pub kino: Option<CreateScenarioVmRuntimeKino>,
+    #[serde(default)]
+    pub peer_vm_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +117,10 @@ pub struct VmStatusResponse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VmDetails {
+    #[serde(skip_serializing)]
+    pub image_key: Option<String>,
+    #[serde(skip_serializing)]
+    pub image_sha256: Option<String>,
     pub run_id: Option<String>,
     pub root_disk_path: String,
     pub seed_disk_path: String,
@@ -202,6 +208,8 @@ impl VmStatusResponse {
         VmRow {
             name: self.name.clone(),
             state: self.state.as_str().to_string(),
+            image_key: self.details.as_ref().and_then(|d| d.image_key.clone()),
+            image_sha256: self.details.as_ref().and_then(|d| d.image_sha256.clone()),
             created_at_s: self.created_at_s,
             updated_at_s: self.updated_at_s,
             running_at_s: self.running_at_s,
@@ -628,11 +636,27 @@ impl VmManager {
                 "runtime.ssh_authorized_keys_openssh must not be empty",
             ));
         }
+        let mut peer_vm_names = Vec::new();
+        for peer_name in req.runtime.peer_vm_names {
+            let peer_name = peer_name.trim().to_string();
+            if peer_name.is_empty() || peer_name == req.name {
+                continue;
+            }
+            if !is_safe_key(&peer_name) {
+                return Err(ApiError::bad_request(
+                    "runtime.peer_vm_names entries must match [A-Za-z0-9_-]+",
+                ));
+            }
+            if !peer_vm_names.contains(&peer_name) {
+                peer_vm_names.push(peer_name);
+            }
+        }
 
         let runtime = CreateScenarioVmRuntime {
             ssh_authorized_keys_openssh,
             network: req.runtime.network,
             kino: req.runtime.kino,
+            peer_vm_names,
         };
 
         self.queue_vm_create(QueueVmCreateRequest {
@@ -721,7 +745,7 @@ impl VmManager {
         }
 
         let scenario_runtime = &runtime;
-        let (mut network, bridge_name) = match scenario_runtime.network.as_ref() {
+        let (mut network, bridge_name, peer_guest_ips) = match scenario_runtime.network.as_ref() {
             Some(runtime_network) => {
                 let guest_ip_cidr = runtime_network.guest_ip_cidr.clone();
                 let gateway = match runtime_network.gateway.clone() {
@@ -740,9 +764,13 @@ impl VmManager {
                             .unwrap_or_else(|| self.inner.defaults.network.dns.clone()),
                     },
                     run_bridge_name(&run_id),
+                    BTreeMap::new(),
                 )
             }
-            None => allocate_run_network(&self.inner, &run_id, &name).await?,
+            None => {
+                allocate_run_network(&self.inner, &run_id, &name, &scenario_runtime.peer_vm_names)
+                    .await?
+            }
         };
         let normalized_guest_cidr = validate_network(&network).map_err(|e| {
             if scenario_runtime.network.is_some() {
@@ -849,6 +877,8 @@ impl VmManager {
         let mac = mac::generate_local_unicast_mac();
 
         let details = VmDetails {
+            image_key: Some(image_key.clone()),
+            image_sha256: None,
             run_id: Some(run_id.clone()),
             root_disk_path: root_disk_path.display().to_string(),
             seed_disk_path: config_disk_path.display().to_string(),
@@ -907,6 +937,7 @@ impl VmManager {
         let resp_name = name.clone();
         let inner = Arc::clone(&self.inner);
         let network_for_task = network.clone();
+        let peer_guest_ips_for_task = peer_guest_ips.clone();
         let bridge_name_for_task = bridge_name.clone();
         let name_for_task = name.clone();
         let image_key_for_task = image_key.clone();
@@ -943,6 +974,7 @@ impl VmManager {
                 config_disk_path: &config_disk_path,
                 recording_disk_path: &recording_disk_path,
                 network: &network_for_task,
+                peer_guest_ips: &peer_guest_ips_for_task,
                 bridge_name: &bridge_name_for_task,
             };
 
@@ -1185,6 +1217,7 @@ struct RunCreateInput<'a> {
     config_disk_path: &'a Path,
     recording_disk_path: &'a Path,
     network: &'a CreateVmNetwork,
+    peer_guest_ips: &'a BTreeMap<String, String>,
     bridge_name: &'a str,
 }
 
@@ -1284,6 +1317,34 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     )
     .await
     .context("failed to ensure image and boot artifacts are cached")?;
+    if let Err(error) = image_cache::touch_cached_image(&inner.db, &cached_image).await {
+        warn!(
+            error = %error,
+            vm = req.name,
+            image = %cached_image.image_key,
+            "failed to update image cache access metadata"
+        );
+    }
+    {
+        let persisted = {
+            let mut states = inner.states.write().await;
+            let Some(vm) = states.get_mut(req.name) else {
+                return Ok(());
+            };
+            if let Some(details) = vm.details.as_mut() {
+                details.image_key = Some(cached_image.image_key.clone());
+                details.image_sha256 = Some(cached_image.image_sha256.clone());
+            }
+            vm.clone()
+        };
+        if let Err(error) = inner.db.upsert_vm(persisted.to_db_row()).await {
+            warn!(
+                error = %error,
+                vm = req.name,
+                "failed to persist vm cached image identity"
+            );
+        }
+    }
     let base_path = cached_image.raw_path.clone();
     ensure_create_not_deleted(inner, req.name).await?;
 
@@ -1333,6 +1394,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let kino_vsock_port = req.kino_vsock_port;
     let kino_host_ready_port = req.kino_host_ready_port;
     let network = req.network.clone();
+    let peer_guest_ips = req.peer_guest_ips.clone();
     let hostname = req.hostname.to_string();
     tokio::task::spawn_blocking(move || {
         runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
@@ -1343,6 +1405,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             kino_host_ready_port,
             hostname: &hostname,
             network: &network,
+            peer_guest_ips: &peer_guest_ips,
         })
     })
     .await
@@ -1403,6 +1466,20 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     ensure_create_not_deleted(inner, req.name).await?;
 
     let details = VmDetails {
+        image_key: {
+            let states = inner.states.read().await;
+            states
+                .get(req.name)
+                .and_then(|vm| vm.details.as_ref())
+                .and_then(|details| details.image_key.clone())
+        },
+        image_sha256: {
+            let states = inner.states.read().await;
+            states
+                .get(req.name)
+                .and_then(|vm| vm.details.as_ref())
+                .and_then(|details| details.image_sha256.clone())
+        },
         run_id: {
             let states = inner.states.read().await;
             states
@@ -2290,7 +2367,7 @@ async fn upload_vm_run_artifacts(
     if !begin_response.status().is_success() {
         let status = begin_response.status();
         let body = begin_response.text().await.unwrap_or_default();
-        if is_missing_remote_run_vm_begin_response(status, &body) {
+        if is_run_purged_remote_response(status, &body) {
             warn!(
                 vm = vm_name,
                 run_id = prepared.run_id,
@@ -2916,13 +2993,20 @@ fn vm_dir_for_status(vm: &VmStatusResponse) -> Option<PathBuf> {
         .and_then(|root_disk_path| root_disk_path.parent().map(Path::to_path_buf))
 }
 
-fn is_missing_remote_run_vm_begin_response(status: StatusCode, body: &str) -> bool {
-    if status != StatusCode::NOT_FOUND {
+fn is_run_purged_remote_response(status: StatusCode, body: &str) -> bool {
+    if !status.is_client_error() {
         return false;
     }
 
-    body.contains("\"error\":\"run VM not found\"")
-        || body.contains("\"error\": \"run VM not found\"")
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: Option<String>,
+    }
+
+    serde_json::from_str::<ErrorBody>(body)
+        .ok()
+        .and_then(|body| body.code)
+        .is_some_and(|code| code == "run_purged")
 }
 
 #[cfg(target_os = "linux")]
@@ -4169,7 +4253,8 @@ async fn allocate_run_network(
     inner: &Inner,
     run_id: &str,
     vm_name: &str,
-) -> Result<(CreateVmNetwork, String), ApiError> {
+    peer_vm_names: &[String],
+) -> Result<(CreateVmNetwork, String, BTreeMap<String, String>), ApiError> {
     let pool_cidr = inner.defaults.network.guest_cidr.trim();
     let (pool_ip, pool_prefix) = parse_ipv4_cidr(pool_cidr, "vm_defaults.network.guest_cidr")
         .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -4182,21 +4267,27 @@ async fn allocate_run_network(
     let pool_network = ipv4_network_u32(pool_ip, pool_prefix);
     let pool_subnet_count = 1_u32 << u32::from(RUN_SUBNET_PREFIX - pool_prefix);
     let run_bridge = run_bridge_name(run_id);
+    let allocation_names = run_allocation_vm_names(vm_name, peer_vm_names);
 
-    let (used_ips, used_run_subnets, existing_run_network) = {
+    let (used_ips, used_run_subnets, existing_run_network, existing_run_guest_ips) = {
         let states = inner.states.read().await;
         let mut used_ips = BTreeSet::new();
         let mut used_run_subnets = BTreeSet::new();
         let mut existing_run_network = None;
+        let mut existing_run_guest_ips = BTreeMap::new();
 
         for vm in states.values() {
             let Some(details) = vm.details.as_ref() else {
                 continue;
             };
+            let is_same_run = details.run_id.as_deref() == Some(run_id);
             if let Some(guest_ip) = details.guest_ip.as_deref()
                 && let Ok(ip) = guest_ip.parse::<Ipv4Addr>()
             {
                 used_ips.insert(u32::from(ip));
+                if is_same_run {
+                    existing_run_guest_ips.insert(vm.name.clone(), ip);
+                }
             }
             let Some(guest_ip_cidr) = details.guest_ip_cidr.as_deref() else {
                 continue;
@@ -4209,7 +4300,7 @@ async fn allocate_run_network(
             if ipv4_in_prefix(run_subnet, pool_network, pool_prefix) {
                 used_run_subnets.insert(run_subnet);
             }
-            if details.run_id.as_deref() == Some(run_id)
+            if is_same_run
                 && let Some(gateway) = details
                     .gateway
                     .as_deref()
@@ -4223,11 +4314,27 @@ async fn allocate_run_network(
             }
         }
 
-        (used_ips, used_run_subnets, existing_run_network)
+        (
+            used_ips,
+            used_run_subnets,
+            existing_run_network,
+            existing_run_guest_ips,
+        )
     };
 
     if let Some((network, prefix, gateway)) = existing_run_network {
-        let guest_ip = allocate_guest_ip_in_subnet(network, prefix, vm_name, &used_ips, gateway)
+        let allocations = allocate_run_guest_ips(
+            network,
+            prefix,
+            gateway,
+            &used_ips,
+            &existing_run_guest_ips,
+            &allocation_names,
+        )
+        .ok_or_else(|| ApiError::conflict(format!("run {run_id} guest subnet exhausted")))?;
+        let guest_ip = allocations
+            .get(vm_name)
+            .copied()
             .ok_or_else(|| ApiError::conflict(format!("run {run_id} guest subnet exhausted")))?;
         return Ok((
             CreateVmNetwork {
@@ -4236,6 +4343,7 @@ async fn allocate_run_network(
                 dns: inner.defaults.network.dns.clone(),
             },
             run_bridge,
+            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations),
         ));
     }
 
@@ -4249,9 +4357,19 @@ async fn allocate_run_network(
         }
 
         let gateway = Ipv4Addr::from(subnet.saturating_add(1));
-        let guest_ip =
-            allocate_guest_ip_in_subnet(subnet, RUN_SUBNET_PREFIX, vm_name, &used_ips, gateway)
-                .ok_or_else(|| ApiError::conflict("guest IP pool exhausted"))?;
+        let allocations = allocate_run_guest_ips(
+            subnet,
+            RUN_SUBNET_PREFIX,
+            gateway,
+            &used_ips,
+            &existing_run_guest_ips,
+            &allocation_names,
+        )
+        .ok_or_else(|| ApiError::conflict("guest IP pool exhausted"))?;
+        let guest_ip = allocations
+            .get(vm_name)
+            .copied()
+            .ok_or_else(|| ApiError::conflict("guest IP pool exhausted"))?;
         return Ok((
             CreateVmNetwork {
                 guest_ip_cidr: format!("{guest_ip}/{RUN_SUBNET_PREFIX}"),
@@ -4259,10 +4377,66 @@ async fn allocate_run_network(
                 dns: inner.defaults.network.dns.clone(),
             },
             run_bridge,
+            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations),
         ));
     }
 
     Err(ApiError::conflict("per-run guest subnet pool exhausted"))
+}
+
+fn run_allocation_vm_names(vm_name: &str, peer_vm_names: &[String]) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([vm_name.to_string()]);
+    names.extend(
+        peer_vm_names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    names
+}
+
+fn allocate_run_guest_ips(
+    network: u32,
+    prefix: u8,
+    gateway: Ipv4Addr,
+    used_ips: &BTreeSet<u32>,
+    existing_run_guest_ips: &BTreeMap<String, Ipv4Addr>,
+    allocation_names: &BTreeSet<String>,
+) -> Option<BTreeMap<String, Ipv4Addr>> {
+    let mut allocations = BTreeMap::new();
+    let mut reserved = used_ips.clone();
+    for (name, ip) in existing_run_guest_ips {
+        if allocation_names.contains(name) {
+            allocations.insert(name.clone(), *ip);
+            reserved.insert(u32::from(*ip));
+        }
+    }
+    for name in allocation_names {
+        if allocations.contains_key(name) {
+            continue;
+        }
+        let guest_ip = allocate_guest_ip_in_subnet(network, prefix, name, &reserved, gateway)?;
+        reserved.insert(u32::from(guest_ip));
+        allocations.insert(name.clone(), guest_ip);
+    }
+    Some(allocations)
+}
+
+fn peer_guest_ip_strings(
+    peer_vm_names: &[String],
+    current_vm_name: &str,
+    allocations: &BTreeMap<String, Ipv4Addr>,
+) -> BTreeMap<String, String> {
+    peer_vm_names
+        .iter()
+        .filter(|name| name.as_str() != current_vm_name)
+        .filter_map(|name| {
+            allocations
+                .get(name)
+                .map(|ip| (name.clone(), ip.to_string()))
+        })
+        .collect()
 }
 
 fn run_bridge_name(run_id: &str) -> String {
@@ -4487,6 +4661,8 @@ fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
 
     let details = match (&row.root_disk_path, &row.seed_disk_path, &row.mac) {
         (Some(root_disk_path), Some(seed_disk_path), Some(mac)) => Some(VmDetails {
+            image_key: row.image_key.clone(),
+            image_sha256: row.image_sha256.clone(),
             run_id: row.run_id.clone(),
             root_disk_path: root_disk_path.clone(),
             seed_disk_path: seed_disk_path.clone(),
@@ -4868,6 +5044,8 @@ mod tests {
             created_at: "1970-01-01T00:00:00Z".to_string(),
             updated_at: "1970-01-01T00:00:00Z".to_string(),
             details: Some(VmDetails {
+                image_key: None,
+                image_sha256: None,
                 run_id: run_id.map(str::to_string),
                 root_disk_path: format!("/tmp/{name}/root.raw"),
                 seed_disk_path: format!("/tmp/{name}/runtime.img"),
@@ -4940,6 +5118,34 @@ mod tests {
         assert_ne!(first, gateway);
         assert_ne!(second, gateway);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn allocate_run_guest_ips_reserves_existing_peer_addresses() {
+        let subnet = u32::from(Ipv4Addr::new(10, 77, 12, 0));
+        let gateway = Ipv4Addr::new(10, 77, 12, 1);
+        let existing_db = Ipv4Addr::new(10, 77, 12, 3);
+        let used = BTreeSet::from([u32::from(gateway), u32::from(existing_db)]);
+        let existing = BTreeMap::from([("db".to_string(), existing_db)]);
+        let names = run_allocation_vm_names("web", &["db".to_string(), "redis-cache".to_string()]);
+
+        let allocations = allocate_run_guest_ips(subnet, 28, gateway, &used, &existing, &names)
+            .expect("run addresses");
+
+        assert_eq!(allocations.get("db"), Some(&existing_db));
+        assert_ne!(allocations.get("web"), allocations.get("db"));
+        assert_ne!(allocations.get("redis-cache"), allocations.get("db"));
+        assert_eq!(
+            peer_guest_ip_strings(
+                &["db".to_string(), "redis-cache".to_string()],
+                "web",
+                &allocations,
+            )
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+            vec!["db".to_string(), "redis-cache".to_string()]
+        );
     }
 
     #[test]
@@ -5029,22 +5235,22 @@ mod tests {
     }
 
     #[test]
-    fn run_begin_missing_remote_vm_matches_expected_404_payload() {
-        assert!(is_missing_remote_run_vm_begin_response(
-            StatusCode::NOT_FOUND,
-            r#"{"error":"run VM not found"}"#
+    fn run_begin_purged_remote_vm_matches_structured_payload() {
+        assert!(is_run_purged_remote_response(
+            StatusCode::GONE,
+            r#"{"code":"run_purged","error":"remote run is gone"}"#
         ));
-        assert!(is_missing_remote_run_vm_begin_response(
+        assert!(is_run_purged_remote_response(
             StatusCode::NOT_FOUND,
-            r#"{"error": "run VM not found"}"#
+            r#"{"code":"run_purged","error":"remote run is gone"}"#
         ));
-        assert!(!is_missing_remote_run_vm_begin_response(
+        assert!(!is_run_purged_remote_response(
             StatusCode::NOT_FOUND,
-            r#"{"error":"scenario run not found"}"#
+            r#"{"error":"remote run is gone"}"#
         ));
-        assert!(!is_missing_remote_run_vm_begin_response(
-            StatusCode::CONFLICT,
-            r#"{"error":"run VM not found"}"#
+        assert!(!is_run_purged_remote_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"code":"run_purged","error":"remote run is gone"}"#
         ));
     }
 
@@ -5225,9 +5431,13 @@ mod tests {
     #[test]
     fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
         let cached_image = image_cache::CachedImage {
+            image_key: "broken".to_string(),
+            image_sha256: "a".repeat(64),
             raw_path: PathBuf::from("/cache/images/broken.raw"),
             kernel_path: PathBuf::from("/cache/artifacts/vmlinuz"),
             initrd_path: PathBuf::from("/cache/artifacts/initrd.img"),
+            kernel_sha256: "b".repeat(64),
+            initrd_sha256: "c".repeat(64),
             cmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4".to_string(),
             virtual_size_bytes: 2 * 1024 * 1024 * 1024,
         };

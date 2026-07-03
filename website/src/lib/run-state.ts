@@ -91,6 +91,7 @@ export interface RunVmStateDocument {
   terminalTarget: TerminalTarget;
   launchSummary: ScenarioLaunchSummary;
   runtimeState: string | null;
+  runtimeObservedAt: number | null;
   vmCreatedAt: number | null;
   provisioning: RunVmProvisioningSpec;
 }
@@ -202,6 +203,7 @@ export function buildInitialVmState(input: {
     terminalTarget: defaultTerminalTarget(),
     launchSummary: input.launchSummary,
     runtimeState: null,
+    runtimeObservedAt: null,
     vmCreatedAt: null,
     provisioning: {
       image: null,
@@ -275,6 +277,7 @@ export function decorateVmState(vm: RunVmStateDocument): RunVmStateDocument {
     phaseDetail: descriptor.detail,
     progressPercent: descriptor.progressPercent,
     terminalPhase: vm.terminalPhase,
+    runtimeObservedAt: vm.runtimeObservedAt ?? null,
     canOpenTerminal:
       vm.terminalPhase === "ready" && hasTerminalEndpoint(vm.terminalTarget),
     primaryReplayArtifactId:

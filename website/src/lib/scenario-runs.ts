@@ -1,9 +1,11 @@
 import { env } from "cloudflare:workers";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import {
   agentHosts,
+  hostActualState,
   scenarioRunArtifacts,
   scenarioRuns,
   type ScenarioRunHintSnapshot,
@@ -15,7 +17,11 @@ import {
   upsertDesiredCachedImage,
   upsertDesiredVm,
 } from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
+import {
+  loadOrCreateHostDesiredState,
+  mutateStoredHostDesiredState,
+} from "@/lib/desired-state-store";
+import { hostHealth } from "@/lib/host-health";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import {
@@ -53,6 +59,12 @@ import {
   loadEnabledScenario,
   type ScenarioDetailRecord,
 } from "@/lib/scenarios";
+import {
+  hostHasImagesReady,
+  imageKeyIdentity,
+  type RequiredScenarioImage,
+} from "@/lib/scenario-host-readiness";
+import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 import {
   isAvailableScenarioLaunchHost,
   isScenarioLaunchHost,
@@ -142,6 +154,10 @@ interface ScenarioRunContentSnapshot {
 }
 
 const HOST_HEARTBEAT_TTL_MS = 90_000;
+
+type HostSelectionResult =
+  | { ok: true; hostId: string }
+  | { ok: false; reason: "unavailable" | "image_not_ready" };
 
 type ScenarioRouteType =
   | "browser"
@@ -239,7 +255,6 @@ export async function startScenarioRunForUserOnHost(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
-  await assertScenarioLaunchHostForUser(params.hostId, params.userId);
   return startScenarioRunInternal(params);
 }
 
@@ -329,6 +344,77 @@ export async function deleteFinishedScenarioRunForUser(params: {
   await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, row.runId));
 }
 
+export async function expireOverdueRunLeases(
+  hostId: string,
+  nowUnixMs: number,
+  options?: {
+    db?: DrizzleD1Database;
+    wakeHostRuntime?: boolean;
+  },
+): Promise<{ expiredRunIds: string[] }> {
+  const db = options?.db ?? drizzle(env.DB);
+  const desiredState = await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
+  const overdue = selectOverdueRunLeases(desiredState, nowUnixMs);
+  const expiredRunIds: string[] = [];
+
+  for (const lease of overdue) {
+    const row = await loadRunRow(lease.runId);
+    if (!row || row.hostId !== hostId) {
+      continue;
+    }
+    if (row.completedAt !== null || row.failedAt !== null) {
+      continue;
+    }
+
+    const expiredVmNames = new Set(lease.vmNames);
+    const expiredVms = row.state.vms.filter((vm) =>
+      expiredVmNames.has(vm.runtimeVmName),
+    );
+    if (!expiredVms.length) {
+      continue;
+    }
+
+    const next = recomputeRunState({
+      ...row.state,
+      phase: "failed",
+      phaseDetail: "The run lease expired before teardown completed.",
+      vms: row.state.vms.map((vm) =>
+        expiredVmNames.has(vm.runtimeVmName)
+          ? {
+              ...vm,
+              phase: "failed",
+              phaseDetail: "The run lease expired.",
+              terminalPhase: "failed",
+              terminalReason: "The run lease expired.",
+            }
+          : vm,
+      ),
+    });
+
+    await updateRunState(row.runId, {
+      state: next,
+      activeKey: row.activeKey,
+      deleteRequestedAt: row.deleteRequestedAt,
+      solvedAt: row.solvedAt,
+      currentPhase: row.state.phase,
+    });
+    await markRunVmsAbsentInDesiredState({
+      hostId,
+      runId: row.runId,
+      vms: expiredVms,
+      nowUnixMs,
+      db,
+    });
+    expiredRunIds.push(row.runId);
+  }
+
+  if (expiredRunIds.length && options?.wakeHostRuntime !== false) {
+    await tryWakeHostRuntime(hostId);
+  }
+
+  return { expiredRunIds };
+}
+
 export async function createScenarioSshSessionForUser(params: {
   runId: string;
   vmId: string;
@@ -338,6 +424,13 @@ export async function createScenarioSshSessionForUser(params: {
   const row = await loadRunRow(params.runId, params.userId);
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
+  }
+  if (row.completedAt !== null || row.failedAt !== null) {
+    throw appError(
+      409,
+      "scenario_terminal_closed",
+      "terminal sessions are closed for finished runs",
+    );
   }
   const vm = row.state.vms.find((candidate) => candidate.id === params.vmId);
   if (!vm) {
@@ -463,9 +556,32 @@ async function startScenarioRunInternal(params: {
     };
   }
 
-  const hostId = params.hostId ?? (await selectScenarioHost());
-  if (!hostId) {
-    throw appError(409, "scenario_host_unavailable", "no scenario host available");
+  const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
+  let hostId: string;
+  if (params.hostId) {
+    await assertScenarioLaunchHostForUser(
+      params.hostId,
+      params.userId,
+      requiredImages,
+    );
+    hostId = params.hostId;
+  } else {
+    const selection = await selectScenarioHost(requiredImages);
+    if (!selection.ok) {
+      if (selection.reason === "image_not_ready") {
+        throw appError(
+          409,
+          "image_not_ready",
+          "scenario images are not ready on any available host",
+        );
+      }
+      throw appError(
+        409,
+        "scenario_host_unavailable",
+        "no scenario host available",
+      );
+    }
+    hostId = selection.hostId;
   }
 
   const runId = createAppId();
@@ -609,6 +725,7 @@ async function startScenarioRunInternal(params: {
 async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
+  requiredImages: RequiredScenarioImage[],
 ): Promise<void> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -618,8 +735,11 @@ async function assertScenarioLaunchHostForUser(
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
+      actualObservedAt: hostActualState.observedAt,
+      actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
+    .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
     .limit(1);
   const host = rows[0];
@@ -653,12 +773,20 @@ async function assertScenarioLaunchHostForUser(
       },
       Date.now(),
       HOST_HEARTBEAT_TTL_MS,
-    )
+    ) ||
+    hostHealth(host.actualObservedAt ?? null, Date.now()) !== "healthy"
   ) {
     throw appError(
       409,
       "scenario_host_unavailable",
       "host is not connected",
+    );
+  }
+  if (!hostHasImagesReady(host.actualReport, requiredImages)) {
+    throw appError(
+      409,
+      "image_not_ready",
+      "scenario images are not ready on this host",
     );
   }
 }
@@ -951,13 +1079,14 @@ async function markRunVmsAbsentInDesiredState(input: {
   runId: string;
   vms: RunVmStateDocument[];
   nowUnixMs: number;
+  db?: DrizzleD1Database;
 }): Promise<void> {
   if (!input.vms.length) {
     return;
   }
 
   await mutateStoredHostDesiredState(
-    drizzle(env.DB),
+    input.db ?? drizzle(env.DB),
     input.hostId,
     input.nowUnixMs,
     (draft) => {
@@ -969,6 +1098,27 @@ async function markRunVmsAbsentInDesiredState(input: {
       }
     },
   );
+}
+
+function requiredImagesForScenarioLaunch(
+  launchSpecs: Array<{ imageKey: RequiredScenarioImage["imageKey"] | null; imageSha256: string | null }>,
+): RequiredScenarioImage[] {
+  const byIdentity = new Map<string, RequiredScenarioImage>();
+  for (const spec of launchSpecs) {
+    const imageSha256 = spec.imageSha256?.trim() ?? "";
+    if (!spec.imageKey || !imageSha256) {
+      throw appError(
+        409,
+        "image_not_ready",
+        "scenario image metadata is not ready",
+      );
+    }
+    byIdentity.set(imageKeyIdentity(spec.imageKey), {
+      imageKey: spec.imageKey,
+      imageSha256,
+    });
+  }
+  return [...byIdentity.values()];
 }
 
 function buildRunVmRouteUsername(
@@ -1078,7 +1228,9 @@ export async function revokeScenarioNativeProfileRoutesForUser(
   );
 }
 
-async function selectScenarioHost(): Promise<string | null> {
+async function selectScenarioHost(
+  requiredImages: RequiredScenarioImage[],
+): Promise<HostSelectionResult> {
   const db = drizzle(env.DB);
   const now = Date.now();
   const rows = await db
@@ -1090,8 +1242,11 @@ async function selectScenarioHost(): Promise<string | null> {
       lastInventoryAt: agentHosts.lastInventoryAt,
       hostInfoJson: agentHosts.hostInfoJson,
       inventoryJson: agentHosts.inventoryJson,
+      actualObservedAt: hostActualState.observedAt,
+      actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
+    .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(
       and(
         eq(agentHosts.disabled, false),
@@ -1131,11 +1286,19 @@ async function selectScenarioHost(): Promise<string | null> {
           },
           now,
           HOST_HEARTBEAT_TTL_MS,
-        ),
+        ) && hostHealth(row.actualObservedAt ?? null, now) === "healthy",
     );
 
   if (!candidates.length) {
-    return null;
+    return { ok: false, reason: "unavailable" };
+  }
+
+  const imageReadyCandidates = candidates.filter((candidate) =>
+    hostHasImagesReady(candidate.actualReport, requiredImages),
+  );
+
+  if (!imageReadyCandidates.length) {
+    return { ok: false, reason: "image_not_ready" };
   }
 
   const activeRuns = await db
@@ -1147,7 +1310,7 @@ async function selectScenarioHost(): Promise<string | null> {
       and(
         inArray(
           scenarioRuns.hostId,
-          candidates.map((candidate) => candidate.id),
+          imageReadyCandidates.map((candidate) => candidate.id),
         ),
         isNull(scenarioRuns.completedAt),
         isNull(scenarioRuns.failedAt),
@@ -1159,7 +1322,7 @@ async function selectScenarioHost(): Promise<string | null> {
     activeRunCounts.set(row.hostId, (activeRunCounts.get(row.hostId) ?? 0) + 1);
   }
 
-  candidates.sort((left, right) => {
+  imageReadyCandidates.sort((left, right) => {
     const leftRuns = activeRunCounts.get(left.id) ?? 0;
     const rightRuns = activeRunCounts.get(right.id) ?? 0;
     if (leftRuns !== rightRuns) {
@@ -1180,7 +1343,8 @@ async function selectScenarioHost(): Promise<string | null> {
     return left.id.localeCompare(right.id);
   });
 
-  return candidates[0]?.id ?? null;
+  const hostId = imageReadyCandidates[0]?.id;
+  return hostId ? { ok: true, hostId } : { ok: false, reason: "unavailable" };
 }
 
 function parseObjectives(raw: string): ScenarioObjective[] {

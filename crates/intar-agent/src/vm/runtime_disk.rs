@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 
@@ -18,6 +19,7 @@ pub struct RuntimeDiskInput<'a> {
     pub kino_host_ready_port: u32,
     pub hostname: &'a str,
     pub network: &'a CreateVmNetwork,
+    pub peer_guest_ips: &'a BTreeMap<String, String>,
 }
 
 pub fn write_runtime_disk(input: &RuntimeDiskInput<'_>) -> Result<()> {
@@ -67,6 +69,7 @@ fn runtime_env(input: &RuntimeDiskInput<'_>) -> RuntimeEnv {
         guest_ip_cidr: input.network.guest_ip_cidr.clone(),
         gateway: input.network.gateway.clone(),
         dns_servers: input.network.dns.clone(),
+        peer_guest_ips: input.peer_guest_ips.clone(),
     }
 }
 
@@ -98,6 +101,10 @@ mod tests {
             gateway: "10.200.0.1".to_string(),
             dns: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
         };
+        let peer_guest_ips = BTreeMap::from([
+            ("db".to_string(), "10.200.0.3".to_string()),
+            ("redis-cache".to_string(), "10.200.0.4".to_string()),
+        ]);
 
         write_runtime_disk(&RuntimeDiskInput {
             path: &disk_path,
@@ -107,6 +114,7 @@ mod tests {
             kino_host_ready_port: 18_081,
             hostname: "broken-nginx",
             network: &network,
+            peer_guest_ips: &peer_guest_ips,
         })
         .expect("runtime disk should be created");
 
@@ -132,5 +140,7 @@ mod tests {
         assert!(runtime_env.contains("INTAR_GUEST_IP_CIDR='10.200.0.2/24'"));
         assert!(runtime_env.contains("INTAR_GATEWAY='10.200.0.1'"));
         assert!(runtime_env.contains("INTAR_DNS_SERVERS='1.1.1.1 8.8.8.8'"));
+        assert!(runtime_env.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
+        assert!(runtime_env.contains("INTAR_PEER_REDIS_CACHE_IP='10.200.0.4'"));
     }
 }

@@ -30,6 +30,12 @@
       "format": "uint32",
       "minimum": 0
     },
+    "peer_guest_ips": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "ssh_authorized_keys_openssh": {
       "type": "array",
       "items": {
@@ -48,6 +54,7 @@
     "vm_hostname",
     "guest_ip_cidr",
     "gateway",
-    "dns_servers"
+    "dns_servers",
+    "peer_guest_ips"
   ]
 }

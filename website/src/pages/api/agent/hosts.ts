@@ -31,6 +31,7 @@ import {
   resolveRequestedHostRole,
 } from "@/lib/scenario-hosts";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { hostHealth, type HostHealth } from "@/lib/host-health";
 
 const BOOTSTRAP_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
@@ -45,6 +46,7 @@ interface CreateHostBody {
 interface HostActualStateSummary {
   appliedDesiredVersion: number;
   observedAt: number;
+  health: HostHealth;
   capacity: HostStateReportV1["capacity"];
   capabilities: HostStateReportV1["capabilities"];
   cachedImages: HostStateReportV1["cached_images"];
@@ -283,6 +285,7 @@ async function loadHostActualStateSummary(
   return {
     appliedDesiredVersion: row.appliedDesiredVersion,
     observedAt: row.observedAt,
+    health: hostHealth(row.observedAt, Date.now()),
     capacity: row.reportJson.capacity,
     capabilities: row.reportJson.capabilities,
     cachedImages: row.reportJson.cached_images,
