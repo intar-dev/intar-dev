@@ -1,5 +1,6 @@
 import type {
   DesiredCachedImageV1,
+  DesiredBuildV1,
   DesiredVmV1,
   HostDesiredStateV1,
 } from "@/generated/bridge";
@@ -21,6 +22,7 @@ export function createEmptyHostDesiredState(input: {
     generated_at_unix_ms: input.nowUnixMs,
     cached_images: [],
     vms: [],
+    builds: [],
   };
 }
 
@@ -74,6 +76,57 @@ export function upsertDesiredVm(
   } else {
     draft.vms[index] = next;
   }
+}
+
+export function upsertDesiredBuild(
+  draft: DesiredStateDraft,
+  build: DesiredBuildV1,
+): void {
+  const next = cloneDesiredBuild(build);
+  const index = draft.builds.findIndex(
+    (candidate) => desiredBuildIdentity(candidate) === desiredBuildIdentity(next),
+  );
+  if (index === -1) {
+    draft.builds.push(next);
+  } else {
+    draft.builds[index] = next;
+  }
+}
+
+export function removeDesiredBuild(
+  draft: DesiredStateDraft,
+  identity: { buildId: string },
+): boolean {
+  const index = draft.builds.findIndex((build) => build.build_id === identity.buildId);
+  if (index === -1) {
+    return false;
+  }
+  draft.builds.splice(index, 1);
+  return true;
+}
+
+export function clearDesiredCachedImages(draft: DesiredStateDraft): boolean {
+  if (draft.cached_images.length === 0) {
+    return false;
+  }
+  draft.cached_images = [];
+  return true;
+}
+
+export function clearDesiredVms(draft: DesiredStateDraft): boolean {
+  if (draft.vms.length === 0) {
+    return false;
+  }
+  draft.vms = [];
+  return true;
+}
+
+export function clearDesiredBuilds(draft: DesiredStateDraft): boolean {
+  if (draft.builds.length === 0) {
+    return false;
+  }
+  draft.builds = [];
+  return true;
 }
 
 export function markDesiredVmAbsent(
@@ -152,6 +205,12 @@ function normalizeDesiredState(
     ).sort((left, right) =>
       desiredVmIdentity(left).localeCompare(desiredVmIdentity(right)),
     ),
+    builds: uniqueLastBy(
+      document.builds.map(cloneDesiredBuild),
+      desiredBuildIdentity,
+    ).sort((left, right) =>
+      desiredBuildIdentity(left).localeCompare(desiredBuildIdentity(right)),
+    ),
   };
 }
 
@@ -162,6 +221,7 @@ function comparableDesiredStatePayload(document: HostDesiredStateV1): string {
     host_id: normalized.host_id,
     cached_images: normalized.cached_images,
     vms: normalized.vms,
+    builds: normalized.builds,
   });
 }
 
@@ -170,6 +230,7 @@ function cloneDesiredState(document: HostDesiredStateV1): HostDesiredStateV1 {
     ...document,
     cached_images: document.cached_images.map(cloneDesiredCachedImage),
     vms: document.vms.map(cloneDesiredVm),
+    builds: document.builds.map(cloneDesiredBuild),
   };
 }
 
@@ -189,6 +250,10 @@ function cloneDesiredVm(vm: DesiredVmV1): DesiredVmV1 {
     resources: { ...vm.resources },
     ssh_authorized_keys_openssh: [...vm.ssh_authorized_keys_openssh],
   };
+}
+
+function cloneDesiredBuild(build: DesiredBuildV1): DesiredBuildV1 {
+  return { ...build };
 }
 
 function cloneImageKey(imageKey: ImageKey): ImageKey {
@@ -215,6 +280,10 @@ function normalizeAuthorizedKeys(values: string[]): string[] {
 
 function desiredVmIdentity(vm: DesiredVmV1): string {
   return `${vm.run_id}\n${vm.vm_name}`;
+}
+
+function desiredBuildIdentity(build: DesiredBuildV1): string {
+  return build.build_id;
 }
 
 function imageKeyIdentity(imageKey: ImageKey): string {

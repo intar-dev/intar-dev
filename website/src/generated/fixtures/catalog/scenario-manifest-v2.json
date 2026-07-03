@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "scenario_id": "broken-nginx",
+  "name": "broken-nginx",
+  "title": "Broken Nginx",
+  "description": "Repair the nginx service.",
+  "difficulty": "easy",
+  "estimated_minutes": 15,
+  "tags": [
+    "nginx",
+    "systemd",
+    "linux"
+  ],
+  "briefing_markdown": "The web server should serve the default site, but nginx was disabled during cleanup.",
+  "solution_markdown": "Enable nginx and restore the default site symlink.",
+  "hints": [
+    {
+      "id": "check-service",
+      "title": "Start with systemd",
+      "body_markdown": "Check whether nginx is active before reading config files."
+    }
+  ],
+  "vms": [
+    {
+      "name": "web",
+      "image_key": {
+        "scenario": "broken-nginx",
+        "vm": "web",
+        "arch": "x86_64"
+      },
+      "image_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "image_format": "raw_zstd",
+      "image_virtual_size_bytes": 8589934592,
+      "boot": {
+        "kernel_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "initrd_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "cmdline": "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
+      },
+      "cpu_count": 2,
+      "memory_mib": 2048,
+      "disk_mib": 8192,
+      "probes": [
+        {
+          "id": "nginx_service_running",
+          "phase": "scenario",
+          "kind": "service",
+          "display_name": "nginx is running",
+          "title": "Bring nginx back up",
+          "body_markdown": "The nginx service must be running before the site can answer requests.",
+          "hints": [
+            {
+              "id": "status",
+              "body_markdown": "`systemctl status nginx` shows whether the service is active."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

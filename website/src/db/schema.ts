@@ -6,11 +6,54 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
-import type { HostDesiredStateV1, HostStateReportV1 } from "@/generated/bridge";
-import type { ImageKey } from "@/generated/catalog";
+import type {
+  BuildPhase,
+  HostDesiredStateV1,
+  HostStateReportV1,
+} from "@/generated/bridge";
+import type {
+  ImageArchitecture,
+  ImageKey,
+  ScenarioHintManifestV2,
+} from "@/generated/catalog";
 
 const nowMsDefault = sql`(cast(unixepoch('subsecond') * 1000 as integer))`;
 const jsonText = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
+
+export interface ScenarioRunHintSnapshot {
+  key: string;
+  scope: "scenario" | "probe";
+  probeName: string | null;
+  id: string;
+  title: string | null;
+  bodyMarkdown: string;
+}
+
+export type AgentHostRole = "agent" | "builder";
+export type ImageBuildStatus =
+  | "queued"
+  | "assigned"
+  | "building"
+  | "succeeded"
+  | "failed"
+  | "stale";
+
+export interface ImageBuildBundleMeta {
+  buildFormatVersion: string;
+  scenarios: Array<{
+    scenarioId: string;
+    arch: ImageArchitecture;
+    contentHash: string;
+  }>;
+  [key: string]: unknown;
+}
+
+export interface ImageBuildTimings {
+  queuedAt?: number | null;
+  startedAt?: number | null;
+  finishedAt?: number | null;
+  lastReportAt?: number | null;
+}
 
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
@@ -194,6 +237,7 @@ export const agentHosts = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    role: text("role").$type<AgentHostRole>().default("agent").notNull(),
     scenarioEnabled: integer("scenario_enabled", { mode: "boolean" })
       .default(true)
       .notNull(),
@@ -216,7 +260,54 @@ export const agentHosts = sqliteTable(
   },
   (table) => [
     index("agent_hosts_user_idx").on(table.userId),
+    index("agent_hosts_role_idx").on(table.role, table.connected),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
+  ],
+);
+
+export const imageBuildBundles = sqliteTable("image_build_bundles", {
+  rev: text("rev").primaryKey(),
+  r2Key: text("r2_key").notNull(),
+  kinoVersion: text("kino_version").notNull(),
+  metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
+  createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+});
+
+export const imageBuilds = sqliteTable(
+  "image_builds",
+  {
+    id: text("id").primaryKey(),
+    scenarioId: text("scenario_id").notNull(),
+    arch: text("arch").$type<ImageArchitecture>().notNull(),
+    rev: text("rev")
+      .notNull()
+      .references(() => imageBuildBundles.rev, { onDelete: "cascade" }),
+    contentHash: text("content_hash").notNull(),
+    kinoVersion: text("kino_version").notNull(),
+    hostId: text("host_id").references(() => agentHosts.id, {
+      onDelete: "set null",
+    }),
+    status: text("status").$type<ImageBuildStatus>().default("queued").notNull(),
+    phase: text("phase").$type<BuildPhase>().default("queued").notNull(),
+    attempt: integer("attempt").default(0).notNull(),
+    error: text("error"),
+    logR2Key: text("log_r2_key"),
+    timingsJson: jsonText<ImageBuildTimings>("timings_json")
+      .default({})
+      .notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("image_builds_scenario_arch_hash_uidx").on(
+      table.scenarioId,
+      table.arch,
+      table.contentHash,
+    ),
+    index("image_builds_status_idx").on(table.status, table.updatedAt),
+    index("image_builds_host_idx").on(table.hostId, table.status),
+    index("image_builds_rev_idx").on(table.rev),
   ],
 );
 
@@ -290,6 +381,16 @@ export const scenarioRuns = sqliteTable(
     objectivesJson: text("objectives_json").notNull(),
     difficulty: text("difficulty").notNull(),
     estimatedMinutes: integer("estimated_minutes").notNull(),
+    tagsJson: jsonText<string[]>("tags_json").notNull(),
+    hintsJson: jsonText<ScenarioRunHintSnapshot[]>("hints_json").notNull(),
+    solutionMarkdown: text("solution_markdown").notNull(),
+    revealedHintsJson: jsonText<string[]>("revealed_hints_json")
+      .default([])
+      .notNull(),
+    solutionRevealedAt: integer("solution_revealed_at"),
+    solutionAssisted: integer("solution_assisted", { mode: "boolean" })
+      .default(false)
+      .notNull(),
     vmCount: integer("vm_count").notNull(),
     state: text("state").notNull(),
     stateRank: integer("state_rank").notNull(),
@@ -420,7 +521,14 @@ export const vmScenarios = sqliteTable(
   "vm_scenarios",
   {
     scenarioId: text("scenario_id").primaryKey(),
+    title: text("title").notNull(),
     description: text("description").notNull(),
+    difficulty: text("difficulty").notNull(),
+    estimatedMinutes: integer("estimated_minutes").notNull(),
+    tagsJson: jsonText<string[]>("tags_json").notNull(),
+    briefingMarkdown: text("briefing_markdown").notNull(),
+    solutionMarkdown: text("solution_markdown").notNull(),
+    hintsJson: jsonText<ScenarioHintManifestV2[]>("hints_json").notNull(),
     enabled: integer("enabled", { mode: "boolean" }).default(false).notNull(),
     enabledAt: integer("enabled_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
@@ -443,6 +551,11 @@ export const vmScenarioVms = sqliteTable(
     image: text("image").notNull(),
     imageKeyJson: jsonText<ImageKey>("image_key_json"),
     imageSha256: text("image_sha256"),
+    imageFormat: text("image_format").notNull(),
+    imageVirtualSizeBytes: integer("image_virtual_size_bytes").notNull(),
+    kernelSha256: text("kernel_sha256").notNull(),
+    initrdSha256: text("initrd_sha256").notNull(),
+    bootCmdline: text("boot_cmdline").notNull(),
     cpu: integer("cpu").notNull(),
     memoryMib: integer("memory_mib").notNull(),
     diskMib: integer("disk_mib").notNull(),
@@ -473,6 +586,9 @@ export const vmScenarioProbes = sqliteTable(
     ordinal: integer("ordinal").notNull(),
     name: text("name").notNull(),
     description: text("description").notNull(),
+    title: text("title"),
+    bodyMarkdown: text("body_markdown"),
+    hintsJson: jsonText<ScenarioHintManifestV2[]>("hints_json").notNull(),
     phase: text("phase").default("scenario").notNull(),
   },
   (table) => [

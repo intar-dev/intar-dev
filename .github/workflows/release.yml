@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - intar-agent
+          - intar-builder
           - kino
           - stargate
       bump:
@@ -58,6 +59,12 @@ jobs:
               package="intar-agent"
               binary="intar-agent"
               tag_prefix="agent/"
+              ;;
+            intar-builder)
+              manifest="crates/intar-builder/Cargo.toml"
+              package="intar-builder"
+              binary="intar-builder"
+              tag_prefix="builder/"
               ;;
             kino)
               manifest="crates/kino/Cargo.toml"
@@ -204,7 +211,11 @@ jobs:
             rm -rf "${workdir}"
           }
           build_archive amd64 x86_64-unknown-linux-musl
-          build_archive arm64 aarch64-unknown-linux-musl
+          if [ "${PACKAGE}" = "intar-builder" ]; then
+            echo "Skipping arm64 intar-builder artifact; the current builder preflight supports x86_64 KVM hosts only."
+          else
+            build_archive arm64 aarch64-unknown-linux-musl
+          fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
 

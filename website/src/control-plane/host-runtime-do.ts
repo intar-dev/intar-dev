@@ -2,9 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  parseBridgeMessageV4,
-  serializeBridgeMessageV4,
-} from "@/control-plane/bridge-v4";
+  parseBridgeMessageV5,
+  serializeBridgeMessageV5,
+} from "@/control-plane/bridge-v5";
 import {
   agentHosts,
   hostActualState,
@@ -23,15 +23,29 @@ import {
   applyVmReportToRunState,
 } from "@/lib/run-lifecycle";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
-import { loadOrCreateHostDesiredState } from "@/lib/desired-state-store";
-import type { BridgeMessageV4, HostDesiredStateV1 } from "@/generated/bridge";
+import {
+  loadOrCreateHostDesiredState,
+  mutateStoredHostDesiredState,
+} from "@/lib/desired-state-store";
+import { removeDesiredBuild } from "@/lib/desired-state";
+import {
+  maintainHostBuildAssignments,
+  recordHostBuildReports,
+} from "@/lib/build-scheduler";
+import {
+  isReportedHostRoleAllowed,
+  resolveScenarioEnabledForHostRole,
+} from "@/lib/scenario-hosts";
+import type { BridgeMessageV5, HostDesiredStateV1 } from "@/generated/bridge";
+
+const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 
 interface SocketAttachment {
   hostId: string;
   sessionId: string | null;
   connectedAt: number;
   helloReceived: boolean;
-  bridgeProtocol: "v4" | null;
+  bridgeProtocol: "v5" | null;
   lastDesiredVersionSent: number | null;
 }
 
@@ -81,14 +95,14 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       return;
     }
 
-    const bridgeMessage = parseBridgeMessageV4(message);
+    const bridgeMessage = parseBridgeMessageV5(message);
     if (bridgeMessage) {
-      await this.handleBridgeMessageV4(ws, attachment, bridgeMessage);
+      await this.handleBridgeMessageV5(ws, attachment, bridgeMessage);
       return;
     }
 
     try {
-      ws.close(1003, "invalid bridge v4 message");
+      ws.close(1003, "invalid bridge v5 message");
     } catch {
       // ignore
     }
@@ -161,10 +175,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     return jsonResponse({ ok: true, hostId }, 202);
   }
 
-  private async handleBridgeMessageV4(
+  private async handleBridgeMessageV5(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: BridgeMessageV4,
+    message: BridgeMessageV5,
   ): Promise<void> {
     if (message.type === "client_hello") {
       await this.handleBridgeClientHello(ws, attachment, message);
@@ -172,7 +186,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
 
     if (
-      attachment.bridgeProtocol !== "v4" ||
+      attachment.bridgeProtocol !== "v5" ||
       !attachment.helloReceived ||
       !attachment.sessionId
     ) {
@@ -202,6 +216,8 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       await this.applyBridgeStateReport(message.host_id, message.report);
     } else if (message.type === "vm_report") {
       await this.applyBridgeVmReport(message.host_id, message.report);
+    } else if (message.type === "build_report") {
+      await this.applyBridgeBuildReport(message.host_id, message.report);
     } else if (message.type === "sync_request") {
       await this.sendBridgeDesiredState(ws, attachment, message.host_id);
     } else {
@@ -219,7 +235,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private async handleBridgeClientHello(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: Extract<BridgeMessageV4, { type: "client_hello" }>,
+    message: Extract<BridgeMessageV5, { type: "client_hello" }>,
   ): Promise<void> {
     if (message.host_id !== attachment.hostId) {
       try {
@@ -232,18 +248,27 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     const now = Date.now();
     const host = await this.loadRequiredHost(message.host_id);
+    if (!isReportedHostRoleAllowed(message.role, host.role)) {
+      try {
+        ws.close(1008, "host role mismatch");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     const db = drizzle(this.env.DB);
     const desiredState = await loadOrCreateHostDesiredState(
       db,
       message.host_id,
       now,
     );
-    const sessionId = `v4:${createAppId()}`;
+    const sessionId = `v5:${createAppId()}`;
     const nextAttachment: SocketAttachment = {
       ...attachment,
       sessionId,
       helloReceived: true,
-      bridgeProtocol: "v4",
+      bridgeProtocol: "v5",
       lastDesiredVersionSent:
         message.last_applied_desired_version === desiredState.version
           ? desiredState.version
@@ -254,6 +279,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     await this.persistKnownHostId(message.host_id);
     await this.updateHostRow(message.host_id, {
       activeSessionId: sessionId,
+      scenarioEnabled: resolveScenarioEnabledForHostRole(
+        host.role,
+        host.scenarioEnabled,
+      ),
       connected: true,
       connectedAt: host.connectedAt ?? now,
       disconnectedAt: null,
@@ -266,7 +295,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     await this.closeOlderSockets(message.host_id, ws, sessionId);
 
     ws.send(
-      serializeBridgeMessageV4({
+      serializeBridgeMessageV5({
         type: "server_hello",
         protocol_version: message.protocol_version,
         host_id: message.host_id,
@@ -283,7 +312,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       );
     }
 
-    await this.scheduleNextAlarm(message.host_id);
+    await this.reconcileHost(message.host_id);
   }
 
   private async sendBridgeDesiredState(
@@ -300,9 +329,9 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         Date.now(),
       ));
     ws.send(
-      serializeBridgeMessageV4({
+      serializeBridgeMessageV5({
         type: "desired_state",
-        protocol_version: 4,
+        protocol_version: 5,
         host_id: hostId,
         desired_state: state,
       }),
@@ -315,7 +344,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
   private async applyBridgeStateReport(
     hostId: string,
-    report: Extract<BridgeMessageV4, { type: "state_report" }>["report"],
+    report: Extract<BridgeMessageV5, { type: "state_report" }>["report"],
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
@@ -347,6 +376,18 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       updatedAt: now,
     });
 
+    const buildUpdates = await recordHostBuildReports(
+      db,
+      hostId,
+      report.builds,
+      now,
+    );
+    await this.removeTerminalBuildsFromDesiredState(
+      hostId,
+      buildUpdates.terminalBuildIds,
+      now,
+    );
+
     const runs = await this.listOpenRunsForHost(hostId);
     for (const run of runs) {
       await this.persistRunState(
@@ -363,7 +404,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
   private async applyBridgeVmReport(
     hostId: string,
-    report: Extract<BridgeMessageV4, { type: "vm_report" }>["report"],
+    report: Extract<BridgeMessageV5, { type: "vm_report" }>["report"],
   ): Promise<void> {
     const run = await this.loadRun(report.run_id);
     if (!run || run.hostId !== hostId) {
@@ -389,9 +430,31 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  private async applyBridgeBuildReport(
+    hostId: string,
+    report: Extract<BridgeMessageV5, { type: "build_report" }>["report"],
+  ): Promise<void> {
+    const db = drizzle(this.env.DB);
+    const now = Date.now();
+    await this.updateHostRow(hostId, {
+      connected: true,
+      disconnectedAt: null,
+      lastHeartbeatAt: now,
+      updatedAt: now,
+    });
+    const buildUpdates = await recordHostBuildReports(db, hostId, [report], now);
+    await this.removeTerminalBuildsFromDesiredState(
+      hostId,
+      buildUpdates.terminalBuildIds,
+      now,
+    );
+  }
+
   private async reconcileHost(hostId: string): Promise<void> {
+    await maintainHostBuildAssignments(drizzle(this.env.DB), hostId, Date.now());
+
     const activeSocket = await this.findActiveSocket(hostId);
-    if (activeSocket?.attachment.bridgeProtocol === "v4") {
+    if (activeSocket?.attachment.bridgeProtocol === "v5") {
       await this.dispatchBridgeDesiredStateIfNeeded(
         hostId,
         activeSocket.socket,
@@ -408,7 +471,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     attachment: SocketAttachment,
   ): Promise<void> {
     if (
-      attachment.bridgeProtocol !== "v4" ||
+      attachment.bridgeProtocol !== "v5" ||
       !attachment.sessionId ||
       attachment.hostId !== hostId
     ) {
@@ -506,6 +569,27 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       .where(eq(scenarioRuns.runId, runId));
   }
 
+  private async removeTerminalBuildsFromDesiredState(
+    hostId: string,
+    buildIds: string[],
+    nowUnixMs: number,
+  ): Promise<void> {
+    if (!buildIds.length) {
+      return;
+    }
+
+    await mutateStoredHostDesiredState(
+      drizzle(this.env.DB),
+      hostId,
+      nowUnixMs,
+      (draft) => {
+        for (const buildId of buildIds) {
+          removeDesiredBuild(draft, { buildId });
+        }
+      },
+    );
+  }
+
   private async scheduleNextAlarm(hostId: string): Promise<void> {
     const next = await this.computeNextAlarm(hostId);
     if (next === null) {
@@ -516,7 +600,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   }
 
   private async computeNextAlarm(_hostId: string): Promise<number | null> {
-    return null;
+    return Date.now() + HOST_BUILD_MAINTENANCE_INTERVAL_MS;
   }
 
   private async handleSocketClosed(ws: WebSocket): Promise<void> {
@@ -641,7 +725,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
             ? Math.floor(parsed.connectedAt)
             : 0,
         helloReceived: Boolean(parsed.helloReceived),
-        bridgeProtocol: parsed.bridgeProtocol === "v4" ? "v4" : null,
+        bridgeProtocol: parsed.bridgeProtocol === "v5" ? "v5" : null,
         lastDesiredVersionSent:
           typeof parsed.lastDesiredVersionSent === "number" &&
           Number.isFinite(parsed.lastDesiredVersionSent) &&

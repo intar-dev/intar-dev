@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { agentHosts } from "@/db/schema";
+import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
@@ -41,6 +42,7 @@ export interface AgentHostRow {
   id: string;
   user_id: string;
   name: string;
+  role: AgentHostRole;
   disabled: boolean;
   scenario_enabled: boolean;
   connected: boolean;
@@ -160,6 +162,7 @@ export async function loadHostForUser(
       id: agentHosts.id,
       user_id: agentHosts.userId,
       name: agentHosts.name,
+      role: agentHosts.role,
       disabled: agentHosts.disabled,
       scenario_enabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,

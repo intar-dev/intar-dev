@@ -66,7 +66,7 @@ describe("run lifecycle", () => {
     })).toBe(false);
   });
 
-  it("rejects inventory snapshots without v4 run identity", () => {
+  it("rejects inventory snapshots without run identity", () => {
     expect(matchesInventoryVmIdentity({
       value: {
         name: "webserver",
@@ -316,5 +316,6 @@ function hostReport(vms: HostStateReportV1["vms"]): HostStateReportV1 {
     },
     cached_images: [],
     vms,
+    builds: [],
   };
 }

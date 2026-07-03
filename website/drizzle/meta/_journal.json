@@ -8,6 +8,27 @@
       "when": 1782977172141,
       "tag": "0000_oval_sasquatch",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1782991008468,
+      "tag": "0001_watery_kronos",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1782992092988,
+      "tag": "0002_wooden_archangel",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1782992521398,
+      "tag": "0003_soft_jack_power",
+      "breakpoints": true
     }
   ]
 }

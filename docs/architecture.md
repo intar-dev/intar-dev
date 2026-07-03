@@ -37,9 +37,11 @@ Host orchestration is desired-state based:
 - `host_actual_state` stores the latest full host report.
 - Desired VMs are keyed by `(run_id, vm_name)`.
 - Desired phases are only `running` and `absent`.
-- The bridge protocol is v4 and full-document based: `client_hello`,
-  `server_hello`, `desired_state`, `state_report`, `vm_report`, and
-  `sync_request`.
+- Image build assignments are keyed by `build_id` and delivered in the same
+  desired-state document under `builds`.
+- The bridge protocol is v5 and full-document based: `client_hello`,
+  `server_hello`, `desired_state`, `state_report`, `vm_report`, `build_report`,
+  and `sync_request`. Every host declares `role = agent` or `role = builder`.
 
 Run lifecycle state is derived in `website/src/lib/run-lifecycle.ts`. Reports only
 advance matching `(run_id, vm_name)` entries, which avoids cross-VM or cross-run
@@ -47,14 +49,38 @@ state bleed.
 
 ## Image Registry
 
-Scenario builds produce qcow2 artifacts and `ScenarioManifestV1` manifest JSON.
-The publish endpoint verifies manifests and image hashes, stores immutable images in
-R2, seeds the D1 scenario catalog, and updates each host desired-state document with
-the referenced cached images.
+Scenario pushes upload source bundles instead of building on GitHub Actions. The
+bundle endpoint stores a deterministic tar.gz in R2, records content hashes in D1,
+and assigns changed scenarios to connected builder hosts.
+
+Builder hosts publish raw zstd artifacts and `ScenarioManifestV2` manifest JSON.
+The publish endpoint verifies manifests and image hashes, stores immutable images
+in R2, seeds the D1 scenario catalog, and updates each agent desired-state document
+with the referenced cached images.
 
 Agents list and download images through the Worker registry endpoint. The agent
-cache validates hashes fail-closed, keeps qcow2 files by image key, pre-converts
-warm images to `<sha256>.raw`, and reports cache readiness from the raw artifact.
+cache validates compressed raw-zstd hashes fail-closed, decompresses sparse raw
+files to `<sha256>.raw`, and reports cache readiness from the raw artifact.
+
+## Builder Daemon
+
+`intar-builder` is a dedicated image-build reconciler:
+
+- It joins the same bridge as agents with `role = builder`.
+- It caches the latest desired-state document in local SQLite.
+- It consumes `DesiredBuildV1` assignments, fetches the source bundle, and
+  recomputes content hashes before building.
+- It reports each phase through `build_report`; terminal reports remove the build
+  from desired state.
+- It uploads build logs to R2 for the admin builds page.
+- The HostRuntime alarm requeues assigned builds from builders that have been
+  disconnected for 10 minutes and marks building jobs stale after 30 minutes
+  without a build report.
+
+Builder hosts are never selected for scenario runs. The admin host onboarding flow
+creates them with `scenario_enabled = false`, and the scheduler only assigns image
+builds to connected, non-disabled builder hosts whose reported architecture matches
+the desired build.
 
 ## Host Agent
 

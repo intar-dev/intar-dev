@@ -1,6 +1,36 @@
 scenario "workshop-cluster" {
-  category = "kubernetes"
-  description = "Restore the workshop environment so the application platform is healthy again"
+  title             = "Workshop Cluster"
+  category          = "kubernetes"
+  tags              = ["kubernetes", "k3s", "workshop"]
+  difficulty        = "medium"
+  estimated_minutes = 25
+  description       = "Restore the workshop environment so the application platform is healthy again"
+  briefing          = <<-MD
+    A lightweight k3s workshop cluster is running, but the demo application is unavailable.
+    Inspect the cluster state and restore the `hello-web` workload so participants can use it.
+  MD
+
+  hint "inspect-workshop-namespace" {
+    title = "Start in the workshop namespace"
+    body  = "Use `kubectl get deploy,pods -n workshop` to compare the deployment with the pod state."
+  }
+
+  hint "look-at-replicas" {
+    title = "Check desired replicas"
+    body  = "A deployment with zero desired replicas will not create a Ready pod."
+  }
+
+  solution {
+    body = <<-MD
+      Scale the workshop deployment back up:
+
+      ```bash
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+      kubectl scale deployment/hello-web --namespace workshop --replicas=1
+      kubectl rollout status deployment/hello-web --namespace workshop
+      ```
+    MD
+  }
 
   image "debian-13-generic" {
     base = "trixie"
@@ -18,6 +48,8 @@ scenario "workshop-cluster" {
       state       = "running"
       phase       = "boot"
       description = "The k3s control plane should be running"
+      title       = "Keep k3s running"
+      body        = "The control plane service must be active before Kubernetes checks can pass."
     }
 
     probe "cluster-dns-ready" {
@@ -28,6 +60,8 @@ scenario "workshop-cluster" {
       kubeconfig    = "/etc/rancher/k3s/k3s.yaml"
       phase         = "boot"
       description   = "Core cluster services should become Ready"
+      title         = "Wait for cluster DNS"
+      body          = "CoreDNS must be Ready before the workload can reliably serve traffic."
     }
 
     probe "hello-web-ready" {
@@ -38,6 +72,16 @@ scenario "workshop-cluster" {
       kubeconfig    = "/etc/rancher/k3s/k3s.yaml"
       phase         = "scenario"
       description   = "The workshop application should have a Ready pod"
+      title         = "Restore hello-web"
+      body          = "The workshop namespace needs a Ready `hello-web` pod."
+
+      hint "get-deploy" {
+        body = "`kubectl get deploy hello-web -n workshop` shows the desired replica count."
+      }
+
+      hint "scale-up" {
+        body = "Scale `deployment/hello-web` in the `workshop` namespace back to one replica."
+      }
     }
   }
 

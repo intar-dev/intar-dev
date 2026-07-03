@@ -14,21 +14,30 @@ pub struct BaseImageCatalog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseImageSpec {
     pub name: String,
-    pub sources: Vec<ImageSource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageSource {
+    pub suite: String,
+    pub mirror: String,
     pub arch: String,
-    pub url: String,
-    pub checksum: String,
+    pub kernel_package: String,
+    pub packages: Vec<String>,
 }
 
 impl BaseImageSpec {
     #[must_use]
-    pub fn source_for_arch(&self, arch: &str) -> Option<&ImageSource> {
+    pub fn definition_for_arch(&self, arch: &str) -> Option<&Self> {
         let normalized = normalize_arch(arch);
-        self.sources.iter().find(|source| source.arch == normalized)
+        (self.arch == normalized).then_some(self)
+    }
+
+    #[must_use]
+    pub fn content_identity(&self) -> String {
+        [
+            format!("suite={}", self.suite),
+            format!("mirror={}", self.mirror),
+            format!("arch={}", self.arch),
+            format!("kernel_package={}", self.kernel_package),
+            format!("packages={}", self.packages.join(",")),
+        ]
+        .join("\n")
     }
 }
 
@@ -75,7 +84,8 @@ impl BaseImageCatalog {
         let normalized_arch = assert_supported_builder_arch(target_arch)?;
 
         for base_image in self.base_images.values() {
-            if base_image.source_for_arch(normalized_arch).is_none() {
+            validate_safe_base_image_identifier("base image name", &base_image.name)?;
+            if base_image.definition_for_arch(normalized_arch).is_none() {
                 return Err(ScenarioError::MissingBaseImageSource {
                     base_image: base_image.name.clone(),
                     arch: normalized_arch.to_string(),
@@ -98,7 +108,7 @@ impl BaseImageCatalog {
                 return Err(ScenarioError::BaseImageNotFound(image.base.clone()));
             };
 
-            if base_image.source_for_arch(normalized_arch).is_none() {
+            if base_image.definition_for_arch(normalized_arch).is_none() {
                 return Err(ScenarioError::MissingBaseImageSource {
                     base_image: base_image.name.clone(),
                     arch: normalized_arch.to_string(),
@@ -110,6 +120,22 @@ impl BaseImageCatalog {
     }
 }
 
+fn validate_safe_base_image_identifier(label: &str, value: &str) -> Result<(), ScenarioError> {
+    if (1..=128).contains(&value.len())
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Ok(());
+    }
+
+    Err(ScenarioError::InvalidBaseImageCatalog(format!(
+        "invalid {label} '{value}' (expected 1-128 safe slug characters)"
+    )))
+}
+
 fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> {
     let name = block
         .labels
@@ -117,79 +143,67 @@ fn parse_base_image(block: &hcl::Block) -> Result<BaseImageSpec, ScenarioError> 
         .map(|label| label.as_str().to_string())
         .ok_or_else(|| ScenarioError::InvalidBaseImageCatalog("missing base image name".into()))?;
 
-    let mut sources = Vec::new();
-    if let Some(attr) = block.body.attributes().next() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
-            "base_image '{name}' does not support attribute '{}'",
-            attr.key
-        )));
+    let mut suite = String::new();
+    let mut mirror = String::new();
+    let mut arch = String::new();
+    let mut kernel_package = String::new();
+    let mut packages = Vec::new();
+
+    for attr in block.body.attributes() {
+        match attr.key.as_str() {
+            "suite" => suite = extract_string(&attr.expr)?,
+            "mirror" => mirror = extract_string(&attr.expr)?,
+            "arch" => arch = extract_string(&attr.expr)?,
+            "kernel_package" => kernel_package = extract_string(&attr.expr)?,
+            "packages" => packages = extract_string_array(&attr.expr)?,
+            other => {
+                return Err(ScenarioError::InvalidBaseImageCatalog(format!(
+                    "base_image '{name}' does not support attribute '{other}'"
+                )));
+            }
+        }
     }
 
-    for inner_block in block.body.blocks() {
-        if inner_block.identifier.as_str() == "source" {
-            sources.push(parse_image_source(inner_block)?);
-            continue;
-        }
-
+    if let Some(inner_block) = block.body.blocks().next() {
         return Err(ScenarioError::InvalidBaseImageCatalog(format!(
             "base_image '{name}' does not support nested block '{}'",
             inner_block.identifier
         )));
     }
 
-    if sources.is_empty() {
+    if suite.is_empty() {
         return Err(ScenarioError::InvalidBaseImageCatalog(format!(
-            "base_image '{name}' has no sources"
+            "base_image '{name}' missing 'suite'"
+        )));
+    }
+    if mirror.is_empty() {
+        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
+            "base_image '{name}' missing 'mirror'"
+        )));
+    }
+    if arch.is_empty() {
+        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
+            "base_image '{name}' missing 'arch'"
+        )));
+    }
+    if kernel_package.is_empty() {
+        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
+            "base_image '{name}' missing 'kernel_package'"
+        )));
+    }
+    if packages.is_empty() {
+        return Err(ScenarioError::InvalidBaseImageCatalog(format!(
+            "base_image '{name}' missing non-empty 'packages'"
         )));
     }
 
-    Ok(BaseImageSpec { name, sources })
-}
-
-fn parse_image_source(block: &hcl::Block) -> Result<ImageSource, ScenarioError> {
-    let mut arch = String::new();
-    let mut url = String::new();
-    let mut checksum = String::new();
-
-    for attr in block.body.attributes() {
-        match attr.key.as_str() {
-            "arch" => arch = extract_string(&attr.expr)?,
-            "url" => url = extract_string(&attr.expr)?,
-            "checksum" => checksum = extract_string(&attr.expr)?,
-            other => {
-                return Err(ScenarioError::InvalidBaseImageCatalog(format!(
-                    "image source does not support attribute '{other}'"
-                )));
-            }
-        }
-    }
-
-    if block.body.blocks().next().is_some() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(
-            "image source does not support nested blocks".into(),
-        ));
-    }
-
-    if arch.is_empty() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(
-            "image source missing 'arch'".into(),
-        ));
-    }
-    if url.is_empty() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(
-            "image source missing 'url'".into(),
-        ));
-    }
-    if checksum.is_empty() {
-        return Err(ScenarioError::InvalidBaseImageCatalog(
-            "image source missing 'checksum' (required for verification)".into(),
-        ));
-    }
-
-    Ok(ImageSource {
+    Ok(BaseImageSpec {
+        name,
+        suite,
+        mirror,
         arch: normalize_arch(&arch).to_string(),
-        url,
-        checksum,
+        kernel_package,
+        packages,
     })
 }
 
@@ -198,6 +212,15 @@ fn extract_string(expr: &hcl::Expression) -> Result<String, ScenarioError> {
         hcl::Expression::String(value) => Ok(value.clone()),
         _ => Err(ScenarioError::InvalidBaseImageCatalog(
             "expected string literal".into(),
+        )),
+    }
+}
+
+fn extract_string_array(expr: &hcl::Expression) -> Result<Vec<String>, ScenarioError> {
+    match expr {
+        hcl::Expression::Array(array) => array.iter().map(extract_string).collect(),
+        _ => Err(ScenarioError::InvalidBaseImageCatalog(
+            "expected string array".into(),
         )),
     }
 }
@@ -213,11 +236,11 @@ mod tests {
     fn catalog_hcl() -> &'static str {
         r#"
 base_image "trixie" {
-  source {
-    arch = "amd64"
-    url = "https://example.com/trixie-amd64.qcow2"
-    checksum = "sha512:abc123"
-  }
+  suite          = "trixie"
+  mirror         = "https://deb.debian.org/debian"
+  arch           = "amd64"
+  kernel_package = "linux-image-cloud-amd64"
+  packages       = ["openssh-server", "ca-certificates", "sudo", "zstd"]
 }
 "#
     }
@@ -226,11 +249,37 @@ base_image "trixie" {
     fn parses_base_image_catalog() {
         let catalog = BaseImageCatalog::parse(catalog_hcl()).unwrap();
         let base_image = catalog.base_image_by_name("trixie").unwrap();
-        let source = base_image.source_for_arch("x86_64").unwrap();
+        let definition = base_image.definition_for_arch("x86_64").unwrap();
 
-        assert_eq!(source.arch, "amd64");
-        assert_eq!(source.url, "https://example.com/trixie-amd64.qcow2");
-        assert_eq!(source.checksum, "sha512:abc123");
+        assert_eq!(definition.arch, "amd64");
+        assert_eq!(definition.suite, "trixie");
+        assert_eq!(definition.mirror, "https://deb.debian.org/debian");
+        assert_eq!(definition.kernel_package, "linux-image-cloud-amd64");
+        assert_eq!(
+            definition.content_identity(),
+            "suite=trixie\nmirror=https://deb.debian.org/debian\narch=amd64\nkernel_package=linux-image-cloud-amd64\npackages=openssh-server,ca-certificates,sudo,zstd"
+        );
+    }
+
+    #[test]
+    fn errors_on_unsafe_base_image_name() {
+        let catalog = BaseImageCatalog::parse(
+            r#"
+base_image "../escape" {
+  suite          = "trixie"
+  mirror         = "https://deb.debian.org/debian"
+  arch           = "amd64"
+  kernel_package = "linux-image-cloud-amd64"
+  packages       = ["openssh-server"]
+}
+"#,
+        )
+        .unwrap();
+
+        let error = catalog.validate_for_builder_arch("amd64").unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidBaseImageCatalog(message) if message.contains("invalid base image name"))
+        );
     }
 
     #[test]

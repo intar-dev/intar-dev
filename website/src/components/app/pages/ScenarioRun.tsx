@@ -10,11 +10,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  Eye,
   CheckCircle2,
   Clock3,
+  Lightbulb,
   LoaderCircle,
+  LockKeyhole,
   Trash2,
 } from "lucide-react";
+import { Markdown } from "@/components/app/Markdown";
 import {
   RunArtifactGifExportButton,
   RunArtifactViewer,
@@ -120,7 +124,11 @@ interface ScenarioRunRecord {
   title: string;
   tagline: string;
   briefingMarkdown: string;
-  objectives: string[];
+  objectives: ScenarioObjective[];
+  tags: string[];
+  hints: ScenarioRunHint[];
+  nextHintKey: string | null;
+  solution: ScenarioRunSolution;
   difficulty: "easy" | "medium" | "hard";
   estimatedMinutes: number;
   solvedAt: number | null;
@@ -137,6 +145,33 @@ interface ScenarioRunRecord {
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
   vms: ScenarioRunVmRecord[];
+}
+
+interface ScenarioObjective {
+  probeName: string;
+  vmName: string;
+  label: string;
+  title: string | null;
+  bodyMarkdown: string | null;
+  hintCount: number;
+}
+
+interface ScenarioRunHint {
+  key: string;
+  scope: "scenario" | "probe";
+  probeName: string | null;
+  id: string;
+  title: string | null;
+  revealed: boolean;
+  bodyMarkdown: string | null;
+}
+
+interface ScenarioRunSolution {
+  unlocked: boolean;
+  revealed: boolean;
+  assisted: boolean;
+  revealedAt: number | null;
+  bodyMarkdown: string | null;
 }
 
 interface ScenarioRunResponse {
@@ -302,6 +337,52 @@ export function ScenarioRun() {
       }
 
       await navigate({ to: "/scenarios" });
+    },
+  });
+
+  const revealHint = useMutation({
+    mutationFn: async (hintKey: string) => {
+      const response = await fetch(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/hints/reveal`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ hintKey }),
+        },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | { run?: Parameters<typeof toLegacyScenarioRunRecord>[0]; error?: string }
+        | null;
+      if (!response.ok || !body?.run) {
+        throw new Error(body?.error ?? "Failed to reveal hint");
+      }
+      return toLegacyScenarioRunRecord(body.run);
+    },
+    onSuccess: (run) => {
+      queryClient.setQueryData(["scenarios", "run", runId], { run });
+    },
+  });
+
+  const revealSolution = useMutation({
+    mutationFn: async () => {
+      const response = await fetch(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}/solution/reveal`,
+        {
+          method: "POST",
+          credentials: "include",
+        },
+      );
+      const body = (await response.json().catch(() => null)) as
+        | { run?: Parameters<typeof toLegacyScenarioRunRecord>[0]; error?: string }
+        | null;
+      if (!response.ok || !body?.run) {
+        throw new Error(body?.error ?? "Failed to reveal solution");
+      }
+      return toLegacyScenarioRunRecord(body.run);
+    },
+    onSuccess: (run) => {
+      queryClient.setQueryData(["scenarios", "run", runId], { run });
     },
   });
 
@@ -833,6 +914,30 @@ export function ScenarioRun() {
                       : "These track the scenario goal."
                   }
                   probes={selectedVm?.scenarioProbes ?? []}
+                  objectives={attemptData.objectives}
+                />
+                <HintList
+                  hints={attemptData.hints}
+                  nextHintKey={attemptData.nextHintKey}
+                  onReveal={(hintKey) => revealHint.mutate(hintKey)}
+                  pendingHintKey={
+                    revealHint.isPending ? revealHint.variables ?? null : null
+                  }
+                  error={
+                    revealHint.error instanceof Error
+                      ? revealHint.error.message
+                      : null
+                  }
+                />
+                <SolutionCard
+                  solution={attemptData.solution}
+                  onReveal={() => revealSolution.mutate()}
+                  pending={revealSolution.isPending}
+                  error={
+                    revealSolution.error instanceof Error
+                      ? revealSolution.error.message
+                      : null
+                  }
                 />
               </aside>
             </div>
@@ -933,6 +1038,7 @@ function ScenarioProbeRail(props: {
   title: string;
   description: string;
   probes: ScenarioProbeStatus[];
+  objectives: ScenarioObjective[];
 }) {
   return (
     <Card>
@@ -942,63 +1048,234 @@ function ScenarioProbeRail(props: {
       </CardHeader>
       <CardContent className="space-y-2">
         {props.probes.length ? (
-          props.probes.map((probe) => (
-            <div
-              key={probe.id}
-              className={cn(
-                "rounded-lg border px-3 py-3",
-                probe.status === "pass"
-                  ? "border-success/30 bg-success/[0.06]"
-                  : probe.status === "fail"
-                    ? "border-destructive/30 bg-destructive/5"
-                    : "",
-              )}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p
+          props.probes.map((probe) => {
+            const objective = props.objectives.find(
+              (candidate) => candidate.probeName === probe.id,
+            );
+            return (
+              <div
+                key={probe.id}
+                className={cn(
+                  "rounded-lg border px-3 py-3",
+                  probe.status === "pass"
+                    ? "border-success/30 bg-success/[0.06]"
+                    : probe.status === "fail"
+                      ? "border-destructive/30 bg-destructive/5"
+                      : "",
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p
+                      className={cn(
+                        "truncate text-sm font-medium",
+                        probe.status === "pass"
+                          ? "text-success"
+                          : "text-foreground",
+                      )}
+                    >
+                      {objective?.title?.trim() || probe.label}
+                    </p>
+                    <p
+                      className={cn(
+                        "mt-1 text-xs",
+                        probe.status === "pass"
+                          ? "text-success/75"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {probe.kind}
+                    </p>
+                  </div>
+                  <ProbeBadge status={probe.status} />
+                </div>
+                {objective?.bodyMarkdown ? (
+                  <Markdown
                     className={cn(
-                      "truncate text-sm font-medium",
+                      "mt-3 space-y-2 text-xs leading-6",
                       probe.status === "pass"
-                        ? "text-success"
-                        : "text-foreground",
-                    )}
-                  >
-                    {probe.label}
-                  </p>
-                  <p
-                    className={cn(
-                      "mt-1 text-xs",
-                      probe.status === "pass"
-                        ? "text-success/75"
+                        ? "text-success/85"
                         : "text-muted-foreground",
                     )}
                   >
-                    {probe.kind}
+                    {objective.bodyMarkdown}
+                  </Markdown>
+                ) : null}
+                {probe.error ? (
+                  <p className="mt-2 text-xs text-destructive">{probe.error}</p>
+                ) : (
+                  <p
+                    className={cn(
+                      "mt-2 text-xs",
+                      probe.status === "pass"
+                        ? "text-success/80"
+                        : "text-muted-foreground",
+                    )}
+                  >
+                    {describeProbeValue(probe)}
                   </p>
-                </div>
-                <ProbeBadge status={probe.status} />
+                )}
               </div>
-              {probe.error ? (
-                <p className="mt-2 text-xs text-destructive">{probe.error}</p>
-              ) : (
-                <p
-                  className={cn(
-                    "mt-2 text-xs",
-                    probe.status === "pass"
-                      ? "text-success/80"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {describeProbeValue(probe)}
-                </p>
-              )}
-            </div>
-          ))
+            );
+          })
         ) : (
           <div className="border border-dashed border-border/70 px-3 py-6 text-sm text-muted-foreground">
             No probes in this section.
           </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function HintList(props: {
+  hints: ScenarioRunHint[];
+  nextHintKey: string | null;
+  onReveal: (hintKey: string) => void;
+  pendingHintKey: string | null;
+  error: string | null;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Lightbulb className="size-4 text-muted-foreground" />
+          Hints
+        </CardTitle>
+        <CardDescription>Hints unlock in order.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {props.error ? <p className="text-xs text-destructive">{props.error}</p> : null}
+        {props.hints.length ? (
+          props.hints.map((hint, index) => {
+            const canReveal = hint.key === props.nextHintKey;
+            return (
+              <div key={hint.key} className="rounded-lg border px-3 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">
+                      {hint.title?.trim() || `Hint ${index + 1}`}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {hint.scope === "probe" && hint.probeName
+                        ? `Probe: ${hint.probeName}`
+                        : "Scenario"}
+                    </p>
+                  </div>
+                  {hint.revealed ? (
+                    <Badge variant="outline">Shown</Badge>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!canReveal || props.pendingHintKey === hint.key}
+                      onClick={() => props.onReveal(hint.key)}
+                    >
+                      {props.pendingHintKey === hint.key ? "Revealing" : "Reveal"}
+                    </Button>
+                  )}
+                </div>
+                {hint.bodyMarkdown ? (
+                  <Markdown className="mt-3 space-y-2 text-xs leading-6 text-muted-foreground">
+                    {hint.bodyMarkdown}
+                  </Markdown>
+                ) : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="border border-dashed border-border/70 px-3 py-6 text-sm text-muted-foreground">
+            No hints for this run.
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SolutionCard(props: {
+  solution: ScenarioRunSolution;
+  onReveal: () => void;
+  pending: boolean;
+  error: string | null;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const reveal = () => {
+    setConfirmOpen(false);
+    props.onReveal();
+  };
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          {props.solution.revealed ? (
+            <Eye className="size-4 text-muted-foreground" />
+          ) : (
+            <LockKeyhole className="size-4 text-muted-foreground" />
+          )}
+          Solution
+        </CardTitle>
+        <CardDescription>
+          {props.solution.revealed
+            ? props.solution.assisted
+              ? "Revealed before completion."
+              : "Unlocked after completion."
+            : props.solution.unlocked
+              ? "Available after all objectives pass."
+              : "Reveal now or solve first."}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {props.error ? <p className="text-xs text-destructive">{props.error}</p> : null}
+        {props.solution.bodyMarkdown ? (
+          <Markdown className="space-y-2 text-xs leading-6 text-muted-foreground">
+            {props.solution.bodyMarkdown}
+          </Markdown>
+        ) : props.solution.unlocked ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            disabled={props.pending}
+            onClick={props.onReveal}
+          >
+            {props.pending ? "Revealing" : "Show solution"}
+          </Button>
+        ) : (
+          <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+            <DialogTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={props.pending}
+              >
+                {props.pending ? "Revealing" : "Reveal solution"}
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Reveal solution?</DialogTitle>
+                <DialogDescription>
+                  Revealing before the scenario is solved marks this run as assisted.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setConfirmOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button type="button" onClick={reveal}>
+                  Reveal
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         )}
       </CardContent>
     </Card>

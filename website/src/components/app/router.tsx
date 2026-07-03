@@ -9,6 +9,7 @@ import { AppNavbar } from "./AppNavbar";
 import { Landing } from "./pages/Landing";
 import { Dashboard } from "./pages/Dashboard";
 import { AgentOnboarding } from "./pages/AgentOnboarding";
+import { AdminBuilds } from "./pages/AdminBuilds";
 import { Scenarios as AdminScenarios } from "./pages/Scenarios";
 import { ScenarioDetails as AdminScenarioDetails } from "./pages/ScenarioDetails";
 import { ScenarioCatalog } from "./pages/ScenarioCatalog";
@@ -49,6 +50,13 @@ const adminScenariosRoute = createRoute({
   path: "admin/scenarios",
   beforeLoad: requireAdminRoute,
   component: AdminScenarios,
+});
+
+const adminBuildsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "admin/builds",
+  beforeLoad: requireAdminRoute,
+  component: AdminBuilds,
 });
 
 const adminScenarioDetailsRoute = createRoute({
@@ -97,6 +105,7 @@ const routeTree = rootRoute.addChildren([
   oauthConsentRoute,
   dashboardRoute,
   dashboardOnboardingRoute,
+  adminBuildsRoute,
   adminScenariosRoute,
   adminScenarioDetailsRoute,
   scenarioCatalogRoute,

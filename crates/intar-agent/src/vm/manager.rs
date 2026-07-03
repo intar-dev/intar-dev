@@ -29,17 +29,15 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    AgentConfig, BridgeConfig, ImageConfig, ImageRegistryConfig, SshAccessConfig, ToolsConfig,
-    VmDefaultsConfig,
+    AgentConfig, BridgeConfig, ImageRegistryConfig, SshAccessConfig, VmDefaultsConfig,
 };
 use crate::db::{ArchiveJobRow, Db, VmProbeStateRow, VmRow};
-use crate::firmware_cache;
 use crate::image_cache;
 use crate::kino_probe::{ProbeCollectionState, ProbeSnapshotView, ProbeUpdateEnvelope};
 #[cfg(target_os = "linux")]
 use crate::kino_probe::{ProbePollResult, decode_probe_snapshot};
 
-use super::{kino_recording, mac, qemu_img, replay_media, runtime_disk};
+use super::{kino_recording, mac, replay_media, runtime_disk};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -270,18 +268,6 @@ impl VmStatusResponse {
     }
 }
 
-#[derive(Debug, Clone)]
-enum BootSpec {
-    /// Boot via UEFI firmware (passed to Cloud Hypervisor as the payload "kernel", per docs).
-    Uefi { firmware_ref: String },
-    /// Boot via a Linux kernel + initramfs + cmdline (no UEFI).
-    Direct {
-        kernel: PathBuf,
-        initramfs: PathBuf,
-        cmdline: String,
-    },
-}
-
 struct QueueVmCreateRequest {
     requested_name: String,
     requested_run_id: String,
@@ -471,9 +457,7 @@ struct Inner {
     ssh_access: SshAccessConfig,
     db: Db,
     http: HttpClient,
-    firmwares: BTreeMap<String, ImageConfig>,
     image_registry: ImageRegistryConfig,
-    tools: ToolsConfig,
     defaults: VmDefaultsConfig,
     states: RwLock<BTreeMap<String, VmStatusResponse>>,
     lease_expiry_error_log: RwLock<BTreeMap<String, LeaseExpiryErrorLogState>>,
@@ -512,9 +496,7 @@ impl VmManager {
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::new(),
-            firmwares: cfg.firmwares.clone(),
             image_registry: cfg.image_registry.clone(),
-            tools: cfg.tools.clone(),
             defaults: cfg.vm_defaults.clone(),
             states: RwLock::new(states),
             lease_expiry_error_log: RwLock::new(BTreeMap::new()),
@@ -715,74 +697,6 @@ impl VmManager {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ApiError::conflict("another vm create is already in progress"))?;
-
-        let boot = {
-            let firmware_ref = self.inner.defaults.firmware.trim().to_string();
-            if !firmware_ref.is_empty() {
-                if !Path::new(&firmware_ref).is_file()
-                    && !self.inner.firmwares.contains_key(&firmware_ref)
-                {
-                    return Err(ApiError::internal(format!(
-                        "vm_defaults.firmware must be an existing file path or a configured firmware key; got {firmware_ref}"
-                    )));
-                }
-                BootSpec::Uefi { firmware_ref }
-            } else {
-                let kernel = self
-                    .inner
-                    .defaults
-                    .boot
-                    .kernel
-                    .clone()
-                    .ok_or_else(|| {
-                        ApiError::internal(
-                            "vm_defaults.firmware is empty and vm_defaults.boot.kernel is not configured",
-                        )
-                    })?;
-                if !kernel.is_file() {
-                    return Err(ApiError::internal(format!(
-                        "vm_defaults.boot.kernel does not exist at {}",
-                        kernel.display()
-                    )));
-                }
-
-                let initramfs = self
-                    .inner
-                    .defaults
-                    .boot
-                    .initramfs
-                    .clone()
-                    .ok_or_else(|| {
-                        ApiError::internal(
-                            "vm_defaults.firmware is empty and vm_defaults.boot.initramfs is not configured",
-                        )
-                    })?;
-                if !initramfs.is_file() {
-                    return Err(ApiError::internal(format!(
-                        "vm_defaults.boot.initramfs does not exist at {}",
-                        initramfs.display()
-                    )));
-                }
-
-                let cmdline = self.inner.defaults.boot.cmdline.trim().to_string();
-                if cmdline.is_empty() {
-                    return Err(ApiError::internal(
-                        "vm_defaults.firmware is empty and vm_defaults.boot.cmdline is not configured",
-                    ));
-                }
-
-                BootSpec::Direct {
-                    kernel,
-                    initramfs,
-                    cmdline,
-                }
-            }
-        };
-
-        let qemu_img = self.inner.tools.qemu_img.trim().to_string();
-        if qemu_img.is_empty() {
-            return Err(ApiError::internal("tools.qemu_img is not configured"));
-        }
 
         let tap_prefix = self.inner.defaults.tap.trim().to_string();
         if tap_prefix.is_empty() {
@@ -998,9 +912,7 @@ impl VmManager {
         let image_key_for_task = image_key.clone();
         let hostname_for_task = hostname.clone();
         let runtime_for_task = runtime.clone();
-        let boot_for_task = boot.clone();
         let tap_for_task = tap_name.clone();
-        let qemu_img_for_task = qemu_img.clone();
         let ch_socket_path_for_task = ch_socket_path.clone();
         let ch_stderr_path_for_task = ch_stderr_path.clone();
         let kino_vsock_path_for_task = kino_vsock_path.clone();
@@ -1014,10 +926,8 @@ impl VmManager {
             let create_input = RunCreateInput {
                 name: &name_for_task,
                 image_key: &image_key_for_task,
-                boot: boot_for_task,
                 runtime: &runtime_for_task,
                 tap: &tap_for_task,
-                qemu_img: &qemu_img_for_task,
                 ch_socket_path: &ch_socket_path_for_task,
                 ch_stderr_path: &ch_stderr_path_for_task,
                 kino_vsock_cid,
@@ -1258,10 +1168,8 @@ impl VmManager {
 struct RunCreateInput<'a> {
     name: &'a str,
     image_key: &'a str,
-    boot: BootSpec,
     runtime: &'a CreateScenarioVmRuntime,
     tap: &'a str,
-    qemu_img: &'a str,
     ch_socket_path: &'a Path,
     ch_stderr_path: &'a Path,
     kino_vsock_cid: u32,
@@ -1280,21 +1188,103 @@ struct RunCreateInput<'a> {
     bridge_name: &'a str,
 }
 
+struct CloudHypervisorVmConfigInput<'a> {
+    name: &'a str,
+    cached_image: &'a image_cache::CachedImage,
+    vcpus: u32,
+    memory_mib: u32,
+    tap: &'a str,
+    mac: &'a str,
+    root_disk_path: &'a Path,
+    config_disk_path: &'a Path,
+    recording_disk_path: &'a Path,
+    kino_vsock_cid: u32,
+    kino_vsock_path: &'a Path,
+}
+
+fn build_cloud_hypervisor_vm_config(input: CloudHypervisorVmConfigInput<'_>) -> Result<VmConfig> {
+    let vm_dir = input
+        .root_disk_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("root disk path has no parent"))?;
+
+    Ok(VmConfig {
+        cpus: Some(CpusConfig {
+            boot_vcpus: input.vcpus,
+            max_vcpus: input.vcpus,
+        }),
+        memory: Some(MemoryConfig {
+            size: (input.memory_mib as i64) * 1024 * 1024,
+        }),
+        payload: PayloadConfig {
+            kernel: Some(input.cached_image.kernel_path.display().to_string()),
+            initramfs: Some(input.cached_image.initrd_path.display().to_string()),
+            cmdline: Some(input.cached_image.cmdline.clone()),
+            ..PayloadConfig::default()
+        },
+        serial: Some(SerialConfig {
+            file: Some(vm_dir.join("serial.log").display().to_string()),
+            mode: "File".to_string(),
+            iommu: false,
+            socket: None,
+        }),
+        console: Some(ConsoleConfig {
+            file: Some(vm_dir.join("console.log").display().to_string()),
+            mode: "File".to_string(),
+            iommu: false,
+            socket: None,
+        }),
+        disks: Some(vec![
+            DiskConfig {
+                path: input.root_disk_path.display().to_string(),
+                readonly: false,
+                id: Some(format!("{}-root", input.name)),
+                image_type: Some(DiskImageType::Raw),
+            },
+            DiskConfig {
+                path: input.config_disk_path.display().to_string(),
+                readonly: true,
+                id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", input.name)),
+                image_type: Some(DiskImageType::Raw),
+            },
+            DiskConfig {
+                path: input.recording_disk_path.display().to_string(),
+                readonly: false,
+                id: Some(format!("{}-recordings", input.name)),
+                image_type: Some(DiskImageType::Raw),
+            },
+        ]),
+        net: Some(vec![NetConfig {
+            tap: input.tap.to_string(),
+            mac: Some(input.mac.to_string()),
+            ip: None,
+            mask: None,
+        }]),
+        vsock: Some(VsockConfig {
+            cid: u64::from(input.kino_vsock_cid),
+            socket: input.kino_vsock_path.display().to_string(),
+            iommu: false,
+            pci_segment: None,
+            id: Some(format!("{}-kino-vsock", input.name)),
+        }),
+    })
+}
+
 async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
 
     let cache_root =
         image_cache::default_cache_root().context("failed to determine image cache root")?;
-    let base_path = image_cache::ensure_cached_raw(
+    let cached_image = image_cache::ensure_cached_image(
         req.image_key,
         &inner.image_registry,
         Some(&inner.bridge),
         &cache_root,
         &inner.http,
-        req.qemu_img,
     )
     .await
-    .context("failed to ensure raw base image is cached")?;
+    .context("failed to ensure image and boot artifacts are cached")?;
+    let base_path = cached_image.raw_path.clone();
     ensure_create_not_deleted(inner, req.name).await?;
 
     set_state(inner, req.name, VmLifecycleState::PreparingDisks).await;
@@ -1304,9 +1294,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         root_path = %req.root_disk_path.display(),
         "creating CoW root disk from cached raw image"
     );
-    let base_virtual_size_bytes = qemu_img::virtual_size_bytes(req.qemu_img, &base_path)
-        .await
-        .context("failed to determine base image virtual size")?;
+    let base_virtual_size_bytes = cached_image.virtual_size_bytes;
 
     copy_root_disk_reflink(&base_path, req.root_disk_path)
         .await
@@ -1322,7 +1310,12 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             );
         }
         if target_bytes > base_virtual_size_bytes {
-            qemu_img::resize(req.qemu_img, req.root_disk_path, target_bytes)
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(req.root_disk_path)
+                .await
+                .with_context(|| format!("failed to open {}", req.root_disk_path.display()))?
+                .set_len(target_bytes)
                 .await
                 .context("failed to resize root disk")?;
         }
@@ -1362,108 +1355,19 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     ensure_tap_ready(req.bridge_name, req.tap).await?;
     ensure_create_not_deleted(inner, req.name).await?;
 
-    let payload = match req.boot {
-        BootSpec::Uefi { firmware_ref } => {
-            let firmware_path = if Path::new(&firmware_ref).is_file() {
-                PathBuf::from(&firmware_ref)
-            } else {
-                let fw = inner
-                    .firmwares
-                    .get(&firmware_ref)
-                    .ok_or_else(|| anyhow::anyhow!("unknown firmware key \"{firmware_ref}\""))?;
-                let fw_cache_root = firmware_cache::default_cache_root()
-                    .context("failed to determine firmware cache root")?;
-                firmware_cache::ensure_cached(&firmware_ref, fw, &fw_cache_root, &inner.http)
-                    .await
-                    .context("failed to ensure firmware is cached")?
-            };
-
-            PayloadConfig {
-                firmware: Some(firmware_path.display().to_string()),
-                ..PayloadConfig::default()
-            }
-        }
-        BootSpec::Direct {
-            kernel,
-            initramfs,
-            cmdline,
-        } => PayloadConfig {
-            kernel: Some(kernel.display().to_string()),
-            initramfs: Some(initramfs.display().to_string()),
-            cmdline: Some(cmdline),
-            ..PayloadConfig::default()
-        },
-    };
-
-    let vm_cfg = VmConfig {
-        cpus: Some(CpusConfig {
-            boot_vcpus: req.vcpus,
-            max_vcpus: req.vcpus,
-        }),
-        memory: Some(MemoryConfig {
-            size: (req.memory_mib as i64) * 1024 * 1024,
-        }),
-        payload,
-        serial: Some(SerialConfig {
-            file: Some(
-                req.root_disk_path
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("root disk path has no parent"))?
-                    .join("serial.log")
-                    .display()
-                    .to_string(),
-            ),
-            mode: "File".to_string(),
-            iommu: false,
-            socket: None,
-        }),
-        console: Some(ConsoleConfig {
-            file: Some(
-                req.root_disk_path
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("root disk path has no parent"))?
-                    .join("console.log")
-                    .display()
-                    .to_string(),
-            ),
-            mode: "File".to_string(),
-            iommu: false,
-            socket: None,
-        }),
-        disks: Some(vec![
-            DiskConfig {
-                path: req.root_disk_path.display().to_string(),
-                readonly: false,
-                id: Some(format!("{}-root", req.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-            DiskConfig {
-                path: req.config_disk_path.display().to_string(),
-                readonly: true,
-                id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", req.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-            DiskConfig {
-                path: req.recording_disk_path.display().to_string(),
-                readonly: false,
-                id: Some(format!("{}-recordings", req.name)),
-                image_type: Some(DiskImageType::Raw),
-            },
-        ]),
-        net: Some(vec![NetConfig {
-            tap: req.tap.to_string(),
-            mac: Some(req.mac.to_string()),
-            ip: None,
-            mask: None,
-        }]),
-        vsock: Some(VsockConfig {
-            cid: u64::from(req.kino_vsock_cid),
-            socket: req.kino_vsock_path.display().to_string(),
-            iommu: false,
-            pci_segment: None,
-            id: Some(format!("{}-kino-vsock", req.name)),
-        }),
-    };
+    let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+        name: req.name,
+        cached_image: &cached_image,
+        vcpus: req.vcpus,
+        memory_mib: req.memory_mib,
+        tap: req.tap,
+        mac: req.mac,
+        root_disk_path: req.root_disk_path,
+        config_disk_path: req.config_disk_path,
+        recording_disk_path: req.recording_disk_path,
+        kino_vsock_cid: req.kino_vsock_cid,
+        kino_vsock_path: req.kino_vsock_path,
+    })?;
 
     let ch_pid =
         spawn_cloud_hypervisor(&inner.ch_binary, req.ch_socket_path, req.ch_stderr_path).await?;
@@ -5316,6 +5220,98 @@ mod tests {
 
         assert!(message.contains("created the Kino vsock socket"));
         assert!(!message.contains("cloud-hypervisor.stderr.log"));
+    }
+
+    #[test]
+    fn cloud_hypervisor_config_uses_direct_boot_payload_and_stable_disks() {
+        let cached_image = image_cache::CachedImage {
+            raw_path: PathBuf::from("/cache/images/broken.raw"),
+            kernel_path: PathBuf::from("/cache/artifacts/vmlinuz"),
+            initrd_path: PathBuf::from("/cache/artifacts/initrd.img"),
+            cmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4".to_string(),
+            virtual_size_bytes: 2 * 1024 * 1024 * 1024,
+        };
+
+        let cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
+            name: "vm-demo",
+            cached_image: &cached_image,
+            vcpus: 2,
+            memory_mib: 768,
+            tap: "intar-tap0",
+            mac: "02:00:00:00:00:01",
+            root_disk_path: Path::new("/work/vms/vm-demo/root.raw"),
+            config_disk_path: Path::new("/work/vms/vm-demo/runtime.vfat"),
+            recording_disk_path: Path::new("/work/runs/run-1/vm-demo/recordings.vfat"),
+            kino_vsock_cid: 10_042,
+            kino_vsock_path: Path::new("/work/vms/vm-demo/kino.vsock"),
+        })
+        .expect("vm config should render");
+
+        assert_eq!(cfg.payload.firmware, None);
+        assert_eq!(
+            cfg.payload.kernel.as_deref(),
+            Some("/cache/artifacts/vmlinuz")
+        );
+        assert_eq!(
+            cfg.payload.initramfs.as_deref(),
+            Some("/cache/artifacts/initrd.img")
+        );
+        assert_eq!(
+            cfg.payload.cmdline.as_deref(),
+            Some("root=/dev/vda rw console=ttyS0 quiet loglevel=4")
+        );
+
+        let cpus = cfg.cpus.as_ref().expect("cpus");
+        assert_eq!(cpus.boot_vcpus, 2);
+        assert_eq!(cpus.max_vcpus, 2);
+        assert_eq!(
+            cfg.memory.as_ref().expect("memory").size,
+            768_i64 * 1024 * 1024
+        );
+        assert_eq!(
+            cfg.serial
+                .as_ref()
+                .and_then(|serial| serial.file.as_deref()),
+            Some("/work/vms/vm-demo/serial.log")
+        );
+        assert_eq!(
+            cfg.console
+                .as_ref()
+                .and_then(|console| console.file.as_deref()),
+            Some("/work/vms/vm-demo/console.log")
+        );
+
+        let disks = cfg.disks.as_ref().expect("disks");
+        assert_eq!(disks.len(), 3);
+        assert_eq!(disks[0].path, "/work/vms/vm-demo/root.raw");
+        assert!(!disks[0].readonly);
+        assert_eq!(disks[0].id.as_deref(), Some("vm-demo-root"));
+        assert!(matches!(
+            disks[0].image_type.as_ref(),
+            Some(DiskImageType::Raw)
+        ));
+        assert_eq!(disks[1].path, "/work/vms/vm-demo/runtime.vfat");
+        assert!(disks[1].readonly);
+        assert_eq!(disks[1].id.as_deref(), Some("vm-demo-runtime"));
+        assert!(matches!(
+            disks[1].image_type.as_ref(),
+            Some(DiskImageType::Raw)
+        ));
+        assert_eq!(disks[2].path, "/work/runs/run-1/vm-demo/recordings.vfat");
+        assert!(!disks[2].readonly);
+        assert_eq!(disks[2].id.as_deref(), Some("vm-demo-recordings"));
+        assert!(matches!(
+            disks[2].image_type.as_ref(),
+            Some(DiskImageType::Raw)
+        ));
+
+        let net = cfg.net.as_ref().expect("net");
+        assert_eq!(net[0].tap, "intar-tap0");
+        assert_eq!(net[0].mac.as_deref(), Some("02:00:00:00:00:01"));
+        let vsock = cfg.vsock.as_ref().expect("vsock");
+        assert_eq!(vsock.cid, 10_042);
+        assert_eq!(vsock.socket, "/work/vms/vm-demo/kino.vsock");
+        assert_eq!(vsock.id.as_deref(), Some("vm-demo-kino-vsock"));
     }
 
     #[test]

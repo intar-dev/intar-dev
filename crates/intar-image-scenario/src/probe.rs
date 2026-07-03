@@ -1,7 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use crate::ScenarioError;
-use crate::scenario::ProbePhase;
+use crate::scenario::{ProbePhase, ScenarioHint};
 use jsonpath_rust::parser::parse_json_path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -95,6 +95,12 @@ pub struct KinoProbeDefinition {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub hints: Vec<ScenarioHint>,
     #[serde(default)]
     pub phase: ProbePhase,
     pub config: KinoProbeConfig,
@@ -105,6 +111,9 @@ impl KinoProbeDefinition {
         probe_name: &str,
         config: &HashMap<String, JsonValue>,
         description: Option<String>,
+        title: Option<String>,
+        body: Option<String>,
+        hints: Vec<ScenarioHint>,
         phase: ProbePhase,
     ) -> Result<Self, ScenarioError> {
         let parsed = serde_json::from_value::<KinoProbeConfig>(serde_json::Value::Object(
@@ -121,6 +130,9 @@ impl KinoProbeDefinition {
         Ok(Self {
             name: probe_name.to_string(),
             description,
+            title,
+            body,
+            hints,
             phase,
             config: parsed,
         })
@@ -409,9 +421,16 @@ mod tests {
             JsonValue::String("running".to_string()),
         );
 
-        let probe =
-            KinoProbeDefinition::from_definition("nginx-running", &config, None, ProbePhase::Boot)
-                .unwrap();
+        let probe = KinoProbeDefinition::from_definition(
+            "nginx-running",
+            &config,
+            None,
+            None,
+            None,
+            Vec::new(),
+            ProbePhase::Boot,
+        )
+        .unwrap();
         assert!(matches!(probe.config, KinoProbeConfig::Service { .. }));
         assert_eq!(probe.config.kind(), KinoProbeKind::Service);
     }
@@ -436,9 +455,16 @@ mod tests {
             JsonValue::String("$.ActiveState".to_string()),
         );
 
-        let probe =
-            KinoProbeDefinition::from_definition("service-state", &config, None, ProbePhase::Boot)
-                .unwrap();
+        let probe = KinoProbeDefinition::from_definition(
+            "service-state",
+            &config,
+            None,
+            None,
+            None,
+            Vec::new(),
+            ProbePhase::Boot,
+        )
+        .unwrap();
         probe.validate().unwrap();
         assert!(matches!(
             probe.config,

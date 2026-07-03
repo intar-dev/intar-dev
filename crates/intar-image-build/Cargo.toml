@@ -8,14 +8,19 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+fatfs.workspace = true
 hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-scenario = { path = "../intar-image-scenario" }
+russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
+zstd.workspace = true
 
 [lints]
 workspace = true

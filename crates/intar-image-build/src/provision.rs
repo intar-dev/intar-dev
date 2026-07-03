@@ -16,39 +16,6 @@ const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
 
-pub fn render_base_provision_script() -> Result<String> {
-    let mut script = String::new();
-    let required_packages = [
-        String::from("ca-certificates"),
-        String::from("curl"),
-        String::from("openssh-server"),
-        String::from("python3"),
-    ];
-
-    writeln!(script, "#!/usr/bin/env bash").context("format error")?;
-    writeln!(script, "set -euo pipefail").context("format error")?;
-    writeln!(script).context("format error")?;
-    append_package_helpers(&mut script, &required_packages, &[], true)?;
-    writeln!(script, "install -d -m 0755 /usr/share/keyrings").context("format error")?;
-    writeln!(script, "ensure_package_lists_updated").context("format error")?;
-    writeln!(script, "log_phase dist_upgrade start").context("format error")?;
-    writeln!(
-        script,
-        "DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y"
-    )
-    .context("format error")?;
-    writeln!(script, "log_phase dist_upgrade end").context("format error")?;
-    writeln!(
-        script,
-        "install_packages base_packages \"${{required_packages[@]}}\""
-    )
-    .context("format error")?;
-    append_apt_cleanup_config(&mut script)?;
-    append_base_cloud_init_cleanup(&mut script)?;
-    append_final_cleanup(&mut script)?;
-    Ok(script)
-}
-
 pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
     let mut script = String::new();
     let derived_kino = scenario
@@ -190,6 +157,12 @@ fn append_script_body(
     writeln!(script, "install -d -m 0755 /usr/share/keyrings").context("format error")?;
     writeln!(
         script,
+        "initial_boot_files=\"$(find /boot -mindepth 1 -maxdepth 1 -printf '%P\\n' 2>/dev/null | sort || true)\""
+    )
+    .context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(
+        script,
         "install_packages scenario_packages \"${{required_packages[@]}}\""
     )
     .context("format error")?;
@@ -222,17 +195,53 @@ fn append_script_body(
         "for unit in systemd-networkd-wait-online.service NetworkManager-wait-online.service; do systemctl disable \"$unit\" >/dev/null 2>&1 || true; done"
     )
     .context("format error")?;
-    // Disable additional services for faster boot
+    writeln!(script, "systemctl set-default multi-user.target").context("format error")?;
+    append_scenario_image_finalization(script)?;
+    append_final_cleanup(script)
+}
+
+fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
+    writeln!(script, "log_phase image_finalize start").context("format error")?;
     writeln!(
         script,
-        "for unit in apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer man-db.timer popularity-contest.service motd-news.service fstrim.timer; do systemctl disable \"$unit\" >/dev/null 2>&1 || true; done"
+        "systemctl disable intar-build.service >/dev/null 2>&1 || true"
     )
     .context("format error")?;
-    writeln!(script, "systemctl set-default multi-user.target").context("format error")?;
-    writeln!(script, "install -d -m 0755 /etc/cloud").context("format error")?;
-    writeln!(script, "touch /etc/cloud/cloud-init.disabled").context("format error")?;
-    writeln!(script, "rm -f /etc/netplan/50-cloud-init.yaml").context("format error")?;
-    append_final_cleanup(script)
+    writeln!(
+        script,
+        "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "rm -f /home/${{bootstrap_username}}/.ssh/authorized_keys"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "final_boot_files=\"$(find /boot -mindepth 1 -maxdepth 1 -printf '%P\\n' 2>/dev/null | sort || true)\""
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "if [ \"$final_boot_files\" != \"$initial_boot_files\" ]; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  echo 'scenario provisioning changed /boot; installing kernels in scenarios is not supported' >&2"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  printf 'before:\\n%s\\nafter:\\n%s\\n' \"$initial_boot_files\" \"$final_boot_files\" >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "fi").context("format error")?;
+    writeln!(script, "fstrim -v / || true").context("format error")?;
+    writeln!(script, "log_phase image_finalize end").context("format error")?;
+    Ok(())
 }
 
 fn append_step_scripts(script: &mut String, step_scripts: &[GeneratedStepScript]) -> Result<()> {
@@ -336,15 +345,6 @@ fn append_final_cleanup(script: &mut String) -> Result<()> {
     writeln!(script, "truncate -s 0 /etc/machine-id").context("format error")?;
     writeln!(script, "rm -f /var/lib/dbus/machine-id").context("format error")?;
     writeln!(script, "log_phase cleanup end").context("format error")?;
-    Ok(())
-}
-
-fn append_base_cloud_init_cleanup(script: &mut String) -> Result<()> {
-    writeln!(script, "log_phase cloud_init_cleanup start").context("format error")?;
-    writeln!(script, "cloud-init clean --logs --seed || true").context("format error")?;
-    writeln!(script, "rm -rf /var/lib/cloud/* || true").context("format error")?;
-    writeln!(script, "log_phase cloud_init_cleanup end").context("format error")?;
-    writeln!(script).context("format error")?;
     Ok(())
 }
 
@@ -518,8 +518,9 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
     writeln!(script, "set -euo pipefail").context("format error")?;
-    writeln!(script, "runtime_device=\"/dev/disk/by-label/INTARRUN\"").context("format error")?;
-    writeln!(script, "recording_device=\"/dev/disk/by-label/INTARREC\"").context("format error")?;
+    writeln!(script, "root_device=\"/dev/vda\"").context("format error")?;
+    writeln!(script, "runtime_device=\"/dev/vdb\"").context("format error")?;
+    writeln!(script, "recording_device=\"/dev/vdc\"").context("format error")?;
     writeln!(script, "runtime_mount_path=\"/run/intar-runtime\"").context("format error")?;
     writeln!(script, "runtime_state_path=\"/run/intar\"").context("format error")?;
     writeln!(
@@ -546,16 +547,35 @@ fn append_runtime_assets(
     writeln!(script, "  local label=\"$2\"").context("format error")?;
     writeln!(script, "  for _ in {{1..100}}; do").context("format error")?;
     writeln!(script, "    if [ -e \"$device\" ]; then").context("format error")?;
-    writeln!(script, "      return 0").context("format error")?;
+    writeln!(script, "      local actual_label").context("format error")?;
+    writeln!(
+        script,
+        "      actual_label=\"$(blkid -s LABEL -o value \"$device\" 2>/dev/null || true)\""
+    )
+    .context("format error")?;
+    writeln!(script, "      if [ \"$actual_label\" = \"$label\" ]; then")
+        .context("format error")?;
+    writeln!(script, "        return 0").context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
     writeln!(script, "    fi").context("format error")?;
     writeln!(script, "    sleep 0.1").context("format error")?;
     writeln!(script, "  done").context("format error")?;
     writeln!(
         script,
-        "  echo \"missing $label block device at $device\" >&2"
+        "  echo \"missing $label block device at $device or label did not match\" >&2"
     )
     .context("format error")?;
     writeln!(script, "  return 1").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "grow_root_filesystem() {{").context("format error")?;
+    writeln!(script, "  log_phase root_resize start").context("format error")?;
+    writeln!(
+        script,
+        "  resize2fs \"$root_device\" >/dev/null 2>&1 || resize2fs \"$root_device\""
+    )
+    .context("format error")?;
+    writeln!(script, "  log_phase root_resize end").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "find_guest_interface() {{").context("format error")?;
@@ -574,19 +594,6 @@ fn append_runtime_assets(
     writeln!(script, "    if [ -c /dev/vsock ]; then").context("format error")?;
     writeln!(script, "      return 0").context("format error")?;
     writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    modprobe vsock >/dev/null 2>&1 || true").context("format error")?;
-    writeln!(
-        script,
-        "    modprobe vmw_vsock_virtio_transport_common >/dev/null 2>&1 || true"
-    )
-    .context("format error")?;
-    writeln!(
-        script,
-        "    modprobe vmw_vsock_virtio_transport >/dev/null 2>&1 || true"
-    )
-    .context("format error")?;
-    writeln!(script, "    modprobe virtio_vsock >/dev/null 2>&1 || true")
-        .context("format error")?;
     writeln!(script, "    sleep 0.1").context("format error")?;
     writeln!(script, "  done").context("format error")?;
     writeln!(script, "  echo 'vsock transport did not become ready' >&2")
@@ -741,7 +748,7 @@ fn append_runtime_assets(
     writeln!(script, "  log_phase ssh_host_keys start").context("format error")?;
     writeln!(
         script,
-        "  if compgen -G '/etc/ssh/ssh_host_*_key.pub' >/dev/null; then"
+        "  if [ -s /etc/ssh/ssh_host_ed25519_key.pub ]; then"
     )
     .context("format error")?;
     writeln!(script, "    log_phase ssh_host_keys end").context("format error")?;
@@ -752,15 +759,19 @@ fn append_runtime_assets(
         "  rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub"
     )
     .context("format error")?;
-    writeln!(script, "  ssh-keygen -A").context("format error")?;
     writeln!(
         script,
-        "  if ! compgen -G '/etc/ssh/ssh_host_*_key.pub' >/dev/null; then"
+        "  ssh-keygen -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key >/dev/null"
     )
     .context("format error")?;
     writeln!(
         script,
-        "    echo 'ssh-keygen -A did not create public host keys' >&2"
+        "  if [ ! -s /etc/ssh/ssh_host_ed25519_key.pub ]; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    echo 'failed to create ed25519 SSH host key' >&2"
     )
     .context("format error")?;
     writeln!(script, "    exit 1").context("format error")?;
@@ -797,8 +808,9 @@ fn append_runtime_assets(
     writeln!(script, "  exit 1").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
+    writeln!(script, "grow_root_filesystem").context("format error")?;
     writeln!(script, "log_phase runtime_disk start").context("format error")?;
-    writeln!(script, "wait_for_block_device \"$runtime_device\" runtime")
+    writeln!(script, "wait_for_block_device \"$runtime_device\" INTARRUN")
         .context("format error")?;
     writeln!(script, "install -d -m 0755 \"$runtime_mount_path\"").context("format error")?;
     writeln!(script, "mount -t vfat -o ro,nosuid,nodev,noexec,utf8=1,shortname=mixed \"$runtime_device\" \"$runtime_mount_path\"").context("format error")?;
@@ -851,7 +863,7 @@ fn append_runtime_assets(
     writeln!(script, "log_phase recording_mount start").context("format error")?;
     writeln!(
         script,
-        "wait_for_block_device \"$recording_device\" recording"
+        "wait_for_block_device \"$recording_device\" INTARREC"
     )
     .context("format error")?;
     writeln!(script, "recording_uid=\"$(id -u \"$recording_user\")\"").context("format error")?;
@@ -899,8 +911,7 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "[Unit]").context("format error")?;
     writeln!(script, "Description=Intar scenario supervisor").context("format error")?;
-    writeln!(script, "After=local-fs.target systemd-udev-trigger.service")
-        .context("format error")?;
+    writeln!(script, "After=local-fs.target").context("format error")?;
     writeln!(script, "Before=multi-user.target").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "[Service]").context("format error")?;
@@ -925,8 +936,27 @@ fn render_scenario_motd(
     probe_descriptors: &[intar_image_scenario::KinoProbeDescriptor],
 ) -> Result<String> {
     let mut output = String::new();
-    writeln!(output, "{}", scenario.description.trim()).context("format error")?;
-    writeln!(output).context("format error")?;
+    let title = scenario.title.trim();
+    let description = scenario.description.trim();
+    let mut wrote_header = false;
+
+    if !title.is_empty() {
+        writeln!(output, "{title}").context("format error")?;
+        wrote_header = true;
+    }
+
+    if !description.is_empty() {
+        if wrote_header {
+            writeln!(output).context("format error")?;
+        }
+        writeln!(output, "{description}").context("format error")?;
+        wrote_header = true;
+    }
+
+    if wrote_header {
+        writeln!(output).context("format error")?;
+    }
+
     for probe in probe_descriptors {
         writeln!(output, "- {}", probe.label.trim()).context("format error")?;
     }
@@ -1295,15 +1325,28 @@ mod tests {
 
     use intar_image_scenario::Scenario;
 
-    use super::{render_base_provision_script, render_scenario_provision_script};
+    use super::render_scenario_provision_script;
 
     #[test]
     fn provision_script_contains_runtime_assets() {
         let scenario = Scenario::parse(
             r#"
 scenario "broken-nginx" {
+  title = "Broken Nginx"
   category = "web"
+  tags = ["nginx", "systemd"]
+  difficulty = "easy"
+  estimated_minutes = 15
   description = "Fix nginx"
+  briefing = "Briefing should stay on the website only."
+
+  hint "service-state" {
+    body = "Hint should not be baked into the VM."
+  }
+
+  solution {
+    body = "Solution should stay gated on the server."
+  }
 
   image "debian-12-minimal" {
     base = "trixie"
@@ -1315,6 +1358,12 @@ scenario "broken-nginx" {
       service = "nginx"
       state = "running"
       description = "Nginx should be running"
+      title = "Start nginx"
+      body = "Probe body should remain website-only."
+
+      hint "status" {
+        body = "Probe hint should not be in the VM."
+      }
     }
   }
 
@@ -1338,8 +1387,6 @@ scenario "broken-nginx" {
         match script {
             Ok(script) => {
                 assert!(script.contains("/etc/kino/kino.hcl.tpl"));
-                assert!(script.contains("runtime_device=\"/dev/disk/by-label/INTARRUN\""));
-                assert!(script.contains("recording_device=\"/dev/disk/by-label/INTARREC\""));
                 assert!(script.contains("INTAR_GUEST_IP_CIDR is required"));
                 assert!(script.contains("FailureAction=poweroff-force"));
                 assert!(script.contains("wait_for_vsock_ready"));
@@ -1354,8 +1401,15 @@ scenario "broken-nginx" {
                 ));
                 assert!(script.contains("systemctl set-default multi-user.target"));
                 assert!(script.contains("cat >/etc/motd <<'EOF_MOTD'"));
+                assert!(script.contains("Broken Nginx"));
                 assert!(script.contains("Fix nginx"));
                 assert!(script.contains("- Nginx should be running"));
+                assert!(!script.contains("Briefing should stay on the website only."));
+                assert!(!script.contains("Hint should not be baked into the VM."));
+                assert!(!script.contains("Solution should stay gated on the server."));
+                assert!(!script.contains("Start nginx"));
+                assert!(!script.contains("Probe body should remain website-only."));
+                assert!(!script.contains("Probe hint should not be in the VM."));
                 assert!(
                     script.contains("find /etc/update-motd.d -maxdepth 1 -type f -exec chmod -x")
                 );
@@ -1376,16 +1430,41 @@ scenario "broken-nginx" {
                 assert!(script.contains("configure_ssh_access() {"));
                 assert!(script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
                 assert!(script.contains("KINO_HOST_READY_PORT is required"));
+                assert!(script.contains("root_device=\"/dev/vda\""));
+                assert!(script.contains("runtime_device=\"/dev/vdb\""));
+                assert!(script.contains("recording_device=\"/dev/vdc\""));
+                assert!(script.contains("actual_label=\"$(blkid -s LABEL -o value"));
+                assert!(script.contains("grow_root_filesystem() {"));
+                assert!(script.contains("resize2fs \"$root_device\""));
+                assert!(script.contains("wait_for_block_device \"$runtime_device\" INTARRUN"));
+                assert!(script.contains("wait_for_block_device \"$recording_device\" INTARREC"));
                 assert!(
                     script.contains("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub")
                 );
                 assert!(script.contains("generate_ssh_host_keys() {"));
-                assert!(script.contains("ssh-keygen -A"));
+                assert!(
+                    script.contains("ssh-keygen -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key")
+                );
+                assert!(!script.contains("ssh-keygen -A"));
+                assert!(!script.contains("modprobe vsock"));
+                assert!(script.contains("After=local-fs.target"));
+                assert!(!script.contains("After=local-fs.target systemd-udev-trigger.service"));
                 assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
                 assert!(script.contains("wait -n \"$KINO_PID\" || true"));
                 assert!(script.contains("start_sshd"));
-                assert!(script.contains("touch /etc/cloud/cloud-init.disabled"));
-                assert!(script.contains("rm -f /etc/netplan/50-cloud-init.yaml"));
+                assert!(script.contains("initial_boot_files=\"$(find /boot"));
+                assert!(script.contains("systemctl disable intar-build.service"));
+                assert!(script.contains(
+                    "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start"
+                ));
+                assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
+                assert!(script.contains("final_boot_files=\"$(find /boot"));
+                assert!(script.contains(
+                    "scenario provisioning changed /boot; installing kernels in scenarios is not supported"
+                ));
+                assert!(script.contains("fstrim -v / || true"));
+                assert!(!script.contains("touch /etc/cloud/cloud-init.disabled"));
+                assert!(!script.contains("rm -f /etc/netplan/50-cloud-init.yaml"));
                 assert!(!script.contains("cloud-init clean --logs --seed"));
                 assert!(!script.contains("dist_upgrade"));
                 assert!(!script.contains("apt-get update"));
@@ -1451,20 +1530,5 @@ scenario "workshop-cluster" {
                 "kubectl scale 'deployment/hello-web' --replicas=0 --namespace 'workshop'"
             )
         );
-    }
-
-    #[test]
-    fn base_provision_script_contains_upgrade_and_common_packages() {
-        let script = render_base_provision_script().unwrap();
-
-        assert!(script.contains("dist_upgrade"));
-        assert!(script.contains("apt-get update"));
-        assert!(script.contains("install_packages base_packages \"${required_packages[@]}\""));
-        assert!(script.contains("ca-certificates"));
-        assert!(script.contains("openssh-server"));
-        assert!(script.contains("cloud-init clean --logs --seed || true"));
-        assert!(script.contains("rm -rf /var/lib/cloud/* || true"));
-        assert!(!script.contains("/var/lib/apt/lists/*"));
-        assert!(!script.contains("touch /etc/cloud/cloud-init.disabled"));
     }
 }

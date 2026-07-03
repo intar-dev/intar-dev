@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BuildReportV1",
+  "type": "object",
+  "properties": {
+    "attempt": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "build_id": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string"
+    },
+    "current_vm": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finished_at_unix_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "host_id": {
+      "type": "string"
+    },
+    "observed_at_unix_ms": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "phase": {
+      "$ref": "#/$defs/BuildPhase"
+    },
+    "scenario_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0
+    },
+    "started_at_unix_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  },
+  "required": [
+    "schema_version",
+    "host_id",
+    "build_id",
+    "scenario_id",
+    "content_hash",
+    "observed_at_unix_ms",
+    "phase",
+    "attempt"
+  ],
+  "$defs": {
+    "BuildPhase": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "fetching_sources",
+        "building_base",
+        "building",
+        "publishing",
+        "uploading_logs",
+        "succeeded",
+        "failed"
+      ]
+    }
+  }
+}

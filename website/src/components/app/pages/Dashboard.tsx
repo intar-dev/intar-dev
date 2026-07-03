@@ -21,11 +21,14 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AgentBridgeStatus, AgentHostInfo } from "@/lib/agent-bridge";
+import { isScenarioLaunchHost } from "@/lib/scenario-hosts";
 
 interface AgentHostApi {
   id: string;
   name: string;
+  role: "agent" | "builder";
   disabled: boolean;
+  scenarioEnabled: boolean;
   createdAt: number;
   updatedAt: number;
   hostInfo: AgentHostInfo | null;
@@ -1451,6 +1454,9 @@ export function Dashboard() {
                             ) : null}
                           </div>
                           <div className="flex flex-wrap gap-2">
+                            <Badge variant="outline">
+                              {host.role === "builder" ? "Builder" : "Agent"}
+                            </Badge>
                             <Badge variant="outline">{host.id}</Badge>
                             <Badge variant="outline">{hostVms.length} live</Badge>
                             <Badge variant="outline">
@@ -2109,8 +2115,10 @@ function HostScenarioLaunchPanel(props: {
 
   const launchVm = scenarioDetail.data?.scenario.vms[0] ?? null;
   const isHostOnline = Boolean(props.host.status?.connected);
+  const canLaunchScenarios = isScenarioLaunchHost(props.host);
   const launchDisabled =
     props.host.disabled ||
+    !canLaunchScenarios ||
     !isHostOnline ||
     !props.selectedScenarioId ||
     props.isLaunching ||
@@ -2198,6 +2206,12 @@ function HostScenarioLaunchPanel(props: {
           {!isHostOnline ? (
             <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
               Host must be online to queue a scenario.
+            </div>
+          ) : null}
+
+          {!canLaunchScenarios ? (
+            <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
+              This host is reserved for image builds.
             </div>
           ) : null}
 

@@ -42,6 +42,7 @@ jobs:
         run: |
           rustup toolchain install --profile minimal
           rustup component add rustfmt clippy
+          rustup target add x86_64-unknown-linux-musl
           rustup show active-toolchain
 
       - name: Set up Rust cache

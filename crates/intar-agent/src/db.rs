@@ -1092,7 +1092,7 @@ mod tests {
             updated_at_s: 200,
             running_at_s: Some(150),
             error: None,
-            root_disk_path: Some("/tmp/root.qcow2".to_string()),
+            root_disk_path: Some("/tmp/root.raw".to_string()),
             seed_disk_path: Some("/tmp/seed.img".to_string()),
             mac: Some("02:00:00:00:00:01".to_string()),
             lease_duration_seconds: Some(3600),
@@ -1109,7 +1109,7 @@ mod tests {
             kino_vsock_path: Some("/tmp/kino.vsock".to_string()),
             ssh_host_keys_openssh_json: Some(r#"["ssh-ed25519 AAAAHOST host"]"#.to_string()),
             run_id: Some("run-1".to_string()),
-            recording_disk_path: Some("/tmp/recording.qcow2".to_string()),
+            recording_disk_path: Some("/tmp/recording.raw".to_string()),
             spool_dir: Some("/tmp/spool".to_string()),
         };
 

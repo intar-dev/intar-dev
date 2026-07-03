@@ -1,16 +1,21 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { Hammer, Server } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
+type HostRole = "agent" | "builder";
+
 export interface AgentOnboardingResponse {
   host: {
     id: string;
     name: string;
+    role: HostRole;
     disabled: boolean;
+    scenarioEnabled: boolean;
     createdAt: number;
   };
   bootstrapTokenExpiresAt: string;
@@ -29,6 +34,7 @@ export function HostOnboardingPanel({
   onGenerated,
 }: HostOnboardingPanelProps) {
   const [hostName, setHostName] = useState("dedicated-host");
+  const [hostRole, setHostRole] = useState<HostRole>("agent");
   const [generated, setGenerated] = useState<AgentOnboardingResponse | null>(
     null,
   );
@@ -44,6 +50,7 @@ export function HostOnboardingPanel({
         },
         body: JSON.stringify({
           name: hostName.trim() || undefined,
+          role: hostRole,
         }),
       });
 
@@ -90,6 +97,29 @@ export function HostOnboardingPanel({
           <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
         </div>
 
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button
+            type="button"
+            variant={hostRole === "agent" ? "default" : "outline"}
+            onClick={() => setHostRole("agent")}
+            disabled={onboard.isPending}
+            className="justify-start"
+          >
+            <Server className="size-4" />
+            Agent
+          </Button>
+          <Button
+            type="button"
+            variant={hostRole === "builder" ? "default" : "outline"}
+            onClick={() => setHostRole("builder")}
+            disabled={onboard.isPending}
+            className="justify-start"
+          >
+            <Hammer className="size-4" />
+            Builder
+          </Button>
+        </div>
+
         <form
           className="flex flex-col gap-3 sm:flex-row"
           onSubmit={(event) => {
@@ -120,11 +150,17 @@ export function HostOnboardingPanel({
           </Alert>
         ) : null}
 
-        <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
+        <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-4">
           <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
             Host name
             <div className="mt-1 font-medium text-foreground">
               {hostName.trim() || "dedicated-host"}
+            </div>
+          </div>
+          <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+            Role
+            <div className="mt-1 font-medium capitalize text-foreground">
+              {hostRole}
             </div>
           </div>
           <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
@@ -133,7 +169,9 @@ export function HostOnboardingPanel({
           </div>
           <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
             Install
-            <div className="mt-1 font-medium text-foreground">`intar-agent`</div>
+            <div className="mt-1 font-medium text-foreground">
+              `{hostRole === "builder" ? "intar-builder" : "intar-agent"}`
+            </div>
           </div>
         </div>
       </div>
@@ -144,6 +182,9 @@ export function HostOnboardingPanel({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary">{generated.host.id}</Badge>
+                <Badge variant="outline" className="capitalize">
+                  {generated.host.role}
+                </Badge>
                 <Badge variant="outline">
                   Expires{" "}
                   {new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}
@@ -165,10 +206,16 @@ export function HostOnboardingPanel({
 
             <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
               <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
-                Replace `[bridge]` in `/etc/intar-agent/config.toml`.
+                Replace `[bridge]` in{" "}
+                {generated.host.role === "builder"
+                  ? "`/etc/intar-builder/config.toml`"
+                  : "`/etc/intar-agent/config.toml`"}
               </li>
               <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
-                Restart with `sudo systemctl restart intar-agent`.
+                Restart with{" "}
+                {generated.host.role === "builder"
+                  ? "`sudo systemctl restart intar-builder`"
+                  : "`sudo systemctl restart intar-agent`"}
               </li>
               <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
                 Confirm the heartbeat in the Hosts tab.

@@ -49,7 +49,6 @@
     },
     "probes": {
       "type": "array",
-      "default": [],
       "items": {
         "$ref": "#/$defs/VmProbeSnapshotV1"
       }
@@ -65,7 +64,6 @@
     },
     "ssh_host_keys_openssh": {
       "type": "array",
-      "default": [],
       "items": {
         "type": "string"
       }
@@ -80,7 +78,9 @@
     "run_id",
     "vm_name",
     "observed_at_unix_ms",
-    "phase"
+    "phase",
+    "ssh_host_keys_openssh",
+    "probes"
   ],
   "$defs": {
     "ProbePhase": {

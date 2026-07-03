@@ -1,27 +1,54 @@
 #![forbid(unsafe_code)]
 
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BridgeConfig, ImageRegistryConfig, normalize_sha256, redact_url_userinfo};
-use crate::vm::qemu_img;
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 2;
+const RAW_CACHE_MARKER_VERSION: u8 = 1;
 #[derive(Debug, Clone)]
 struct RegistryImageRecord {
     image_key: String,
     image_filename: String,
     image_sha256: String,
+    image_virtual_size_bytes: u64,
+    boot: RegistryImageBoot,
     download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct RegistryImageBoot {
+    kernel_sha256: String,
+    initrd_sha256: String,
+    cmdline: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CachedImage {
+    pub raw_path: PathBuf,
+    pub kernel_path: PathBuf,
+    pub initrd_path: PathBuf,
+    pub cmdline: String,
+    pub virtual_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct RawCacheMarker {
+    schema_version: u8,
+    image_key: String,
+    image_sha256: String,
+    image_virtual_size_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,14 +60,20 @@ struct RegistryIndex {
 struct RegistryIndexImage {
     image_key: String,
     image_sha256: String,
+    image_format: String,
+    image_virtual_size_bytes: u64,
+    boot: RegistryIndexImageBoot,
     download_url: String,
 }
 
-pub fn spawn_warm_cache_with_bridge(
-    registry: ImageRegistryConfig,
-    bridge: BridgeConfig,
-    qemu_img: String,
-) {
+#[derive(Debug, Deserialize)]
+struct RegistryIndexImageBoot {
+    kernel_sha256: String,
+    initrd_sha256: String,
+    cmdline: String,
+}
+
+pub fn spawn_warm_cache_with_bridge(registry: ImageRegistryConfig, bridge: BridgeConfig) {
     tokio::spawn(async move {
         let cache_root = match default_cache_root() {
             Ok(path) => path,
@@ -58,7 +91,7 @@ pub fn spawn_warm_cache_with_bridge(
             "starting image registry cache worker"
         );
 
-        run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client, &qemu_img).await;
+        run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client).await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(
             registry.refresh_interval_minutes.saturating_mul(60),
@@ -67,8 +100,7 @@ pub fn spawn_warm_cache_with_bridge(
         interval.tick().await;
         loop {
             interval.tick().await;
-            run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client, &qemu_img)
-                .await;
+            run_cache_refresh_cycle(&registry, Some(&bridge), &cache_root, &client).await;
         }
     });
 }
@@ -101,8 +133,12 @@ pub fn spawn_log_cache_state_with_bridge(registry: ImageRegistryConfig, bridge: 
 
         for image in images {
             let path = cached_raw_image_path(&cache_root, &image);
-            match tokio::fs::metadata(&path).await {
-                Ok(meta) => {
+            match verified_cached_raw_image_metadata(
+                &cache_root,
+                &image.image_key,
+                &image.image_sha256,
+            ) {
+                Some(meta) => {
                     present = present.saturating_add(1);
                     info!(
                         image = %image.image_key,
@@ -111,16 +147,16 @@ pub fn spawn_log_cache_state_with_bridge(registry: ImageRegistryConfig, bridge: 
                         "cache present"
                     );
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                None if !path.exists() => {
                     missing = missing.saturating_add(1);
                     info!(image = %image.image_key, path = %path.display(), "cache missing");
                 }
-                Err(e) => {
+                None => {
                     unknown = unknown.saturating_add(1);
                     warn!(
                         image = %image.image_key,
                         path = %path.display(),
-                        "failed to stat cache file: {e}"
+                        "cache unverified"
                     );
                 }
             }
@@ -142,12 +178,31 @@ pub fn default_cache_root() -> Result<PathBuf> {
     Ok(base.join("intar-agent").join("images"))
 }
 
+pub(crate) fn verified_cached_raw_image_metadata(
+    cache_root: &Path,
+    image_key: &str,
+    image_sha256: &str,
+) -> Option<std::fs::Metadata> {
+    let raw_path = cached_raw_image_path_for_key(cache_root, image_key, image_sha256);
+    let metadata = std::fs::metadata(&raw_path).ok()?;
+    let marker_path = raw_cache_marker_path_for_key(cache_root, image_key, image_sha256);
+    let marker = read_raw_cache_marker_sync(&marker_path).ok()?;
+    if marker.schema_version == RAW_CACHE_MARKER_VERSION
+        && marker.image_key == image_key
+        && marker.image_sha256 == image_sha256
+        && marker.image_virtual_size_bytes == metadata.len()
+    {
+        Some(metadata)
+    } else {
+        None
+    }
+}
+
 async fn run_cache_refresh_cycle(
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
     cache_root: &Path,
     client: &reqwest::Client,
-    qemu_img: &str,
 ) {
     let images = match list_registry_images(registry, bridge, client).await {
         Ok(images) => images,
@@ -163,7 +218,7 @@ async fn run_cache_refresh_cycle(
     if images.is_empty() {
         warn!(
             registry = %redact_url_userinfo(&registry.url),
-            "image registry did not advertise any qcow2 images"
+            "image registry did not advertise any raw_zstd images"
         );
         return;
     }
@@ -182,7 +237,6 @@ async fn run_cache_refresh_cycle(
         let cache_root = cache_root.to_path_buf();
         let registry = registry.clone();
         let bridge = bridge.cloned();
-        let qemu_img = qemu_img.to_string();
         let sem = Arc::clone(&sem);
         handles.push(tokio::spawn(async move {
             let span = tracing::info_span!(
@@ -197,15 +251,8 @@ async fn run_cache_refresh_cycle(
                 Err(_) => return,
             };
 
-            match ensure_cached_raw_entry(
-                &image,
-                &registry,
-                bridge.as_ref(),
-                &cache_root,
-                &client,
-                &qemu_img,
-            )
-            .await
+            match ensure_cached_raw_entry(&image, &registry, bridge.as_ref(), &cache_root, &client)
+                .await
             {
                 Ok(path) => info!(path = %path.display(), "cache ready"),
                 Err(e) => error!("failed to cache image: {e}"),
@@ -232,16 +279,51 @@ pub async fn ensure_cached(
     ensure_cached_entry(&image, registry, bridge, cache_root, client).await
 }
 
+#[cfg(test)]
 pub async fn ensure_cached_raw(
     image_key: &str,
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
     cache_root: &Path,
     client: &reqwest::Client,
-    qemu_img: &str,
 ) -> Result<PathBuf> {
     let image = resolve_registry_image(image_key, registry, bridge, client).await?;
-    ensure_cached_raw_entry(&image, registry, bridge, cache_root, client, qemu_img).await
+    ensure_cached_raw_entry(&image, registry, bridge, cache_root, client).await
+}
+
+pub async fn ensure_cached_image(
+    image_key: &str,
+    registry: &ImageRegistryConfig,
+    bridge: Option<&BridgeConfig>,
+    cache_root: &Path,
+    client: &reqwest::Client,
+) -> Result<CachedImage> {
+    let image = resolve_registry_image(image_key, registry, bridge, client).await?;
+    let raw_path = ensure_cached_raw_entry(&image, registry, bridge, cache_root, client).await?;
+    let kernel_path = ensure_cached_artifact(
+        &image.boot.kernel_sha256,
+        registry,
+        bridge,
+        cache_root,
+        client,
+    )
+    .await?;
+    let initrd_path = ensure_cached_artifact(
+        &image.boot.initrd_sha256,
+        registry,
+        bridge,
+        cache_root,
+        client,
+    )
+    .await?;
+
+    Ok(CachedImage {
+        raw_path,
+        kernel_path,
+        initrd_path,
+        cmdline: image.boot.cmdline,
+        virtual_size_bytes: image.image_virtual_size_bytes,
+    })
 }
 
 async fn ensure_cached_raw_entry(
@@ -250,35 +332,94 @@ async fn ensure_cached_raw_entry(
     bridge: Option<&BridgeConfig>,
     cache_root: &Path,
     client: &reqwest::Client,
-    qemu_img: &str,
 ) -> Result<PathBuf> {
-    let qcow2_path = ensure_cached_entry(image, registry, bridge, cache_root, client).await?;
     let raw_path = cached_raw_image_path(cache_root, image);
-    if tokio::fs::metadata(&raw_path).await.is_ok() {
-        info!(path = %raw_path.display(), "raw image cache hit");
-        return Ok(raw_path);
+    let marker_path = raw_cache_marker_path(cache_root, image);
+    match tokio::fs::metadata(&raw_path).await {
+        Ok(metadata) if metadata.len() == image.image_virtual_size_bytes => {
+            match read_raw_cache_marker(&marker_path).await {
+                Ok(marker) if raw_cache_marker_matches(&marker, image, metadata.len()) => {
+                    info!(path = %raw_path.display(), "raw image cache hit");
+                    return Ok(raw_path);
+                }
+                Ok(marker) => {
+                    warn!(
+                        path = %raw_path.display(),
+                        marker_image_sha256 = %marker.image_sha256,
+                        marker_bytes = marker.image_virtual_size_bytes,
+                        "cached raw image marker mismatch; refreshing"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    warn!(
+                        path = %raw_path.display(),
+                        "cached raw image missing verification marker; refreshing"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        path = %raw_path.display(),
+                        "failed to read cached raw image marker: {error}; refreshing"
+                    );
+                }
+            }
+            remove_raw_cache_entry(&raw_path, &marker_path).await?;
+        }
+        Ok(metadata) => {
+            warn!(
+                path = %raw_path.display(),
+                expected_bytes = image.image_virtual_size_bytes,
+                actual_bytes = metadata.len(),
+                "cached raw image size mismatch; refreshing"
+            );
+            remove_raw_cache_entry(&raw_path, &marker_path).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(path = %raw_path.display(), "failed to stat cached raw image: {error}");
+        }
     }
 
+    debug!(
+        image = %image.image_key,
+        kernel_sha256 = %image.boot.kernel_sha256,
+        initrd_sha256 = %image.boot.initrd_sha256,
+        cmdline = %image.boot.cmdline,
+        "preparing direct-boot raw image cache entry"
+    );
+
+    let compressed_path = ensure_cached_entry(image, registry, bridge, cache_root, client).await?;
     let image_dir = cache_root.join(&image.image_key);
     let (tmp_path, tmp_file) =
         create_tmp_file(&image_dir, &format!("{}.raw", image.image_sha256)).await?;
     drop(tmp_file);
 
-    let base_format = qemu_img::detect_format(qemu_img, &qcow2_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to detect cached image format at {}",
-                qcow2_path.display()
-            )
-        })?;
-    qemu_img::convert_to_raw(qemu_img, &qcow2_path, &base_format, &tmp_path)
-        .await
-        .with_context(|| format!("failed to convert cached image {} to raw", image.image_key))?;
+    let compressed_path_for_task = compressed_path.clone();
+    let tmp_path_for_task = tmp_path.clone();
+    let virtual_size_bytes = image.image_virtual_size_bytes;
+    let decompress_result = tokio::task::spawn_blocking(move || {
+        decompress_raw_zstd_sparse(
+            &compressed_path_for_task,
+            &tmp_path_for_task,
+            virtual_size_bytes,
+        )
+    })
+    .await
+    .context("raw zstd decompression task panicked")?;
+    if let Err(error) = decompress_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(error)
+            .with_context(|| format!("failed to decompress cached image {}", image.image_key));
+    }
 
     if tokio::fs::metadata(&raw_path).await.is_ok() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Ok(raw_path);
+        if verified_cached_raw_image_metadata(cache_root, &image.image_key, &image.image_sha256)
+            .is_some()
+        {
+            return Ok(raw_path);
+        }
+        remove_raw_cache_entry(&raw_path, &marker_path).await?;
     }
     tokio::fs::rename(&tmp_path, &raw_path)
         .await
@@ -288,6 +429,9 @@ async fn ensure_cached_raw_entry(
                 raw_path.display()
             )
         })?;
+    write_raw_cache_marker(cache_root, image)
+        .await
+        .with_context(|| format!("failed to write raw cache marker for {}", image.image_key))?;
     info!(path = %raw_path.display(), "raw image cache ready");
     Ok(raw_path)
 }
@@ -322,7 +466,7 @@ async fn ensure_cached_entry(
     let image_path = cached_image_path(cache_root, image);
     let expected_sha256 = image.image_sha256.clone();
     cache_sha_sidecar(
-        &format!("{expected_sha256}  {}.qcow2\n", image.image_key),
+        &format!("{expected_sha256}  {}\n", image.image_filename),
         &image_dir,
         &sha_filename(image),
     )
@@ -425,6 +569,82 @@ async fn ensure_cached_entry(
     Ok(image_path)
 }
 
+async fn ensure_cached_artifact(
+    sha256: &str,
+    registry: &ImageRegistryConfig,
+    bridge: Option<&BridgeConfig>,
+    cache_root: &Path,
+    client: &reqwest::Client,
+) -> Result<PathBuf> {
+    let expected_sha256 = normalize_sha256(sha256)
+        .ok_or_else(|| anyhow::anyhow!("invalid artifact sha256 {sha256:?}"))?;
+    let artifact_dir = cache_root.join("artifacts");
+    tokio::fs::create_dir_all(&artifact_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create artifact cache dir {}",
+                artifact_dir.display()
+            )
+        })?;
+    let artifact_path = artifact_dir.join(&expected_sha256);
+
+    if tokio::fs::metadata(&artifact_path).await.is_ok() {
+        match sha256_file(&artifact_path).await {
+            Ok(have) if have == expected_sha256 => {
+                info!(path = %artifact_path.display(), "artifact cache hit");
+                return Ok(artifact_path);
+            }
+            Ok(have) => {
+                warn!(
+                    path = %artifact_path.display(),
+                    expected_sha256 = %expected_sha256,
+                    actual_sha256 = %have,
+                    "cached artifact sha256 mismatch; refreshing"
+                );
+            }
+            Err(error) => {
+                warn!(path = %artifact_path.display(), "failed to hash cached artifact: {error}");
+            }
+        }
+    }
+
+    let (tmp_path, mut tmp_file) = create_tmp_file(&artifact_dir, &expected_sha256).await?;
+    let artifact_url = format!("/agent/registry/artifacts/{expected_sha256}");
+    let download = download_to_file(client, registry, bridge, &artifact_url, &mut tmp_file).await;
+    drop(tmp_file);
+
+    let download = match download {
+        Ok(download) => download,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(error).with_context(|| format!("failed to download artifact {sha256}"));
+        }
+    };
+
+    if download.sha256 != expected_sha256 {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        anyhow::bail!(
+            "downloaded artifact sha256 mismatch: expected {}, got {}",
+            expected_sha256,
+            download.sha256
+        );
+    }
+
+    if tokio::fs::metadata(&artifact_path).await.is_ok() {
+        let _ = tokio::fs::remove_file(&artifact_path).await;
+    }
+    tokio::fs::rename(&tmp_path, &artifact_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to move cached artifact into place at {}",
+                artifact_path.display()
+            )
+        })?;
+    Ok(artifact_path)
+}
+
 async fn list_registry_images(
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
@@ -458,13 +678,27 @@ fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryImageRecord> 
                 return None;
             }
             let image_sha256 = normalize_sha256(&image.image_sha256)?;
+            if image.image_format != "raw_zstd" || image.image_virtual_size_bytes == 0 {
+                return None;
+            }
+            let kernel_sha256 = normalize_sha256(&image.boot.kernel_sha256)?;
+            let initrd_sha256 = normalize_sha256(&image.boot.initrd_sha256)?;
+            if image.boot.cmdline.trim().is_empty() {
+                return None;
+            }
             if image.download_url.trim().is_empty() {
                 return None;
             }
             Some(RegistryImageRecord {
-                image_filename: format!("{}.qcow2", image.image_key),
+                image_filename: format!("{}.raw.zst", image.image_key),
                 image_key: image.image_key,
                 image_sha256,
+                image_virtual_size_bytes: image.image_virtual_size_bytes,
+                boot: RegistryImageBoot {
+                    kernel_sha256,
+                    initrd_sha256,
+                    cmdline: image.boot.cmdline,
+                },
                 download_url: image.download_url,
             })
         })
@@ -524,13 +758,176 @@ fn cached_image_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf 
 }
 
 fn cached_raw_image_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf {
+    cached_raw_image_path_for_key(cache_root, &image.image_key, &image.image_sha256)
+}
+
+fn cached_raw_image_path_for_key(
+    cache_root: &Path,
+    image_key: &str,
+    image_sha256: &str,
+) -> PathBuf {
     cache_root
-        .join(&image.image_key)
-        .join(format!("{}.raw", image.image_sha256))
+        .join(image_key)
+        .join(format!("{image_sha256}.raw"))
+}
+
+fn raw_cache_marker_path(cache_root: &Path, image: &RegistryImageRecord) -> PathBuf {
+    raw_cache_marker_path_for_key(cache_root, &image.image_key, &image.image_sha256)
+}
+
+fn raw_cache_marker_path_for_key(
+    cache_root: &Path,
+    image_key: &str,
+    image_sha256: &str,
+) -> PathBuf {
+    cache_root
+        .join(image_key)
+        .join(format!("{image_sha256}.raw.verified.json"))
+}
+
+fn raw_cache_marker_matches(
+    marker: &RawCacheMarker,
+    image: &RegistryImageRecord,
+    actual_size_bytes: u64,
+) -> bool {
+    marker.schema_version == RAW_CACHE_MARKER_VERSION
+        && marker.image_key == image.image_key
+        && marker.image_sha256 == image.image_sha256
+        && marker.image_virtual_size_bytes == image.image_virtual_size_bytes
+        && marker.image_virtual_size_bytes == actual_size_bytes
+}
+
+async fn read_raw_cache_marker(path: &Path) -> std::io::Result<RawCacheMarker> {
+    let bytes = tokio::fs::read(path).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn read_raw_cache_marker_sync(path: &Path) -> std::io::Result<RawCacheMarker> {
+    let bytes = std::fs::read(path)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn write_raw_cache_marker(cache_root: &Path, image: &RegistryImageRecord) -> Result<()> {
+    let image_dir = cache_root.join(&image.image_key);
+    let marker_path = raw_cache_marker_path(cache_root, image);
+    let marker = RawCacheMarker {
+        schema_version: RAW_CACHE_MARKER_VERSION,
+        image_key: image.image_key.clone(),
+        image_sha256: image.image_sha256.clone(),
+        image_virtual_size_bytes: image.image_virtual_size_bytes,
+    };
+    let body = serde_json::to_vec(&marker).context("serializing raw cache marker")?;
+    let (tmp_path, mut tmp_file) = create_tmp_file(
+        &image_dir,
+        &format!("{}.raw.verified.json", image.image_sha256),
+    )
+    .await?;
+    tmp_file
+        .write_all(&body)
+        .await
+        .context("writing raw cache marker temp file")?;
+    tmp_file
+        .flush()
+        .await
+        .context("flushing raw cache marker temp file")?;
+    drop(tmp_file);
+    tokio::fs::rename(&tmp_path, &marker_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to move raw cache marker into place at {}",
+                marker_path.display()
+            )
+        })?;
+    Ok(())
+}
+
+async fn remove_raw_cache_entry(raw_path: &Path, marker_path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(raw_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to remove {}", raw_path.display()));
+        }
+    }
+    match tokio::fs::remove_file(marker_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to remove {}", marker_path.display()));
+        }
+    }
+    Ok(())
 }
 
 fn sha_filename(image: &RegistryImageRecord) -> String {
     format!("{}.sha256", image.image_filename)
+}
+
+fn decompress_raw_zstd_sparse(
+    compressed_path: &Path,
+    raw_path: &Path,
+    virtual_size_bytes: u64,
+) -> Result<()> {
+    let input = std::fs::File::open(compressed_path)
+        .with_context(|| format!("failed to open {}", compressed_path.display()))?;
+    let mut decoder = zstd::stream::read::Decoder::new(input)
+        .with_context(|| format!("failed to open zstd stream {}", compressed_path.display()))?;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(raw_path)
+        .with_context(|| format!("failed to open {}", raw_path.display()))?;
+
+    let mut written = 0u64;
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = decoder
+            .read(&mut buffer)
+            .with_context(|| format!("failed to decompress {}", compressed_path.display()))?;
+        if read == 0 {
+            break;
+        }
+        written = written
+            .checked_add(read as u64)
+            .ok_or_else(|| anyhow::anyhow!("decompressed image size overflow"))?;
+        if written > virtual_size_bytes {
+            anyhow::bail!(
+                "decompressed image {} exceeds advertised virtual size: {} > {}",
+                compressed_path.display(),
+                written,
+                virtual_size_bytes
+            );
+        }
+        if buffer[..read].iter().all(|byte| *byte == 0) {
+            output
+                .seek(SeekFrom::Current(read as i64))
+                .with_context(|| format!("failed to seek {}", raw_path.display()))?;
+        } else {
+            output
+                .write_all(&buffer[..read])
+                .with_context(|| format!("failed to write {}", raw_path.display()))?;
+        }
+    }
+
+    if written != virtual_size_bytes {
+        anyhow::bail!(
+            "decompressed image {} size does not match advertised virtual size: {} != {}",
+            compressed_path.display(),
+            written,
+            virtual_size_bytes
+        );
+    }
+    output
+        .set_len(virtual_size_bytes)
+        .with_context(|| format!("failed to set length for {}", raw_path.display()))?;
+    output
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", raw_path.display()))?;
+    Ok(())
 }
 
 fn build_registry_url(registry: &ImageRegistryConfig, path_or_url: &str) -> String {
@@ -736,8 +1133,10 @@ fn nibble_to_hex(nibble: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::MetadataExt as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::tls_provider::ensure_ring_provider;
@@ -760,16 +1159,44 @@ mod tests {
     }
 
     fn registry_index(entries: &[(&str, &str, &str)]) -> Vec<u8> {
+        registry_index_with_boot(entries, &"b".repeat(64), &"c".repeat(64), 11)
+    }
+
+    fn registry_index_with_boot(
+        entries: &[(&str, &str, &str)],
+        kernel_sha256: &str,
+        initrd_sha256: &str,
+        virtual_size_bytes: u64,
+    ) -> Vec<u8> {
         let images = entries
             .iter()
             .map(|(image_key, image_sha256, download_url)| {
                 format!(
-                    r#"{{"image_key":"{image_key}","image_sha256":"{image_sha256}","download_url":"{download_url}"}}"#
+                    r#"{{"image_key":"{image_key}","image_sha256":"{image_sha256}","image_format":"raw_zstd","image_virtual_size_bytes":{virtual_size_bytes},"boot":{{"kernel_sha256":"{kernel_sha256}","initrd_sha256":"{initrd_sha256}","cmdline":"root=/dev/vda rw"}},"download_url":"{download_url}"}}"#
                 )
             })
             .collect::<Vec<_>>()
             .join(",");
         format!(r#"{{"images":[{images}]}}"#).into_bytes()
+    }
+
+    fn raw_cache_record(
+        image_key: &str,
+        image_sha256: &str,
+        virtual_size_bytes: u64,
+    ) -> RegistryImageRecord {
+        RegistryImageRecord {
+            image_key: image_key.to_string(),
+            image_filename: format!("{image_key}.raw.zst"),
+            image_sha256: image_sha256.to_string(),
+            image_virtual_size_bytes: virtual_size_bytes,
+            boot: RegistryImageBoot {
+                kernel_sha256: "b".repeat(64),
+                initrd_sha256: "c".repeat(64),
+                cmdline: "root=/dev/vda rw".to_string(),
+            },
+            download_url: "/agent/registry/images/ubuntu/sha".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -841,9 +1268,314 @@ mod tests {
             cache_root
                 .path()
                 .join("ubuntu")
-                .join("ubuntu.qcow2.sha256")
+                .join("ubuntu.raw.zst.sha256")
                 .is_file()
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_raw_decompresses_raw_zstd() -> Result<()> {
+        let raw_body = b"hello-image";
+        let compressed_body = zstd::encode_all(Cursor::new(raw_body), 0)?;
+        let expected = sha256_bytes(&compressed_body);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let body_vec = compressed_body.clone();
+        let index = registry_index(&[("ubuntu", &expected, "/agent/registry/images/ubuntu/sha")]);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, response_body) = match path {
+                    "/images" => ("200 OK", index.clone()),
+                    "/agent/registry/images/ubuntu/sha" => ("200 OK", body_vec.clone()),
+                    _ => ("404 Not Found", Vec::new()),
+                };
+
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&response_body);
+            }
+        });
+
+        let cache_root = tempfile::tempdir()?;
+        ensure_ring_provider()?;
+        let client = reqwest::Client::new();
+        let registry = registry_config(addr);
+
+        let path = ensure_cached_raw("ubuntu", &registry, None, cache_root.path(), &client).await?;
+
+        assert_eq!(tokio::fs::read(&path).await?, raw_body);
+        assert!(
+            cache_root
+                .path()
+                .join("ubuntu")
+                .join("ubuntu.raw.zst")
+                .is_file()
+        );
+        assert!(
+            cache_root
+                .path()
+                .join("ubuntu")
+                .join(format!("{expected}.raw.verified.json"))
+                .is_file()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn raw_zstd_decompression_round_trips_sparse_image() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let compressed_path = temp.path().join("root.raw.zst");
+        let raw_path = temp.path().join("root.raw");
+        let virtual_size = 16 * 1024 * 1024;
+        let mut raw_body = vec![0u8; virtual_size];
+        raw_body[4096..4104].copy_from_slice(b"INTAR001");
+        raw_body[(8 * 1024 * 1024)..(8 * 1024 * 1024 + 8)].copy_from_slice(b"INTAR002");
+        raw_body[(virtual_size - 8192)..(virtual_size - 8184)].copy_from_slice(b"INTAR003");
+        std::fs::write(
+            &compressed_path,
+            zstd::encode_all(Cursor::new(&raw_body), 0)?,
+        )?;
+        std::fs::File::create(&raw_path)?;
+
+        decompress_raw_zstd_sparse(&compressed_path, &raw_path, virtual_size as u64)?;
+
+        assert_eq!(std::fs::read(&raw_path)?, raw_body);
+        let metadata = std::fs::metadata(&raw_path)?;
+        assert_eq!(metadata.len(), virtual_size as u64);
+
+        #[cfg(target_os = "linux")]
+        {
+            let allocated_bytes = metadata.blocks().saturating_mul(512);
+            assert!(
+                allocated_bytes < (virtual_size as u64 / 2),
+                "expected sparse allocation below half of virtual size, got {allocated_bytes} bytes for {virtual_size}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn raw_zstd_decompression_rejects_short_stream() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let compressed_path = temp.path().join("short.raw.zst");
+        let raw_path = temp.path().join("short.raw");
+        std::fs::write(
+            &compressed_path,
+            zstd::encode_all(Cursor::new(b"short"), 0)?,
+        )?;
+        std::fs::File::create(&raw_path)?;
+
+        let error = decompress_raw_zstd_sparse(&compressed_path, &raw_path, 4096)
+            .expect_err("short raw-zstd stream should be rejected");
+
+        assert!(format!("{error:#}").contains("advertised virtual size"));
+        assert!(!raw_path.is_file() || std::fs::metadata(&raw_path)?.len() != 4096);
+
+        Ok(())
+    }
+
+    #[test]
+    fn raw_zstd_decompression_rejects_oversized_stream_before_declared_size() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let compressed_path = temp.path().join("oversized.raw.zst");
+        let raw_path = temp.path().join("oversized.raw");
+        let advertised_size = 4096u64;
+        let raw_body = vec![1u8; (advertised_size as usize) + 8192];
+        std::fs::write(
+            &compressed_path,
+            zstd::encode_all(Cursor::new(&raw_body), 0)?,
+        )?;
+        std::fs::File::create(&raw_path)?;
+
+        let error = decompress_raw_zstd_sparse(&compressed_path, &raw_path, advertised_size)
+            .expect_err("oversized raw-zstd stream should be rejected");
+
+        assert!(format!("{error:#}").contains("exceeds advertised virtual size"));
+        assert!(std::fs::metadata(&raw_path)?.len() <= advertised_size);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_image_downloads_boot_artifacts() -> Result<()> {
+        let raw_body = b"hello-image";
+        let compressed_body = zstd::encode_all(Cursor::new(raw_body), 0)?;
+        let image_sha256 = sha256_bytes(&compressed_body);
+        let kernel_body = b"kernel";
+        let initrd_body = b"initrd";
+        let kernel_sha256 = sha256_bytes(kernel_body);
+        let initrd_sha256 = sha256_bytes(initrd_body);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let compressed_body_bg = compressed_body.clone();
+        let kernel_body_bg = kernel_body.to_vec();
+        let initrd_body_bg = initrd_body.to_vec();
+        let kernel_sha256_bg = kernel_sha256.clone();
+        let initrd_sha256_bg = initrd_sha256.clone();
+        let index = registry_index_with_boot(
+            &[("ubuntu", &image_sha256, "/agent/registry/images/ubuntu/sha")],
+            &kernel_sha256,
+            &initrd_sha256,
+            raw_body.len() as u64,
+        );
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, response_body) = match path {
+                    "/images" => ("200 OK", index.clone()),
+                    "/agent/registry/images/ubuntu/sha" => ("200 OK", compressed_body_bg.clone()),
+                    path if path == format!("/agent/registry/artifacts/{kernel_sha256_bg}") => {
+                        ("200 OK", kernel_body_bg.clone())
+                    }
+                    path if path == format!("/agent/registry/artifacts/{initrd_sha256_bg}") => {
+                        ("200 OK", initrd_body_bg.clone())
+                    }
+                    _ => ("404 Not Found", Vec::new()),
+                };
+
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&response_body);
+            }
+        });
+
+        let cache_root = tempfile::tempdir()?;
+        ensure_ring_provider()?;
+        let client = reqwest::Client::new();
+        let registry = registry_config(addr);
+
+        let cached =
+            ensure_cached_image("ubuntu", &registry, None, cache_root.path(), &client).await?;
+
+        assert_eq!(tokio::fs::read(&cached.raw_path).await?, raw_body);
+        assert_eq!(tokio::fs::read(&cached.kernel_path).await?, kernel_body);
+        assert_eq!(tokio::fs::read(&cached.initrd_path).await?, initrd_body);
+        assert_eq!(cached.cmdline, "root=/dev/vda rw");
+        assert_eq!(cached.virtual_size_bytes, raw_body.len() as u64);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_raw_removes_tmp_file_after_decompression_error() -> Result<()> {
+        let raw_body = b"short";
+        let compressed_body = zstd::encode_all(Cursor::new(raw_body), 0)?;
+        let expected = sha256_bytes(&compressed_body);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let body_vec = compressed_body.clone();
+        let index = registry_index_with_boot(
+            &[("ubuntu", &expected, "/agent/registry/images/ubuntu/sha")],
+            &"b".repeat(64),
+            &"c".repeat(64),
+            4096,
+        );
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, response_body) = match path {
+                    "/images" => ("200 OK", index.clone()),
+                    "/agent/registry/images/ubuntu/sha" => ("200 OK", body_vec.clone()),
+                    _ => ("404 Not Found", Vec::new()),
+                };
+
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&response_body);
+            }
+        });
+
+        let cache_root = tempfile::tempdir()?;
+        ensure_ring_provider()?;
+        let client = reqwest::Client::new();
+        let registry = registry_config(addr);
+
+        let error = ensure_cached_raw("ubuntu", &registry, None, cache_root.path(), &client)
+            .await
+            .expect_err("short raw-zstd image should not be cached");
+
+        assert!(format!("{error:#}").contains("advertised virtual size"));
+        let image_dir = cache_root.path().join("ubuntu");
+        assert!(!image_dir.join(format!("{expected}.raw")).exists());
+        assert!(
+            !image_dir
+                .join(format!("{expected}.raw.verified.json"))
+                .exists()
+        );
+        for entry in std::fs::read_dir(&image_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.contains(".raw.part."),
+                "temporary raw cache file was not removed: {name}"
+            );
+        }
 
         Ok(())
     }
@@ -895,30 +1627,169 @@ mod tests {
         let raw_dir = cache_root.path().join("ubuntu");
         tokio::fs::create_dir_all(&raw_dir).await?;
         let raw_path = raw_dir.join(format!("{expected}.raw"));
-        tokio::fs::write(&raw_path, b"preconverted raw").await?;
+        tokio::fs::write(&raw_path, body).await?;
+        write_raw_cache_marker(
+            cache_root.path(),
+            &raw_cache_record("ubuntu", &expected, body.len() as u64),
+        )
+        .await?;
         ensure_ring_provider()?;
         let client = reqwest::Client::new();
         let registry = registry_config(addr);
 
-        let path = ensure_cached_raw(
-            "ubuntu",
-            &registry,
-            None,
-            cache_root.path(),
-            &client,
-            "/definitely/missing/qemu-img",
-        )
-        .await?;
+        let path = ensure_cached_raw("ubuntu", &registry, None, cache_root.path(), &client).await?;
 
         assert_eq!(path, raw_path);
-        assert_eq!(tokio::fs::read(&path).await?, b"preconverted raw");
+        assert_eq!(tokio::fs::read(&path).await?, body);
         assert!(
             cache_root
                 .path()
                 .join("ubuntu")
-                .join("ubuntu.qcow2")
+                .join("ubuntu.raw.zst")
+                .try_exists()
+                .is_ok_and(|exists| !exists)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_raw_refreshes_unverified_same_size_raw() -> Result<()> {
+        let raw_body = b"hello-image";
+        let compressed_body = zstd::encode_all(Cursor::new(raw_body), 0)?;
+        let expected = sha256_bytes(&compressed_body);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let body_vec = compressed_body.clone();
+        let image_requests = Arc::new(AtomicUsize::new(0));
+        let image_requests_bg = Arc::clone(&image_requests);
+        let index = registry_index(&[("ubuntu", &expected, "/agent/registry/images/ubuntu/sha")]);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, response_body) = match path {
+                    "/images" => ("200 OK", index.clone()),
+                    "/agent/registry/images/ubuntu/sha" => {
+                        image_requests_bg.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", body_vec.clone())
+                    }
+                    _ => ("404 Not Found", Vec::new()),
+                };
+
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&response_body);
+            }
+        });
+
+        let cache_root = tempfile::tempdir()?;
+        let raw_dir = cache_root.path().join("ubuntu");
+        tokio::fs::create_dir_all(&raw_dir).await?;
+        let raw_path = raw_dir.join(format!("{expected}.raw"));
+        tokio::fs::write(&raw_path, b"bad-cache!!").await?;
+        ensure_ring_provider()?;
+        let client = reqwest::Client::new();
+        let registry = registry_config(addr);
+
+        let path = ensure_cached_raw("ubuntu", &registry, None, cache_root.path(), &client).await?;
+
+        assert_eq!(path, raw_path);
+        assert_eq!(tokio::fs::read(&path).await?, raw_body);
+        assert_eq!(image_requests.load(Ordering::SeqCst), 1);
+        assert!(
+            cache_root
+                .path()
+                .join("ubuntu")
+                .join(format!("{expected}.raw.verified.json"))
                 .is_file()
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_raw_refreshes_wrong_size_preconverted_raw() -> Result<()> {
+        let raw_body = b"hello-image";
+        let compressed_body = zstd::encode_all(Cursor::new(raw_body), 0)?;
+        let expected = sha256_bytes(&compressed_body);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let body_vec = compressed_body.clone();
+        let image_requests = Arc::new(AtomicUsize::new(0));
+        let image_requests_bg = Arc::clone(&image_requests);
+        let index = registry_index(&[("ubuntu", &expected, "/agent/registry/images/ubuntu/sha")]);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let read = match stream.read(&mut buf) {
+                    Ok(read) => read,
+                    Err(_) => continue,
+                };
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, response_body) = match path {
+                    "/images" => ("200 OK", index.clone()),
+                    "/agent/registry/images/ubuntu/sha" => {
+                        image_requests_bg.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", body_vec.clone())
+                    }
+                    _ => ("404 Not Found", Vec::new()),
+                };
+
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&response_body);
+            }
+        });
+
+        let cache_root = tempfile::tempdir()?;
+        let raw_dir = cache_root.path().join("ubuntu");
+        tokio::fs::create_dir_all(&raw_dir).await?;
+        let raw_path = raw_dir.join(format!("{expected}.raw"));
+        tokio::fs::write(&raw_path, b"truncated").await?;
+        ensure_ring_provider()?;
+        let client = reqwest::Client::new();
+        let registry = registry_config(addr);
+
+        let path = ensure_cached_raw("ubuntu", &registry, None, cache_root.path(), &client).await?;
+
+        assert_eq!(path, raw_path);
+        assert_eq!(tokio::fs::read(&path).await?, raw_body);
+        assert_eq!(image_requests.load(Ordering::SeqCst), 1);
 
         Ok(())
     }
@@ -982,7 +1853,7 @@ mod tests {
             !cache_root
                 .path()
                 .join("ubuntu")
-                .join("ubuntu.qcow2")
+                .join("ubuntu.raw.zst")
                 .exists(),
             "mismatched image must not be installed in cache"
         );
@@ -994,9 +1865,12 @@ mod tests {
     async fn ensure_cached_rejects_missing_registry_sha256() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
-        let index =
-            br#"{"images":[{"image_key":"ubuntu","image_sha256":"","download_url":"/image"}]}"#
-                .to_vec();
+        let index = format!(
+            r#"{{"images":[{{"image_key":"ubuntu","image_sha256":"","image_format":"raw_zstd","image_virtual_size_bytes":11,"boot":{{"kernel_sha256":"{}","initrd_sha256":"{}","cmdline":"root=/dev/vda rw"}},"download_url":"/image"}}]}}"#,
+            "b".repeat(64),
+            "c".repeat(64)
+        )
+        .into_bytes();
 
         std::thread::spawn(move || {
             for stream in listener.incoming().take(4) {
@@ -1052,7 +1926,7 @@ mod tests {
             !cache_root
                 .path()
                 .join("ubuntu")
-                .join("ubuntu.qcow2")
+                .join("ubuntu.raw.zst")
                 .exists(),
             "unverified image must not be installed in cache"
         );
@@ -1135,16 +2009,37 @@ mod tests {
                 RegistryIndexImage {
                     image_key: "ubuntu".to_string(),
                     image_sha256: sha.clone(),
+                    image_format: "raw_zstd".to_string(),
+                    image_virtual_size_bytes: 11,
+                    boot: RegistryIndexImageBoot {
+                        kernel_sha256: "b".repeat(64),
+                        initrd_sha256: "c".repeat(64),
+                        cmdline: "root=/dev/vda rw".to_string(),
+                    },
                     download_url: "/agent/registry/images/ubuntu/sha".to_string(),
                 },
                 RegistryIndexImage {
                     image_key: "../bad".to_string(),
                     image_sha256: sha.clone(),
+                    image_format: "raw_zstd".to_string(),
+                    image_virtual_size_bytes: 11,
+                    boot: RegistryIndexImageBoot {
+                        kernel_sha256: "b".repeat(64),
+                        initrd_sha256: "c".repeat(64),
+                        cmdline: "root=/dev/vda rw".to_string(),
+                    },
                     download_url: "/bad".to_string(),
                 },
                 RegistryIndexImage {
                     image_key: "missing-sha".to_string(),
                     image_sha256: String::new(),
+                    image_format: "raw_zstd".to_string(),
+                    image_virtual_size_bytes: 11,
+                    boot: RegistryIndexImageBoot {
+                        kernel_sha256: "b".repeat(64),
+                        initrd_sha256: "c".repeat(64),
+                        cmdline: "root=/dev/vda rw".to_string(),
+                    },
                     download_url: "/missing".to_string(),
                 },
             ],
@@ -1164,7 +2059,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(
                 "ubuntu".to_string(),
-                "ubuntu.qcow2".to_string(),
+                "ubuntu.raw.zst".to_string(),
                 sha,
                 "/agent/registry/images/ubuntu/sha".to_string(),
             )]

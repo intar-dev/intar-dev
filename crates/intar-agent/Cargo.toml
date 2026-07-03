@@ -33,6 +33,7 @@ tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpk
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

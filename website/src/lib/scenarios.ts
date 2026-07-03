@@ -2,12 +2,28 @@ import { env } from "cloudflare:workers";
 import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
-import type { ScenarioProbeRecord, ScenarioVmRecord } from "@/lib/scenario-model";
+import type {
+  ScenarioDifficulty,
+  ScenarioProbeRecord,
+  ScenarioVmRecord,
+} from "@/lib/scenario-model";
+import {
+  normalizeScenarioVmDirectBootMetadata,
+  parseScenarioDifficulty,
+} from "@/lib/scenario-model";
+import type { ScenarioHintManifestV2 } from "@/generated/catalog";
 import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 
 export interface ScenarioListRecord {
   scenarioId: string;
+  title: string;
   description: string;
+  difficulty: ScenarioDifficulty;
+  estimatedMinutes: number;
+  tags: string[];
+  briefingMarkdown: string;
+  solutionMarkdown: string;
+  hints: ScenarioHintManifestV2[];
   probeCount: number;
   vmCount: number;
   enabled: boolean;
@@ -34,7 +50,14 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
     if (!detail) continue;
     output.push({
       scenarioId: detail.scenarioId,
+      title: detail.title,
       description: detail.description,
+      difficulty: detail.difficulty,
+      estimatedMinutes: detail.estimatedMinutes,
+      tags: detail.tags,
+      briefingMarkdown: detail.briefingMarkdown,
+      solutionMarkdown: detail.solutionMarkdown,
+      hints: detail.hints,
       probeCount: detail.probeCount,
       vmCount: detail.vmCount,
       enabled: detail.enabled,
@@ -80,7 +103,14 @@ export async function loadScenario(
 
   return {
     scenarioId: scenario.scenarioId,
+    title: scenario.title,
     description: scenario.description,
+    difficulty: scenarioDifficulty(scenario.scenarioId, scenario.difficulty),
+    estimatedMinutes: scenario.estimatedMinutes,
+    tags: scenario.tagsJson,
+    briefingMarkdown: scenario.briefingMarkdown,
+    solutionMarkdown: scenario.solutionMarkdown,
+    hints: scenario.hintsJson,
     probeCount: probes.length,
     vmCount: vms.length,
     enabled: scenario.enabled,
@@ -95,24 +125,63 @@ export async function loadScenario(
         ordinal: probe.ordinal,
         name: probe.name,
         description: probe.description,
+        title: probe.title,
+        bodyMarkdown: probe.bodyMarkdown,
+        hints: probe.hintsJson,
         phase: probe.phase === "boot" ? "boot" : "scenario",
       };
     }),
-    vms: vms.map((vm) => ({
-      id: vm.id,
-      ordinal: vm.ordinal,
-      name: vm.vmName,
-      image: vm.image,
-      imageKey: vm.imageKeyJson ?? null,
-      imageSha256:
-        typeof vm.imageSha256 === "string" && vm.imageSha256.trim()
-          ? vm.imageSha256.trim()
-          : null,
-      cpu: vm.cpu,
-      memoryMib: vm.memoryMib,
-      diskMib: vm.diskMib,
-    })),
+    vms: vms.map((vm) => {
+      const directBoot = normalizeScenarioVmDirectBootMetadata({
+        imageFormat: vm.imageFormat,
+        imageVirtualSizeBytes: vm.imageVirtualSizeBytes,
+        kernelSha256: vm.kernelSha256,
+        initrdSha256: vm.initrdSha256,
+        bootCmdline: vm.bootCmdline,
+      });
+      if (!directBoot) {
+        invalidDirectBootMetadata(vm);
+      }
+      return {
+        id: vm.id,
+        ordinal: vm.ordinal,
+        name: vm.vmName,
+        image: vm.image,
+        imageKey: vm.imageKeyJson ?? null,
+        imageSha256:
+          typeof vm.imageSha256 === "string" && vm.imageSha256.trim()
+            ? vm.imageSha256.trim()
+            : null,
+        ...directBoot,
+        cpu: vm.cpu,
+        memoryMib: vm.memoryMib,
+        diskMib: vm.diskMib,
+      };
+    }),
   };
+}
+
+function scenarioDifficulty(
+  scenarioId: string,
+  value: string,
+): ScenarioDifficulty {
+  const parsed = parseScenarioDifficulty(value);
+  if (parsed) {
+    return parsed;
+  }
+  throw appError(
+    500,
+    "scenario_catalog_invalid",
+    `scenario ${scenarioId} has invalid difficulty`,
+  );
+}
+
+function invalidDirectBootMetadata(vm: typeof vmScenarioVms.$inferSelect): never {
+  throw appError(
+    500,
+    "scenario_catalog_invalid",
+    `scenario VM ${vm.scenarioId}/${vm.vmName} has invalid direct-boot image metadata`,
+  );
 }
 
 export async function listEnabledScenarios(): Promise<ScenarioDetailRecord[]> {

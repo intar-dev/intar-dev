@@ -1,6 +1,9 @@
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
-import type { ScenarioManifestV1, ScenarioVmManifestV1 } from "../src/generated/catalog";
+import { readFile, readdir } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import type {
+  ScenarioManifestV2,
+  ScenarioVmManifestV2,
+} from "../src/generated/catalog";
 
 interface Options {
   baseUrl: string;
@@ -8,14 +11,17 @@ interface Options {
   scenarioId: string;
   crossRunScenarioId: string | null;
   hostId: string | null;
+  buildRev: string | null;
   publishToken: string | null;
   manifestPaths: string[];
   imagePathsByVmName: Map<string, string>;
+  artifactPathsBySha: Map<string, string>;
   skipPublish: boolean;
   skipTeardown: boolean;
   skipTerminalProbe: boolean;
   allowNoArtifacts: boolean;
   waitCacheMs: number;
+  waitBuildMs: number;
   waitReadyMs: number;
   waitCompleteMs: number;
   pollMs: number;
@@ -26,7 +32,12 @@ interface Options {
 
 interface LoadedManifest {
   path: string;
-  manifest: ScenarioManifestV1;
+  manifest: ScenarioManifestV2;
+}
+
+interface RequiredImage {
+  image_key: ScenarioVmManifestV2["image_key"];
+  image_sha256: string;
 }
 
 interface HostSummary {
@@ -48,7 +59,7 @@ interface HostSummary {
       arch: string;
     };
     cachedImages: Array<{
-      image_key: ScenarioVmManifestV1["image_key"];
+      image_key: ScenarioVmManifestV2["image_key"];
       image_sha256: string;
       phase: string;
       error?: string | null;
@@ -74,6 +85,38 @@ interface HostRunsResponse {
   }>;
 }
 
+interface AdminBuildsResponse {
+  builds: AdminBuildSummary[];
+}
+
+interface AdminBuildSummary {
+  id: string;
+  scenarioId: string;
+  arch: RequiredImage["image_key"]["arch"];
+  rev: string;
+  contentHash: string;
+  hostId: string | null;
+  status: string;
+  phase: string;
+  attempt: number;
+  error: string | null;
+  updatedAt: number;
+}
+
+interface AdminScenarioResponse {
+  scenario: {
+    vms: Array<{
+      imageKey: ScenarioVmManifestV2["image_key"] | null;
+      imageSha256: string | null;
+      imageFormat: string;
+      imageVirtualSizeBytes: number;
+      kernelSha256: string;
+      initrdSha256: string;
+      bootCmdline: string;
+    }>;
+  };
+}
+
 interface StartRunResponse {
   accepted: true;
   runId: string;
@@ -90,10 +133,31 @@ interface ScenarioRun {
   id: string;
   phase: string;
   canOpenTerminal: boolean;
+  hints: ScenarioRunHint[];
+  nextHintKey: string | null;
+  solution: ScenarioRunSolution;
   createdAt: number;
   updatedAt: number;
   replayArtifacts?: RunArtifact[];
   vms: RunVm[];
+}
+
+interface ScenarioRunHint {
+  key: string;
+  scope: "scenario" | "probe";
+  probeName: string | null;
+  id: string;
+  title: string | null;
+  revealed: boolean;
+  bodyMarkdown: string | null;
+}
+
+interface ScenarioRunSolution {
+  unlocked: boolean;
+  revealed: boolean;
+  assisted: boolean;
+  revealedAt: number | null;
+  bodyMarkdown: string | null;
 }
 
 interface RunVm {
@@ -148,8 +212,15 @@ function main(): Promise<void> {
 async function runLiveE2e(options: Options): Promise<void> {
   const client = new ApiClient(options.baseUrl, options.cookie);
   const loadedManifests = await loadManifests(options.manifestPaths);
-  const manifest = loadedManifests.length ? combineManifests(loadedManifests) : null;
-  const requiredImages = manifest?.vms ?? [];
+  const manifest = loadedManifests.length
+    ? combineManifests(loadedManifests)
+    : null;
+  let requiredImages: RequiredImage[] = manifest?.vms ?? [];
+  const scenarioIdsToVerify = unique(
+    [options.scenarioId, options.crossRunScenarioId].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    ),
+  );
   const runIdsToTeardown: string[] = [];
   let mainError: unknown = null;
 
@@ -163,6 +234,35 @@ async function runLiveE2e(options: Options): Promise<void> {
       logStep("publish skipped by flag");
     }
 
+    if (options.buildRev) {
+      await waitForBuildsSucceeded(
+        client,
+        options,
+        scenarioIdsToVerify,
+        requiredImages,
+      );
+      if (!requiredImages.length) {
+        requiredImages = await loadRequiredImagesFromAdminScenarios(
+          client,
+          scenarioIdsToVerify,
+        );
+        logStep(
+          `loaded ${requiredImages.length} image cache requirement(s) from admin scenarios ${scenarioIdsToVerify.join(",")}`,
+        );
+      } else if (options.crossRunScenarioId) {
+        requiredImages = appendUniqueRequiredImages(
+          requiredImages,
+          await loadRequiredImagesFromAdminScenario(
+            client,
+            options.crossRunScenarioId,
+          ),
+        );
+        logStep(
+          `added cross-run image cache requirements from admin scenario ${options.crossRunScenarioId}`,
+        );
+      }
+    }
+
     const host = await waitForHostReady(client, options, requiredImages);
     logStep(`host ready: ${host.id}`);
 
@@ -170,7 +270,9 @@ async function runLiveE2e(options: Options): Promise<void> {
     const start = await startRun(client, options, host.id, options.scenarioId);
     const primaryRunId = start.runId;
     runIdsToTeardown.push(primaryRunId);
-    logStep(`run accepted: ${primaryRunId}${start.reused ? " (reused active run)" : ""}`);
+    logStep(
+      `run accepted: ${primaryRunId}${start.reused ? " (reused active run)" : ""}`,
+    );
 
     const readyRun = await waitForRunReady(
       client,
@@ -185,6 +287,8 @@ async function runLiveE2e(options: Options): Promise<void> {
       );
     }
     logStep(`terminal ready in ${readyElapsedMs}ms`);
+
+    await verifyRunContentGating(client, readyRun);
 
     let primaryForbiddenIps = options.forbiddenIps;
     let secondaryReadyRun: ScenarioRun | null = null;
@@ -218,16 +322,32 @@ async function runLiveE2e(options: Options): Promise<void> {
         timeoutMs: options.waitReadyMs,
         pollMs: options.pollMs,
       });
-      primaryForbiddenIps = [...options.forbiddenIps, ...crossRunIps.secondaryGuestIps];
-      secondaryForbiddenIps = [...options.forbiddenIps, ...crossRunIps.primaryGuestIps];
+      primaryForbiddenIps = [
+        ...options.forbiddenIps,
+        ...crossRunIps.secondaryGuestIps,
+      ];
+      secondaryForbiddenIps = [
+        ...options.forbiddenIps,
+        ...crossRunIps.primaryGuestIps,
+      ];
       logStep(
         `cross-run guest IPs primary=${crossRunIps.primaryGuestIps.join(",")} secondary=${crossRunIps.secondaryGuestIps.join(",")}`,
       );
     }
 
-    await verifyTerminalSessions(client, readyRun, options, primaryForbiddenIps);
+    await verifyTerminalSessions(
+      client,
+      readyRun,
+      options,
+      primaryForbiddenIps,
+    );
     if (secondaryReadyRun) {
-      await verifyTerminalSessions(client, secondaryReadyRun, options, secondaryForbiddenIps);
+      await verifyTerminalSessions(
+        client,
+        secondaryReadyRun,
+        options,
+        secondaryForbiddenIps,
+      );
     }
     logStep("terminal routes and isolation probes verified");
   } catch (error) {
@@ -244,7 +364,9 @@ async function runLiveE2e(options: Options): Promise<void> {
         if (!mainError) {
           teardownFailure = teardownError;
         } else {
-          logStep(`teardown verification failed after primary error: ${errorMessage(teardownError)}`);
+          logStep(
+            `teardown verification failed after primary error: ${errorMessage(teardownError)}`,
+          );
         }
       }
       if (!mainError && teardownFailure) {
@@ -259,21 +381,34 @@ async function runLiveE2e(options: Options): Promise<void> {
 async function publishManifest(
   options: Options,
   loadedManifests: LoadedManifest[],
-  manifest: ScenarioManifestV1,
+  manifest: ScenarioManifestV2,
 ): Promise<void> {
   if (!options.publishToken) {
-    throw new Error("live E2E publish requires --publish-token or INTAR_IMAGE_PUBLISH_TOKEN");
+    throw new Error(
+      "live E2E publish requires --publish-token or INTAR_IMAGE_PUBLISH_TOKEN",
+    );
   }
   const inferredImages = inferImagePaths(loadedManifests);
+  const inferredArtifacts = await inferArtifactPaths(loadedManifests, manifest);
   const form = new FormData();
   form.set("manifest", JSON.stringify(manifest));
 
   for (const vm of manifest.vms) {
-    const imagePath = options.imagePathsByVmName.get(vm.name) ?? inferredImages.get(vm.name);
+    const imagePath =
+      options.imagePathsByVmName.get(vm.name) ?? inferredImages.get(vm.name);
     if (!imagePath) {
       throw new Error(`missing image path for manifest VM ${vm.name}`);
     }
     const imageBytes = await readFile(imagePath);
+    const imageSha256 = await sha256BytesHex(imageBytes);
+    if (imageSha256 !== vm.image_sha256.toLowerCase()) {
+      throw new Error(
+        `image ${imagePath} sha256 mismatch for VM ${vm.name}: expected ${vm.image_sha256.toLowerCase()}, got ${imageSha256}`,
+      );
+    }
+    logStep(
+      `verified image ${vm.name}: ${basename(imagePath)} ${imageBytes.byteLength} bytes sha256=${imageSha256.slice(0, 12)}`,
+    );
     form.append(
       `image:${vm.name}`,
       new Blob([copyToArrayBuffer(imageBytes)], {
@@ -282,32 +417,66 @@ async function publishManifest(
       basename(imagePath),
     );
   }
+  for (const sha256 of bootArtifactSha256s(manifest)) {
+    const artifactPath =
+      options.artifactPathsBySha.get(sha256) ?? inferredArtifacts.get(sha256);
+    if (!artifactPath) {
+      throw new Error(
+        `missing boot artifact ${sha256}; pass --artifact ${sha256}=PATH or place it under base-images/ beside the manifest`,
+      );
+    }
+    const artifactBytes = await readFile(artifactPath);
+    const artifactSha256 = await sha256BytesHex(artifactBytes);
+    if (artifactSha256 !== sha256) {
+      throw new Error(
+        `boot artifact ${artifactPath} sha256 mismatch: expected ${sha256}, got ${artifactSha256}`,
+      );
+    }
+    logStep(
+      `verified boot artifact ${basename(artifactPath)} ${artifactBytes.byteLength} bytes sha256=${artifactSha256.slice(0, 12)}`,
+    );
+    form.append(
+      `artifact:${sha256}`,
+      new Blob([copyToArrayBuffer(artifactBytes)], {
+        type: "application/octet-stream",
+      }),
+      `${sha256}.artifact`,
+    );
+  }
 
-  const response = await fetch(new URL("/registry/v1/publish", options.baseUrl), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${options.publishToken}`,
+  const response = await fetch(
+    new URL("/registry/v1/publish", options.baseUrl),
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.publishToken}`,
+      },
+      body: form,
     },
-    body: form,
-  });
+  );
   const body = await parseResponseBody(response);
   if (!response.ok) {
     throw new HttpError("registry publish failed", response.status, body);
   }
-  logStep(`published ${manifest.scenario_id} with ${manifest.vms.length} VM image(s)`);
+  logStep(
+    `published ${manifest.scenario_id} with ${manifest.vms.length} VM image(s)`,
+  );
 }
 
 async function waitForHostReady(
   client: ApiClient,
   options: Options,
-  requiredImages: ScenarioVmManifestV1[],
+  requiredImages: RequiredImage[],
 ): Promise<HostSummary> {
   const deadline = Date.now() + options.waitCacheMs;
   let lastStatus = "host not checked yet";
 
   while (Date.now() <= deadline) {
     const host = options.hostId
-      ? await client.json<HostResponse>(`/api/agent/hosts/${encodeURIComponent(options.hostId)}`)
+      ? await client
+          .json<HostResponse>(
+            `/api/agent/hosts/${encodeURIComponent(options.hostId)}`,
+          )
           .then((response) => response.host)
           .catch((error: unknown) => {
             lastStatus = errorMessage(error);
@@ -332,6 +501,239 @@ async function waitForHostReady(
   throw new Error(`timed out waiting for host readiness: ${lastStatus}`);
 }
 
+async function loadRequiredImagesFromAdminScenario(
+  client: ApiClient,
+  scenarioId: string,
+): Promise<RequiredImage[]> {
+  const response = await client.json<AdminScenarioResponse>(
+    `/api/admin/scenarios/${encodeURIComponent(scenarioId)}`,
+  );
+  const images = response.scenario.vms.flatMap((vm) => {
+    if (!vm.imageKey || !vm.imageSha256) {
+      return [];
+    }
+    assertAdminScenarioDirectBootMetadata(vm, scenarioId);
+    return [
+      {
+        image_key: vm.imageKey,
+        image_sha256: vm.imageSha256,
+      },
+    ];
+  });
+  if (!images.length) {
+    throw new Error(
+      `admin scenario ${scenarioId} has no published image metadata`,
+    );
+  }
+  return images;
+}
+
+function assertAdminScenarioDirectBootMetadata(
+  vm: AdminScenarioResponse["scenario"]["vms"][number],
+  scenarioId: string,
+): void {
+  const label = `${scenarioId}/${vm.imageKey?.vm ?? "unknown-vm"}`;
+  if (vm.imageFormat !== "raw_zstd") {
+    throw new Error(
+      `admin scenario ${label} is not raw_zstd: ${vm.imageFormat}`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(vm.imageVirtualSizeBytes) ||
+    vm.imageVirtualSizeBytes <= 0
+  ) {
+    throw new Error(
+      `admin scenario ${label} has invalid imageVirtualSizeBytes: ${vm.imageVirtualSizeBytes}`,
+    );
+  }
+  if (!isSha256Hex(vm.kernelSha256)) {
+    throw new Error(
+      `admin scenario ${label} has invalid kernelSha256: ${vm.kernelSha256}`,
+    );
+  }
+  if (!isSha256Hex(vm.initrdSha256)) {
+    throw new Error(
+      `admin scenario ${label} has invalid initrdSha256: ${vm.initrdSha256}`,
+    );
+  }
+  if (!vm.bootCmdline.includes("root=/dev/vda")) {
+    throw new Error(
+      `admin scenario ${label} boot cmdline does not direct-boot /dev/vda: ${vm.bootCmdline}`,
+    );
+  }
+}
+
+async function loadRequiredImagesFromAdminScenarios(
+  client: ApiClient,
+  scenarioIds: string[],
+): Promise<RequiredImage[]> {
+  let images: RequiredImage[] = [];
+  for (const scenarioId of scenarioIds) {
+    images = appendUniqueRequiredImages(
+      images,
+      await loadRequiredImagesFromAdminScenario(client, scenarioId),
+    );
+  }
+  return images;
+}
+
+function appendUniqueRequiredImages(
+  existing: RequiredImage[],
+  next: RequiredImage[],
+): RequiredImage[] {
+  const images = [...existing];
+  for (const image of next) {
+    if (
+      images.some(
+        (candidate) =>
+          sameImageKey(candidate.image_key, image.image_key) &&
+          candidate.image_sha256.toLowerCase() ===
+            image.image_sha256.toLowerCase(),
+      )
+    ) {
+      continue;
+    }
+    images.push(image);
+  }
+  return images;
+}
+
+async function waitForBuildsSucceeded(
+  client: ApiClient,
+  options: Options,
+  scenarioIds: string[],
+  requiredImages: RequiredImage[],
+): Promise<AdminBuildSummary[]> {
+  const buildRev = options.buildRev;
+  if (!buildRev) {
+    return [];
+  }
+  if (scenarioIds.length === 0) {
+    throw new Error("at least one scenario id is required when waiting for builds");
+  }
+
+  const deadline = Date.now() + options.waitBuildMs;
+  let lastStatus = "builds not checked yet";
+  const scenarioIdSet = new Set(scenarioIds);
+  const expectedBuilds = uniqueBuildTargets(
+    requiredImages
+      .filter((image) => scenarioIdSet.has(image.image_key.scenario))
+      .map((image) => ({
+        scenarioId: image.image_key.scenario,
+        arch: image.image_key.arch,
+      })),
+  );
+  const expectedBuildKeys = new Set(
+    expectedBuilds.map((target) => buildTargetKey(target.scenarioId, target.arch)),
+  );
+
+  while (Date.now() <= deadline) {
+    const response =
+      await client.json<AdminBuildsResponse>("/api/admin/builds");
+    const builds = response.builds.filter(
+      (build) =>
+        build.rev === buildRev &&
+        scenarioIdSet.has(build.scenarioId) &&
+        (expectedBuildKeys.size === 0 ||
+          expectedBuildKeys.has(buildTargetKey(build.scenarioId, build.arch))),
+    );
+    if (builds.length) {
+      const terminalFailure = builds.find(
+        (build) => build.status === "failed" || build.status === "stale",
+      );
+      if (terminalFailure) {
+        throw new Error(
+          `build ${terminalFailure.id} for rev ${buildRev} ${terminalFailure.scenarioId}/${terminalFailure.arch} is ${terminalFailure.status}/${terminalFailure.phase}: ${terminalFailure.error ?? "no error"}`,
+        );
+      }
+      const missingBuildTargets = missingExpectedBuildTargets(
+        builds,
+        scenarioIds,
+        expectedBuilds,
+      );
+      if (missingBuildTargets.length === 0 && builds.every((build) => build.status === "succeeded")) {
+        logStep(
+          `build rev ${buildRev} succeeded for ${formatExpectedBuildScope(scenarioIds, expectedBuilds)}: ${builds.map((build) => `${build.id}:${build.arch}/${build.contentHash.slice(0, 12)}${build.hostId ? `@${build.hostId}` : ""}`).join(",")}`,
+        );
+        return builds;
+      }
+      lastStatus = [
+        ...builds.map(
+          (build) =>
+            `${build.scenarioId}/${build.arch}/${build.id}:${build.status}/${build.phase}`,
+        ),
+        ...missingBuildTargets.map((target) => `${target}:missing`),
+      ].join(", ");
+    } else {
+      lastStatus = `no builds found for ${formatExpectedBuildScope(scenarioIds, expectedBuilds)} rev=${buildRev}`;
+    }
+
+    await sleep(options.pollMs);
+  }
+
+  throw new Error(`timed out waiting for build rev ${buildRev}: ${lastStatus}`);
+}
+
+interface ExpectedBuildTarget {
+  scenarioId: string;
+  arch: RequiredImage["image_key"]["arch"];
+}
+
+function uniqueBuildTargets(
+  targets: ExpectedBuildTarget[],
+): ExpectedBuildTarget[] {
+  const seen = new Set<string>();
+  const uniqueTargets: ExpectedBuildTarget[] = [];
+  for (const target of targets) {
+    const key = buildTargetKey(target.scenarioId, target.arch);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueTargets.push(target);
+  }
+  return uniqueTargets;
+}
+
+function missingExpectedBuildTargets(
+  builds: AdminBuildSummary[],
+  scenarioIds: string[],
+  expectedBuilds: ExpectedBuildTarget[],
+): string[] {
+  if (expectedBuilds.length === 0) {
+    const scenariosWithBuilds = new Set(builds.map((build) => build.scenarioId));
+    return scenarioIds
+      .filter((scenarioId) => !scenariosWithBuilds.has(scenarioId))
+      .map((scenarioId) => `${scenarioId}:any-arch`);
+  }
+
+  const buildsByTarget = new Set(
+    builds.map((build) => buildTargetKey(build.scenarioId, build.arch)),
+  );
+  return expectedBuilds
+    .filter(
+      (target) => !buildsByTarget.has(buildTargetKey(target.scenarioId, target.arch)),
+    )
+    .map((target) => `${target.scenarioId}:${target.arch}`);
+}
+
+function formatExpectedBuildScope(
+  scenarioIds: string[],
+  expectedBuilds: ExpectedBuildTarget[],
+): string {
+  if (expectedBuilds.length === 0) {
+    return scenarioIds.map((scenarioId) => `${scenarioId}:any-arch`).join(",");
+  }
+  return expectedBuilds
+    .map((target) => `${target.scenarioId}:${target.arch}`)
+    .join(",");
+}
+
+function buildTargetKey(
+  scenarioId: string,
+  arch: RequiredImage["image_key"]["arch"],
+): string {
+  return `${scenarioId}\0${arch}`;
+}
+
 async function selectBestHost(client: ApiClient): Promise<HostSummary | null> {
   const response = await client.json<HostsResponse>("/api/agent/hosts");
   return (
@@ -349,7 +751,7 @@ async function selectBestHost(client: ApiClient): Promise<HostSummary | null> {
 
 function hostReadinessProblems(
   host: HostSummary,
-  requiredImages: ScenarioVmManifestV1[],
+  requiredImages: RequiredImage[],
 ): string[] {
   const problems: string[] = [];
   if (host.disabled) problems.push("host is disabled");
@@ -361,10 +763,26 @@ function hostReadinessProblems(
   }
 
   const capabilities = host.actualState.capabilities;
-  if (!capabilities.supports_kvm) problems.push("host does not report KVM support");
-  if (!capabilities.supports_vsock) problems.push("host does not report vsock support");
-  if (!capabilities.supports_nftables) problems.push("host does not report nftables support");
-  if (!capabilities.supports_reflink) problems.push("host does not report reflink support");
+  if (!capabilities.supports_kvm)
+    problems.push("host does not report KVM support");
+  if (!capabilities.supports_vsock)
+    problems.push("host does not report vsock support");
+  if (!capabilities.supports_nftables)
+    problems.push("host does not report nftables support");
+  if (!capabilities.supports_reflink)
+    problems.push("host does not report reflink support");
+
+  const requiredArchitectures = unique(
+    requiredImages.map((image) => image.image_key.arch),
+  );
+  if (
+    requiredArchitectures.length > 0 &&
+    !requiredArchitectures.includes(capabilities.arch)
+  ) {
+    problems.push(
+      `host architecture ${capabilities.arch} does not match required image architecture(s) ${requiredArchitectures.join(",")}`,
+    );
+  }
 
   for (const vm of requiredImages) {
     const cached = host.actualState.cachedImages.find(
@@ -375,7 +793,9 @@ function hostReadinessProblems(
     if (!cached) {
       problems.push(`image ${imageLabel(vm)} is not reported by cache`);
     } else if (cached.phase !== "ready") {
-      problems.push(`image ${imageLabel(vm)} is ${cached.phase}${cached.error ? `: ${cached.error}` : ""}`);
+      problems.push(
+        `image ${imageLabel(vm)} is ${cached.phase}${cached.error ? `: ${cached.error}` : ""}`,
+      );
     }
   }
 
@@ -414,7 +834,9 @@ async function waitForRunReady(
 ): Promise<ScenarioRun> {
   return waitForRun(client, runId, timeoutMs, pollMs, (run) => {
     if (run.phase === "failed") {
-      throw new Error(`run failed while waiting for readiness: ${run.vms.map((vm) => vm.phaseDetail).join("; ")}`);
+      throw new Error(
+        `run failed while waiting for readiness: ${run.vms.map((vm) => vm.phaseDetail).join("; ")}`,
+      );
     }
     const problems = run.vms.flatMap((vm) => terminalReadinessProblems(vm));
     return problems.length
@@ -434,7 +856,9 @@ async function waitForRunComplete(
       return { done: true, detail: "completed" };
     }
     if (run.phase === "failed") {
-      throw new Error(`run failed during teardown: ${run.vms.map((vm) => vm.phaseDetail).join("; ")}`);
+      throw new Error(
+        `run failed during teardown: ${run.vms.map((vm) => vm.phaseDetail).join("; ")}`,
+      );
     }
     return { done: false, detail: `phase=${run.phase}` };
   });
@@ -445,7 +869,9 @@ async function waitForRun(
   runId: string,
   timeoutMs: number,
   pollMs: number,
-  check: (run: ScenarioRun) => { done: true; detail: string } | { done: false; detail: string },
+  check: (
+    run: ScenarioRun,
+  ) => { done: true; detail: string } | { done: false; detail: string },
 ): Promise<ScenarioRun> {
   const deadline = Date.now() + timeoutMs;
   let lastDetail = "run not checked yet";
@@ -482,13 +908,152 @@ function terminalReadinessProblems(vm: RunVm): string[] {
   return problems;
 }
 
+async function verifyRunContentGating(
+  client: ApiClient,
+  run: ScenarioRun,
+): Promise<void> {
+  if (run.hints.length === 0) {
+    throw new Error("run has no authored hints to verify");
+  }
+
+  const firstHint = run.hints[0];
+  if (!firstHint) {
+    throw new Error("run has no first hint");
+  }
+  const skipAheadHint = run.hints.find((hint) => hint.key !== firstHint.key);
+  if (!skipAheadHint) {
+    throw new Error(
+      "run needs at least two authored hints to verify skip-ahead gating",
+    );
+  }
+  if (run.nextHintKey !== firstHint.key) {
+    throw new Error(
+      `expected next hint ${firstHint.key}, got ${run.nextHintKey ?? "none"}`,
+    );
+  }
+
+  for (const hint of run.hints) {
+    if (hint.revealed) {
+      throw new Error(
+        `hint ${hint.key} was revealed before the E2E reveal step`,
+      );
+    }
+    if (hint.bodyMarkdown !== null) {
+      throw new Error(`hint ${hint.key} body was exposed before reveal`);
+    }
+  }
+  if (run.solution.revealed) {
+    throw new Error("solution was revealed before the E2E reveal step");
+  }
+  if (run.solution.bodyMarkdown !== null) {
+    throw new Error("solution body was exposed before reveal");
+  }
+  const preRevealPayloads = [
+    {
+      label: "initial run payload",
+      text: await client.text(`/api/scenarios/runs/${encodeURIComponent(run.id)}`),
+    },
+  ];
+  const expectSolutionAssisted = !run.solution.unlocked;
+
+  await expectHttpErrorCode(
+    () =>
+      client.json<RunResponse>(
+        `/api/scenarios/runs/${encodeURIComponent(run.id)}/hints/reveal`,
+        {
+          method: "POST",
+          json: { hintKey: skipAheadHint.key },
+        },
+      ),
+    409,
+    "scenario_hint_not_next",
+    `skip-ahead reveal for ${skipAheadHint.key}`,
+  );
+  const afterSkipAheadText = await client.text(
+    `/api/scenarios/runs/${encodeURIComponent(run.id)}`,
+  );
+  preRevealPayloads.push({
+    label: "post skip-ahead rejection run payload",
+    text: afterSkipAheadText,
+  });
+  const afterSkipAhead = parseJsonText<RunResponse>(
+    afterSkipAheadText,
+    "post skip-ahead run response",
+  );
+  if (afterSkipAhead.run.nextHintKey !== run.nextHintKey) {
+    throw new Error("skip-ahead hint rejection changed the next hint key");
+  }
+  for (const hint of afterSkipAhead.run.hints) {
+    if (hint.revealed || hint.bodyMarkdown !== null) {
+      throw new Error(
+        `skip-ahead hint rejection leaked or revealed ${hint.key}`,
+      );
+    }
+  }
+
+  const hintReveal = await client.json<RunResponse>(
+    `/api/scenarios/runs/${encodeURIComponent(run.id)}/hints/reveal`,
+    {
+      method: "POST",
+      json: { hintKey: run.nextHintKey },
+    },
+  );
+  const revealedHint = hintReveal.run.hints.find(
+    (hint) => hint.key === run.nextHintKey,
+  );
+  if (!revealedHint) {
+    throw new Error(`revealed hint ${run.nextHintKey} missing from response`);
+  }
+  if (!revealedHint.revealed || !hasBody(revealedHint.bodyMarkdown)) {
+    throw new Error(
+      `hint ${revealedHint.key} did not expose its body after reveal`,
+    );
+  }
+  for (const hint of hintReveal.run.hints) {
+    if (hint.key !== revealedHint.key && hint.bodyMarkdown !== null) {
+      throw new Error(`hint ${hint.key} body was exposed out of order`);
+    }
+  }
+
+  const solutionReveal = await client.json<RunResponse>(
+    `/api/scenarios/runs/${encodeURIComponent(run.id)}/solution/reveal`,
+    {
+      method: "POST",
+    },
+  );
+  if (!solutionReveal.run.solution.revealed) {
+    throw new Error("solution was not marked revealed after reveal request");
+  }
+  if (!hasBody(solutionReveal.run.solution.bodyMarkdown)) {
+    throw new Error("solution body was not exposed after reveal");
+  }
+  for (const payload of preRevealPayloads) {
+    assertRawPayloadDoesNotContain(
+      payload.text,
+      solutionReveal.run.solution.bodyMarkdown,
+      payload.label,
+    );
+  }
+  if (expectSolutionAssisted && !solutionReveal.run.solution.assisted) {
+    throw new Error(
+      "pre-solve solution reveal did not mark the run as assisted",
+    );
+  }
+
+  logStep(
+    `content gating verified: skip-ahead rejected, hint ${revealedHint.key} and solution reveal`,
+  );
+}
+
 async function verifyTerminalSessions(
   client: ApiClient,
   run: ScenarioRun,
   options: Options,
   forbiddenIps: string[],
 ): Promise<void> {
-  for (const vm of [...run.vms].sort((left, right) => left.ordinal - right.ordinal)) {
+  for (const vm of [...run.vms].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  )) {
     const session = await client.json<BrowserTerminalSessionResponse>(
       `/api/scenarios/runs/${encodeURIComponent(run.id)}/ssh`,
       {
@@ -500,7 +1065,9 @@ async function verifyTerminalSessions(
       },
     );
     if (!session.browser?.websocketUrl) {
-      throw new Error(`browser terminal session missing websocket URL for ${vm.runtimeVmName}`);
+      throw new Error(
+        `browser terminal session missing websocket URL for ${vm.runtimeVmName}`,
+      );
     }
     if (options.skipTerminalProbe) {
       logStep(`terminal probe skipped for ${vm.runtimeVmName}`);
@@ -530,7 +1097,8 @@ async function runTerminalProbe(input: {
     url: string,
     options?: { headers?: Record<string, string> },
   ) => WebSocket;
-  const WebSocketWithHeaders = globalThis.WebSocket as unknown as HeaderWebSocket;
+  const WebSocketWithHeaders =
+    globalThis.WebSocket as unknown as HeaderWebSocket;
   const websocket = new WebSocketWithHeaders(input.websocketUrl, {
     headers: { origin: input.origin },
   });
@@ -570,7 +1138,9 @@ async function runTerminalProbe(input: {
 
     const handleClose = () => {
       if (!settled) {
-        finish(() => reject(new Error("terminal websocket closed before probe completed")));
+        finish(() =>
+          reject(new Error("terminal websocket closed before probe completed")),
+        );
       }
     };
 
@@ -580,7 +1150,11 @@ async function runTerminalProbe(input: {
           const control = parseControlMessage(event.data);
           if (control?.type === "ready" && !opened) {
             opened = true;
-            websocket.send(new TextEncoder().encode(terminalProbeCommand(input.marker, input.forbiddenIps)));
+            websocket.send(
+              new TextEncoder().encode(
+                terminalProbeCommand(input.marker, input.forbiddenIps),
+              ),
+            );
           } else if (control?.type === "error") {
             finish(() => reject(new Error(control.message)));
           }
@@ -621,7 +1195,7 @@ function terminalProbeCommand(marker: string, forbiddenIps: string[]): string {
     `  timeout 4 bash -lc ':</dev/tcp/169.254.169.254/80' >/dev/null 2>&1 && echo "${marker}:metadata=reachable" || echo "${marker}:metadata=blocked"`,
     "fi",
     "gateway=\"$(ip route show default 2>/dev/null | awk '/default/ { print $3; exit }')\"",
-    "if [ -n \"$gateway\" ]; then",
+    'if [ -n "$gateway" ]; then',
     `  timeout 4 bash -lc ":</dev/tcp/$gateway/22" >/dev/null 2>&1 && echo "${marker}:host=reachable" || echo "${marker}:host=blocked"`,
     "else",
     `  echo "${marker}:host=unknown"`,
@@ -646,14 +1220,20 @@ function assertTerminalProbeOutput(
   forbiddenIps: string[],
 ): void {
   if (!output.includes(`${marker}:metadata=blocked`)) {
-    throw new Error("metadata endpoint was reachable or probe output was incomplete");
+    throw new Error(
+      "metadata endpoint was reachable or probe output was incomplete",
+    );
   }
   if (!output.includes(`${marker}:host=blocked`)) {
-    throw new Error("host gateway endpoint was reachable or not conclusively blocked");
+    throw new Error(
+      "host gateway endpoint was reachable or not conclusively blocked",
+    );
   }
   forbiddenIps.forEach((ip, index) => {
     if (!output.includes(`${marker}:forbidden_${index}=blocked`)) {
-      throw new Error(`forbidden IP ${ip} was reachable or not conclusively blocked`);
+      throw new Error(
+        `forbidden IP ${ip} was reachable or not conclusively blocked`,
+      );
     }
   });
 }
@@ -702,9 +1282,12 @@ async function teardownAndVerify(
   runId: string,
   options: Options,
 ): Promise<void> {
-  await client.json(`/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`, {
-    method: "POST",
-  });
+  await client.json(
+    `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
+    {
+      method: "POST",
+    },
+  );
   logStep(`teardown requested: ${runId}`);
   const completed = await waitForRunComplete(
     client,
@@ -748,7 +1331,11 @@ async function assertArtifactReadable(
   );
   if (!response.ok) {
     const body = await parseResponseBody(response);
-    throw new HttpError(`artifact ${artifact.id} is not readable`, response.status, body);
+    throw new HttpError(
+      `artifact ${artifact.id} is not readable`,
+      response.status,
+      body,
+    );
   }
 }
 
@@ -775,6 +1362,26 @@ class ApiClient {
       throw new HttpError(`request failed: ${path}`, response.status, body);
     }
     return body as T;
+  }
+
+  async text(
+    path: string,
+    init: {
+      method?: string;
+      headers?: Record<string, string>;
+      json?: unknown;
+    } = {},
+  ): Promise<string> {
+    const response = await this.raw(path, init);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new HttpError(
+        `request failed: ${path}`,
+        response.status,
+        parseResponseText(text),
+      );
+    }
+    return text;
   }
 
   raw(
@@ -814,12 +1421,12 @@ async function loadManifests(paths: string[]): Promise<LoadedManifest[]> {
   return loaded;
 }
 
-function parseManifest(value: unknown, path: string): ScenarioManifestV1 {
+function parseManifest(value: unknown, path: string): ScenarioManifestV2 {
   if (!isRecord(value)) {
     throw new Error(`manifest ${path} is not a JSON object`);
   }
-  if (value.schema_version !== 1) {
-    throw new Error(`manifest ${path} must use schema_version 1`);
+  if (value.schema_version !== 2) {
+    throw new Error(`manifest ${path} must use schema_version 2`);
   }
   if (typeof value.scenario_id !== "string" || !value.scenario_id) {
     throw new Error(`manifest ${path} is missing scenario_id`);
@@ -827,26 +1434,81 @@ function parseManifest(value: unknown, path: string): ScenarioManifestV1 {
   if (!Array.isArray(value.vms) || value.vms.length === 0) {
     throw new Error(`manifest ${path} must contain at least one VM`);
   }
-  return value as unknown as ScenarioManifestV1;
+  value.vms.forEach((vm, index) =>
+    assertManifestVmDirectBootMetadata(vm, path, index),
+  );
+  return value as unknown as ScenarioManifestV2;
 }
 
-function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV1 {
+function assertManifestVmDirectBootMetadata(
+  value: unknown,
+  path: string,
+  index: number,
+): void {
+  if (!isRecord(value)) {
+    throw new Error(`manifest ${path} VM ${index} is not an object`);
+  }
+  const name = typeof value.name === "string" && value.name ? value.name : index;
+  if (value.image_format !== "raw_zstd") {
+    throw new Error(
+      `manifest ${path} VM ${name} must use image_format raw_zstd`,
+    );
+  }
+  const virtualSize = value.image_virtual_size_bytes;
+  if (!Number.isSafeInteger(virtualSize) || Number(virtualSize) <= 0) {
+    throw new Error(
+      `manifest ${path} VM ${name} has invalid image_virtual_size_bytes`,
+    );
+  }
+  if (typeof value.image_sha256 !== "string" || !isSha256Hex(value.image_sha256)) {
+    throw new Error(`manifest ${path} VM ${name} has invalid image_sha256`);
+  }
+  if (!isRecord(value.image_key)) {
+    throw new Error(`manifest ${path} VM ${name} is missing image_key`);
+  }
+  if (!isImageArchitecture(value.image_key.arch)) {
+    throw new Error(`manifest ${path} VM ${name} has invalid image_key.arch`);
+  }
+  if (!isRecord(value.boot)) {
+    throw new Error(`manifest ${path} VM ${name} is missing boot metadata`);
+  }
+  if (
+    typeof value.boot.kernel_sha256 !== "string" ||
+    !isSha256Hex(value.boot.kernel_sha256)
+  ) {
+    throw new Error(`manifest ${path} VM ${name} has invalid kernel_sha256`);
+  }
+  if (
+    typeof value.boot.initrd_sha256 !== "string" ||
+    !isSha256Hex(value.boot.initrd_sha256)
+  ) {
+    throw new Error(`manifest ${path} VM ${name} has invalid initrd_sha256`);
+  }
+  if (
+    typeof value.boot.cmdline !== "string" ||
+    !value.boot.cmdline.includes("root=/dev/vda")
+  ) {
+    throw new Error(
+      `manifest ${path} VM ${name} boot cmdline does not direct-boot /dev/vda`,
+    );
+  }
+}
+
+function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV2 {
   const [first, ...rest] = loaded;
   if (!first) {
     throw new Error("cannot combine zero manifests");
   }
-  const combined: ScenarioManifestV1 = {
+  const combined: ScenarioManifestV2 = {
     ...first.manifest,
     vms: [...first.manifest.vms],
   };
   const seenVmNames = new Set(combined.vms.map((vm) => vm.name));
 
   for (const next of rest) {
-    if (
-      next.manifest.scenario_id !== combined.scenario_id ||
-      next.manifest.name !== combined.name ||
-      next.manifest.description !== combined.description
-    ) {
+    const nextHeader = { ...next.manifest, vms: [] };
+    const combinedHeader = { ...combined, vms: [] };
+    if (JSON.stringify(nextHeader) !== JSON.stringify(combinedHeader)) {
       throw new Error("cannot combine manifests for different scenarios");
     }
     for (const vm of next.manifest.vms) {
@@ -870,6 +1532,50 @@ function inferImagePaths(loaded: LoadedManifest[]): Map<string, string> {
     }
   }
   return images;
+}
+
+async function inferArtifactPaths(
+  loaded: LoadedManifest[],
+  manifest: ScenarioManifestV2,
+): Promise<Map<string, string>> {
+  const required = new Set(bootArtifactSha256s(manifest));
+  const inferred = new Map<string, string>();
+  const dirs = new Set<string>();
+  for (const item of loaded) {
+    const dir = dirname(item.path);
+    dirs.add(dir);
+    dirs.add(join(dir, "base-images"));
+  }
+
+  for (const dir of dirs) {
+    for (const path of await listCandidateArtifactFiles(dir)) {
+      if (inferred.size === required.size) return inferred;
+      const sha256 = await sha256FileHex(path);
+      if (required.has(sha256) && !inferred.has(sha256)) {
+        inferred.set(sha256, path);
+      }
+    }
+  }
+  return inferred;
+}
+
+async function listCandidateArtifactFiles(dir: string): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter(
+      (name) =>
+        name.includes("vmlinuz") ||
+        name.includes("initrd") ||
+        name.endsWith(".artifact"),
+    )
+    .map((name) => join(dir, name));
 }
 
 function stripManifestSuffix(path: string): string {
@@ -911,10 +1617,7 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
   }
 
   const baseUrl = last(values, "base-url") ?? env.INTAR_LIVE_BASE_URL ?? "";
-  const cookie =
-    last(values, "cookie") ??
-    env.INTAR_LIVE_COOKIE ??
-    "";
+  const cookie = last(values, "cookie") ?? env.INTAR_LIVE_COOKIE ?? "";
   const scenarioId =
     last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "broken-nginx";
   const crossRunScenarioId =
@@ -922,6 +1625,8 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
     env.INTAR_LIVE_CROSS_RUN_SCENARIO_ID ??
     null;
   const hostId = last(values, "host") ?? env.INTAR_LIVE_HOST_ID ?? null;
+  const buildRev =
+    last(values, "build-rev") ?? env.INTAR_LIVE_BUILD_REV ?? null;
   const publishToken =
     last(values, "publish-token") ?? env.INTAR_IMAGE_PUBLISH_TOKEN ?? null;
   const manifestPaths = [
@@ -931,6 +1636,10 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
   const imageSpecs = [
     ...splitEnvList(env.INTAR_LIVE_IMAGES),
     ...(values.get("image") ?? []),
+  ];
+  const artifactSpecs = [
+    ...splitEnvList(env.INTAR_LIVE_ARTIFACTS),
+    ...(values.get("artifact") ?? []),
   ];
 
   if (!baseUrl) {
@@ -946,20 +1655,27 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
     scenarioId,
     crossRunScenarioId,
     hostId,
+    buildRev,
     publishToken,
     manifestPaths,
     imagePathsByVmName: parseImageSpecs(imageSpecs),
+    artifactPathsBySha: parseArtifactSpecs(artifactSpecs),
     skipPublish: flags.has("skip-publish"),
     skipTeardown: flags.has("skip-teardown"),
     skipTerminalProbe: flags.has("skip-terminal-probe"),
     allowNoArtifacts: flags.has("allow-no-artifacts"),
     waitCacheMs: parseMs(last(values, "wait-cache-ms"), 180_000),
+    waitBuildMs: parseMs(last(values, "wait-build-ms"), 900_000),
     waitReadyMs: parseMs(last(values, "wait-ready-ms"), 180_000),
     waitCompleteMs: parseMs(last(values, "wait-complete-ms"), 240_000),
     pollMs: parseMs(last(values, "poll-ms"), 2_000),
     warmStartBudgetMs: parseMs(last(values, "warm-start-ms"), 10_000),
-    terminalProbeTimeoutMs: parseMs(last(values, "terminal-probe-timeout-ms"), 30_000),
-    forbiddenIps: values.get("forbidden-ip") ?? splitEnvList(env.INTAR_LIVE_FORBIDDEN_IPS),
+    terminalProbeTimeoutMs: parseMs(
+      last(values, "terminal-probe-timeout-ms"),
+      30_000,
+    ),
+    forbiddenIps:
+      values.get("forbidden-ip") ?? splitEnvList(env.INTAR_LIVE_FORBIDDEN_IPS),
   };
 }
 
@@ -980,6 +1696,30 @@ function parseImageSpecs(specs: string[]): Map<string, string> {
     images.set(spec.slice(0, eq), spec.slice(eq + 1));
   }
   return images;
+}
+
+function parseArtifactSpecs(specs: string[]): Map<string, string> {
+  const artifacts = new Map<string, string>();
+  for (const spec of specs) {
+    const eq = spec.indexOf("=");
+    if (eq <= 0) {
+      throw new Error(`artifact spec must be sha256=path: ${spec}`);
+    }
+    const sha256 = spec.slice(0, eq).trim().toLowerCase();
+    if (!isSha256Hex(sha256)) {
+      throw new Error(`artifact spec has invalid sha256: ${spec}`);
+    }
+    artifacts.set(sha256, spec.slice(eq + 1));
+  }
+  return artifacts;
+}
+
+function isSha256Hex(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
+function isImageArchitecture(value: unknown): value is RequiredImage["image_key"]["arch"] {
+  return value === "x86_64" || value === "aarch64";
 }
 
 function parseMs(raw: string | undefined, fallback: number): number {
@@ -1007,7 +1747,7 @@ function splitEnvList(value: string | undefined): string[] {
 function printHelp(): void {
   console.log(`Usage:
   bun run e2e:live -- --base-url https://intar.dev --cookie 'better-auth.session_token=...' \\
-    --manifest ../dist/broken-nginx-webserver-amd64.qcow2.manifest.json
+    --manifest ../dist/broken-nginx-webserver-amd64.raw.zst.manifest.json
 
 Required unless skipped:
   --base-url URL                 Deployed website origin.
@@ -1019,19 +1759,22 @@ Useful options:
   --scenario ID                  Scenario to start. Defaults to broken-nginx.
   --cross-run-scenario ID        Optional second scenario for cross-run isolation.
   --host HOST_ID                 Pin the run to a specific host.
-  --image VM=PATH                Override inferred qcow2 path for a VM manifest.
+  --build-rev REV                Wait for admin image build rows for this bundle revision.
+  --image VM=PATH                Override inferred raw.zst path for a VM manifest.
+  --artifact SHA=PATH            Override inferred kernel/initrd boot artifact path.
   --forbidden-ip IP              Guest-side IP that must be unreachable. Repeatable.
   --skip-publish                 Assume catalog/cache desired state is already published.
   --skip-terminal-probe          Only create Stargate routes; do not open the terminal websocket.
   --skip-teardown                Leave the run active for manual inspection.
   --allow-no-artifacts           Do not fail if teardown produces no artifacts.
+  --wait-build-ms MS             Builder queue timeout. Defaults to 900000.
   --warm-start-ms MS             Click-to-terminal budget. Defaults to 10000.
 `);
 }
 
 function sameImageKey(
-  left: ScenarioVmManifestV1["image_key"],
-  right: ScenarioVmManifestV1["image_key"],
+  left: RequiredImage["image_key"],
+  right: RequiredImage["image_key"],
 ): boolean {
   return (
     left.scenario === right.scenario &&
@@ -1040,8 +1783,32 @@ function sameImageKey(
   );
 }
 
-function imageLabel(vm: ScenarioVmManifestV1): string {
+function imageLabel(vm: RequiredImage): string {
   return `${vm.image_key.scenario}/${vm.image_key.vm}/${vm.image_key.arch}@${vm.image_sha256.slice(0, 12)}`;
+}
+
+function bootArtifactSha256s(manifest: ScenarioManifestV2): string[] {
+  const values = new Set<string>();
+  for (const vm of manifest.vms) {
+    values.add(vm.boot.kernel_sha256.toLowerCase());
+    values.add(vm.boot.initrd_sha256.toLowerCase());
+  }
+  return [...values].sort();
+}
+
+async function sha256FileHex(path: string): Promise<string> {
+  const bytes = await readFile(path);
+  return sha256BytesHex(bytes);
+}
+
+async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    copyToArrayBuffer(bytes),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -1052,6 +1819,10 @@ function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 async function parseResponseBody(response: Response): Promise<unknown> {
   const text = await response.text();
+  return parseResponseText(text);
+}
+
+function parseResponseText(text: string): unknown {
   if (!text) return null;
   try {
     return JSON.parse(text) as unknown;
@@ -1060,7 +1831,33 @@ async function parseResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-function parseControlMessage(raw: string): { type: "ready" } | { type: "error"; message: string } | null {
+function parseJsonText<T>(text: string, label: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    throw new Error(`${label} was not valid JSON: ${errorMessage(error)}`);
+  }
+}
+
+function assertRawPayloadDoesNotContain(
+  payload: string,
+  forbidden: string,
+  label: string,
+): void {
+  const variants = unique([
+    forbidden,
+    JSON.stringify(forbidden).slice(1, -1),
+  ]).filter((value) => value.length > 0);
+  for (const variant of variants) {
+    if (payload.includes(variant)) {
+      throw new Error(`${label} leaked solution body before reveal`);
+    }
+  }
+}
+
+function parseControlMessage(
+  raw: string,
+): { type: "ready" } | { type: "error"; message: string } | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed) || typeof parsed.type !== "string") return null;
@@ -1096,6 +1893,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function hasBody(value: string | null): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+async function expectHttpErrorCode(
+  action: () => Promise<unknown>,
+  status: number,
+  code: string,
+  description: string,
+): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (
+      error instanceof HttpError &&
+      error.status === status &&
+      errorBodyCode(error.body) === code
+    ) {
+      return;
+    }
+    throw new Error(
+      `${description} returned unexpected error: ${errorMessage(error)}`,
+    );
+  }
+  throw new Error(`${description} unexpectedly succeeded`);
+}
+
+function errorBodyCode(body: unknown): string | null {
+  return isRecord(body) && typeof body.code === "string" ? body.code : null;
 }
 
 function shellQuote(value: string): string {

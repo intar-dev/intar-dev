@@ -15,12 +15,16 @@ For scenario work, the source of truth is the event log. Read tables are disposa
 
 ## Useful commands
 
+Use the Node.js version pinned in `.node-version`; the Astro build relies on
+runtime APIs that are not present in older Node 22 patch releases.
+
 Run from `website/`:
 
 ```bash
 bun dev
 bun run build
 bunx wrangler d1 migrations apply DB --local --config wrangler.jsonc
+bunx wrangler dev --config dist/server/wrangler.json --port 8788
 bunx wrangler deploy --config dist/server/wrangler.json
 ```
 

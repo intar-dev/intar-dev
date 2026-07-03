@@ -25,6 +25,7 @@ interface JwtPayload {
 export interface VerifiedAgentHost {
   hostId: string;
   userId: string;
+  role: "agent" | "builder";
 }
 
 export async function handleAgentBootstrap(
@@ -197,6 +198,7 @@ export async function requireVerifiedAgentRequest(
     .select({
       id: agentHosts.id,
       userId: agentHosts.userId,
+      role: agentHosts.role,
       disabled: agentHosts.disabled,
     })
     .from(agentHosts)
@@ -222,6 +224,7 @@ export async function requireVerifiedAgentRequest(
     agent: {
       hostId: host.id,
       userId: host.userId,
+      role: host.role,
     },
   };
 }

@@ -1,0 +1,31 @@
+[bridge]
+enabled = true
+base_url = "https://intar.dev"
+host_id = ""
+bootstrap_token = ""
+heartbeat_interval_seconds = 20
+
+[builder]
+work_root = "/var/lib/intar-builder/work"
+cache_root = "/var/cache/intar-builder"
+state_db = "/var/lib/intar-builder/state.sqlite3"
+kino_release_base_url = "https://github.com/intar-dev/intar-dev/releases/download"
+# For local development or air-gapped builders, use a preinstalled kino binary.
+# kino_binary = "/usr/local/bin/kino"
+
+[qemu]
+qemu_binary = "qemu-system-x86_64"
+mmdebstrap_binary = "mmdebstrap"
+mke2fs_binary = "mke2fs"
+e2fsck_binary = "e2fsck"
+resize2fs_binary = "resize2fs"
+ssh_wait_timeout_seconds = 1200
+provision_timeout_seconds = 2400
+qemu_exit_timeout_seconds = 300
+accelerator = "kvm"
+build_cpus = 4
+build_memory_mb = 4096
+
+[jobs]
+max_attempts = 3
+max_concurrent_builds = 1

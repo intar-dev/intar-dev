@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DesiredBuildV1",
+  "type": "object",
+  "properties": {
+    "arch": {
+      "$ref": "#/$defs/ImageArchitecture"
+    },
+    "build_id": {
+      "type": "string"
+    },
+    "bundle_ref": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string"
+    },
+    "kino_version": {
+      "type": "string"
+    },
+    "rev": {
+      "type": "string"
+    },
+    "scenario_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "build_id",
+    "scenario_id",
+    "arch",
+    "rev",
+    "content_hash",
+    "bundle_ref",
+    "kino_version"
+  ],
+  "$defs": {
+    "ImageArchitecture": {
+      "type": "string",
+      "enum": [
+        "x86_64",
+        "aarch64"
+      ]
+    }
+  }
+}

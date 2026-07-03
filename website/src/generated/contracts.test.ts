@@ -22,8 +22,8 @@ describe("generated contract schemas", () => {
 
   it("validates the scenario manifest fixture", () => {
     expect(validateFixture(
-      "schemas/catalog-scenario-manifest-v1.schema.json",
-      "fixtures/catalog/scenario-manifest-v1.json",
+      "schemas/catalog-scenario-manifest-v2.schema.json",
+      "fixtures/catalog/scenario-manifest-v2.json",
     )).toBe(true);
   });
 
@@ -48,10 +48,24 @@ describe("generated contract schemas", () => {
     )).toBe(true);
   });
 
+  it("validates the bridge desired build fixture", () => {
+    expect(validateFixture(
+      "schemas/bridge-desired-build-v1.schema.json",
+      "fixtures/bridge/desired-build-v1.json",
+    )).toBe(true);
+  });
+
+  it("validates the bridge build report fixture", () => {
+    expect(validateFixture(
+      "schemas/bridge-build-report-v1.schema.json",
+      "fixtures/bridge/build-report-v1.json",
+    )).toBe(true);
+  });
+
   it("validates the bridge message fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-message-v4.schema.json",
-      "fixtures/bridge/sync-request-v4.json",
+      "schemas/bridge-message-v5.schema.json",
+      "fixtures/bridge/sync-request-v5.json",
     )).toBe(true);
   });
 });

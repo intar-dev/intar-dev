@@ -5,6 +5,10 @@ import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, hostActualState } from "@/db/schema";
 import type { HostStateReportV1 } from "@/generated/bridge";
 import {
+  assignQueuedImageBuilds,
+  releaseBuildAssignmentsForHostRemoval,
+} from "@/lib/build-scheduler";
+import {
   buildStoredBridgeStatus,
   jsonResponse,
   loadHostForUser,
@@ -44,6 +48,7 @@ export const GET: APIRoute = async ({ request, params }) => {
     host: {
       id: host.id,
       name: host.name,
+      role: host.role,
       disabled: Boolean(host.disabled),
       scenarioEnabled: Boolean(host.scenario_enabled),
       createdAt: host.created_at,
@@ -73,11 +78,18 @@ export const DELETE: APIRoute = async ({ request, params }) => {
   }
 
   const db = drizzle(env.DB);
+  const now = Date.now();
+  if (host.role === "builder") {
+    await releaseBuildAssignmentsForHostRemoval(db, host.id, now);
+  }
   await db
     .delete(agentHosts)
     .where(
       and(eq(agentHosts.id, hostId), eq(agentHosts.userId, authz.context.userId)),
     );
+  if (host.role === "builder") {
+    await assignQueuedImageBuilds(db, now);
+  }
 
   return jsonResponse({ ok: true, hostId });
 };

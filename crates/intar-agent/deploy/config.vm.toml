@@ -12,18 +12,9 @@ host_id = "my-dedicated-host-1"
 bootstrap_token = ""
 heartbeat_interval_seconds = 30
 
-[tools]
-qemu_img = "qemu-img"
-
 [vm_defaults]
-firmware = "cloudhv"
 tap = "tap"
 work_dir = "/var/cache/intar-agent"
-
-[vm_defaults.boot]
-kernel = "/var/cache/intar-agent/boot/vmlinux"
-initramfs = "/var/cache/intar-agent/boot/initrd.img"
-cmdline = "console=ttyAMA0 root=/dev/vda1 rw"
 
 [vm_defaults.resources]
 vcpus = 1
@@ -36,7 +27,3 @@ dns = ["1.1.1.1", "8.8.8.8"]
 [image_registry]
 url = "https://intar.dev/agent/registry/images"
 refresh_interval_minutes = 15
-
-[firmwares.cloudhv]
-url = "https://github.com/cloud-hypervisor/edk2/releases/download/ch-a54f262b09/CLOUDHV.fd"
-sha256 = "0624c06c5d07cb8efe38806890ce7076c41c0902f2fcd5b2376f107033e3222b"

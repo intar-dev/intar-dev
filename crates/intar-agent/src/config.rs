@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -17,10 +16,8 @@ pub struct AgentConfig {
     pub cloud_hypervisor: CloudHypervisorConfig,
     pub bridge: BridgeConfig,
     pub ssh_access: SshAccessConfig,
-    pub tools: ToolsConfig,
     pub vm_defaults: VmDefaultsConfig,
     pub image_registry: ImageRegistryConfig,
-    pub firmwares: BTreeMap<String, ImageConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,28 +83,11 @@ pub struct SshAccessConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct ToolsConfig {
-    pub qemu_img: String,
-}
-
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            qemu_img: "qemu-img".to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, default)]
 pub struct VmDefaultsConfig {
-    /// Path to UEFI firmware (e.g. `hypervisor-fw`).
-    pub firmware: String,
     /// Prefix used for dynamically created tap devices.
     pub tap: String,
     /// Optional working directory for per-VM artifacts.
     pub work_dir: Option<PathBuf>,
-    pub boot: VmBootConfig,
     pub resources: VmResourcesConfig,
     pub network: VmNetworkConfig,
 }
@@ -115,25 +95,12 @@ pub struct VmDefaultsConfig {
 impl Default for VmDefaultsConfig {
     fn default() -> Self {
         Self {
-            firmware: String::new(),
             tap: "tap0".to_string(),
             work_dir: None,
-            boot: VmBootConfig::default(),
             resources: VmResourcesConfig::default(),
             network: VmNetworkConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields, default)]
-pub struct VmBootConfig {
-    /// Optional kernel path for direct (non-UEFI) boot.
-    pub kernel: Option<PathBuf>,
-    /// Optional initramfs path for direct (non-UEFI) boot.
-    pub initramfs: Option<PathBuf>,
-    /// Kernel cmdline for direct (non-UEFI) boot.
-    pub cmdline: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,13 +153,6 @@ impl Default for ImageRegistryConfig {
             refresh_interval_minutes: 15,
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageConfig {
-    pub url: String,
-    pub sha256: String,
 }
 
 pub fn redact_url_userinfo(url: &str) -> String {
@@ -281,13 +241,6 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
     })?;
     cfg.server.bind = bind.to_string();
 
-    cfg.tools.qemu_img = cfg.tools.qemu_img.trim().to_string();
-    if cfg.tools.qemu_img.is_empty() {
-        anyhow::bail!(
-            "config value tools.qemu_img must not be empty\n\nExample config:\n{EXAMPLE_TOML}"
-        );
-    }
-
     cfg.bridge.base_url = cfg.bridge.base_url.trim_end_matches('/').to_string();
     cfg.bridge.host_id = cfg.bridge.host_id.trim().to_string();
     cfg.bridge.bootstrap_token = cfg.bridge.bootstrap_token.trim().to_string();
@@ -345,14 +298,12 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         }
     }
 
-    cfg.vm_defaults.firmware = cfg.vm_defaults.firmware.trim().to_string();
     cfg.vm_defaults.tap = cfg.vm_defaults.tap.trim().to_string();
     if cfg.vm_defaults.tap.is_empty() {
         anyhow::bail!(
             "config value vm_defaults.tap must not be empty\n\nExample config:\n{EXAMPLE_TOML}"
         );
     }
-    cfg.vm_defaults.boot.cmdline = cfg.vm_defaults.boot.cmdline.trim().to_string();
 
     cfg.vm_defaults.network.guest_cidr = cfg.vm_defaults.network.guest_cidr.trim().to_string();
     if cfg.vm_defaults.network.guest_cidr.is_empty() {
@@ -408,40 +359,6 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
             "config value image_registry.refresh_interval_minutes must be >= 1\n\nExample config:\n{EXAMPLE_TOML}"
         );
     }
-
-    let mut validated_firmwares = BTreeMap::new();
-    for (name, mut fw) in cfg.firmwares {
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            anyhow::bail!("firmware key must not be empty\n\nExample config:\n{EXAMPLE_TOML}");
-        }
-        if !is_safe_image_key(&name) {
-            anyhow::bail!(
-                "invalid firmware key \"{name}\": only [A-Za-z0-9_-] allowed\n\nExample config:\n{EXAMPLE_TOML}"
-            );
-        }
-
-        fw.url = fw.url.trim().to_string();
-        if fw.url.is_empty() {
-            anyhow::bail!(
-                "config value firmwares.{name}.url must not be empty\n\nExample config:\n{EXAMPLE_TOML}"
-            );
-        }
-        if !(fw.url.starts_with("http://") || fw.url.starts_with("https://")) {
-            anyhow::bail!(
-                "config value firmwares.{name}.url must start with http:// or https://\n\nExample config:\n{EXAMPLE_TOML}"
-            );
-        }
-
-        fw.sha256 = normalize_sha256(&fw.sha256).ok_or_else(|| {
-            anyhow::anyhow!(
-                "config value firmwares.{name}.sha256 must be a 64-char hex SHA-256\n\nExample config:\n{EXAMPLE_TOML}"
-            )
-        })?;
-
-        validated_firmwares.insert(name, fw);
-    }
-    cfg.firmwares = validated_firmwares;
 
     Ok(cfg)
 }
@@ -557,34 +474,6 @@ refresh_interval_minutes = 7
     }
 
     #[test]
-    fn load_parses_firmwares() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-[firmwares.cloudhv]
-url = "https://example.com/CLOUDHV.fd"
-sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-[image_registry]
-url = "https://example.com/images"
-"#,
-        )?;
-
-        let cfg = load(&path)?;
-        let fw = cfg
-            .firmwares
-            .get("cloudhv")
-            .ok_or_else(|| anyhow::anyhow!("expected cloudhv firmware key"))?;
-        assert_eq!(fw.url, "https://example.com/CLOUDHV.fd");
-        assert_eq!(
-            fw.sha256,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn load_parses_server_bind() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("config.toml");
@@ -605,14 +494,14 @@ url = "https://example.com/images"
 
     #[test]
     fn redact_url_userinfo_strips_credentials_from_valid_urls() {
-        let got = redact_url_userinfo("https://user:secret@example.com/path/image.qcow2");
-        assert_eq!(got, "https://example.com/path/image.qcow2");
+        let got = redact_url_userinfo("https://user:secret@example.com/path/image.raw.zst");
+        assert_eq!(got, "https://example.com/path/image.raw.zst");
     }
 
     #[test]
     fn redact_url_userinfo_best_effort_strips_credentials_from_invalid_urls() {
-        let got = redact_url_userinfo("https://user:abc%sm@example.com/path/image.qcow2");
-        assert_eq!(got, "https://example.com/path/image.qcow2");
+        let got = redact_url_userinfo("https://user:abc%sm@example.com/path/image.raw.zst");
+        assert_eq!(got, "https://example.com/path/image.raw.zst");
     }
 
     #[test]

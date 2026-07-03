@@ -3,10 +3,10 @@
 mod bridge;
 mod config;
 mod db;
-mod firmware_cache;
 mod host_profile;
 mod image_cache;
 mod kino_probe;
+mod preflight;
 mod proto;
 mod tls_provider;
 mod vm;
@@ -32,6 +32,9 @@ struct Cli {
     /// Path to the TOML configuration file.
     #[arg(long, value_name = "PATH")]
     config: std::path::PathBuf,
+    /// Check host prerequisites and exit without starting the daemon.
+    #[arg(long)]
+    doctor: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -47,13 +50,19 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = config::load(&cli.config)?;
+    if cli.doctor {
+        let report = preflight::collect_preflight(&cfg);
+        print_preflight_report(&report);
+        if report.has_failures() {
+            anyhow::bail!(
+                "agent host preflight failed with {} required failure(s)",
+                report.failure_count()
+            );
+        }
+        return Ok(());
+    }
 
-    firmware_cache::spawn_warm_cache(cfg.firmwares.clone());
-    image_cache::spawn_warm_cache_with_bridge(
-        cfg.image_registry.clone(),
-        cfg.bridge.clone(),
-        cfg.tools.qemu_img.clone(),
-    );
+    image_cache::spawn_warm_cache_with_bridge(cfg.image_registry.clone(), cfg.bridge.clone());
 
     let bind: SocketAddr = cfg
         .server
@@ -134,7 +143,6 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind to {bind}"))?;
 
     info!(bind = %bind, "intar-agent listening");
-    firmware_cache::spawn_log_cache_state(cfg.firmwares.clone());
     image_cache::spawn_log_cache_state_with_bridge(cfg.image_registry.clone(), cfg.bridge.clone());
 
     axum::serve(listener, app)
@@ -150,6 +158,16 @@ fn init_tracing() {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+fn print_preflight_report(report: &preflight::PreflightReport) {
+    for check in &report.checks {
+        let status = match check.status {
+            preflight::PreflightStatus::Pass => "ok",
+            preflight::PreflightStatus::Fail => "fail",
+        };
+        println!("[{status}] {}: {}", check.name, check.detail);
+    }
 }
 
 async fn ping_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -252,6 +270,15 @@ mod tests {
     fn cli_accepts_config() -> Result<()> {
         let cli = Cli::try_parse_from(["intar-agent", "--config", "config.toml"])?;
         assert_eq!(cli.config, std::path::PathBuf::from("config.toml"));
+        assert!(!cli.doctor);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_accepts_doctor() -> Result<()> {
+        let cli = Cli::try_parse_from(["intar-agent", "--config", "config.toml", "--doctor"])?;
+        assert_eq!(cli.config, std::path::PathBuf::from("config.toml"));
+        assert!(cli.doctor);
         Ok(())
     }
 }

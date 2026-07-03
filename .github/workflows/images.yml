@@ -11,10 +11,26 @@ on:
       - "justfile"
       - "crates/kino/**"
       - "crates/intar-kino-proto/**"
+      - "crates/intar-builder/**"
+      - "crates/intar-contracts/**"
+      - "crates/intar-contracts-typegen/**"
       - "crates/intar-image-*/**"
       - "base-images.hcl"
+      - "build-tools.hcl"
       - "builder.*.hcl"
       - "scenarios/**"
+      - "website/drizzle/**"
+      - "website/src/control-plane/auth.ts"
+      - "website/src/control-plane/bridge-v5.ts"
+      - "website/src/control-plane/host-runtime-do.ts"
+      - "website/src/control-plane/image-registry.ts"
+      - "website/src/generated/**"
+      - "website/src/lib/build-scheduler*.ts"
+      - "website/src/lib/desired-state*.ts"
+      - "website/src/lib/host-runtime-wake.ts"
+      - "website/src/lib/scenario-hosts.ts"
+      - "website/src/db/schema.ts"
+      - "website/src/pages/api/agent/hosts.ts"
   push:
     branches:
       - main
@@ -26,10 +42,26 @@ on:
       - "justfile"
       - "crates/kino/**"
       - "crates/intar-kino-proto/**"
+      - "crates/intar-builder/**"
+      - "crates/intar-contracts/**"
+      - "crates/intar-contracts-typegen/**"
       - "crates/intar-image-*/**"
       - "base-images.hcl"
+      - "build-tools.hcl"
       - "builder.*.hcl"
       - "scenarios/**"
+      - "website/drizzle/**"
+      - "website/src/control-plane/auth.ts"
+      - "website/src/control-plane/bridge-v5.ts"
+      - "website/src/control-plane/host-runtime-do.ts"
+      - "website/src/control-plane/image-registry.ts"
+      - "website/src/generated/**"
+      - "website/src/lib/build-scheduler*.ts"
+      - "website/src/lib/desired-state*.ts"
+      - "website/src/lib/host-runtime-wake.ts"
+      - "website/src/lib/scenario-hosts.ts"
+      - "website/src/db/schema.ts"
+      - "website/src/pages/api/agent/hosts.ts"
   workflow_dispatch:
 
 permissions:
@@ -37,8 +69,8 @@ permissions:
 
 jobs:
   images:
-    name: Validate and build images
-    runs-on: [self-hosted, linux, x64, kvm]
+    name: Validate and queue images
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -72,14 +104,20 @@ jobs:
         run: just validate-images
 
       - name: Render image build inputs
-        run: just render-images "" builder.gha.amd64.hcl
+        run: just render-images "" builder.sample.amd64.hcl
 
-      - name: Install Packer
-        if: github.event_name != 'pull_request'
-        uses: hashicorp/setup-packer@v3
-
-      - name: Build and upload images
-        if: github.event_name != 'pull_request'
+      - name: Verify bundle upload token
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: just build-images "" builder.gha.amd64.hcl
+        run: |
+          if [ -z "${INTAR_IMAGE_PUBLISH_TOKEN:-}" ]; then
+            echo "INTAR_IMAGE_PUBLISH_TOKEN secret is required to upload scenario bundles." >&2
+            exit 1
+          fi
+
+      - name: Upload scenario source bundle
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: just bundle-images "" builder.sample.amd64.hcl "${GITHUB_SHA::12}" false "https://intar.dev/registry/v1/bundles"

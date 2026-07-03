@@ -1,28 +1,49 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
-import { agentHosts, vmScenarioVms } from "@/db/schema";
+import {
+  agentHosts,
+  imageBuilds,
+  imageBuildBundles,
+  vmScenarioVms,
+} from "@/db/schema";
 import type {
   ImageArchitecture,
   ImageKey,
-  ScenarioManifestV1,
-  ScenarioVmManifestV1,
+  ScenarioHintManifestV2,
+  ScenarioManifestV2,
+  ScenarioProbeManifestV2,
+  ScenarioVmManifestV2,
 } from "@/generated/catalog";
+import type { AgentHostRole, ImageBuildBundleMeta } from "@/db/schema";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { upsertDesiredCachedImage } from "@/lib/desired-state";
+import {
+  assignQueuedImageBuilds,
+  queueImageBuildsFromBundle,
+} from "@/lib/build-scheduler";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 const IMAGE_KEY_RE = /^[A-Za-z0-9._-]+$/;
+const BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+const EXPECTED_BUILD_FORMAT_VERSION = "intar-image-build-v1";
+const TAR_BLOCK_SIZE = 512;
+const MAX_BUNDLE_TAR_BYTES = 64 * 1024 * 1024;
 
 export async function handleImageRegistryRequest(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
   const url = new URL(request.url);
+
+  if (url.pathname === "/registry/v1/bundles") {
+    return handleBundleUpload(request, env);
+  }
 
   if (url.pathname === "/registry/v1/publish") {
     return handlePublish(request, env);
@@ -44,7 +65,106 @@ export async function handleImageRegistryRequest(
     );
   }
 
+  const artifactMatch = url.pathname.match(
+    /^\/agent\/registry\/artifacts\/([A-Fa-f0-9]{64})$/,
+  );
+  if (artifactMatch) {
+    return handleAgentArtifactDownload(
+      request,
+      env,
+      (artifactMatch[1] ?? "").toLowerCase(),
+    );
+  }
+
+  const bundleMatch = url.pathname.match(
+    /^\/agent\/registry\/bundles\/([^/]+)$/,
+  );
+  if (bundleMatch) {
+    return handleAgentBundleDownload(
+      request,
+      env,
+      decodeURIComponent(bundleMatch[1] ?? ""),
+    );
+  }
+
+  const buildLogMatch = url.pathname.match(/^\/agent\/builds\/([^/]+)\/log$/);
+  if (buildLogMatch) {
+    return handleAgentBuildLogUpload(
+      request,
+      env,
+      decodeURIComponent(buildLogMatch[1] ?? ""),
+    );
+  }
+
   return null;
+}
+
+async function handleBundleUpload(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const authz = requireBundleUploadAuth(request, env);
+  if (authz) return authz;
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return jsonResponse({ error: "multipart form data is required" }, 400);
+  }
+
+  const meta = await readBundleMeta(form.get("meta"));
+  if (!meta.ok) return meta.response;
+
+  const bundle = form.get("bundle");
+  if (!(bundle instanceof File)) {
+    return jsonResponse({ error: "bundle form field is required" }, 400);
+  }
+
+  const payload = await bundle.arrayBuffer();
+  if (payload.byteLength === 0) {
+    return jsonResponse({ error: "bundle archive is empty" }, 400);
+  }
+  const archiveError = await validateBundleArchivePayload(
+    payload,
+    meta.value.bundleMeta,
+  );
+  if (archiveError) return archiveError;
+
+  const objectKey = bundleObjectKey(meta.value.rev);
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
+    httpMetadata: { contentType: "application/gzip" },
+    customMetadata: {
+      rev: meta.value.rev,
+      kino_version: meta.value.kinoVersion,
+    },
+  });
+
+  const db = drizzle(env.DB);
+  const now = Date.now();
+  const queued = await queueImageBuildsFromBundle(db, {
+    rev: meta.value.rev,
+    r2Key: objectKey,
+    kinoVersion: meta.value.kinoVersion,
+    meta: meta.value.bundleMeta,
+    nowUnixMs: now,
+  });
+  const assigned = await assignQueuedImageBuilds(db, now);
+
+  return jsonResponse(
+    {
+      ok: true,
+      rev: meta.value.rev,
+      bundle_key: objectKey,
+      queued: queued.queued,
+      assigned,
+    },
+    202,
+  );
 }
 
 async function handlePublish(
@@ -55,7 +175,7 @@ async function handlePublish(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const authz = requirePublishToken(request, env);
+  const authz = await requirePublishAuth(request, env);
   if (authz) return authz;
 
   let form: FormData;
@@ -71,82 +191,348 @@ async function handlePublish(
   const validationError = validateManifest(manifest.value);
   if (validationError) return validationError;
 
+  const artifacts = await prepareBootArtifacts(env, form, manifest.value);
+  if (!artifacts.ok) return artifacts.response;
+
+  const images = await prepareVmImages(form, manifest.value);
+  if (!images.ok) return images.response;
+  const normalizedManifest = normalizePublishManifest(manifest.value);
+
+  await storePreparedBootArtifacts(env, artifacts.prepared);
+
   const uploaded = [];
-  for (const vm of manifest.value.vms) {
-    const imageKey = registryImageKey(vm.image_key);
-    const expectedSha256 = normalizeSha256(vm.image_sha256);
-    if (!expectedSha256) {
-      return jsonResponse(
-        { error: `invalid image_sha256 for vm ${vm.name}` },
-        400,
-      );
-    }
-
-    const file = imageFileForVm(form, vm);
-    if (!file) {
-      return jsonResponse(
-        { error: `missing image file for vm ${vm.name}` },
-        400,
-      );
-    }
-
-    const payload = await file.arrayBuffer();
-    const actualSha256 = await sha256Hex(payload);
-    if (actualSha256 !== expectedSha256) {
-      return jsonResponse(
-        {
-          error: `sha256 mismatch for vm ${vm.name}`,
-          expected: expectedSha256,
-          actual: actualSha256,
-        },
-        422,
-      );
-    }
-
-    const objectKey = imageObjectKey(imageKey, expectedSha256);
-    await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
+  for (const image of images.prepared) {
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(image.objectKey, image.payload, {
       httpMetadata: { contentType: "application/octet-stream" },
       customMetadata: {
-        image_key: imageKey,
-        image_sha256: expectedSha256,
-        scenario_id: manifest.value.scenario_id,
-        vm_name: vm.name,
+        image_key: image.imageKey,
+        image_sha256: image.imageSha256,
+        scenario_id: normalizedManifest.scenario_id,
+        vm_name: image.vmName,
       },
     });
     await env.VM_IMAGE_REGISTRY_BUCKET.put(
-      `${objectKey}.sha256`,
-      textEncoder.encode(`${expectedSha256}  ${imageKey}.qcow2\n`),
+      `${image.objectKey}.sha256`,
+      textEncoder.encode(`${image.imageSha256}  ${image.imageKey}.raw.zst\n`),
       { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
     );
 
     uploaded.push({
-      image_key: imageKey,
-      image_sha256: expectedSha256,
-      object_key: objectKey,
-      bytes: payload.byteLength,
+      image_key: image.imageKey,
+      image_sha256: image.imageSha256,
+      object_key: image.objectKey,
+      bytes: image.payload.byteLength,
     });
   }
 
   const db = drizzle(env.DB);
-  await seedScenarioManifest(db, manifest.value, {
+  await seedScenarioManifest(db, normalizedManifest, {
     enabled: true,
     nowUnixMs: Date.now(),
   });
-  await bumpHostCachedImages(db, manifest.value);
+  await bumpHostCachedImages(db, normalizedManifest);
 
   return jsonResponse(
     {
       ok: true,
-      scenario_id: manifest.value.scenario_id,
+      scenario_id: normalizedManifest.scenario_id,
       images: uploaded,
+      artifacts: artifacts.uploaded,
     },
     201,
   );
 }
 
+type PreparedBootArtifact = {
+  sha256: string;
+  objectKey: string;
+  bytes: number;
+  reused: boolean;
+  payload: ArrayBuffer | null;
+};
+
+type PreparedVmImage = {
+  vmName: string;
+  imageKey: string;
+  imageSha256: string;
+  objectKey: string;
+  payload: ArrayBuffer;
+};
+
+async function prepareBootArtifacts(
+  env: Cloudflare.Env,
+  form: FormData,
+  manifest: ScenarioManifestV2,
+): Promise<
+  | {
+      ok: true;
+      prepared: PreparedBootArtifact[];
+      uploaded: Array<{
+        sha256: string;
+        object_key: string;
+        bytes: number;
+        reused: boolean;
+      }>;
+    }
+  | { ok: false; response: Response }
+> {
+  const prepared: PreparedBootArtifact[] = [];
+  const uploaded = [];
+  for (const sha256 of bootArtifactSha256s(manifest)) {
+    const objectKey = artifactObjectKey(sha256);
+    const existing = await env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
+    if (bootArtifactObjectMatchesSha(existing, sha256)) {
+      prepared.push({
+        sha256,
+        objectKey,
+        bytes: existing.size,
+        reused: true,
+        payload: null,
+      });
+      uploaded.push({
+        sha256,
+        object_key: objectKey,
+        bytes: existing.size,
+        reused: true,
+      });
+      continue;
+    }
+
+    const file = artifactFileForSha(form, sha256);
+    if (!file) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: `missing boot artifact ${sha256}` },
+          400,
+        ),
+      };
+    }
+
+    const payload = await file.arrayBuffer();
+    const actualSha256 = await sha256Hex(payload);
+    if (actualSha256 !== sha256) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          {
+            error: "boot artifact sha256 mismatch",
+            expected: sha256,
+            actual: actualSha256,
+          },
+          422,
+        ),
+      };
+    }
+
+    prepared.push({
+      sha256,
+      objectKey,
+      bytes: payload.byteLength,
+      reused: false,
+      payload,
+    });
+    uploaded.push({
+      sha256,
+      object_key: objectKey,
+      bytes: payload.byteLength,
+      reused: false,
+    });
+  }
+
+  return { ok: true, prepared, uploaded };
+}
+
+async function prepareVmImages(
+  form: FormData,
+  manifest: ScenarioManifestV2,
+): Promise<
+  { ok: true; prepared: PreparedVmImage[] } | { ok: false; response: Response }
+> {
+  const prepared: PreparedVmImage[] = [];
+  for (const vm of manifest.vms) {
+    const imageKey = registryImageKey(vm.image_key);
+    const expectedSha256 = normalizeSha256(vm.image_sha256);
+    if (!expectedSha256) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: `invalid image_sha256 for vm ${vm.name}` },
+          400,
+        ),
+      };
+    }
+
+    const file = imageFileForVm(form, vm);
+    if (!file) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: `missing image file for vm ${vm.name}` },
+          400,
+        ),
+      };
+    }
+
+    const payload = await file.arrayBuffer();
+    const actualSha256 = await sha256Hex(payload);
+    if (actualSha256 !== expectedSha256) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          {
+            error: `sha256 mismatch for vm ${vm.name}`,
+            expected: expectedSha256,
+            actual: actualSha256,
+          },
+          422,
+        ),
+      };
+    }
+
+    prepared.push({
+      vmName: vm.name.trim(),
+      imageKey,
+      imageSha256: expectedSha256,
+      objectKey: imageObjectKey(imageKey, expectedSha256),
+      payload,
+    });
+  }
+  return { ok: true, prepared };
+}
+
+async function storePreparedBootArtifacts(
+  env: Cloudflare.Env,
+  artifacts: PreparedBootArtifact[],
+): Promise<void> {
+  for (const artifact of artifacts) {
+    if (artifact.reused || !artifact.payload) {
+      continue;
+    }
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      artifact.objectKey,
+      artifact.payload,
+      {
+        httpMetadata: { contentType: "application/octet-stream" },
+        customMetadata: { artifact_sha256: artifact.sha256 },
+      },
+    );
+  }
+}
+
+async function handleAgentBundleDownload(
+  request: Request,
+  env: Cloudflare.Env,
+  rev: string,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const verified = await requireBuilderAgentRequest(request, env);
+  if (!verified.ok) return verified.response;
+
+  if (!isSafeBundleRev(rev)) {
+    return jsonResponse({ error: "invalid bundle rev" }, 400);
+  }
+
+  const rows = await drizzle(env.DB)
+    .select({ r2Key: imageBuildBundles.r2Key })
+    .from(imageBuildBundles)
+    .where(eq(imageBuildBundles.rev, rev))
+    .limit(1);
+  const objectKey = rows[0]?.r2Key;
+  if (!objectKey) {
+    return jsonResponse({ error: "bundle not found" }, 404);
+  }
+
+  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
+  if (!object) {
+    return jsonResponse({ error: "bundle object not found" }, 404);
+  }
+
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "content-type": "application/gzip",
+      "content-length": String(object.size),
+      "cache-control": "private, max-age=31536000, immutable",
+      etag: object.httpEtag,
+      "x-build-bundle-rev": rev,
+    },
+  });
+}
+
+async function handleAgentBuildLogUpload(
+  request: Request,
+  env: Cloudflare.Env,
+  buildId: string,
+): Promise<Response> {
+  if (request.method !== "PUT") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const verified = await requireBuilderAgentRequest(request, env);
+  if (!verified.ok) return verified.response;
+
+  if (!isSafeBuildId(buildId)) {
+    return jsonResponse({ error: "invalid build id" }, 400);
+  }
+
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({ hostId: imageBuilds.hostId })
+    .from(imageBuilds)
+    .where(eq(imageBuilds.id, buildId))
+    .limit(1);
+  const build = rows[0];
+  if (!build) {
+    return jsonResponse({ error: "build not found" }, 404);
+  }
+  if (build.hostId !== verified.agent.hostId) {
+    return jsonResponse(
+      { error: "build is not assigned to this builder" },
+      409,
+    );
+  }
+
+  const payload = await request.arrayBuffer();
+  const objectKey = `builds/logs/${buildId}.log`;
+  await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
+    httpMetadata: { contentType: "text/plain; charset=utf-8" },
+    customMetadata: {
+      build_id: buildId,
+      host_id: verified.agent.hostId,
+    },
+  });
+
+  const updated = await db
+    .update(imageBuilds)
+    .set({
+      logR2Key: objectKey,
+      updatedAt: Date.now(),
+    })
+    .where(
+      and(
+        eq(imageBuilds.id, buildId),
+        eq(imageBuilds.hostId, verified.agent.hostId),
+      ),
+    )
+    .returning({ id: imageBuilds.id });
+  if (!updated.length) {
+    await env.VM_IMAGE_REGISTRY_BUCKET.delete(objectKey);
+    return jsonResponse(
+      { error: "build assignment changed during log upload" },
+      409,
+    );
+  }
+
+  return jsonResponse({ ok: true, build_id: buildId, log_key: objectKey });
+}
+
 async function bumpHostCachedImages(
   db: DrizzleD1Database,
-  manifest: ScenarioManifestV1,
+  manifest: ScenarioManifestV2,
 ): Promise<void> {
   const nowUnixMs = Date.now();
   const images = manifest.vms.map((vm) => ({
@@ -154,11 +540,19 @@ async function bumpHostCachedImages(
     image_sha256: vm.image_sha256,
   }));
   const hosts = await db
-    .select({ id: agentHosts.id })
+    .select({
+      id: agentHosts.id,
+      role: agentHosts.role,
+      disabled: agentHosts.disabled,
+      scenarioEnabled: agentHosts.scenarioEnabled,
+    })
     .from(agentHosts)
     .where(eq(agentHosts.disabled, false));
 
   for (const host of hosts) {
+    if (!isRuntimeImageCacheHost(host)) {
+      continue;
+    }
     await mutateStoredHostDesiredState(db, host.id, nowUnixMs, (draft) => {
       for (const image of images) {
         upsertDesiredCachedImage(draft, image);
@@ -166,6 +560,14 @@ async function bumpHostCachedImages(
     });
     await tryWakeHostRuntime(host.id);
   }
+}
+
+export function isRuntimeImageCacheHost(host: {
+  role: AgentHostRole;
+  disabled: boolean;
+  scenarioEnabled: boolean;
+}): boolean {
+  return host.role === "agent" && !host.disabled && host.scenarioEnabled;
 }
 
 async function handleAgentImageIndex(
@@ -184,29 +586,66 @@ async function handleAgentImageIndex(
     .select({
       imageKey: vmScenarioVms.imageKeyJson,
       imageSha256: vmScenarioVms.imageSha256,
+      imageFormat: vmScenarioVms.imageFormat,
+      imageVirtualSizeBytes: vmScenarioVms.imageVirtualSizeBytes,
+      kernelSha256: vmScenarioVms.kernelSha256,
+      initrdSha256: vmScenarioVms.initrdSha256,
+      bootCmdline: vmScenarioVms.bootCmdline,
     })
     .from(vmScenarioVms);
 
-  const byKey = new Map<string, {
-    image_key: string;
-    image_sha256: string;
-    bytes: number;
-    download_url: string;
-  }>();
+  const byKey = new Map<
+    string,
+    {
+      image_key: string;
+      image_sha256: string;
+      image_format: string;
+      image_virtual_size_bytes: number;
+      boot: {
+        kernel_sha256: string;
+        initrd_sha256: string;
+        cmdline: string;
+      };
+      bytes: number;
+      download_url: string;
+    }
+  >();
 
   for (const row of rows) {
     if (!isImageKey(row.imageKey)) continue;
     const sha256 = normalizeSha256(row.imageSha256 ?? "");
     if (!sha256) continue;
+    const kernelSha256 = normalizeSha256(row.kernelSha256 ?? "");
+    const initrdSha256 = normalizeSha256(row.initrdSha256 ?? "");
+    const bootCmdline = row.bootCmdline?.trim() ?? "";
+    if (
+      row.imageFormat !== "raw_zstd" ||
+      row.imageVirtualSizeBytes <= 0 ||
+      !kernelSha256 ||
+      !initrdSha256 ||
+      !bootCmdline
+    ) {
+      continue;
+    }
 
     const imageKey = registryImageKey(row.imageKey);
     const objectKey = imageObjectKey(imageKey, sha256);
     const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey);
-    if (!object) continue;
+    if (!imageObjectMatchesSha(object, imageKey, sha256)) continue;
+    if (!(await bootArtifactsExist(env, [kernelSha256, initrdSha256]))) {
+      continue;
+    }
 
     byKey.set(`${imageKey}:${sha256}`, {
       image_key: imageKey,
       image_sha256: sha256,
+      image_format: row.imageFormat,
+      image_virtual_size_bytes: row.imageVirtualSizeBytes,
+      boot: {
+        kernel_sha256: kernelSha256,
+        initrd_sha256: initrdSha256,
+        cmdline: bootCmdline,
+      },
       bytes: object.size,
       download_url: `/agent/registry/images/${encodeURIComponent(imageKey)}/${sha256}`,
     });
@@ -217,6 +656,59 @@ async function handleAgentImageIndex(
       a.image_key.localeCompare(b.image_key),
     ),
   });
+}
+
+async function bootArtifactsExist(
+  env: Cloudflare.Env,
+  sha256s: string[],
+): Promise<boolean> {
+  const objectKeys = [...new Set(sha256s.map(artifactObjectKey))];
+  const heads = await Promise.all(
+    objectKeys.map((objectKey) => env.VM_IMAGE_REGISTRY_BUCKET.head(objectKey)),
+  );
+  return heads.every((head, index) => {
+    const objectKey = objectKeys[index];
+    const sha256 = objectKey?.slice("artifacts/".length) ?? "";
+    return bootArtifactObjectMatchesSha(head, sha256);
+  });
+}
+
+function imageObjectMatchesSha<
+  T extends { customMetadata?: Record<string, string> },
+>(
+  object: T | null,
+  imageKey: string,
+  sha256: string,
+): object is T {
+  if (!object) {
+    return false;
+  }
+  const metadataSha256 = normalizeSha256(
+    object.customMetadata?.image_sha256 ??
+      object.customMetadata?.imageSha256 ??
+      "",
+  );
+  const metadataImageKey =
+    readString(object.customMetadata?.image_key) ??
+    readString(object.customMetadata?.imageKey);
+  return metadataSha256 === sha256 && metadataImageKey === imageKey;
+}
+
+function bootArtifactObjectMatchesSha<
+  T extends { customMetadata?: Record<string, string> },
+>(
+  object: T | null,
+  sha256: string,
+): object is T {
+  if (!object) {
+    return false;
+  }
+  const metadataSha256 = normalizeSha256(
+    object.customMetadata?.artifact_sha256 ??
+      object.customMetadata?.artifactSha256 ??
+      "",
+  );
+  return metadataSha256 === sha256;
 }
 
 async function handleAgentImageDownload(
@@ -238,7 +730,7 @@ async function handleAgentImageDownload(
 
   const objectKey = imageObjectKey(imageKey, sha256);
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
-  if (!object) {
+  if (!imageObjectMatchesSha(object, imageKey, sha256)) {
     return jsonResponse({ error: "image not found" }, 404);
   }
 
@@ -255,27 +747,91 @@ async function handleAgentImageDownload(
   });
 }
 
-function requirePublishToken(
+async function handleAgentArtifactDownload(
+  request: Request,
+  env: Cloudflare.Env,
+  sha256: string,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const verified = await requireVerifiedAgentRequest(request, env);
+  if (!verified.ok) return verified.response;
+
+  if (!SHA256_HEX_RE.test(sha256)) {
+    return jsonResponse({ error: "invalid artifact sha256" }, 400);
+  }
+
+  const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(
+    artifactObjectKey(sha256),
+  );
+  if (!bootArtifactObjectMatchesSha(object, sha256)) {
+    return jsonResponse({ error: "artifact not found" }, 404);
+  }
+
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-length": String(object.size),
+      "cache-control": "private, max-age=31536000, immutable",
+      etag: object.httpEtag,
+      "x-artifact-sha256": sha256,
+    },
+  });
+}
+
+async function requirePublishAuth(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response | null> {
+  if (hasRegistryPublishToken(request, env)) {
+    return null;
+  }
+
+  const verified = await requireVerifiedAgentRequest(request, env);
+  if (verified.ok) {
+    if (verified.agent.role === "builder") {
+      return null;
+    }
+    return jsonResponse({ error: "builder role required" }, 403);
+  }
+
+  return jsonResponse({ error: "unauthorized" }, 401);
+}
+
+function requireBundleUploadAuth(
   request: Request,
   env: Cloudflare.Env,
 ): Response | null {
-  const expected = env.REGISTRY_PUBLISH_TOKEN?.trim();
-  if (!expected) {
-    return jsonResponse({ error: "registry publish token is not configured" }, 500);
+  if (hasRegistryPublishToken(request, env)) {
+    return null;
   }
+  return jsonResponse({ error: "unauthorized" }, 401);
+}
+
+function hasRegistryPublishToken(
+  request: Request,
+  env: Cloudflare.Env,
+): boolean {
+  const expected = env.REGISTRY_PUBLISH_TOKEN?.trim();
   const authHeader = request.headers.get("authorization") ?? "";
   const bearer = authHeader.startsWith("Bearer ")
     ? authHeader.slice("Bearer ".length).trim()
     : "";
-  if (bearer !== expected) {
-    return jsonResponse({ error: "unauthorized" }, 401);
-  }
-  return null;
+  return Boolean(expected && bearer === expected);
+}
+
+function isSafeBuildId(value: string): boolean {
+  return value !== "." && value !== ".." && BUILD_ID_RE.test(value);
 }
 
 async function readManifest(
   value: FormDataEntryValue | null,
-): Promise<{ ok: true; value: ScenarioManifestV1 } | { ok: false; response: Response }> {
+): Promise<
+  { ok: true; value: ScenarioManifestV2 } | { ok: false; response: Response }
+> {
   if (!value) {
     return {
       ok: false,
@@ -284,39 +840,632 @@ async function readManifest(
   }
 
   const raw = typeof value === "string" ? value : await value.text();
+  let parsed: unknown;
   try {
-    return { ok: true, value: JSON.parse(raw) as ScenarioManifestV1 };
+    parsed = JSON.parse(raw);
   } catch {
     return {
       ok: false,
       response: jsonResponse({ error: "manifest is not valid JSON" }, 400),
     };
   }
+  if (!isRecord(parsed)) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "manifest is not a JSON object" }, 400),
+    };
+  }
+  return { ok: true, value: parsed as unknown as ScenarioManifestV2 };
 }
 
-function validateManifest(manifest: ScenarioManifestV1): Response | null {
-  if (manifest.schema_version !== 1) {
-    return jsonResponse({ error: "manifest schema_version must be 1" }, 400);
+async function readBundleMeta(value: FormDataEntryValue | null): Promise<
+  | {
+      ok: true;
+      value: {
+        rev: string;
+        kinoVersion: string;
+        bundleMeta: ImageBuildBundleMeta;
+      };
+    }
+  | { ok: false; response: Response }
+> {
+  if (!value) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta form field is required" }, 400),
+    };
   }
-  if (!manifest.scenario_id?.trim()) {
+
+  const raw = typeof value === "string" ? value : await value.text();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta is not valid JSON" }, 400),
+    };
+  }
+  if (!isRecord(parsed)) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta is not a JSON object" }, 400),
+    };
+  }
+
+  const rev = readString(parsed.rev);
+  const kinoVersion =
+    readString(parsed.kino_version) ?? readString(parsed.kinoVersion);
+  if (!rev || !isSafeBundleRev(rev)) {
+    return { ok: false, response: jsonResponse({ error: "invalid rev" }, 400) };
+  }
+  if (!kinoVersion) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "kino_version is required" }, 400),
+    };
+  }
+  if (!isSafeKinoVersion(kinoVersion)) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "invalid kino_version" }, 400),
+    };
+  }
+  const buildFormatVersion =
+    readString(parsed.build_format_version) ??
+    readString(parsed.buildFormatVersion);
+  if (buildFormatVersion !== EXPECTED_BUILD_FORMAT_VERSION) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "unsupported build_format_version" },
+        400,
+      ),
+    };
+  }
+
+  if (!Array.isArray(parsed.scenarios)) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta.scenarios is required" }, 400),
+    };
+  }
+  const scenarios: ImageBuildBundleMeta["scenarios"] = [];
+  for (const rawScenario of parsed.scenarios) {
+    const scenario = normalizeBundleScenario(rawScenario);
+    if (!scenario) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: "meta.scenarios contains an invalid scenario entry" },
+          400,
+        ),
+      };
+    }
+    scenarios.push(scenario);
+  }
+  if (!scenarios.length) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "meta.scenarios is required" }, 400),
+    };
+  }
+  const scenarioKeys = new Set<string>();
+  for (const scenario of scenarios) {
+    const key = `${scenario.scenarioId}:${scenario.arch}`;
+    if (scenarioKeys.has(key)) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: "meta contains duplicate scenario/arch entries" },
+          400,
+        ),
+      };
+    }
+    scenarioKeys.add(key);
+  }
+
+  return {
+    ok: true,
+    value: {
+      rev,
+      kinoVersion,
+      bundleMeta: {
+        ...parsed,
+        buildFormatVersion,
+        scenarios,
+      },
+    },
+  };
+}
+
+function normalizeBundleScenario(
+  value: unknown,
+): ImageBuildBundleMeta["scenarios"][number] | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const raw = value as Record<string, unknown>;
+  const scenarioId = readString(raw.scenario_id) ?? readString(raw.scenarioId);
+  const arch = readString(raw.arch);
+  const contentHash =
+    normalizeSha256(readString(raw.content_hash) ?? "") ??
+    normalizeSha256(readString(raw.contentHash) ?? "");
+  if (
+    !scenarioId ||
+    !isSafeBundleRev(scenarioId) ||
+    !isImageArchitecture(arch) ||
+    !contentHash
+  ) {
+    return null;
+  }
+  return {
+    scenarioId,
+    arch,
+    contentHash,
+  };
+}
+
+async function validateBundleArchivePayload(
+  payload: ArrayBuffer,
+  meta: ImageBuildBundleMeta,
+): Promise<Response | null> {
+  const archive = await readGzipBundleArchive(payload);
+  if (!archive.ok) return archive.response;
+
+  const entries = inspectTarArchive(archive.bytes);
+  if (!entries.ok) {
+    return jsonResponse({ error: entries.error }, 400);
+  }
+
+  for (const requiredPath of requiredBundlePaths(meta)) {
+    if (!entries.files.has(requiredPath)) {
+      return jsonResponse(
+        { error: `bundle archive is missing ${requiredPath}` },
+        400,
+      );
+    }
+  }
+
+  return null;
+}
+
+async function readGzipBundleArchive(
+  payload: ArrayBuffer,
+): Promise<
+  { ok: true; bytes: Uint8Array } | { ok: false; response: Response }
+> {
+  let stream: ReadableStream<Uint8Array>;
+  try {
+    stream = new Blob([payload])
+      .stream()
+      .pipeThrough(new DecompressionStream("gzip"));
+  } catch {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "bundle archive is not valid gzip" },
+        400,
+      ),
+    };
+  }
+
+  try {
+    return await readLimitedBundleArchiveStream(stream);
+  } catch {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "bundle archive is not valid gzip" },
+        400,
+      ),
+    };
+  }
+}
+
+async function readLimitedBundleArchiveStream(
+  stream: ReadableStream<Uint8Array>,
+): Promise<
+  { ok: true; bytes: Uint8Array } | { ok: false; response: Response }
+> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+
+    length += value.byteLength;
+    if (length > MAX_BUNDLE_TAR_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+      return {
+        ok: false,
+        response: jsonResponse({ error: "bundle archive is too large" }, 413),
+      };
+    }
+    chunks.push(value);
+  }
+  reader.releaseLock();
+
+  return { ok: true, bytes: concatUint8Arrays(chunks, length) };
+}
+
+function concatUint8Arrays(chunks: Uint8Array[], length: number): Uint8Array {
+  if (chunks.length === 1 && chunks[0]?.byteLength === length) {
+    return chunks[0];
+  }
+
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+type TarInspectionResult =
+  | { ok: true; files: Set<string> }
+  | { ok: false; error: string };
+
+function inspectTarArchive(bytes: Uint8Array): TarInspectionResult {
+  if (bytes.length === 0) {
+    return {
+      ok: false,
+      error: "bundle archive tar is empty",
+    };
+  }
+
+  const files = new Set<string>();
+  let offset = 0;
+  let zeroBlocks = 0;
+  while (offset + TAR_BLOCK_SIZE <= bytes.length) {
+    const header = bytes.subarray(offset, offset + TAR_BLOCK_SIZE);
+    offset += TAR_BLOCK_SIZE;
+
+    if (isZeroBlock(header)) {
+      zeroBlocks += 1;
+      if (zeroBlocks >= 2) {
+        break;
+      }
+      continue;
+    }
+    zeroBlocks = 0;
+
+    const path = tarHeaderPath(header);
+    if (!path || !isSafeBundleArchivePath(path)) {
+      return { ok: false, error: "bundle archive contains an unsafe path" };
+    }
+    if (!hasValidTarHeaderChecksum(header)) {
+      return { ok: false, error: "bundle archive contains an invalid header" };
+    }
+
+    const size = tarHeaderSize(header);
+    if (size === null) {
+      return { ok: false, error: "bundle archive contains an invalid size" };
+    }
+    const paddedSize = Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+    const dataEnd = offset + size;
+    const paddedEnd = offset + paddedSize;
+    if (dataEnd > bytes.length || paddedEnd > bytes.length) {
+      return { ok: false, error: "bundle archive is truncated" };
+    }
+
+    const typeflag = String.fromCharCode(header[156] ?? 0);
+    if (typeflag === "\0" || typeflag === "0") {
+      files.add(path);
+    } else if (typeflag === "5") {
+      // Directory entry.
+    } else {
+      return {
+        ok: false,
+        error: "bundle archive contains an unsupported entry type",
+      };
+    }
+
+    offset = paddedEnd;
+  }
+
+  if (zeroBlocks < 2) {
+    return { ok: false, error: "bundle archive is missing tar terminator" };
+  }
+  if (files.size === 0) {
+    return { ok: false, error: "bundle archive contains no files" };
+  }
+
+  return { ok: true, files };
+}
+
+function isZeroBlock(bytes: Uint8Array): boolean {
+  return bytes.every((byte) => byte === 0);
+}
+
+function tarHeaderPath(header: Uint8Array): string | null {
+  const name = tarHeaderString(header.subarray(0, 100));
+  const prefix = tarHeaderString(header.subarray(345, 500));
+  const path = prefix ? `${prefix}/${name}` : name;
+  return path || null;
+}
+
+function tarHeaderString(bytes: Uint8Array): string {
+  const nul = bytes.indexOf(0);
+  const end = nul >= 0 ? nul : bytes.length;
+  return textDecoder.decode(bytes.subarray(0, end)).trim();
+}
+
+function tarHeaderSize(header: Uint8Array): number | null {
+  const raw = tarHeaderString(header.subarray(124, 136)).replace(/\0/g, "");
+  if (!/^[0-7]*$/.test(raw)) return null;
+  const size = raw ? Number.parseInt(raw, 8) : 0;
+  return Number.isSafeInteger(size) && size >= 0 ? size : null;
+}
+
+function hasValidTarHeaderChecksum(header: Uint8Array): boolean {
+  const expected = tarHeaderChecksumValue(header);
+  return expected !== null && expected === tarHeaderChecksum(header);
+}
+
+function tarHeaderChecksumValue(header: Uint8Array): number | null {
+  const raw = tarHeaderString(header.subarray(148, 156)).replace(/\0/g, "");
+  if (!/^[0-7]+$/.test(raw)) return null;
+  const value = Number.parseInt(raw, 8);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function tarHeaderChecksum(header: Uint8Array): number {
+  return header.reduce(
+    (sum, byte, index) => sum + (index >= 148 && index < 156 ? 0x20 : byte),
+    0,
+  );
+}
+
+function isSafeBundleArchivePath(path: string): boolean {
+  if (!path || path.startsWith("/") || path.includes("\\")) {
+    return false;
+  }
+  const parts = path.split("/");
+  return parts.every((part) => part && part !== "." && part !== "..");
+}
+
+function requiredBundlePaths(meta: ImageBuildBundleMeta): string[] {
+  return [
+    "base-images.hcl",
+    "build-tools.hcl",
+    ...meta.scenarios.map(
+      (scenario) => `scenarios/${scenario.scenarioId}/scenario.hcl`,
+    ),
+  ];
+}
+
+async function requireBuilderAgentRequest(
+  request: Request,
+  env: Cloudflare.Env,
+) {
+  const verified = await requireVerifiedAgentRequest(request, env);
+  if (!verified.ok) return verified;
+  if (verified.agent.role !== "builder") {
+    return {
+      ok: false as const,
+      response: jsonResponse({ error: "builder role required" }, 403),
+    };
+  }
+  return verified;
+}
+
+function validateManifest(manifest: ScenarioManifestV2): Response | null {
+  if (manifest.schema_version !== 2) {
+    return jsonResponse({ error: "manifest schema_version must be 2" }, 400);
+  }
+  const scenarioId = manifest.scenario_id?.trim();
+  if (!scenarioId) {
     return jsonResponse({ error: "manifest scenario_id is required" }, 400);
   }
-  if (!Array.isArray(manifest.vms) || manifest.vms.length === 0) {
-    return jsonResponse({ error: "manifest must contain at least one vm" }, 400);
+  if (!isSafeRegistrySlug(scenarioId)) {
+    return jsonResponse({ error: "manifest scenario_id is invalid" }, 400);
   }
+  if (!hasValidScenarioMetadata(manifest, scenarioId)) {
+    return jsonResponse(
+      { error: "manifest contains invalid scenario metadata" },
+      400,
+    );
+  }
+  if (!hasValidHintList(manifest.hints)) {
+    return jsonResponse(
+      { error: "manifest contains invalid scenario hints" },
+      400,
+    );
+  }
+  if (!Array.isArray(manifest.vms) || manifest.vms.length === 0) {
+    return jsonResponse(
+      { error: "manifest must contain at least one vm" },
+      400,
+    );
+  }
+  const vmNames = new Set<string>();
+  const imageKeys = new Set<string>();
   for (const vm of manifest.vms) {
-    if (!vm.name?.trim() || !isImageKey(vm.image_key)) {
+    const vmName = vm.name?.trim();
+    if (!vmName || !isSafeRegistrySlug(vmName) || !isImageKey(vm.image_key)) {
       return jsonResponse({ error: "manifest contains an invalid vm" }, 400);
+    }
+    if (!hasValidVmResources(vm)) {
+      return jsonResponse(
+        { error: "manifest contains invalid vm resources" },
+        400,
+      );
+    }
+    if (vmNames.has(vmName)) {
+      return jsonResponse(
+        { error: "manifest contains duplicate vm names" },
+        400,
+      );
+    }
+    vmNames.add(vmName);
+    if (vm.image_key.scenario !== scenarioId || vm.image_key.vm !== vmName) {
+      return jsonResponse(
+        { error: "manifest image key must match scenario and vm names" },
+        400,
+      );
+    }
+    if (!normalizeSha256(vm.image_sha256)) {
+      return jsonResponse(
+        { error: "manifest contains invalid image sha256" },
+        400,
+      );
+    }
+    const imageKey = registryImageKey(vm.image_key);
+    if (imageKeys.has(imageKey)) {
+      return jsonResponse(
+        { error: "manifest contains duplicate image keys" },
+        400,
+      );
+    }
+    imageKeys.add(imageKey);
+    const kernelSha256 = normalizeSha256(vm.boot?.kernel_sha256 ?? "");
+    const initrdSha256 = normalizeSha256(vm.boot?.initrd_sha256 ?? "");
+    const bootCmdline = vm.boot?.cmdline?.trim() ?? "";
+    if (
+      vm.image_format !== "raw_zstd" ||
+      typeof vm.image_virtual_size_bytes !== "number" ||
+      !Number.isSafeInteger(vm.image_virtual_size_bytes) ||
+      vm.image_virtual_size_bytes <= 0 ||
+      !kernelSha256 ||
+      !initrdSha256 ||
+      !isDirectBootCmdline(bootCmdline)
+    ) {
+      return jsonResponse(
+        { error: "manifest contains invalid boot metadata" },
+        400,
+      );
+    }
+    const probeError = validateVmProbes(vm.probes);
+    if (probeError) {
+      return probeError;
     }
   }
   return null;
 }
 
-function imageFileForVm(form: FormData, vm: ScenarioVmManifestV1): File | null {
+function isDirectBootCmdline(value: string): boolean {
+  return value.split(/\s+/).includes("root=/dev/vda");
+}
+
+function normalizePublishManifest(
+  manifest: ScenarioManifestV2,
+): ScenarioManifestV2 {
+  const scenarioId = manifest.scenario_id.trim();
+  return {
+    ...manifest,
+    scenario_id: scenarioId,
+    name: scenarioId,
+    vms: manifest.vms.map((vm) => {
+      const vmName = vm.name.trim();
+      return {
+        ...vm,
+        name: vmName,
+        image_key: {
+          ...vm.image_key,
+          scenario: scenarioId,
+          vm: vmName,
+        },
+        image_sha256: normalizeSha256(vm.image_sha256) ?? vm.image_sha256,
+        boot: {
+          ...vm.boot,
+          kernel_sha256:
+            normalizeSha256(vm.boot.kernel_sha256) ?? vm.boot.kernel_sha256,
+          initrd_sha256:
+            normalizeSha256(vm.boot.initrd_sha256) ?? vm.boot.initrd_sha256,
+          cmdline: vm.boot.cmdline.trim(),
+        },
+      };
+    }),
+  };
+}
+
+function hasValidScenarioMetadata(
+  manifest: ScenarioManifestV2,
+  scenarioId: string,
+): boolean {
+  return (
+    readString(manifest.name) === scenarioId &&
+    Boolean(readString(manifest.title)) &&
+    Boolean(readString(manifest.description)) &&
+    isScenarioDifficulty(manifest.difficulty) &&
+    isPositiveInteger(manifest.estimated_minutes) &&
+    Array.isArray(manifest.tags) &&
+    manifest.tags.every((tag) => Boolean(readString(tag))) &&
+    Boolean(readString(manifest.briefing_markdown)) &&
+    Boolean(readString(manifest.solution_markdown))
+  );
+}
+
+function hasValidVmResources(vm: ScenarioVmManifestV2): boolean {
+  return (
+    isPositiveInteger(vm.cpu_count) &&
+    isPositiveInteger(vm.memory_mib) &&
+    isPositiveInteger(vm.disk_mib)
+  );
+}
+
+function validateVmProbes(probes: ScenarioProbeManifestV2[]): Response | null {
+  if (!Array.isArray(probes)) {
+    return jsonResponse({ error: "manifest contains an invalid probe" }, 400);
+  }
+  const probeIds = new Set<string>();
+  for (const probe of probes) {
+    const probeId = readString(probe.id);
+    if (
+      !probeId ||
+      !isSafeRegistrySlug(probeId) ||
+      probeIds.has(probeId) ||
+      !isProbePhase(probe.phase) ||
+      !readString(probe.kind) ||
+      !readString(probe.display_name) ||
+      !isOptionalString(probe.title) ||
+      !isOptionalString(probe.body_markdown)
+    ) {
+      return jsonResponse({ error: "manifest contains an invalid probe" }, 400);
+    }
+    probeIds.add(probeId);
+    if (!hasValidHintList(probe.hints)) {
+      return jsonResponse(
+        { error: "manifest contains invalid probe hints" },
+        400,
+      );
+    }
+  }
+  return null;
+}
+
+function hasValidHintList(hints: ScenarioHintManifestV2[]): boolean {
+  if (!Array.isArray(hints)) {
+    return false;
+  }
+  const ids = new Set<string>();
+  for (const hint of hints) {
+    const id = readString(hint.id);
+    if (
+      !id ||
+      !isSafeRegistrySlug(id) ||
+      ids.has(id) ||
+      !isOptionalString(hint.title) ||
+      !readString(hint.body_markdown)
+    ) {
+      return false;
+    }
+    ids.add(id);
+  }
+  return true;
+}
+
+function imageFileForVm(form: FormData, vm: ScenarioVmManifestV2): File | null {
   const field = form.get(`image:${vm.name}`);
   if (field instanceof File) return field;
 
-  const imageKey = `${registryImageKey(vm.image_key)}.qcow2`;
+  const imageKey = `${registryImageKey(vm.image_key)}.raw.zst`;
   for (const entry of form.getAll("image")) {
     if (entry instanceof File && entry.name === imageKey) {
       return entry;
@@ -326,18 +1475,62 @@ function imageFileForVm(form: FormData, vm: ScenarioVmManifestV1): File | null {
   return null;
 }
 
+function artifactFileForSha(form: FormData, sha256: string): File | null {
+  const field = form.get(`artifact:${sha256}`);
+  if (field instanceof File) return field;
+
+  for (const entry of form.getAll("artifact")) {
+    if (entry instanceof File && artifactFilenameMatches(entry.name, sha256)) {
+      return entry;
+    }
+  }
+
+  return null;
+}
+
+function artifactFilenameMatches(filename: string, sha256: string): boolean {
+  return filename === sha256 || filename === `${sha256}.artifact`;
+}
+
+function bootArtifactSha256s(manifest: ScenarioManifestV2): string[] {
+  const values = new Set<string>();
+  for (const vm of manifest.vms) {
+    const kernelSha256 = normalizeSha256(vm.boot.kernel_sha256);
+    const initrdSha256 = normalizeSha256(vm.boot.initrd_sha256);
+    if (kernelSha256) values.add(kernelSha256);
+    if (initrdSha256) values.add(initrdSha256);
+  }
+  return [...values].sort();
+}
+
 function isImageKey(value: unknown): value is ImageKey {
   const maybe = value as Partial<ImageKey> | null;
   return Boolean(
     maybe &&
-      typeof maybe.scenario === "string" &&
-      typeof maybe.vm === "string" &&
-      isImageArchitecture(maybe.arch),
+    typeof maybe.scenario === "string" &&
+    typeof maybe.vm === "string" &&
+    isImageArchitecture(maybe.arch),
   );
 }
 
 function isImageArchitecture(value: unknown): value is ImageArchitecture {
   return value === "x86_64" || value === "aarch64";
+}
+
+function isScenarioDifficulty(value: unknown): boolean {
+  return value === "easy" || value === "medium" || value === "hard";
+}
+
+function isProbePhase(value: unknown): boolean {
+  return value === "boot" || value === "scenario";
+}
+
+function isPositiveInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
 }
 
 function registryImageKey(imageKey: ImageKey): string {
@@ -352,7 +1545,15 @@ function safeSlug(value: string): string {
 }
 
 function imageObjectKey(imageKey: string, sha256: string): string {
-  return `images/${imageKey}/${sha256}.qcow2`;
+  return `images/${imageKey}/${sha256}.raw.zst`;
+}
+
+function artifactObjectKey(sha256: string): string {
+  return `artifacts/${sha256}`;
+}
+
+function bundleObjectKey(rev: string): string {
+  return `builds/bundles/${rev}.tar.gz`;
 }
 
 function normalizeSha256(value: string): string | null {
@@ -365,6 +1566,33 @@ async function sha256Hex(value: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSafeBundleRev(value: string): boolean {
+  return (
+    value !== "." && value !== ".." && /^[A-Za-z0-9._-]{1,128}$/.test(value)
+  );
+}
+
+function isSafeRegistrySlug(value: string): boolean {
+  return isSafeBundleRev(value);
+}
+
+function isSafeKinoVersion(value: string): boolean {
+  return (
+    value !== "." &&
+    value !== ".." &&
+    value.length > 0 &&
+    !/[\s/\\]/.test(value)
+  );
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

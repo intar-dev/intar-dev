@@ -11,6 +11,9 @@ pub enum ScenarioError {
     #[error("invalid base image catalog: {0}")]
     InvalidBaseImageCatalog(String),
 
+    #[error("invalid build tools config: {0}")]
+    InvalidBuildTools(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -31,6 +34,15 @@ pub enum ScenarioError {
 
     #[error("unsupported builder arch '{arch}'; only 'amd64' is supported")]
     UnsupportedBuilderArch { arch: String },
+
+    #[error("scenario is missing required field '{field}'")]
+    MissingScenarioField { field: String },
+
+    #[error("scenario field '{field}' is invalid: {message}")]
+    InvalidScenarioField { field: String, message: String },
+
+    #[error("{scope} has duplicate hint id '{id}'")]
+    DuplicateHintId { scope: String, id: String },
 
     #[error("probe '{probe}' is missing a description")]
     MissingProbeDescription { probe: String },

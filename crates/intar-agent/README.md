@@ -8,6 +8,18 @@
 cargo run -p intar-agent -- --config path/to/config.toml
 ```
 
+Before enabling a deployed scenario host, run the preflight checker:
+
+```bash
+intar-agent --config /etc/intar-agent/config.toml --doctor
+```
+
+`--doctor` loads the normal config and exits without starting the HTTP service.
+It fails if the host is not a Linux x86_64 direct-boot agent candidate, KVM or
+vhost-vsock is missing, `cloud-hypervisor`/`nft`/`cp` are unavailable, the VM
+work directory or image cache root is not ready, the bridge is disabled, or the
+image registry URL is missing.
+
 Then:
 
 ```bash
@@ -78,11 +90,7 @@ host_id = "my-dedicated-host-1"
 bootstrap_token = ""
 heartbeat_interval_seconds = 30
 
-[tools]
-qemu_img = "qemu-img"
-
 [vm_defaults]
-firmware = "cloudhv"
 tap = "tap"
 work_dir = "/var/cache/intar-agent"
 
@@ -97,16 +105,14 @@ dns = ["1.1.1.1", "8.8.8.8"]
 [image_registry]
 url = "https://intar.dev/agent/registry/images"
 refresh_interval_minutes = 15
-# Optional HTTP basic auth used for the registry index and qcow2 image downloads.
+# Optional HTTP basic auth used for local/dev registries. Production agents use bridge JWT auth.
 # username = ""
 # password = ""
-
-[firmwares.cloudhv]
-url = "https://github.com/cloud-hypervisor/edk2/releases/download/ch-a54f262b09/CLOUDHV.fd"
-sha256 = "0624c06c5d07cb8efe38806890ce7076c41c0902f2fcd5b2376f107033e3222b"
 ```
 
 The image registry is expected to expose a JSON index at `url` with `image_key`,
-`image_sha256`, and `download_url` entries. `intar-agent` polls the registry
-every `refresh_interval_minutes`, caches discovered `.qcow2` images, and rejects
-missing or mismatched SHA-256 values.
+compressed `image_sha256`, `image_format = "raw_zstd"`, `image_virtual_size_bytes`,
+boot artifact hashes, boot cmdline, and `download_url` entries. `intar-agent` polls
+the registry every `refresh_interval_minutes`, downloads `.raw.zst` images, verifies
+the compressed SHA-256, decompresses sparse raw disks, downloads kernel/initrd
+artifacts, and direct-boots VMs from that metadata.

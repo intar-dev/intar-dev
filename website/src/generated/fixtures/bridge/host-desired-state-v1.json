@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "host_id": "host-alpha",
   "version": 42,
   "generated_at_unix_ms": 1762041600000,
@@ -33,6 +33,17 @@
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example"
       ],
       "lease_expires_at_unix_ms": 1762045200000
+    }
+  ],
+  "builds": [
+    {
+      "build_id": "build-broken-nginx-amd64-001",
+      "scenario_id": "broken-nginx",
+      "arch": "x86_64",
+      "rev": "0123456789abcdef0123456789abcdef01234567",
+      "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "bundle_ref": "builds/bundles/0123456789abcdef0123456789abcdef01234567.tar.gz",
+      "kino_version": "0.4.0"
     }
   ]
 }

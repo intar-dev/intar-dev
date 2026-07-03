@@ -11,6 +11,11 @@ const navItems = [
   { id: "scenarios", label: "Scenarios", to: "/scenarios" as const },
   { id: "overview", label: "Overview", to: "/dashboard" as const },
   {
+    id: "admin-builds",
+    label: "Builds",
+    to: "/admin/builds" as const,
+  },
+  {
     id: "admin-scenarios",
     label: "Scenario Registry",
     to: "/admin/scenarios" as const,
@@ -130,6 +135,10 @@ function resolveCurrentNav(pathname: string) {
 
   if (pathname.startsWith("/admin/scenarios")) {
     return "admin-scenarios";
+  }
+
+  if (pathname.startsWith("/admin/builds")) {
+    return "admin-builds";
   }
 
   if (pathname.startsWith("/scenarios")) {

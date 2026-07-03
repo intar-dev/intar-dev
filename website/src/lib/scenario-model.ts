@@ -1,6 +1,14 @@
-import type { ImageKey } from "@/generated/catalog";
+import type { ImageKey, ScenarioHintManifestV2 } from "@/generated/catalog";
 
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
+
+export function parseScenarioDifficulty(
+  value: string,
+): ScenarioDifficulty | null {
+  return value === "easy" || value === "medium" || value === "hard"
+    ? value
+    : null;
+}
 
 export interface ScenarioProbeRecord {
   scenarioVmId: string;
@@ -8,6 +16,9 @@ export interface ScenarioProbeRecord {
   ordinal: number;
   name: string;
   description: string;
+  title: string | null;
+  bodyMarkdown: string | null;
+  hints: ScenarioHintManifestV2[];
   phase: "boot" | "scenario";
 }
 
@@ -18,9 +29,59 @@ export interface ScenarioVmRecord {
   image: string;
   imageKey: ImageKey | null;
   imageSha256: string | null;
+  imageFormat: "raw_zstd";
+  imageVirtualSizeBytes: number;
+  kernelSha256: string;
+  initrdSha256: string;
+  bootCmdline: string;
   cpu: number;
   memoryMib: number;
   diskMib: number;
+}
+
+export type ScenarioVmDirectBootMetadata = Pick<
+  ScenarioVmRecord,
+  | "imageFormat"
+  | "imageVirtualSizeBytes"
+  | "kernelSha256"
+  | "initrdSha256"
+  | "bootCmdline"
+>;
+
+export function normalizeScenarioVmDirectBootMetadata(input: {
+  imageFormat: string;
+  imageVirtualSizeBytes: number;
+  kernelSha256: string;
+  initrdSha256: string;
+  bootCmdline: string;
+}): ScenarioVmDirectBootMetadata | null {
+  if (input.imageFormat !== "raw_zstd") {
+    return null;
+  }
+  if (
+    !Number.isSafeInteger(input.imageVirtualSizeBytes) ||
+    input.imageVirtualSizeBytes <= 0
+  ) {
+    return null;
+  }
+  const kernelSha256 = normalizeSha256Hex(input.kernelSha256);
+  const initrdSha256 = normalizeSha256Hex(input.initrdSha256);
+  const bootCmdline = input.bootCmdline.trim();
+  if (
+    !kernelSha256 ||
+    !initrdSha256 ||
+    !bootCmdline.split(/\s+/).includes("root=/dev/vda")
+  ) {
+    return null;
+  }
+
+  return {
+    imageFormat: "raw_zstd",
+    imageVirtualSizeBytes: input.imageVirtualSizeBytes,
+    kernelSha256,
+    initrdSha256,
+    bootCmdline,
+  };
 }
 
 export interface ScenarioBriefing {
@@ -29,7 +90,17 @@ export interface ScenarioBriefing {
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
   briefingMarkdown: string;
-  objectives: string[];
+  tags: string[];
+  objectives: ScenarioObjective[];
+}
+
+export interface ScenarioObjective {
+  probeName: string;
+  vmName: string;
+  label: string;
+  title: string | null;
+  bodyMarkdown: string | null;
+  hintCount: number;
 }
 
 export interface ScenarioLaunchProbeDescriptor {
@@ -64,34 +135,34 @@ export interface ScenarioLaunchSpec {
 }
 
 const DEFAULT_VM_LEASE_DURATION_SECONDS = 3600;
-const DEFAULT_SCENARIO_TAGLINE = "";
-
 export function deriveScenarioBriefing(input: {
   scenarioId: string;
+  title: string;
   description: string;
+  difficulty: ScenarioDifficulty;
+  estimatedMinutes: number;
+  tags: string[];
+  briefingMarkdown: string;
   probes: ScenarioProbeRecord[];
 }): ScenarioBriefing {
-  const title = input.scenarioId.trim() || "Untitled scenario";
-  const description = normalizeMultilineText(input.description);
-  const tagline = firstNonEmptyLine(description);
-  const multiVm = new Set(input.probes.map((probe) => probe.scenarioVmId)).size > 1;
   const objectives = input.probes
     .filter((probe) => probe.phase === "scenario")
-    .map((probe) => {
-      const detail = probe.description.trim() || probe.name.trim();
-      if (!detail) {
-        return "";
-      }
-      return multiVm ? `${probe.scenarioVmName}: ${detail}` : detail;
-    })
-    .filter(Boolean);
+    .map((probe) => ({
+      probeName: probe.name,
+      vmName: probe.scenarioVmName,
+      label: probe.description.trim() || probe.name.trim(),
+      title: probe.title,
+      bodyMarkdown: probe.bodyMarkdown,
+      hintCount: probe.hints.length,
+    }));
 
   return {
-    title,
-    tagline: tagline || DEFAULT_SCENARIO_TAGLINE,
-    difficulty: "easy",
-    estimatedMinutes: Math.max(10, objectives.length * 5 || 15),
-    briefingMarkdown: description,
+    title: input.title.trim(),
+    tagline: input.description.trim(),
+    difficulty: input.difficulty,
+    estimatedMinutes: input.estimatedMinutes,
+    briefingMarkdown: normalizeMultilineText(input.briefingMarkdown),
+    tags: input.tags,
     objectives,
   };
 }
@@ -212,13 +283,9 @@ function normalizeMultilineText(value: string) {
   return value.replace(/\r\n?/g, "\n");
 }
 
-function firstNonEmptyLine(value: string) {
-  return (
-    value
-      .split("\n")
-      .map((line) => line.trim())
-      .find(Boolean) ?? ""
-  );
+function normalizeSha256Hex(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(normalized) ? normalized : null;
 }
 
 function parseJson<T>(value: string | null, fallback: T | null): T | null {

@@ -3,9 +3,14 @@
   "title": "HostDesiredStateV1",
   "type": "object",
   "properties": {
+    "builds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DesiredBuildV1"
+      }
+    },
     "cached_images": {
       "type": "array",
-      "default": [],
       "items": {
         "$ref": "#/$defs/DesiredCachedImageV1"
       }
@@ -30,7 +35,6 @@
     },
     "vms": {
       "type": "array",
-      "default": [],
       "items": {
         "$ref": "#/$defs/DesiredVmV1"
       }
@@ -40,9 +44,47 @@
     "schema_version",
     "host_id",
     "version",
-    "generated_at_unix_ms"
+    "generated_at_unix_ms",
+    "cached_images",
+    "vms",
+    "builds"
   ],
   "$defs": {
+    "DesiredBuildV1": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/ImageArchitecture"
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "bundle_ref": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "kino_version": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "build_id",
+        "scenario_id",
+        "arch",
+        "rev",
+        "content_hash",
+        "bundle_ref",
+        "kino_version"
+      ]
+    },
     "DesiredCachedImageV1": {
       "type": "object",
       "properties": {
@@ -89,7 +131,6 @@
         },
         "ssh_authorized_keys_openssh": {
           "type": "array",
-          "default": [],
           "items": {
             "type": "string"
           }
@@ -105,6 +146,7 @@
         "image_key",
         "image_sha256",
         "resources",
+        "ssh_authorized_keys_openssh",
         "lease_expires_at_unix_ms"
       ]
     },

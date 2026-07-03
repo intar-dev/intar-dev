@@ -35,11 +35,39 @@ const INTAR_ALWAYS_BLOCKED_KINO_COMMANDS: &[&str] = &["usermod", "chsh"];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     pub name: String,
+    pub title: String,
     pub category: String,
+    pub tags: Vec<String>,
+    pub difficulty: Option<ScenarioDifficulty>,
+    pub estimated_minutes: Option<u32>,
     pub description: String,
+    pub briefing: String,
+    pub hints: Vec<ScenarioHint>,
+    pub solution: Option<ScenarioSolution>,
     pub images: HashMap<String, ImageSpec>,
     pub kino: KinoDefinition,
     pub vms: Vec<VmDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScenarioDifficulty {
+    Easy,
+    Medium,
+    Hard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioHint {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioSolution {
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,8 +184,16 @@ impl Scenario {
             hcl::from_str(content).map_err(|error| ScenarioError::HclParse(error.to_string()))?;
 
         let mut scenario_name = String::new();
+        let mut saw_scenario_block = false;
+        let mut title = String::new();
         let mut category = String::new();
+        let mut tags = Vec::new();
+        let mut difficulty = None;
+        let mut estimated_minutes = None;
         let mut description = String::new();
+        let mut briefing = String::new();
+        let mut hints = Vec::new();
+        let mut solution = None;
         let mut images = HashMap::new();
         let mut kino = KinoDefinition::default();
         let mut vms = Vec::new();
@@ -166,43 +202,75 @@ impl Scenario {
             if block.identifier.as_str() != "scenario" {
                 continue;
             }
-
-            scenario_name = block
-                .labels
-                .first()
-                .map(|label| label.as_str().to_string())
-                .ok_or_else(|| ScenarioError::InvalidScenario("missing scenario name".into()))?;
-
-            if let Some(attr) = block
-                .body
-                .attributes()
-                .find(|attr| attr.key.as_str() == "category")
-            {
-                category = extract_string(&attr.expr)?;
+            if saw_scenario_block {
+                return Err(ScenarioError::InvalidScenario(
+                    "only one scenario block is supported".into(),
+                ));
             }
+            saw_scenario_block = true;
 
-            if let Some(attr) = block
-                .body
-                .attributes()
-                .find(|attr| attr.key.as_str() == "description")
-            {
-                description = extract_string(&attr.expr)?;
+            scenario_name = required_single_label(block, "scenario", "missing scenario name")?;
+
+            for attr in block.body.attributes() {
+                match attr.key.as_str() {
+                    "title" => title = extract_string(&attr.expr)?,
+                    "category" => category = extract_string(&attr.expr)?,
+                    "tags" => tags = extract_string_array(&attr.expr)?,
+                    "difficulty" => difficulty = Some(parse_difficulty(&attr.expr)?),
+                    "estimated_minutes" => estimated_minutes = Some(extract_u32(&attr.expr)?),
+                    "description" => description = extract_string(&attr.expr)?,
+                    "briefing" => briefing = extract_string(&attr.expr)?,
+                    other => {
+                        return Err(ScenarioError::InvalidScenario(format!(
+                            "scenario '{scenario_name}' does not support attribute '{other}'"
+                        )));
+                    }
+                }
             }
 
             for inner_block in block.body.blocks() {
                 match inner_block.identifier.as_str() {
+                    "hint" => {
+                        hints.push(parse_hint(inner_block)?);
+                    }
+                    "solution" => {
+                        if solution.is_some() {
+                            return Err(ScenarioError::InvalidScenario(format!(
+                                "scenario '{scenario_name}' may only contain one solution block"
+                            )));
+                        }
+                        solution = Some(parse_solution(inner_block)?);
+                    }
                     "image" => {
                         let image = parse_image(inner_block)?;
-                        images.insert(image.name.clone(), image);
+                        let image_name = image.name.clone();
+                        if images.insert(image_name.clone(), image).is_some() {
+                            return Err(ScenarioError::InvalidScenario(format!(
+                                "duplicate image '{image_name}'"
+                            )));
+                        }
                     }
                     "kino" => {
                         kino = parse_kino(inner_block)?;
                     }
                     "vm" => {
                         let vm = parse_vm(inner_block)?;
+                        if vms
+                            .iter()
+                            .any(|existing: &VmDefinition| existing.name == vm.name)
+                        {
+                            return Err(ScenarioError::InvalidScenario(format!(
+                                "duplicate vm '{}'",
+                                vm.name
+                            )));
+                        }
                         vms.push(vm);
                     }
-                    _ => {}
+                    other => {
+                        return Err(ScenarioError::InvalidScenario(format!(
+                            "unsupported block '{other}' in scenario '{scenario_name}'"
+                        )));
+                    }
                 }
             }
         }
@@ -221,8 +289,15 @@ impl Scenario {
 
         Ok(Self {
             name: scenario_name,
+            title,
             category,
+            tags,
+            difficulty,
+            estimated_minutes,
             description,
+            briefing,
+            hints,
+            solution,
             images,
             kino,
             vms,
@@ -230,15 +305,44 @@ impl Scenario {
     }
 
     pub fn validate(&self) -> Result<(), ScenarioError> {
+        validate_safe_identifier("scenario name", &self.name)?;
+        for image in self.images.values() {
+            validate_safe_identifier("image name", &image.name)?;
+            validate_safe_identifier("base image reference", &image.base)?;
+        }
+
+        let mut vm_names = HashSet::new();
         for vm in &self.vms {
+            validate_safe_identifier("vm name", &vm.name)?;
+            if !vm_names.insert(vm.name.as_str()) {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "duplicate vm '{}'",
+                    vm.name
+                )));
+            }
             if !self.images.contains_key(&vm.image) {
                 return Err(ScenarioError::ImageNotFound(vm.image.clone()));
             }
+            validate_safe_identifier("vm image reference", &vm.image)?;
+            let mut step_names = HashSet::new();
+            for step in &vm.steps {
+                validate_safe_identifier("step name", &step.name)?;
+                if !step_names.insert(step.name.as_str()) {
+                    return Err(ScenarioError::InvalidScenario(format!(
+                        "vm '{}' has duplicate step '{}'",
+                        vm.name, step.name
+                    )));
+                }
+            }
             for probe_name in &vm.probes {
+                validate_safe_identifier("probe reference", probe_name)?;
                 if !self.kino.probes.contains_key(probe_name) {
                     return Err(ScenarioError::ProbeNotFound(probe_name.clone()));
                 }
             }
+        }
+        for probe in self.kino.probes.values() {
+            validate_safe_identifier("probe name", &probe.name)?;
         }
         Ok(())
     }
@@ -265,7 +369,10 @@ impl Scenario {
                 });
             }
             probe.validate()?;
+            validate_hint_scope(&format!("probe '{}'", probe.name), &probe.hints, true)?;
         }
+
+        validate_hint_scope("scenario", &self.hints, true)?;
 
         for vm in &self.vms {
             for step in &vm.steps {
@@ -275,6 +382,54 @@ impl Scenario {
             }
         }
 
+        self.validate_authoring_fields()?;
+
+        Ok(())
+    }
+
+    fn validate_authoring_fields(&self) -> Result<(), ScenarioError> {
+        validate_required_scenario_text("title", &self.title)?;
+        validate_required_scenario_text("description", &self.description)?;
+        if self.description.lines().count() > 1 {
+            return Err(ScenarioError::InvalidScenarioField {
+                field: "description".to_string(),
+                message: "must be a single line".to_string(),
+            });
+        }
+        validate_required_scenario_text("briefing", &self.briefing)?;
+        if self.difficulty.is_none() {
+            return Err(ScenarioError::MissingScenarioField {
+                field: "difficulty".to_string(),
+            });
+        }
+        match self.estimated_minutes {
+            Some(value) if value > 0 => {}
+            Some(_) => {
+                return Err(ScenarioError::InvalidScenarioField {
+                    field: "estimated_minutes".to_string(),
+                    message: "must be greater than zero".to_string(),
+                });
+            }
+            None => {
+                return Err(ScenarioError::MissingScenarioField {
+                    field: "estimated_minutes".to_string(),
+                });
+            }
+        }
+        match &self.solution {
+            Some(solution) if !solution.body.trim().is_empty() => {}
+            Some(_) => {
+                return Err(ScenarioError::InvalidScenarioField {
+                    field: "solution.body".to_string(),
+                    message: "must not be empty".to_string(),
+                });
+            }
+            None => {
+                return Err(ScenarioError::MissingScenarioField {
+                    field: "solution".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -408,6 +563,55 @@ pub fn validate_managed_text(value: &str, context: &str) -> Result<(), ScenarioE
     Ok(())
 }
 
+fn validate_required_scenario_text(field: &str, value: &str) -> Result<(), ScenarioError> {
+    if value.trim().is_empty() {
+        return Err(ScenarioError::MissingScenarioField {
+            field: field.to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_safe_identifier(label: &str, value: &str) -> Result<(), ScenarioError> {
+    if (1..=128).contains(&value.len())
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Ok(());
+    }
+
+    Err(ScenarioError::InvalidScenario(format!(
+        "invalid {label} '{value}' (expected 1-128 safe slug characters)"
+    )))
+}
+
+fn validate_hint_scope(
+    scope: &str,
+    hints: &[ScenarioHint],
+    require_body: bool,
+) -> Result<(), ScenarioError> {
+    let mut seen = HashSet::new();
+    for hint in hints {
+        validate_safe_identifier(&format!("{scope} hint id"), &hint.id)?;
+        if !seen.insert(hint.id.as_str()) {
+            return Err(ScenarioError::DuplicateHintId {
+                scope: scope.to_string(),
+                id: hint.id.clone(),
+            });
+        }
+        if require_body && hint.body.trim().is_empty() {
+            return Err(ScenarioError::InvalidScenarioField {
+                field: format!("{scope}.hint.{}.body", hint.id),
+                message: "must not be empty".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_vm_action(
     vm: &VmDefinition,
     step: &VmStep,
@@ -441,11 +645,7 @@ fn validate_vm_action(
 }
 
 fn parse_image(block: &hcl::Block) -> Result<ImageSpec, ScenarioError> {
-    let name = block
-        .labels
-        .first()
-        .map(|label| label.as_str().to_string())
-        .ok_or_else(|| ScenarioError::InvalidScenario("missing image name".into()))?;
+    let name = required_single_label(block, "image", "missing image name")?;
     let mut base = String::new();
 
     for attr in block.body.attributes() {
@@ -476,6 +676,7 @@ fn parse_image(block: &hcl::Block) -> Result<ImageSpec, ScenarioError> {
 }
 
 fn parse_kino(block: &hcl::Block) -> Result<KinoDefinition, ScenarioError> {
+    reject_labels(block)?;
     if block.body.attributes().next().is_some() {
         return Err(ScenarioError::InvalidScenario(
             "kino block does not support attributes; use nested defaults and probe blocks".into(),
@@ -518,6 +719,7 @@ fn parse_kino(block: &hcl::Block) -> Result<KinoDefinition, ScenarioError> {
 }
 
 fn parse_kino_defaults(block: &hcl::Block) -> Result<KinoDefaults, ScenarioError> {
+    reject_labels(block)?;
     let mut defaults = KinoDefaults::default();
 
     for attr in block.body.attributes() {
@@ -542,25 +744,20 @@ fn parse_kino_defaults(block: &hcl::Block) -> Result<KinoDefaults, ScenarioError
 }
 
 fn parse_kino_probe(block: &hcl::Block) -> Result<KinoProbeDefinition, ScenarioError> {
-    let name = block
-        .labels
-        .first()
-        .map(|label| label.as_str().to_string())
-        .ok_or_else(|| ScenarioError::InvalidScenario("missing kino probe name".into()))?;
-
-    if block.body.blocks().next().is_some() {
-        return Err(ScenarioError::InvalidScenario(format!(
-            "kino probe '{name}' does not support nested blocks"
-        )));
-    }
+    let name = required_single_label(block, "kino probe", "missing kino probe name")?;
 
     let mut description = None;
+    let mut title = None;
+    let mut body = None;
+    let mut hints = Vec::new();
     let mut phase = ProbePhase::Scenario;
     let mut config = HashMap::new();
 
     for attr in block.body.attributes() {
         match attr.key.as_str() {
             "description" => description = Some(extract_string(&attr.expr)?),
+            "title" => title = Some(extract_string(&attr.expr)?),
+            "body" => body = Some(extract_string(&attr.expr)?),
             "phase" => phase = parse_probe_phase(&name, &attr.expr)?,
             _ => {
                 config.insert(attr.key.to_string(), expr_to_json(&attr.expr)?);
@@ -568,7 +765,84 @@ fn parse_kino_probe(block: &hcl::Block) -> Result<KinoProbeDefinition, ScenarioE
         }
     }
 
-    KinoProbeDefinition::from_definition(&name, &config, description, phase)
+    for inner_block in block.body.blocks() {
+        match inner_block.identifier.as_str() {
+            "hint" => hints.push(parse_hint(inner_block)?),
+            other => {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "unsupported block '{other}' in kino probe '{name}'"
+                )));
+            }
+        }
+    }
+
+    KinoProbeDefinition::from_definition(&name, &config, description, title, body, hints, phase)
+}
+
+fn parse_hint(block: &hcl::Block) -> Result<ScenarioHint, ScenarioError> {
+    let id = required_single_label(block, "hint", "hint block missing id")?;
+    let mut title = None;
+    let mut body = String::new();
+
+    for attr in block.body.attributes() {
+        match attr.key.as_str() {
+            "title" => title = Some(extract_string(&attr.expr)?),
+            "body" => body = extract_string(&attr.expr)?,
+            other => {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "hint '{id}' does not support attribute '{other}'"
+                )));
+            }
+        }
+    }
+
+    if let Some(inner_block) = block.body.blocks().next() {
+        return Err(ScenarioError::InvalidScenario(format!(
+            "hint '{id}' does not support nested block '{}'",
+            inner_block.identifier
+        )));
+    }
+
+    Ok(ScenarioHint { id, title, body })
+}
+
+fn parse_solution(block: &hcl::Block) -> Result<ScenarioSolution, ScenarioError> {
+    if !block.labels.is_empty() {
+        return Err(ScenarioError::InvalidScenario(
+            "solution block does not support labels".into(),
+        ));
+    }
+    let mut body = String::new();
+    for attr in block.body.attributes() {
+        match attr.key.as_str() {
+            "body" => body = extract_string(&attr.expr)?,
+            other => {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "solution block does not support attribute '{other}'"
+                )));
+            }
+        }
+    }
+    if let Some(inner_block) = block.body.blocks().next() {
+        return Err(ScenarioError::InvalidScenario(format!(
+            "solution block does not support nested block '{}'",
+            inner_block.identifier
+        )));
+    }
+    Ok(ScenarioSolution { body })
+}
+
+fn parse_difficulty(expr: &hcl::Expression) -> Result<ScenarioDifficulty, ScenarioError> {
+    let value = extract_string(expr)?;
+    match value.as_str() {
+        "easy" => Ok(ScenarioDifficulty::Easy),
+        "medium" => Ok(ScenarioDifficulty::Medium),
+        "hard" => Ok(ScenarioDifficulty::Hard),
+        other => Err(ScenarioError::InvalidScenarioField {
+            field: "difficulty".to_string(),
+            message: format!("must be 'easy', 'medium', or 'hard', got '{other}'"),
+        }),
+    }
 }
 
 fn parse_probe_phase(name: &str, expr: &hcl::Expression) -> Result<ProbePhase, ScenarioError> {
@@ -583,11 +857,7 @@ fn parse_probe_phase(name: &str, expr: &hcl::Expression) -> Result<ProbePhase, S
 }
 
 fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
-    let name = block
-        .labels
-        .first()
-        .map(|label| label.as_str().to_string())
-        .ok_or_else(|| ScenarioError::InvalidScenario("missing vm name".into()))?;
+    let name = required_single_label(block, "vm", "missing vm name")?;
 
     let mut cpu: u32 = 1;
     let mut memory: u32 = 1024;
@@ -605,7 +875,11 @@ fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
             "image" => image = extract_string(&attr.expr)?,
             "packages" => packages = extract_string_array(&attr.expr)?,
             "probes" => probes = extract_string_array(&attr.expr)?,
-            _ => {}
+            other => {
+                return Err(ScenarioError::InvalidScenario(format!(
+                    "vm '{name}' does not support attribute '{other}'"
+                )));
+            }
         }
     }
 
@@ -655,11 +929,14 @@ fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
 }
 
 fn parse_vm_step(block: &hcl::Block) -> Result<VmStep, ScenarioError> {
-    let name = block
-        .labels
-        .first()
-        .map(|label| label.as_str().to_string())
-        .ok_or_else(|| ScenarioError::InvalidScenario("step block missing name".into()))?;
+    let name = required_single_label(block, "step", "step block missing name")?;
+
+    if let Some(attr) = block.body.attributes().next() {
+        return Err(ScenarioError::InvalidScenario(format!(
+            "step '{name}' does not support attribute '{}'",
+            attr.key
+        )));
+    }
 
     let mut actions = Vec::new();
     for inner_block in block.body.blocks() {
@@ -676,44 +953,80 @@ fn parse_vm_step(block: &hcl::Block) -> Result<VmStep, ScenarioError> {
 }
 
 fn parse_vm_action(block: &hcl::Block) -> Result<VmAction, ScenarioError> {
+    reject_labels(block)?;
+
     match block.identifier.as_str() {
-        "file_delete" => Ok(VmAction::FileDelete {
-            path: extract_required_attr_string(block, "path")?,
-        }),
-        "file_write" => Ok(VmAction::FileWrite {
-            path: extract_required_attr_string(block, "path")?,
-            content: extract_required_attr_string(block, "content")?,
-            permissions: extract_optional_attr_string(block, "permissions")?,
-        }),
-        "file_replace" => Ok(VmAction::FileReplace {
-            path: extract_required_attr_string(block, "path")?,
-            pattern: extract_required_attr_string(block, "pattern")?,
-            replacement: extract_required_attr_string(block, "replacement")?,
-            regex: extract_optional_attr_bool(block, "regex")?.unwrap_or(false),
-        }),
-        "systemctl" => Ok(VmAction::Systemctl {
-            unit: extract_required_attr_string(block, "unit")?,
-            action: parse_systemctl_action(&extract_required_attr_string(block, "action")?)?,
-        }),
-        "command" => Ok(VmAction::Command {
-            cmd: extract_required_attr_string(block, "cmd")?,
-        }),
+        "file_delete" => {
+            reject_unknown_attrs(block, &["path"])?;
+            reject_nested_blocks(block)?;
+            Ok(VmAction::FileDelete {
+                path: extract_required_attr_string(block, "path")?,
+            })
+        }
+        "file_write" => {
+            reject_unknown_attrs(block, &["path", "content", "permissions"])?;
+            reject_nested_blocks(block)?;
+            Ok(VmAction::FileWrite {
+                path: extract_required_attr_string(block, "path")?,
+                content: extract_required_attr_string(block, "content")?,
+                permissions: extract_optional_attr_string(block, "permissions")?,
+            })
+        }
+        "file_replace" => {
+            reject_unknown_attrs(block, &["path", "pattern", "replacement", "regex"])?;
+            reject_nested_blocks(block)?;
+            Ok(VmAction::FileReplace {
+                path: extract_required_attr_string(block, "path")?,
+                pattern: extract_required_attr_string(block, "pattern")?,
+                replacement: extract_required_attr_string(block, "replacement")?,
+                regex: extract_optional_attr_bool(block, "regex")?.unwrap_or(false),
+            })
+        }
+        "systemctl" => {
+            reject_unknown_attrs(block, &["unit", "action"])?;
+            reject_nested_blocks(block)?;
+            Ok(VmAction::Systemctl {
+                unit: extract_required_attr_string(block, "unit")?,
+                action: parse_systemctl_action(&extract_required_attr_string(block, "action")?)?,
+            })
+        }
+        "command" => {
+            reject_unknown_attrs(block, &["cmd"])?;
+            reject_nested_blocks(block)?;
+            Ok(VmAction::Command {
+                cmd: extract_required_attr_string(block, "cmd")?,
+            })
+        }
         "k8s_apply" => {
-            reject_attr(block, "kubectl")?;
+            reject_unknown_attrs(block, &["manifest", "kubeconfig"])?;
+            reject_nested_blocks(block)?;
             Ok(VmAction::K8sApply {
                 manifest: extract_required_attr_string(block, "manifest")?,
                 kubeconfig: extract_optional_attr_string(block, "kubeconfig")?,
             })
         }
         "k8s_namespace" => {
-            reject_attr(block, "kubectl")?;
+            reject_unknown_attrs(block, &["name", "kubeconfig"])?;
+            reject_nested_blocks(block)?;
             Ok(VmAction::K8sNamespace {
                 name: extract_required_attr_string(block, "name")?,
                 kubeconfig: extract_optional_attr_string(block, "kubeconfig")?,
             })
         }
         "k8s_deployment" => {
-            reject_attr(block, "kubectl")?;
+            reject_unknown_attrs(
+                block,
+                &[
+                    "name",
+                    "namespace",
+                    "image",
+                    "replicas",
+                    "labels",
+                    "container_port",
+                    "kubeconfig",
+                ],
+            )?;
+            reject_nested_blocks(block)?;
             Ok(VmAction::K8sDeployment {
                 name: extract_required_attr_string(block, "name")?,
                 namespace: extract_required_attr_string(block, "namespace")?,
@@ -727,7 +1040,18 @@ fn parse_vm_action(block: &hcl::Block) -> Result<VmAction, ScenarioError> {
             })
         }
         "k8s_service" => {
-            reject_attr(block, "kubectl")?;
+            reject_unknown_attrs(
+                block,
+                &[
+                    "name",
+                    "namespace",
+                    "selector",
+                    "port",
+                    "target_port",
+                    "kubeconfig",
+                ],
+            )?;
+            reject_nested_blocks(block)?;
             Ok(VmAction::K8sService {
                 name: extract_required_attr_string(block, "name")?,
                 namespace: extract_required_attr_string(block, "namespace")?,
@@ -739,7 +1063,8 @@ fn parse_vm_action(block: &hcl::Block) -> Result<VmAction, ScenarioError> {
             })
         }
         "k8s_scale_deployment" => {
-            reject_attr(block, "kubectl")?;
+            reject_unknown_attrs(block, &["name", "namespace", "replicas", "kubeconfig"])?;
+            reject_nested_blocks(block)?;
             Ok(VmAction::K8sScaleDeployment {
                 name: extract_required_attr_string(block, "name")?,
                 namespace: extract_required_attr_string(block, "namespace")?,
@@ -829,11 +1154,48 @@ fn extract_optional_attr_string(
         .transpose()
 }
 
-fn reject_attr(block: &hcl::Block, key: &str) -> Result<(), ScenarioError> {
-    if block.body.attributes().any(|attr| attr.key.as_str() == key) {
+fn required_single_label(
+    block: &hcl::Block,
+    context: &str,
+    missing_message: &str,
+) -> Result<String, ScenarioError> {
+    match block.labels.len() {
+        0 => Err(ScenarioError::InvalidScenario(missing_message.into())),
+        1 => Ok(block.labels[0].as_str().to_string()),
+        _ => Err(ScenarioError::InvalidScenario(format!(
+            "{context} block expects exactly one label"
+        ))),
+    }
+}
+
+fn reject_labels(block: &hcl::Block) -> Result<(), ScenarioError> {
+    if !block.labels.is_empty() {
         return Err(ScenarioError::InvalidScenario(format!(
-            "{} block does not support attribute '{key}'",
+            "{} block does not support labels",
             block.identifier
+        )));
+    }
+    Ok(())
+}
+
+fn reject_unknown_attrs(block: &hcl::Block, allowed: &[&str]) -> Result<(), ScenarioError> {
+    for attr in block.body.attributes() {
+        if allowed.contains(&attr.key.as_str()) {
+            continue;
+        }
+        return Err(ScenarioError::InvalidScenario(format!(
+            "{} block does not support attribute '{}'",
+            block.identifier, attr.key
+        )));
+    }
+    Ok(())
+}
+
+fn reject_nested_blocks(block: &hcl::Block) -> Result<(), ScenarioError> {
+    if let Some(inner_block) = block.body.blocks().next() {
+        return Err(ScenarioError::InvalidScenario(format!(
+            "{} block does not support nested block '{}'",
+            block.identifier, inner_block.identifier
         )));
     }
     Ok(())
@@ -990,8 +1352,26 @@ mod tests {
     fn supported_hcl() -> &'static str {
         r#"
 scenario "broken-nginx" {
+  title = "Broken Nginx"
   category = "web"
+  tags = ["nginx", "systemd", "linux"]
+  difficulty = "easy"
+  estimated_minutes = 15
   description = "Fix a misconfigured nginx server"
+  briefing = <<-MD
+    Nginx should be serving the default site, but the service was broken during cleanup.
+  MD
+
+  hint "check-service" {
+    title = "Start with systemd"
+    body  = "Check the nginx service state first."
+  }
+
+  solution {
+    body = <<-MD
+      Start nginx and restore the default site symlink.
+    MD
+  }
 
   image "debian-12-minimal" {
     base = "trixie"
@@ -1008,7 +1388,13 @@ scenario "broken-nginx" {
       service     = "nginx"
       state       = "running"
       description = "Nginx should be running"
+      title       = "Bring nginx back"
+      body        = "The service must be active before the site can answer traffic."
       phase       = "boot"
+
+      hint "status" {
+        body = "systemctl status nginx shows whether the service is active."
+      }
     }
 
     probe "port-80-open" {
@@ -1067,9 +1453,262 @@ scenario "broken-nginx" {
         scenario.validate_for_repo().unwrap();
 
         assert_eq!(scenario.name, "broken-nginx");
+        assert_eq!(scenario.title, "Broken Nginx");
         assert_eq!(scenario.category, "web");
+        assert_eq!(scenario.tags, vec!["nginx", "systemd", "linux"]);
+        assert_eq!(scenario.difficulty, Some(ScenarioDifficulty::Easy));
+        assert_eq!(scenario.estimated_minutes, Some(15));
+        assert_eq!(scenario.hints[0].id, "check-service");
+        assert!(
+            scenario
+                .solution
+                .as_ref()
+                .unwrap()
+                .body
+                .contains("Start nginx")
+        );
+        let probe = scenario.kino.probes.get("nginx-running").unwrap();
+        assert_eq!(probe.title.as_deref(), Some("Bring nginx back"));
+        assert_eq!(probe.hints[0].id, "status");
         assert_eq!(scenario.total_probe_count(), 4);
         assert_eq!(scenario.images["debian-12-minimal"].base, "trixie");
+    }
+
+    #[test]
+    fn errors_on_unknown_scenario_attribute() {
+        let hcl = supported_hcl().replace(
+            r#"  description = "Fix a misconfigured nginx server""#,
+            r#"  typo_description = "This should not be silently ignored"
+  description = "Fix a misconfigured nginx server""#,
+        );
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("does not support attribute 'typo_description'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_unknown_vm_attribute() {
+        let hcl = supported_hcl().replace(
+            r#"    packages = ["nginx"]"#,
+            r#"    package = ["nginx"]
+    packages = ["nginx"]"#,
+        );
+
+        let error = Scenario::parse(&hcl).unwrap_err();
+
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("vm 'webserver' does not support attribute 'package'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_unknown_step_attribute() {
+        let hcl = supported_hcl().replace(
+            r#"    step "break-nginx" {"#,
+            r#"    step "break-nginx" {
+      summary = "This should not be accepted""#,
+        );
+
+        let error = Scenario::parse(&hcl).unwrap_err();
+
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("step 'break-nginx' does not support attribute 'summary'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_unknown_vm_action_attribute() {
+        let hcl = supported_hcl().replace(
+            r#"        path = "/etc/nginx/sites-enabled/default""#,
+            r#"        target = "/etc/nginx/sites-enabled/default"
+        path = "/etc/nginx/sites-enabled/default""#,
+        );
+
+        let error = Scenario::parse(&hcl).unwrap_err();
+
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("file_delete block does not support attribute 'target'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_nested_vm_action_block() {
+        let hcl = supported_hcl().replace(
+            r#"      file_delete {
+        path = "/etc/nginx/sites-enabled/default"
+      }"#,
+            r#"      file_delete {
+        path = "/etc/nginx/sites-enabled/default"
+        nested {}
+      }"#,
+        );
+
+        let error = Scenario::parse(&hcl).unwrap_err();
+
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("file_delete block does not support nested block 'nested'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_extra_named_block_label() {
+        let hcl = supported_hcl().replace(
+            r#"scenario "broken-nginx" {"#,
+            r#"scenario "broken-nginx" "extra" {"#,
+        );
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("scenario block expects exactly one label"))
+        );
+
+        let hcl = supported_hcl().replace(
+            r#"    probe "nginx-running" {"#,
+            r#"    probe "nginx-running" "extra" {"#,
+        );
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("kino probe block expects exactly one label"))
+        );
+    }
+
+    #[test]
+    fn errors_on_label_free_block_labels() {
+        let hcl = supported_hcl().replace(r#"  kino {"#, r#"  kino "checks" {"#);
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("kino block does not support labels"))
+        );
+
+        let hcl = supported_hcl().replace(r#"      systemctl {"#, r#"      systemctl "stop" {"#);
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("systemctl block does not support labels"))
+        );
+    }
+
+    #[test]
+    fn errors_on_duplicate_hint_ids_per_scope() {
+        let hcl = supported_hcl().replace(
+            "  solution {",
+            r#"  hint "check-service" {
+    body = "Read the systemd state again."
+  }
+
+  solution {"#,
+        );
+        let scenario = Scenario::parse(&hcl).unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(matches!(
+            error,
+            ScenarioError::DuplicateHintId { scope, id }
+                if scope == "scenario" && id == "check-service"
+        ));
+
+        let hcl = supported_hcl().replace(
+            r#"      hint "status" {
+        body = "systemctl status nginx shows whether the service is active."
+      }"#,
+            r#"      hint "status" {
+        body = "systemctl status nginx shows whether the service is active."
+      }
+
+      hint "status" {
+        body = "Check the service status again."
+      }"#,
+        );
+        let scenario = Scenario::parse(&hcl).unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(matches!(
+            error,
+            ScenarioError::DuplicateHintId { scope, id }
+                if scope == "probe 'nginx-running'" && id == "status"
+        ));
+    }
+
+    #[test]
+    fn errors_on_unsafe_scenario_identifiers() {
+        let hcl =
+            supported_hcl().replace(r#"scenario "broken-nginx" {"#, r#"scenario "../escape" {"#);
+        let scenario = Scenario::parse(&hcl).unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("invalid scenario name"))
+        );
+
+        let hcl = supported_hcl().replace(r#"vm "webserver" {"#, r#"vm "../web" {"#);
+        let scenario = Scenario::parse(&hcl).unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("invalid vm name"))
+        );
+    }
+
+    #[test]
+    fn errors_on_duplicate_image_and_vm_labels() {
+        let hcl = supported_hcl().replace(
+            r#"  kino {"#,
+            r#"  image "debian-12-minimal" {
+    base = "trixie"
+  }
+
+  kino {"#,
+        );
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("duplicate image 'debian-12-minimal'"))
+        );
+
+        let hcl = supported_hcl().replace(
+            r#"  vm "webserver" {"#,
+            r#"  vm "webserver" {
+    image = "debian-12-minimal"
+    probes = ["nginx-running"]
+  }
+
+  vm "webserver" {"#,
+        );
+        let error = Scenario::parse(&hcl).unwrap_err();
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("duplicate vm 'webserver'"))
+        );
+    }
+
+    #[test]
+    fn errors_on_multiline_description() {
+        let hcl = supported_hcl().replace(
+            r#"description = "Fix a misconfigured nginx server""#,
+            r#"description = <<-MD
+    Fix a misconfigured nginx server.
+    Keep the tagline on one line.
+  MD"#,
+        );
+        let scenario = Scenario::parse(&hcl).unwrap();
+        let error = scenario.validate_for_repo().unwrap_err();
+        assert!(matches!(
+            error,
+            ScenarioError::InvalidScenarioField { field, message }
+                if field == "description" && message.contains("single line")
+        ));
+    }
+
+    #[test]
+    fn authoring_prose_may_reference_managed_commands() {
+        let hcl = supported_hcl()
+            .replace(
+                "Nginx should be serving the default site, but the service was broken during cleanup.",
+                "As prose, mention `systemctl status intar-scenario.service` without making it executable.",
+            )
+            .replace(
+                "Check the nginx service state first.",
+                "The hint can mention `systemctl restart sshd.service` as text.",
+            )
+            .replace(
+                "Start nginx and restore the default site symlink.",
+                "The solution may discuss why `chsh ubuntu` would be wrong without running it.",
+            );
+        let scenario = Scenario::parse(&hcl).unwrap();
+        scenario.validate_for_repo().unwrap();
     }
 
     #[test]
@@ -1101,6 +1740,9 @@ scenario "broken-nginx" {
             "Nginx should be running".to_string()
         );
         assert_eq!(kino.probe_descriptors[0].phase, ProbePhase::Boot);
+        assert!(!kino.config_hcl.contains("Bring nginx back"));
+        assert!(!kino.config_hcl.contains("systemctl status nginx"));
+        assert!(!kino.config_hcl.contains("Start nginx and restore"));
     }
 
     #[test]
@@ -1413,10 +2055,17 @@ scenario "missing-vm-probe" {
     fn parses_k8s_scale_deployment_action() {
         let hcl = r#"
 scenario "scale-action" {
+  title = "Scale Action"
   category = "test"
+  tags = ["kubernetes"]
+  difficulty = "medium"
+  estimated_minutes = 20
   image "debian-12-minimal" {
     base = "trixie"
   }
+  description = "Scale a deployment"
+  briefing = "Restore the expected deployment replica count."
+  solution { body = "Scale the api deployment back to one replica." }
 
   kino {
     probe "api-ready" {

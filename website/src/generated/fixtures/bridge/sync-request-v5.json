@@ -1,0 +1,6 @@
+{
+  "type": "sync_request",
+  "protocol_version": 5,
+  "host_id": "host-alpha",
+  "reason": "reconnect"
+}

@@ -1,5 +1,6 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
+import { isSafeScenarioId } from "@/lib/scenario-id";
 import { loadEnabledScenarioForUser } from "@/lib/scenario-runs";
 
 export const prerender = false;
@@ -11,6 +12,9 @@ export const GET: APIRoute = async ({ request, params }) => {
   const scenarioId = params.scenarioId?.trim() ?? "";
   if (!scenarioId) {
     return jsonResponse({ error: "scenarioId is required" }, { status: 400 });
+  }
+  if (!isSafeScenarioId(scenarioId)) {
+    return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 
   const scenario = await loadEnabledScenarioForUser({

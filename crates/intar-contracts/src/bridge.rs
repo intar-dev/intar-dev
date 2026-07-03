@@ -3,28 +3,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 
-pub const BRIDGE_PROTOCOL_VERSION: u16 = 4;
-pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 1;
+pub const BRIDGE_PROTOCOL_VERSION: u16 = 5;
+pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 2;
 pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 1;
+pub const BUILD_REPORT_SCHEMA_VERSION: u16 = 1;
 pub const VM_REPORT_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeMessageV4 {
-    ClientHello(ClientHelloV4),
-    ServerHello(ServerHelloV4),
-    DesiredState(DesiredStateV4),
-    StateReport(StateReportV4),
-    VmReport(VmReportV4),
-    SyncRequest(SyncRequestV4),
+pub enum BridgeMessageV5 {
+    ClientHello(ClientHelloV5),
+    ServerHello(ServerHelloV5),
+    DesiredState(DesiredStateV5),
+    StateReport(StateReportV5),
+    VmReport(VmReportV5),
+    BuildReport(BuildReportV5),
+    SyncRequest(SyncRequestV5),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ClientHelloV4 {
+pub struct ClientHelloV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub agent_version: String,
+    pub role: HostRoleV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_applied_desired_version: Option<u64>,
     pub capabilities: HostCapabilitiesV1,
@@ -32,7 +35,7 @@ pub struct ClientHelloV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ServerHelloV4 {
+pub struct ServerHelloV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_version: u64,
@@ -40,7 +43,7 @@ pub struct ServerHelloV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct DesiredStateV4 {
+pub struct DesiredStateV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub desired_state: HostDesiredStateV1,
@@ -48,7 +51,7 @@ pub struct DesiredStateV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct StateReportV4 {
+pub struct StateReportV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub report: HostStateReportV1,
@@ -56,7 +59,7 @@ pub struct StateReportV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct VmReportV4 {
+pub struct VmReportV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub report: VmReportV1,
@@ -64,10 +67,25 @@ pub struct VmReportV4 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct SyncRequestV4 {
+pub struct BuildReportV5 {
+    pub protocol_version: u16,
+    pub host_id: String,
+    pub report: BuildReportV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SyncRequestV5 {
     pub protocol_version: u16,
     pub host_id: String,
     pub reason: SyncRequestReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostRoleV1 {
+    Agent,
+    Builder,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -86,10 +104,9 @@ pub struct HostDesiredStateV1 {
     pub host_id: String,
     pub version: u64,
     pub generated_at_unix_ms: i64,
-    #[serde(default)]
     pub cached_images: Vec<DesiredCachedImageV1>,
-    #[serde(default)]
     pub vms: Vec<DesiredVmV1>,
+    pub builds: Vec<DesiredBuildV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -101,6 +118,18 @@ pub struct DesiredCachedImageV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub struct DesiredBuildV1 {
+    pub build_id: String,
+    pub scenario_id: String,
+    pub arch: ImageArchitecture,
+    pub rev: String,
+    pub content_hash: String,
+    pub bundle_ref: String,
+    pub kino_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct DesiredVmV1 {
     pub run_id: String,
     pub vm_name: String,
@@ -108,7 +137,6 @@ pub struct DesiredVmV1 {
     pub image_key: ImageKey,
     pub image_sha256: String,
     pub resources: VmResourcesV1,
-    #[serde(default)]
     pub ssh_authorized_keys_openssh: Vec<String>,
     pub lease_expires_at_unix_ms: i64,
 }
@@ -137,10 +165,9 @@ pub struct HostStateReportV1 {
     pub applied_desired_version: u64,
     pub capacity: HostCapacityV1,
     pub capabilities: HostCapabilitiesV1,
-    #[serde(default)]
     pub cached_images: Vec<CachedImageStateV1>,
-    #[serde(default)]
     pub vms: Vec<VmActualStateV1>,
+    pub builds: Vec<BuildReportV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -200,9 +227,7 @@ pub struct VmActualStateV1 {
     pub image_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<VmNetworkStateV1>,
-    #[serde(default)]
     pub ssh_host_keys_openssh: Vec<String>,
-    #[serde(default)]
     pub probes: Vec<VmProbeSnapshotV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<VmArchiveStateV1>,
@@ -291,14 +316,46 @@ pub struct VmReportV1 {
     pub phase: VmPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<VmNetworkStateV1>,
-    #[serde(default)]
     pub ssh_host_keys_openssh: Vec<String>,
-    #[serde(default)]
     pub probes: Vec<VmProbeSnapshotV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive: Option<VmArchiveStateV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BuildReportV1 {
+    pub schema_version: u16,
+    pub host_id: String,
+    pub build_id: String,
+    pub scenario_id: String,
+    pub content_hash: String,
+    pub observed_at_unix_ms: i64,
+    pub phase: BuildPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_vm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at_unix_ms: Option<i64>,
+    pub attempt: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPhase {
+    Queued,
+    FetchingSources,
+    BuildingBase,
+    Building,
+    Publishing,
+    UploadingLogs,
+    Succeeded,
+    Failed,
 }
 
 #[cfg(test)]
@@ -307,7 +364,7 @@ mod tests {
 
     #[test]
     fn sync_request_message_uses_flat_snake_case_tag() {
-        let message = BridgeMessageV4::SyncRequest(SyncRequestV4 {
+        let message = BridgeMessageV5::SyncRequest(SyncRequestV5 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "host-1".to_owned(),
             reason: SyncRequestReason::Reconnect,
@@ -319,7 +376,7 @@ mod tests {
             actual,
             serde_json::json!({
                 "type": "sync_request",
-                "protocol_version": 4,
+                "protocol_version": 5,
                 "host_id": "host-1",
                 "reason": "reconnect",
             })

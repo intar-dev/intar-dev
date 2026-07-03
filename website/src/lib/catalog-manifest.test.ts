@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ScenarioManifestV1 } from "@/generated/catalog";
+import type { ScenarioManifestV2 } from "@/generated/catalog";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 
 describe("catalog manifest", () => {
@@ -12,7 +12,21 @@ describe("catalog manifest", () => {
 
     expect(rows.scenario).toMatchObject({
       scenarioId: "broken-nginx",
+      title: "Broken Nginx",
       description: "Repair the nginx service.",
+      difficulty: "easy",
+      estimatedMinutes: 15,
+      tagsJson: ["nginx", "systemd", "linux"],
+      briefingMarkdown:
+        "The web server should serve the default site, but nginx was disabled during cleanup.",
+      solutionMarkdown: "Enable nginx and restore the default site symlink.",
+      hintsJson: [
+        {
+          id: "check-service",
+          title: "Start with systemd",
+          body_markdown: "Check whether nginx is active before reading config files.",
+        },
+      ],
       enabled: true,
       enabledAt: 1_762_041_600_000,
     });
@@ -22,7 +36,7 @@ describe("catalog manifest", () => {
         scenarioId: "broken-nginx",
         ordinal: 0,
         vmName: "web",
-        image: "broken-nginx-web-x86_64.qcow2",
+        image: "broken-nginx-web-x86_64.raw.zst",
         imageKeyJson: {
           scenario: "broken-nginx",
           vm: "web",
@@ -30,6 +44,14 @@ describe("catalog manifest", () => {
         },
         imageSha256:
           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        imageFormat: "raw_zstd",
+        imageVirtualSizeBytes: 8589934592,
+        kernelSha256:
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        initrdSha256:
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        bootCmdline:
+          "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false",
         cpu: 2,
         memoryMib: 2048,
         diskMib: 8192,
@@ -43,6 +65,16 @@ describe("catalog manifest", () => {
         ordinal: 0,
         name: "nginx_service_running",
         description: "nginx is running",
+        title: "Bring nginx back up",
+        bodyMarkdown:
+          "The nginx service must be running before the site can answer requests.",
+        hintsJson: [
+          {
+            id: "status",
+            body_markdown:
+              "`systemctl status nginx` shows whether the service is active.",
+          },
+        ],
         phase: "scenario",
       },
     ]);
@@ -59,11 +91,11 @@ describe("catalog manifest", () => {
   });
 });
 
-function readManifestFixture(): ScenarioManifestV1 {
+function readManifestFixture(): ScenarioManifestV2 {
   return JSON.parse(
     readFileSync(
-      new URL("../generated/fixtures/catalog/scenario-manifest-v1.json", import.meta.url),
+      new URL("../generated/fixtures/catalog/scenario-manifest-v2.json", import.meta.url),
       "utf8",
     ),
-  ) as ScenarioManifestV1;
+  ) as ScenarioManifestV2;
 }

@@ -8,7 +8,9 @@ import {
   History,
   ShieldCheck,
   Trash2,
+  Tags,
 } from "lucide-react";
+import { Markdown } from "@/components/app/Markdown";
 import { SignedInShell } from "@/components/app/SignedInShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +26,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+interface ScenarioObjective {
+  probeName: string;
+  vmName: string;
+  label: string;
+  title: string | null;
+  bodyMarkdown: string | null;
+  hintCount: number;
+}
+
 interface ScenarioDetail {
   scenarioId: string;
   slug: string;
@@ -35,7 +46,8 @@ interface ScenarioDetail {
     difficulty: "easy" | "medium" | "hard";
     estimatedMinutes: number;
     briefingMarkdown: string;
-    objectives: string[];
+    tags: string[];
+    objectives: ScenarioObjective[];
   };
   vmCount: number;
   hasActiveRun: boolean;
@@ -64,6 +76,7 @@ interface ScenarioDetail {
     finishedAt: number;
     solvedAt: number | null;
     solveDurationMs: number | null;
+    solutionAssisted: boolean;
     hasReplay: boolean;
   }>;
 }
@@ -224,13 +237,18 @@ export function ScenarioBriefing() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4 text-sm leading-7">
-              {scenarioData.briefing.briefingMarkdown
-                .split(/\n{2,}/)
-                .map((paragraph) => paragraph.trim())
-                .filter(Boolean)
-                .map((paragraph, index) => (
-                  <p key={index}>{paragraph}</p>
-                ))}
+              {scenarioData.briefing.tags.length ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <Tags className="size-4 text-muted-foreground" />
+                  {scenarioData.briefing.tags.map((tag) => (
+                    <Badge key={tag} variant="outline" className="h-6 px-2 text-xs">
+                      {tag}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+
+              <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
 
               <div className="space-y-3 border-t pt-4">
                 <h2 className="text-base font-semibold tracking-tight">
@@ -238,8 +256,8 @@ export function ScenarioBriefing() {
                 </h2>
                 <ol className="list-decimal space-y-2 pl-5 marker:font-medium marker:text-muted-foreground">
                   {scenarioData.briefing.objectives.map((objective, index) => (
-                    <li key={`${objective}-${index}`} className="pl-1">
-                      {objective}
+                    <li key={`${objective.probeName}-${index}`} className="pl-1">
+                      {objective.title?.trim() || objective.label}
                     </li>
                   ))}
                 </ol>
@@ -263,7 +281,12 @@ export function ScenarioBriefing() {
                   const runTone = outcomeTone(run.outcome);
                   const content = (
                     <div className="space-y-3">
-                      <Badge variant={runTone.variant}>{runTone.label}</Badge>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge variant={runTone.variant}>{runTone.label}</Badge>
+                        {run.solutionAssisted ? (
+                          <Badge variant="outline">Assisted</Badge>
+                        ) : null}
+                      </div>
                       <div className="space-y-1 text-sm">
                         <p className="font-medium">{describeFinishedRun(run)}</p>
                         <p className="text-muted-foreground">

@@ -3,9 +3,10 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import {
+  agentHosts,
   scenarioRunArtifacts,
   scenarioRuns,
-  agentHosts,
+  type ScenarioRunHintSnapshot,
 } from "@/db/schema";
 import { parseHostInfo, parseInventory } from "@/lib/agent-bridge";
 import {
@@ -20,8 +21,10 @@ import { createAppId } from "@/lib/id";
 import {
   buildScenarioLaunchSpecs,
   deriveScenarioBriefing,
+  parseScenarioDifficulty,
   type ScenarioBriefing,
   type ScenarioDifficulty,
+  type ScenarioObjective,
 } from "@/lib/scenario-model";
 import {
   RUN_PHASE_ORDER,
@@ -33,6 +36,13 @@ import {
   type RunVmStateDocument,
 } from "@/lib/run-state";
 import {
+  buildScenarioRunHintViews,
+  buildScenarioRunSolutionView,
+  nextScenarioRunHintKey,
+  type ScenarioRunHintView,
+  type ScenarioRunSolutionView,
+} from "@/lib/scenario-run-content";
+import {
   deriveScenarioRunOutcome,
   deriveScenarioRunSolveDurationMs,
   nextSolvedAt,
@@ -43,6 +53,10 @@ import {
   loadEnabledScenario,
   type ScenarioDetailRecord,
 } from "@/lib/scenarios";
+import {
+  isAvailableScenarioLaunchHost,
+  isScenarioLaunchHost,
+} from "@/lib/scenario-hosts";
 import {
   deleteStargateRoute,
   issueStargateTerminalSession,
@@ -95,6 +109,7 @@ export interface ScenarioDetail {
     finishedAt: number;
     solvedAt: number | null;
     solveDurationMs: number | null;
+    solutionAssisted: boolean;
     hasReplay: boolean;
   }>;
 }
@@ -106,7 +121,11 @@ export interface ScenarioRunRecord extends RunStateDocument {
   title: string;
   tagline: string;
   briefingMarkdown: string;
-  objectives: string[];
+  objectives: ScenarioObjective[];
+  tags: string[];
+  hints: ScenarioRunHintView[];
+  nextHintKey: string | null;
+  solution: ScenarioRunSolutionView;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
   solvedAt: number | null;
@@ -114,6 +133,12 @@ export interface ScenarioRunRecord extends RunStateDocument {
   outcome: ScenarioRunOutcome;
   createdAt: number;
   updatedAt: number;
+}
+
+interface ScenarioRunContentSnapshot {
+  tags: string[];
+  hints: ScenarioRunHintSnapshot[];
+  solutionMarkdown: string;
 }
 
 const HOST_HEARTBEAT_TTL_MS = 90_000;
@@ -214,6 +239,7 @@ export async function startScenarioRunForUserOnHost(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
+  await assertScenarioLaunchHostForUser(params.hostId, params.userId);
   return startScenarioRunInternal(params);
 }
 
@@ -535,6 +561,12 @@ async function startScenarioRunInternal(params: {
       objectivesJson: JSON.stringify(scenario.briefing.objectives),
       difficulty: scenario.briefing.difficulty,
       estimatedMinutes: scenario.briefing.estimatedMinutes,
+      tagsJson: scenario.content.tags,
+      hintsJson: scenario.content.hints,
+      solutionMarkdown: scenario.content.solutionMarkdown,
+      revealedHintsJson: [],
+      solutionRevealedAt: null,
+      solutionAssisted: false,
       vmCount: provisionedState.vms.length,
       state: provisionedState.phase,
       stateRank: RUN_PHASE_ORDER[provisionedState.phase],
@@ -574,6 +606,63 @@ async function startScenarioRunInternal(params: {
   };
 }
 
+async function assertScenarioLaunchHostForUser(
+  hostId: string,
+  userId: string,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      role: agentHosts.role,
+      disabled: agentHosts.disabled,
+      scenarioEnabled: agentHosts.scenarioEnabled,
+      connected: agentHosts.connected,
+      lastHeartbeatAt: agentHosts.lastHeartbeatAt,
+    })
+    .from(agentHosts)
+    .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
+    .limit(1);
+  const host = rows[0];
+  if (!host) {
+    throw appError(404, "scenario_host_not_found", "host not found");
+  }
+  if (host.disabled) {
+    throw appError(403, "scenario_host_disabled", "host is disabled");
+  }
+  if (
+    !isScenarioLaunchHost({
+      role: host.role,
+      disabled: host.disabled,
+      scenarioEnabled: host.scenarioEnabled,
+    })
+  ) {
+    throw appError(
+      403,
+      "scenario_host_not_launchable",
+      "host cannot run scenarios",
+    );
+  }
+  if (
+    !isAvailableScenarioLaunchHost(
+      {
+        role: host.role,
+        disabled: host.disabled,
+        scenarioEnabled: host.scenarioEnabled,
+        connected: host.connected,
+        lastHeartbeatAt: host.lastHeartbeatAt,
+      },
+      Date.now(),
+      HOST_HEARTBEAT_TTL_MS,
+    )
+  ) {
+    throw appError(
+      409,
+      "scenario_host_unavailable",
+      "host is not connected",
+    );
+  }
+}
+
 async function loadEnabledScenarioRows(scenarioId?: string) {
   const scenarios = scenarioId
     ? [await loadEnabledScenario(scenarioId)].filter(
@@ -585,8 +674,38 @@ async function loadEnabledScenarioRows(scenarioId?: string) {
     scenarioId: scenario.scenarioId,
     enabledAt: scenario.enabledAt ?? Date.now(),
     briefing: deriveScenarioBriefing(scenario),
+    content: scenarioRunContentSnapshot(scenario),
     launchSpecs: buildScenarioLaunchSpecs(scenario),
   }));
+}
+
+function scenarioRunContentSnapshot(
+  scenario: ScenarioDetailRecord,
+): ScenarioRunContentSnapshot {
+  return {
+    tags: scenario.tags,
+    solutionMarkdown: scenario.solutionMarkdown,
+    hints: [
+      ...scenario.hints.map((hint) => ({
+        key: `scenario:${hint.id}`,
+        scope: "scenario" as const,
+        probeName: null,
+        id: hint.id,
+        title: hint.title ?? null,
+        bodyMarkdown: hint.body_markdown,
+      })),
+      ...scenario.probes.flatMap((probe) =>
+        probe.hints.map((hint) => ({
+          key: `probe:${probe.name}:${hint.id}`,
+          scope: "probe" as const,
+          probeName: probe.name,
+          id: hint.id,
+          title: hint.title ?? null,
+          bodyMarkdown: hint.body_markdown,
+        })),
+      ),
+    ],
+  };
 }
 
 async function loadActiveRunRow(userId: string, scenarioId: string) {
@@ -611,6 +730,7 @@ async function loadFinishedRuns(userId: string, scenarioId: string) {
       failedAt: scenarioRuns.failedAt,
       deleteRequestedAt: scenarioRuns.deleteRequestedAt,
       stateJson: scenarioRuns.stateJson,
+      solutionAssisted: scenarioRuns.solutionAssisted,
     })
     .from(scenarioRuns)
     .where(
@@ -641,6 +761,7 @@ async function loadFinishedRuns(userId: string, scenarioId: string) {
       createdAt: row.createdAt,
       solvedAt: row.solvedAt,
     }),
+    solutionAssisted: row.solutionAssisted,
     hasReplay: hasReplayArtifacts(row.stateJson),
   }));
 }
@@ -704,8 +825,21 @@ function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
     title: row.title,
     tagline: row.tagline,
     briefingMarkdown: row.briefingMarkdown,
-    objectives: safeStringArray(row.objectivesJson),
-    difficulty: normalizeDifficulty(row.difficulty),
+    objectives: parseObjectives(row.objectivesJson),
+    tags: row.tagsJson,
+    hints: buildScenarioRunHintViews({
+      hints: row.hintsJson,
+      revealedHintKeys: row.revealedHintsJson,
+    }),
+    nextHintKey: nextScenarioRunHintKey(row.hintsJson, row.revealedHintsJson),
+    solution: buildScenarioRunSolutionView({
+      solutionMarkdown: row.solutionMarkdown,
+      solutionRevealedAt: row.solutionRevealedAt,
+      solutionAssisted: row.solutionAssisted,
+      state: parseRunState(row.stateJson),
+      solvedAt: row.solvedAt,
+    }),
+    difficulty: scenarioRunDifficulty(row.runId, row.difficulty),
     estimatedMinutes: row.estimatedMinutes,
     activeKey: row.activeKey,
     deleteRequestedAt: row.deleteRequestedAt,
@@ -727,6 +861,10 @@ function toScenarioRunRecord(row: ReturnType<typeof fromDbRow>): ScenarioRunReco
     tagline: row.tagline,
     briefingMarkdown: row.briefingMarkdown,
     objectives: row.objectives,
+    tags: row.tags,
+    hints: row.hints,
+    nextHintKey: row.nextHintKey,
+    solution: row.solution,
     difficulty: row.difficulty,
     estimatedMinutes: row.estimatedMinutes,
     solvedAt: row.solvedAt,
@@ -957,6 +1095,7 @@ async function selectScenarioHost(): Promise<string | null> {
     .where(
       and(
         eq(agentHosts.disabled, false),
+        eq(agentHosts.role, "agent"),
         eq(agentHosts.scenarioEnabled, true),
         eq(agentHosts.connected, true),
       ),
@@ -982,8 +1121,17 @@ async function selectScenarioHost(): Promise<string | null> {
     })
     .filter(
       (row) =>
-        row.connected &&
-        isFreshTimestamp(row.lastHeartbeatAt, now, HOST_HEARTBEAT_TTL_MS),
+        isAvailableScenarioLaunchHost(
+          {
+            role: "agent",
+            disabled: false,
+            scenarioEnabled: true,
+            connected: row.connected,
+            lastHeartbeatAt: row.lastHeartbeatAt,
+          },
+          now,
+          HOST_HEARTBEAT_TTL_MS,
+        ),
     );
 
   if (!candidates.length) {
@@ -1035,19 +1183,51 @@ async function selectScenarioHost(): Promise<string | null> {
   return candidates[0]?.id ?? null;
 }
 
-function safeStringArray(raw: string): string[] {
+function parseObjectives(raw: string): ScenarioObjective[] {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.flatMap((item) => {
+      if (
+        typeof item !== "object" ||
+        item === null ||
+        Array.isArray(item) ||
+        typeof item.probeName !== "string" ||
+        typeof item.vmName !== "string" ||
+        typeof item.label !== "string"
+      ) {
+        return [];
+      }
+      return [{
+        probeName: item.probeName,
+        vmName: item.vmName,
+        label: item.label,
+        title: typeof item.title === "string" ? item.title : null,
+        bodyMarkdown:
+          typeof item.bodyMarkdown === "string" ? item.bodyMarkdown : null,
+        hintCount:
+          typeof item.hintCount === "number" && Number.isFinite(item.hintCount)
+            ? Math.max(0, Math.floor(item.hintCount))
+            : 0,
+      } satisfies ScenarioObjective];
+    });
   } catch {
     return [];
   }
 }
 
-function normalizeDifficulty(value: string): ScenarioDifficulty {
-  return value === "hard" || value === "medium" ? value : "easy";
+function scenarioRunDifficulty(runId: string, value: string): ScenarioDifficulty {
+  const parsed = parseScenarioDifficulty(value);
+  if (parsed) {
+    return parsed;
+  }
+  throw appError(
+    500,
+    "scenario_run_invalid",
+    `scenario run ${runId} has invalid difficulty`,
+  );
 }
 
 function slugify(value: string) {
@@ -1067,14 +1247,6 @@ function hasReplayArtifacts(rawStateJson: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isFreshTimestamp(
-  value: number | null,
-  now: number,
-  maxAgeMs: number,
-): boolean {
-  return typeof value === "number" && now - value <= maxAgeMs;
 }
 
 async function loadHostTerminalAddress(hostId: string): Promise<string | null> {

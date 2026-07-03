@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "host_id": "host-alpha",
+  "build_id": "build-broken-nginx-amd64-001",
+  "scenario_id": "broken-nginx",
+  "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "observed_at_unix_ms": 1762041660000,
+  "phase": "building",
+  "current_vm": "web",
+  "started_at_unix_ms": 1762041600000,
+  "attempt": 1
+}

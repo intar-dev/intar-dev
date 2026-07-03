@@ -9,6 +9,12 @@ import {
   scenarioRuns,
 } from "@/db/schema";
 import type { HostStateReportV1 } from "@/generated/bridge";
+import { releaseBuildAssignmentsForHostRoleChange } from "@/lib/build-scheduler";
+import {
+  clearDesiredCachedImages,
+  clearDesiredVms,
+} from "@/lib/desired-state";
+import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -20,13 +26,20 @@ import {
   type AgentHostRow,
 } from "@/lib/agent-bridge";
 import { createAppId, createShortAppId } from "@/lib/id";
+import {
+  bridgeSessionResetForHostRoleChange,
+  resolveRequestedHostRole,
+} from "@/lib/scenario-hosts";
+import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 
 const BOOTSTRAP_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
+type AppDb = Parameters<typeof mutateStoredHostDesiredState>[0];
 
 interface CreateHostBody {
   name?: string;
   hostId?: string;
+  role?: string;
 }
 
 interface HostActualStateSummary {
@@ -51,6 +64,7 @@ export const GET: APIRoute = async ({ request }) => {
       id: agentHosts.id,
       user_id: agentHosts.userId,
       name: agentHosts.name,
+      role: agentHosts.role,
       disabled: agentHosts.disabled,
       scenario_enabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
@@ -115,6 +129,7 @@ export const POST: APIRoute = async ({ request, url }) => {
   if (existingHostId && !host) {
     return jsonResponse({ error: "host not found" }, { status: 404 });
   }
+  const requestedRole = resolveRequestedHostRole(body.role, host?.role);
 
   if (!host) {
     const hostName = normalizeHostName(body.name);
@@ -136,7 +151,8 @@ export const POST: APIRoute = async ({ request, url }) => {
         id: hostId,
         userId: authz.context.userId,
         name: hostName,
-        scenarioEnabled: true,
+        role: requestedRole,
+        scenarioEnabled: requestedRole === "agent",
         disabled: false,
         connected: false,
         createdAt: now,
@@ -145,6 +161,33 @@ export const POST: APIRoute = async ({ request, url }) => {
     }
 
     host = await loadHostForUser(hostId, authz.context.userId);
+  }
+
+  if (host && host.role !== requestedRole) {
+    const now = Date.now();
+    const previousRole = host.role;
+    await db
+      .update(agentHosts)
+      .set({
+        role: requestedRole,
+        scenarioEnabled: requestedRole === "agent",
+        ...bridgeSessionResetForHostRoleChange(now),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(agentHosts.id, host.id),
+          eq(agentHosts.userId, authz.context.userId),
+        ),
+      );
+    await cleanupDesiredStateForRoleChange(
+      db,
+      host.id,
+      previousRole,
+      requestedRole,
+      now,
+    );
+    host = await loadHostForUser(host.id, authz.context.userId);
   }
 
   if (!host) {
@@ -185,7 +228,9 @@ export const POST: APIRoute = async ({ request, url }) => {
     host: {
       id: host.id,
       name: host.name,
+      role: host.role,
       disabled: Boolean(host.disabled),
+      scenarioEnabled: Boolean(host.scenario_enabled),
       createdAt: host.created_at,
     },
     bootstrapTokenExpiresAt: new Date(expiresAt).toISOString(),
@@ -207,6 +252,7 @@ function serializeHost(
   return {
     id: host.id,
     name: host.name,
+    role: host.role,
     disabled: Boolean(host.disabled),
     scenarioEnabled: Boolean(host.scenario_enabled),
     createdAt: host.created_at,
@@ -263,6 +309,29 @@ async function allocateHostId(name: string): Promise<string> {
     }
   }
   throw new Error("failed to allocate host id");
+}
+
+async function cleanupDesiredStateForRoleChange(
+  db: AppDb,
+  hostId: string,
+  previousRole: "agent" | "builder",
+  requestedRole: "agent" | "builder",
+  now: number,
+): Promise<void> {
+  await db.delete(hostActualState).where(eq(hostActualState.hostId, hostId));
+
+  if (previousRole === "agent" && requestedRole === "builder") {
+    await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
+      clearDesiredCachedImages(draft);
+      clearDesiredVms(draft);
+    });
+    await tryWakeHostRuntime(hostId);
+    return;
+  }
+
+  if (previousRole === "builder" && requestedRole === "agent") {
+    await releaseBuildAssignmentsForHostRoleChange(db, hostId, now);
+  }
 }
 
 function toSafeKey(value: string): string {

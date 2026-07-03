@@ -1,6 +1,9 @@
 use intar_contracts::{
-    bridge::{BridgeMessageV4, HostDesiredStateV1, HostStateReportV1, VmReportV1},
-    catalog::ScenarioManifestV1,
+    bridge::{
+        BridgeMessageV5, BuildReportV1, DesiredBuildV1, HostDesiredStateV1, HostStateReportV1,
+        VmReportV1,
+    },
+    catalog::ScenarioManifestV2,
     stargate::{IssueTerminalSessionRequest, IssueTerminalSessionResponse},
 };
 
@@ -20,8 +23,8 @@ fn stargate_response_fixture_round_trips() {
 
 #[test]
 fn catalog_manifest_fixture_round_trips() {
-    assert_round_trip::<ScenarioManifestV1>(include_str!(
-        "../fixtures/catalog/scenario-manifest-v1.json"
+    assert_round_trip::<ScenarioManifestV2>(include_str!(
+        "../fixtures/catalog/scenario-manifest-v2.json"
     ));
 }
 
@@ -45,8 +48,18 @@ fn bridge_vm_report_fixture_round_trips() {
 }
 
 #[test]
+fn bridge_desired_build_fixture_round_trips() {
+    assert_round_trip::<DesiredBuildV1>(include_str!("../fixtures/bridge/desired-build-v1.json"));
+}
+
+#[test]
+fn bridge_build_report_fixture_round_trips() {
+    assert_round_trip::<BuildReportV1>(include_str!("../fixtures/bridge/build-report-v1.json"));
+}
+
+#[test]
 fn bridge_message_fixture_round_trips() {
-    assert_round_trip::<BridgeMessageV4>(include_str!("../fixtures/bridge/sync-request-v4.json"));
+    assert_round_trip::<BridgeMessageV5>(include_str!("../fixtures/bridge/sync-request-v5.json"));
 }
 
 fn assert_round_trip<T>(raw: &str)

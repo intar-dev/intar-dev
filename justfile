@@ -67,6 +67,27 @@ build-images scenario="" config="builder.sample.amd64.hcl" no_upload="false":
 
     cargo run -p intar-image-cli -- "${args[@]}"
 
+bundle-images scenario="" config="builder.sample.amd64.hcl" rev="" no_upload="false" url="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    args=(bundle)
+    if [[ -n "{{scenario}}" ]]; then
+      args+=("{{scenario}}")
+    fi
+    args+=(--config "{{config}}")
+    if [[ -n "{{rev}}" ]]; then
+      args+=(--rev "{{rev}}")
+    fi
+    if [[ -n "{{url}}" ]]; then
+      args+=(--url "{{url}}")
+    fi
+    if [[ "{{no_upload}}" == "true" ]]; then
+      args+=(--no-upload)
+    fi
+
+    cargo run -p intar-image-cli -- "${args[@]}"
+
 live-e2e args="":
     cd website && bun run e2e:live -- {{args}}
 
