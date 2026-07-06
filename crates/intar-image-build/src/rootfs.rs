@@ -90,12 +90,12 @@ pub fn ensure_base_rootfs(
 /// Render the mmdebstrap rootfs build plan for a base image definition.
 #[must_use]
 pub fn render_rootfs_build_plan(base: &BaseImageSpec, config: &QemuBuildConfig) -> RootfsBuildPlan {
-    let definition_hash = base_definition_hash(base);
-    let paths = rootfs_build_paths(base, config, &definition_hash);
     let essential_hook = render_essential_hook();
     let build_service = render_intar_build_service();
     let build_start_script = render_intar_build_start_script();
     let customize_hook = render_customize_hook(&build_service, &build_start_script);
+    let definition_hash = base_definition_hash(base, &essential_hook, &customize_hook);
+    let paths = rootfs_build_paths(base, config, &definition_hash);
     let mmdebstrap_args = render_mmdebstrap_args(base, &paths);
 
     RootfsBuildPlan {
@@ -109,9 +109,21 @@ pub fn render_rootfs_build_plan(base: &BaseImageSpec, config: &QemuBuildConfig) 
     }
 }
 
+/// Cache key for the mmdebstrap base rootfs. Covers the generated hook
+/// scripts in addition to the base image definition: the hooks bake network
+/// and dpkg policy into the rootfs, so a cached artifact from an older hook
+/// version is not equivalent even when the package set is unchanged.
 #[must_use]
-pub fn base_definition_hash(base: &BaseImageSpec) -> String {
-    sha256_bytes_hex(base.content_identity().as_bytes())
+pub fn base_definition_hash(
+    base: &BaseImageSpec,
+    essential_hook: &str,
+    customize_hook: &str,
+) -> String {
+    let identity = format!(
+        "{}\n--hooks--\n{essential_hook}\n--\n{customize_hook}",
+        base.content_identity()
+    );
+    sha256_bytes_hex(identity.as_bytes())
 }
 
 fn base_rootfs_artifact_exists(plan: &RootfsBuildPlan) -> bool {
