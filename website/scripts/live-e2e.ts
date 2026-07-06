@@ -1752,6 +1752,11 @@ class ApiClient {
     const headers = new Headers(init.headers);
     headers.set("cookie", this.cookie);
     headers.set("accept", "application/json");
+    // Astro's CSRF protection rejects form-like POSTs without a same-site
+    // Origin; bodyless mutations (e.g. run destroy) need it explicitly.
+    if ((init.method ?? "GET") !== "GET") {
+      headers.set("origin", new URL(this.baseUrl).origin);
+    }
     let body: BodyInit | undefined;
     if (init.json !== undefined) {
       headers.set("content-type", "application/json");
