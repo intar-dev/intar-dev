@@ -200,6 +200,7 @@ pub fn prepare_direct_build_inputs(input: &DirectBuildPrepareInput<'_>) -> Resul
         ssh_authorized_keys_openssh: &[input.build_public_key_openssh.to_string()],
         guest_ip_cidr: "10.0.2.15/24",
         gateway: "10.0.2.2",
+        dns: "10.0.2.3",
         iface: None,
     })?;
     Ok(())

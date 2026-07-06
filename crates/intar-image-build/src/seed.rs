@@ -15,6 +15,7 @@ pub struct BuildSeedInput<'a> {
     pub ssh_authorized_keys_openssh: &'a [String],
     pub guest_ip_cidr: &'a str,
     pub gateway: &'a str,
+    pub dns: &'a str,
     pub iface: Option<&'a str>,
 }
 
@@ -58,6 +59,7 @@ pub fn render_build_env(input: &BuildSeedInput<'_>) -> String {
     for (key, value) in [
         ("INTAR_BUILD_IP", input.guest_ip_cidr),
         ("INTAR_BUILD_GATEWAY", input.gateway),
+        ("INTAR_BUILD_DNS", input.dns),
     ] {
         env.push_str(&format!("{key}={}\n", shell_quote(value)));
     }
@@ -96,6 +98,7 @@ mod tests {
             ssh_authorized_keys_openssh: &["ssh-ed25519 AAAATEST intar-build".to_string()],
             guest_ip_cidr: "10.0.2.15/24",
             gateway: "10.0.2.2",
+            dns: "10.0.2.3",
             iface: Some("eth0"),
         })
         .unwrap();
@@ -117,6 +120,7 @@ mod tests {
         assert!(build_env.contains("INTAR_BUILD_IFACE='eth0'"));
         assert!(build_env.contains("INTAR_BUILD_IP='10.0.2.15/24'"));
         assert!(build_env.contains("INTAR_BUILD_GATEWAY='10.0.2.2'"));
+        assert!(build_env.contains("INTAR_BUILD_DNS='10.0.2.3'"));
 
         let mut authorized_keys = String::new();
         root.open_file(AUTHORIZED_KEYS_FILENAME)
@@ -134,6 +138,7 @@ mod tests {
             ssh_authorized_keys_openssh: &[],
             guest_ip_cidr: "10.0.2.15/24",
             gateway: "10.0.2'2",
+            dns: "10.0.2.3",
             iface: Some("eth0"),
         });
         assert!(rendered.contains("INTAR_BUILD_GATEWAY='10.0.2'\\''2'"));
@@ -147,6 +152,7 @@ mod tests {
             ssh_authorized_keys_openssh: &[],
             guest_ip_cidr: "10.0.2.15/24",
             gateway: "10.0.2.2",
+            dns: "10.0.2.3",
             iface: None,
         });
 

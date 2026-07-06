@@ -397,6 +397,10 @@ EOF
 cat > "$root/etc/dpkg/dpkg.cfg.d/02intar-conffile-policy" <<'EOF'
 force-confold
 EOF
+# mmdebstrap seeds the chroot with the build host's hostname; pin a neutral
+# one so in-guest sudo does not warn about an unresolvable host on every call.
+echo intar-build > "$root/etc/hostname"
+echo "127.0.1.1 intar-build" >> "$root/etc/hosts"
 cat > "$root/etc/initramfs-tools/initramfs.conf" <<'EOF'
 MODULES=list
 COMPRESS=zstd
@@ -506,6 +510,14 @@ fi
 ip link set "$iface" up
 ip addr add "${INTAR_BUILD_IP:-10.0.2.15/24}" dev "$iface" 2>/dev/null || true
 ip route replace default via "${INTAR_BUILD_GATEWAY:-10.0.2.2}" dev "$iface"
+
+# The mmdebstrap rootfs ships without resolv.conf; without a nameserver every
+# apt/curl step in the build provisioning fails on DNS resolution.
+rm -f /etc/resolv.conf
+for dns_server in ${INTAR_BUILD_DNS:-10.0.2.3}; do
+  printf 'nameserver %s\n' "$dns_server" >>/etc/resolv.conf
+done
+chmod 0644 /etc/resolv.conf
 
 install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
 install -m 0600 -o ubuntu -g ubuntu /run/intar-build/authorized_keys /home/ubuntu/.ssh/authorized_keys
