@@ -391,6 +391,12 @@ path-exclude=/usr/share/man/*
 path-exclude=/usr/share/info/*
 path-exclude=/usr/share/locale/*
 EOF
+# Conffiles pre-seeded by this hook (e.g. initramfs.conf) must win over the
+# package defaults; without this dpkg raises an interactive conffile prompt
+# and non-interactive package configuration fails.
+cat > "$root/etc/dpkg/dpkg.cfg.d/02intar-conffile-policy" <<'EOF'
+force-confold
+EOF
 cat > "$root/etc/initramfs-tools/initramfs.conf" <<'EOF'
 MODULES=list
 COMPRESS=zstd
@@ -585,6 +591,7 @@ base_image "trixie" {
         );
         assert!(plan.essential_hook.contains("MODULES=list"));
         assert!(plan.essential_hook.contains("COMPRESS=zstd"));
+        assert!(plan.essential_hook.contains("force-confold"));
         assert!(plan.essential_hook.contains("vmw_vsock_virtio_transport"));
         assert!(
             plan.customize_hook
