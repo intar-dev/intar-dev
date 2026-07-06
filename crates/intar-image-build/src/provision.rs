@@ -48,7 +48,9 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
     )
     .context("format error")?;
     writeln!(script).context("format error")?;
-    append_package_helpers(&mut script, &vm.packages, &step_scripts, false)?;
+    // The mmdebstrap base rootfs ships without apt package lists, so package
+    // installs must be able to lazily run apt-get update first.
+    append_package_helpers(&mut script, &vm.packages, &step_scripts, true)?;
     append_script_body(
         &mut script,
         &kino_template,
@@ -1491,7 +1493,8 @@ scenario "broken-nginx" {
                 assert!(!script.contains("rm -f /etc/netplan/50-cloud-init.yaml"));
                 assert!(!script.contains("cloud-init clean --logs --seed"));
                 assert!(!script.contains("dist_upgrade"));
-                assert!(!script.contains("apt-get update"));
+                assert!(script.contains("ensure_package_lists_updated"));
+                assert!(script.contains("apt-get update"));
                 assert!(script.contains("apt-get clean"));
                 assert!(!script.contains("/var/lib/apt/lists/*"));
                 assert!(!script.contains("dd if=/dev/zero of=/EMPTY"));
