@@ -84,7 +84,6 @@ async fn main() -> Result<()> {
     vm.reconcile_tracked_vms()
         .await
         .context("failed to reconcile tracked vm state on startup")?;
-    vm.spawn_kino_ready_listener();
     vm.restore_probe_workers()
         .await
         .context("failed to restore vm probe workers")?;

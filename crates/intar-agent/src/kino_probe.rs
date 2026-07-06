@@ -112,6 +112,7 @@ impl ProbeUpdateEnvelope {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn snapshot_view(&self) -> ProbeSnapshotView {
         ProbeSnapshotView {
             generated_at_ms: Some(self.generated_at_ms),

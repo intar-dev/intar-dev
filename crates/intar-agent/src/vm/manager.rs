@@ -33,9 +33,9 @@ use crate::config::{
 };
 use crate::db::{ArchiveJobRow, Db, VmProbeStateRow, VmRow};
 use crate::image_cache;
-use crate::kino_probe::{ProbeCollectionState, ProbeSnapshotView, ProbeUpdateEnvelope};
+use crate::kino_probe::{ProbeCollectionState, ProbeUpdateEnvelope};
 #[cfg(target_os = "linux")]
-use crate::kino_probe::{ProbePollResult, decode_probe_snapshot};
+use crate::kino_probe::{ProbePollResult, ProbeSnapshotView, decode_probe_snapshot};
 
 use super::{kino_recording, mac, replay_media, runtime_disk};
 
@@ -530,10 +530,6 @@ impl VmManager {
 
     pub fn subscribe_probe_updates(&self) -> broadcast::Receiver<ProbeUpdateEnvelope> {
         self.inner.probe_updates_tx.subscribe()
-    }
-
-    pub fn spawn_kino_ready_listener(&self) {
-        spawn_kino_ready_listener(Arc::clone(&self.inner));
     }
 
     pub fn subscribe_terminal_updates(&self) -> broadcast::Receiver<VmTerminalState> {
@@ -1517,6 +1513,11 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         kino_vsock_path: Some(req.kino_vsock_path.display().to_string()),
         ssh_host_keys_openssh: current_ssh_host_keys(inner, req.name).await,
     };
+    // The probe worker owns the per-VM Kino readiness push listener, so it
+    // must be running before we wait for the first readiness snapshot.
+    start_probe_worker(inner, req.name, &details)
+        .await
+        .context("failed to start vm probe worker")?;
     let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details)
         .await
         .context("scenario runtime did not become ready")?;
@@ -1528,9 +1529,6 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     start_terminal_worker(inner, req.name)
         .await
         .context("failed to start vm terminal worker")?;
-    start_probe_worker(inner, req.name, &details)
-        .await
-        .context("failed to start vm probe worker")?;
     info!("vm booted");
 
     Ok(())
@@ -1670,7 +1668,8 @@ async fn wait_for_scenario_runtime_ready(
                     stop_booting_vm(inner, vm_name).await;
                     let error = last_error.unwrap_or_else(|| {
                         anyhow::anyhow!(
-                            "timed out waiting for Kino readiness push on host vsock port {KINO_HOST_READY_PORT}"
+                            "timed out waiting for Kino readiness push on {}",
+                            kino_ready_socket_path(&kino_vsock_path).display()
                         )
                     });
                     return Err(error).context(scenario_runtime_timeout_context(
@@ -1973,6 +1972,11 @@ async fn resume_tracked_vm_on_startup(
                     .context("cloud-hypervisor vm.boot failed during startup resume")?;
             }
 
+            // The probe worker owns the per-VM Kino readiness push listener,
+            // so it must be running before waiting for a readiness snapshot.
+            start_probe_worker(&inner_for_task, &vm_name, &details)
+                .await
+                .context("failed to restart vm probe worker after startup resume")?;
             let ready =
                 wait_for_scenario_runtime_ready(&inner_for_task, &vm_name, &ch, &details).await?;
             persist_probe_update(&inner_for_task, &ready).await;
@@ -1982,9 +1986,6 @@ async fn resume_tracked_vm_on_startup(
             start_terminal_worker(&inner_for_task, &vm_name)
                 .await
                 .context("failed to restart vm terminal worker after startup resume")?;
-            start_probe_worker(&inner_for_task, &vm_name, &details)
-                .await
-                .context("failed to restart vm probe worker after startup resume")?;
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -3012,57 +3013,48 @@ fn is_run_purged_remote_response(status: StatusCode, body: &str) -> bool {
         .is_some_and(|code| code == "run_purged")
 }
 
-#[cfg(target_os = "linux")]
-fn spawn_kino_ready_listener(inner: Arc<Inner>) {
-    tokio::spawn(async move {
-        if let Err(error) = run_kino_ready_listener(inner).await {
-            error!(error = %error, "Kino readiness push listener stopped");
-        }
-    });
-}
-
 #[cfg(not(target_os = "linux"))]
-fn spawn_kino_ready_listener(_inner: Arc<Inner>) {
-    warn!("Kino readiness push listener is only available on Linux");
-}
-
-#[cfg(target_os = "linux")]
-async fn run_kino_ready_listener(inner: Arc<Inner>) -> Result<()> {
-    use tokio_vsock::{VMADDR_CID_HOST, VsockAddr, VsockListener};
-
-    let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_HOST, KINO_HOST_READY_PORT))
-        .with_context(|| {
-            format!("failed to bind Kino readiness listener on vsock port {KINO_HOST_READY_PORT}")
-        })?;
-    info!(
-        port = KINO_HOST_READY_PORT,
-        "listening for guest-initiated Kino readiness pushes"
+async fn run_probe_worker_task(
+    inner: Arc<Inner>,
+    vm_name: String,
+    run_id: String,
+    _kino_vsock_path: PathBuf,
+    _kino_vsock_port: u32,
+) {
+    warn!(
+        vm = vm_name,
+        "Kino readiness push listener is only available on Linux"
     );
-
+    let mut interval = tokio::time::interval(Duration::from_secs(PROBE_POLL_INTERVAL_SECONDS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let (stream, peer) = listener
-            .accept()
-            .await
-            .context("failed to accept Kino readiness push connection")?;
-        let peer_cid = peer.cid();
-        let inner_for_task = Arc::clone(&inner);
-        tokio::spawn(async move {
-            if let Err(error) = handle_kino_ready_stream(inner_for_task, peer_cid, stream).await {
-                warn!(
-                    error = %error,
-                    peer_cid,
-                    "Kino readiness push connection failed"
-                );
+        interval.tick().await;
+        let should_continue = {
+            let states = inner.states.read().await;
+            match states.get(&vm_name) {
+                Some(vm) => {
+                    vm.state == VmLifecycleState::Running
+                        && vm
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.run_id.as_ref())
+                            .is_some_and(|current| current == &run_id)
+                }
+                None => false,
             }
-        });
+        };
+        if !should_continue {
+            break;
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 async fn handle_kino_ready_stream(
     inner: Arc<Inner>,
-    peer_cid: u32,
-    mut stream: tokio_vsock::VsockStream,
+    vm_name: &str,
+    run_id: &str,
+    mut stream: tokio::net::UnixStream,
 ) -> Result<()> {
     use std::io::ErrorKind;
     use tokio::io::AsyncReadExt as _;
@@ -3088,37 +3080,36 @@ async fn handle_kino_ready_stream(
             .context("failed to read Kino readiness frame body")?;
 
         let result = decode_probe_snapshot(&frame)?;
-        apply_kino_ready_snapshot(&inner, peer_cid, result).await?;
+        apply_kino_ready_snapshot(&inner, vm_name, run_id, result).await?;
     }
 }
 
 #[cfg(target_os = "linux")]
 async fn apply_kino_ready_snapshot(
     inner: &Arc<Inner>,
-    peer_cid: u32,
+    vm_name: &str,
+    run_id: &str,
     result: ProbePollResult,
 ) -> Result<()> {
-    let (vm_name, run_id) = vm_identity_for_kino_cid(inner, peer_cid)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("no tracked VM owns Kino vsock CID {peer_cid}"))?;
+    let current_run_matches = {
+        let states = inner.states.read().await;
+        states.get(vm_name).is_some_and(|vm| {
+            vm.details
+                .as_ref()
+                .and_then(|details| details.run_id.as_deref())
+                .is_some_and(|current| current == run_id)
+        })
+    };
+    anyhow::ensure!(
+        current_run_matches,
+        "dropping Kino readiness snapshot for stale run {run_id} of vm {vm_name}"
+    );
 
-    update_vm_ssh_host_keys(inner, &vm_name, result.ssh_host_keys_openssh.clone()).await;
-    let update = ProbeUpdateEnvelope::from_poll_result(&vm_name, &run_id, result);
+    update_vm_ssh_host_keys(inner, vm_name, result.ssh_host_keys_openssh.clone()).await;
+    let update = ProbeUpdateEnvelope::from_poll_result(vm_name, run_id, result);
     persist_probe_update(inner, &update).await;
     let _ = inner.probe_updates_tx.send(update);
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-async fn vm_identity_for_kino_cid(inner: &Inner, peer_cid: u32) -> Option<(String, String)> {
-    let states = inner.states.read().await;
-    states.iter().find_map(|(name, vm)| {
-        let details = vm.details.as_ref()?;
-        (details.kino_vsock_cid == Some(peer_cid)).then(|| {
-            let run_id = details.run_id.clone().unwrap_or_default();
-            (name.clone(), run_id)
-        })
-    })
 }
 
 #[cfg(target_os = "linux")]
@@ -3299,11 +3290,23 @@ async fn emit_terminal_state_update(inner: &Inner, state: VmTerminalState, force
     }
 }
 
+/// Filesystem path where cloud-hypervisor surfaces guest-initiated vsock
+/// connections to `KINO_HOST_READY_PORT`. Cloud Hypervisor implements the
+/// Firecracker-style hybrid vsock scheme: a guest connect to host CID 2 port
+/// P is forwarded to the unix socket `<vsock-socket>_P` on the host, so the
+/// agent must listen there — a host AF_VSOCK listener never sees it.
+fn kino_ready_socket_path(kino_vsock_path: &Path) -> PathBuf {
+    let mut os = kino_vsock_path.as_os_str().to_owned();
+    os.push(format!("_{KINO_HOST_READY_PORT}"));
+    PathBuf::from(os)
+}
+
+#[cfg(target_os = "linux")]
 async fn run_probe_worker_task(
     inner: Arc<Inner>,
     vm_name: String,
     run_id: String,
-    _kino_vsock_path: PathBuf,
+    kino_vsock_path: PathBuf,
     _kino_vsock_port: u32,
 ) {
     match inner.db.load_vm_probe_state(vm_name.clone()).await {
@@ -3318,30 +3321,99 @@ async fn run_probe_worker_task(
         }
     }
 
+    let ready_socket_path = kino_ready_socket_path(&kino_vsock_path);
+    let _ = tokio::fs::remove_file(&ready_socket_path).await;
+    let listener = match tokio::net::UnixListener::bind(&ready_socket_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            error!(
+                error = %error,
+                vm = vm_name,
+                path = %ready_socket_path.display(),
+                "failed to bind Kino readiness push listener"
+            );
+            return;
+        }
+    };
+    info!(
+        vm = vm_name,
+        path = %ready_socket_path.display(),
+        "listening for guest-initiated Kino readiness pushes"
+    );
+
     let mut interval = tokio::time::interval(Duration::from_secs(PROBE_POLL_INTERVAL_SECONDS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut connection_task: Option<JoinHandle<()>> = None;
 
     loop {
-        interval.tick().await;
-
-        let should_continue = {
-            let states = inner.states.read().await;
-            match states.get(&vm_name) {
-                Some(vm) => {
-                    vm.state == VmLifecycleState::Running
-                        && vm
-                            .details
-                            .as_ref()
-                            .and_then(|details| details.run_id.as_ref())
-                            .is_some_and(|current| current == &run_id)
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        // Kino keeps a single persistent push connection; a
+                        // new connection supersedes the previous one.
+                        if let Some(task) = connection_task.take() {
+                            task.abort();
+                        }
+                        let inner_for_task = Arc::clone(&inner);
+                        let vm_name_for_task = vm_name.clone();
+                        let run_id_for_task = run_id.clone();
+                        connection_task = Some(tokio::spawn(async move {
+                            if let Err(error) = handle_kino_ready_stream(
+                                inner_for_task,
+                                &vm_name_for_task,
+                                &run_id_for_task,
+                                stream,
+                            )
+                            .await
+                            {
+                                warn!(
+                                    error = %error,
+                                    vm = vm_name_for_task,
+                                    "Kino readiness push connection failed"
+                                );
+                            }
+                        }));
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            vm = vm_name,
+                            "failed to accept Kino readiness push connection"
+                        );
+                    }
                 }
-                None => false,
             }
-        };
-        if !should_continue {
-            break;
+            _ = interval.tick() => {
+                let should_continue = {
+                    let states = inner.states.read().await;
+                    match states.get(&vm_name) {
+                        Some(vm) => {
+                            matches!(
+                                vm.state,
+                                VmLifecycleState::CreatingVm
+                                    | VmLifecycleState::BootingVm
+                                    | VmLifecycleState::Running
+                            ) && vm
+                                .details
+                                .as_ref()
+                                .and_then(|details| details.run_id.as_ref())
+                                .is_some_and(|current| current == &run_id)
+                        }
+                        None => false,
+                    }
+                };
+                if !should_continue {
+                    break;
+                }
+            }
         }
     }
+
+    if let Some(task) = connection_task.take() {
+        task.abort();
+    }
+    let _ = tokio::fs::remove_file(&ready_socket_path).await;
 }
 
 async fn persist_probe_update(inner: &Inner, update: &ProbeUpdateEnvelope) {
@@ -3378,6 +3450,7 @@ async fn persist_probe_update(inner: &Inner, update: &ProbeUpdateEnvelope) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn probe_snapshot_from_state_row(row: &VmProbeStateRow) -> Option<ProbeSnapshotView> {
     serde_json::from_str::<ProbeSnapshotView>(&row.snapshot_json)
         .ok()
@@ -3388,6 +3461,7 @@ fn probe_snapshot_from_state_row(row: &VmProbeStateRow) -> Option<ProbeSnapshotV
         })
 }
 
+#[cfg(target_os = "linux")]
 fn probe_update_from_state_row(row: &VmProbeStateRow) -> Option<ProbeUpdateEnvelope> {
     if let Ok(update) = serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json) {
         return Some(update);
@@ -5016,6 +5090,7 @@ fn validate_network(net: &CreateVmNetwork) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::kino_probe::{ProbeSummary, ProbeView};
     use cloud_hypervisor_client::Error as ChError;
     use serde_json::json;
@@ -5282,6 +5357,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn probe_replay_preserves_stored_envelope_payload() {
         let stored = ProbeUpdateEnvelope {
             update_id: "update-1".to_string(),
