@@ -826,8 +826,14 @@ function hostReadinessProblems(
     problems.push("host does not report vsock support");
   if (!capabilities.supports_nftables)
     problems.push("host does not report nftables support");
-  if (!capabilities.supports_reflink)
-    problems.push("host does not report reflink support");
+  // Reflink is a performance optimization, not a scheduling requirement: the
+  // agent falls back to sparse copies on filesystems without reflink support
+  // (e.g. ext4), and the control plane does not gate run placement on it.
+  if (!capabilities.supports_reflink) {
+    logStep(
+      "host does not report reflink support; VM root disks fall back to sparse copies",
+    );
+  }
 
   const requiredArchitectures = unique(
     requiredImages.map((image) => image.image_key.arch),

@@ -997,8 +997,11 @@ fn probe_reflink_for_image_cache() -> bool {
     }
 
     let supported = Command::new("cp")
+        // coreutils >= 9.2 rejects --reflink=always combined with
+        // --sparse=always; reflink clones share extents, so sparseness is
+        // preserved without an explicit sparse mode.
         .arg("--reflink=always")
-        .arg("--sparse=always")
+        .arg("--sparse=auto")
         .arg(&src)
         .arg(&dst)
         .status()
