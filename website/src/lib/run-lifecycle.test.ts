@@ -177,6 +177,7 @@ describe("run lifecycle", () => {
           guest_ip: "10.77.0.2",
           guest_cidr: "10.77.0.2/28",
           gateway: "10.77.0.1",
+          ssh_host: "203.0.113.7",
           ssh_host_port: 2201,
         },
         sshHostKeysOpenssh: [
@@ -185,12 +186,15 @@ describe("run lifecycle", () => {
       }),
     });
 
+    // The terminal target must be routable from stargate: advertised host +
+    // forward port; the guest IP is tracked separately.
     expect(next.vms[0]?.terminalTarget).toMatchObject({
-      host: "10.77.0.2",
+      host: "203.0.113.7",
       port: 2201,
       username: "webserver",
       hostKeyOpenssh: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey",
     });
+    expect(next.vms[0]?.guestIp).toBe("10.77.0.2");
     expect(next.vms[0]?.terminalPhase).toBe("ready");
   });
 

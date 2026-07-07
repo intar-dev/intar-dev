@@ -200,13 +200,13 @@ describe("HostRuntimeDO workers integration", () => {
       phase: "ready",
       runtimeState: "ready",
       runtimeObservedAt: now + 110,
-      terminalTarget: { host: "10.77.0.2", port: 22001 },
+      terminalTarget: { host: "203.0.113.9", port: 22001 },
     });
     expect(dbVm).toMatchObject({
       phase: "ready",
       runtimeState: "ready",
       runtimeObservedAt: now + 100,
-      terminalTarget: { host: "10.77.0.3", port: 22002 },
+      terminalTarget: { host: "203.0.113.9", port: 22002 },
     });
 
     ws.close();
@@ -730,6 +730,7 @@ function vmReport(
         guest_ip: guestIp,
         guest_cidr: `${guestIp}/28`,
         gateway: "10.77.0.1",
+        ssh_host: "203.0.113.9",
         ssh_host_port: sshHostPort,
       },
       ssh_host_keys_openssh: [

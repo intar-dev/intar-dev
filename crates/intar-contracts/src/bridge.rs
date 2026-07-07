@@ -259,6 +259,11 @@ pub struct VmNetworkStateV1 {
     pub guest_ip: String,
     pub guest_cidr: String,
     pub gateway: String,
+    /// Publicly routable address of the agent host's SSH forward for this VM
+    /// (the agent's advertised host). The guest IP is only reachable within
+    /// the agent's internal VM network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_host_port: Option<u16>,
 }

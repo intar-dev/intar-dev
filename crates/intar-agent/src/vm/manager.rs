@@ -536,6 +536,19 @@ impl VmManager {
         self.inner.terminal_updates_tx.subscribe()
     }
 
+    /// Publicly routable address for this host's per-VM SSH forwards, from
+    /// `[ssh_access] advertised_host`.
+    #[must_use]
+    pub fn ssh_advertised_host(&self) -> Option<String> {
+        self.inner
+            .ssh_access
+            .advertised_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
         let names = {
             let states = self.inner.states.read().await;

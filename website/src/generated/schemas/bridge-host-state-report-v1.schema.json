@@ -424,6 +424,13 @@
         "guest_ip": {
           "type": "string"
         },
+        "ssh_host": {
+          "description": "Publicly routable address of the agent host's SSH forward for this VM\n(the agent's advertised host). The guest IP is only reachable within\nthe agent's internal VM network.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "ssh_host_port": {
           "type": [
             "integer",

@@ -196,6 +196,7 @@ function applyReportedVmState(input: {
 
   return decorateVmState({
     ...withProbes,
+    guestIp: input.report.network?.guest_ip?.trim() || withProbes.guestIp,
     phase: derived.phase,
     phaseDetail: derived.phaseDetail,
     terminalPhase: terminalReady ? "ready" : withProbes.terminalPhase,
@@ -295,7 +296,10 @@ function terminalTargetFromNetwork(
   hostname: string,
   observedAt: number,
 ): RunVmStateDocument["terminalTarget"] {
-  const host = network?.guest_ip?.trim() || current.host;
+  // The terminal target must be routable from stargate: the agent's
+  // advertised host plus the per-VM SSH forward port. The guest IP is only
+  // reachable inside the agent's VM network and is tracked separately.
+  const host = network?.ssh_host?.trim() || current.host;
   const port = network?.ssh_host_port ?? current.port;
   const hostKeyOpenssh =
     sshHostKeysOpenssh?.find((key) => key.trim().length > 0)?.trim() ??

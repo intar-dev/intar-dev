@@ -89,6 +89,8 @@ export interface RunVmStateDocument {
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
   terminalTarget: TerminalTarget;
+  /// Reported guest IP inside the agent's VM network (not publicly routable).
+  guestIp: string | null;
   launchSummary: ScenarioLaunchSummary;
   runtimeState: string | null;
   runtimeObservedAt: number | null;
@@ -201,6 +203,7 @@ export function buildInitialVmState(input: {
     replayArtifacts: [],
     primaryReplayArtifactId: null,
     terminalTarget: defaultTerminalTarget(),
+    guestIp: null,
     launchSummary: input.launchSummary,
     runtimeState: null,
     runtimeObservedAt: null,

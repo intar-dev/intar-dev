@@ -158,9 +158,7 @@ export async function loadDashboardHostRuns(params: {
               ]),
             },
             details: {
-              // The run state stores the reported guest IP as the terminal
-              // target host (see terminalTargetFromNetwork).
-              guest_ip: readString(vm.terminalTarget.host),
+              guest_ip: readString(vm.guestIp),
               ssh_authorized_key_openssh:
                 sshKeysByRunVmId.get(runVmKey(run.id, vm.id)) ?? null,
             },

@@ -256,6 +256,7 @@ async fn connect_once(
                             let probes = load_probe_snapshots_for_vm(db, &update.run_id, &update.vm_name).await;
                             let report = build_vm_report_from_status(
                                 &cfg.host_id,
+                                vm.ssh_advertised_host().as_deref(),
                                 current_desired_state.as_ref(),
                                 status,
                                 probes,
@@ -624,6 +625,7 @@ async fn build_host_state_report(
         }
     };
     let probes_by_vm = probe_snapshots_by_vm(probe_rows);
+    let ssh_host = vm.ssh_advertised_host();
 
     HostStateReportV1 {
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -651,7 +653,7 @@ async fn build_host_state_report(
                     .get(&(run_id.clone(), status.name.clone()))
                     .cloned()
                     .unwrap_or_default();
-                actual_state_from_status(host_id, desired, status, probes)
+                actual_state_from_status(host_id, ssh_host.as_deref(), desired, status, probes)
             })
             .collect(),
         builds: Vec::new(),
@@ -667,6 +669,7 @@ async fn build_vm_report_from_probe_update(
     let status = vm.get_vm(&update.vm_name).await?;
     Some(build_vm_report_from_status(
         host_id,
+        vm.ssh_advertised_host().as_deref(),
         desired,
         status,
         probe_snapshots_from_update(update),
@@ -675,11 +678,12 @@ async fn build_vm_report_from_probe_update(
 
 fn build_vm_report_from_status(
     host_id: &str,
+    ssh_host: Option<&str>,
     desired: Option<&HostDesiredStateV1>,
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
 ) -> VmReportV1 {
-    let actual = actual_state_from_status(host_id, desired, status, probes);
+    let actual = actual_state_from_status(host_id, ssh_host, desired, status, probes);
     VmReportV1 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
@@ -698,6 +702,7 @@ fn build_vm_report_from_status(
 
 fn actual_state_from_status(
     _host_id: &str,
+    ssh_host: Option<&str>,
     desired: Option<&HostDesiredStateV1>,
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
@@ -717,7 +722,7 @@ fn actual_state_from_status(
         phase: vm_phase_from_status(&status, &probes),
         image_key: desired_vm.map(|vm| vm.image_key.clone()),
         image_sha256: desired_vm.map(|vm| vm.image_sha256.clone()),
-        network: network_state_from_status(&status),
+        network: network_state_from_status(&status, ssh_host),
         ssh_host_keys_openssh: status
             .details
             .as_ref()
@@ -782,7 +787,10 @@ fn vm_phase_from_status(status: &VmStatusResponse, probes: &[VmProbeSnapshotV1])
     }
 }
 
-fn network_state_from_status(status: &VmStatusResponse) -> Option<VmNetworkStateV1> {
+fn network_state_from_status(
+    status: &VmStatusResponse,
+    ssh_host: Option<&str>,
+) -> Option<VmNetworkStateV1> {
     let details = status.details.as_ref()?;
     let guest_ip = details.guest_ip.as_ref()?.trim();
     if guest_ip.is_empty() {
@@ -799,6 +807,10 @@ fn network_state_from_status(status: &VmStatusResponse) -> Option<VmNetworkState
         guest_ip: guest_ip.to_string(),
         guest_cidr: guest_cidr.to_string(),
         gateway: gateway.to_string(),
+        ssh_host: ssh_host
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         ssh_host_port: details.ssh_public_port,
     })
 }
