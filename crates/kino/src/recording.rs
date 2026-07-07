@@ -297,7 +297,10 @@ mod imp {
         )?;
         let loop_result = run_linux_interactive_loop(&mut session, &shared_writer, &recording_path);
         if loop_result.is_err() {
+            // Interactive shells ignore TERM; escalate so finish() can join
+            // the shell wait thread instead of hanging on an immortal shell.
             best_effort_terminate_process_group(session.child_pid);
+            best_effort_kill_shell(session.child_pid, Signal::KILL);
         }
         let exit_code = session.finish(loop_result)?;
 
@@ -589,7 +592,14 @@ mod imp {
             ];
             let timeout = Timespec::try_from(INTERACTIVE_POLL_INTERVAL)
                 .context("failed to build PTY poll timeout")?;
-            poll(&mut poll_fds, Some(&timeout)).context("failed polling PTY session fds")?;
+            // EINTR is a signal wakeup (SIGWINCH resize, SIGHUP/SIGTERM
+            // hangup) — fall through so the flag checks below observe it.
+            match poll(&mut poll_fds, Some(&timeout)) {
+                Ok(_) | Err(RustixErrno::INTR) => {}
+                Err(error) => {
+                    return Err(error).context("failed polling PTY session fds");
+                }
+            }
             let exit_ready = poll_fds[2].revents().contains(PollFlags::IN);
             let resize_ready = poll_fds[3].revents().contains(PollFlags::IN);
             let pty_events = poll_fds[0].revents();
