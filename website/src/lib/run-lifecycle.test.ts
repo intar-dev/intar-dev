@@ -191,7 +191,7 @@ describe("run lifecycle", () => {
     expect(next.vms[0]?.terminalTarget).toMatchObject({
       host: "203.0.113.7",
       port: 2201,
-      username: "webserver",
+      username: "ubuntu",
       hostKeyOpenssh: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey",
     });
     expect(next.vms[0]?.guestIp).toBe("10.77.0.2");

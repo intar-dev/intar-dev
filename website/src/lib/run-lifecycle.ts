@@ -189,7 +189,6 @@ function applyReportedVmState(input: {
     input.report.network,
     input.report.ssh_host_keys_openssh,
     withProbes.terminalTarget,
-    withProbes.hostname,
     input.report.updated_at_unix_ms,
   );
   const terminalReady = hasTerminalEndpoint(terminalTarget);
@@ -289,11 +288,15 @@ function hasTerminalEndpoint(target: RunVmStateDocument["terminalTarget"]): bool
   return Boolean(target.host && target.port > 0);
 }
 
+// Guest images are provisioned with a fixed SSH login user (DEFAULT_USERNAME
+// in intar-image-build); stargate authenticates as this user, not the VM
+// hostname.
+const GUEST_SSH_USERNAME = "ubuntu";
+
 function terminalTargetFromNetwork(
   network: VmNetworkStateV1 | null | undefined,
   sshHostKeysOpenssh: string[] | null | undefined,
   current: RunVmStateDocument["terminalTarget"],
-  hostname: string,
   observedAt: number,
 ): RunVmStateDocument["terminalTarget"] {
   // The terminal target must be routable from stargate: the agent's
@@ -312,7 +315,7 @@ function terminalTargetFromNetwork(
   return {
     host,
     port,
-    username: hostname.trim() || current.username,
+    username: GUEST_SSH_USERNAME,
     hostKeyOpenssh,
     checkedAt: observedAt,
   };
