@@ -1301,7 +1301,10 @@ async function runTerminalProbe(input: {
         const chunk = await decodeWebSocketData(event.data, textDecoder);
         if (chunk) {
           output += chunk;
-          if (output.includes(`${input.marker}_END`)) {
+          // Match only the executed printf output (real CR after the
+          // marker); the echoed script text is `${marker}_END\n'` with a
+          // literal backslash, so echo alone can never satisfy this.
+          if (output.includes(`${input.marker}_END\r`)) {
             finish(() => resolve(output));
           }
         }
@@ -1363,31 +1366,38 @@ function terminalProbeCommand(
   return `${lines.join("\n")}\n`;
 }
 
+// Executed result lines end with a real CR; the echoed script text quotes
+// the same strings but always continues with `"` or a literal backslash, so
+// requiring the trailing CR keeps echo from satisfying these assertions.
+function probeResultSeen(output: string, resultLine: string): boolean {
+  return output.includes(`${resultLine}\r`);
+}
+
 function assertTerminalProbeOutput(
   output: string,
   marker: string,
   forbiddenIps: string[],
   sameRunPeerIps: string[],
 ): void {
-  if (!output.includes(`${marker}:metadata=blocked`)) {
+  if (!probeResultSeen(output, `${marker}:metadata=blocked`)) {
     throw new Error(
       "metadata endpoint was reachable or probe output was incomplete",
     );
   }
-  if (!output.includes(`${marker}:host=blocked`)) {
+  if (!probeResultSeen(output, `${marker}:host=blocked`)) {
     throw new Error(
       "host gateway endpoint was reachable or not conclusively blocked",
     );
   }
   forbiddenIps.forEach((ip, index) => {
-    if (!output.includes(`${marker}:forbidden_${index}=blocked`)) {
+    if (!probeResultSeen(output, `${marker}:forbidden_${index}=blocked`)) {
       throw new Error(
         `forbidden IP ${ip} was reachable or not conclusively blocked`,
       );
     }
   });
   sameRunPeerIps.forEach((ip, index) => {
-    if (!output.includes(`${marker}:peer_${index}=reachable`)) {
+    if (!probeResultSeen(output, `${marker}:peer_${index}=reachable`)) {
       throw new Error(
         `same-run peer IP ${ip} was not reachable or probe output was incomplete`,
       );
@@ -1739,22 +1749,23 @@ async function assertReplaysContainProbeOutput(
       );
     }
     const cast = await response.text();
-    let executedOutputSeen = false;
+    let beginSeen = false;
+    let endSeen = false;
     for (const line of cast.split("\n").slice(1)) {
       if (!line.trim()) continue;
       const event = JSON.parse(line) as unknown;
       if (!Array.isArray(event) || event[1] !== "o") continue;
-      if (
-        typeof event[2] === "string" &&
-        event[2].includes(`${session.probeMarker}_BEGIN\r`)
-      ) {
-        executedOutputSeen = true;
-        break;
+      if (typeof event[2] !== "string") continue;
+      if (event[2].includes(`${session.probeMarker}_BEGIN\r`)) {
+        beginSeen = true;
+      }
+      if (event[2].includes(`${session.probeMarker}_END\r`)) {
+        endSeen = true;
       }
     }
-    if (!executedOutputSeen) {
+    if (!beginSeen || !endSeen) {
       throw new Error(
-        `replay cast for ${session.runtimeVmName} is missing the probe's executed output (${session.probeMarker}); the recording lost the session tail`,
+        `replay cast for ${session.runtimeVmName} is missing the probe's executed output (begin=${beginSeen} end=${endSeen}); the recording lost the session tail`,
       );
     }
     logStep(`replay cast verified for ${session.runtimeVmName}`);
