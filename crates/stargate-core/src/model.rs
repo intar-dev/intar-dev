@@ -101,10 +101,14 @@ impl RouteRecord {
         &self,
         candidate: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool> {
+        // Compare only the key material. PublicKey equality also compares the
+        // OpenSSH comment, and profile keys are stored with their comment
+        // while the key a client presents over the wire has none — so
+        // full-value equality always rejected a correct client key.
         Ok(self
             .authorized_client_public_keys()?
             .into_iter()
-            .any(|expected| expected == *candidate))
+            .any(|expected| expected.key_data() == candidate.key_data()))
     }
 
     pub fn target_host_key(&self) -> Result<russh::keys::ssh_key::PublicKey> {
@@ -182,6 +186,38 @@ mod tests {
     use super::{
         validate_route_username, validate_target_username, validate_terminal_session_request,
     };
+
+    // Profile keys are stored with their comment; the key a client offers
+    // during SSH auth carries none. Authorization must compare key material
+    // only, and still reject a genuinely different key.
+    #[test]
+    fn allows_client_public_key_ignores_comment() {
+        let base =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR";
+        let route = super::RouteRecord {
+            route_username: "run-01-worker".to_owned(),
+            target_username: "ubuntu".to_owned(),
+            target_ip: "127.0.0.1".to_owned(),
+            target_port: 22,
+            authorized_client_public_keys_openssh: vec![format!("{base} laptop-key")],
+            target_host_key_openssh: String::new(),
+            target_private_key_openssh: String::new(),
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            metadata: RouteMetadata::default(),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        };
+
+        let wire_key =
+            russh::keys::ssh_key::PublicKey::from_openssh(base).expect("wire key parses");
+        let other = russh::keys::ssh_key::PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA8ax6Yk1ZMSRpAkk8cIriNXtVufy6mxst2stQk66n+d",
+        )
+        .expect("other key parses");
+
+        assert!(route.allows_client_public_key(&wire_key).expect("check"));
+        assert!(!route.allows_client_public_key(&other).expect("check"));
+    }
 
     #[test]
     fn username_validation_accepts_expected_values() {

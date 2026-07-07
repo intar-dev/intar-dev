@@ -24,9 +24,13 @@ uploads a source bundle with revision `${GITHUB_SHA::12}`; the builder downloads
 that bundle, builds the raw-zstd image, publishes it, and uploads logs. The live
 harness waits for the corresponding admin build rows before starting a run.
 
+Against the deployed HTTPS site, better-auth issues its session cookie with
+the `__Secure-` prefix; the plain name below only exists on plain-HTTP
+`wrangler dev` instances.
+
 ```sh
 export INTAR_LIVE_BASE_URL="https://intar.dev"
-export INTAR_LIVE_COOKIE="better-auth.session_token=..."
+export INTAR_LIVE_COOKIE="__Secure-better-auth.session_token=..."
 export INTAR_LIVE_BUILD_REV="<first-12-characters-of-main-commit-sha>"
 
 just live-e2e "--skip-publish --build-rev ${INTAR_LIVE_BUILD_REV}"
@@ -175,7 +179,7 @@ Use environment variables so shell history does not capture the cookie or token.
 
 ```sh
 export INTAR_LIVE_BASE_URL="https://intar.dev"
-export INTAR_LIVE_COOKIE="better-auth.session_token=..."
+export INTAR_LIVE_COOKIE="__Secure-better-auth.session_token=..."
 export INTAR_IMAGE_PUBLISH_TOKEN="..."
 export INTAR_LIVE_MANIFESTS="$PWD/dist/pair-ping-web-amd64.raw.zst.manifest.json,$PWD/dist/pair-ping-db-amd64.raw.zst.manifest.json"
 
