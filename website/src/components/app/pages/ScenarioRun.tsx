@@ -53,6 +53,7 @@ import { parseProbeValue, summarizeProbeValue } from "@/lib/probe-values";
 import { ProbeDetail } from "@/components/app/run/ProbeDetail";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
+import { VmDetailsCard } from "@/components/app/run/VmDetailsCard";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import { cn } from "@/lib/utils";
@@ -942,6 +943,14 @@ export function ScenarioRun() {
                   objectives={attemptData.objectives}
                 />
                 <RunTimelineSection runId={runId} />
+                {selectedVm ? (
+                  <VmDetailsCard
+                    vmName={selectedVm.scenarioVmName}
+                    hostname={selectedVm.hostname}
+                    provisioning={selectedVm.provisioning}
+                    terminalTarget={selectedVm.terminalTarget}
+                  />
+                ) : null}
                 <HintList
                   hints={attemptData.hints}
                   nextHintKey={attemptData.nextHintKey}
