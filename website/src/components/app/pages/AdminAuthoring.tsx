@@ -294,7 +294,9 @@ function ScenarioPreviewCard({
 }: {
   preview: NonNullable<ScenarioValidationResult["preview"]>;
 }) {
-  const probes = preview.kino.probes ?? [];
+  const probes = Object.entries(preview.kino?.probes ?? {}).map(
+    ([name, probe]) => ({ ...probe, name: probe.name || name }),
+  );
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -338,7 +340,10 @@ function ScenarioPreviewCard({
               {preview.vms.map((vm) => (
                 <li key={vm.name}>
                   <code>{vm.name}</code>
-                  <span className="text-muted-foreground"> · {vm.image}</span>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {vm.image} · {vm.cpu} vCPU · {vm.memory} MiB
+                  </span>
                 </li>
               ))}
             </ul>
