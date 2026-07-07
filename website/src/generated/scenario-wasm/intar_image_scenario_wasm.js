@@ -29,6 +29,29 @@ export function content_hash(input_json) {
 }
 
 /**
+ * Validate a scenario and compute everything a source-bundle upload needs:
+ * `{ ok, errors, scenario_id, content_hash, kino_version, target_arch,
+ * image_arch }`. The hash covers exactly one file, `scenario.hcl`, matching
+ * how the in-app build endpoint assembles its bundle.
+ * @param {string} scenario_hcl
+ * @returns {string}
+ */
+export function prepare_build(scenario_hcl) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(scenario_hcl, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.prepare_build(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * Validate a scenario HCL document. Returns a JSON string:
  * `{ ok, errors: string[], preview: Scenario | null }`.
  * @param {string} scenario_hcl

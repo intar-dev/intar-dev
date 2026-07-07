@@ -4,6 +4,7 @@
 
 import init, {
   content_hash,
+  prepare_build,
   validate,
 } from "@/generated/scenario-wasm/intar_image_scenario_wasm";
 import wasmUrl from "@/generated/scenario-wasm/intar_image_scenario_wasm_bg.wasm?url";
@@ -61,6 +62,25 @@ export async function validateScenarioHcl(
 ): Promise<ScenarioValidationResult> {
   await ensureLoaded();
   return JSON.parse(validate(scenarioHcl)) as ScenarioValidationResult;
+}
+
+export interface PreparedBuild {
+  ok: boolean;
+  errors: string[];
+  scenario_id?: string;
+  content_hash?: string;
+  kino_version?: string;
+  target_arch: string;
+  image_arch: string;
+}
+
+// Validate + compute the source-bundle inputs (content hash, kino version,
+// arch) for the in-app build trigger. Runs the exact build-pipeline Rust.
+export async function prepareScenarioBuild(
+  scenarioHcl: string,
+): Promise<PreparedBuild> {
+  await ensureLoaded();
+  return JSON.parse(prepare_build(scenarioHcl)) as PreparedBuild;
 }
 
 export async function computeScenarioContentHash(params: {

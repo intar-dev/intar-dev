@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
   FileCode2,
+  Hammer,
   Save,
   ShieldAlert,
   Trash2,
@@ -11,6 +12,7 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import {
+  prepareScenarioBuild,
   validateScenarioHcl,
   type ScenarioValidationResult,
 } from "@/lib/authoring-wasm";
@@ -101,6 +103,41 @@ export function AdminAuthoring() {
     },
   });
 
+  const queueBuild = useMutation({
+    mutationFn: async () => {
+      if (!scenarioId) throw new Error("validate first");
+      const prepared = await prepareScenarioBuild(hcl);
+      if (!prepared.ok || !prepared.content_hash || !prepared.kino_version) {
+        throw new Error(
+          prepared.errors.join("; ") || "scenario failed build preparation",
+        );
+      }
+      // Save the draft first so the queued bundle matches what's stored.
+      await saveDraft.mutateAsync();
+      const response = await fetch("/api/admin/authoring/build", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scenarioId,
+          contentHash: prepared.content_hash,
+          kinoVersion: prepared.kino_version,
+          imageArch: prepared.image_arch,
+        }),
+      });
+      const result = (await response.json().catch(() => null)) as {
+        rev?: string;
+        queued?: number;
+        assigned?: Array<{ buildId: string; hostId: string }>;
+        error?: string;
+      } | null;
+      if (!response.ok || !result?.rev) {
+        throw new Error(result?.error ?? `Failed to queue build (${response.status})`);
+      }
+      return result;
+    },
+  });
+
   const loadDraft = useMutation({
     mutationFn: async (id: string) => {
       const response = await fetch(
@@ -175,7 +212,20 @@ export function AdminAuthoring() {
                   <Save className="size-4" />
                   {saveDraft.isPending ? "Saving…" : "Save draft"}
                 </Button>
-                {saveDraft.isSuccess ? (
+                <Button
+                  variant="outline"
+                  onClick={() => queueBuild.mutate()}
+                  disabled={
+                    !result?.ok ||
+                    !scenarioId ||
+                    queueBuild.isPending ||
+                    saveDraft.isPending
+                  }
+                >
+                  <Hammer className="size-4" />
+                  {queueBuild.isPending ? "Queueing…" : "Build images"}
+                </Button>
+                {saveDraft.isSuccess && !queueBuild.isSuccess ? (
                   <span className="text-xs text-success">Draft saved.</span>
                 ) : null}
                 {saveDraft.error ? (
@@ -183,6 +233,21 @@ export function AdminAuthoring() {
                     {saveDraft.error instanceof Error
                       ? saveDraft.error.message
                       : "Failed to save"}
+                  </span>
+                ) : null}
+                {queueBuild.isSuccess ? (
+                  <span className="text-xs text-success">
+                    Build queued as {queueBuild.data.rev}
+                    {queueBuild.data.assigned?.length
+                      ? ` — assigned to ${queueBuild.data.assigned.length} builder(s); watch Builds.`
+                      : " — waiting for a builder; watch Builds."}
+                  </span>
+                ) : null}
+                {queueBuild.error ? (
+                  <span className="text-xs text-destructive">
+                    {queueBuild.error instanceof Error
+                      ? queueBuild.error.message
+                      : "Failed to queue build"}
                   </span>
                 ) : null}
               </div>
@@ -278,9 +343,11 @@ export function AdminAuthoring() {
 
           <Card>
             <CardContent className="py-4 text-xs leading-5 text-muted-foreground">
-              App-triggered image builds from drafts are next: the content
-              hash already matches the build pipeline bit-for-bit, so a
-              validated draft can be bundled and queued without CI.
+              Build images bundles the validated draft (with the pinned base
+              images and kino version) and queues it exactly like a CI upload.
+              The builder re-verifies the content hash before building;
+              progress shows on the Builds page, and a published scenario
+              lands in the registry.
             </CardContent>
           </Card>
         </div>
