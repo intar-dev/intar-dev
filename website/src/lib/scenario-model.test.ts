@@ -143,13 +143,13 @@ describe("scenario model", () => {
             {
               id: "boot-network",
               label: "network is ready",
-              kind: "probe",
+              kind: "service",
               phase: "boot",
             },
             {
               id: "http-ok",
               label: "HTTP responds",
-              kind: "probe",
+              kind: "service",
               phase: "scenario",
             },
           ],
@@ -280,6 +280,7 @@ function probe(
     bodyMarkdown: null,
     hints: [],
     phase: "scenario",
+    kind: "service",
     ...overrides,
   };
 }

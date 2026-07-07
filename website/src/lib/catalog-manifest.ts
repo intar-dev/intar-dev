@@ -73,6 +73,7 @@ export function catalogRowsFromScenarioManifest(
             bodyMarkdown: probe.body_markdown ?? null,
             hintsJson: probe.hints,
             phase: probe.phase,
+            kind: probe.kind,
           }) satisfies typeof vmScenarioProbes.$inferInsert,
       );
     }),

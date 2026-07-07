@@ -57,6 +57,13 @@
       "when": 1783442011476,
       "tag": "0007_scenario-category",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1783443498822,
+      "tag": "0008_probe-kind",
+      "breakpoints": true
     }
   ]
 }

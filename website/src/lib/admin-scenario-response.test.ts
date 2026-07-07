@@ -58,6 +58,7 @@ const scenario: ScenarioDetailRecord = {
       ordinal: 0,
       name: "http-ok",
       description: "HTTP responds",
+      kind: "port_open",
       title: "Restore HTTP",
       bodyMarkdown: "Make nginx respond on localhost.",
       hints: [

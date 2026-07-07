@@ -76,6 +76,7 @@ describe("catalog manifest", () => {
           },
         ],
         phase: "scenario",
+        kind: "service",
       },
     ]);
   });

@@ -591,6 +591,9 @@ export const vmScenarioProbes = sqliteTable(
     bodyMarkdown: text("body_markdown"),
     hintsJson: jsonText<ScenarioHintManifestV2[]>("hints_json").notNull(),
     phase: text("phase").default("scenario").notNull(),
+    // Probe kind from the manifest (file_exists, port_open, service, …) —
+    // drives the per-kind "why is this failing" rendering on the run page.
+    kind: text("kind").default("probe").notNull(),
   },
   (table) => [
     uniqueIndex("vm_scenario_probes_vm_ordinal_uidx").on(

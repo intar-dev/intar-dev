@@ -132,6 +132,7 @@ export async function loadScenario(
         bodyMarkdown: probe.bodyMarkdown,
         hints: probe.hintsJson,
         phase: probe.phase === "boot" ? "boot" : "scenario",
+        kind: probe.kind,
       };
     }),
     vms: vms.map((vm) => {

@@ -20,6 +20,7 @@ export interface ScenarioProbeRecord {
   bodyMarkdown: string | null;
   hints: ScenarioHintManifestV2[];
   phase: "boot" | "scenario";
+  kind: string;
 }
 
 export interface ScenarioVmRecord {
@@ -187,7 +188,7 @@ export function buildScenarioLaunchSpecs(input: {
           probe.description.trim() ||
           probe.name.trim() ||
           `Probe ${probe.ordinal + 1}`,
-        kind: "probe",
+        kind: probe.kind,
         phase: probe.phase,
       }));
     const probePhaseMap = Object.fromEntries(
