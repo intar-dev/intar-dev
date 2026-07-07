@@ -31,7 +31,23 @@ declare module "asciinema-player" {
     getCurrentTime: () => Promise<number>;
     getDuration: () => Promise<number>;
     addEventListener: (
-      name: string,
+      // The player throws for names outside this set.
+      name:
+        | "ended"
+        | "error"
+        | "input"
+        | "loading"
+        | "marker"
+        | "metadata"
+        | "offline"
+        | "output"
+        | "pause"
+        | "play"
+        | "playing"
+        | "ready"
+        | "reset"
+        | "resize"
+        | "seeked",
       callback: (event: unknown) => void,
     ) => unknown;
   }

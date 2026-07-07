@@ -456,7 +456,10 @@ function AsciicastReplaySurface({
         playerRef.current.addEventListener("ready", () => {
           setPlayerError(null);
         });
-        playerRef.current.addEventListener("errored", () => {
+        // The player throws from addEventListener for unknown event names,
+        // and its error event is named "error" (not "errored") - the wrong
+        // name unmounted every successfully created player.
+        playerRef.current.addEventListener("error", () => {
           setPlayerError(
             "asciinema player failed to initialize this recording",
           );
