@@ -195,9 +195,12 @@ async fn run_bridge(
         match run_bridge_inner(route, target, mode, input_rx, &events_tx, &cancel).await {
             Ok(status) => status,
             Err(error) => {
-                tracing::warn!(error = %error, "outbound ssh bridge failed");
+                // Log and surface the full anyhow cause chain: the outermost
+                // context alone ("failed connecting to target …") hides the
+                // underlying russh/auth failure that operators need.
+                tracing::warn!(error = ?error, "outbound ssh bridge failed");
                 let _ = events_tx.send(BridgeEvent::Stderr(
-                    format!("stargate outbound ssh bridge failed: {error}\n").into_bytes(),
+                    format!("stargate outbound ssh bridge failed: {error:#}\n").into_bytes(),
                 ));
                 255
             }
