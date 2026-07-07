@@ -3,35 +3,28 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use serde::Serialize;
 use serde_json::{Map, Value, json};
+
+use super::replay_compose::compose_sessions;
 
 pub const PRIMARY_REPLAY_KIND: &str = "ssh_recording";
 pub const REPLAY_SEGMENT_KIND: &str = "ssh_recording_segment";
 pub const PRIMARY_REPLAY_FILENAME: &str = "replay.cast";
 
-const RECORDING_DIVIDER_DURATION_S: f64 = 2.0;
-
 #[derive(Debug, Clone)]
-struct ParsedCast {
-    header: Map<String, Value>,
-    width: u16,
-    height: u16,
-    events: Vec<CastEvent>,
-    duration_s: f64,
+pub(crate) struct ParsedCast {
+    pub(crate) header: Map<String, Value>,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) events: Vec<CastEvent>,
+    pub(crate) duration_s: f64,
 }
 
 #[derive(Debug, Clone)]
-struct CastEvent {
-    time_s: f64,
-    kind: String,
-    payload: String,
-}
-
-#[derive(Debug, Serialize)]
-struct CombinedCastHeader {
-    #[serde(flatten)]
-    fields: Map<String, Value>,
+pub(crate) struct CastEvent {
+    pub(crate) time_s: f64,
+    pub(crate) kind: String,
+    pub(crate) payload: String,
 }
 
 pub async fn create_primary_replay_cast(artifacts_dir: &Path) -> Result<Option<PathBuf>> {
@@ -77,7 +70,7 @@ pub async fn create_primary_replay_cast(artifacts_dir: &Path) -> Result<Option<P
         .map(|path| parse_cast_file(path))
         .collect::<Result<Vec<_>>>()?;
     let replay_path = artifacts_dir.join(PRIMARY_REPLAY_FILENAME);
-    let combined = build_combined_cast(&sessions)?;
+    let combined = compose_sessions(&sessions)?;
     tokio::fs::write(&replay_path, combined)
         .await
         .with_context(|| format!("failed to write replay cast at {}", replay_path.display()))?;
@@ -104,7 +97,7 @@ fn parse_cast_file(path: &Path) -> Result<ParsedCast> {
     parse_cast(&content).with_context(|| format!("failed to parse cast {}", path.display()))
 }
 
-fn parse_cast(content: &str) -> Result<ParsedCast> {
+pub(crate) fn parse_cast(content: &str) -> Result<ParsedCast> {
     let mut lines = content.lines();
     let header_line = lines
         .find(|line| !line.trim().is_empty())
@@ -186,111 +179,11 @@ fn parse_cast(content: &str) -> Result<ParsedCast> {
     })
 }
 
-fn build_combined_cast(sessions: &[ParsedCast]) -> Result<String> {
-    let first = sessions
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("cannot combine an empty cast list"))?;
-    let mut out = String::new();
-    let header = CombinedCastHeader {
-        fields: first.header.clone(),
-    };
-    out.push_str(
-        &serde_json::to_string(&header).context("failed to serialize combined cast header")?,
-    );
-    out.push('\n');
-
-    let total_sessions = sessions.len();
-    let mut offset_s = 0.0_f64;
-    for (index, session) in sessions.iter().enumerate() {
-        if index > 0 {
-            write_session_divider(
-                &mut out,
-                offset_s,
-                session.width,
-                session.height,
-                index + 1,
-                total_sessions,
-            )
-            .context("failed to write session divider")?;
-            offset_s += RECORDING_DIVIDER_DURATION_S;
-        }
-
-        for event in &session.events {
-            write_cast_event(
-                &mut out,
-                offset_s + event.time_s,
-                &event.kind,
-                &event.payload,
-            )
-            .context("failed to write combined cast event")?;
-        }
-        offset_s += session.duration_s;
-    }
-
-    Ok(out)
-}
-
-fn write_session_divider(
-    out: &mut String,
-    start_time_s: f64,
-    width: u16,
-    height: u16,
-    session_number: usize,
-    total_sessions: usize,
-) -> Result<()> {
-    write_cast_event(out, start_time_s, "r", &format!("{width}x{height}"))?;
-    write_cast_event(
-        out,
-        start_time_s,
-        "o",
-        &render_session_divider(width, height, session_number, total_sessions),
-    )?;
-    write_cast_event(
-        out,
-        start_time_s + RECORDING_DIVIDER_DURATION_S,
-        "o",
-        "\u{1b}[2J\u{1b}[H",
-    )?;
-    Ok(())
-}
-
-fn render_session_divider(
-    width: u16,
-    height: u16,
-    session_number: usize,
-    total_sessions: usize,
-) -> String {
-    let label = format!("Session {session_number} of {total_sessions}");
-    let label_width = label.chars().count() as u16;
-    let row = (height / 2).max(1);
-    let col = if width > label_width {
-        ((width - label_width) / 2).max(1)
-    } else {
-        1
-    };
-    format!("\u{1b}[2J\u{1b}[H\u{1b}[{row};{col}H{label}")
-}
-
-fn write_cast_event(out: &mut String, time_s: f64, kind: &str, payload: &str) -> Result<()> {
-    out.push_str(
-        &serde_json::to_string(&(round_cast_time(time_s), kind, payload))
-            .context("failed to serialize cast event")?,
-    );
-    out.push('\n');
-    Ok(())
-}
-
-fn round_cast_time(time_s: f64) -> f64 {
-    (time_s.max(0.0) * 1000.0).round() / 1000.0
-}
-
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
 
-    use super::{
-        PRIMARY_REPLAY_FILENAME, create_primary_replay_cast, parse_cast, render_session_divider,
-    };
+    use super::{PRIMARY_REPLAY_FILENAME, create_primary_replay_cast, parse_cast};
 
     fn cast_fixture(width: u16, height: u16, events: &[(&str, f64, &str)]) -> String {
         let mut out = format!(
@@ -306,7 +199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_primary_replay_cast_concatenates_sessions_with_divider() -> Result<()> {
+    async fn create_primary_replay_cast_composes_sessions_on_a_fixed_canvas() -> Result<()> {
         let dir = tempfile::tempdir()?;
         tokio::fs::write(
             dir.path().join("session-01.cast"),
@@ -329,18 +222,45 @@ mod tests {
 
         let combined = tokio::fs::read_to_string(&replay_path).await?;
         let parsed = parse_cast(&combined)?;
-        assert_eq!(parsed.width, 80);
-        assert_eq!(parsed.height, 24);
-        assert_eq!(parsed.events.len(), 6);
-        assert_eq!(parsed.events[0].payload, "alpha");
-        assert_eq!(parsed.events[1].payload, "omega");
-        assert_eq!(parsed.events[2].kind, "r");
-        assert_eq!(parsed.events[2].payload, "120x30");
-        assert!(parsed.events[3].payload.contains("Session 2 of 2"));
-        assert_eq!(parsed.events[3].time_s, 1.0);
-        assert_eq!(parsed.events[4].time_s, 3.0);
-        assert_eq!(parsed.events[5].payload, "bravo");
-        assert_eq!(parsed.events[5].time_s, 3.5);
+
+        // One ~16:9 canvas fitting both 80x24 and 120x30, no mid-playback
+        // resize events.
+        assert_eq!(parsed.width, 125);
+        assert_eq!(parsed.height, 30);
+        assert!(parsed.events.iter().all(|event| event.kind != "r"));
+
+        // Session 1 output stays at its original offsets, the divider slide
+        // holds for two seconds, and session 2 is shifted past it.
+        assert!(
+            parsed
+                .events
+                .iter()
+                .any(|event| event.time_s == 0.0 && event.payload.contains("alpha"))
+        );
+        let divider = parsed
+            .events
+            .iter()
+            .find(|event| event.payload.contains("Session 2 of 2"))
+            .expect("divider slide should exist");
+        assert_eq!(divider.time_s, 1.0);
+        assert!(
+            parsed
+                .events
+                .iter()
+                .any(|event| event.time_s == 3.5 && event.payload.contains("bravo"))
+        );
+
+        // Replaying the composed output ends on session 2's content centered
+        // inside the canvas: pad_left = (125 - 120) / 2 = 2.
+        let mut vt = avt::Vt::builder().size(125, 30).scrollback_limit(0).build();
+        for event in &parsed.events {
+            if event.kind == "o" {
+                let _ = vt.feed_str(&event.payload);
+            }
+        }
+        let row = vt.line(0).text();
+        assert_eq!(row.trim(), "bravo");
+        assert_eq!(row.len() - row.trim_start().len(), 2);
 
         Ok(())
     }
@@ -350,12 +270,5 @@ mod tests {
         let dir = tempfile::tempdir()?;
         assert!(create_primary_replay_cast(dir.path()).await?.is_none());
         Ok(())
-    }
-
-    #[test]
-    fn session_divider_centers_text_inside_terminal() {
-        let slide = render_session_divider(80, 24, 2, 3);
-        assert!(slide.contains("Session 2 of 3"));
-        assert!(slide.starts_with("\u{1b}[2J\u{1b}[H\u{1b}[12;"));
     }
 }

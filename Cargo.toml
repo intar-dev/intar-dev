@@ -26,6 +26,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 anyhow = "=1.0.103"
+avt = "=0.18.0"
 axum = { version = "=0.8.9", default-features = false }
 base16ct = { version = "=1.0.0", features = ["alloc"] }
 base64 = "=0.22.1"

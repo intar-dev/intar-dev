@@ -2,10 +2,9 @@ import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Clock3 } from "lucide-react";
-import {
-  RunArtifactGifExportButton,
-  type RunArtifactFile,
-  type RunArtifactViewerState,
+import type {
+  RunArtifactFile,
+  RunArtifactViewerState,
 } from "@/components/app/RunArtifactViewer";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { PageHeader } from "@/components/app/patterns/PageHeader";
@@ -634,9 +633,6 @@ export function ScenarioRun() {
             !showShutdownLoadingScreen
               ? shellAccessActions
               : null}
-            {attemptData?.phase === "completed" ? (
-              <RunArtifactGifExportButton viewer={viewer} />
-            ) : null}
             {canDeleteRun ? (
               <DeleteRunDialog
                 open={deleteRunDialogOpen}

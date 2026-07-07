@@ -1,13 +1,7 @@
 import "asciinema-player/dist/bundle/asciinema-player.css";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import {
-  CheckIcon,
-  CopyIcon,
-  DownloadIcon,
-  LoaderCircle,
-  TriangleAlertIcon,
-} from "lucide-react";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { search, searchKeymap } from "@codemirror/search";
 import {
@@ -27,13 +21,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { exportAsciicastGif } from "@/lib/replay/gif-export";
 import {
   REPLAY_IDLE_TIME_LIMIT_SECONDS,
   REPLAY_TERMINAL_FONT_FAMILY,
   REPLAY_TERMINAL_THEME,
 } from "@/lib/replay/config";
-import type { GifExportProgress } from "@/lib/replay/gif-export-types";
 
 export interface RunArtifactFile {
   id: string;
@@ -67,12 +59,6 @@ interface RunArtifactViewerProps {
 }
 
 type CastTab = "replay" | "raw";
-
-interface CastGifExportState {
-  status: "idle" | "running" | "done" | "error";
-  progress: number;
-  detail: string;
-}
 
 const editorTheme = EditorView.theme(
   {
@@ -157,7 +143,6 @@ export function RunArtifactViewer({
     "idle",
   );
   const copyResetTimeoutRef = useRef<number | null>(null);
-  const gifExport = useRunArtifactGifExport(viewer);
 
   const artifactId = viewer?.artifact.id ?? null;
   const isCast = viewer ? isCastArtifact(viewer.artifact) : false;
@@ -294,13 +279,6 @@ export function RunArtifactViewer({
 
             <div className="flex flex-col items-start gap-2 sm:items-end">
               <div className="flex flex-wrap items-center gap-2">
-                {isCast ? (
-                  <GifExportButton
-                    state={gifExport.state}
-                    canExport={gifExport.canExport}
-                    onStart={() => void gifExport.start()}
-                  />
-                ) : null}
                 <Button
                   type="button"
                   variant={
@@ -385,26 +363,6 @@ export function RunArtifactViewer({
         </CardFooter>
       ) : null}
     </Card>
-  );
-}
-
-export function RunArtifactGifExportButton({
-  viewer,
-}: {
-  viewer: RunArtifactViewerState | null;
-}) {
-  const gifExport = useRunArtifactGifExport(viewer);
-
-  if (!gifExport.isCast || !viewer) {
-    return null;
-  }
-
-  return (
-    <GifExportButton
-      state={gifExport.state}
-      canExport={gifExport.canExport}
-      onStart={() => void gifExport.start()}
-    />
   );
 }
 
@@ -667,180 +625,6 @@ function ToolbarTab({
   );
 }
 
-function GifExportButton({
-  state,
-  canExport,
-  onStart,
-}: {
-  state: CastGifExportState;
-  canExport: boolean;
-  onStart: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={
-        state.status === "error"
-          ? "destructive"
-          : state.status === "done"
-            ? "secondary"
-            : "outline"
-      }
-      size="sm"
-      onClick={onStart}
-      disabled={!canExport || state.status === "running"}
-      title={state.status === "error" ? state.detail : undefined}
-    >
-      {state.status === "running" ? (
-        <LoaderCircle className="size-3.5 motion-safe:animate-spin" />
-      ) : state.status === "done" ? (
-        <CheckIcon className="size-3.5" />
-      ) : state.status === "error" ? (
-        <TriangleAlertIcon className="size-3.5" />
-      ) : (
-        <DownloadIcon className="size-3.5" />
-      )}
-      {state.status === "done"
-        ? "GIF ready"
-        : state.status === "error"
-          ? "Retry GIF"
-          : "Download GIF"}
-    </Button>
-  );
-}
-
-function useRunArtifactGifExport(viewer: RunArtifactViewerState | null) {
-  const [state, setState] = useState<CastGifExportState>({
-    status: "idle",
-    progress: 0,
-    detail: "",
-  });
-  const resetTimeoutRef = useRef<number | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  const artifactId = viewer?.artifact.id ?? null;
-  const isCast = viewer ? isCastArtifact(viewer.artifact) : false;
-  const canExport = Boolean(
-    viewer && isCast && !viewer.loading && viewer.content.trim(),
-  );
-
-  useEffect(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    if (resetTimeoutRef.current !== null) {
-      window.clearTimeout(resetTimeoutRef.current);
-      resetTimeoutRef.current = null;
-    }
-    setState({
-      status: "idle",
-      progress: 0,
-      detail: "",
-    });
-  }, [artifactId]);
-
-  useEffect(() => {
-    return () => {
-      if (resetTimeoutRef.current !== null) {
-        window.clearTimeout(resetTimeoutRef.current);
-      }
-      abortRef.current?.abort();
-      abortRef.current = null;
-    };
-  }, []);
-
-  const scheduleReset = (nextState: CastGifExportState) => {
-    if (resetTimeoutRef.current !== null) {
-      window.clearTimeout(resetTimeoutRef.current);
-    }
-    resetTimeoutRef.current = window.setTimeout(() => {
-      setState(nextState);
-      resetTimeoutRef.current = null;
-    }, 2200);
-  };
-
-  const handleProgress = (progress: GifExportProgress) => {
-    setState({
-      status: "running",
-      progress: progress.progress,
-      detail: progress.detail,
-    });
-  };
-
-  const start = async () => {
-    if (!viewer || !isCast || viewer.loading || !viewer.content.trim()) {
-      return;
-    }
-
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    if (resetTimeoutRef.current !== null) {
-      window.clearTimeout(resetTimeoutRef.current);
-      resetTimeoutRef.current = null;
-    }
-
-    setState({
-      status: "running",
-      progress: 0.03,
-      detail: "Preparing GIF export",
-    });
-
-    try {
-      const blob = await exportAsciicastGif(viewer.content, {
-        signal: controller.signal,
-        onProgress: handleProgress,
-      });
-
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      downloadBlob(blob, castGifFilename(viewer.artifact.filename));
-
-      setState({
-        status: "done",
-        progress: 1,
-        detail: "GIF downloaded",
-      });
-      scheduleReset({
-        status: "idle",
-        progress: 0,
-        detail: "",
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
-        setState({
-          status: "idle",
-          progress: 0,
-          detail: "",
-        });
-        return;
-      }
-
-      setState({
-        status: "error",
-        progress: 0,
-        detail:
-          error instanceof Error
-            ? error.message
-            : "failed to export replay GIF",
-      });
-    } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
-    }
-  };
-
-  return {
-    canExport,
-    isCast,
-    start,
-    state,
-  };
-}
-
 function isCastArtifact(artifact: RunArtifactFile) {
   return (
     artifact.kind === "ssh_recording" ||
@@ -884,22 +668,4 @@ function countLines(content: string) {
     return 0;
   }
   return content.split(/\r\n|\r|\n/).length;
-}
-
-function castGifFilename(filename: string) {
-  return filename.toLowerCase().endsWith(".cast")
-    ? filename.slice(0, -5) + ".gif"
-    : `${filename}.gif`;
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = filename;
-  anchor.rel = "noopener";
-  anchor.click();
-  window.setTimeout(() => {
-    URL.revokeObjectURL(objectUrl);
-  }, 60_000);
 }
