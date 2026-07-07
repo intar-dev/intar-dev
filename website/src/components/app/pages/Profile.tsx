@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { KeyRound, LoaderCircle, MonitorUp, ShieldCheck } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SignedInShell } from "@/components/app/SignedInShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { useSession } from "@/components/app/hooks/useSession";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -134,7 +134,7 @@ export function Profile() {
   const keyCount = sshKeys.data?.keys.length ?? 0;
 
   return (
-    <SignedInShell
+    <PageShell
       title="Profile"
       description="Control how Intar lets you into mission VMs. Public SSH keys are copied into new runs so native access can go straight to the mapped VM port from your own machine."
       eyebrow="Identity"
@@ -345,7 +345,7 @@ export function Profile() {
           </CardContent>
         </Card>
       </div>
-    </SignedInShell>
+    </PageShell>
   );
 }
 

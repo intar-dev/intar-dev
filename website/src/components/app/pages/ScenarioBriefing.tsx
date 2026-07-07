@@ -11,7 +11,7 @@ import {
   Tags,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
-import { SignedInShell } from "@/components/app/SignedInShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -95,7 +95,7 @@ interface ScenarioStartAcceptedResponse {
 
 export function ScenarioBriefing() {
   const navigate = useNavigate();
-  const { scenarioId } = useParams({ from: "/scenarios/$scenarioId" });
+  const { scenarioId } = useParams({ from: "/app/scenarios/$scenarioId" });
   const [deleteTarget, setDeleteTarget] = useState<
     ScenarioDetail["finishedRuns"][number] | null
   >(null);
@@ -158,7 +158,7 @@ export function ScenarioBriefing() {
   };
 
   return (
-    <SignedInShell
+    <PageShell
       title={scenarioData?.briefing.title ?? "Scenario briefing"}
       description={
         scenarioData?.briefing.tagline ??
@@ -384,7 +384,7 @@ export function ScenarioBriefing() {
           </Dialog>
         </div>
       ) : null}
-    </SignedInShell>
+    </PageShell>
   );
 }
 

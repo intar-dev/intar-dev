@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight, Clock3, ShieldCheck } from "lucide-react";
 import { EmptyStateCard } from "@/components/app/PagePatterns";
-import { SignedInShell } from "@/components/app/SignedInShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,7 +55,7 @@ export function ScenarioCatalog() {
   });
 
   return (
-    <SignedInShell title="Scenarios" description="" showHeader={false}>
+    <PageShell title="Scenarios" description="" showHeader={false}>
       <h1 className="text-3xl font-semibold tracking-tight">Scenarios</h1>
 
       {scenarios.error ? (
@@ -127,7 +127,7 @@ export function ScenarioCatalog() {
           ))}
         </div>
       )}
-    </SignedInShell>
+    </PageShell>
   );
 }
 

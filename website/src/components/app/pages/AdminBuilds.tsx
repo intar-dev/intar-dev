@@ -7,7 +7,7 @@ import {
   RefreshCcw,
 } from "lucide-react";
 import { useState } from "react";
-import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyStateCard } from "@/components/app/PagePatterns";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -129,7 +129,7 @@ export function AdminBuilds() {
   ).length;
 
   return (
-    <AuthenticatedShell
+    <PageShell admin
       title="Image builds"
       description="Builder job queue, assignment, reports, and logs."
     >
@@ -211,7 +211,7 @@ export function AdminBuilds() {
           )}
         </CardContent>
       </Card>
-    </AuthenticatedShell>
+    </PageShell>
   );
 }
 

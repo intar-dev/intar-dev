@@ -26,7 +26,7 @@ import {
   type RunArtifactViewerState,
 } from "@/components/app/RunArtifactViewer";
 import { NativeSshDialogButton } from "@/components/remote-access/NativeSshDialogButton";
-import { SignedInShell } from "@/components/app/SignedInShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -206,7 +206,7 @@ const POLL_INTERVALS: Record<ScenarioRunRecord["phase"], number> = {
 export function ScenarioRun() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { runId } = useParams({ from: "/scenarios/runs/$runId" });
+  const { runId } = useParams({ from: "/app/scenarios/runs/$runId" });
   const [projectionPending, setProjectionPending] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -723,7 +723,7 @@ export function ScenarioRun() {
   }, [attemptData, replayArtifact, replayArtifactIndex, selectedVm]);
 
   return (
-    <SignedInShell
+    <PageShell
       title="Scenario run"
       description="Progress, shell access, and the final replay."
       showHeader={false}
@@ -950,7 +950,7 @@ export function ScenarioRun() {
           )}
         </div>
       ) : null}
-    </SignedInShell>
+    </PageShell>
   );
 }
 

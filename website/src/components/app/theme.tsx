@@ -83,32 +83,30 @@ export function ThemeProvider(props: { children: ReactNode }) {
   );
 }
 
-export function ThemeToggle() {
+export function ThemeToggle({ className }: { className?: string }) {
   const { theme, cycleTheme } = useTheme();
   const { icon, label, nextLabel } = getThemeMeta(theme);
 
   return (
-    <div className="fixed top-4 right-4 z-50">
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              type="button"
-              variant="outline"
-              size="icon-sm"
-              className="bg-background/95 shadow-xs backdrop-blur supports-[backdrop-filter]:bg-background/80"
-              onClick={cycleTheme}
-              aria-label={`Theme: ${label}. Click to switch to ${nextLabel}.`}
-            >
-              {icon}
-            </Button>
-          }
-        />
-        <TooltipContent side="left" sideOffset={8}>
-          {label} theme
-        </TooltipContent>
-      </Tooltip>
-    </div>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className={className}
+            onClick={cycleTheme}
+            aria-label={`Theme: ${label}. Click to switch to ${nextLabel}.`}
+          >
+            {icon}
+          </Button>
+        }
+      />
+      <TooltipContent side="bottom" sideOffset={8}>
+        {label} theme
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

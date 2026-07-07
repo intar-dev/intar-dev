@@ -1,0 +1,97 @@
+import { useMutation } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { ChevronsUpDown, LogOut, User as UserIcon } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  useSidebar,
+} from "@/components/ui/sidebar";
+import { authClient } from "@/lib/auth-client";
+import { useSession } from "../hooks/useSession";
+
+export function SidebarUserMenu() {
+  const navigate = useNavigate();
+  const { isMobile } = useSidebar();
+  const { data, refetch } = useSession();
+  const user = data?.user ?? null;
+  const username = user?.username ?? user?.email ?? "Account";
+
+  const signOut = useMutation({
+    mutationFn: async () => {
+      const result = await authClient.signOut();
+      if ("error" in result && result.error) {
+        throw new Error(result.error.message ?? "Failed to sign out");
+      }
+      return result;
+    },
+    onSuccess: async () => {
+      await refetch();
+      void navigate({ to: "/" });
+    },
+  });
+
+  if (!user) return null;
+
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <SidebarMenuButton
+                size="lg"
+                className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+              >
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-sidebar-accent text-sidebar-accent-foreground">
+                  <UserIcon className="size-4" />
+                </span>
+                <span className="grid flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-medium">{username}</span>
+                  {user.email ? (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {user.email}
+                    </span>
+                  ) : null}
+                </span>
+                <ChevronsUpDown className="ml-auto size-4" />
+              </SidebarMenuButton>
+            }
+          />
+          <DropdownMenuContent
+            side={isMobile ? "bottom" : "right"}
+            align="end"
+            sideOffset={8}
+            className="min-w-56"
+          >
+            <DropdownMenuLabel className="truncate">
+              {username}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem render={<Link to="/profile" />}>
+              <UserIcon className="size-4" />
+              Profile
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              variant="destructive"
+              disabled={signOut.isPending}
+              onClick={() => signOut.mutate()}
+            >
+              <LogOut className="size-4" />
+              {signOut.isPending ? "Signing out…" : "Sign out"}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}

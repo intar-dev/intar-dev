@@ -1,7 +1,7 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { CircleHelpIcon } from "lucide-react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import {
   RunArtifactViewer,
@@ -1121,7 +1121,7 @@ export function Dashboard() {
   }, [totalRunPages]);
 
   return (
-    <AuthenticatedShell
+    <PageShell admin
       title="Overview"
       description="Scenario runs stay front and center while host operations remain close at hand."
     >
@@ -1609,7 +1609,7 @@ export function Dashboard() {
           onClose={() => setActiveWebSsh(null)}
         />
       ) : null}
-    </AuthenticatedShell>
+    </PageShell>
   );
 }
 

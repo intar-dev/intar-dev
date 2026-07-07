@@ -1,15 +1,14 @@
-import { AdminWorkspaceNav } from "@/components/app/AdminWorkspaceNav";
-import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 
 export function AgentOnboarding() {
   return (
-    <AuthenticatedShell
-      title="Agent onboarding"
-      description="Generate a bridge config for a host."
+    <PageShell
+      admin
+      title="Host onboarding"
+      description="Generate a bridge config to register a new agent or builder host."
     >
-      <AdminWorkspaceNav />
       <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
-    </AuthenticatedShell>
+    </PageShell>
   );
 }

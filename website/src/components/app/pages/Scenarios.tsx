@@ -6,7 +6,7 @@ import {
   HardDriveDownload,
   Radar,
 } from "lucide-react";
-import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyStateCard } from "@/components/app/PagePatterns";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -61,7 +61,7 @@ export function Scenarios() {
   const enabledCount = scenarioList.filter((scenario) => scenario.enabled).length;
 
   return (
-    <AuthenticatedShell
+    <PageShell admin
       title="Scenarios"
       description="Read-only registry of uploaded scenarios. The web UI no longer edits scenario content; it only lets you inspect the current stored scenario and enable or disable it for learners."
     >
@@ -188,7 +188,7 @@ export function Scenarios() {
           </CardContent>
         </Card>
       ) : null}
-    </AuthenticatedShell>
+    </PageShell>
   );
 }
 
