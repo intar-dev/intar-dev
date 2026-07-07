@@ -6,9 +6,12 @@ use std::{
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
+use std::borrow::Cow;
+
 use russh::{
-    ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect,
+    ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Preferred,
     client::{self, Msg},
+    kex,
     keys::{PrivateKeyWithHashAlg, ssh_key::PublicKey},
 };
 use stargate_core::RouteRecord;
@@ -352,12 +355,21 @@ async fn bridge_channel(
 }
 
 fn client_config() -> Arc<client::Config> {
+    // russh's default KEX order prefers mlkem768x25519-sha256, which does not
+    // interoperate with the post-quantum KEX in the OpenSSH 10 servers our
+    // guest images ship, so the outbound handshake fails before auth. Pin the
+    // curve25519 KEX both sides implement compatibly.
+    let preferred = Preferred {
+        kex: Cow::Borrowed(&[kex::CURVE25519, kex::CURVE25519_PRE_RFC_8731]),
+        ..Preferred::DEFAULT
+    };
     Arc::new(client::Config {
         client_id: russh::SshId::Standard("SSH-2.0-Stargate".into()),
         inactivity_timeout: Some(Duration::from_secs(300)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 2,
         nodelay: true,
+        preferred,
         ..Default::default()
     })
 }
