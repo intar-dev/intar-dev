@@ -199,6 +199,7 @@ interface VerifiedTerminalSession {
   vmId: string;
   runtimeVmName: string;
   websocketUrl: string;
+  probeMarker: string | null;
 }
 
 class HttpError extends Error {
@@ -1142,17 +1143,20 @@ async function verifyTerminalSessions(
         `browser terminal session missing websocket URL for ${vm.runtimeVmName}`,
       );
     }
-    sessions.push({
+    const verifiedSession: VerifiedTerminalSession = {
       runId: run.id,
       vmId: vm.id,
       runtimeVmName: vm.runtimeVmName,
       websocketUrl: session.browser.websocketUrl,
-    });
+      probeMarker: null,
+    };
+    sessions.push(verifiedSession);
     if (options.skipTerminalProbe) {
       logStep(`terminal probe skipped for ${vm.runtimeVmName}`);
       continue;
     }
     const marker = `INTAR_E2E_${Date.now()}_${vm.ordinal}`;
+    verifiedSession.probeMarker = marker;
     const output = await runTerminalProbe({
       websocketUrl: session.browser.websocketUrl,
       origin: new URL(options.baseUrl).origin,
@@ -1559,6 +1563,9 @@ async function teardownAndVerify(
   if (artifacts[0]) {
     await assertArtifactReadable(client, completed.id, artifacts[0]);
   }
+  if (!options.allowNoArtifacts) {
+    await assertReplaysContainProbeOutput(client, completed, terminalSessions);
+  }
   await assertTerminalSessionsRevoked(
     client,
     completed,
@@ -1698,6 +1705,60 @@ function collectArtifacts(run: ScenarioRun): RunArtifact[] {
     }
   }
   return [...byId.values()];
+}
+
+// The probe's executed output shows up in the cast as `<marker>_BEGIN\r\n`
+// (a real CR), while the echoed command only ever contains the source text
+// `<marker>_BEGIN\n'` with a literal backslash — so this asserts the replay
+// captured what the shell actually ran, not just the keystrokes.
+async function assertReplaysContainProbeOutput(
+  client: ApiClient,
+  run: ScenarioRun,
+  terminalSessions: VerifiedTerminalSession[],
+): Promise<void> {
+  for (const session of terminalSessions) {
+    if (!session.probeMarker) continue;
+    const vm = run.vms.find((candidate) => candidate.id === session.vmId);
+    const replay = vm?.replayArtifacts?.find((artifact) =>
+      artifact.filename.endsWith(".cast"),
+    );
+    if (!replay) {
+      throw new Error(
+        `no replay cast artifact for ${session.runtimeVmName} after teardown`,
+      );
+    }
+    const response = await client.raw(
+      `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(replay.id)}/content`,
+    );
+    if (!response.ok) {
+      const body = await parseResponseBody(response);
+      throw new HttpError(
+        `replay cast ${replay.id} is not readable`,
+        response.status,
+        body,
+      );
+    }
+    const cast = await response.text();
+    let executedOutputSeen = false;
+    for (const line of cast.split("\n").slice(1)) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as unknown;
+      if (!Array.isArray(event) || event[1] !== "o") continue;
+      if (
+        typeof event[2] === "string" &&
+        event[2].includes(`${session.probeMarker}_BEGIN\r`)
+      ) {
+        executedOutputSeen = true;
+        break;
+      }
+    }
+    if (!executedOutputSeen) {
+      throw new Error(
+        `replay cast for ${session.runtimeVmName} is missing the probe's executed output (${session.probeMarker}); the recording lost the session tail`,
+      );
+    }
+    logStep(`replay cast verified for ${session.runtimeVmName}`);
+  }
 }
 
 async function assertArtifactReadable(

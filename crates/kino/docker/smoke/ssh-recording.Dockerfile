@@ -11,6 +11,10 @@ COPY crates/intar-kino-proto/src crates/intar-kino-proto/src
 COPY crates/kino/Cargo.toml crates/kino/Cargo.toml
 COPY crates/kino/src crates/kino/src
 
+# The smoke context only carries kino and its proto crate; prune the other
+# workspace members so cargo can load the workspace.
+RUN awk 'BEGIN{skip=0} /^members = \[/{print "members = [\"crates/intar-kino-proto\", \"crates/kino\"]"; skip=1; next} skip && /^\]$/{skip=0; next} !skip{print}' Cargo.toml > Cargo.toml.pruned && mv Cargo.toml.pruned Cargo.toml
+
 RUN cargo build --release -p kino
 
 FROM alpine:3.22
