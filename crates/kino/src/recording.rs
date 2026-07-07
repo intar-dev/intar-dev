@@ -20,9 +20,9 @@ mod imp {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use rustix::io::{Errno as RustixErrno, dup, read as fd_read, write as fd_write};
     use rustix::pipe::{PipeFlags, pipe_with};
-    use rustix::process::{Pid, Signal, kill_process_group};
+    use rustix::process::{Pid, Signal, kill_process, kill_process_group};
     use serde::Serialize;
-    use signal_hook::consts::signal::SIGWINCH;
+    use signal_hook::consts::signal::{SIGHUP, SIGTERM, SIGWINCH};
     use signal_hook::iterator::{Handle as SignalsHandle, Signals};
     use std::collections::BTreeMap;
     use std::fs::{self, File, OpenOptions};
@@ -33,6 +33,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::process::ExitStatus;
     use std::process::{ChildStdin, Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -415,6 +416,7 @@ mod imp {
         exit_notify_read: OwnedFd,
         wait_handle: thread::JoinHandle<()>,
         resize_state: Arc<Mutex<Option<(u16, u16)>>>,
+        hangup_state: Arc<AtomicBool>,
         resize_notify_read: OwnedFd,
         resize_handle: SignalsHandle,
         resize_thread: thread::JoinHandle<()>,
@@ -467,14 +469,24 @@ mod imp {
                     .context("failed to create resize notify pipe")?;
             let resize_state = Arc::new(Mutex::new(None::<(u16, u16)>));
             let resize_state_thread = Arc::clone(&resize_state);
-            let mut signals =
-                Signals::new([SIGWINCH]).context("failed to subscribe to SIGWINCH")?;
+            // Registering SIGHUP/SIGTERM here keeps the recorder alive when
+            // sshd tears the session down (browser close, route revocation):
+            // the loop drains what the shell already produced, writes the
+            // exit event, and syncs the recording instead of dying mid-write.
+            let hangup_state = Arc::new(AtomicBool::new(false));
+            let hangup_state_thread = Arc::clone(&hangup_state);
+            let mut signals = Signals::new([SIGWINCH, SIGHUP, SIGTERM])
+                .context("failed to subscribe to session signals")?;
             let resize_handle = signals.handle();
             let resize_thread = thread::spawn(move || {
-                for _ in signals.forever() {
-                    let dimensions = tty_dimensions();
-                    if let Ok(mut guard) = resize_state_thread.lock() {
-                        *guard = Some(dimensions);
+                for signal in signals.forever() {
+                    if signal == SIGWINCH {
+                        let dimensions = tty_dimensions();
+                        if let Ok(mut guard) = resize_state_thread.lock() {
+                            *guard = Some(dimensions);
+                        }
+                    } else {
+                        hangup_state_thread.store(true, Ordering::SeqCst);
                     }
                     notify_pipe(&resize_notify_write);
                 }
@@ -487,6 +499,7 @@ mod imp {
                 exit_notify_read,
                 wait_handle,
                 resize_state,
+                hangup_state,
                 resize_notify_read,
                 resize_handle,
                 resize_thread,
@@ -521,6 +534,9 @@ mod imp {
         }
     }
 
+    const HANGUP_SHELL_KILL_GRACE: Duration = Duration::from_secs(2);
+    const HANGUP_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
     fn run_linux_interactive_loop(
         session: &mut LinuxInteractiveSession,
         writer: &Arc<Mutex<RawEventLogWriter>>,
@@ -533,6 +549,9 @@ mod imp {
         let mut exit_observed_at = None::<Instant>;
         let mut last_output_at = Instant::now();
         let mut pty_hup_seen = false;
+        let mut forwarding_broken = false;
+        let mut hangup_observed_at = None::<Instant>;
+        let mut hangup_killed_shell = false;
         let mut pty_buffer = [0_u8; 4096];
         let mut stdin_buffer = [0_u8; 4096];
 
@@ -582,6 +601,18 @@ mod imp {
                 )?;
             }
 
+            // A hangup means the outer session is gone; keep recording what
+            // the shell already produced, hang the shell up, and finish once
+            // it exits (or the drain deadline passes).
+            if session.hangup_state.load(Ordering::SeqCst) && hangup_observed_at.is_none() {
+                hangup_observed_at = Some(Instant::now());
+                stdin_closed = true;
+                forwarding_broken = true;
+                if exit_code.is_none() {
+                    best_effort_hangup_process_group(session.child_pid);
+                }
+            }
+
             if pty_events.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR) {
                 drain_pty_output(
                     session,
@@ -590,6 +621,7 @@ mod imp {
                     &mut pty_buffer,
                     &mut last_output_at,
                     &mut pty_hup_seen,
+                    &mut forwarding_broken,
                     exit_code,
                 )?;
             }
@@ -608,6 +640,21 @@ mod imp {
 
             if !pending_input.is_empty() {
                 flush_pending_input(&session.pty, &mut pending_input, exit_code.is_some())?;
+            }
+
+            if let Some(hangup_at) = hangup_observed_at {
+                if exit_code.is_none()
+                    && !hangup_killed_shell
+                    && hangup_at.elapsed() >= HANGUP_SHELL_KILL_GRACE
+                {
+                    hangup_killed_shell = true;
+                    best_effort_kill_shell(session.child_pid, Signal::KILL);
+                }
+                if hangup_at.elapsed() >= HANGUP_DRAIN_DEADLINE {
+                    // The wait thread joins on the shell; make sure it can.
+                    best_effort_kill_shell(session.child_pid, Signal::KILL);
+                    return Ok(exit_code.unwrap_or(128 + 1));
+                }
             }
 
             if should_finish_interactive_loop(
@@ -667,6 +714,7 @@ mod imp {
         pty_buffer: &mut [u8; 4096],
         last_output_at: &mut Instant,
         pty_hup_seen: &mut bool,
+        forwarding_broken: &mut bool,
         exit_code: Option<i32>,
     ) -> Result<()> {
         let mut stdout = io::stdout();
@@ -679,10 +727,10 @@ mod imp {
                 Ok(read_count) => {
                     let now = unix_ms();
                     *last_output_at = Instant::now();
-                    stdout
-                        .write_all(&pty_buffer[..read_count])
-                        .context("failed to forward shell output to stdout")?;
-                    stdout.flush().context("failed to flush stdout")?;
+                    // Record before forwarding so a torn-down session can
+                    // never lose output the viewer already saw. Forwarding is
+                    // best-effort: once the outer pty is gone (browser closed,
+                    // sshd hangup) the recording is the only consumer left.
                     write_cast_chunk(writer, now, "o", &pty_buffer[..read_count]).with_context(
                         || {
                             format!(
@@ -691,6 +739,14 @@ mod imp {
                             )
                         },
                     )?;
+                    if !*forwarding_broken {
+                        let forwarded = stdout
+                            .write_all(&pty_buffer[..read_count])
+                            .and_then(|()| stdout.flush());
+                        if forwarded.is_err() {
+                            *forwarding_broken = true;
+                        }
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -814,6 +870,19 @@ mod imp {
     fn best_effort_terminate_process_group(pid: Option<Pid>) {
         if let Some(pid) = pid {
             let _ = kill_process_group(pid, Signal::TERM);
+        }
+    }
+
+    fn best_effort_hangup_process_group(pid: Option<Pid>) {
+        best_effort_kill_shell(pid, Signal::HUP);
+    }
+
+    fn best_effort_kill_shell(pid: Option<Pid>, signal: Signal) {
+        if let Some(pid) = pid {
+            // Interactive shells ignore HUP/TERM in their own group; signal
+            // both the group and the shell process itself.
+            let _ = kill_process_group(pid, signal);
+            let _ = kill_process(pid, signal);
         }
     }
 

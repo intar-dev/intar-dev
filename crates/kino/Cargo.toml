@@ -31,6 +31,12 @@ tokio.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+base64.workspace = true
+pty-process.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 crossterm.workspace = true
 pty-process.workspace = true
