@@ -1538,6 +1538,13 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let _ = inner.probe_updates_tx.send(ready);
     ensure_create_not_deleted(inner, req.name).await?;
     set_state(inner, req.name, VmLifecycleState::Running).await;
+    // The queue-time reconcile can run before this VM's network and SSH
+    // forward port exist (VMs of a run are created concurrently), so render
+    // the nftables forwards again now that the network details are final —
+    // before the terminal target is advertised as ready.
+    ensure_vm_network_reconciled(inner)
+        .await
+        .context("failed to reconcile ssh forwarding for running vm")?;
     publish_terminal_state_update(inner, req.name, false).await;
     start_terminal_worker(inner, req.name)
         .await
