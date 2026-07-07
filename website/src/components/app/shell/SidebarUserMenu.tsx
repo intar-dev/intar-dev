@@ -4,6 +4,7 @@ import { ChevronsUpDown, LogOut, User as UserIcon } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -72,9 +73,12 @@ export function SidebarUserMenu() {
             sideOffset={8}
             className="min-w-56"
           >
-            <DropdownMenuLabel className="truncate">
-              {username}
-            </DropdownMenuLabel>
+            {/* Base UI requires GroupLabel to live inside a Menu.Group. */}
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="truncate">
+                {username}
+              </DropdownMenuLabel>
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem render={<Link to="/profile" />}>
               <UserIcon className="size-4" />
