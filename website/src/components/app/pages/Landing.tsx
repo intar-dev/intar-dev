@@ -1,11 +1,9 @@
 import { useMutation } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { ArrowRight, Clock3, Film, Server, SquareTerminal } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { startGithubSignIn } from "@/lib/auth-client";
 import { ThemeToggle } from "../theme";
-import { DifficultyChip, MetaChip, type ScenarioDifficulty } from "../patterns/MetaChip";
 import hetznerLogo from "@/assets/hetzner-logo.jpg";
 import namespaceLogo from "@/assets/namespace-logo.png";
 
@@ -44,41 +42,6 @@ const steps = [
     body: "Objectives turn green as you fix things. Stuck? Reveal hints in order, or the full solution when you need it.",
   },
 ] as const;
-
-interface ShowcaseScenario {
-  title: string;
-  tagline: string;
-  difficulty: ScenarioDifficulty;
-  estimatedMinutes: number;
-  vmCount: number;
-}
-
-const showcaseScenarios: ShowcaseScenario[] = [
-  {
-    title: "Nginx is down",
-    tagline:
-      "The company site returns connection refused. Find out why nginx won't start and bring it back.",
-    difficulty: "easy",
-    estimatedMinutes: 20,
-    vmCount: 1,
-  },
-  {
-    title: "Postgres won't accept writes",
-    tagline:
-      "Reads work, writes fail. Dig through logs and disk state to figure out what's blocking the database.",
-    difficulty: "medium",
-    estimatedMinutes: 35,
-    vmCount: 1,
-  },
-  {
-    title: "Kubernetes OOM loop",
-    tagline:
-      "A deployment keeps crash-looping under memory pressure. Diagnose the limits and stop the churn.",
-    difficulty: "hard",
-    estimatedMinutes: 45,
-    vmCount: 3,
-  },
-];
 
 // Deliberately always-dark terminal palette (independent of theme tokens).
 const terminalLines = [
@@ -162,9 +125,7 @@ export function Landing() {
     <div>
       <header className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-6">
         <span className="flex items-center gap-2.5">
-          <span className="flex size-8 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <SquareTerminal className="size-5" aria-hidden="true" />
-          </span>
+          <img src="/favicon.svg" alt="" className="size-8" />
           <span className="font-heading text-lg font-bold tracking-tight">
             intar
           </span>
@@ -177,9 +138,6 @@ export function Landing() {
             disabled={signIn.isPending}
           >
             {signIn.isPending ? "Opening GitHub…" : "Sign in"}
-          </Button>
-          <Button size="sm" render={<Link to="/request-access" />}>
-            Request access
           </Button>
           <ThemeToggle />
         </div>
@@ -200,24 +158,21 @@ export function Landing() {
             <div className="flex flex-col items-start gap-6">
               <p className="text-eyebrow">Hands-on DevOps training</p>
               <h1 className="text-display text-balance sm:text-5xl">
-                Learn DevOps by fixing real broken systems
+                Learn DevOps by fixing{" "}
+                <span className="text-gradient-brand">real broken systems</span>
               </h1>
               <p className="max-w-2xl text-lg leading-8 text-muted-foreground">
                 Real scenarios, live sandboxes, actual VMs to break and repair —
                 not slideshows.
               </p>
               <div className="flex flex-col gap-3 sm:flex-row">
-                <Button size="lg" render={<Link to="/request-access" />}>
-                  Request access
-                  <ArrowRight className="size-4" />
-                </Button>
                 <Button
-                  variant="outline"
                   size="lg"
                   onClick={() => signIn.mutate()}
                   disabled={signIn.isPending}
                 >
                   {signIn.isPending ? "Opening GitHub…" : "Sign in with GitHub"}
+                  <ArrowRight className="size-4" />
                 </Button>
               </div>
             </div>
@@ -243,56 +198,6 @@ export function Landing() {
                 </p>
               </div>
             ))}
-          </div>
-        </section>
-
-        <section className="mx-auto w-full max-w-6xl px-6 py-16">
-          <p className="text-eyebrow">Scenario catalog</p>
-          <h2 className="mt-2 text-page-title">What you'll fix</h2>
-          <div className="mt-8 grid gap-6 md:grid-cols-3">
-            {showcaseScenarios.map((scenario) => (
-              <div
-                key={scenario.title}
-                className="flex flex-col gap-4 rounded-2xl border bg-card p-6 shadow-xs"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <DifficultyChip difficulty={scenario.difficulty} />
-                  <MetaChip icon={<Clock3 />}>
-                    ~{scenario.estimatedMinutes} min
-                  </MetaChip>
-                  <MetaChip icon={<Server />}>
-                    {scenario.vmCount === 1
-                      ? "1 machine"
-                      : `${scenario.vmCount} machines`}
-                  </MetaChip>
-                </div>
-                <div className="space-y-1.5">
-                  <h3 className="font-heading text-xl font-semibold tracking-tight">
-                    {scenario.title}
-                  </h3>
-                  <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
-                    {scenario.tagline}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="mx-auto w-full max-w-6xl px-6 py-8">
-          <div className="flex items-center gap-4 rounded-2xl border bg-card p-6 shadow-xs">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-secondary-foreground">
-              <Film className="size-5" aria-hidden="true" />
-            </span>
-            <div>
-              <h2 className="text-card-title">
-                Every run ends with a replay you can share.
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                Your whole terminal session is recorded — review what you did,
-                or send the link to a teammate.
-              </p>
-            </div>
           </div>
         </section>
 
@@ -329,22 +234,6 @@ export function Landing() {
                 />
               </a>
             </div>
-          </div>
-        </section>
-
-        <section className="mx-auto w-full max-w-6xl px-6 py-8">
-          <div className="flex flex-col items-center gap-6 rounded-2xl border border-primary/20 bg-primary/5 px-6 py-14 text-center">
-            <h2 className="text-page-title text-balance">
-              Ready to fix something real?
-            </h2>
-            <p className="max-w-xl text-muted-foreground">
-              intar is invite-only while we scale the sandbox fleet. Request
-              access and we'll get you in.
-            </p>
-            <Button size="lg" render={<Link to="/request-access" />}>
-              Request access
-              <ArrowRight className="size-4" />
-            </Button>
           </div>
         </section>
       </main>

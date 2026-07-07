@@ -36,10 +36,10 @@ export function MetaChip({
 }
 
 const DIFFICULTY_STYLES: Record<ScenarioDifficulty, string> = {
-  // A challenge scale, not a threat scale: teal → amber → strong orange.
+  // A challenge scale following the brand gradient: gold → orange → red.
   easy: "bg-secondary text-secondary-foreground",
-  medium: "bg-warning/20 text-warning-foreground dark:text-warning",
-  hard: "bg-primary/15 text-primary",
+  medium: "bg-primary/15 text-primary",
+  hard: "bg-destructive/15 text-destructive",
 };
 
 const DIFFICULTY_LABELS: Record<ScenarioDifficulty, string> = {

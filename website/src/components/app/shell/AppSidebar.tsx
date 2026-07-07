@@ -1,5 +1,4 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { SquareTerminal } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -35,9 +34,7 @@ export function AppSidebar() {
           to="/scenarios"
           className="flex items-center gap-2.5 px-1.5 py-1.5"
         >
-          <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <SquareTerminal className="size-4.5" />
-          </span>
+          <img src="/favicon.svg" alt="" className="size-8 shrink-0" />
           <span className="font-heading text-base font-bold tracking-tight group-data-[collapsible=icon]:hidden">
             intar
           </span>
