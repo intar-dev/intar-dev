@@ -7,6 +7,7 @@ import {
   ListChecks,
   Server,
   User,
+  UserPlus,
   Users,
 } from "lucide-react";
 
@@ -120,6 +121,13 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Scenario registry",
         to: "/admin/scenarios",
         icon: Library,
+        requires: "admin",
+      },
+      {
+        id: "admin-people",
+        label: "People",
+        to: "/admin/people",
+        icon: UserPlus,
         requires: "admin",
       },
     ],

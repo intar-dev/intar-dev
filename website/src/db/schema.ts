@@ -738,6 +738,30 @@ export const oauthConsent = sqliteTable(
   ],
 );
 
+export const accessRequests = sqliteTable(
+  "access_requests",
+  {
+    id: text("id").primaryKey(),
+    // Normalized (lowercased) GitHub username — the allowlist key.
+    githubUsername: text("github_username").notNull(),
+    note: text("note"),
+    status: text("status", {
+      enum: ["pending", "approved", "rejected"],
+    })
+      .default("pending")
+      .notNull(),
+    decidedBy: text("decided_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    decidedAt: integer("decided_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("access_requests_username_uidx").on(table.githubUsername),
+    index("access_requests_status_idx").on(table.status, table.createdAt),
+  ],
+);
+
 export const jwks = sqliteTable("jwks", {
   id: text("id").primaryKey(),
   publicKey: text("public_key").notNull(),
