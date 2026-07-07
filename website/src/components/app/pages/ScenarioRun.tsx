@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  ChevronDown,
   Eye,
   CheckCircle2,
   Clock3,
@@ -51,6 +52,7 @@ import { toLegacyScenarioRunRecord } from "@/lib/legacy-scenario-ui";
 import { parseProbeValue, summarizeProbeValue } from "@/lib/probe-values";
 import { ProbeDetail } from "@/components/app/run/ProbeDetail";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
+import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import { cn } from "@/lib/utils";
@@ -939,6 +941,7 @@ export function ScenarioRun() {
                   probes={selectedVm?.scenarioProbes ?? []}
                   objectives={attemptData.objectives}
                 />
+                <RunTimelineSection runId={runId} />
                 <HintList
                   hints={attemptData.hints}
                   nextHintKey={attemptData.nextHintKey}
@@ -1054,6 +1057,41 @@ function ScenarioVmSelector(props: {
         })}
       </div>
     </div>
+  );
+}
+
+// Timeline stays collapsed by default; ObjectiveTimeline only mounts (and
+// fetches) when expanded, keeping it off the run poll's hot path.
+function RunTimelineSection({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 text-left"
+          onClick={() => setOpen((current) => !current)}
+          aria-expanded={open}
+        >
+          <span>
+            <CardTitle className="text-base">Timeline</CardTitle>
+            <CardDescription>When each check flipped.</CardDescription>
+          </span>
+          <ChevronDown
+            className={cn(
+              "size-4 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-180",
+            )}
+            aria-hidden="true"
+          />
+        </button>
+      </CardHeader>
+      {open ? (
+        <CardContent>
+          <ObjectiveTimeline runId={runId} />
+        </CardContent>
+      ) : null}
+    </Card>
   );
 }
 
