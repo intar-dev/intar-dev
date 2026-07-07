@@ -1537,14 +1537,17 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     persist_probe_update(inner, &ready).await;
     let _ = inner.probe_updates_tx.send(ready);
     ensure_create_not_deleted(inner, req.name).await?;
-    set_state(inner, req.name, VmLifecycleState::Running).await;
-    // The queue-time reconcile can run before this VM's network and SSH
-    // forward port exist (VMs of a run are created concurrently), so render
-    // the nftables forwards again now that the network details are final —
-    // before the terminal target is advertised as ready.
+    // Render the nftables SSH forwards before flipping to Running: terminal
+    // readiness (and thus the advertised terminal target) is gated on the
+    // Running state, and a concurrent Kino-readiness report can observe the
+    // Running transition and advertise the terminal before a reconcile that
+    // ran afterwards would install the DNAT forward. The queue-time reconcile
+    // can also miss this VM's port because a run's VMs are created
+    // concurrently, so this is the reconcile that guarantees the forward.
     ensure_vm_network_reconciled(inner)
         .await
         .context("failed to reconcile ssh forwarding for running vm")?;
+    set_state(inner, req.name, VmLifecycleState::Running).await;
     publish_terminal_state_update(inner, req.name, false).await;
     start_terminal_worker(inner, req.name)
         .await
