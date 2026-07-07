@@ -1,12 +1,17 @@
 #![allow(clippy::missing_errors_doc)]
 
+//! Filesystem-facing wrapper around the pure content-hash core in
+//! `intar-image-scenario`. Walks the scenario directory into in-memory
+//! entries so the fs pipeline and the wasm authoring validator hash
+//! byte-identically.
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use intar_image_scenario::{ScenarioContentHashParams, scenario_content_hash_from_entries};
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v1";
+pub use intar_image_scenario::{BUILD_FORMAT_VERSION, sha256_bytes_hex};
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashInput<'a> {
@@ -28,40 +33,26 @@ pub fn scenario_content_hash(input: &ScenarioContentHashInput<'_>) -> Result<Str
         );
     }
 
-    let mut hasher = Sha256::new();
-    hash_field(&mut hasher, "format", BUILD_FORMAT_VERSION.as_bytes());
-    hash_field(&mut hasher, "scenario_id", input.scenario_id.as_bytes());
-    hash_field(
-        &mut hasher,
-        "base_definition",
-        input.base_definition.as_bytes(),
-    );
-    hash_field(&mut hasher, "kino_version", input.kino_version.as_bytes());
-    hash_field(&mut hasher, "target_arch", input.target_arch.as_bytes());
-
+    let mut entries = Vec::new();
     for path in sorted_files(input.scenario_dir)? {
         let relative = path
             .strip_prefix(input.scenario_dir)
             .context("scenario file escaped scenario directory")?;
-        let normalized_path = format!(
-            "scenarios/{}/{}",
-            input.scenario_id.trim(),
-            normalize_relative_path(relative)?
-        );
         let bytes = fs::read(&path)
             .with_context(|| format!("failed to read scenario file '{}'", path.display()))?;
-        hash_field(&mut hasher, "file_path", normalized_path.as_bytes());
-        hash_field(&mut hasher, "file_bytes", &bytes);
+        entries.push((normalize_relative_path(relative)?, bytes));
     }
 
-    Ok(hex_digest(hasher.finalize()))
-}
-
-#[must_use]
-pub fn sha256_bytes_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex_digest(hasher.finalize())
+    scenario_content_hash_from_entries(
+        &ScenarioContentHashParams {
+            scenario_id: input.scenario_id,
+            base_definition: input.base_definition,
+            kino_version: input.kino_version,
+            target_arch: input.target_arch,
+        },
+        &entries,
+    )
+    .map_err(|error| anyhow::anyhow!(error))
 }
 
 fn sorted_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -115,27 +106,13 @@ fn normalize_relative_path(path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn hash_field(hasher: &mut Sha256, key: &str, value: &[u8]) {
-    hasher.update(key.as_bytes());
-    hasher.update([0]);
-    hasher.update(value.len().to_le_bytes());
-    hasher.update(value);
-    hasher.update([0xff]);
-}
-
-fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
+
+    use intar_image_scenario::{ScenarioContentHashParams, scenario_content_hash_from_entries};
 
     use super::{ScenarioContentHashInput, scenario_content_hash};
 
@@ -182,6 +159,32 @@ mod tests {
         fs::write(right.path().join("b.txt"), "same").unwrap();
 
         assert_ne!(hash_for(left.path()), hash_for(right.path()));
+    }
+
+    #[test]
+    fn fs_walk_matches_in_memory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("scenario.hcl"), "scenario body").unwrap();
+        fs::write(dir.path().join("sub/provision.sh"), "apt update").unwrap();
+
+        let from_fs = hash_for(dir.path());
+        let from_entries = scenario_content_hash_from_entries(
+            &ScenarioContentHashParams {
+                scenario_id: "broken-nginx",
+                base_definition: "trixie=suite=trixie\narch=amd64",
+                kino_version: "0.1.24",
+                target_arch: "x86_64",
+            },
+            &[
+                // Deliberately unsorted; the core sorts.
+                ("sub/provision.sh".to_string(), b"apt update".to_vec()),
+                ("scenario.hcl".to_string(), b"scenario body".to_vec()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(from_fs, from_entries);
     }
 
     fn hash_for(path: &std::path::Path) -> String {

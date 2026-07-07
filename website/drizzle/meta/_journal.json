@@ -29,6 +29,34 @@
       "when": 1782992521398,
       "tag": "0003_soft_jack_power",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1783439601939,
+      "tag": "0004_access-requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1783440062087,
+      "tag": "0005_teams",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1783441625119,
+      "tag": "0006_scenario-sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1783442011476,
+      "tag": "0007_scenario-category",
+      "breakpoints": true
     }
   ]
 }

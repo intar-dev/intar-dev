@@ -121,6 +121,24 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/*
+ * Per-surface mood. The hybrid design uses one base-nova token set with two
+ * moods: a warm, spacious public marketing surface and a denser, terminal-
+ * leaning authenticated app surface. These are additive nudges layered on top
+ * of :root / .dark — they only adjust radius/warmth, never fork the palette.
+ */
+[data-surface="marketing"] {
+  --radius: 0.75rem;
+  /* subtle warm cast on the light marketing surface */
+  --background: oklch(0.995 0.004 95);
+  --muted: oklch(0.97 0.005 95);
+  --accent: oklch(0.97 0.005 95);
+}
+
+[data-surface="app"] {
+  --radius: 0.5rem;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

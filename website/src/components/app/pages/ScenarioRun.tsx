@@ -10,6 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  ChevronDown,
   Eye,
   CheckCircle2,
   Clock3,
@@ -26,7 +27,7 @@ import {
   type RunArtifactViewerState,
 } from "@/components/app/RunArtifactViewer";
 import { NativeSshDialogButton } from "@/components/remote-access/NativeSshDialogButton";
-import { SignedInShell } from "@/components/app/SignedInShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +49,13 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { toLegacyScenarioRunRecord } from "@/lib/legacy-scenario-ui";
+import { parseProbeValue, summarizeProbeValue } from "@/lib/probe-values";
+import { ProbeDetail } from "@/components/app/run/ProbeDetail";
+import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
+import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
+import { VmDetailsCard } from "@/components/app/run/VmDetailsCard";
+import { computeLeaseDeadline } from "@/lib/run-lease";
+import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import { cn } from "@/lib/utils";
 
 interface ScenarioProbeStatus {
@@ -96,6 +104,7 @@ interface ScenarioRunVmRecord {
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
+  provisioning: RunVmProvisioningSpec;
   terminalTarget: {
     host: string | null;
     port: number;
@@ -206,7 +215,7 @@ const POLL_INTERVALS: Record<ScenarioRunRecord["phase"], number> = {
 export function ScenarioRun() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { runId } = useParams({ from: "/scenarios/runs/$runId" });
+  const { runId } = useParams({ from: "/app/runs/$runId" });
   const [projectionPending, setProjectionPending] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -723,7 +732,7 @@ export function ScenarioRun() {
   }, [attemptData, replayArtifact, replayArtifactIndex, selectedVm]);
 
   return (
-    <SignedInShell
+    <PageShell
       title="Scenario run"
       description="Progress, shell access, and the final replay."
       showHeader={false}
@@ -776,6 +785,17 @@ export function ScenarioRun() {
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {attemptData && attemptData.outcome === "in_progress" ? (
+              <LeaseCountdown
+                deadlineMs={computeLeaseDeadline(
+                  attemptData.createdAt,
+                  attemptData.vms.map(
+                    (vm) => vm.provisioning?.leaseDurationSeconds,
+                  ),
+                )}
+                className="rounded-full border bg-muted/40 px-3 py-1"
+              />
+            ) : null}
             {attemptData?.phase === "completed" ? (
               <RunArtifactGifExportButton viewer={viewer} />
             ) : null}
@@ -922,6 +942,15 @@ export function ScenarioRun() {
                   probes={selectedVm?.scenarioProbes ?? []}
                   objectives={attemptData.objectives}
                 />
+                <RunTimelineSection runId={runId} />
+                {selectedVm ? (
+                  <VmDetailsCard
+                    vmName={selectedVm.scenarioVmName}
+                    hostname={selectedVm.hostname}
+                    provisioning={selectedVm.provisioning}
+                    terminalTarget={selectedVm.terminalTarget}
+                  />
+                ) : null}
                 <HintList
                   hints={attemptData.hints}
                   nextHintKey={attemptData.nextHintKey}
@@ -950,7 +979,7 @@ export function ScenarioRun() {
           )}
         </div>
       ) : null}
-    </SignedInShell>
+    </PageShell>
   );
 }
 
@@ -1040,6 +1069,41 @@ function ScenarioVmSelector(props: {
   );
 }
 
+// Timeline stays collapsed by default; ObjectiveTimeline only mounts (and
+// fetches) when expanded, keeping it off the run poll's hot path.
+function RunTimelineSection({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 text-left"
+          onClick={() => setOpen((current) => !current)}
+          aria-expanded={open}
+        >
+          <span>
+            <CardTitle className="text-base">Timeline</CardTitle>
+            <CardDescription>When each check flipped.</CardDescription>
+          </span>
+          <ChevronDown
+            className={cn(
+              "size-4 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-180",
+            )}
+            aria-hidden="true"
+          />
+        </button>
+      </CardHeader>
+      {open ? (
+        <CardContent>
+          <ObjectiveTimeline runId={runId} />
+        </CardContent>
+      ) : null}
+    </Card>
+  );
+}
+
 function ScenarioProbeRail(props: {
   title: string;
   description: string;
@@ -1109,6 +1173,13 @@ function ScenarioProbeRail(props: {
                 ) : null}
                 {probe.error ? (
                   <p className="mt-2 text-xs text-destructive">{probe.error}</p>
+                ) : probe.status === "fail" &&
+                  parseProbeValue(probe.kind, probe.value) ? (
+                  <ProbeDetail
+                    kind={probe.kind}
+                    value={probe.value}
+                    className="mt-3 rounded-md border border-destructive/20 bg-background/60 p-2.5"
+                  />
                 ) : (
                   <p
                     className={cn(
@@ -1907,6 +1978,9 @@ function describeProbeValue(probe: ScenarioProbeStatus) {
       ? "Passing"
       : "Waiting for a passing signal.";
   }
+
+  const summary = summarizeProbeValue(probe.kind, probe.value);
+  if (summary) return summary;
 
   if (typeof probe.value === "string") {
     return probe.value;

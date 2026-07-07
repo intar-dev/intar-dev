@@ -44,6 +44,7 @@ export function catalogRowsFromScenarioManifest(
     scenario: {
       scenarioId,
       title: manifest.title,
+      category: manifest.category,
       description: manifest.description,
       difficulty: manifest.difficulty,
       estimatedMinutes: manifest.estimated_minutes,
@@ -98,6 +99,7 @@ export async function seedScenarioManifest(
       target: vmScenarios.scenarioId,
       set: {
         title: rows.scenario.title,
+        category: rows.scenario.category,
         description: rows.scenario.description,
         difficulty: rows.scenario.difficulty,
         estimatedMinutes: rows.scenario.estimatedMinutes,

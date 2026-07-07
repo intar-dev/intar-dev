@@ -8,6 +8,7 @@ members = [
     "crates/intar-image-build",
     "crates/intar-image-cli",
     "crates/intar-image-scenario",
+    "crates/intar-image-scenario-wasm",
     "crates/intar-image-upload",
     "crates/intar-kino-proto",
     "crates/kino",

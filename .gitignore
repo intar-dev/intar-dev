@@ -6,3 +6,6 @@ target/
 .work/
 dist/
 config.vm.local.toml
+
+# wrangler local state
+.wrangler/

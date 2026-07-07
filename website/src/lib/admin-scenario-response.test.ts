@@ -29,6 +29,7 @@ describe("admin scenario response serialization", () => {
 });
 
 const scenario: ScenarioDetailRecord = {
+  category: "web",
   scenarioId: "broken-nginx",
   title: "Broken Nginx",
   description: "Fix a misconfigured nginx server",

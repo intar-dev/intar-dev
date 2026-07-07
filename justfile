@@ -24,6 +24,10 @@ security:
 generate-contracts:
     cargo run -p intar-contracts-typegen
 
+generate-scenario-wasm:
+    wasm-pack build crates/intar-image-scenario-wasm --target web --release --no-pack --out-dir ../../website/src/generated/scenario-wasm
+    rm -f website/src/generated/scenario-wasm/.gitignore
+
 check-generated-contracts:
     cargo run -p intar-contracts-typegen
     git diff --exit-code -- website/src/generated

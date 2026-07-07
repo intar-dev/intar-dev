@@ -87,6 +87,7 @@ export function normalizeScenarioVmDirectBootMetadata(input: {
 export interface ScenarioBriefing {
   title: string;
   tagline: string;
+  category: string;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
   briefingMarkdown: string;
@@ -138,6 +139,7 @@ const DEFAULT_VM_LEASE_DURATION_SECONDS = 3600;
 export function deriveScenarioBriefing(input: {
   scenarioId: string;
   title: string;
+  category: string;
   description: string;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
@@ -159,6 +161,7 @@ export function deriveScenarioBriefing(input: {
   return {
     title: input.title.trim(),
     tagline: input.description.trim(),
+    category: input.category.trim(),
     difficulty: input.difficulty,
     estimatedMinutes: input.estimatedMinutes,
     briefingMarkdown: normalizeMultilineText(input.briefingMarkdown),

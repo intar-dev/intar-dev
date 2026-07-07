@@ -5,113 +5,184 @@ import {
   Outlet,
   redirect,
 } from "@tanstack/react-router";
-import { AppNavbar } from "./AppNavbar";
+import { MarketingShell } from "./shell/MarketingShell";
+import { AppShell } from "./shell/AppShell";
 import { Landing } from "./pages/Landing";
+import { RequestAccess } from "./pages/RequestAccess";
+import { OAuthConsent } from "./pages/OAuthConsent";
 import { Dashboard } from "./pages/Dashboard";
 import { AgentOnboarding } from "./pages/AgentOnboarding";
 import { AdminBuilds } from "./pages/AdminBuilds";
 import { Scenarios as AdminScenarios } from "./pages/Scenarios";
 import { ScenarioDetails as AdminScenarioDetails } from "./pages/ScenarioDetails";
+import { AdminPeople } from "./pages/AdminPeople";
+import { AdminAuthoring } from "./pages/AdminAuthoring";
 import { ScenarioCatalog } from "./pages/ScenarioCatalog";
 import { ScenarioBriefing } from "./pages/ScenarioBriefing";
 import { ScenarioRun } from "./pages/ScenarioRun";
+import { RunsList } from "./pages/RunsList";
+import { Teams } from "./pages/Teams";
+import { TeamDetail } from "./pages/TeamDetail";
 import { Profile } from "./pages/Profile";
-import { OAuthConsent } from "./pages/OAuthConsent";
-import { ThemeToggle } from "./theme";
 import { getClientSession } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 
-const rootRoute = createRootRoute({
-  component: RootLayout,
+const rootRoute = createRootRoute({ component: () => <Outlet /> });
+
+/* -------------------------------------------------------------------------- */
+/* Marketing surface (public, light)                                          */
+/* -------------------------------------------------------------------------- */
+
+const marketingLayoutRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  id: "marketing",
+  component: MarketingShell,
 });
 
 const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => marketingLayoutRoute,
   path: "/",
   component: Landing,
 });
 
-const dashboardRoute = createRoute({
+const requestAccessRoute = createRoute({
+  getParentRoute: () => marketingLayoutRoute,
+  path: "request-access",
+  component: RequestAccess,
+});
+
+const oauthConsentRoute = createRoute({
+  getParentRoute: () => marketingLayoutRoute,
+  path: "oauth/consent",
+  component: OAuthConsent,
+});
+
+/* -------------------------------------------------------------------------- */
+/* App surface (signed-in, dark). Guard lives here, once.                     */
+/* -------------------------------------------------------------------------- */
+
+const appLayoutRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "dashboard",
+  id: "app",
+  beforeLoad: requireSignedInRoute,
+  component: AppShell,
+});
+
+const scenarioCatalogRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "scenarios",
+  component: ScenarioCatalog,
+});
+
+const scenarioBriefingRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "scenarios/$scenarioId",
+  component: ScenarioBriefing,
+});
+
+const scenarioRunRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "runs/$runId",
+  component: ScenarioRun,
+});
+
+const runsListRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "runs",
+  component: RunsList,
+});
+
+const teamsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "teams",
+  component: Teams,
+});
+
+const teamDetailRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "teams/$orgId",
+  component: TeamDetail,
+});
+
+const profileRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "profile",
+  component: Profile,
+});
+
+/* Admin routes — additionally require the admin role. */
+
+const adminOverviewRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin",
   beforeLoad: requireAdminRoute,
   component: Dashboard,
 });
 
-const dashboardOnboardingRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dashboard/onboarding",
+const adminOnboardingRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/onboarding",
   beforeLoad: requireAdminRoute,
   component: AgentOnboarding,
 });
 
-const adminScenariosRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "admin/scenarios",
-  beforeLoad: requireAdminRoute,
-  component: AdminScenarios,
-});
-
 const adminBuildsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => appLayoutRoute,
   path: "admin/builds",
   beforeLoad: requireAdminRoute,
   component: AdminBuilds,
 });
 
+const adminScenariosRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/scenarios",
+  beforeLoad: requireAdminRoute,
+  component: AdminScenarios,
+});
+
 const adminScenarioDetailsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => appLayoutRoute,
   path: "admin/scenarios/$scenarioId",
   beforeLoad: requireAdminRoute,
   component: AdminScenarioDetails,
 });
 
-const scenarioCatalogRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "scenarios",
-  beforeLoad: requireSignedInRoute,
-  component: ScenarioCatalog,
+const adminPeopleRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/people",
+  beforeLoad: requireAdminRoute,
+  component: AdminPeople,
 });
 
-const scenarioBriefingRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "scenarios/$scenarioId",
-  beforeLoad: requireSignedInRoute,
-  component: ScenarioBriefing,
-});
-
-const scenarioRunRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "scenarios/runs/$runId",
-  beforeLoad: requireSignedInRoute,
-  component: ScenarioRun,
-});
-
-const profileRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "profile",
-  beforeLoad: requireSignedInRoute,
-  component: Profile,
-});
-
-const oauthConsentRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "oauth/consent",
-  component: OAuthConsent,
+const adminAuthoringRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/authoring",
+  beforeLoad: requireAdminRoute,
+  component: AdminAuthoring,
 });
 
 const routeTree = rootRoute.addChildren([
-  indexRoute,
-  oauthConsentRoute,
-  dashboardRoute,
-  dashboardOnboardingRoute,
-  adminBuildsRoute,
-  adminScenariosRoute,
-  adminScenarioDetailsRoute,
-  scenarioCatalogRoute,
-  scenarioBriefingRoute,
-  scenarioRunRoute,
-  profileRoute,
+  marketingLayoutRoute.addChildren([
+    indexRoute,
+    requestAccessRoute,
+    oauthConsentRoute,
+  ]),
+  appLayoutRoute.addChildren([
+    scenarioCatalogRoute,
+    scenarioBriefingRoute,
+    scenarioRunRoute,
+    runsListRoute,
+    teamsRoute,
+    teamDetailRoute,
+    profileRoute,
+    adminOverviewRoute,
+    adminOnboardingRoute,
+    adminBuildsRoute,
+    adminScenariosRoute,
+    adminScenarioDetailsRoute,
+    adminPeopleRoute,
+    adminAuthoringRoute,
+  ]),
 ]);
 
 export const router = createRouter({
@@ -120,19 +191,8 @@ export const router = createRouter({
   defaultPendingMinMs: 150,
 });
 
-function RootLayout() {
-  return (
-    <div className="min-h-screen text-foreground">
-      <ThemeToggle />
-      <AppNavbar />
-      <Outlet />
-    </div>
-  );
-}
-
 async function requireAdminRoute() {
   const session = await getClientSession();
-
   if (!session?.user || !isAdminUser(session.user)) {
     throw redirect({ to: "/" });
   }
@@ -140,7 +200,6 @@ async function requireAdminRoute() {
 
 async function requireSignedInRoute() {
   const session = await getClientSession();
-
   if (!session?.user) {
     throw redirect({ to: "/" });
   }

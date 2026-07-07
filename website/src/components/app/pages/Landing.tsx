@@ -1,4 +1,10 @@
+import { useMutation } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { ArrowRight, ScrollText, ShieldCheck, Terminal } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { startGithubSignIn } from "@/lib/auth-client";
+import { ThemeToggle } from "../theme";
 import hetznerLogo from "@/assets/hetzner-logo.jpg";
 import namespaceLogo from "@/assets/namespace-logo.png";
 
@@ -20,6 +26,24 @@ const errorMessages: Record<string, string> = {
     "GitHub didn't return an email. Please check your GitHub email settings.",
 };
 
+const steps = [
+  {
+    icon: ShieldCheck,
+    title: "Pick a scenario",
+    body: "Choose a real, broken system — a misconfigured web server, a flaky service, a cluster that won't schedule.",
+  },
+  {
+    icon: Terminal,
+    title: "Drop into a live sandbox",
+    body: "Get one or more real VMs with a browser or native SSH terminal. No simulations — an actual box to fix.",
+  },
+  {
+    icon: ScrollText,
+    title: "Solve, with checks & hints",
+    body: "Objectives turn green as you fix things. Stuck? Reveal hints in order, or the full solution when you need it.",
+  },
+] as const;
+
 export function Landing() {
   const errorFromQuery =
     typeof window === "undefined"
@@ -27,33 +51,97 @@ export function Landing() {
       : new URLSearchParams(window.location.search).get("error");
   const errorMessage = friendlyMessageFor(errorFromQuery) ?? null;
 
-  return (
-    <div className="px-4 py-6 sm:px-6 lg:px-8">
-      <div className="mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-7xl flex-col">
-        <main className="flex flex-1 items-center py-6">
-          <div className="w-full space-y-6">
-            {errorMessage ? (
-              <Alert variant="destructive" className="max-w-xl">
-                <AlertTitle>Sign-in failed</AlertTitle>
-                <AlertDescription>{errorMessage}</AlertDescription>
-              </Alert>
-            ) : null}
+  const signIn = useMutation({
+    mutationFn: () =>
+      startGithubSignIn({
+        callbackURL: `${window.location.origin}/scenarios`,
+        errorCallbackURL: `${window.location.origin}/`,
+      }),
+  });
 
-            <section className="mx-auto flex max-w-3xl flex-col items-center gap-5 text-center sm:gap-6">
-              <h1 className="flex items-center gap-3 text-6xl font-semibold leading-none tracking-tight sm:gap-4 sm:text-7xl lg:text-8xl">
-                <img
-                  src="/favicon.svg"
-                  alt=""
-                  aria-hidden="true"
-                  className="h-[1em] w-[1em]"
-                />
-                intar
-              </h1>
-              <p className="mx-auto max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">
-                Hands-on DevOps training through real scenarios.
-              </p>
-            </section>
+  return (
+    <div className="px-4 sm:px-6 lg:px-8">
+      <div className="mx-auto w-full max-w-6xl">
+        <header className="flex items-center justify-between py-5">
+          <span className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+            <img
+              src="/favicon.svg"
+              alt=""
+              aria-hidden="true"
+              className="size-6"
+            />
+            intar
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => signIn.mutate()}
+              disabled={signIn.isPending}
+            >
+              {signIn.isPending ? "Opening GitHub…" : "Sign in"}
+            </Button>
+            <ThemeToggle />
           </div>
+        </header>
+
+        {errorMessage ? (
+          <Alert variant="destructive" className="mx-auto max-w-xl">
+            <AlertTitle>Sign-in failed</AlertTitle>
+            <AlertDescription>{errorMessage}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <main>
+          <section className="mx-auto flex max-w-3xl flex-col items-center gap-6 py-16 text-center sm:py-24">
+            <h1 className="flex items-center gap-3 text-6xl font-semibold leading-none tracking-tight sm:gap-4 sm:text-7xl lg:text-8xl">
+              <img
+                src="/favicon.svg"
+                alt=""
+                aria-hidden="true"
+                className="h-[1em] w-[1em]"
+              />
+              intar
+            </h1>
+            <p className="mx-auto max-w-xl text-lg leading-8 text-muted-foreground sm:text-xl">
+              Hands-on DevOps training through real scenarios. Fix real broken
+              systems in live sandboxes — not slideshows.
+            </p>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <Button size="lg" render={<Link to="/request-access" />}>
+                Request access
+                <ArrowRight className="size-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={() => signIn.mutate()}
+                disabled={signIn.isPending}
+              >
+                {signIn.isPending ? "Opening GitHub…" : "Sign in with GitHub"}
+              </Button>
+            </div>
+          </section>
+
+          <section className="mx-auto grid max-w-5xl gap-4 pb-16 sm:grid-cols-3">
+            {steps.map((step) => {
+              const Icon = step.icon;
+              return (
+                <div
+                  key={step.title}
+                  className="rounded-2xl border bg-card/60 p-6 text-left"
+                >
+                  <span className="mb-4 flex size-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                    <Icon className="size-5" />
+                  </span>
+                  <h3 className="text-base font-semibold">{step.title}</h3>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    {step.body}
+                  </p>
+                </div>
+              );
+            })}
+          </section>
         </main>
 
         <section className="py-10 sm:py-12">
@@ -94,7 +182,7 @@ export function Landing() {
           </div>
         </section>
 
-        <footer className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 pt-6 text-center text-sm text-muted-foreground">
+        <footer className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 py-8 text-center text-sm text-muted-foreground">
           <span>Built by</span>
           <a
             href="https://icepuma.dev"

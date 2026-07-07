@@ -9,7 +9,7 @@ import {
   Microchip,
   Radar,
 } from "lucide-react";
-import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,7 +48,7 @@ interface ScenarioDetailResponse {
 }
 
 export function ScenarioDetails() {
-  const { scenarioId } = useParams({ from: "/admin/scenarios/$scenarioId" });
+  const { scenarioId } = useParams({ from: "/app/admin/scenarios/$scenarioId" });
   const queryClient = useQueryClient();
 
   const scenario = useQuery({
@@ -156,7 +156,7 @@ export function ScenarioDetails() {
   const enabled = scenarioRecord?.enabled ?? false;
 
   return (
-    <AuthenticatedShell
+    <PageShell admin
       title={scenarioRecord?.scenarioId ?? "Scenario details"}
       description="Read-only scenario record. The web UI reflects the current stored scenario and only controls whether it is enabled for learners."
     >
@@ -386,7 +386,7 @@ export function ScenarioDetails() {
           </div>
         </div>
       ) : null}
-    </AuthenticatedShell>
+    </PageShell>
   );
 }
 

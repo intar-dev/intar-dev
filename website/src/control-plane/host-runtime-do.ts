@@ -22,6 +22,7 @@ import {
   applyHostReportToRunState,
   applyVmReportToRunState,
 } from "@/lib/run-lifecycle";
+import { recordProbeTransitions } from "@/lib/run-probe-history";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 import {
   loadOrCreateHostDesiredState,
@@ -587,6 +588,13 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         updatedAt: now,
       })
       .where(eq(scenarioRuns.runId, runId));
+
+    await recordProbeTransitions(db, {
+      runId,
+      current,
+      next: merged,
+      observedAt: now,
+    });
   }
 
   private async removeTerminalBuildsFromDesiredState(

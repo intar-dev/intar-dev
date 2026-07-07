@@ -522,6 +522,7 @@ export const vmScenarios = sqliteTable(
   {
     scenarioId: text("scenario_id").primaryKey(),
     title: text("title").notNull(),
+    category: text("category").default("").notNull(),
     description: text("description").notNull(),
     difficulty: text("difficulty").notNull(),
     estimatedMinutes: integer("estimated_minutes").notNull(),
@@ -735,6 +736,106 @@ export const oauthConsent = sqliteTable(
     index("oauthConsent_clientId_idx").on(table.clientId),
     index("oauthConsent_userId_idx").on(table.userId),
     index("oauthConsent_referenceId_idx").on(table.referenceId),
+  ],
+);
+
+// App-owned team invites keyed by GitHub username (the product identity),
+// unlike better-auth's email-keyed `invitation` table which stays unused.
+export const teamInvites = sqliteTable(
+  "team_invites",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    // Normalized (lowercased) GitHub username.
+    githubUsername: text("github_username").notNull(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    status: text("status", {
+      enum: ["pending", "accepted", "revoked"],
+    })
+      .default("pending")
+      .notNull(),
+    acceptedAt: integer("accepted_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("team_invites_org_username_uidx").on(
+      table.organizationId,
+      table.githubUsername,
+    ),
+    index("team_invites_username_idx").on(table.githubUsername, table.status),
+  ],
+);
+
+export const scenarioAssignments = sqliteTable(
+  "scenario_assignments",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    scenarioId: text("scenario_id").notNull(),
+    assignedBy: text("assigned_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_assignments_org_scenario_uidx").on(
+      table.organizationId,
+      table.scenarioId,
+    ),
+  ],
+);
+
+export const accessRequests = sqliteTable(
+  "access_requests",
+  {
+    id: text("id").primaryKey(),
+    // Normalized (lowercased) GitHub username — the allowlist key.
+    githubUsername: text("github_username").notNull(),
+    note: text("note"),
+    status: text("status", {
+      enum: ["pending", "approved", "rejected"],
+    })
+      .default("pending")
+      .notNull(),
+    decidedBy: text("decided_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    decidedAt: integer("decided_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("access_requests_username_uidx").on(table.githubUsername),
+    index("access_requests_status_idx").on(table.status, table.createdAt),
+  ],
+);
+
+// Authoring drafts: the HCL system-of-record for scenarios written in the
+// app (repo/CI-authored scenarios don't appear here).
+export const scenarioSources = sqliteTable(
+  "scenario_sources",
+  {
+    id: text("id").primaryKey(),
+    scenarioId: text("scenario_id").notNull(),
+    hcl: text("hcl").notNull(),
+    status: text("status", {
+      enum: ["draft", "published"],
+    })
+      .default("draft")
+      .notNull(),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_sources_scenario_uidx").on(table.scenarioId),
   ],
 );
 

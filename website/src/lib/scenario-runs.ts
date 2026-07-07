@@ -90,6 +90,8 @@ export interface ScenarioCatalogEntry {
   tagline: string;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
+  tags: string[];
+  category: string;
   scenarioName: string;
   enabledAt: number;
   vmCount: number;
@@ -178,6 +180,8 @@ export async function listEnabledScenariosForUser(): Promise<
     tagline: scenario.briefing.tagline,
     difficulty: scenario.briefing.difficulty,
     estimatedMinutes: scenario.briefing.estimatedMinutes,
+    tags: scenario.briefing.tags,
+    category: scenario.briefing.category,
     scenarioName: scenario.scenarioId,
     enabledAt: scenario.enabledAt,
     vmCount: scenario.launchSpecs.length,
@@ -229,6 +233,75 @@ export async function getScenarioRunForUser(params: {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
   return toScenarioRunRecord(row);
+}
+
+export interface ScenarioRunListEntry {
+  runId: string;
+  scenarioId: string;
+  scenarioName: string;
+  title: string;
+  difficulty: ScenarioDifficulty;
+  phase: RunPhase;
+  outcome: ScenarioRunOutcome;
+  active: boolean;
+  createdAt: number;
+  finishedAt: number | null;
+  solvedAt: number | null;
+  solveDurationMs: number | null;
+  solutionAssisted: boolean;
+  hasReplay: boolean;
+}
+
+export async function listScenarioRunsForUser(params: {
+  userId: string;
+}): Promise<ScenarioRunListEntry[]> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      runId: scenarioRuns.runId,
+      scenarioId: scenarioRuns.scenarioId,
+      scenarioName: scenarioRuns.scenarioName,
+      title: scenarioRuns.title,
+      difficulty: scenarioRuns.difficulty,
+      state: scenarioRuns.state,
+      activeKey: scenarioRuns.activeKey,
+      createdAt: scenarioRuns.createdAt,
+      completedAt: scenarioRuns.completedAt,
+      solvedAt: scenarioRuns.solvedAt,
+      failedAt: scenarioRuns.failedAt,
+      deleteRequestedAt: scenarioRuns.deleteRequestedAt,
+      solutionAssisted: scenarioRuns.solutionAssisted,
+      stateJson: scenarioRuns.stateJson,
+    })
+    .from(scenarioRuns)
+    .where(eq(scenarioRuns.userId, params.userId))
+    .orderBy(desc(scenarioRuns.createdAt))
+    .limit(100);
+
+  return rows.map((row) => ({
+    runId: row.runId,
+    scenarioId: row.scenarioId,
+    scenarioName: row.scenarioName,
+    title: row.title,
+    difficulty: scenarioRunDifficulty(row.runId, row.difficulty),
+    phase: row.state as RunPhase,
+    outcome: deriveScenarioRunOutcome({
+      phase: row.state as RunPhase,
+      solvedAt: row.solvedAt,
+      deleteRequestedAt: row.deleteRequestedAt,
+      failedAt: row.failedAt,
+    }),
+    active: row.activeKey !== null,
+    createdAt: row.createdAt,
+    finishedAt: row.completedAt ?? row.failedAt ?? null,
+    solvedAt: row.solvedAt,
+    solveDurationMs: deriveScenarioRunSolveDurationMs({
+      createdAt: row.createdAt,
+      solvedAt: row.solvedAt,
+    }),
+    solutionAssisted: row.solutionAssisted,
+    hasReplay: hasReplayArtifacts(row.stateJson),
+  }));
 }
 
 export async function startScenarioRunForUser(params: {

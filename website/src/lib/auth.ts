@@ -13,6 +13,7 @@ import {
 } from "better-auth/plugins";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
+import { isAllowlisted } from "./allowlist";
 import { getUserRole, isAdminRole } from "./authz";
 
 const runtimeEnv =
@@ -24,8 +25,6 @@ const runtimeEnv =
 const baseURL =
   runtimeEnv?.BETTER_AUTH_URL ?? env.BETTER_AUTH_URL ?? "http://localhost:4321";
 
-const toAllowlistKey = (value?: string | null) =>
-  value?.trim().toLowerCase() ?? null;
 
 const oauthScopes = [
   "openid",
@@ -72,15 +71,6 @@ const getOAuthRoleClaims = (user: User, scopes: readonly string[]) => {
   };
 };
 
-const isAllowlisted = async (username?: string | null) => {
-  const key = toAllowlistKey(username);
-  if (!key) return false;
-
-  const allowlist = (env as { ALLOWLIST?: KVNamespace }).ALLOWLIST;
-  if (!allowlist) return false;
-  const entry = await allowlist.get(key);
-  return entry !== null;
-};
 
 interface AuthRuntimeConfig {
   allowContextlessSessionCreate: boolean;

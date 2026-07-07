@@ -1,0 +1,1 @@
+ALTER TABLE `vm_scenarios` ADD `category` text DEFAULT '' NOT NULL;

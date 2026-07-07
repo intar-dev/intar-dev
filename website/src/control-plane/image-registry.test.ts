@@ -2744,6 +2744,7 @@ function publishManifest(input: {
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
+    category: "web",
     description: "Repair nginx.",
     difficulty: "easy",
     estimated_minutes: 15,

@@ -46,7 +46,7 @@ export async function startGithubSignIn(options?: {
   errorCallbackURL?: string;
 }) {
   const callbackURL =
-    options?.callbackURL ?? `${window.location.origin}/dashboard`;
+    options?.callbackURL ?? `${window.location.origin}/scenarios`;
   const errorCallbackURL =
     options?.errorCallbackURL ?? `${window.location.origin}/`;
   const result = await authClient.signIn.social({

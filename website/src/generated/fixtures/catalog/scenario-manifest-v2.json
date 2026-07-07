@@ -3,6 +3,7 @@
   "scenario_id": "broken-nginx",
   "name": "broken-nginx",
   "title": "Broken Nginx",
+  "category": "web",
   "description": "Repair the nginx service.",
   "difficulty": "easy",
   "estimated_minutes": 15,

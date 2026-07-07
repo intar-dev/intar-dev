@@ -17,6 +17,7 @@ import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 export interface ScenarioListRecord {
   scenarioId: string;
   title: string;
+  category: string;
   description: string;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
@@ -51,6 +52,7 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
     output.push({
       scenarioId: detail.scenarioId,
       title: detail.title,
+      category: detail.category,
       description: detail.description,
       difficulty: detail.difficulty,
       estimatedMinutes: detail.estimatedMinutes,
@@ -104,6 +106,7 @@ export async function loadScenario(
   return {
     scenarioId: scenario.scenarioId,
     title: scenario.title,
+    category: scenario.category,
     description: scenario.description,
     difficulty: scenarioDifficulty(scenario.scenarioId, scenario.difficulty),
     estimatedMinutes: scenario.estimatedMinutes,
