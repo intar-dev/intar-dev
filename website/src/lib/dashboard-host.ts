@@ -2,8 +2,7 @@ import { env } from "cloudflare:workers";
 import { asc, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { scenarioRunArtifacts, scenarioRunSshKeys } from "@/db/schema";
-import { parseInventory, type AgentHostRow } from "@/lib/agent-bridge";
-import { matchesInventoryVmIdentity } from "@/lib/run-lifecycle";
+import type { AgentHostRow } from "@/lib/agent-bridge";
 import { listHostRunsForUser, type ScenarioRunRecord } from "@/lib/scenario-runs";
 
 export interface DashboardVmProbeState {
@@ -115,10 +114,6 @@ export async function loadDashboardHostRuns(params: {
     hostId: params.host.id,
     userId: params.userId,
   });
-  const inventory = parseInventory(params.host.inventory_json);
-  const inventoryVms = Array.isArray(inventory?.vms)
-    ? inventory.vms.filter(isRecord)
-    : [];
 
   const liveRuns = runs.filter((run) => !isArchivePhase(run.phase));
   const archivedRuns = runs.filter((run) => isArchivePhase(run.phase));
@@ -131,14 +126,7 @@ export async function loadDashboardHostRuns(params: {
       run.vms
         .filter((vm) => vm.phase !== "archived" && vm.phase !== "completed")
         .map((vm) => {
-          const inventoryVm = inventoryVms.find((candidate) =>
-            matchesInventoryVmIdentity({
-              value: candidate,
-              runId: run.id,
-              runtimeVmName: vm.runtimeVmName,
-            }),
-          );
-          const probeState = buildProbeState(run, vm, inventoryVm);
+          const probeState = buildProbeState(run, vm);
           const terminalReady = hasVmTerminalReady(vm);
           return {
             id: vm.id,
@@ -146,9 +134,7 @@ export async function loadDashboardHostRuns(params: {
             state: dashboardVmState(vm.phase, terminalReady),
             created_at: new Date(vm.vmCreatedAt ?? run.createdAt).toISOString(),
             updated_at: new Date(run.updatedAt).toISOString(),
-            error:
-              readString(inventoryVm?.error) ??
-              (vm.phase === "failed" ? vm.phaseDetail : null),
+            error: vm.phase === "failed" ? vm.phaseDetail : null,
             run_id: run.id,
             probe_state: probeState,
             terminal_target: {
@@ -172,10 +158,9 @@ export async function loadDashboardHostRuns(params: {
               ]),
             },
             details: {
-              guest_ip:
-                readString(readRecord(inventoryVm?.details)?.guest_ip) ??
-                readString(readRecord(inventoryVm?.details)?.guestIp) ??
-                null,
+              // The run state stores the reported guest IP as the terminal
+              // target host (see terminalTargetFromNetwork).
+              guest_ip: readString(vm.terminalTarget.host),
               ssh_authorized_key_openssh:
                 sshKeysByRunVmId.get(runVmKey(run.id, vm.id)) ?? null,
             },
@@ -394,43 +379,7 @@ function buildArchivedRunEvents(
 function buildProbeState(
   run: ScenarioRunRecord,
   vm: ScenarioRunRecord["vms"][number],
-  inventoryVm: Record<string, unknown> | undefined,
 ): DashboardVmProbeState | null {
-  const inventoryProbeState = readRecord(inventoryVm?.probe_state);
-  if (inventoryProbeState) {
-    const summary = readRecord(inventoryProbeState.summary);
-    const probes = Array.isArray(inventoryProbeState.probes)
-      ? inventoryProbeState.probes.filter(isRecord)
-      : [];
-    return {
-      collection_state:
-        readString(inventoryProbeState.collection_state) ?? "ready",
-      collection_error: readString(inventoryProbeState.collection_error),
-      generated_at: readString(inventoryProbeState.generated_at),
-      updated_at:
-        readString(inventoryProbeState.updated_at) ??
-        new Date(run.updatedAt).toISOString(),
-      summary: {
-        total: readNumber(summary?.total) ?? probes.length,
-        pass: readNumber(summary?.pass) ?? countProbeStatus(probes, "pass"),
-        fail: readNumber(summary?.fail) ?? countProbeStatus(probes, "fail"),
-        unknown:
-          readNumber(summary?.unknown) ?? countProbeStatus(probes, "unknown"),
-      },
-      probes: probes.map((probe) => ({
-        id: readString(probe.id) ?? "unknown",
-        kind: readString(probe.kind) ?? "unknown",
-        status: readString(probe.status) ?? "unknown",
-        every_seconds: readNumber(probe.every_seconds) ?? 0,
-        last_attempt_at: readString(probe.last_attempt_at),
-        last_success_at: readString(probe.last_success_at),
-        last_duration_ms: readNumber(probe.last_duration_ms) ?? 0,
-        error: readString(probe.error),
-        value: probe.value ?? null,
-      })),
-    };
-  }
-
   const probes = [...vm.bootProbes, ...vm.scenarioProbes];
   if (!probes.length || !hasReportedProbeResults(probes)) {
     return null;
@@ -462,12 +411,6 @@ function buildProbeState(
   };
 }
 
-function countProbeStatus(
-  probes: Record<string, unknown>[],
-  status: string,
-): number {
-  return probes.filter((probe) => readString(probe.status) === status).length;
-}
 
 function dashboardVmState(
   phase: ScenarioRunRecord["vms"][number]["phase"],

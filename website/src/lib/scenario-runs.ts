@@ -10,7 +10,7 @@ import {
   scenarioRuns,
   type ScenarioRunHintSnapshot,
 } from "@/db/schema";
-import { parseHostInfo, parseInventory } from "@/lib/agent-bridge";
+import { parseHostInfo } from "@/lib/agent-bridge";
 import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
@@ -1237,7 +1237,6 @@ async function selectScenarioHost(
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
       lastInventoryAt: agentHosts.lastInventoryAt,
       hostInfoJson: agentHosts.hostInfoJson,
-      inventoryJson: agentHosts.inventoryJson,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
@@ -1256,8 +1255,9 @@ async function selectScenarioHost(
   const candidates = rows
     .map((row) => {
       const hostInfo = parseHostInfo(row.hostInfoJson);
-      const inventory = parseInventory(row.inventoryJson);
-      const inventoryVmCount = Array.isArray(inventory?.vms) ? inventory.vms.length : 0;
+      // The bridge v5 state report is the live source of per-host VM load;
+      // the legacy inventory upload no longer exists.
+      const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
       const cpuCores = Math.max(1, hostInfo?.cpuCores ?? 0);
       const loadPerCpu =
         typeof hostInfo?.loadAvg1m === "number" && hostInfo.loadAvg1m >= 0
