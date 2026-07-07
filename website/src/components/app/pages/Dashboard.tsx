@@ -1,7 +1,8 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { Plus } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import { type RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -950,13 +951,19 @@ export function Dashboard() {
         </TabsContent>
 
         <TabsContent value="hosts" className="space-y-6">
-          <HostOnboardingPanel
-            eyebrow="New host"
-            title="Bridge config"
-            onGenerated={() => {
-              void hosts.refetch();
-            }}
-          />
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">
+              Connected fleet and per-host scenario launcher.
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              render={<Link to="/admin/onboarding" />}
+            >
+              <Plus className="size-3.5" />
+              Add host
+            </Button>
+          </div>
 
           {hosts.isLoading ? (
             <div className="rounded-3xl border border-border/70 bg-card/70 px-6 py-10 text-sm text-muted-foreground shadow-sm">
@@ -1152,8 +1159,16 @@ export function Dashboard() {
               })}
             </div>
           ) : (
-            <div className="rounded-3xl border border-dashed border-border/70 bg-card/70 px-6 py-12 text-center text-sm text-muted-foreground">
-              No hosts yet. Generate a bridge config to register one.
+            <div className="space-y-3 rounded-3xl border border-dashed border-border/70 bg-card/70 px-6 py-12 text-center text-sm text-muted-foreground">
+              <p>No hosts yet. Generate a bridge config to register one.</p>
+              <Button
+                variant="outline"
+                size="sm"
+                render={<Link to="/admin/onboarding" />}
+              >
+                <Plus className="size-3.5" />
+                Onboard a host
+              </Button>
             </div>
           )}
         </TabsContent>
