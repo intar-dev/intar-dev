@@ -469,24 +469,24 @@ mod imp {
                     .context("failed to create resize notify pipe")?;
             let resize_state = Arc::new(Mutex::new(None::<(u16, u16)>));
             let resize_state_thread = Arc::clone(&resize_state);
-            // Registering SIGHUP/SIGTERM here keeps the recorder alive when
-            // sshd tears the session down (browser close, route revocation):
-            // the loop drains what the shell already produced, writes the
-            // exit event, and syncs the recording instead of dying mid-write.
+            // Registering SIGHUP/SIGTERM keeps the recorder alive when sshd
+            // tears the session down (browser close, route revocation): the
+            // loop drains what the shell already produced, writes the exit
+            // event, and syncs the recording instead of dying mid-write. The
+            // 50ms poll tick observes the flag.
             let hangup_state = Arc::new(AtomicBool::new(false));
-            let hangup_state_thread = Arc::clone(&hangup_state);
-            let mut signals = Signals::new([SIGWINCH, SIGHUP, SIGTERM])
-                .context("failed to subscribe to session signals")?;
+            signal_hook::flag::register(SIGHUP, Arc::clone(&hangup_state))
+                .context("failed to subscribe to SIGHUP")?;
+            signal_hook::flag::register(SIGTERM, Arc::clone(&hangup_state))
+                .context("failed to subscribe to SIGTERM")?;
+            let mut signals =
+                Signals::new([SIGWINCH]).context("failed to subscribe to SIGWINCH")?;
             let resize_handle = signals.handle();
             let resize_thread = thread::spawn(move || {
-                for signal in signals.forever() {
-                    if signal == SIGWINCH {
-                        let dimensions = tty_dimensions();
-                        if let Ok(mut guard) = resize_state_thread.lock() {
-                            *guard = Some(dimensions);
-                        }
-                    } else {
-                        hangup_state_thread.store(true, Ordering::SeqCst);
+                for _ in signals.forever() {
+                    let dimensions = tty_dimensions();
+                    if let Ok(mut guard) = resize_state_thread.lock() {
+                        *guard = Some(dimensions);
                     }
                     notify_pipe(&resize_notify_write);
                 }
@@ -537,6 +537,12 @@ mod imp {
     const HANGUP_SHELL_KILL_GRACE: Duration = Duration::from_secs(2);
     const HANGUP_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
+    struct OutputDrainState {
+        last_output_at: Instant,
+        pty_hup_seen: bool,
+        forwarding_broken: bool,
+    }
+
     fn run_linux_interactive_loop(
         session: &mut LinuxInteractiveSession,
         writer: &Arc<Mutex<RawEventLogWriter>>,
@@ -547,9 +553,11 @@ mod imp {
         let mut stdin_closed = false;
         let mut exit_code = None::<i32>;
         let mut exit_observed_at = None::<Instant>;
-        let mut last_output_at = Instant::now();
-        let mut pty_hup_seen = false;
-        let mut forwarding_broken = false;
+        let mut output = OutputDrainState {
+            last_output_at: Instant::now(),
+            pty_hup_seen: false,
+            forwarding_broken: false,
+        };
         let mut hangup_observed_at = None::<Instant>;
         let mut hangup_killed_shell = false;
         let mut pty_buffer = [0_u8; 4096];
@@ -597,7 +605,7 @@ mod imp {
                     writer,
                     recording_path,
                     exit_code,
-                    pty_hup_seen,
+                    output.pty_hup_seen,
                 )?;
             }
 
@@ -607,7 +615,7 @@ mod imp {
             if session.hangup_state.load(Ordering::SeqCst) && hangup_observed_at.is_none() {
                 hangup_observed_at = Some(Instant::now());
                 stdin_closed = true;
-                forwarding_broken = true;
+                output.forwarding_broken = true;
                 if exit_code.is_none() {
                     best_effort_hangup_process_group(session.child_pid);
                 }
@@ -619,9 +627,7 @@ mod imp {
                     writer,
                     recording_path,
                     &mut pty_buffer,
-                    &mut last_output_at,
-                    &mut pty_hup_seen,
-                    &mut forwarding_broken,
+                    &mut output,
                     exit_code,
                 )?;
             }
@@ -634,7 +640,7 @@ mod imp {
                     &mut pending_input,
                     &mut stdin_closed,
                     exit_code,
-                    pty_hup_seen,
+                    output.pty_hup_seen,
                 )?;
             }
 
@@ -660,8 +666,8 @@ mod imp {
             if should_finish_interactive_loop(
                 exit_code,
                 pending_input.is_empty(),
-                pty_hup_seen,
-                last_output_at,
+                output.pty_hup_seen,
+                output.last_output_at,
                 exit_observed_at,
             ) {
                 return Ok(exit_code.expect("checked above"));
@@ -712,21 +718,19 @@ mod imp {
         writer: &Arc<Mutex<RawEventLogWriter>>,
         recording_path: &Path,
         pty_buffer: &mut [u8; 4096],
-        last_output_at: &mut Instant,
-        pty_hup_seen: &mut bool,
-        forwarding_broken: &mut bool,
+        output: &mut OutputDrainState,
         exit_code: Option<i32>,
     ) -> Result<()> {
         let mut stdout = io::stdout();
         loop {
             match fd_read(&session.pty, &mut *pty_buffer) {
                 Ok(0) => {
-                    *pty_hup_seen = true;
+                    output.pty_hup_seen = true;
                     break;
                 }
                 Ok(read_count) => {
                     let now = unix_ms();
-                    *last_output_at = Instant::now();
+                    output.last_output_at = Instant::now();
                     // Record before forwarding so a torn-down session can
                     // never lose output the viewer already saw. Forwarding is
                     // best-effort: once the outer pty is gone (browser closed,
@@ -739,12 +743,12 @@ mod imp {
                             )
                         },
                     )?;
-                    if !*forwarding_broken {
+                    if !output.forwarding_broken {
                         let forwarded = stdout
                             .write_all(&pty_buffer[..read_count])
                             .and_then(|()| stdout.flush());
                         if forwarded.is_err() {
-                            *forwarding_broken = true;
+                            output.forwarding_broken = true;
                         }
                     }
                 }
@@ -753,7 +757,7 @@ mod imp {
                 Err(error)
                     if is_expected_linux_pty_shutdown_error(error) || exit_code.is_some() =>
                 {
-                    *pty_hup_seen = true;
+                    output.pty_hup_seen = true;
                     break;
                 }
                 Err(error) => return Err(error).context("failed to read PTY output"),
