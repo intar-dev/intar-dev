@@ -36,6 +36,17 @@ interface ScenarioCatalogResponse {
   scenarios: ScenarioCatalogEntry[];
 }
 
+interface MyAssignmentsResponse {
+  assignments: Array<{
+    assignmentId: string;
+    scenarioId: string;
+    scenarioTitle: string | null;
+    teamId: string;
+    teamName: string;
+    assignedAt: number;
+  }>;
+}
+
 const DIFFICULTIES: ScenarioDifficulty[] = ["easy", "medium", "hard"];
 
 export function ScenarioCatalog() {
@@ -65,7 +76,23 @@ export function ScenarioCatalog() {
     staleTime: 10_000,
   });
 
+  const myAssignments = useQuery({
+    queryKey: ["teams", "my-assignments"],
+    queryFn: async () => {
+      const response = await fetch("/api/teams/my-assignments", {
+        method: "GET",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        return { assignments: [] } satisfies MyAssignmentsResponse;
+      }
+      return (await response.json()) as MyAssignmentsResponse;
+    },
+    staleTime: 30_000,
+  });
+
   const allEntries = scenarios.data?.scenarios ?? [];
+  const assignments = myAssignments.data?.assignments ?? [];
 
   const allTags = useMemo(
     () =>
@@ -115,6 +142,32 @@ export function ScenarioCatalog() {
               : "Failed to load scenarios"}
           </AlertDescription>
         </Alert>
+      ) : null}
+
+      {assignments.length ? (
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium text-muted-foreground">
+            Assigned to you
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            {assignments.map((assignment) => (
+              <Link
+                key={assignment.assignmentId}
+                to="/scenarios/$scenarioId"
+                params={{ scenarioId: assignment.scenarioId }}
+                className="inline-flex items-center gap-2 rounded-full border bg-primary/5 px-3 py-1.5 text-sm transition-colors hover:bg-primary/10"
+              >
+                <span className="font-medium">
+                  {assignment.scenarioTitle ?? assignment.scenarioId}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {assignment.teamName}
+                </span>
+                <ArrowRight className="size-3.5 text-muted-foreground" />
+              </Link>
+            ))}
+          </div>
+        </section>
       ) : null}
 
       {allEntries.length ? (

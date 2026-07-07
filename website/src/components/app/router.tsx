@@ -21,6 +21,7 @@ import { ScenarioBriefing } from "./pages/ScenarioBriefing";
 import { ScenarioRun } from "./pages/ScenarioRun";
 import { RunsList } from "./pages/RunsList";
 import { Teams } from "./pages/Teams";
+import { TeamDetail } from "./pages/TeamDetail";
 import { Profile } from "./pages/Profile";
 import { getClientSession } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
@@ -96,6 +97,12 @@ const teamsRoute = createRoute({
   component: Teams,
 });
 
+const teamDetailRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "teams/$orgId",
+  component: TeamDetail,
+});
+
 const profileRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "profile",
@@ -158,6 +165,7 @@ const routeTree = rootRoute.addChildren([
     scenarioRunRoute,
     runsListRoute,
     teamsRoute,
+    teamDetailRoute,
     profileRoute,
     adminOverviewRoute,
     adminOnboardingRoute,

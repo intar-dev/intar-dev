@@ -738,6 +738,58 @@ export const oauthConsent = sqliteTable(
   ],
 );
 
+// App-owned team invites keyed by GitHub username (the product identity),
+// unlike better-auth's email-keyed `invitation` table which stays unused.
+export const teamInvites = sqliteTable(
+  "team_invites",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    // Normalized (lowercased) GitHub username.
+    githubUsername: text("github_username").notNull(),
+    invitedBy: text("invited_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    status: text("status", {
+      enum: ["pending", "accepted", "revoked"],
+    })
+      .default("pending")
+      .notNull(),
+    acceptedAt: integer("accepted_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("team_invites_org_username_uidx").on(
+      table.organizationId,
+      table.githubUsername,
+    ),
+    index("team_invites_username_idx").on(table.githubUsername, table.status),
+  ],
+);
+
+export const scenarioAssignments = sqliteTable(
+  "scenario_assignments",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    scenarioId: text("scenario_id").notNull(),
+    assignedBy: text("assigned_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_assignments_org_scenario_uidx").on(
+      table.organizationId,
+      table.scenarioId,
+    ),
+  ],
+);
+
 export const accessRequests = sqliteTable(
   "access_requests",
   {
