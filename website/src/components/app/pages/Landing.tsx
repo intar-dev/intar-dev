@@ -181,6 +181,49 @@ export function Landing() {
         </section>
 
         <section className="mx-auto w-full max-w-6xl px-6 py-16">
+          <div className="flex flex-col items-center gap-2 text-center">
+            <p className="text-eyebrow">Sponsored by</p>
+            <h2 className="text-page-title">Made possible by our sponsors</h2>
+          </div>
+          <div className="mx-auto mt-8 grid max-w-3xl gap-6 sm:grid-cols-2">
+            <a
+              href="https://www.hetzner.com/?mtm_campaign=intar-dev&mtm_medium=referral&mtm_content=sponsoring_link"
+              target="_blank"
+              rel="noreferrer"
+              className={sponsorCardClassName}
+            >
+              <img
+                src={hetznerLogo.src}
+                width={hetznerLogo.width}
+                height={hetznerLogo.height}
+                alt="Hetzner"
+                className="h-14 w-auto rounded-[4px] sm:h-16"
+              />
+              <span className="text-sm text-muted-foreground">
+                Cloud & dedicated server hosting
+              </span>
+            </a>
+            <a
+              href="https://namespace.so"
+              target="_blank"
+              rel="noreferrer"
+              className={sponsorCardClassName}
+            >
+              <img
+                src={namespaceLogo.src}
+                width={namespaceLogo.width}
+                height={namespaceLogo.height}
+                alt="namespace"
+                className="h-10 w-auto sm:h-12 dark:invert"
+              />
+              <span className="text-sm text-muted-foreground">
+                High-performance build infrastructure
+              </span>
+            </a>
+          </div>
+        </section>
+
+        <section className="mx-auto w-full max-w-6xl px-6 py-16">
           <p className="text-eyebrow">How it works</p>
           <h2 className="mt-2 text-page-title">
             From broken to fixed, in three steps
@@ -201,41 +244,6 @@ export function Landing() {
           </div>
         </section>
 
-        <section className="mx-auto w-full max-w-6xl px-6 py-16">
-          <div className="flex flex-col items-center gap-6 text-center">
-            <h2 className="text-eyebrow">Sponsored by</h2>
-            <div className="flex flex-wrap items-center justify-center gap-8 sm:gap-14">
-              <a
-                href="https://www.hetzner.com/?mtm_campaign=intar-dev&mtm_medium=referral&mtm_content=sponsoring_link"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-sm opacity-70 grayscale outline-none ring-offset-background transition-all hover:opacity-100 hover:grayscale-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                <img
-                  src={hetznerLogo.src}
-                  width={hetznerLogo.width}
-                  height={hetznerLogo.height}
-                  alt="Hetzner"
-                  className="h-12 w-auto rounded-[4px] sm:h-16"
-                />
-              </a>
-              <a
-                href="https://namespace.so"
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-sm opacity-70 grayscale outline-none ring-offset-background transition-all hover:opacity-100 hover:grayscale-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                <img
-                  src={namespaceLogo.src}
-                  width={namespaceLogo.width}
-                  height={namespaceLogo.height}
-                  alt="namespace"
-                  className="h-9 w-auto sm:h-12 dark:invert"
-                />
-              </a>
-            </div>
-          </div>
-        </section>
       </main>
 
       <footer className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-center gap-x-2 gap-y-1 px-6 py-10 text-center text-sm text-muted-foreground">
@@ -278,6 +286,9 @@ export function Landing() {
 
 const footerLinkClassName =
   "underline decoration-border underline-offset-4 transition-colors hover:text-foreground";
+
+const sponsorCardClassName =
+  "flex flex-col items-center justify-center gap-4 rounded-2xl border bg-card p-8 text-center shadow-xs outline-none ring-offset-background transition-colors hover:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 function normalizeErrorCode(value?: string | null) {
   if (!value) return null;
