@@ -153,14 +153,17 @@ export function Scenarios() {
                   </div>
 
                   <div className="flex items-center">
-                    <Button asChild variant="outline">
-                      <Link
-                        to="/admin/scenarios/$scenarioId"
-                        params={{ scenarioId: scenario.scenarioId }}
-                      >
-                        Inspect
-                        <ChevronRight className="size-4" />
-                      </Link>
+                    <Button
+                      variant="outline"
+                      render={
+                        <Link
+                          to="/admin/scenarios/$scenarioId"
+                          params={{ scenarioId: scenario.scenarioId }}
+                        />
+                      }
+                    >
+                      Inspect
+                      <ChevronRight className="size-4" />
                     </Button>
                   </div>
                 </article>

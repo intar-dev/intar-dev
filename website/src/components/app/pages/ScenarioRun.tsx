@@ -730,21 +730,27 @@ export function ScenarioRun() {
     >
       <div className="space-y-2">
         {attemptData ? (
-          <Button variant="ghost" asChild className="-ml-3 w-fit">
-            <Link
-              to="/scenarios/$scenarioId"
-              params={{ scenarioId: attemptData.scenarioId }}
-            >
-              <ArrowLeft className="size-4" />
-              Back to scenario
-            </Link>
+          <Button
+            variant="ghost"
+            className="-ml-3 w-fit"
+            render={
+              <Link
+                to="/scenarios/$scenarioId"
+                params={{ scenarioId: attemptData.scenarioId }}
+              />
+            }
+          >
+            <ArrowLeft className="size-4" />
+            Back to scenario
           </Button>
         ) : (
-          <Button variant="ghost" asChild className="-ml-3 w-fit">
-            <Link to="/scenarios">
-              <ArrowLeft className="size-4" />
-              Back to scenarios
-            </Link>
+          <Button
+            variant="ghost"
+            className="-ml-3 w-fit"
+            render={<Link to="/scenarios" />}
+          >
+            <ArrowLeft className="size-4" />
+            Back to scenarios
           </Button>
         )}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -1245,16 +1251,18 @@ function SolutionCard(props: {
           </Button>
         ) : (
           <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-            <DialogTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                className="w-full"
-                disabled={props.pending}
-              >
-                {props.pending ? "Revealing" : "Reveal solution"}
-              </Button>
-            </DialogTrigger>
+            <DialogTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  disabled={props.pending}
+                >
+                  {props.pending ? "Revealing" : "Reveal solution"}
+                </Button>
+              }
+            />
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Reveal solution?</DialogTitle>
@@ -1455,12 +1463,14 @@ function ScenarioCancelDialog(props: {
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogTrigger asChild>
-        <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-          <Trash2 className="size-4" />
-          Cancel scenario
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger
+        render={
+          <Button size="sm" variant="destructive" className="w-full sm:w-auto">
+            <Trash2 className="size-4" />
+            Cancel scenario
+          </Button>
+        }
+      />
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Cancel this scenario?</DialogTitle>
@@ -1495,12 +1505,14 @@ function DeleteRunDialog(props: {
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogTrigger asChild>
-        <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-          <Trash2 className="size-4" />
-          Delete run
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger
+        render={
+          <Button size="sm" variant="destructive" className="w-full sm:w-auto">
+            <Trash2 className="size-4" />
+            Delete run
+          </Button>
+        }
+      />
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete this run?</DialogTitle>

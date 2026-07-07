@@ -161,11 +161,13 @@ export function ScenarioDetails() {
       description="Read-only scenario record. The web UI reflects the current stored scenario and only controls whether it is enabled for learners."
     >
       <div className="flex items-center justify-between gap-3">
-        <Button variant="ghost" asChild className="w-fit">
-          <Link to="/admin/scenarios">
-            <ArrowLeft className="size-4" />
-            Back to scenarios
-          </Link>
+        <Button
+          variant="ghost"
+          className="w-fit"
+          render={<Link to="/admin/scenarios" />}
+        >
+          <ArrowLeft className="size-4" />
+          Back to scenarios
         </Button>
 
         {enabled ? (

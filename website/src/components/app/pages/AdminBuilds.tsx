@@ -297,15 +297,20 @@ function BuildRow(props: {
           Retry
         </Button>
         {build.hasLog ? (
-          <Button asChild type="button" variant="outline" className="lg:w-full">
-            <a
-              href={`/api/admin/builds/${encodeURIComponent(build.id)}/log`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <ExternalLink className="size-4" />
-              Log
-            </a>
+          <Button
+            type="button"
+            variant="outline"
+            className="lg:w-full"
+            render={
+              <a
+                href={`/api/admin/builds/${encodeURIComponent(build.id)}/log`}
+                target="_blank"
+                rel="noreferrer"
+              />
+            }
+          >
+            <ExternalLink className="size-4" />
+            Log
           </Button>
         ) : (
           <Button type="button" variant="outline" disabled className="lg:w-full">
