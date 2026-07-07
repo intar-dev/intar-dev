@@ -737,7 +737,9 @@ fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "  [ -s \"$decoded_keys\" ] || {{ echo 'INTAR_SSH_AUTHORIZED_KEYS_B64 decoded no keys' >&2; exit 1; }}").context("format error")?;
-    writeln!(script, "  while IFS= read -r key; do").context("format error")?;
+    // `|| [ -n "$key" ]` processes a final line with no trailing newline,
+    // which a plain `while read` would otherwise drop.
+    writeln!(script, "  while IFS= read -r key || [ -n \"$key\" ]; do").context("format error")?;
     writeln!(script, "    [ -n \"$key\" ] || continue").context("format error")?;
     writeln!(script, "    if ! grep -qxF \"$key\" \"$tmp_path\" 2>/dev/null; then printf '%s\\n' \"$key\" >>\"$tmp_path\"; fi").context("format error")?;
     writeln!(script, "  done <\"$decoded_keys\"").context("format error")?;

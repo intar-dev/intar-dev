@@ -39,7 +39,16 @@ impl RuntimeEnv {
         let mut lines = [
             render_line(
                 ENV_SSH_AUTHORIZED_KEYS_B64,
-                &BASE64_STANDARD.encode(self.ssh_authorized_keys_openssh.join("\n")),
+                // Terminate every key with a newline. The guest supervisor
+                // reads these with `while read`, which drops a final line that
+                // is not newline-terminated — so a single key (the common
+                // case) would otherwise never be written to authorized_keys.
+                &BASE64_STANDARD.encode(
+                    self.ssh_authorized_keys_openssh
+                        .iter()
+                        .map(|key| format!("{key}\n"))
+                        .collect::<String>(),
+                ),
             ),
             render_line(ENV_KINO_VSOCK_CID, &self.kino_vsock_cid.to_string()),
             render_line(ENV_KINO_VSOCK_PORT, &self.kino_vsock_port.to_string()),
@@ -208,5 +217,31 @@ mod tests {
         assert!(rendered.contains("KINO_HOST_READY_PORT='18081'"));
         assert!(rendered.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
         assert_eq!(RuntimeEnv::parse(&rendered), Ok(env));
+    }
+
+    #[test]
+    fn authorized_keys_are_newline_terminated() {
+        // The guest supervisor reads these keys with `while read`; every key,
+        // including the last, must be newline-terminated so none is dropped.
+        let env = RuntimeEnv {
+            ssh_authorized_keys_openssh: vec!["ssh-ed25519 AAAAONLYKEY only".to_owned()],
+            kino_vsock_cid: 10_001,
+            kino_vsock_port: 18_080,
+            kino_host_ready_port: 18_081,
+            vm_hostname: "pair-ping-db".to_owned(),
+            guest_ip_cidr: "10.200.0.2/24".to_owned(),
+            gateway: "10.200.0.1".to_owned(),
+            dns_servers: vec!["1.1.1.1".to_owned()],
+            peer_guest_ips: BTreeMap::new(),
+        };
+        let rendered = env.render();
+        let b64 = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix("INTAR_SSH_AUTHORIZED_KEYS_B64='"))
+            .and_then(|value| value.strip_suffix('\''))
+            .expect("authorized keys line present");
+        let decoded = String::from_utf8(BASE64_STANDARD.decode(b64).expect("valid base64"))
+            .expect("valid utf8");
+        assert_eq!(decoded, "ssh-ed25519 AAAAONLYKEY only\n");
     }
 }
