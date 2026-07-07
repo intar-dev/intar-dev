@@ -8,7 +8,6 @@ import {
   History,
   ShieldCheck,
   Trash2,
-  Tags,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
@@ -158,41 +157,66 @@ export function ScenarioBriefing() {
   };
 
   return (
-    <PageShell
-      title={scenarioData?.briefing.title ?? "Scenario briefing"}
-      description={
-        scenarioData?.briefing.tagline ??
-        "Read the objective, understand the constraints, then start the scenario when you are ready to drop into the shell."
-      }
-      compactHeader
-    >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <Button
-          variant="ghost"
-          className="w-fit"
-          render={<Link to="/scenarios" />}
-        >
-          <ArrowLeft className="size-4" />
-          Back to scenarios
-        </Button>
-        {scenarioData ? (
-          <Button
-            className="w-full sm:w-auto"
-            onClick={handlePrimaryAction}
-            disabled={
-              startScenario.isPending ||
-              (scenarioData.hasActiveRun && !scenarioData.activeRunId)
-            }
-          >
-            {startScenario.isPending
-              ? "Starting..."
-              : scenarioData.hasActiveRun
-                ? "Resume"
-                : "Start"}
-            <ArrowRight className="size-4" />
-          </Button>
-        ) : null}
-      </div>
+    <PageShell title="Scenario briefing" description="" showHeader={false}>
+      <Button
+        variant="ghost"
+        className="-ml-3 w-fit"
+        render={<Link to="/scenarios" />}
+      >
+        <ArrowLeft className="size-4" />
+        Back to scenarios
+      </Button>
+
+      {scenarioData ? (
+        <header className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <DifficultyBadge difficulty={scenarioData.briefing.difficulty} />
+            <MetaBadge
+              icon={<Clock3 className="size-4" />}
+              label={`~${scenarioData.briefing.estimatedMinutes} min`}
+            />
+            <MetaBadge
+              icon={<ShieldCheck className="size-4" />}
+              label={`${scenarioData.vmCount} machine${scenarioData.vmCount === 1 ? "" : "s"}`}
+            />
+            {scenarioData.briefing.tags.map((tag) => (
+              <Badge key={tag} variant="outline" className="h-6 px-2 text-xs">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-3xl font-semibold tracking-tight">
+              {scenarioData.briefing.title}
+            </h1>
+            <p className="max-w-2xl text-base leading-7 text-muted-foreground">
+              {scenarioData.briefing.tagline}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              size="lg"
+              onClick={handlePrimaryAction}
+              disabled={
+                startScenario.isPending ||
+                (scenarioData.hasActiveRun && !scenarioData.activeRunId)
+              }
+            >
+              {startScenario.isPending
+                ? "Starting..."
+                : scenarioData.hasActiveRun
+                  ? "Resume run"
+                  : "Start scenario"}
+              <ArrowRight className="size-4" />
+            </Button>
+            <p className="text-sm text-muted-foreground">
+              {scenarioData.activeRun
+                ? `${scenarioData.activeRun.phaseTitle} · updated ${formatDateTime(scenarioData.activeRun.updatedAt)}`
+                : "Runs in your browser — nothing to install."}
+            </p>
+          </div>
+        </header>
+      ) : null}
 
       {scenarioQuery.error ? (
         <Alert variant="destructive">
@@ -221,35 +245,10 @@ export function ScenarioBriefing() {
           ) : null}
 
           <Card>
-            <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <CardHeader>
               <CardTitle className="text-lg">Briefing</CardTitle>
-              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                <DifficultyBadge difficulty={scenarioData.briefing.difficulty} />
-                <MetaBadge
-                  icon={<Clock3 className="size-4" />}
-                  label={`${scenarioData.briefing.estimatedMinutes} min`}
-                />
-                <MetaBadge
-                  icon={<ShieldCheck className="size-4" />}
-                  label={`${scenarioData.vmCount} VM${scenarioData.vmCount === 1 ? "" : "s"}`}
-                />
-                <MetaBadge
-                  label={`Enabled ${formatDate(scenarioData.enabledAt)}`}
-                />
-              </div>
             </CardHeader>
             <CardContent className="space-y-4 text-sm leading-7">
-              {scenarioData.briefing.tags.length ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <Tags className="size-4 text-muted-foreground" />
-                  {scenarioData.briefing.tags.map((tag) => (
-                    <Badge key={tag} variant="outline" className="h-6 px-2 text-xs">
-                      {tag}
-                    </Badge>
-                  ))}
-                </div>
-              ) : null}
-
               <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
 
               <div className="space-y-3 border-t pt-4">
@@ -260,6 +259,12 @@ export function ScenarioBriefing() {
                   {scenarioData.briefing.objectives.map((objective, index) => (
                     <li key={`${objective.probeName}-${index}`} className="pl-1">
                       {objective.title?.trim() || objective.label}
+                      {objective.hintCount > 0 ? (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          {objective.hintCount} hint
+                          {objective.hintCount === 1 ? "" : "s"}
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ol>
@@ -461,14 +466,6 @@ function MetaBadge(props: { icon?: React.ReactNode; label: string }) {
       {props.label}
     </Badge>
   );
-}
-
-function formatDate(value: number) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(value);
 }
 
 function formatDateTime(value: number) {
