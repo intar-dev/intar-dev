@@ -167,11 +167,13 @@ export function ScenarioBriefing() {
       compactHeader
     >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <Button variant="ghost" asChild className="w-fit">
-          <Link to="/scenarios">
-            <ArrowLeft className="size-4" />
-            Back to scenarios
-          </Link>
+        <Button
+          variant="ghost"
+          className="w-fit"
+          render={<Link to="/scenarios" />}
+        >
+          <ArrowLeft className="size-4" />
+          Back to scenarios
         </Button>
         {scenarioData ? (
           <Button

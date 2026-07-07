@@ -110,14 +110,16 @@ export function ScenarioCatalog() {
                   <p className="text-sm text-muted-foreground">
                     Enabled {formatRelativeDate(scenario.enabledAt)}
                   </p>
-                  <Button asChild>
-                    <Link
-                      to="/scenarios/$scenarioId"
-                      params={{ scenarioId: scenario.scenarioId }}
-                    >
-                      Open briefing
-                      <ArrowRight className="size-4" />
-                    </Link>
+                  <Button
+                    render={
+                      <Link
+                        to="/scenarios/$scenarioId"
+                        params={{ scenarioId: scenario.scenarioId }}
+                      />
+                    }
+                  >
+                    Open briefing
+                    <ArrowRight className="size-4" />
                   </Button>
                 </div>
               </CardContent>

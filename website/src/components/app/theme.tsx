@@ -90,18 +90,20 @@ export function ThemeToggle() {
   return (
     <div className="fixed top-4 right-4 z-50">
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            className="bg-background/95 shadow-xs backdrop-blur supports-[backdrop-filter]:bg-background/80"
-            onClick={cycleTheme}
-            aria-label={`Theme: ${label}. Click to switch to ${nextLabel}.`}
-          >
-            {icon}
-          </Button>
-        </TooltipTrigger>
+        <TooltipTrigger
+          render={
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              className="bg-background/95 shadow-xs backdrop-blur supports-[backdrop-filter]:bg-background/80"
+              onClick={cycleTheme}
+              aria-label={`Theme: ${label}. Click to switch to ${nextLabel}.`}
+            >
+              {icon}
+            </Button>
+          }
+        />
         <TooltipContent side="left" sideOffset={8}>
           {label} theme
         </TooltipContent>

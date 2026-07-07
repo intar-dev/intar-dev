@@ -2152,7 +2152,9 @@ function HostScenarioLaunchPanel(props: {
         <div className="space-y-4 rounded-3xl border border-border/70 bg-muted/15 p-4">
           <Select
             value={props.selectedScenarioId}
-            onValueChange={props.onScenarioChange}
+            onValueChange={(value) => {
+              if (value) props.onScenarioChange(value);
+            }}
           >
             <SelectTrigger className="w-full">
               <SelectValue placeholder="Select scenario" />

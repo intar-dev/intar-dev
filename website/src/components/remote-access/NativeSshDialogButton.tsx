@@ -131,17 +131,19 @@ export function NativeSshDialogButton({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger asChild>
-        <Button
-          type="button"
-          size={size}
-          variant={variant}
-          className={className}
-          disabled={disabled}
-        >
-          {label}
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger
+        render={
+          <Button
+            type="button"
+            size={size}
+            variant={variant}
+            className={className}
+            disabled={disabled}
+          >
+            {label}
+          </Button>
+        }
+      />
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Native SSH for {vmName}</DialogTitle>

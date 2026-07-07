@@ -90,14 +90,12 @@ export function AppNavbar() {
         {user ? (
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <Button
-              asChild
               type="button"
               variant={pathname.startsWith("/profile") ? "secondary" : "ghost"}
               size="sm"
+              render={<Link to="/profile" />}
             >
-              <Link to="/profile">
-                {user.username ?? "Anonymous"}
-              </Link>
+              {user.username ?? "Anonymous"}
             </Button>
             <Button
               type="button"
