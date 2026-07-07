@@ -48,6 +48,11 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { toLegacyScenarioRunRecord } from "@/lib/legacy-scenario-ui";
+import { parseProbeValue, summarizeProbeValue } from "@/lib/probe-values";
+import { ProbeDetail } from "@/components/app/run/ProbeDetail";
+import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
+import { computeLeaseDeadline } from "@/lib/run-lease";
+import type { RunVmProvisioningSpec } from "@/lib/run-state";
 import { cn } from "@/lib/utils";
 
 interface ScenarioProbeStatus {
@@ -96,6 +101,7 @@ interface ScenarioRunVmRecord {
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
+  provisioning: RunVmProvisioningSpec;
   terminalTarget: {
     host: string | null;
     port: number;
@@ -776,6 +782,17 @@ export function ScenarioRun() {
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {attemptData && attemptData.outcome === "in_progress" ? (
+              <LeaseCountdown
+                deadlineMs={computeLeaseDeadline(
+                  attemptData.createdAt,
+                  attemptData.vms.map(
+                    (vm) => vm.provisioning?.leaseDurationSeconds,
+                  ),
+                )}
+                className="rounded-full border bg-muted/40 px-3 py-1"
+              />
+            ) : null}
             {attemptData?.phase === "completed" ? (
               <RunArtifactGifExportButton viewer={viewer} />
             ) : null}
@@ -1109,6 +1126,13 @@ function ScenarioProbeRail(props: {
                 ) : null}
                 {probe.error ? (
                   <p className="mt-2 text-xs text-destructive">{probe.error}</p>
+                ) : probe.status === "fail" &&
+                  parseProbeValue(probe.kind, probe.value) ? (
+                  <ProbeDetail
+                    kind={probe.kind}
+                    value={probe.value}
+                    className="mt-3 rounded-md border border-destructive/20 bg-background/60 p-2.5"
+                  />
                 ) : (
                   <p
                     className={cn(
@@ -1907,6 +1931,9 @@ function describeProbeValue(probe: ScenarioProbeStatus) {
       ? "Passing"
       : "Waiting for a passing signal.";
   }
+
+  const summary = summarizeProbeValue(probe.kind, probe.value);
+  if (summary) return summary;
 
   if (typeof probe.value === "string") {
     return probe.value;
