@@ -4,7 +4,6 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { ArrowLeft, Clock3 } from "lucide-react";
 import {
   RunArtifactGifExportButton,
-  RunArtifactViewer,
   type RunArtifactFile,
   type RunArtifactViewerState,
 } from "@/components/app/RunArtifactViewer";
@@ -15,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toLegacyScenarioRunRecord } from "@/lib/legacy-scenario-ui";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
+import { RunReplayPanel } from "@/components/app/run/RunReplayPanel";
 import { VmDetailsCard } from "@/components/app/run/VmDetailsCard";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import {
@@ -691,7 +691,7 @@ export function ScenarioRun() {
                   onSelect={setSelectedVmId}
                 />
               ) : null}
-              <RunArtifactViewer viewer={viewer} minimalCastReplay />
+              <RunReplayPanel viewer={viewer} />
             </section>
           ) : showBootLoadingScreen ? (
             <div className="mx-auto w-full max-w-7xl">

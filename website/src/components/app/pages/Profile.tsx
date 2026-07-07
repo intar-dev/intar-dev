@@ -135,11 +135,29 @@ export function Profile() {
 
   return (
     <PageShell
-      title="Profile"
-      description="Control how Intar lets you into mission VMs. Public SSH keys are copied into new runs so native access can go straight to the mapped VM port from your own machine."
-      eyebrow="Identity"
+      title="Connect your identity"
+      description="Who you are on intar, and how your own machine gets into scenario VMs. Public SSH keys are copied into new runs so native access can go straight to the mapped VM port."
+      eyebrow="Profile"
       compactHeader
     >
+      {user ? (
+        <div className="flex flex-wrap items-center gap-4 rounded-lg border px-4 py-3">
+          {user.image ? (
+            <img src={user.image} alt="" className="size-10 rounded-full border" />
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">{user.name}</p>
+            <p className="text-xs text-muted-foreground">{user.email}</p>
+          </div>
+          {"username" in user && typeof user.username === "string" ? (
+            <Badge variant="outline" className="font-mono">
+              @{user.username}
+            </Badge>
+          ) : null}
+          <Badge variant="secondary">Signed in with GitHub</Badge>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(22rem,0.85fr)]">
         <Card className="overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-muted/20">
           <CardHeader className="gap-4 border-b border-border/70 bg-muted/30">

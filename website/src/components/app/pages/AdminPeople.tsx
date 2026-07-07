@@ -41,12 +41,16 @@ export function AdminPeople() {
         <TabsList>
           <TabsTrigger value="requests">Access requests</TabsTrigger>
           <TabsTrigger value="users">Users</TabsTrigger>
+          <TabsTrigger value="teams">Teams</TabsTrigger>
         </TabsList>
         <TabsContent value="requests" className="pt-4">
           <AccessRequestsPanel />
         </TabsContent>
         <TabsContent value="users" className="pt-4">
           <UsersPanel />
+        </TabsContent>
+        <TabsContent value="teams" className="pt-4">
+          <TeamsPanel />
         </TabsContent>
       </Tabs>
     </PageShell>
@@ -435,4 +439,108 @@ function StatusBadge({ status }: { status: AccessRequestRecord["status"] }) {
     default:
       return <Badge>Pending</Badge>;
   }
+}
+
+interface AdminTeamRow {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: number;
+  memberCount: number;
+  assignmentCount: number;
+  owner: { name: string; username: string | null } | null;
+}
+
+function TeamsPanel() {
+  const teams = useQuery({
+    queryKey: ["admin", "teams"],
+    queryFn: async () => {
+      const response = await fetch("/api/admin/teams", {
+        method: "GET",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error ?? `Failed to load teams (${response.status})`);
+      }
+      return (await response.json()) as { teams: AdminTeamRow[] };
+    },
+    staleTime: 10_000,
+  });
+
+  if (teams.error) {
+    return (
+      <ErrorState
+        title="Could not load teams"
+        description={
+          teams.error instanceof Error ? teams.error.message : "Failed to load teams"
+        }
+      />
+    );
+  }
+  if (teams.isLoading) {
+    return <LoadingState title="Loading teams" />;
+  }
+
+  const entries = teams.data?.teams ?? [];
+  if (!entries.length) {
+    return (
+      <EmptyState
+        icon={<UserPlus className="size-6" />}
+        title="No teams yet"
+        description="Teams created by instructors show up here with their roster and assignment counts."
+      />
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Team</TableHead>
+            <TableHead>Owner</TableHead>
+            <TableHead>Members</TableHead>
+            <TableHead>Assignments</TableHead>
+            <TableHead>Created</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {entries.map((team) => (
+            <TableRow key={team.id}>
+              <TableCell>
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">{team.name}</p>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {team.slug}
+                  </p>
+                </div>
+              </TableCell>
+              <TableCell className="text-sm">
+                {team.owner ? (
+                  <>
+                    {team.owner.name}
+                    {team.owner.username ? (
+                      <span className="ml-1.5 font-mono text-xs text-muted-foreground">
+                        @{team.owner.username}
+                      </span>
+                    ) : null}
+                  </>
+                ) : (
+                  "—"
+                )}
+              </TableCell>
+              <TableCell className="text-sm">{team.memberCount}</TableCell>
+              <TableCell className="text-sm">{team.assignmentCount}</TableCell>
+              <TableCell className="text-xs text-muted-foreground">
+                {formatRelativeTime(team.createdAt)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
 }

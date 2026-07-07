@@ -34,7 +34,7 @@ interface ScenarioListResponse {
   scenarios: ScenarioSummary[];
 }
 
-export function Scenarios() {
+export function ScenarioRegistry() {
   const scenarios = useQuery({
     queryKey: ["admin-scenarios"],
     queryFn: async () => {
