@@ -485,20 +485,7 @@ function hasReportedProbeResults(
   });
 }
 
-function readRecord(value: unknown): Record<string, unknown> | null {
-  return isRecord(value) ? value : null;
-}
-
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.floor(value)
-    : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
