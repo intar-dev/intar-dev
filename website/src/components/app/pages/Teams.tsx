@@ -1,13 +1,20 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Check, Plus, Users } from "lucide-react";
-import { PageHeader } from "../patterns/PageHeader";
+import { Check, Plus, Users } from "lucide-react";
+import { PageShell } from "../patterns/PageShell";
 import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
 interface TeamSummary {
@@ -34,7 +41,7 @@ interface TeamsResponse {
 export function Teams() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [creating, setCreating] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [teamName, setTeamName] = useState("");
 
   const teams = useQuery({
@@ -73,7 +80,7 @@ export function Teams() {
       return body.team;
     },
     onSuccess: async (team) => {
-      setCreating(false);
+      setCreateOpen(false);
       setTeamName("");
       await queryClient.invalidateQueries({ queryKey: ["teams"] });
       void navigate({ to: "/teams/$orgId", params: { orgId: team.id } });
@@ -101,89 +108,102 @@ export function Teams() {
   const entries = teams.data?.teams ?? [];
   const invites = teams.data?.invites ?? [];
 
-  return (
-    <>
-      <PageHeader
-        eyebrow="Teams"
-        title="Teams"
-        description="Learn together: instructors assign scenarios and track the roster's progress."
-        actions={
-          <Button onClick={() => setCreating((current) => !current)}>
-            <Plus className="size-4" />
-            New team
-          </Button>
-        }
-      />
+  const openCreateDialog = () => {
+    setTeamName("");
+    createTeam.reset();
+    setCreateOpen(true);
+  };
 
-      {creating ? (
-        <Card>
-          <CardContent className="py-4">
-            <form
-              className="flex flex-wrap items-center gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (teamName.trim().length >= 2 && !createTeam.isPending) {
-                  createTeam.mutate();
-                }
-              }}
+  return (
+    <PageShell
+      title="Teams"
+      description="Learn together — gather your group, assign scenarios, and follow everyone's progress."
+      actions={
+        <Button onClick={openCreateDialog}>
+          <Plus className="size-4" />
+          New team
+        </Button>
+      }
+    >
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create a team</DialogTitle>
+            <DialogDescription>
+              Name your team, then invite learners and pick the scenarios you
+              want them to work through.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            id="create-team-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (teamName.trim().length >= 2 && !createTeam.isPending) {
+                createTeam.mutate();
+              }
+            }}
+          >
+            <Input
+              value={teamName}
+              onChange={(event) => setTeamName(event.target.value)}
+              placeholder="Team name"
+              aria-label="Team name"
+              autoFocus
+            />
+            {createTeam.error ? (
+              <p className="mt-2 text-sm text-destructive">
+                {createTeam.error instanceof Error
+                  ? createTeam.error.message
+                  : "Failed to create team"}
+              </p>
+            ) : null}
+          </form>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setCreateOpen(false)}
             >
-              <Input
-                value={teamName}
-                onChange={(event) => setTeamName(event.target.value)}
-                placeholder="Team name"
-                className="max-w-xs"
-                autoFocus
-              />
-              <Button
-                type="submit"
-                disabled={teamName.trim().length < 2 || createTeam.isPending}
-              >
-                {createTeam.isPending ? "Creating…" : "Create"}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => setCreating(false)}
-              >
-                Cancel
-              </Button>
-              {createTeam.error ? (
-                <p className="w-full text-sm text-destructive">
-                  {createTeam.error instanceof Error
-                    ? createTeam.error.message
-                    : "Failed to create team"}
-                </p>
-              ) : null}
-            </form>
-          </CardContent>
-        </Card>
-      ) : null}
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="create-team-form"
+              disabled={teamName.trim().length < 2 || createTeam.isPending}
+            >
+              {createTeam.isPending ? "Creating…" : "Create team"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {invites.length ? (
-        <section className="space-y-2">
-          <h2 className="text-sm font-medium text-muted-foreground">
-            Invitations
-          </h2>
+        <div className="space-y-3">
           {invites.map((invite) => (
-            <Card key={invite.id} className="py-0">
-              <CardContent className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <div
+              key={invite.id}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/5 p-4"
+            >
+              <div className="min-w-0">
                 <p className="text-sm">
-                  You've been invited to{" "}
-                  <span className="font-medium">{invite.teamName}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    {formatRelativeTime(invite.createdAt)}
+                  You&apos;ve been invited to{" "}
+                  <span className="font-heading font-semibold">
+                    {invite.teamName}
                   </span>
                 </p>
-                <Button
-                  size="sm"
-                  disabled={acceptInvite.isPending}
-                  onClick={() => acceptInvite.mutate(invite.id)}
-                >
-                  <Check className="size-3.5" />
-                  Join team
-                </Button>
-              </CardContent>
-            </Card>
+                <p className="text-caption">
+                  Invited {formatRelativeTime(invite.createdAt)}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                disabled={acceptInvite.isPending}
+                onClick={() => acceptInvite.mutate(invite.id)}
+              >
+                <Check className="size-3.5" />
+                Join team
+              </Button>
+            </div>
           ))}
           {acceptInvite.error ? (
             <p className="text-sm text-destructive">
@@ -192,7 +212,7 @@ export function Teams() {
                 : "Failed to accept invite"}
             </p>
           ) : null}
-        </section>
+        </div>
       ) : null}
 
       {teams.error ? (
@@ -208,46 +228,42 @@ export function Teams() {
         <LoadingState title="Loading teams" />
       ) : !entries.length && !invites.length ? (
         <EmptyState
-          icon={<Users className="size-6" />}
-          title="No teams yet"
-          description="Create a team to invite learners, assign scenarios, and follow everyone's progress."
+          icon={<Users />}
+          title="Teams let you learn together"
+          description="Create a team to invite learners, assign scenarios, and follow everyone's progress in one place."
+          action={
+            <Button onClick={openCreateDialog}>
+              <Plus className="size-4" />
+              Create team
+            </Button>
+          }
         />
       ) : entries.length ? (
-        <div className="space-y-2">
+        <div className="grid gap-4 md:grid-cols-2">
           {entries.map((team) => (
-            <Card key={team.id} className="py-0">
-              <CardContent className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
-                <div className="min-w-0 flex-1 space-y-0.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Link
-                      to="/teams/$orgId"
-                      params={{ orgId: team.id }}
-                      className="text-sm font-medium hover:underline"
-                    >
-                      {team.name}
-                    </Link>
-                    {team.role !== "member" ? (
-                      <Badge variant="secondary">Instructor</Badge>
-                    ) : null}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {team.memberCount} member{team.memberCount === 1 ? "" : "s"} ·
-                    created {formatRelativeTime(team.createdAt)}
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={<Link to="/teams/$orgId" params={{ orgId: team.id }} />}
-                >
-                  Open
-                  <ArrowRight className="size-3.5" />
-                </Button>
-              </CardContent>
-            </Card>
+            <Link
+              key={team.id}
+              to="/teams/$orgId"
+              params={{ orgId: team.id }}
+              className="group flex flex-col gap-3 rounded-2xl border bg-card p-6 shadow-xs transition-colors hover:border-primary/40"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="font-heading font-semibold transition-colors group-hover:text-primary">
+                  {team.name}
+                </h2>
+                <Badge variant={team.role === "member" ? "outline" : "secondary"}>
+                  {team.role === "member" ? "Member" : "Instructor"}
+                </Badge>
+              </div>
+              <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Users className="size-4" />
+                {team.memberCount} member{team.memberCount === 1 ? "" : "s"} ·
+                created {formatRelativeTime(team.createdAt)}
+              </p>
+            </Link>
           ))}
         </div>
       ) : null}
-    </>
+    </PageShell>
   );
 }

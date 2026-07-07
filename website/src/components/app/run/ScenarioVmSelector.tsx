@@ -1,7 +1,15 @@
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { ScenarioRunVmRecord } from "./run-types";
 
+const PHASE_DOT: Partial<Record<ScenarioRunVmRecord["phase"], string>> = {
+  running: "bg-success",
+  solved: "bg-success",
+  failed: "bg-destructive",
+  completed: "bg-muted-foreground",
+};
+
+// Segmented machine tabs, sitting flush above the terminal. Only rendered
+// when the scenario has more than one machine.
 export function ScenarioVmSelector(props: {
   vms: ScenarioRunVmRecord[];
   selectedVmId: string | null;
@@ -12,48 +20,34 @@ export function ScenarioVmSelector(props: {
   }
 
   return (
-    <div className="rounded-2xl border border-border/70 bg-muted/[0.18] p-2">
-      <div className="mb-2 flex items-center justify-between px-2 pt-1">
-        <div>
-          <p className="text-sm font-medium tracking-tight">Mission VMs</p>
-          <p className="text-xs text-muted-foreground">
-            Switch the terminal and probe rail between scenario machines.
-          </p>
-        </div>
-      </div>
-      <div className="grid gap-2 md:grid-cols-2">
-        {props.vms.map((vm) => {
-          const active = vm.id === props.selectedVmId;
-          return (
-            <button
-              key={vm.id}
-              type="button"
-              onClick={() => props.onSelect(vm.id)}
+    <div className="flex w-fit flex-wrap gap-1 rounded-xl bg-muted p-1">
+      {props.vms.map((vm) => {
+        const active = vm.id === props.selectedVmId;
+        return (
+          <button
+            key={vm.id}
+            type="button"
+            onClick={() => props.onSelect(vm.id)}
+            title={`${vm.hostname} · ${vm.phaseTitle}`}
+            aria-pressed={active}
+            className={cn(
+              "flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors",
+              active
+                ? "bg-background text-foreground shadow-xs"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <span
               className={cn(
-                "rounded-xl border px-4 py-3 text-left transition-colors",
-                active
-                  ? "border-foreground/20 bg-background shadow-sm"
-                  : "border-transparent bg-transparent hover:border-border/80 hover:bg-background/70",
+                "size-2 rounded-full",
+                PHASE_DOT[vm.phase] ?? "bg-warning motion-safe:animate-pulse",
               )}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{vm.scenarioVmName}</p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {vm.hostname}
-                  </p>
-                </div>
-                <Badge variant={vm.phase === "solved" ? "default" : "secondary"}>
-                  {vm.phaseTitle}
-                </Badge>
-              </div>
-              <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                {vm.phaseDetail}
-              </p>
-            </button>
-          );
-        })}
-      </div>
+              aria-hidden="true"
+            />
+            {vm.scenarioVmName}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp, probeCollectionTone } from "./format";
 import { groupVmProbesByScenario, ProbeRows } from "./ProbeRows";
-import { DetailStat } from "./stats";
+import { Stat } from "@/components/app/patterns/Stat";
 import type { AgentHostApi, VmStatus } from "./types";
 
 export function LiveScenarioRunCard(props: {
@@ -34,7 +34,7 @@ export function LiveScenarioRunCard(props: {
   };
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-border/70 bg-background/80 shadow-sm">
+    <article className="overflow-hidden rounded-2xl border bg-card shadow-xs">
       <div className="flex flex-col gap-4 px-5 py-5 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -65,19 +65,19 @@ export function LiveScenarioRunCard(props: {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <DetailStat
+            <Stat size="sm"
               label="Guest IP"
               value={props.vmItem.details?.guest_ip ?? "—"}
             />
-            <DetailStat
+            <Stat size="sm"
               label="Updated"
               value={formatTimestamp(props.vmItem.updated_at)}
             />
-            <DetailStat
+            <Stat size="sm"
               label="Probe update"
               value={formatTimestamp(probeState?.updated_at)}
             />
-            <DetailStat
+            <Stat size="sm"
               label="Target"
               value={
                 terminalTarget.host
@@ -86,7 +86,7 @@ export function LiveScenarioRunCard(props: {
               }
               detail={terminalTarget.state === "ready" ? "Ready" : "Bootstrap pending"}
             />
-            <DetailStat label="Host" value={props.host.name} detail={props.host.id} />
+            <Stat size="sm" label="Host" value={props.host.name} detail={props.host.id} />
           </div>
 
           {props.vmItem.error ? (
@@ -158,7 +158,7 @@ export function LiveScenarioRunCard(props: {
         }`}
       >
         <div className="overflow-hidden">
-          <div className="grid gap-4 border-t border-border/70 px-5 py-5 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
+          <div className="grid gap-4 border-t px-5 py-5 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
             <div className="space-y-4">
               {probeState ? (
                 <div
@@ -179,7 +179,7 @@ export function LiveScenarioRunCard(props: {
                   ) : null}
                 </div>
               ) : (
-                <div className="rounded-xl border border-dashed border-border/70 bg-muted/15 px-4 py-8 text-center text-sm text-muted-foreground">
+                <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
                   Waiting for the first probe scrape.
                 </div>
               )}
@@ -189,14 +189,14 @@ export function LiveScenarioRunCard(props: {
               {probeState?.probes.length ? (
                 scenarioMeta && groupedProbes ? (
                   <>
-                    <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
+                    <div className="rounded-xl bg-muted/40 p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
                         <p className="text-sm font-medium">Boot probes</p>
                         <Badge variant="outline">{groupedProbes.boot.length}</Badge>
                       </div>
                       <ProbeRows probes={groupedProbes.boot} />
                     </div>
-                    <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
+                    <div className="rounded-xl bg-muted/40 p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
                         <p className="text-sm font-medium">Scenario probes</p>
                         <Badge variant="outline">
@@ -206,7 +206,7 @@ export function LiveScenarioRunCard(props: {
                       <ProbeRows probes={groupedProbes.scenario} />
                     </div>
                     {groupedProbes.other.length ? (
-                      <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
+                      <div className="rounded-xl bg-muted/40 p-4">
                         <div className="mb-3 flex items-center justify-between gap-2">
                           <p className="text-sm font-medium">Ungrouped probes</p>
                           <Badge variant="outline">
@@ -221,7 +221,7 @@ export function LiveScenarioRunCard(props: {
                   <ProbeRows probes={probeState.probes} />
                 )
               ) : (
-                <div className="rounded-xl border border-dashed border-border/70 bg-muted/15 px-4 py-8 text-center text-sm text-muted-foreground">
+                <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
                   No probe rows yet for this VM.
                 </div>
               )}

@@ -39,6 +39,7 @@ interface ThemeContextValue {
   theme: AppTheme;
   resolvedTheme: Exclude<AppTheme, "system">;
   cycleTheme: () => void;
+  setTheme: (theme: AppTheme) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -72,6 +73,7 @@ export function ThemeProvider(props: { children: ReactNode }) {
       theme,
       resolvedTheme,
       cycleTheme: () => setTheme((current) => getNextTheme(current)),
+      setTheme,
     }),
     [resolvedTheme, theme],
   );

@@ -7,7 +7,6 @@ import {
   Library,
   ListChecks,
   Server,
-  User,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -26,17 +25,18 @@ export interface NavItem {
 
 export interface NavSection {
   id: string;
-  label: string;
+  /** Omitted for the primary group — it renders without a group label. */
+  label?: string;
   requires: NavRequirement;
   items: NavItem[];
 }
 
 // Single source of truth for the sidebar and breadcrumb labels. Role filtering
-// happens at render time via `isAdminUser`.
+// happens at render time via `isAdminUser`. Profile intentionally has no nav
+// item — it lives in the sidebar user menu.
 export const NAV_SECTIONS: NavSection[] = [
   {
-    id: "learn",
-    label: "Learn",
+    id: "main",
     requires: "signedIn",
     items: [
       {
@@ -45,48 +45,23 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/scenarios",
         icon: BookOpen,
         requires: "signedIn",
+        matchPrefix: "/scenarios",
       },
-    ],
-  },
-  {
-    id: "activity",
-    label: "Activity",
-    requires: "signedIn",
-    items: [
       {
         id: "runs",
         label: "My runs",
         to: "/runs",
         icon: ListChecks,
         requires: "signedIn",
+        matchPrefix: "/runs",
       },
-    ],
-  },
-  {
-    id: "teams",
-    label: "Teams",
-    requires: "signedIn",
-    items: [
       {
         id: "teams",
         label: "Teams",
         to: "/teams",
         icon: Users,
         requires: "signedIn",
-      },
-    ],
-  },
-  {
-    id: "account",
-    label: "Account",
-    requires: "signedIn",
-    items: [
-      {
-        id: "profile",
-        label: "Profile",
-        to: "/profile",
-        icon: User,
-        requires: "signedIn",
+        matchPrefix: "/teams",
       },
     ],
   },
@@ -101,12 +76,11 @@ export const NAV_SECTIONS: NavSection[] = [
         to: "/admin",
         icon: LayoutDashboard,
         requires: "admin",
-        matchPrefix: "/admin",
       },
       {
         id: "admin-hosts",
-        label: "Host onboarding",
-        to: "/admin/onboarding",
+        label: "Hosts",
+        to: "/admin/hosts",
         icon: Server,
         requires: "admin",
       },
@@ -119,7 +93,7 @@ export const NAV_SECTIONS: NavSection[] = [
       },
       {
         id: "admin-scenarios",
-        label: "Scenario registry",
+        label: "Scenarios",
         to: "/admin/scenarios",
         icon: Library,
         requires: "admin",

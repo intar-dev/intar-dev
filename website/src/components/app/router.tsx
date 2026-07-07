@@ -11,7 +11,7 @@ import { Landing } from "./pages/Landing";
 import { RequestAccess } from "./pages/RequestAccess";
 import { OAuthConsent } from "./pages/OAuthConsent";
 import { Dashboard } from "./pages/Dashboard";
-import { AgentOnboarding } from "./pages/AgentOnboarding";
+import { AdminHosts } from "./pages/admin/Hosts";
 import { AdminBuilds } from "./pages/AdminBuilds";
 import { ScenarioRegistry as AdminScenarios } from "./pages/admin/ScenarioRegistry";
 import { ScenarioDetails as AdminScenarioDetails } from "./pages/admin/ScenarioDetails";
@@ -119,11 +119,20 @@ const adminOverviewRoute = createRoute({
   component: Dashboard,
 });
 
-const adminOnboardingRoute = createRoute({
+const adminHostsRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/hosts",
+  beforeLoad: requireAdminRoute,
+  component: AdminHosts,
+});
+
+// Old bookmark compatibility: onboarding folded into the Hosts page.
+const adminOnboardingRedirectRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/onboarding",
-  beforeLoad: requireAdminRoute,
-  component: AgentOnboarding,
+  beforeLoad: () => {
+    throw redirect({ to: "/admin/hosts" });
+  },
 });
 
 const adminBuildsRoute = createRoute({
@@ -176,7 +185,8 @@ const routeTree = rootRoute.addChildren([
     teamDetailRoute,
     profileRoute,
     adminOverviewRoute,
-    adminOnboardingRoute,
+    adminHostsRoute,
+    adminOnboardingRedirectRoute,
     adminBuildsRoute,
     adminScenariosRoute,
     adminScenarioDetailsRoute,

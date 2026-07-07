@@ -1,12 +1,21 @@
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronsUpDown, LogOut, User as UserIcon } from "lucide-react";
+import {
+  ChevronsUpDown,
+  Laptop2,
+  LogOut,
+  Moon,
+  Sun,
+  User as UserIcon,
+} from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -18,10 +27,12 @@ import {
 } from "@/components/ui/sidebar";
 import { authClient } from "@/lib/auth-client";
 import { useSession } from "../hooks/useSession";
+import { useTheme, type AppTheme } from "../theme";
 
 export function SidebarUserMenu() {
   const navigate = useNavigate();
   const { isMobile } = useSidebar();
+  const { theme, setTheme } = useTheme();
   const { data, refetch } = useSession();
   const user = data?.user ?? null;
   const username = user?.username ?? user?.email ?? "Account";
@@ -84,6 +95,27 @@ export function SidebarUserMenu() {
               <UserIcon className="size-4" />
               Profile
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Theme</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={theme}
+                onValueChange={(value) => setTheme(value as AppTheme)}
+              >
+                <DropdownMenuRadioItem value="light">
+                  <Sun className="size-4" />
+                  Light
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="dark">
+                  <Moon className="size-4" />
+                  Dark
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="system">
+                  <Laptop2 className="size-4" />
+                  System
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               variant="destructive"

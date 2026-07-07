@@ -175,6 +175,8 @@ export function AdminAuthoring() {
   return (
     <PageShell
       admin
+      width="wide"
+      compactHeader
       title="Authoring"
       description="Write scenario HCL, validate it with the exact build-pipeline rules (in your browser), preview, and save drafts."
     >
@@ -312,7 +314,13 @@ export function AdminAuthoring() {
                           Updated {formatRelativeTime(source.updatedAt)}
                         </p>
                       </div>
-                      <Badge variant="outline">{source.status}</Badge>
+                      <Badge
+                        variant={
+                          source.status === "published" ? "success" : "outline"
+                        }
+                      >
+                        {source.status}
+                      </Badge>
                       <Button
                         size="sm"
                         variant="outline"

@@ -33,12 +33,14 @@ export function AppSidebar() {
       <SidebarHeader>
         <Link
           to="/scenarios"
-          className="flex items-center gap-2 px-1.5 py-1 font-semibold tracking-tight"
+          className="flex items-center gap-2.5 px-1.5 py-1.5"
         >
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <SquareTerminal className="size-4" />
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+            <SquareTerminal className="size-4.5" />
           </span>
-          <span className="group-data-[collapsible=icon]:hidden">intar</span>
+          <span className="font-heading text-base font-bold tracking-tight group-data-[collapsible=icon]:hidden">
+            intar
+          </span>
         </Link>
       </SidebarHeader>
 
@@ -50,7 +52,11 @@ export function AppSidebar() {
           if (items.length === 0) return null;
           return (
             <SidebarGroup key={section.id}>
-              <SidebarGroupLabel>{section.label}</SidebarGroupLabel>
+              {section.label ? (
+                <SidebarGroupLabel className="text-eyebrow text-[0.68rem] text-sidebar-foreground/60">
+                  {section.label}
+                </SidebarGroupLabel>
+              ) : null}
               <SidebarMenu>
                 {items.map((item) => {
                   const Icon = item.icon;

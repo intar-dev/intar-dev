@@ -1,25 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
+import { useParams } from "@tanstack/react-router";
 import {
-  ArrowLeft,
   CircleCheckBig,
   CircleOff,
-  FileText,
   HardDriveDownload,
-  Microchip,
   Radar,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { Section } from "@/components/app/patterns/Section";
+import { MetaChip } from "@/components/app/patterns/MetaChip";
+import {
+  ErrorState,
+  LoadingState,
+} from "@/components/app/patterns/StateCard";
+import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
+import { formatTimestamp } from "@/components/app/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import type { ScenarioProbeRecord } from "@/lib/scenario-model";
 
 interface ScenarioRecord {
@@ -48,7 +47,9 @@ interface ScenarioDetailResponse {
 }
 
 export function ScenarioDetails() {
-  const { scenarioId } = useParams({ from: "/app/admin/scenarios/$scenarioId" });
+  const { scenarioId } = useParams({
+    from: "/app/admin/scenarios/$scenarioId",
+  });
   const queryClient = useQueryClient();
 
   const scenario = useQuery({
@@ -155,139 +156,122 @@ export function ScenarioDetails() {
   const scenarioRecord = scenario.data ?? null;
   const enabled = scenarioRecord?.enabled ?? false;
 
+  useBreadcrumbLabel(scenarioRecord?.scenarioId);
+
   return (
-    <PageShell admin
-      title={scenarioRecord?.scenarioId ?? "Scenario details"}
-      description="Read-only scenario record. The web UI reflects the current stored scenario and only controls whether it is enabled for learners."
-    >
-      <div className="flex items-center justify-between gap-3">
-        <Button
-          variant="ghost"
-          className="w-fit"
-          render={<Link to="/admin/scenarios" />}
-        >
-          <ArrowLeft className="size-4" />
-          Back to scenarios
-        </Button>
-
-        {enabled ? (
-          <Button
-            variant="outline"
-            onClick={() => disableScenario.mutate()}
-            disabled={disableScenario.isPending || enableScenario.isPending}
-          >
-            <CircleOff className="size-4" />
-            {disableScenario.isPending ? "Disabling..." : "Disable scenario"}
-          </Button>
-        ) : (
-          <Button
-            onClick={() => enableScenario.mutate()}
-            disabled={enableScenario.isPending || disableScenario.isPending}
-          >
-            <CircleCheckBig className="size-4" />
-            {enableScenario.isPending ? "Enabling..." : "Enable scenario"}
-          </Button>
-        )}
-      </div>
-
+    <PageShell admin title="Scenario details" showHeader={false}>
       {scenario.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Could not load scenario</AlertTitle>
-          <AlertDescription>
-            {scenario.error instanceof Error
+        <ErrorState
+          title="Could not load scenario"
+          description={
+            scenario.error instanceof Error
               ? scenario.error.message
-              : "Failed to load scenario"}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {enableScenario.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Enable failed</AlertTitle>
-          <AlertDescription>
-            {enableScenario.error instanceof Error
-              ? enableScenario.error.message
-              : "Failed to enable scenario"}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {disableScenario.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Disable failed</AlertTitle>
-          <AlertDescription>
-            {disableScenario.error instanceof Error
-              ? disableScenario.error.message
-              : "Failed to disable scenario"}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {scenarioRecord ? (
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
-          <Card className="overflow-hidden">
-            <CardHeader className="space-y-5 border-b border-border/70 bg-muted/30">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={enabled ? "default" : "outline"}>
+              : "Failed to load scenario"
+          }
+          onRetry={() => void scenario.refetch()}
+        />
+      ) : !scenarioRecord ? (
+        <LoadingState title="Loading scenario" />
+      ) : (
+        <>
+          <PageHeader
+            eyebrow="Admin"
+            badge="Admin"
+            backLink={{ to: "/admin/scenarios", label: "Registry" }}
+            title={scenarioRecord.scenarioId}
+            description="Read-only scenario record. The web UI reflects the current stored scenario and only controls whether it is enabled for learners."
+            meta={
+              <>
+                <Badge variant={enabled ? "success" : "outline"}>
                   {enabled ? "Enabled" : "Disabled"}
                 </Badge>
-                <Badge variant="outline">
-                  <HardDriveDownload className="size-3" />
+                <MetaChip icon={<HardDriveDownload />}>
                   {scenarioRecord.vmCount} VM
                   {scenarioRecord.vmCount === 1 ? "" : "s"}
-                </Badge>
-                <Badge variant="outline">
-                  <Radar className="size-3" />
+                </MetaChip>
+                <MetaChip icon={<Radar />}>
                   {scenarioRecord.probeCount} probe
                   {scenarioRecord.probeCount === 1 ? "" : "s"}
-                </Badge>
-              </div>
+                </MetaChip>
+              </>
+            }
+            actions={
+              enabled ? (
+                <Button
+                  variant="outline"
+                  onClick={() => disableScenario.mutate()}
+                  disabled={
+                    disableScenario.isPending || enableScenario.isPending
+                  }
+                >
+                  <CircleOff className="size-4" />
+                  {disableScenario.isPending
+                    ? "Disabling…"
+                    : "Disable scenario"}
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => enableScenario.mutate()}
+                  disabled={
+                    enableScenario.isPending || disableScenario.isPending
+                  }
+                >
+                  <CircleCheckBig className="size-4" />
+                  {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
+                </Button>
+              )
+            }
+          />
 
-              <div className="space-y-2">
-                <CardTitle className="text-2xl tracking-tight">
-                  {scenarioRecord.scenarioId}
-                </CardTitle>
-                <CardDescription className="text-sm leading-6 text-muted-foreground">
-                  Current stored scenario
-                </CardDescription>
-              </div>
-            </CardHeader>
+          {enableScenario.error ? (
+            <Alert variant="destructive">
+              <AlertTitle>Enable failed</AlertTitle>
+              <AlertDescription>
+                {enableScenario.error instanceof Error
+                  ? enableScenario.error.message
+                  : "Failed to enable scenario"}
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
-            <CardContent className="space-y-6 pt-6">
-              <section className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <FileText className="size-4 text-muted-foreground" />
-                  <h2 className="text-base font-semibold tracking-tight">
-                    Scenario description
-                  </h2>
-                </div>
-                <div className="rounded-xl border bg-background px-4 py-4">
-                  <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">
-                    {scenarioRecord.description}
-                  </p>
-                </div>
-              </section>
+          {disableScenario.error ? (
+            <Alert variant="destructive">
+              <AlertTitle>Disable failed</AlertTitle>
+              <AlertDescription>
+                {disableScenario.error instanceof Error
+                  ? disableScenario.error.message
+                  : "Failed to disable scenario"}
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
-              <section className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Microchip className="size-4 text-muted-foreground" />
-                  <h2 className="text-base font-semibold tracking-tight">
-                    Scenario VMs
-                  </h2>
-                </div>
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
+            <div className="space-y-6">
+              <Section
+                title="Briefing preview"
+                description="How the scenario description reads to learners."
+              >
+                <p className="text-sm leading-6 whitespace-pre-wrap">
+                  {scenarioRecord.description}
+                </p>
+              </Section>
 
+              <Section
+                title="VM inventory"
+                description="Machines provisioned for every run of this scenario."
+              >
                 {scenarioRecord.vms.length ? (
-                  <div className="space-y-3">
+                  <div className="divide-y">
                     {scenarioRecord.vms.map((vm) => (
                       <div
                         key={vm.id}
-                        className="rounded-xl border bg-background px-4 py-4"
+                        className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
                       >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-medium">{vm.name}</p>
-                          <Badge variant="outline">{vm.image}</Badge>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground">
+                        <p className="font-mono text-sm font-medium">
+                          {vm.name}
+                        </p>
+                        <Badge variant="outline">{vm.image}</Badge>
+                        <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
                           <span>{vm.cpu} vCPU</span>
                           <span>{formatMemory(vm.memoryMib)}</span>
                           <span>{formatDisk(vm.diskMib)}</span>
@@ -296,26 +280,22 @@ export function ScenarioDetails() {
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     No VMs are defined on this scenario.
-                  </div>
+                  </p>
                 )}
-              </section>
+              </Section>
 
-              <section className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Radar className="size-4 text-muted-foreground" />
-                  <h2 className="text-base font-semibold tracking-tight">
-                    Probe checklist
-                  </h2>
-                </div>
-
+              <Section
+                title="Probes"
+                description="Checks that grade a run, in order."
+              >
                 {scenarioRecord.probes.length ? (
-                  <div className="space-y-3">
+                  <div className="divide-y">
                     {scenarioRecord.probes.map((probe, index) => (
                       <div
                         key={`${scenarioRecord.scenarioId}-probe-${probe.ordinal}`}
-                        className="rounded-xl border bg-background px-4 py-4"
+                        className="space-y-1.5 py-3 first:pt-0 last:pb-0"
                       >
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="text-sm font-medium">
@@ -331,61 +311,49 @@ export function ScenarioDetails() {
                               : "Scenario probe"}
                           </Badge>
                         </div>
-                        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+                        <p className="text-sm leading-6 whitespace-pre-wrap text-muted-foreground">
                           {probe.description}
                         </p>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     No probes are defined on this scenario.
-                  </div>
+                  </p>
                 )}
-              </section>
-            </CardContent>
-          </Card>
+              </Section>
+            </div>
 
-          <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Record</CardTitle>
-                <CardDescription>
-                  This page always reflects the current stored scenario for this
-                  scenario ID.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4 text-sm">
-                <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} />
-                <MetaRow
-                  label="State"
-                  value={enabled ? "Enabled" : "Disabled"}
-                />
-                <MetaRow
-                  label="VM count"
-                  value={String(scenarioRecord.vmCount)}
-                />
-                <MetaRow
-                  label="Probe count"
-                  value={String(scenarioRecord.probeCount)}
-                />
-                <MetaRow
-                  label="Enabled at"
-                  value={
-                    scenarioRecord.enabledAt
-                      ? formatDateTime(scenarioRecord.enabledAt)
-                      : "Not enabled"
-                  }
-                />
-                <MetaRow
-                  label="Updated"
-                  value={formatDateTime(scenarioRecord.updatedAt)}
-                />
-              </CardContent>
-            </Card>
+            <Section
+              title="Record"
+              description="Always reflects the current stored scenario for this scenario ID."
+              className="h-fit"
+              bodyClassName="space-y-4"
+            >
+              <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} />
+              <MetaRow label="State" value={enabled ? "Enabled" : "Disabled"} />
+              <MetaRow label="VM count" value={String(scenarioRecord.vmCount)} />
+              <MetaRow
+                label="Probe count"
+                value={String(scenarioRecord.probeCount)}
+              />
+              <MetaRow
+                label="Enabled at"
+                value={
+                  scenarioRecord.enabledAt
+                    ? formatTimestamp(scenarioRecord.enabledAt)
+                    : "Not enabled"
+                }
+              />
+              <MetaRow
+                label="Updated"
+                value={formatTimestamp(scenarioRecord.updatedAt)}
+              />
+            </Section>
           </div>
-        </div>
-      ) : null}
+        </>
+      )}
     </PageShell>
   );
 }
@@ -393,20 +361,10 @@ export function ScenarioDetails() {
 function MetaRow(props: { label: string; value: string }) {
   return (
     <div className="space-y-1">
-      <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground/80">
-        {props.label}
-      </p>
-      <p className="break-all text-sm font-medium">{props.value}</p>
+      <p className="text-eyebrow">{props.label}</p>
+      <p className="text-sm font-medium break-all">{props.value}</p>
     </div>
   );
-}
-
-function formatDateTime(value: number | null | undefined) {
-  if (!value) {
-    return "Unknown";
-  }
-
-  return new Date(value).toLocaleString();
 }
 
 function formatMemory(value: number) {

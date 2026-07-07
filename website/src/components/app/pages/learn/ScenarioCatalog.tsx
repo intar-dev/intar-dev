@@ -1,36 +1,25 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, Clock3, Search, ShieldCheck } from "lucide-react";
-import { EmptyStateCard } from "@/components/app/PagePatterns";
+import { ArrowRight, CircleDot, Search, ShieldCheck, Users } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/app/patterns/StateCard";
+import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+  ScenarioCard,
+  type ScenarioCardData,
+} from "@/components/app/patterns/ScenarioCard";
+import type { ScenarioDifficulty } from "@/components/app/patterns/MetaChip";
+import { useMyRuns } from "@/components/app/hooks/useMyRuns";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 
-type ScenarioDifficulty = "easy" | "medium" | "hard";
-
-interface ScenarioCatalogEntry {
-  scenarioId: string;
+interface ScenarioCatalogEntry extends ScenarioCardData {
   slug: string;
-  title: string;
-  tagline: string;
-  difficulty: ScenarioDifficulty;
-  estimatedMinutes: number;
-  tags: string[];
   category: string;
   scenarioName: string;
   enabledAt: number;
-  vmCount: number;
 }
 
 interface ScenarioCatalogResponse {
@@ -93,12 +82,14 @@ export function ScenarioCatalog() {
     staleTime: 30_000,
   });
 
+  const myRuns = useMyRuns();
+  const activeRuns = (myRuns.data?.runs ?? []).filter((run) => run.active);
+
   const allEntries = scenarios.data?.scenarios ?? [];
   const assignments = myAssignments.data?.assignments ?? [];
 
   const allTags = useMemo(
-    () =>
-      [...new Set(allEntries.flatMap((scenario) => scenario.tags))].sort(),
+    () => [...new Set(allEntries.flatMap((scenario) => scenario.tags))].sort(),
     [allEntries],
   );
 
@@ -146,10 +137,18 @@ export function ScenarioCatalog() {
     search.trim() || difficulty || category || selectedTags.length,
   );
 
-  return (
-    <PageShell title="Scenarios" description="" showHeader={false}>
-      <h1 className="text-3xl font-semibold tracking-tight">Scenarios</h1>
+  const clearFilters = () => {
+    setSearch("");
+    setDifficulty(null);
+    setCategory(null);
+    setSelectedTags([]);
+  };
 
+  return (
+    <PageShell
+      title="Scenarios"
+      description="Real broken systems. Pick one and go fix it."
+    >
       {scenarios.error ? (
         <Alert variant="destructive">
           <AlertTitle>Could not load scenarios</AlertTitle>
@@ -161,26 +160,50 @@ export function ScenarioCatalog() {
         </Alert>
       ) : null}
 
-      {assignments.length ? (
-        <section className="space-y-2">
-          <h2 className="text-sm font-medium text-muted-foreground">
-            Assigned to you
-          </h2>
-          <div className="flex flex-wrap gap-2">
+      {activeRuns.length || assignments.length ? (
+        <section className="space-y-3">
+          <h2 className="text-eyebrow">Continue</h2>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {activeRuns.map((run) => (
+              <Link
+                key={run.runId}
+                to="/runs/$runId"
+                params={{ runId: run.runId }}
+                className="group flex items-center gap-4 rounded-2xl border border-primary/30 bg-primary/5 p-4 shadow-xs transition-colors hover:border-primary/50"
+              >
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+                  <CircleDot className="size-4.5 motion-safe:animate-pulse" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">
+                    {run.title}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Run in progress — jump back in
+                  </span>
+                </span>
+                <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+              </Link>
+            ))}
             {assignments.map((assignment) => (
               <Link
                 key={assignment.assignmentId}
                 to="/scenarios/$scenarioId"
                 params={{ scenarioId: assignment.scenarioId }}
-                className="inline-flex items-center gap-2 rounded-full border bg-primary/5 px-3 py-1.5 text-sm transition-colors hover:bg-primary/10"
+                className="group flex items-center gap-4 rounded-2xl border bg-card p-4 shadow-xs transition-colors hover:border-primary/40"
               >
-                <span className="font-medium">
-                  {assignment.scenarioTitle ?? assignment.scenarioId}
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-secondary-foreground">
+                  <Users className="size-4.5" />
                 </span>
-                <span className="text-xs text-muted-foreground">
-                  {assignment.teamName}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">
+                    {assignment.scenarioTitle ?? assignment.scenarioId}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Assigned by {assignment.teamName}
+                  </span>
                 </span>
-                <ArrowRight className="size-3.5 text-muted-foreground" />
+                <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
               </Link>
             ))}
           </div>
@@ -189,18 +212,15 @@ export function ScenarioCatalog() {
 
       {allEntries.length ? (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-56 flex-1 sm:max-w-xs">
-              <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search scenarios…"
-                className="pl-8"
-                aria-label="Search scenarios"
-              />
-            </div>
-            <div className="flex items-center gap-1">
+          <FilterBar
+            search={search}
+            onSearchChange={setSearch}
+            searchPlaceholder="Search scenarios…"
+            searchLabel="Search scenarios"
+            filtersActive={filtersActive}
+            onClear={clearFilters}
+          >
+            <div className="flex items-center gap-1.5">
               {DIFFICULTIES.map((level) => (
                 <FilterChip
                   key={level}
@@ -216,7 +236,7 @@ export function ScenarioCatalog() {
               ))}
             </div>
             {allCategories.length ? (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1.5">
                 {allCategories.map((entry) => (
                   <FilterChip
                     key={entry}
@@ -232,8 +252,8 @@ export function ScenarioCatalog() {
                 ))}
               </div>
             ) : null}
-          </div>
-          {allTags.length ? (
+          </FilterBar>
+          {allTags.length > 1 ? (
             <div className="flex flex-wrap items-center gap-1.5">
               {allTags.map((tag) => (
                 <FilterChip
@@ -249,143 +269,42 @@ export function ScenarioCatalog() {
         </div>
       ) : null}
 
-      {!scenarios.isLoading && !allEntries.length ? (
-        <EmptyStateCard
-          icon={<ShieldCheck className="size-10" />}
+      {scenarios.error ? null : scenarios.isLoading ? (
+        <div className="grid gap-6 lg:grid-cols-2 2xl:grid-cols-3">
+          {Array.from({ length: 6 }, (_, index) => (
+            <Skeleton key={index} className="h-52 rounded-2xl" />
+          ))}
+        </div>
+      ) : !allEntries.length ? (
+        <EmptyState
+          icon={<ShieldCheck />}
           title="No scenarios are enabled yet"
-          description="This list will fill once an admin enables a scenario with a scenario briefing and at least one scenario probe."
-          className="min-h-[20rem]"
-          contentClassName="min-h-[20rem]"
+          description="This list will fill once an admin enables a scenario with a briefing and at least one probe."
         />
-      ) : !scenarios.isLoading && !filtered.length ? (
-        <EmptyStateCard
-          icon={<Search className="size-10" />}
+      ) : !filtered.length ? (
+        <EmptyState
+          icon={<Search />}
           title="No scenarios match your filters"
-          description="Try a different search term or clear the difficulty/tag filters."
-          className="min-h-[16rem]"
-          contentClassName="min-h-[16rem]"
+          description="Try a different search term, or clear the filters to see everything."
+          action={
+            <Button variant="outline" onClick={clearFilters}>
+              Clear filters
+            </Button>
+          }
         />
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid gap-6 lg:grid-cols-2 2xl:grid-cols-3">
           {filtered.map((scenario) => (
-            <Card key={scenario.scenarioId}>
-              <CardHeader className="gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <DifficultyBadge difficulty={scenario.difficulty} />
-                  {scenario.tags.map((tag) => (
-                    <Badge key={tag} variant="outline">
-                      {tag}
-                    </Badge>
-                  ))}
-                </div>
-                <div className="space-y-2">
-                  <CardTitle className="text-xl">{scenario.title}</CardTitle>
-                  <CardDescription className="leading-6">
-                    {scenario.tagline}
-                  </CardDescription>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <dl className="grid gap-4 sm:grid-cols-2">
-                  <ScenarioMeta
-                    icon={<Clock3 className="size-4" />}
-                    label="Estimate"
-                    value={`${scenario.estimatedMinutes} min`}
-                  />
-                  <ScenarioMeta
-                    icon={<ShieldCheck className="size-4" />}
-                    label="Machines"
-                    value={`${scenario.vmCount}`}
-                  />
-                </dl>
-
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm text-muted-foreground">
-                    Enabled {formatRelativeDate(scenario.enabledAt)}
-                  </p>
-                  <Button
-                    render={
-                      <Link
-                        to="/scenarios/$scenarioId"
-                        params={{ scenarioId: scenario.scenarioId }}
-                      />
-                    }
-                  >
-                    Open briefing
-                    <ArrowRight className="size-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+            <ScenarioCard key={scenario.scenarioId} scenario={scenario} />
           ))}
         </div>
       )}
 
       {filtersActive && filtered.length ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption">
           Showing {filtered.length} of {allEntries.length} scenarios.
         </p>
       ) : null}
     </PageShell>
   );
-}
-
-function FilterChip({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "rounded-full border px-2.5 py-1 text-xs font-medium capitalize transition-colors",
-        active
-          ? "border-primary bg-primary text-primary-foreground"
-          : "bg-background text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ScenarioMeta(props: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="space-y-1">
-      <dt className="flex items-center gap-2 text-sm text-muted-foreground">
-        {props.icon}
-        {props.label}
-      </dt>
-      <dd className="text-base font-medium">{props.value}</dd>
-    </div>
-  );
-}
-
-function DifficultyBadge(props: {
-  difficulty: ScenarioCatalogEntry["difficulty"];
-}) {
-  if (props.difficulty === "hard") {
-    return <Badge variant="destructive">Hard</Badge>;
-  }
-
-  if (props.difficulty === "easy") {
-    return <Badge variant="secondary">Easy</Badge>;
-  }
-
-  return <Badge variant="outline">Medium</Badge>;
-}
-
-function formatRelativeDate(value: number) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(value);
 }

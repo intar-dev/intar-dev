@@ -89,12 +89,12 @@ export function HostOnboardingPanel({
 
   return (
     <section className="grid gap-6 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
-      <div className="space-y-4 rounded-3xl border border-border/70 bg-card/80 p-6 shadow-sm">
+      <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-xs">
         <div className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">
+          <p className="text-eyebrow">
             {eyebrow}
           </p>
-          <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
+          <h2 className="text-section-title">{title}</h2>
         </div>
 
         <div className="grid gap-2 sm:grid-cols-2">
@@ -151,23 +151,23 @@ export function HostOnboardingPanel({
         ) : null}
 
         <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-4">
-          <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+          <div className="rounded-xl bg-muted/40 px-4 py-3">
             Host name
             <div className="mt-1 font-medium text-foreground">
               {hostName.trim() || "dedicated-host"}
             </div>
           </div>
-          <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+          <div className="rounded-xl bg-muted/40 px-4 py-3">
             Role
             <div className="mt-1 font-medium capitalize text-foreground">
               {hostRole}
             </div>
           </div>
-          <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+          <div className="rounded-xl bg-muted/40 px-4 py-3">
             Output
             <div className="mt-1 font-medium text-foreground">`config.toml`</div>
           </div>
-          <div className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+          <div className="rounded-xl bg-muted/40 px-4 py-3">
             Install
             <div className="mt-1 font-medium text-foreground">
               `{hostRole === "builder" ? "intar-builder" : "intar-agent"}`
@@ -176,7 +176,7 @@ export function HostOnboardingPanel({
         </div>
       </div>
 
-      <div className="rounded-3xl border border-border/70 bg-card/80 p-6 shadow-sm">
+      <div className="rounded-2xl border bg-card p-6 shadow-xs">
         {generated ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -198,32 +198,32 @@ export function HostOnboardingPanel({
               </Button>
             </div>
 
-            <ScrollArea className="h-[24rem] rounded-3xl border border-border/70 bg-muted/25">
+            <ScrollArea className="h-[24rem] rounded-xl border bg-muted/30">
               <pre className="p-4 text-xs leading-6 text-foreground">
                 <code>{generated.bridgeConfigToml}</code>
               </pre>
             </ScrollArea>
 
             <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
-              <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+              <li className="rounded-xl bg-muted/40 px-4 py-3">
                 Replace `[bridge]` in{" "}
                 {generated.host.role === "builder"
                   ? "`/etc/intar-builder/config.toml`"
                   : "`/etc/intar-agent/config.toml`"}
               </li>
-              <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+              <li className="rounded-xl bg-muted/40 px-4 py-3">
                 Restart with{" "}
                 {generated.host.role === "builder"
                   ? "`sudo systemctl restart intar-builder`"
                   : "`sudo systemctl restart intar-agent`"}
               </li>
-              <li className="rounded-2xl border border-border/70 bg-muted/20 px-4 py-3">
+              <li className="rounded-xl bg-muted/40 px-4 py-3">
                 Confirm the heartbeat in the Hosts tab.
               </li>
             </ol>
           </div>
         ) : (
-          <div className="flex min-h-[24rem] items-center justify-center rounded-3xl border border-dashed border-border/70 bg-muted/15 px-6 text-center text-sm text-muted-foreground">
+          <div className="flex min-h-[24rem] items-center justify-center rounded-xl bg-muted/40 px-6 text-center text-sm text-muted-foreground">
             Generate a host config to reveal the bridge block and install steps.
           </div>
         )}

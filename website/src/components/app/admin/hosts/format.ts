@@ -118,7 +118,7 @@ export const probeStatusTone = (status: string) => {
 export const probeCollectionTone = (state: string) =>
   state === "error"
     ? "border-destructive/30 bg-destructive/5 text-destructive"
-    : "border-border/70 bg-secondary text-secondary-foreground";
+    : "border-border bg-secondary text-secondary-foreground";
 
 export const summarizeProbeValue = (value: unknown) => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

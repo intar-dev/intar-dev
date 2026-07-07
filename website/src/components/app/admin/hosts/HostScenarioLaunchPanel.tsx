@@ -63,17 +63,8 @@ export function HostScenarioLaunchPanel(props: {
 
   return (
     <div className="space-y-4">
-      <div>
-        <p className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">
-          Launch
-        </p>
-        <h3 className="mt-2 text-lg font-semibold tracking-tight">
-          Run scenario
-        </h3>
-      </div>
-
       {props.scenarios.length ? (
-        <div className="space-y-4 rounded-3xl border border-border/70 bg-muted/15 p-4">
+        <div className="space-y-4">
           <Select
             value={props.selectedScenarioId}
             onValueChange={(value) => {
@@ -120,13 +111,11 @@ export function HostScenarioLaunchPanel(props: {
               </p>
 
               {launchVm ? (
-                <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-                  <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
-                    Launch target
-                  </p>
+                <div className="rounded-xl bg-muted/40 px-4 py-3">
+                  <p className="text-eyebrow">Launch target</p>
                   <p className="mt-2 text-sm font-medium">{launchVm.name}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {launchVm.cpu} vCPU • {launchVm.memoryMib} MiB •{" "}
+                    {launchVm.cpu} vCPU · {launchVm.memoryMib} MiB ·{" "}
                     {launchVm.diskMib} MiB
                   </p>
                 </div>
@@ -143,13 +132,13 @@ export function HostScenarioLaunchPanel(props: {
           ) : null}
 
           {!isHostOnline ? (
-            <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
+            <div className="rounded-xl bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
               Host must be online to queue a scenario.
             </div>
           ) : null}
 
           {!canLaunchScenarios ? (
-            <div className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
+            <div className="rounded-xl bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
               This host is reserved for image builds.
             </div>
           ) : null}
@@ -164,7 +153,7 @@ export function HostScenarioLaunchPanel(props: {
           </Button>
         </div>
       ) : (
-        <div className="rounded-3xl border border-dashed border-border/70 bg-muted/15 px-4 py-8 text-center text-sm text-muted-foreground">
+        <div className="rounded-xl bg-muted/40 px-4 py-8 text-center text-sm text-muted-foreground">
           No scenarios available.
         </div>
       )}

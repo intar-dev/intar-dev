@@ -1,16 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { SquareTerminal } from "lucide-react";
 import { useSession } from "../hooks/useSession";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 
 interface OAuthClientSummary {
   client_id: string;
@@ -162,105 +156,112 @@ export function OAuthConsent() {
     : null;
 
   return (
-    <div className="px-4 py-12 sm:px-6 lg:px-8">
-      <div className="mx-auto flex min-h-[calc(100vh-8rem)] w-full max-w-3xl items-center justify-center">
-        <Card className="w-full max-w-2xl">
-          <CardHeader>
-            <CardTitle>Authorize access</CardTitle>
-            <CardDescription>
-              Review the client and the scopes it is requesting before continuing
-              the OAuth flow.
-            </CardDescription>
-          </CardHeader>
+    <main className="flex min-h-screen flex-col items-center justify-center px-6 py-16">
+      <Link
+        to="/"
+        className="mb-8 flex items-center gap-2.5 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <span className="flex size-8 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+          <SquareTerminal className="size-5" aria-hidden="true" />
+        </span>
+        <span className="font-heading text-lg font-bold tracking-tight">
+          intar
+        </span>
+      </Link>
 
-          <CardContent className="space-y-6">
-            {oauthQueryMissing ? (
-              <Alert variant="destructive">
-                <AlertTitle>Missing OAuth request</AlertTitle>
-                <AlertDescription>
-                  This consent screen was opened without a signed OAuth request.
-                  Restart the sign-in flow from the external application.
-                </AlertDescription>
-              </Alert>
-            ) : null}
+      <div className="w-full max-w-md rounded-2xl border bg-card p-6 shadow-xs">
+        <div className="space-y-2">
+          <h1 className="text-page-title">Authorize access</h1>
+          <p className="text-sm leading-6 text-muted-foreground">
+            Review the client and the scopes it is requesting before continuing
+            the OAuth flow.
+          </p>
+        </div>
 
-            {!oauthQueryMissing && !sessionLoading && !hasSignedInUser ? (
-              <Alert variant="destructive">
-                <AlertTitle>Session required</AlertTitle>
-                <AlertDescription>
-                  Your Intar session is no longer active. Sign in again and restart
-                  authorization from the external application.
-                </AlertDescription>
-              </Alert>
-            ) : null}
+        <div className="mt-6 space-y-6">
+          {oauthQueryMissing ? (
+            <Alert variant="destructive">
+              <AlertTitle>Missing OAuth request</AlertTitle>
+              <AlertDescription>
+                This consent screen was opened without a signed OAuth request.
+                Restart the sign-in flow from the external application.
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
-            {clientError ? (
-              <Alert variant="destructive">
-                <AlertTitle>Unable to load client</AlertTitle>
-                <AlertDescription>{clientError}</AlertDescription>
-              </Alert>
-            ) : null}
+          {!oauthQueryMissing && !sessionLoading && !hasSignedInUser ? (
+            <Alert variant="destructive">
+              <AlertTitle>Session required</AlertTitle>
+              <AlertDescription>
+                Your Intar session is no longer active. Sign in again and restart
+                authorization from the external application.
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
-            {consentError ? (
-              <Alert variant="destructive">
-                <AlertTitle>Consent failed</AlertTitle>
-                <AlertDescription>{consentError}</AlertDescription>
-              </Alert>
-            ) : null}
+          {clientError ? (
+            <Alert variant="destructive">
+              <AlertTitle>Unable to load client</AlertTitle>
+              <AlertDescription>{clientError}</AlertDescription>
+            </Alert>
+          ) : null}
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <h2 className="text-2xl font-semibold tracking-tight">
-                  {clientName}
-                </h2>
-                {redirectHost ? <Badge variant="outline">{redirectHost}</Badge> : null}
-              </div>
+          {consentError ? (
+            <Alert variant="destructive">
+              <AlertTitle>Consent failed</AlertTitle>
+              <AlertDescription>{consentError}</AlertDescription>
+            </Alert>
+          ) : null}
 
-              <div className="space-y-1 text-sm text-muted-foreground">
+          <section className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="font-heading text-xl font-semibold tracking-tight">
+                {clientName}
+              </h2>
+              {redirectHost ? <Badge variant="outline">{redirectHost}</Badge> : null}
+            </div>
+
+            <div className="space-y-1 text-sm text-muted-foreground">
+              <p>
+                Client ID:{" "}
+                <span className="font-mono text-foreground">{clientId}</span>
+              </p>
+              {session?.user ? (
                 <p>
-                  Client ID: <span className="font-mono text-foreground">{clientId}</span>
+                  Signed in as{" "}
+                  <span className="font-medium text-foreground">
+                    {session.user.email}
+                  </span>
                 </p>
-                {session?.user ? (
-                  <p>
-                    Signed in as{" "}
-                    <span className="font-medium text-foreground">
-                      {session.user.email}
-                    </span>
-                  </p>
-                ) : null}
+              ) : null}
+            </div>
+          </section>
+
+          <section className="space-y-3">
+            <h3 className="text-eyebrow">Requested scopes</h3>
+            {scopes.length ? (
+              <div className="flex flex-wrap gap-2">
+                {scopes.map((scope) => (
+                  <Badge key={scope} variant="secondary">
+                    {scope}
+                  </Badge>
+                ))}
               </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No scopes were requested.
+              </p>
+            )}
+          </section>
+
+          {clientQuery.data?.client_uri ? (
+            <section className="space-y-1 text-sm text-muted-foreground">
+              <h3 className="text-eyebrow">Client URL</h3>
+              <p className="break-all">{clientQuery.data.client_uri}</p>
             </section>
+          ) : null}
 
-            <section className="space-y-3">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Requested scopes
-              </h3>
-              {scopes.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {scopes.map((scope) => (
-                    <Badge key={scope} variant="secondary">
-                      {scope}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  No scopes were requested.
-                </p>
-              )}
-            </section>
-
-            {clientQuery.data?.client_uri ? (
-              <section className="space-y-1 text-sm text-muted-foreground">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                  Client URL
-                </h3>
-                <p className="break-all">{clientQuery.data.client_uri}</p>
-              </section>
-            ) : null}
-          </CardContent>
-
-          <CardFooter className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <Button
               type="button"
               variant="outline"
@@ -278,9 +279,9 @@ export function OAuthConsent() {
             >
               {consentMutation.isPending ? "Working..." : "Allow access"}
             </Button>
-          </CardFooter>
-        </Card>
+          </div>
+        </div>
       </div>
-    </div>
+    </main>
   );
 }

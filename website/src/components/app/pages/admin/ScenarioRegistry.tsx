@@ -1,23 +1,23 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   ChevronRight,
-  FolderKanban,
+  CircleCheckBig,
+  CircleOff,
   HardDriveDownload,
   Radar,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { EmptyStateCard } from "@/components/app/PagePatterns";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Section } from "@/components/app/patterns/Section";
+import { MetaChip } from "@/components/app/patterns/MetaChip";
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+} from "@/components/app/patterns/StateCard";
+import { formatRelativeTime } from "@/components/app/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 
 interface ScenarioSummary {
   scenarioId: string;
@@ -35,6 +35,8 @@ interface ScenarioListResponse {
 }
 
 export function ScenarioRegistry() {
+  const queryClient = useQueryClient();
+
   const scenarios = useQuery({
     queryKey: ["admin-scenarios"],
     queryFn: async () => {
@@ -57,145 +59,157 @@ export function ScenarioRegistry() {
     staleTime: 10_000,
   });
 
+  const setEnabled = useMutation({
+    mutationFn: async (params: { scenarioId: string; enabled: boolean }) => {
+      const response = await fetch(
+        `/api/admin/scenarios/${encodeURIComponent(params.scenarioId)}/enabled`,
+        {
+          method: params.enabled ? "POST" : "DELETE",
+          credentials: "include",
+        },
+      );
+
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(
+          body?.error ??
+            `Failed to ${params.enabled ? "enable" : "disable"} scenario`,
+        );
+      }
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin-scenarios"] }),
+        queryClient.invalidateQueries({ queryKey: ["scenarios"] }),
+      ]);
+    },
+  });
+
   const scenarioList = scenarios.data?.scenarios ?? [];
-  const enabledCount = scenarioList.filter((scenario) => scenario.enabled).length;
+  const enabledCount = scenarioList.filter(
+    (scenario) => scenario.enabled,
+  ).length;
 
   return (
-    <PageShell admin
+    <PageShell
+      admin
       title="Scenarios"
-      description="Read-only registry of uploaded scenarios. The web UI no longer edits scenario content; it only lets you inspect the current stored scenario and enable or disable it for learners."
+      description="Inspect uploaded scenarios and control which ones are live for learners."
+      meta={
+        <>
+          <MetaChip>{scenarioList.length} total</MetaChip>
+          <MetaChip variant="accent">{enabledCount} enabled</MetaChip>
+        </>
+      }
     >
-      <Card className="overflow-hidden">
-        <CardHeader className="border-b border-border/70 bg-muted/30">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-2">
-              <CardTitle className="text-lg">Scenario registry</CardTitle>
-              <CardDescription className="max-w-3xl leading-6">
-                Each uploaded scenario is keyed by its stable scenario ID. New
-                uploads replace the current stored scenario for that scenario
-                ID, while scenario runs keep their own launch-time state.
-              </CardDescription>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">{scenarioList.length} total</Badge>
-              <Badge variant="secondary">{enabledCount} enabled</Badge>
-              <Badge variant="outline">
-                {scenarioList.length - enabledCount} disabled
-              </Badge>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4 pt-6">
-          {scenarios.error ? (
-            <Alert variant="destructive">
-              <AlertTitle>Could not load scenarios</AlertTitle>
-              <AlertDescription>
-                {scenarios.error instanceof Error
-                  ? scenarios.error.message
-                  : "Failed to load scenarios"}
-              </AlertDescription>
-            </Alert>
+      {scenarios.error ? (
+        <ErrorState
+          title="Could not load scenarios"
+          description={
+            scenarios.error instanceof Error
+              ? scenarios.error.message
+              : "Failed to load scenarios"
+          }
+          onRetry={() => void scenarios.refetch()}
+        />
+      ) : scenarios.isLoading ? (
+        <LoadingState title="Loading scenarios" />
+      ) : !scenarioList.length ? (
+        <EmptyState
+          icon={<HardDriveDownload />}
+          title="No scenarios uploaded"
+          description="Scenario authoring lives outside the web UI. Upload a scenario through the external pipeline and it appears here with its description, VM inventory, probes, and enabled state."
+        />
+      ) : (
+        <Section
+          title="Registry"
+          description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
+          bodyClassName="divide-y"
+        >
+          {setEnabled.error ? (
+            <p className="pb-3 text-sm text-destructive">
+              {setEnabled.error instanceof Error
+                ? setEnabled.error.message
+                : "Failed to update scenario"}
+            </p>
           ) : null}
-
-          {!scenarios.isLoading && !scenarioList.length ? (
-            <EmptyStateCard
-              icon={<HardDriveDownload className="size-10" />}
-              title="No scenarios uploaded"
-              description="Upload a valid scenario through the external scenario pipeline. Once it lands, it appears here with its current description, VM inventory, probes, and enabled state."
-            />
-          ) : (
-            <div className="space-y-3">
-              {scenarioList.map((scenario) => (
-                <article
-                  key={scenario.scenarioId}
-                  className="grid gap-4 rounded-2xl border border-border/70 bg-card/70 p-4 transition-colors hover:border-foreground/20 lg:grid-cols-[minmax(0,1fr)_auto]"
-                >
-                  <div className="min-w-0 space-y-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-base font-semibold tracking-tight">
-                        {scenario.scenarioId}
-                      </p>
-                      <Badge
-                        variant={scenario.enabled ? "secondary" : "outline"}
-                      >
-                        {scenario.enabled ? "Enabled" : "Disabled"}
-                      </Badge>
-                      <Badge variant="outline">
-                        {scenario.vmCount} VM
-                        {scenario.vmCount === 1 ? "" : "s"}
-                      </Badge>
-                    </div>
-
-                    <p className="whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
-                      {scenario.description}
+          {scenarioList.map((scenario) => {
+            const togglePending =
+              setEnabled.isPending &&
+              setEnabled.variables?.scenarioId === scenario.scenarioId;
+            return (
+              <div
+                key={scenario.scenarioId}
+                className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-mono text-sm font-medium">
+                      {scenario.scenarioId}
                     </p>
-
-                    <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground">
-                      <span className="inline-flex items-center gap-2">
-                        <HardDriveDownload className="size-4" />
-                        {scenario.vmCount} VM
-                        {scenario.vmCount === 1 ? "" : "s"}
-                      </span>
-                      <span className="inline-flex items-center gap-2">
-                        <Radar className="size-4" />
-                        {scenario.probeCount} probe
-                        {scenario.probeCount === 1 ? "" : "s"}
-                      </span>
-                      <span>
-                        Updated {formatDateTime(scenario.updatedAt)}
-                      </span>
-                      <span>
-                        {scenario.enabledAt
-                          ? `Enabled ${formatDateTime(scenario.enabledAt)}`
-                          : "Not enabled for learners"}
-                      </span>
-                    </div>
+                    <Badge variant={scenario.enabled ? "success" : "outline"}>
+                      {scenario.enabled ? "Enabled" : "Disabled"}
+                    </Badge>
+                    <MetaChip icon={<HardDriveDownload />}>
+                      {scenario.vmCount} VM{scenario.vmCount === 1 ? "" : "s"}
+                    </MetaChip>
+                    <MetaChip icon={<Radar />}>
+                      {scenario.probeCount} probe
+                      {scenario.probeCount === 1 ? "" : "s"}
+                    </MetaChip>
                   </div>
+                  <p className="truncate text-sm text-muted-foreground">
+                    {scenario.description}
+                  </p>
+                  <p className="text-caption">
+                    Updated {formatRelativeTime(scenario.updatedAt)}
+                  </p>
+                </div>
 
-                  <div className="flex items-center">
-                    <Button
-                      variant="outline"
-                      render={
-                        <Link
-                          to="/admin/scenarios/$scenarioId"
-                          params={{ scenarioId: scenario.scenarioId }}
-                        />
-                      }
-                    >
-                      Inspect
-                      <ChevronRight className="size-4" />
-                    </Button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {!scenarioList.length && !scenarios.isLoading ? (
-        <Card className="border-dashed">
-          <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-3 px-6 py-10 text-center">
-            <FolderKanban className="size-10 text-muted-foreground" />
-            <div className="space-y-2">
-              <p className="text-lg font-semibold">Upload-driven workflow</p>
-              <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                Scenario authoring lives outside the web UI now. This surface is
-                intentionally narrow: inspect the current stored scenario and
-                decide whether it should be live for learners.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={setEnabled.isPending}
+                    onClick={() =>
+                      setEnabled.mutate({
+                        scenarioId: scenario.scenarioId,
+                        enabled: !scenario.enabled,
+                      })
+                    }
+                  >
+                    {scenario.enabled ? (
+                      <CircleOff className="size-4" />
+                    ) : (
+                      <CircleCheckBig className="size-4" />
+                    )}
+                    {togglePending
+                      ? "Updating…"
+                      : scenario.enabled
+                        ? "Disable"
+                        : "Enable"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    render={
+                      <Link
+                        to="/admin/scenarios/$scenarioId"
+                        params={{ scenarioId: scenario.scenarioId }}
+                      />
+                    }
+                  >
+                    Inspect
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </Section>
+      )}
     </PageShell>
   );
-}
-
-function formatDateTime(value: number | null | undefined) {
-  if (!value) {
-    return "Unknown";
-  }
-
-  return new Date(value).toLocaleString();
 }

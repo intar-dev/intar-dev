@@ -1,21 +1,31 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Clock3 } from "lucide-react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+import { Clock3 } from "lucide-react";
 import {
   RunArtifactGifExportButton,
   type RunArtifactFile,
   type RunArtifactViewerState,
 } from "@/components/app/RunArtifactViewer";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { MetaChip } from "@/components/app/patterns/MetaChip";
+import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { toLegacyScenarioRunRecord } from "@/lib/legacy-scenario-ui";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { presentScenarioRun } from "@/lib/run-phase";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { RunReplayPanel } from "@/components/app/run/RunReplayPanel";
-import { VmDetailsCard } from "@/components/app/run/VmDetailsCard";
+import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
+import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import {
   ScenarioProbeRail,
@@ -25,7 +35,6 @@ import {
   DeleteRunDialog,
   ScenarioCancelDialog,
 } from "@/components/app/run/RunDialogs";
-import { RunTimelineSection } from "@/components/app/run/RunTimelineSection";
 import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
@@ -97,10 +106,10 @@ export function ScenarioRun() {
       }
 
       const body = (await response.json()) as {
-        run: Parameters<typeof toLegacyScenarioRunRecord>[0];
+        run: Parameters<typeof presentScenarioRun>[0];
       };
       return {
-        run: toLegacyScenarioRunRecord(body.run),
+        run: presentScenarioRun(body.run),
       } satisfies ScenarioRunResponse;
     },
     refetchInterval: (query) => {
@@ -199,12 +208,12 @@ export function ScenarioRun() {
         },
       );
       const body = (await response.json().catch(() => null)) as
-        | { run?: Parameters<typeof toLegacyScenarioRunRecord>[0]; error?: string }
+        | { run?: Parameters<typeof presentScenarioRun>[0]; error?: string }
         | null;
       if (!response.ok || !body?.run) {
         throw new Error(body?.error ?? "Failed to reveal hint");
       }
-      return toLegacyScenarioRunRecord(body.run);
+      return presentScenarioRun(body.run);
     },
     onSuccess: (run) => {
       queryClient.setQueryData(["scenarios", "run", runId], { run });
@@ -221,12 +230,12 @@ export function ScenarioRun() {
         },
       );
       const body = (await response.json().catch(() => null)) as
-        | { run?: Parameters<typeof toLegacyScenarioRunRecord>[0]; error?: string }
+        | { run?: Parameters<typeof presentScenarioRun>[0]; error?: string }
         | null;
       if (!response.ok || !body?.run) {
         throw new Error(body?.error ?? "Failed to reveal solution");
       }
-      return toLegacyScenarioRunRecord(body.run);
+      return presentScenarioRun(body.run);
     },
     onSuccess: (run) => {
       queryClient.setQueryData(["scenarios", "run", runId], { run });
@@ -234,6 +243,7 @@ export function ScenarioRun() {
   });
 
   const attemptData = attempt.data?.run ?? null;
+  useBreadcrumbLabel(attemptData?.scenarioName);
   const outcomeMeta = attemptData
     ? scenarioRunOutcomeMeta(attemptData.outcome)
     : null;
@@ -574,66 +584,56 @@ export function ScenarioRun() {
       title="Scenario run"
       description="Progress, shell access, and the final replay."
       showHeader={false}
+      width="wide"
     >
-      <div className="space-y-2">
-        {attemptData ? (
-          <Button
-            variant="ghost"
-            className="-ml-3 w-fit"
-            render={
-              <Link
-                to="/scenarios/$scenarioId"
-                params={{ scenarioId: attemptData.scenarioId }}
-              />
-            }
-          >
-            <ArrowLeft className="size-4" />
-            Back to scenario
-          </Button>
-        ) : (
-          <Button
-            variant="ghost"
-            className="-ml-3 w-fit"
-            render={<Link to="/scenarios" />}
-          >
-            <ArrowLeft className="size-4" />
-            Back to scenarios
-          </Button>
-        )}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-2">
-            <h1 className="text-lg font-semibold tracking-tight">
-              {attemptData?.phase === "completed" && attemptData.scenarioName
-                ? `${attemptData.scenarioName} - Replay`
-                : (attemptData?.scenarioName ?? "Scenario run")}
-            </h1>
+      <PageHeader
+        compact
+        backLink={
+          attemptData
+            ? {
+                to: "/scenarios/$scenarioId",
+                params: { scenarioId: attemptData.scenarioId },
+                label: "Briefing",
+              }
+            : { to: "/scenarios", label: "All scenarios" }
+        }
+        eyebrow={attemptData?.phase === "completed" ? "Replay" : undefined}
+        title={attemptData?.scenarioName ?? "Scenario run"}
+        meta={
+          attemptData ? (
+            <>
+              {outcomeMeta && attemptData.outcome !== "in_progress" ? (
+                <Badge variant={outcomeMeta.variant}>{outcomeMeta.label}</Badge>
+              ) : null}
+              {attemptData.solveDurationMs !== null ? (
+                <MetaChip icon={<Clock3 />}>
+                  Solved in{" "}
+                  {formatScenarioDurationMs(attemptData.solveDurationMs)}
+                </MetaChip>
+              ) : null}
+              {attemptData.outcome === "in_progress" ? (
+                <MetaChip variant="outline">
+                  <LeaseCountdown
+                    deadlineMs={computeLeaseDeadline(
+                      attemptData.createdAt,
+                      attemptData.vms.map(
+                        (vm) => vm.provisioning?.leaseDurationSeconds,
+                      ),
+                    )}
+                    className="text-xs"
+                  />
+                </MetaChip>
+              ) : null}
+            </>
+          ) : undefined
+        }
+        actions={
+          <>
             {attemptData &&
-            (attemptData.outcome !== "in_progress" ||
-              attemptData.solveDurationMs !== null) ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {outcomeMeta ? (
-                  <Badge variant={outcomeMeta.variant}>{outcomeMeta.label}</Badge>
-                ) : null}
-                {attemptData.solveDurationMs !== null ? (
-                  <Badge variant="outline">
-                    Solved in {formatScenarioDurationMs(attemptData.solveDurationMs)}
-                  </Badge>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {attemptData && attemptData.outcome === "in_progress" ? (
-              <LeaseCountdown
-                deadlineMs={computeLeaseDeadline(
-                  attemptData.createdAt,
-                  attemptData.vms.map(
-                    (vm) => vm.provisioning?.leaseDurationSeconds,
-                  ),
-                )}
-                className="rounded-full border bg-muted/40 px-3 py-1"
-              />
-            ) : null}
+            attemptData.outcome === "in_progress" &&
+            !showShutdownLoadingScreen
+              ? shellAccessActions
+              : null}
             {attemptData?.phase === "completed" ? (
               <RunArtifactGifExportButton viewer={viewer} />
             ) : null}
@@ -645,9 +645,9 @@ export function ScenarioRun() {
                 pending={deleteRun.isPending}
               />
             ) : null}
-          </div>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {attempt.error ? (
         <Alert variant="destructive">
@@ -683,7 +683,7 @@ export function ScenarioRun() {
       {attemptData ? (
         <div className="space-y-6">
           {attemptData.phase === "completed" ? (
-            <section className="space-y-4">
+            <section className="mx-auto w-full max-w-5xl space-y-4">
               {attemptData.vms.length > 1 ? (
                 <ScenarioVmSelector
                   vms={attemptData.vms}
@@ -692,16 +692,28 @@ export function ScenarioRun() {
                 />
               ) : null}
               <RunReplayPanel viewer={viewer} />
+              <Card size="sm">
+                <CardHeader>
+                  <CardTitle className="font-heading text-base">
+                    Timeline
+                  </CardTitle>
+                  <CardDescription>
+                    When each check flipped during this run.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ObjectiveTimeline runId={runId} />
+                </CardContent>
+              </Card>
             </section>
           ) : showBootLoadingScreen ? (
-            <div className="mx-auto w-full max-w-7xl">
+            <div className="mx-auto w-full max-w-2xl">
               <ScenarioStepScreen
                 title={bootScreenCopy.title}
                 description={bootScreenCopy.description}
                 progressLabel="Getting ready"
                 progressPercent={attemptData.progressPercent}
                 steps={bootSteps}
-                actions={cancelScenarioAction}
                 topRight={
                   bootElapsedSeconds !== null ? (
                     <div className="inline-flex items-center gap-2 rounded-full border bg-muted/40 px-3 py-1 text-xs text-muted-foreground">
@@ -715,7 +727,7 @@ export function ScenarioRun() {
               />
             </div>
           ) : showShutdownLoadingScreen ? (
-            <div className="mx-auto w-full max-w-7xl">
+            <div className="mx-auto w-full max-w-2xl">
               <ScenarioStepScreen
                 title={shutdownScreenCopy.title}
                 description={shutdownScreenCopy.description}
@@ -723,15 +735,13 @@ export function ScenarioRun() {
               />
             </div>
           ) : (
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
-              <div className="relative min-w-0">
-                <div className="mb-4">
-                  <ScenarioVmSelector
-                    vms={attemptData.vms}
-                    selectedVmId={selectedVmId}
-                    onSelect={setSelectedVmId}
-                  />
-                </div>
+            <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_22rem]">
+              <div className="relative min-w-0 space-y-3">
+                <ScenarioVmSelector
+                  vms={attemptData.vms}
+                  selectedVmId={selectedVmId}
+                  onSelect={setSelectedVmId}
+                />
 
                 {selectedVm && selectedVmShellReady && terminalVisible ? (
                   <WebSshTerminal
@@ -741,7 +751,6 @@ export function ScenarioRun() {
                     title={`${selectedVm.scenarioVmName} shell`}
                     showCloseButton={false}
                     onClose={() => setTerminalVisible(false)}
-                    headerActions={shellAccessActions}
                   />
                 ) : (
                   <ScenarioShellStatusCard
@@ -754,7 +763,6 @@ export function ScenarioRun() {
                       !selectedVmShellReady &&
                       Boolean(selectedVm && selectedVm.phase !== "failed")
                     }
-                    actions={shellAccessActions}
                   />
                 )}
 
@@ -780,15 +788,6 @@ export function ScenarioRun() {
                   probes={selectedVm?.scenarioProbes ?? []}
                   objectives={attemptData.objectives}
                 />
-                <RunTimelineSection runId={runId} />
-                {selectedVm ? (
-                  <VmDetailsCard
-                    vmName={selectedVm.scenarioVmName}
-                    hostname={selectedVm.hostname}
-                    provisioning={selectedVm.provisioning}
-                    terminalTarget={selectedVm.terminalTarget}
-                  />
-                ) : null}
                 <HintList
                   hints={attemptData.hints}
                   nextHintKey={attemptData.nextHintKey}
@@ -811,6 +810,13 @@ export function ScenarioRun() {
                       ? revealSolution.error.message
                       : null
                   }
+                />
+                <RunDetailsSection
+                  runId={runId}
+                  vmName={selectedVm?.scenarioVmName ?? null}
+                  hostname={selectedVm?.hostname ?? null}
+                  provisioning={selectedVm?.provisioning ?? null}
+                  terminalTarget={selectedVm?.terminalTarget ?? null}
                 />
               </aside>
             </div>

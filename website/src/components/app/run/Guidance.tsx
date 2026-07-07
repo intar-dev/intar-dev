@@ -1,12 +1,10 @@
 import { useState } from "react";
 import { Eye, Lightbulb, LockKeyhole } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -21,6 +19,8 @@ import {
 } from "@/components/ui/dialog";
 import type { ScenarioRunHint, ScenarioRunSolution } from "./run-types";
 
+// Hints unlock in order: revealed hints show their body, the next hint gets
+// the reveal button, everything still locked stays a one-line row.
 export function HintList(props: {
   hints: ScenarioRunHint[];
   nextHintKey: string | null;
@@ -28,65 +28,75 @@ export function HintList(props: {
   pendingHintKey: string | null;
   error: string | null;
 }) {
+  if (!props.hints.length) {
+    return null;
+  }
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Lightbulb className="size-4 text-muted-foreground" />
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 font-heading text-base">
+          <Lightbulb className="size-4 text-warning" />
           Hints
         </CardTitle>
-        <CardDescription>Hints unlock in order.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
-        {props.error ? <p className="text-xs text-destructive">{props.error}</p> : null}
-        {props.hints.length ? (
-          props.hints.map((hint, index) => {
-            const canReveal = hint.key === props.nextHintKey;
+      <CardContent className="space-y-2">
+        {props.error ? (
+          <p className="text-xs text-destructive">{props.error}</p>
+        ) : null}
+        {props.hints.map((hint, index) => {
+          const label = hint.title?.trim() || `Hint ${index + 1}`;
+
+          if (hint.revealed) {
             return (
               <div key={hint.key} className="rounded-lg border px-3 py-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">
-                      {hint.title?.trim() || `Hint ${index + 1}`}
-                    </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {hint.scope === "probe" && hint.probeName
-                        ? `Probe: ${hint.probeName}`
-                        : "Scenario"}
-                    </p>
-                  </div>
-                  {hint.revealed ? (
-                    <Badge variant="outline">Shown</Badge>
-                  ) : (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={!canReveal || props.pendingHintKey === hint.key}
-                      onClick={() => props.onReveal(hint.key)}
-                    >
-                      {props.pendingHintKey === hint.key ? "Revealing" : "Reveal"}
-                    </Button>
-                  )}
-                </div>
+                <p className="text-sm font-medium">{label}</p>
                 {hint.bodyMarkdown ? (
-                  <Markdown className="mt-3 space-y-2 text-xs leading-6 text-muted-foreground">
+                  <Markdown className="mt-2 space-y-2 text-xs leading-6 text-muted-foreground">
                     {hint.bodyMarkdown}
                   </Markdown>
                 ) : null}
               </div>
             );
-          })
-        ) : (
-          <div className="border border-dashed border-border/70 px-3 py-6 text-sm text-muted-foreground">
-            No hints for this run.
-          </div>
-        )}
+          }
+
+          if (hint.key === props.nextHintKey) {
+            return (
+              <div
+                key={hint.key}
+                className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5"
+              >
+                <p className="min-w-0 truncate text-sm font-medium">{label}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={props.pendingHintKey === hint.key}
+                  onClick={() => props.onReveal(hint.key)}
+                >
+                  {props.pendingHintKey === hint.key ? "Revealing…" : "Reveal"}
+                </Button>
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={hint.key}
+              className="flex items-center gap-2.5 px-3 py-1.5 text-muted-foreground/70"
+            >
+              <LockKeyhole className="size-3.5 shrink-0" aria-hidden="true" />
+              <p className="min-w-0 truncate text-sm">{label}</p>
+            </div>
+          );
+        })}
       </CardContent>
     </Card>
   );
 }
 
+// The solution is deliberately quiet: one text link at the bottom of the
+// rail. Revealing before solving marks the run as assisted.
 export function SolutionCard(props: {
   solution: ScenarioRunSolution;
   onReveal: () => void;
@@ -94,85 +104,100 @@ export function SolutionCard(props: {
   error: string | null;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  // Don't pre-open the view dialog here: the reveal mutation can fail, and a
+  // latched-open flag would pop the dialog unprompted once a later poll turns
+  // `revealed` true. The link switches to "View the solution" on success.
   const reveal = () => {
     setConfirmOpen(false);
     props.onReveal();
   };
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
-          {props.solution.revealed ? (
-            <Eye className="size-4 text-muted-foreground" />
-          ) : (
-            <LockKeyhole className="size-4 text-muted-foreground" />
-          )}
-          Solution
-        </CardTitle>
-        <CardDescription>
-          {props.solution.revealed
-            ? props.solution.assisted
-              ? "Revealed before completion."
-              : "Unlocked after completion."
-            : props.solution.unlocked
-              ? "Available after all objectives pass."
-              : "Reveal now or solve first."}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {props.error ? <p className="text-xs text-destructive">{props.error}</p> : null}
-        {props.solution.bodyMarkdown ? (
-          <Markdown className="space-y-2 text-xs leading-6 text-muted-foreground">
-            {props.solution.bodyMarkdown}
-          </Markdown>
-        ) : props.solution.unlocked ? (
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full"
-            disabled={props.pending}
-            onClick={props.onReveal}
+    <div className="space-y-1 px-1">
+      {props.error ? (
+        <p className="text-xs text-destructive">{props.error}</p>
+      ) : null}
+      {props.solution.revealed || props.solution.bodyMarkdown ? (
+        <Dialog open={viewOpen} onOpenChange={setViewOpen}>
+          <DialogTrigger
+            render={
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+              />
+            }
           >
-            {props.pending ? "Revealing" : "Show solution"}
-          </Button>
-        ) : (
-          <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-            <DialogTrigger
-              render={
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="w-full"
-                  disabled={props.pending}
-                >
-                  {props.pending ? "Revealing" : "Reveal solution"}
-                </Button>
-              }
-            />
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Reveal solution?</DialogTitle>
-                <DialogDescription>
-                  Revealing before the scenario is solved marks this run as assisted.
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setConfirmOpen(false)}
-                >
-                  Cancel
-                </Button>
-                <Button type="button" onClick={reveal}>
-                  Reveal
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        )}
-      </CardContent>
-    </Card>
+            <Eye className="size-3.5" />
+            View the solution
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Solution</DialogTitle>
+              <DialogDescription>
+                {props.solution.assisted
+                  ? "Revealed before completion — this run counts as assisted."
+                  : "Unlocked after completion."}
+              </DialogDescription>
+            </DialogHeader>
+            {props.solution.bodyMarkdown ? (
+              <Markdown className="max-h-[60vh] space-y-2 overflow-y-auto text-sm leading-6">
+                {props.solution.bodyMarkdown}
+              </Markdown>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {props.pending ? "Loading solution…" : "Solution unavailable."}
+              </p>
+            )}
+          </DialogContent>
+        </Dialog>
+      ) : props.solution.unlocked ? (
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+          disabled={props.pending}
+          onClick={reveal}
+        >
+          <Eye className="size-3.5" />
+          {props.pending ? "Loading solution…" : "Show the solution"}
+        </button>
+      ) : (
+        <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <DialogTrigger
+            render={
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                disabled={props.pending}
+              />
+            }
+          >
+            <LockKeyhole className="size-3.5" />
+            Stuck? Reveal the full solution
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Reveal solution?</DialogTitle>
+              <DialogDescription>
+                Revealing before the scenario is solved marks this run as
+                assisted.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setConfirmOpen(false)}
+              >
+                Keep trying
+              </Button>
+              <Button type="button" onClick={reveal}>
+                Reveal
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
   );
 }

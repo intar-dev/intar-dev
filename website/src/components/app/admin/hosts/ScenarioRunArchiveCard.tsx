@@ -13,7 +13,7 @@ import {
   runOutcomeTone,
   runStatusTone,
 } from "./format";
-import { DetailStat } from "./stats";
+import { Stat } from "@/components/app/patterns/Stat";
 import type { AgentHostApi, AgentVmRunArtifact, AgentVmRunRecord } from "./types";
 
 export function ScenarioRunArchiveCard(props: {
@@ -30,7 +30,7 @@ export function ScenarioRunArchiveCard(props: {
   const outcome = runOutcomeTone(props.run.outcome);
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-border/70 bg-background/80 shadow-sm">
+    <article className="overflow-hidden rounded-2xl border bg-card shadow-xs">
       <div className={`h-1 w-full ${tone.rail}`} />
       <div className="flex flex-col gap-4 px-5 py-5 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
@@ -54,11 +54,11 @@ export function ScenarioRunArchiveCard(props: {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <DetailStat
+            <Stat size="sm"
               label="Deleted"
               value={formatTimestampMs(props.run.deletedAt)}
             />
-            <DetailStat
+            <Stat size="sm"
               label="Uploaded"
               value={
                 props.run.uploadCompletedAt
@@ -68,14 +68,14 @@ export function ScenarioRunArchiveCard(props: {
                     : "Pending"
               }
             />
-            <DetailStat
+            <Stat size="sm"
               label="Artifacts"
               value={String(props.run.artifacts.length)}
               detail={
                 props.run.artifacts.length === 1 ? "file captured" : "files captured"
               }
             />
-            <DetailStat
+            <Stat size="sm"
               label="Solve time"
               value={
                 props.run.outcome === "succeeded"
@@ -113,22 +113,22 @@ export function ScenarioRunArchiveCard(props: {
         }`}
       >
         <div className="overflow-hidden">
-          <div className="grid gap-6 border-t border-border/70 px-5 py-5 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
+          <div className="grid gap-6 border-t px-5 py-5 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <DetailStat
+                <Stat size="sm"
                   label="Created"
                   value={formatTimestampMs(props.run.vmCreatedAt)}
                 />
-                <DetailStat
+                <Stat size="sm"
                   label="Delete requested"
                   value={formatTimestampMs(props.run.deleteRequestedAt)}
                 />
-                <DetailStat
+                <Stat size="sm"
                   label="Upload state"
                   value={props.run.uploadStatus}
                 />
-                <DetailStat label="Owner" value={props.run.userId} />
+                <Stat size="sm" label="Owner" value={props.run.userId} />
               </div>
 
               {props.run.uploadError ? (
@@ -137,7 +137,7 @@ export function ScenarioRunArchiveCard(props: {
                 </div>
               ) : null}
 
-              <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
+              <div className="rounded-xl bg-muted/40 p-4">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-medium">Milestones</p>
                   <Badge variant="outline">{props.run.events.length}</Badge>
@@ -168,7 +168,7 @@ export function ScenarioRunArchiveCard(props: {
             </div>
 
             <div className="space-y-4">
-              <div className="rounded-xl border border-border/70 bg-muted/15 p-4">
+              <div className="rounded-xl bg-muted/40 p-4">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-medium">Artifacts</p>
                   <Badge variant="outline">{props.run.artifacts.length}</Badge>
@@ -182,7 +182,7 @@ export function ScenarioRunArchiveCard(props: {
                         className={`rounded-2xl border px-4 py-3 text-left text-sm transition-colors ${
                           props.viewer?.artifact.id === artifact.id
                             ? "border-primary/40 bg-primary/10 text-foreground"
-                            : "border-border/70 bg-background/90 text-muted-foreground hover:border-primary/30 hover:text-foreground"
+                            : "border-border bg-card text-muted-foreground hover:border-primary/30 hover:text-foreground"
                         }`}
                         onClick={() => {
                           props.onStreamArtifact(artifact);

@@ -1,21 +1,36 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import {
-  ArrowLeft,
   ArrowRight,
   Clock3,
   History,
-  ShieldCheck,
+  Server,
   Trash2,
+  Trophy,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/app/patterns/PageHeader";
+import {
+  DifficultyChip,
+  MetaChip,
+} from "@/components/app/patterns/MetaChip";
+import { RunListItem } from "@/components/app/patterns/RunListItem";
+import { ErrorState, LoadingState } from "@/components/app/patterns/StateCard";
+import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
+import {
+  formatDurationMs,
+  formatTimestamp,
+} from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { toLegacyScenarioDetail } from "@/lib/legacy-scenario-ui";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { presentScenarioDetail } from "@/lib/run-phase";
 import {
   Dialog,
   DialogContent,
@@ -110,9 +125,7 @@ export function ScenarioBriefing() {
   const startScenario = useMutation({
     mutationFn: () => requestScenarioStart(scenarioId),
     onSuccess: (runId) => {
-      window.location.assign(
-        `/runs/${encodeURIComponent(runId)}?pending=1`,
-      );
+      window.location.assign(`/runs/${encodeURIComponent(runId)}?pending=1`);
     },
   });
 
@@ -143,6 +156,17 @@ export function ScenarioBriefing() {
 
   const scenarioData = scenarioQuery.data?.scenario ?? null;
   const finishedRuns = scenarioData?.finishedRuns ?? [];
+  useBreadcrumbLabel(scenarioData?.briefing.title);
+
+  const bestSolveMs = finishedRuns
+    .filter((run) => run.outcome === "succeeded" && run.solveDurationMs !== null)
+    .reduce<number | null>(
+      (best, run) =>
+        best === null
+          ? run.solveDurationMs
+          : Math.min(best, run.solveDurationMs ?? best),
+      null,
+    );
 
   const handlePrimaryAction = () => {
     if (scenarioData?.hasActiveRun && scenarioData.activeRunId) {
@@ -158,195 +182,182 @@ export function ScenarioBriefing() {
 
   return (
     <PageShell title="Scenario briefing" description="" showHeader={false}>
-      <Button
-        variant="ghost"
-        className="-ml-3 w-fit"
-        render={<Link to="/scenarios" />}
-      >
-        <ArrowLeft className="size-4" />
-        Back to scenarios
-      </Button>
-
-      {scenarioData ? (
-        <header className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <DifficultyBadge difficulty={scenarioData.briefing.difficulty} />
-            <MetaBadge
-              icon={<Clock3 className="size-4" />}
-              label={`~${scenarioData.briefing.estimatedMinutes} min`}
-            />
-            <MetaBadge
-              icon={<ShieldCheck className="size-4" />}
-              label={`${scenarioData.vmCount} machine${scenarioData.vmCount === 1 ? "" : "s"}`}
-            />
-            {scenarioData.briefing.tags.map((tag) => (
-              <Badge key={tag} variant="outline" className="h-6 px-2 text-xs">
-                {tag}
-              </Badge>
-            ))}
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight">
-              {scenarioData.briefing.title}
-            </h1>
-            <p className="max-w-2xl text-base leading-7 text-muted-foreground">
-              {scenarioData.briefing.tagline}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              size="lg"
-              onClick={handlePrimaryAction}
-              disabled={
-                startScenario.isPending ||
-                (scenarioData.hasActiveRun && !scenarioData.activeRunId)
-              }
-            >
-              {startScenario.isPending
-                ? "Starting..."
-                : scenarioData.hasActiveRun
-                  ? "Resume run"
-                  : "Start scenario"}
-              <ArrowRight className="size-4" />
-            </Button>
-            <p className="text-sm text-muted-foreground">
-              {scenarioData.activeRun
-                ? `${scenarioData.activeRun.phaseTitle} · updated ${formatDateTime(scenarioData.activeRun.updatedAt)}`
-                : "Runs in your browser — nothing to install."}
-            </p>
-          </div>
-        </header>
-      ) : null}
-
       {scenarioQuery.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Could not load scenario</AlertTitle>
-          <AlertDescription>
-            {scenarioQuery.error instanceof Error
+        <ErrorState
+          title="Could not load scenario"
+          description={
+            scenarioQuery.error instanceof Error
               ? scenarioQuery.error.message
-              : "Failed to load scenario briefing"}
-          </AlertDescription>
-        </Alert>
-      ) : null}
+              : "Failed to load scenario briefing"
+          }
+          onRetry={() => void scenarioQuery.refetch()}
+        />
+      ) : !scenarioData ? (
+        <LoadingState title="Loading briefing" />
+      ) : (
+        <>
+          <PageHeader
+            backLink={{ to: "/scenarios", label: "All scenarios" }}
+            title={scenarioData.briefing.title}
+            description={scenarioData.briefing.tagline}
+            meta={
+              <>
+                <DifficultyChip
+                  difficulty={scenarioData.briefing.difficulty}
+                />
+                <MetaChip icon={<Clock3 />}>
+                  ~{scenarioData.briefing.estimatedMinutes} min
+                </MetaChip>
+                <MetaChip icon={<Server />}>
+                  {scenarioData.vmCount === 1
+                    ? "1 machine"
+                    : `${scenarioData.vmCount} machines`}
+                </MetaChip>
+                {scenarioData.briefing.tags.map((tag) => (
+                  <MetaChip key={tag} variant="outline">
+                    {tag}
+                  </MetaChip>
+                ))}
+              </>
+            }
+          />
 
-      {scenarioData ? (
-        <div className="space-y-6">
-          {scenarioData.activeRun ? (
-            <Alert>
-              <AlertTitle>Scenario already in progress</AlertTitle>
-              <AlertDescription>
-                <p>{scenarioData.activeRun.phaseDetail}</p>
-                <p className="text-foreground/80">
-                  {scenarioData.activeRun.phaseTitle} • Updated{" "}
-                  {formatDateTime(scenarioData.activeRun.updatedAt)}
-                </p>
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Briefing</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4 text-sm leading-7">
-              <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
-
-              <div className="space-y-3 border-t pt-4">
-                <h2 className="text-base font-semibold tracking-tight">
-                  Objectives
-                </h2>
-                <ol className="list-decimal space-y-2 pl-5 marker:font-medium marker:text-muted-foreground">
-                  {scenarioData.briefing.objectives.map((objective, index) => (
-                    <li key={`${objective.probeName}-${index}`} className="pl-1">
-                      {objective.title?.trim() || objective.label}
-                      {objective.hintCount > 0 ? (
-                        <span className="ml-2 text-xs text-muted-foreground">
-                          {objective.hintCount} hint
-                          {objective.hintCount === 1 ? "" : "s"}
-                        </span>
-                      ) : null}
-                    </li>
-                  ))}
-                </ol>
+          <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
+            <div className="space-y-10">
+              <div className="max-w-3xl text-[0.95rem] leading-7">
+                <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
               </div>
-            </CardContent>
-          </Card>
 
-          {finishedRuns.length ? (
-            <section className="space-y-3">
-              <div className="flex items-center gap-2">
-                <History className="size-4 text-muted-foreground" />
-                <h2 className="text-base font-semibold tracking-tight">
-                  Previous runs
-                </h2>
-                <Badge variant="outline" className="h-6 px-2 text-xs">
-                  {finishedRuns.length}
-                </Badge>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                {finishedRuns.map((run) => {
-                  const runTone = outcomeTone(run.outcome);
-                  const content = (
-                    <div className="space-y-3">
-                      <div className="flex flex-wrap gap-2">
-                        <Badge variant={runTone.variant}>{runTone.label}</Badge>
-                        {run.solutionAssisted ? (
-                          <Badge variant="outline">Assisted</Badge>
-                        ) : null}
-                      </div>
-                      <div className="space-y-1 text-sm">
-                        <p className="font-medium">{describeFinishedRun(run)}</p>
-                        <p className="text-muted-foreground">
-                          Started {formatDateTime(run.createdAt)}
-                        </p>
-                        <p className="text-muted-foreground">
-                          Finished {formatDateTime(run.finishedAt)}
-                        </p>
-                      </div>
-                      <div className="pt-1 text-sm font-medium">
-                        {run.hasReplay ? (
-                          <span className="text-primary">Open replay</span>
-                        ) : (
-                          <span className="text-muted-foreground">
-                            Replay unavailable
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-
-                  return (
-                    <div key={run.runId} className="relative">
-                      {run.hasReplay ? (
-                        <Link
-                          to="/runs/$runId"
-                          params={{ runId: run.runId }}
-                          className="block rounded-lg border p-4 pr-12 transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          {content}
-                        </Link>
-                      ) : (
-                        <div className="rounded-lg border p-4 pr-12">
-                          {content}
-                        </div>
+              {scenarioData.briefing.objectives.length ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Objectives</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <ol className="space-y-3">
+                      {scenarioData.briefing.objectives.map(
+                        (objective, index) => (
+                          <li
+                            key={`${objective.probeName}-${index}`}
+                            className="flex items-start gap-3"
+                          >
+                            <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
+                              {index + 1}
+                            </span>
+                            <div className="min-w-0 space-y-0.5 pt-0.5">
+                              <p className="text-sm font-medium">
+                                {objective.title?.trim() || objective.label}
+                              </p>
+                              {objective.hintCount > 0 ? (
+                                <p className="text-caption">
+                                  {objective.hintCount} hint
+                                  {objective.hintCount === 1 ? "" : "s"}{" "}
+                                  available
+                                </p>
+                              ) : null}
+                            </div>
+                          </li>
+                        ),
                       )}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="absolute top-3 right-3 text-muted-foreground hover:text-destructive"
-                        onClick={() => setDeleteTarget(run)}
-                        aria-label="Delete run"
-                        title="Delete run"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
+                    </ol>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {finishedRuns.length ? (
+                <section className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <History className="size-4 text-muted-foreground" />
+                    <h2 className="text-section-title">Previous runs</h2>
+                  </div>
+                  <div className="space-y-2.5">
+                    {finishedRuns.map((run) => (
+                      <RunListItem
+                        key={run.runId}
+                        run={{
+                          runId: run.runId,
+                          title: describeFinishedRun(run),
+                          outcome: run.outcome,
+                          active: false,
+                          createdAt: run.createdAt,
+                          solveDurationMs: null,
+                          solutionAssisted: run.solutionAssisted,
+                          hasReplay: run.hasReplay,
+                        }}
+                        trailing={
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeleteTarget(run)}
+                            aria-label="Delete run"
+                            title="Delete run"
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        }
+                      />
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+            </div>
+
+            <aside className="top-24 space-y-4 lg:sticky">
+              <Card>
+                <CardContent className="space-y-4">
+                  <Button
+                    size="lg"
+                    className="w-full"
+                    onClick={handlePrimaryAction}
+                    disabled={
+                      startScenario.isPending ||
+                      (scenarioData.hasActiveRun && !scenarioData.activeRunId)
+                    }
+                  >
+                    {startScenario.isPending
+                      ? "Starting…"
+                      : scenarioData.hasActiveRun
+                        ? "Resume run"
+                        : "Start scenario"}
+                    <ArrowRight className="size-4" />
+                  </Button>
+                  {startScenario.error ? (
+                    <p className="text-sm text-destructive">
+                      {startScenario.error instanceof Error
+                        ? startScenario.error.message
+                        : "Failed to start scenario"}
+                    </p>
+                  ) : null}
+                  {scenarioData.activeRun ? (
+                    <div className="space-y-1 rounded-xl bg-muted/50 px-4 py-3">
+                      <p className="text-sm font-medium">
+                        {scenarioData.activeRun.phaseTitle}
+                      </p>
+                      <p className="text-caption">
+                        {scenarioData.activeRun.phaseDetail}
+                      </p>
+                      <p className="text-caption">
+                        Updated{" "}
+                        {formatTimestamp(scenarioData.activeRun.updatedAt)}
+                      </p>
                     </div>
-                  );
-                })}
-              </div>
-            </section>
-          ) : null}
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Runs in your browser — nothing to install.
+                    </p>
+                  )}
+                  {bestSolveMs !== null ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Trophy className="size-4 text-warning" />
+                      Best time: {formatDurationMs(bestSolveMs)}
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+            </aside>
+          </div>
 
           <Dialog
             open={deleteTarget !== null}
@@ -382,35 +393,40 @@ export function ScenarioBriefing() {
                   disabled={deleteRun.isPending || !deleteTarget}
                 >
                   <Trash2 className="size-4" />
-                  {deleteRun.isPending ? "Deleting..." : "Delete run"}
+                  {deleteRun.isPending ? "Deleting…" : "Delete run"}
                 </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
-        </div>
-      ) : null}
+        </>
+      )}
     </PageShell>
   );
 }
 
 async function fetchScenarioDetail(scenarioId: string) {
-  const response = await fetch(`/api/scenarios/${encodeURIComponent(scenarioId)}`, {
-    method: "GET",
-    credentials: "include",
-  });
+  const response = await fetch(
+    `/api/scenarios/${encodeURIComponent(scenarioId)}`,
+    {
+      method: "GET",
+      credentials: "include",
+    },
+  );
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(body?.error ?? `Failed to load scenario (${response.status})`);
+    throw new Error(
+      body?.error ?? `Failed to load scenario (${response.status})`,
+    );
   }
 
   const body = (await response.json()) as {
-    scenario: Parameters<typeof toLegacyScenarioDetail>[0];
+    scenario: Parameters<typeof presentScenarioDetail>[0];
   };
   return {
-    scenario: toLegacyScenarioDetail(body.scenario),
+    scenario: presentScenarioDetail(body.scenario),
   } satisfies ScenarioDetailResponse;
 }
 
@@ -445,56 +461,6 @@ async function requestScenarioStart(scenarioId: string) {
   return body.runId;
 }
 
-function DifficultyBadge(props: {
-  difficulty: ScenarioDetail["briefing"]["difficulty"];
-}) {
-  if (props.difficulty === "hard") {
-    return <Badge variant="destructive">Hard</Badge>;
-  }
-
-  if (props.difficulty === "easy") {
-    return <Badge variant="secondary">Easy</Badge>;
-  }
-
-  return <Badge variant="outline">Medium</Badge>;
-}
-
-function MetaBadge(props: { icon?: React.ReactNode; label: string }) {
-  return (
-    <Badge variant="outline" className="gap-1">
-      {props.icon ? props.icon : null}
-      {props.label}
-    </Badge>
-  );
-}
-
-function formatDateTime(value: number) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(value);
-}
-
-function formatDurationMs(value: number) {
-  const totalSeconds = Math.max(0, Math.floor(value / 1_000));
-  const hours = Math.floor(totalSeconds / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) {
-    return [hours, minutes, seconds]
-      .map((part) => String(part).padStart(2, "0"))
-      .join(":");
-  }
-
-  return [minutes, seconds]
-    .map((part) => String(part).padStart(2, "0"))
-    .join(":");
-}
-
 function describeFinishedRun(run: ScenarioDetail["finishedRuns"][number]) {
   if (run.outcome === "succeeded" && run.solveDurationMs !== null) {
     return `Solved in ${formatDurationMs(run.solveDurationMs)}`;
@@ -503,27 +469,7 @@ function describeFinishedRun(run: ScenarioDetail["finishedRuns"][number]) {
     return "Solved successfully";
   }
   if (run.outcome === "cancelled") {
-    return "Cancelled before solve";
+    return "Ended early";
   }
   return "Run failed";
-}
-
-function outcomeTone(outcome: ScenarioDetail["finishedRuns"][number]["outcome"]) {
-  switch (outcome) {
-    case "succeeded":
-      return {
-        variant: "secondary" as const,
-        label: "Succeeded",
-      };
-    case "cancelled":
-      return {
-        variant: "outline" as const,
-        label: "Cancelled",
-      };
-    case "failed":
-      return {
-        variant: "destructive" as const,
-        label: "Failed",
-      };
-  }
 }

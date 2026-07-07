@@ -136,14 +136,14 @@ export function NativeSshConnectPanel({
     <div className="space-y-4">
       <div className="grid gap-3 rounded-lg border bg-primary/5 px-4 py-3 text-sm sm:grid-cols-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="text-eyebrow">
             Access mode
           </p>
           <p className="mt-1 font-medium">Profile key route</p>
         </div>
         {session.routeUsername ? (
           <div>
-            <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+            <p className="text-eyebrow">
               Route
             </p>
             <p className="mt-1 font-mono text-xs">{session.routeUsername}</p>
@@ -151,14 +151,14 @@ export function NativeSshConnectPanel({
         ) : null}
         {typeof session.expiresAt === "number" ? (
           <div>
-            <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+            <p className="text-eyebrow">
               Expires
             </p>
             <p className="mt-1">{new Date(session.expiresAt).toLocaleString()}</p>
           </div>
         ) : null}
         <div>
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="text-eyebrow">
             Target
           </p>
           <p className="mt-1 font-mono text-xs">
@@ -166,13 +166,13 @@ export function NativeSshConnectPanel({
           </p>
         </div>
         <div>
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="text-eyebrow">
             Authorized keys
           </p>
           <p className="mt-1">{session.native.authorizedKeyCount} loaded</p>
         </div>
         <div>
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="text-eyebrow">
             Host key
           </p>
           <p className="mt-1 font-mono text-xs">

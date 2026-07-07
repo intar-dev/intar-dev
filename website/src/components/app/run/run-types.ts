@@ -1,5 +1,5 @@
-// Wire/view types for the scenario run page. These mirror the legacy run
-// record shape produced by lib/legacy-scenario-ui's toLegacyScenarioRunRecord.
+// Wire/view types for the scenario run page. These mirror the presented run
+// record shape produced by lib/run-phase's presentScenarioRun.
 
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
 

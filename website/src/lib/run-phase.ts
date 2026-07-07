@@ -1,6 +1,10 @@
+// Presentation-phase mapping: collapses the wire run/VM lifecycle phases into
+// the coarser view phases the run UI renders (boot screens, terminal state,
+// teardown screens), plus their display titles.
+
 import type { ScenarioDetail, ScenarioRunRecord } from "@/lib/scenario-runs";
 
-export type LegacyScenarioRunPhase =
+export type RunViewPhase =
   | "launching"
   | "booting"
   | "waiting_for_target"
@@ -11,58 +15,49 @@ export type LegacyScenarioRunPhase =
   | "completed"
   | "failed";
 
-export type LegacyScenarioVmPhase =
-  | "launching"
-  | "booting"
-  | "waiting_for_target"
-  | "running"
-  | "solved"
-  | "deleting"
-  | "archiving"
-  | "completed"
-  | "failed";
+export type VmViewPhase = RunViewPhase;
 
-export function toLegacyScenarioDetail(detail: ScenarioDetail) {
+export function presentScenarioDetail(detail: ScenarioDetail) {
   return {
     ...detail,
     activeRun: detail.activeRun
       ? (() => {
-          const phase = mapRunPhaseToLegacy(detail.activeRun);
+          const phase = toRunViewPhase(detail.activeRun);
           return {
             ...detail.activeRun,
             phase:
               phase === "completed" || phase === "failed" ? "running" : phase,
-            phaseTitle: legacyRunPhaseTitle(phase),
+            phaseTitle: runViewPhaseTitle(phase),
           };
         })()
       : null,
   };
 }
 
-export function toLegacyScenarioRunRecord(run: ScenarioRunRecord) {
-  const phase = mapRunPhaseToLegacy(run);
+export function presentScenarioRun(run: ScenarioRunRecord) {
+  const phase = toRunViewPhase(run);
   return {
     ...run,
     phase,
-    phaseTitle: legacyRunPhaseTitle(phase),
+    phaseTitle: runViewPhaseTitle(phase),
     vms: run.vms.map((vm) => {
-      const vmPhase = mapVmPhaseToLegacy(vm);
+      const vmPhase = toVmViewPhase(vm);
       return {
         ...vm,
         phase: vmPhase,
-        phaseTitle: legacyVmPhaseTitle(vmPhase),
+        phaseTitle: vmViewPhaseTitle(vmPhase),
       };
     }),
   };
 }
 
-function mapRunPhaseToLegacy(run: {
+function toRunViewPhase(run: {
   phase:
     | ScenarioRunRecord["phase"]
     | NonNullable<ScenarioDetail["activeRun"]>["phase"];
   canOpenTerminal?: boolean;
   terminalPhase?: ScenarioRunRecord["terminalPhase"];
-}): LegacyScenarioRunPhase {
+}): RunViewPhase {
   switch (run.phase) {
     case "queued":
       return "launching";
@@ -83,9 +78,7 @@ function mapRunPhaseToLegacy(run: {
   }
 }
 
-function mapVmPhaseToLegacy(
-  vm: ScenarioRunRecord["vms"][number],
-): LegacyScenarioVmPhase {
+function toVmViewPhase(vm: ScenarioRunRecord["vms"][number]): VmViewPhase {
   switch (vm.phase) {
     case "queued":
     case "launching":
@@ -119,7 +112,7 @@ function hasVmReadyTerminal(vm: ScenarioRunRecord["vms"][number]) {
   );
 }
 
-function legacyRunPhaseTitle(phase: LegacyScenarioRunPhase): string {
+function runViewPhaseTitle(phase: RunViewPhase): string {
   switch (phase) {
     case "launching":
       return "Queued";
@@ -142,7 +135,7 @@ function legacyRunPhaseTitle(phase: LegacyScenarioRunPhase): string {
   }
 }
 
-function legacyVmPhaseTitle(phase: LegacyScenarioVmPhase): string {
+function vmViewPhaseTitle(phase: VmViewPhase): string {
   switch (phase) {
     case "launching":
       return "Launching";

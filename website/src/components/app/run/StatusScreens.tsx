@@ -27,7 +27,6 @@ export function ScenarioStepScreen(props: {
   progressLabel?: string;
   progressPercent?: number;
   steps: ScenarioStatusStep[];
-  actions?: ReactNode;
   topRight?: ReactNode;
 }) {
   return (
@@ -35,7 +34,9 @@ export function ScenarioStepScreen(props: {
       <CardHeader className="space-y-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-2">
-            <CardTitle className="text-lg">{props.title}</CardTitle>
+            <CardTitle className="font-heading text-xl font-semibold tracking-tight">
+              {props.title}
+            </CardTitle>
             <CardDescription className="leading-6">
               {props.description}
             </CardDescription>
@@ -134,12 +135,6 @@ export function ScenarioStepScreen(props: {
             </li>
           ))}
         </ul>
-
-        {props.actions ? (
-          <div className="flex flex-wrap justify-end gap-3">
-            {props.actions}
-          </div>
-        ) : null}
       </CardContent>
     </Card>
   );
@@ -167,12 +162,12 @@ export function ScenarioSuccessOverlay(props: {
               Success
             </Badge>
             <div className="space-y-2">
-              <h2 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-                Scenario solved
+              <h2 className="font-heading text-3xl font-bold tracking-tight text-foreground">
+                Nice work.
               </h2>
               <p className="max-w-xl text-sm leading-6 text-muted-foreground sm:text-base">
-                You completed {props.scenarioName}. End the scenario to save
-                your replay and wrap up this run.
+                You solved {props.scenarioName}. End the scenario to save your
+                replay and wrap up this run.
               </p>
             </div>
             {props.solveDurationMs !== null ? (
@@ -234,7 +229,6 @@ export function ScenarioShellStatusCard(props: {
   title: string;
   description: string;
   pending?: boolean;
-  actions?: ReactNode;
 }) {
   const isTransient =
     props.pending === true ||
@@ -264,11 +258,6 @@ export function ScenarioShellStatusCard(props: {
             {props.description}
           </p>
         </div>
-        {props.actions ? (
-          <div className="flex flex-wrap justify-center gap-3">
-            {props.actions}
-          </div>
-        ) : null}
       </CardContent>
     </Card>
   );

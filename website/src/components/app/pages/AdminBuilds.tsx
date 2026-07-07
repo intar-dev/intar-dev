@@ -8,17 +8,20 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { EmptyStateCard } from "@/components/app/PagePatterns";
+import { Section } from "@/components/app/patterns/Section";
+import { MetaChip } from "@/components/app/patterns/MetaChip";
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+} from "@/components/app/patterns/StateCard";
+import {
+  formatRelativeTime,
+  formatTimestamp,
+} from "@/components/app/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import type { BuildPhase } from "@/generated/bridge";
 import { cn } from "@/lib/utils";
 
@@ -123,94 +126,94 @@ export function AdminBuilds() {
   const activeCount = records.filter((build) =>
     ["queued", "assigned", "building", "stale"].includes(build.status),
   ).length;
-  const failedCount = records.filter((build) => build.status === "failed").length;
+  const failedCount = records.filter(
+    (build) => build.status === "failed",
+  ).length;
   const succeededCount = records.filter(
     (build) => build.status === "succeeded",
   ).length;
 
   return (
-    <PageShell admin
+    <PageShell
+      admin
       title="Image builds"
       description="Builder job queue, assignment, reports, and logs."
+      meta={
+        <>
+          <MetaChip>{records.length} total</MetaChip>
+          <MetaChip variant="accent">{activeCount} active</MetaChip>
+          <MetaChip>{succeededCount} succeeded</MetaChip>
+          <MetaChip
+            className={failedCount > 0 ? "bg-destructive/10 text-destructive" : ""}
+          >
+            {failedCount} failed
+          </MetaChip>
+        </>
+      }
     >
-      <Card className="overflow-hidden">
-        <CardHeader className="border-b border-border/70 bg-muted/30">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-2">
-              <CardTitle className="text-lg">Build queue</CardTitle>
-              <CardDescription>
-                Content-addressed scenario image builds reported by builder hosts.
-              </CardDescription>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">{records.length} total</Badge>
-              <Badge variant="secondary">{activeCount} active</Badge>
-              <Badge variant="outline">{succeededCount} succeeded</Badge>
-              <Badge variant={failedCount > 0 ? "destructive" : "outline"}>
-                {failedCount} failed
-              </Badge>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4 pt-6">
-          {builds.error ? (
-            <Alert variant="destructive">
-              <AlertTitle>Could not load builds</AlertTitle>
-              <AlertDescription>
-                {builds.error instanceof Error
-                  ? builds.error.message
-                  : "Failed to load builds"}
-              </AlertDescription>
-            </Alert>
-          ) : null}
+      {retryBuild.error ? (
+        <Alert variant="destructive">
+          <AlertTitle>Could not retry build</AlertTitle>
+          <AlertDescription>
+            {retryBuild.error instanceof Error
+              ? retryBuild.error.message
+              : "Failed to retry build"}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-          {retryBuild.error ? (
-            <Alert variant="destructive">
-              <AlertTitle>Could not retry build</AlertTitle>
-              <AlertDescription>
-                {retryBuild.error instanceof Error
-                  ? retryBuild.error.message
-                  : "Failed to retry build"}
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          {!builds.isLoading && !records.length ? (
-            <EmptyStateCard
-              icon={<PackageOpen className="size-10" />}
-              title="No builds queued"
-              description="Uploaded scenario bundles will create build jobs here."
+      {builds.error ? (
+        <ErrorState
+          title="Could not load builds"
+          description={
+            builds.error instanceof Error
+              ? builds.error.message
+              : "Failed to load builds"
+          }
+          onRetry={() => void builds.refetch()}
+        />
+      ) : builds.isLoading ? (
+        <LoadingState title="Loading builds" />
+      ) : !records.length ? (
+        <EmptyState
+          icon={<PackageOpen />}
+          title="No builds queued"
+          description="Uploaded scenario bundles will create build jobs here."
+        />
+      ) : (
+        <Section
+          title="Build queue"
+          description="Content-addressed scenario image builds reported by builder hosts."
+          bodyClassName="divide-y"
+        >
+          {records.map((build) => (
+            <BuildRow
+              key={build.id}
+              build={build}
+              retryPending={
+                retryBuild.isPending && retryBuild.variables === build.id
+              }
+              retryDisabled={retryBuild.isPending || !build.canRetry}
+              detail={
+                selectedBuildId === build.id ? buildDetail.data?.build : null
+              }
+              detailLoading={
+                selectedBuildId === build.id && buildDetail.isLoading
+              }
+              detailError={
+                selectedBuildId === build.id ? buildDetail.error : null
+              }
+              detailOpen={selectedBuildId === build.id}
+              onToggleDetails={() =>
+                setSelectedBuildId((current) =>
+                  current === build.id ? null : build.id,
+                )
+              }
+              onRetry={() => retryBuild.mutate(build.id)}
             />
-          ) : (
-            <div className="space-y-3">
-              {records.map((build) => (
-                <BuildRow
-                  key={build.id}
-                  build={build}
-                  retryPending={
-                    retryBuild.isPending && retryBuild.variables === build.id
-                  }
-                  retryDisabled={retryBuild.isPending || !build.canRetry}
-                  detail={selectedBuildId === build.id ? buildDetail.data?.build : null}
-                  detailLoading={
-                    selectedBuildId === build.id && buildDetail.isLoading
-                  }
-                  detailError={
-                    selectedBuildId === build.id ? buildDetail.error : null
-                  }
-                  detailOpen={selectedBuildId === build.id}
-                  onToggleDetails={() =>
-                    setSelectedBuildId((current) =>
-                      current === build.id ? null : build.id,
-                    )
-                  }
-                  onRetry={() => retryBuild.mutate(build.id)}
-                />
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          ))}
+        </Section>
+      )}
     </PageShell>
   );
 }
@@ -228,17 +231,17 @@ function BuildRow(props: {
 }) {
   const { build } = props;
   return (
-    <article className="grid gap-4 rounded-lg border border-border/70 bg-card/70 p-4 lg:grid-cols-[minmax(0,1fr)_auto]">
+    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={build.status} />
-          <Badge variant="outline">{build.phase}</Badge>
-          <Badge variant="outline">{build.arch}</Badge>
-          <Badge variant="outline">kino {build.kinoVersion}</Badge>
+          <MetaChip>{build.phase}</MetaChip>
+          <MetaChip>{build.arch}</MetaChip>
+          <MetaChip>kino {build.kinoVersion}</MetaChip>
         </div>
 
         <div className="min-w-0">
-          <p className="truncate text-base font-semibold tracking-tight">
+          <p className="truncate font-mono text-sm font-medium">
             {build.scenarioId}
           </p>
           <p className="truncate font-mono text-xs text-muted-foreground">
@@ -246,16 +249,19 @@ function BuildRow(props: {
           </p>
         </div>
 
-        <div className="grid gap-2 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
           <BuildMeta
             label="Host"
             value={build.hostName ?? build.hostId ?? "Unassigned"}
           />
           <BuildMeta label="Attempt" value={String(build.attempt)} />
-          <BuildMeta label="Updated" value={formatDateTime(build.updatedAt)} />
+          <BuildMeta
+            label="Updated"
+            value={formatRelativeTime(build.updatedAt)}
+          />
           <BuildMeta
             label="Last report"
-            value={formatDateTime(build.timings.lastReportAt)}
+            value={formatRelativeTime(build.timings.lastReportAt)}
           />
         </div>
 
@@ -277,6 +283,7 @@ function BuildRow(props: {
       <div className="flex flex-wrap items-center gap-2 lg:flex-col lg:items-stretch">
         <Button
           type="button"
+          size="sm"
           variant={props.detailOpen ? "secondary" : "outline"}
           onClick={props.onToggleDetails}
           className="lg:w-full"
@@ -286,6 +293,7 @@ function BuildRow(props: {
         </Button>
         <Button
           type="button"
+          size="sm"
           variant="outline"
           onClick={props.onRetry}
           disabled={props.retryDisabled}
@@ -299,6 +307,7 @@ function BuildRow(props: {
         {build.hasLog ? (
           <Button
             type="button"
+            size="sm"
             variant="outline"
             className="lg:w-full"
             render={
@@ -313,13 +322,19 @@ function BuildRow(props: {
             Log
           </Button>
         ) : (
-          <Button type="button" variant="outline" disabled className="lg:w-full">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled
+            className="lg:w-full"
+          >
             <ExternalLink className="size-4" />
             Log
           </Button>
         )}
       </div>
-    </article>
+    </div>
   );
 }
 
@@ -337,7 +352,9 @@ async function fetchBuilds(): Promise<ImageBuildListResponse> {
   return (await response.json()) as ImageBuildListResponse;
 }
 
-async function fetchBuildDetail(buildId: string): Promise<ImageBuildDetailResponse> {
+async function fetchBuildDetail(
+  buildId: string,
+): Promise<ImageBuildDetailResponse> {
   const response = await fetch(
     `/api/admin/builds/${encodeURIComponent(buildId)}`,
     {
@@ -361,15 +378,15 @@ function BuildDetails(props: {
 }) {
   if (props.loading) {
     return (
-      <div className="border-t border-border/70 pt-3 text-sm text-muted-foreground">
-        Loading build details...
+      <div className="border-t pt-3 text-sm text-muted-foreground">
+        Loading build details…
       </div>
     );
   }
 
   if (props.error) {
     return (
-      <div className="border-t border-border/70 pt-3 text-sm text-destructive">
+      <div className="border-t pt-3 text-sm text-destructive">
         {props.error instanceof Error
           ? props.error.message
           : "Failed to load build details"}
@@ -383,8 +400,8 @@ function BuildDetails(props: {
   }
 
   return (
-    <div className="border-t border-border/70 pt-3">
-      <div className="grid gap-2 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-4">
+    <div className="border-t pt-3">
+      <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
         <BuildMeta label="Bundle" value={detail.bundle.r2Key ?? detail.rev} />
         <BuildMeta
           label="Bundle kino"
@@ -396,19 +413,19 @@ function BuildDetails(props: {
         />
         <BuildMeta
           label="Started"
-          value={formatDateTime(detail.timings.startedAt)}
+          value={formatTimestamp(detail.timings.startedAt)}
         />
       </div>
-      <dl className="mt-3 grid gap-2 text-xs text-muted-foreground md:grid-cols-2">
-        <DetailPair label="Created" value={formatDateTime(detail.createdAt)} />
+      <dl className="mt-3 grid gap-x-6 gap-y-2 text-xs md:grid-cols-2">
+        <DetailPair label="Created" value={formatTimestamp(detail.createdAt)} />
         <DetailPair
           label="Finished"
-          value={formatDateTime(detail.timings.finishedAt)}
+          value={formatTimestamp(detail.timings.finishedAt)}
         />
         <DetailPair label="Content hash" value={detail.contentHash} />
         <DetailPair
           label="Host heartbeat"
-          value={formatDateTime(detail.host?.lastHeartbeatAt)}
+          value={formatTimestamp(detail.host?.lastHeartbeatAt)}
         />
       </dl>
     </div>
@@ -418,7 +435,7 @@ function BuildDetails(props: {
 function DetailPair(props: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <dt className="uppercase">{props.label}</dt>
+      <dt className="text-eyebrow">{props.label}</dt>
       <dd className="truncate font-mono text-foreground">{props.value}</dd>
     </div>
   );
@@ -427,14 +444,14 @@ function DetailPair(props: { label: string; value: string }) {
 function StatusBadge(props: { status: ImageBuildRecord["status"] }) {
   switch (props.status) {
     case "succeeded":
-      return <Badge variant="secondary">Succeeded</Badge>;
+      return <Badge variant="success">Succeeded</Badge>;
     case "failed":
       return <Badge variant="destructive">Failed</Badge>;
     case "stale":
-      return <Badge variant="outline">Stale</Badge>;
+      return <Badge variant="warning">Stale</Badge>;
     case "building":
       return (
-        <Badge variant="outline" className="gap-1">
+        <Badge variant="warning" className="gap-1">
           <Hammer className="size-3" />
           Building
         </Badge>
@@ -448,22 +465,17 @@ function StatusBadge(props: { status: ImageBuildRecord["status"] }) {
 
 function BuildMeta(props: { label: string; value: string }) {
   return (
-    <div className="min-w-0 rounded-md bg-muted/30 px-3 py-2">
-      <p className="text-xs uppercase text-muted-foreground">{props.label}</p>
-      <p className="truncate font-medium text-foreground">{props.value}</p>
+    <div className="min-w-0">
+      <p className="text-eyebrow">{props.label}</p>
+      <p className="truncate text-sm font-medium text-foreground">
+        {props.value}
+      </p>
     </div>
   );
 }
 
 function shortHash(value: string) {
   return value.length > 12 ? `${value.slice(0, 12)}...` : value;
-}
-
-function formatDateTime(value: number | null | undefined) {
-  if (!value) {
-    return "Never";
-  }
-  return new Date(value).toLocaleString();
 }
 
 function hostStatus(host: NonNullable<ImageBuildDetailRecord["host"]>) {

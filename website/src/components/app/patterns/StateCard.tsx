@@ -4,10 +4,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-// Re-export the existing empty-state primitive so both names resolve to one
-// implementation during the migration.
-export { EmptyStateCard } from "../PagePatterns";
-
 interface StateShellProps {
   icon?: ReactNode;
   title: string;
@@ -29,13 +25,17 @@ function StateShell({
     <Card className={className}>
       <CardContent
         className={cn(
-          "flex min-h-[16rem] flex-col items-center justify-center gap-3 text-center",
+          "flex min-h-[16rem] flex-col items-center justify-center gap-4 text-center",
           contentClassName,
         )}
       >
-        {icon ? <div className="text-muted-foreground">{icon}</div> : null}
+        {icon ? (
+          <div className="flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground [&_svg:not([class*='size-'])]:size-6">
+            {icon}
+          </div>
+        ) : null}
         <div className="space-y-2">
-          <h2 className="text-lg font-semibold">{title}</h2>
+          <h2 className="text-section-title">{title}</h2>
           {description ? (
             <p className="max-w-xl text-sm leading-6 text-muted-foreground">
               {description}
@@ -64,7 +64,7 @@ export function LoadingState({
   return (
     <StateShell
       className={className}
-      icon={<LoaderCircle className="size-6 motion-safe:animate-spin" />}
+      icon={<LoaderCircle className="motion-safe:animate-spin" />}
       title={title}
       description={description}
     />
@@ -87,7 +87,7 @@ export function ErrorState({
   return (
     <StateShell
       className={className}
-      icon={<TriangleAlert className="size-6 text-destructive" />}
+      icon={<TriangleAlert className="text-destructive" />}
       title={title}
       description={description}
       action={

@@ -1,9 +1,17 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, Check, ShieldCheck, UserPlus, X } from "lucide-react";
+import { Ban, Check, ShieldCheck, UserPlus, Users, X } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import { Section } from "@/components/app/patterns/Section";
+import { FilterBar } from "@/components/app/patterns/FilterBar";
 import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import { authClient, type AppAuthUser } from "@/lib/auth-client";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 
 interface AccessRequestRecord {
   id: string;
@@ -37,22 +45,9 @@ export function AdminPeople() {
       title="People"
       description="Approve access requests and manage existing accounts."
     >
-      <Tabs defaultValue="requests">
-        <TabsList>
-          <TabsTrigger value="requests">Access requests</TabsTrigger>
-          <TabsTrigger value="users">Users</TabsTrigger>
-          <TabsTrigger value="teams">Teams</TabsTrigger>
-        </TabsList>
-        <TabsContent value="requests" className="pt-4">
-          <AccessRequestsPanel />
-        </TabsContent>
-        <TabsContent value="users" className="pt-4">
-          <UsersPanel />
-        </TabsContent>
-        <TabsContent value="teams" className="pt-4">
-          <TeamsPanel />
-        </TabsContent>
-      </Tabs>
+      <AccessRequestsPanel />
+      <UsersPanel />
+      <TeamsPanel />
     </PageShell>
   );
 }
@@ -110,71 +105,73 @@ function AccessRequestsPanel() {
     },
   });
 
+  if (requests.error) {
+    return (
+      <ErrorState
+        title="Could not load access requests"
+        description={
+          requests.error instanceof Error
+            ? requests.error.message
+            : "Failed to load access requests"
+        }
+        onRetry={() => void requests.refetch()}
+      />
+    );
+  }
+  if (requests.isLoading) {
+    return <LoadingState title="Loading access requests" />;
+  }
+
   const entries = requests.data?.requests ?? [];
   const pending = entries.filter((entry) => entry.status === "pending");
   const decided = entries.filter((entry) => entry.status !== "pending");
 
   return (
     <>
-      {requests.error ? (
-        <ErrorState
-          title="Could not load access requests"
-          description={
-            requests.error instanceof Error
-              ? requests.error.message
-              : "Failed to load access requests"
-          }
-        />
-      ) : requests.isLoading ? (
-        <LoadingState title="Loading access requests" />
-      ) : (
-        <div className="space-y-8">
-          <section className="space-y-3">
-            <h2 className="text-sm font-medium text-muted-foreground">
-              Pending{pending.length ? ` (${pending.length})` : ""}
-            </h2>
-            {pending.length ? (
-              <RequestsTable
-                entries={pending}
-                pendingActions
-                decide={(requestId, decision) =>
-                  decide.mutate({ requestId, decision })
-                }
-                actionPending={decide.isPending}
-              />
-            ) : (
-              <EmptyState
-                icon={<UserPlus className="size-6" />}
-                title="No pending requests"
-                description="New requests from the public request-access form land here."
-              />
-            )}
-          </section>
+      <Section
+        title={
+          pending.length ? `Access requests (${pending.length})` : "Access requests"
+        }
+        description="New requests from the public request-access form land here."
+        className={cn(pending.length && "border-primary/40 bg-primary/[0.02]")}
+      >
+        {pending.length ? (
+          <RequestsTable
+            entries={pending}
+            pendingActions
+            decide={(requestId, decision) =>
+              decide.mutate({ requestId, decision })
+            }
+            actionPending={decide.isPending}
+          />
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No pending requests right now.
+          </p>
+        )}
+        {decide.error ? (
+          <p className="mt-3 text-sm text-destructive">
+            {decide.error instanceof Error
+              ? decide.error.message
+              : "Failed to update request"}
+          </p>
+        ) : null}
+      </Section>
 
-          {decided.length ? (
-            <section className="space-y-3">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                Decided
-              </h2>
-              <RequestsTable
-                entries={decided}
-                decide={(requestId, decision) =>
-                  decide.mutate({ requestId, decision })
-                }
-                actionPending={decide.isPending}
-              />
-            </section>
-          ) : null}
-
-          {decide.error ? (
-            <p className="text-sm text-destructive">
-              {decide.error instanceof Error
-                ? decide.error.message
-                : "Failed to update request"}
-            </p>
-          ) : null}
-        </div>
-      )}
+      {decided.length ? (
+        <Section
+          title="Decided requests"
+          description="Approvals can be revoked and rejections reversed at any time."
+        >
+          <RequestsTable
+            entries={decided}
+            decide={(requestId, decision) =>
+              decide.mutate({ requestId, decision })
+            }
+            actionPending={decide.isPending}
+          />
+        </Section>
+      ) : null}
     </>
   );
 }
@@ -185,6 +182,7 @@ interface AdminListedUser extends AppAuthUser {
 
 function UsersPanel() {
   const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
 
   const users = useQuery({
     queryKey: ["admin", "users"],
@@ -245,6 +243,7 @@ function UsersPanel() {
             ? users.error.message
             : "Failed to load users"
         }
+        onRetry={() => void users.refetch()}
       />
     );
   }
@@ -253,95 +252,125 @@ function UsersPanel() {
   }
 
   const entries = (users.data?.users ?? []) as AdminListedUser[];
+  const needle = search.trim().toLowerCase();
+  const filtered = needle
+    ? entries.filter((entry) =>
+        [entry.name ?? "", entry.email ?? "", entry.username ?? ""].some(
+          (value) => value.toLowerCase().includes(needle),
+        ),
+      )
+    : entries;
   const actionError = setBanned.error ?? setRole.error;
 
   return (
-    <div className="space-y-3">
-      <div className="overflow-x-auto rounded-lg border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>User</TableHead>
-              <TableHead>GitHub</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {entries.map((entry) => {
-              const isAdmin = entry.role === "admin";
-              return (
-                <TableRow key={entry.id}>
-                  <TableCell>
-                    <div className="space-y-0.5">
-                      <p className="text-sm font-medium">{entry.name}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {entry.email}
+    <Section
+      title="Roster"
+      description="Banning revokes all sessions and blocks sign-in. To fully revoke someone, also reject their access request so the allowlist entry is removed."
+      bodyClassName="space-y-4"
+    >
+      <FilterBar
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search by name, email, or GitHub handle…"
+        filtersActive={needle.length > 0}
+        onClear={() => setSearch("")}
+      />
+
+      {filtered.length ? (
+        <div className="divide-y">
+          {filtered.map((entry) => {
+            const isAdmin = entry.role === "admin";
+            return (
+              <div
+                key={entry.id}
+                className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <Avatar>
+                    {entry.image ? (
+                      <AvatarImage src={entry.image} alt="" />
+                    ) : null}
+                    <AvatarFallback>
+                      {(entry.name || entry.username || "?")
+                        .slice(0, 1)
+                        .toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-medium">
+                        {entry.name}
                       </p>
+                      {entry.username ? (
+                        <p className="font-mono text-xs text-muted-foreground">
+                          @{entry.username}
+                        </p>
+                      ) : null}
+                      {isAdmin ? (
+                        <Badge>Admin</Badge>
+                      ) : (
+                        <Badge variant="outline">User</Badge>
+                      )}
+                      {entry.banned ? (
+                        <Badge variant="destructive">Banned</Badge>
+                      ) : (
+                        <Badge variant="success">Active</Badge>
+                      )}
                     </div>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {entry.username ?? "—"}
-                  </TableCell>
-                  <TableCell>
-                    {isAdmin ? (
-                      <Badge>Admin</Badge>
-                    ) : (
-                      <Badge variant="outline">User</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {entry.banned ? (
-                      <Badge variant="destructive">Banned</Badge>
-                    ) : (
-                      <Badge variant="secondary">Active</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1.5">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={setRole.isPending}
-                        onClick={() =>
-                          setRole.mutate({
-                            userId: entry.id,
-                            role: isAdmin ? "user" : "admin",
-                          })
-                        }
-                      >
-                        <ShieldCheck className="size-3.5" />
-                        {isAdmin ? "Make user" : "Make admin"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-muted-foreground hover:text-destructive"
-                        disabled={setBanned.isPending}
-                        onClick={() =>
-                          setBanned.mutate({
-                            userId: entry.id,
-                            banned: !entry.banned,
-                          })
-                        }
-                      >
-                        <Ban className="size-3.5" />
-                        {entry.banned ? "Unban" : "Ban"}
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Banning revokes all sessions and blocks sign-in. To fully revoke
-        someone, also reject their access request so the allowlist entry is
-        removed.
-      </p>
+                    <p className="truncate text-caption">
+                      {entry.email} · added{" "}
+                      {formatRelativeTime(new Date(entry.createdAt).getTime())}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={setRole.isPending}
+                    onClick={() =>
+                      setRole.mutate({
+                        userId: entry.id,
+                        role: isAdmin ? "user" : "admin",
+                      })
+                    }
+                  >
+                    <ShieldCheck className="size-3.5" />
+                    {isAdmin ? "Make user" : "Make admin"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground hover:text-destructive"
+                    disabled={setBanned.isPending}
+                    onClick={() =>
+                      setBanned.mutate({
+                        userId: entry.id,
+                        banned: !entry.banned,
+                      })
+                    }
+                  >
+                    <Ban className="size-3.5" />
+                    {entry.banned ? "Unban" : "Ban"}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState
+          icon={<Users />}
+          title={needle ? "No matching people" : "No users yet"}
+          description={
+            needle
+              ? "Try a different name, email, or GitHub handle."
+              : "Approved accounts show up here after their first sign-in."
+          }
+        />
+      )}
+
       {actionError ? (
         <p className="text-sm text-destructive">
           {actionError instanceof Error
@@ -349,7 +378,7 @@ function UsersPanel() {
             : "Failed to update user"}
         </p>
       ) : null}
-    </div>
+    </Section>
   );
 }
 
@@ -365,7 +394,7 @@ function RequestsTable({
   pendingActions?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto rounded-lg border">
+    <div className="overflow-x-auto">
       <Table>
         <TableHeader>
           <TableRow>
@@ -433,11 +462,11 @@ function RequestsTable({
 function StatusBadge({ status }: { status: AccessRequestRecord["status"] }) {
   switch (status) {
     case "approved":
-      return <Badge variant="secondary">Approved</Badge>;
+      return <Badge variant="success">Approved</Badge>;
     case "rejected":
       return <Badge variant="outline">Rejected</Badge>;
     default:
-      return <Badge>Pending</Badge>;
+      return <Badge variant="warning">Pending</Badge>;
   }
 }
 
@@ -463,7 +492,9 @@ function TeamsPanel() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Failed to load teams (${response.status})`);
+        throw new Error(
+          body?.error ?? `Failed to load teams (${response.status})`,
+        );
       }
       return (await response.json()) as { teams: AdminTeamRow[] };
     },
@@ -475,8 +506,11 @@ function TeamsPanel() {
       <ErrorState
         title="Could not load teams"
         description={
-          teams.error instanceof Error ? teams.error.message : "Failed to load teams"
+          teams.error instanceof Error
+            ? teams.error.message
+            : "Failed to load teams"
         }
+        onRetry={() => void teams.refetch()}
       />
     );
   }
@@ -485,62 +519,68 @@ function TeamsPanel() {
   }
 
   const entries = teams.data?.teams ?? [];
-  if (!entries.length) {
-    return (
-      <EmptyState
-        icon={<UserPlus className="size-6" />}
-        title="No teams yet"
-        description="Teams created by instructors show up here with their roster and assignment counts."
-      />
-    );
-  }
 
   return (
-    <div className="overflow-x-auto rounded-lg border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Team</TableHead>
-            <TableHead>Owner</TableHead>
-            <TableHead>Members</TableHead>
-            <TableHead>Assignments</TableHead>
-            <TableHead>Created</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {entries.map((team) => (
-            <TableRow key={team.id}>
-              <TableCell>
-                <div className="space-y-0.5">
-                  <p className="text-sm font-medium">{team.name}</p>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {team.slug}
-                  </p>
-                </div>
-              </TableCell>
-              <TableCell className="text-sm">
-                {team.owner ? (
-                  <>
-                    {team.owner.name}
-                    {team.owner.username ? (
-                      <span className="ml-1.5 font-mono text-xs text-muted-foreground">
-                        @{team.owner.username}
-                      </span>
-                    ) : null}
-                  </>
-                ) : (
-                  "—"
-                )}
-              </TableCell>
-              <TableCell className="text-sm">{team.memberCount}</TableCell>
-              <TableCell className="text-sm">{team.assignmentCount}</TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {formatRelativeTime(team.createdAt)}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+    <Section
+      title="Teams"
+      description="Teams created by instructors, with their roster and assignment counts."
+    >
+      {entries.length ? (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Team</TableHead>
+                <TableHead>Owner</TableHead>
+                <TableHead>Members</TableHead>
+                <TableHead>Assignments</TableHead>
+                <TableHead>Created</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {entries.map((team) => (
+                <TableRow key={team.id}>
+                  <TableCell>
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium">{team.name}</p>
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {team.slug}
+                      </p>
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {team.owner ? (
+                      <>
+                        {team.owner.name}
+                        {team.owner.username ? (
+                          <span className="ml-1.5 font-mono text-xs text-muted-foreground">
+                            @{team.owner.username}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm">{team.memberCount}</TableCell>
+                  <TableCell className="text-sm">
+                    {team.assignmentCount}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {formatRelativeTime(team.createdAt)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <EmptyState
+          icon={<UserPlus />}
+          title="No teams yet"
+          description="Teams created by instructors show up here with their roster and assignment counts."
+        />
+      )}
+    </Section>
   );
 }
