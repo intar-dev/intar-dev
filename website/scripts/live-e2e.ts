@@ -1563,7 +1563,9 @@ async function teardownAndVerify(
   if (artifacts[0]) {
     await assertArtifactReadable(client, completed.id, artifacts[0]);
   }
-  await assertReplaysContainProbeOutput(client, completed, terminalSessions);
+  if (!options.allowNoArtifacts) {
+    await assertReplaysContainProbeOutput(client, completed, terminalSessions);
+  }
   await assertTerminalSessionsRevoked(
     client,
     completed,
