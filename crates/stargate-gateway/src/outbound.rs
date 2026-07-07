@@ -179,7 +179,12 @@ impl client::Handler for StrictHostKey {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(server_public_key == &self.expected)
+        // Compare only the key material. PublicKey equality also compares the
+        // OpenSSH comment, and the expected key is derived from the guest's
+        // `.pub` file (which carries a `root@host` comment) while the key the
+        // server presents over the wire has none — so full-value equality
+        // always rejected a correct host key.
+        Ok(server_public_key.key_data() == self.expected.key_data())
     }
 }
 
@@ -375,4 +380,36 @@ fn client_config() -> Arc<client::Config> {
         preferred,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StrictHostKey;
+    use russh::client::Handler as _;
+    use russh::keys::ssh_key::PublicKey;
+
+    // The guest reports its host key from the `.pub` file with a `root@host`
+    // comment; the key presented over the wire has none. The strict check
+    // must accept the key regardless of the comment, and still reject a
+    // genuinely different key.
+    #[tokio::test]
+    async fn accepts_matching_key_ignoring_comment_and_rejects_others() {
+        let base =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR";
+        let expected = PublicKey::from_openssh(&format!("{base} root@pair-ping-db-1"))
+            .expect("expected host key parses");
+        let wire_key = PublicKey::from_openssh(base).expect("wire host key parses");
+        let other = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA8ax6Yk1ZMSRpAkk8cIriNXtVufy6mxst2stQk66n+d",
+        )
+        .expect("other host key parses");
+
+        let mut handler = StrictHostKey {
+            expected: expected.clone(),
+        };
+        assert!(handler.check_server_key(&wire_key).await.expect("check ok"));
+
+        let mut handler = StrictHostKey { expected };
+        assert!(!handler.check_server_key(&other).await.expect("check ok"));
+    }
 }
