@@ -237,10 +237,13 @@ export function AdminAuthoring() {
                 ) : null}
                 {queueBuild.isSuccess ? (
                   <span className="text-xs text-success">
-                    Build queued as {queueBuild.data.rev}
-                    {queueBuild.data.assigned?.length
-                      ? ` — assigned to ${queueBuild.data.assigned.length} builder(s); watch Builds.`
-                      : " — waiting for a builder; watch Builds."}
+                    {queueBuild.data.queued === 0
+                      ? "Images for this exact content already exist — nothing to build."
+                      : `Build queued as ${queueBuild.data.rev}${
+                          queueBuild.data.assigned?.length
+                            ? ` — assigned to ${queueBuild.data.assigned.length} builder(s); watch Builds.`
+                            : " — waiting for a builder; watch Builds."
+                        }`}
                   </span>
                 ) : null}
                 {queueBuild.error ? (
