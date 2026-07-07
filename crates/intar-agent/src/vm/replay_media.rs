@@ -223,9 +223,9 @@ mod tests {
         let combined = tokio::fs::read_to_string(&replay_path).await?;
         let parsed = parse_cast(&combined)?;
 
-        // One ~16:9 canvas fitting both 80x24 and 120x30, no mid-playback
+        // The pinned 16:9 canvas fits both 80x24 and 120x30, no mid-playback
         // resize events.
-        assert_eq!(parsed.width, 125);
+        assert_eq!(parsed.width, 120);
         assert_eq!(parsed.height, 30);
         assert!(parsed.events.iter().all(|event| event.kind != "r"));
 
@@ -250,9 +250,9 @@ mod tests {
                 .any(|event| event.time_s == 3.5 && event.payload.contains("bravo"))
         );
 
-        // Replaying the composed output ends on session 2's content centered
-        // inside the canvas: pad_left = (125 - 120) / 2 = 2.
-        let mut vt = avt::Vt::builder().size(125, 30).scrollback_limit(0).build();
+        // Replaying the composed output ends on session 2's content, which
+        // matches the canvas exactly (120x30 -> no padding).
+        let mut vt = avt::Vt::builder().size(120, 30).scrollback_limit(0).build();
         for event in &parsed.events {
             if event.kind == "o" {
                 let _ = vt.feed_str(&event.payload);
@@ -260,7 +260,7 @@ mod tests {
         }
         let row = vt.line(0).text();
         assert_eq!(row.trim(), "bravo");
-        assert_eq!(row.len() - row.trim_start().len(), 2);
+        assert_eq!(row.len() - row.trim_start().len(), 0);
 
         Ok(())
     }

@@ -19,6 +19,10 @@ declare module "asciinema-player" {
     speed?: number;
     theme?: string;
     terminalFontFamily?: string;
+    terminalFontSize?: string | number;
+    terminalLineHeight?: number;
+    cols?: number;
+    rows?: number;
     logger?: Console;
   }
 

@@ -24,6 +24,7 @@ import {
 import {
   REPLAY_IDLE_TIME_LIMIT_SECONDS,
   REPLAY_TERMINAL_FONT_FAMILY,
+  REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_THEME,
 } from "@/lib/replay/config";
 
@@ -405,7 +406,11 @@ function AsciicastReplaySurface({
             autoPlay: false,
             preload: true,
             controls: true,
-            fit: "width",
+            // The cast renders its native grid scaled to fill the 16:9 box.
+            // New recordings are all 120x30, so they share one font size;
+            // legacy or oversized casts shrink gracefully instead of cropping.
+            fit: "both",
+            terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
             idleTimeLimit: REPLAY_IDLE_TIME_LIMIT_SECONDS,
             terminalFontFamily: REPLAY_TERMINAL_FONT_FAMILY,
             theme: REPLAY_TERMINAL_THEME,
@@ -445,9 +450,11 @@ function AsciicastReplaySurface({
 
   if (playerError) {
     return (
-      <div className="flex min-h-[22rem] items-center justify-center px-6 py-10">
-        <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
-          {playerError}
+      <div className={minimal ? "p-0" : "p-4"}>
+        <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
+          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
+            {playerError}
+          </div>
         </div>
       </div>
     );
@@ -455,20 +462,22 @@ function AsciicastReplaySurface({
 
   if (viewer.loading) {
     return (
-      <div className="flex min-h-[22rem] flex-col items-center justify-center gap-3 px-6 py-10 text-center">
-        <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
-          <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
-        </div>
-        <p className="text-sm font-medium">
-          {minimal ? "Preparing replay" : "Preparing replay surface"}
-        </p>
-        {!minimal ? (
-          <p className="max-w-md text-sm leading-6 text-muted-foreground">
-            Cast playback waits for the complete `.cast` stream so timing and
-            frame boundaries stay correct. The Raw tab remains available while
-            bytes are arriving.
+      <div className={minimal ? "p-0" : "p-4"}>
+        <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-muted/20 px-6 text-center">
+          <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
+            <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
+          </div>
+          <p className="text-sm font-medium">
+            {minimal ? "Preparing replay" : "Preparing replay surface"}
           </p>
-        ) : null}
+          {!minimal ? (
+            <p className="max-w-md text-sm leading-6 text-muted-foreground">
+              Cast playback waits for the complete `.cast` stream so timing and
+              frame boundaries stay correct. The Raw tab remains available
+              while bytes are arriving.
+            </p>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -480,12 +489,10 @@ function AsciicastReplaySurface({
           minimal ? "" : "overflow-hidden rounded-md border bg-background"
         }
       >
-        <div className="min-h-[20rem] px-0 py-0 sm:px-0 sm:py-0">
-          <div
-            ref={containerRef}
-            className="run-artifact-player mx-auto min-h-[18rem] w-full [&_.ap-player]:mx-auto [&_.ap-player]:max-w-full"
-          />
-        </div>
+        <div
+          ref={containerRef}
+          className="run-artifact-player aspect-video w-full overflow-hidden rounded-md bg-[#121314] [&_.ap-player]:h-full [&_.ap-player]:w-full"
+        />
       </div>
     </div>
   );

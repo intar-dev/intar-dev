@@ -6,9 +6,11 @@
 //! address absolute coordinates and carriage returns jump to column zero.
 //! Each session is therefore re-rendered through a virtual terminal (`avt`)
 //! at its native dimensions and re-emitted as row repaints translated into
-//! canvas coordinates. The canvas keeps one ~16:9 size for the entire
-//! recording, so the player viewport never resizes between sessions; smaller
-//! sessions sit centered with symmetric bars. Re-rendering drops OSC
+//! canvas coordinates. The canvas is 120x30 — the grid the live web terminal
+//! is pinned to — so every recording renders at the same size; sessions
+//! smaller than the canvas sit centered with symmetric bars, and the rare
+//! larger session gets the smallest 4:1 canvas that contains it (the player
+//! scales the font down instead of cropping). Re-rendering drops OSC
 //! sequences (window titles, hyperlinks) and bells, which have no effect on
 //! replay playback; the raw per-session casts remain available as separate
 //! artifacts.
@@ -25,14 +27,14 @@ use super::replay_media::ParsedCast;
 const RECORDING_DIVIDER_DURATION_S: f64 = 2.0;
 
 /// The canvas targets a 16:9 pixel aspect. With the website player's cell
-/// metrics (0.6em glyph advance, 1.4 line height => cell w:h of 3:7) a 16:9
-/// frame corresponds to a cols:rows grid ratio of 16*7 : 9*3 = 112:27.
-const CANVAS_RATIO_COLS: u32 = 112;
-const CANVAS_RATIO_ROWS: u32 = 27;
-/// The 112x27 floor comfortably fits a classic 80x24 session.
-const MIN_CANVAS_ROWS: u16 = 27;
-/// Guard against absurd resize claims (canvas tops out at 560x135).
-const MAX_CANVAS_ROWS: u16 = 135;
+/// metrics (0.6em glyph advance, 1.35 line height — must match
+/// `website/src/lib/replay/config.ts`) a 4:1 grid is exactly 16:9:
+/// 120 * 0.6em : 30 * 1.35em = 72 : 40.5 = 16 : 9.
+const CANVAS_COLS_PER_ROW: u16 = 4;
+/// The base canvas is 120x30, the grid the live web terminal is pinned to.
+const MIN_CANVAS_ROWS: u16 = 30;
+/// Guard against absurd resize claims (canvas tops out at 480x120).
+const MAX_CANVAS_ROWS: u16 = 120;
 
 /// Hide cursor, reset the pen, clear the canvas, and home the cursor.
 const CANVAS_RESET: &str = "\u{1b}[?25l\u{1b}[0m\u{1b}[2J\u{1b}[H";
@@ -140,17 +142,14 @@ fn select_canvas_for_sessions(sessions: &[ParsedCast]) -> (u16, u16) {
     select_canvas(max_cols, max_rows)
 }
 
-/// Picks the smallest ~16:9 canvas that fits `max_cols` x `max_rows`.
+/// Picks the smallest 16:9 (4:1 grid) canvas that fits `max_cols` x
+/// `max_rows`, with a 120x30 floor so everything the pinned web terminal
+/// records lands on the identical canvas.
 fn select_canvas(max_cols: u16, max_rows: u16) -> (u16, u16) {
-    let rows_for_cols = (u32::from(max_cols) * CANVAS_RATIO_ROWS).div_ceil(CANVAS_RATIO_COLS);
-    let rows = u32::from(max_rows)
-        .max(rows_for_cols)
-        .clamp(u32::from(MIN_CANVAS_ROWS), u32::from(MAX_CANVAS_ROWS));
-    let cols = (rows * CANVAS_RATIO_COLS).div_ceil(CANVAS_RATIO_ROWS);
-    (
-        u16::try_from(cols).unwrap_or(u16::MAX),
-        u16::try_from(rows).unwrap_or(u16::MAX),
-    )
+    let rows = max_rows
+        .max(max_cols.div_ceil(CANVAS_COLS_PER_ROW))
+        .clamp(MIN_CANVAS_ROWS, MAX_CANVAS_ROWS);
+    (rows * CANVAS_COLS_PER_ROW, rows)
 }
 
 fn parse_resize_payload(payload: &str) -> Option<(u16, u16)> {
@@ -439,15 +438,16 @@ mod tests {
 
     #[test]
     fn select_canvas_keeps_16_9_ratio() {
-        assert_eq!(select_canvas(80, 24), (112, 27));
-        assert_eq!(select_canvas(120, 30), (125, 30));
-        assert_eq!(select_canvas(200, 50), (208, 50));
-        // Tall sessions letterbox by widening instead.
-        assert_eq!(select_canvas(80, 60), (249, 60));
-        // Tiny sessions still get the floor canvas.
-        assert_eq!(select_canvas(10, 5), (112, 27));
+        // Everything that fits the pinned 120x30 grid gets exactly 120x30.
+        assert_eq!(select_canvas(80, 24), (120, 30));
+        assert_eq!(select_canvas(120, 30), (120, 30));
+        assert_eq!(select_canvas(10, 5), (120, 30));
+        // Bigger sessions get the smallest containing 4:1 canvas.
+        assert_eq!(select_canvas(150, 30), (152, 38));
+        assert_eq!(select_canvas(200, 50), (200, 50));
+        assert_eq!(select_canvas(200, 60), (240, 60));
         // Absurd claims are capped.
-        assert_eq!(select_canvas(2000, 10), (560, 135));
+        assert_eq!(select_canvas(2000, 10), (480, 120));
     }
 
     #[test]
@@ -456,22 +456,22 @@ mod tests {
         let combined = compose_sessions(&sessions)?;
         let parsed = parse_cast(&combined)?;
 
-        assert_eq!(parsed.width, 112);
-        assert_eq!(parsed.height, 27);
-        // pad_left = (112 - 80) / 2 = 16, pad_top = (27 - 24) / 2 = 1, so the
-        // session's row 0 repaints at canvas row 2, column 17.
+        assert_eq!(parsed.width, 120);
+        assert_eq!(parsed.height, 30);
+        // pad_left = (120 - 80) / 2 = 20, pad_top = (30 - 24) / 2 = 3, so the
+        // session's row 0 repaints at canvas row 4, column 21.
         assert!(
             parsed
                 .events
                 .iter()
-                .any(|event| event.payload.contains("\u{1b}[2;17H")),
+                .any(|event| event.payload.contains("\u{1b}[4;21H")),
             "expected a repaint at the padded origin"
         );
 
         let vt = replay_composed(&combined)?;
-        let row = vt.line(1).text();
+        let row = vt.line(3).text();
         assert_eq!(row.trim(), "hello");
-        assert_eq!(row.len() - row.trim_start().len(), 16);
+        assert_eq!(row.len() - row.trim_start().len(), 20);
 
         Ok(())
     }
@@ -491,7 +491,7 @@ mod tests {
         let _ = reference.feed_str(payload);
 
         let vt = replay_composed(&combined)?;
-        let (pad_left, pad_top) = ((112 - 40) / 2, (27 - 6) / 2);
+        let (pad_left, pad_top) = ((120 - 40) / 2, (30 - 6) / 2);
         for row in 0..6 {
             let canvas_cells = vt.line(pad_top + row).cells();
             let reference_cells = reference.line(row).cells();
@@ -529,24 +529,24 @@ mod tests {
         let parsed = parse_cast(&combined)?;
 
         assert!(parsed.events.iter().all(|event| event.kind != "r"));
-        // Canvas fits the resize target: max dims 100x30 -> 125x30.
-        assert_eq!(parsed.width, 125);
+        // Max dims 100x30 still fit the pinned 120x30 canvas.
+        assert_eq!(parsed.width, 120);
         assert_eq!(parsed.height, 30);
 
         // The resize repaint clears the canvas and re-centers: the new
-        // padding is ((125 - 100) / 2, (30 - 30) / 2) = (12, 0).
+        // padding is ((120 - 100) / 2, (30 - 30) / 2) = (10, 0).
         let resize_event = parsed
             .events
             .iter()
             .find(|event| event.time_s == 1.0)
             .expect("resize repaint should exist");
         assert!(resize_event.payload.contains("\u{1b}[2J"));
-        assert!(resize_event.payload.contains("\u{1b}[1;13H"));
+        assert!(resize_event.payload.contains("\u{1b}[1;11H"));
 
         let vt = replay_composed(&combined)?;
         let row = vt.line(0).text();
         assert_eq!(row.trim(), "beforeafter");
-        assert_eq!(row.len() - row.trim_start().len(), 12);
+        assert_eq!(row.len() - row.trim_start().len(), 10);
 
         Ok(())
     }
@@ -579,11 +579,30 @@ mod tests {
 
     #[test]
     fn divider_is_centered_on_the_canvas() {
-        let slide = render_divider(112, 27, 2, 3);
+        let slide = render_divider(120, 30, 2, 3);
         assert!(slide.contains("Session 2 of 3"));
-        // Row 13 of 27; "Session 2 of 3" is 14 chars -> column (112-14)/2 = 49.
-        assert!(slide.contains("\u{1b}[13;49H"));
+        // Row 15 of 30; "Session 2 of 3" is 14 chars -> column (120-14)/2 = 53.
+        assert!(slide.contains("\u{1b}[15;53H"));
         assert!(slide.starts_with("\u{1b}[?25l\u{1b}[0m\u{1b}[2J\u{1b}[H"));
+    }
+
+    #[test]
+    fn oversized_sessions_grow_the_canvas() -> Result<()> {
+        let sessions = vec![session(200, 60, vec![event(0.0, "o", "hello")])];
+        let combined = compose_sessions(&sessions)?;
+        let parsed = parse_cast(&combined)?;
+
+        // The smallest 4:1 canvas containing 200x60 is 240x60 — the player
+        // shrinks the font instead of the compositor cropping content.
+        assert_eq!(parsed.width, 240);
+        assert_eq!(parsed.height, 60);
+
+        let vt = replay_composed(&combined)?;
+        let row = vt.line(0).text();
+        assert_eq!(row.trim(), "hello");
+        assert_eq!(row.len() - row.trim_start().len(), (240 - 200) / 2);
+
+        Ok(())
     }
 
     #[test]

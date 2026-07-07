@@ -8,9 +8,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { Button } from "@/components/ui/button";
+import {
+  REPLAY_TERMINAL_BACKGROUND,
+  REPLAY_TERMINAL_COLS,
+  REPLAY_TERMINAL_FONT_FAMILY,
+  REPLAY_TERMINAL_FOREGROUND,
+  REPLAY_TERMINAL_LINE_HEIGHT,
+  REPLAY_TERMINAL_ROWS,
+} from "@/lib/replay/config";
 
 interface WebSshTerminalProps {
   vmName: string;
@@ -42,7 +49,6 @@ type SessionStatus =
 
 type TerminalControlMessage =
   | { type: "open"; cols: number; rows: number }
-  | { type: "resize"; cols: number; rows: number }
   | { type: "close" };
 
 type TerminalEventMessage =
@@ -52,6 +58,10 @@ type TerminalEventMessage =
 
 const SSH_CONNECT_RETRY_ATTEMPTS = 6;
 const SSH_CONNECT_RETRY_BASE_MS = 250;
+const TERMINAL_MIN_FONT_PX = 6;
+const TERMINAL_MAX_FONT_PX = 40;
+// Fallback glyph advance for the mono stack before a grid has rendered.
+const APPROX_CELL_ADVANCE_EM = 0.6;
 const textEncoder = new TextEncoder();
 
 const sleep = (ms: number) =>
@@ -59,6 +69,32 @@ const sleep = (ms: number) =>
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function clampFontSize(value: number): number {
+  return Math.min(TERMINAL_MAX_FONT_PX, Math.max(TERMINAL_MIN_FONT_PX, value));
+}
+
+// The grid never changes (fixed 120x30); the font scales so it fills the
+// container. Uses the rendered `.xterm-screen` rect when available, else a
+// width-based estimate from the approximate glyph advance.
+function computeFitFontSize(
+  container: HTMLElement,
+  currentFontSize: number,
+): number | null {
+  const box = container.getBoundingClientRect();
+  if (box.width <= 0 || box.height <= 0) {
+    return null;
+  }
+  const screen = container.querySelector<HTMLElement>(".xterm-screen");
+  const grid = screen?.getBoundingClientRect();
+  if (grid && grid.width > 0 && grid.height > 0) {
+    const scale = Math.min(box.width / grid.width, box.height / grid.height);
+    return clampFontSize(Math.floor(currentFontSize * scale));
+  }
+  return clampFontSize(
+    Math.floor(box.width / (REPLAY_TERMINAL_COLS * APPROX_CELL_ADVANCE_EM)),
+  );
 }
 
 function isTransientBootstrapError(message: string): boolean {
@@ -94,7 +130,7 @@ export function WebSshTerminal({
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
+  const fitFontSizeRef = useRef<(() => void) | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
 
@@ -138,28 +174,28 @@ export function WebSshTerminal({
       return terminalRef.current;
     }
 
+    // The grid is pinned to the shared replay dimensions so live sessions,
+    // recordings, and replays all share one layout; only the font scales.
     const terminal = new Terminal({
+      cols: REPLAY_TERMINAL_COLS,
+      rows: REPLAY_TERMINAL_ROWS,
       convertEol: true,
       cursorBlink: true,
-      fontFamily:
-        "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace",
-      fontSize: 13,
+      fontFamily: REPLAY_TERMINAL_FONT_FAMILY,
+      fontSize: 14,
+      lineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
       theme: {
-        background: "#020617",
-        foreground: "#e2e8f0",
+        background: REPLAY_TERMINAL_BACKGROUND,
+        foreground: REPLAY_TERMINAL_FOREGROUND,
         cursor: "#f8fafc",
       },
     });
-
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
 
     if (!terminalContainerRef.current) {
       throw new Error("terminal container not available");
     }
 
     terminal.open(terminalContainerRef.current);
-    fitAddon.fit();
 
     terminal.onData((data) => {
       const websocket = websocketRef.current;
@@ -169,43 +205,41 @@ export function WebSshTerminal({
       websocket.send(textEncoder.encode(data));
     });
 
-    terminal.onResize(({ cols, rows }) => {
-      const websocket = websocketRef.current;
-      if (!websocket || websocket.readyState !== WebSocket.OPEN || cols <= 0 || rows <= 0) {
+    const fitFontSize = () => {
+      const container = terminalContainerRef.current;
+      if (!container) {
         return;
       }
-      sendTerminalControl(websocket, { type: "resize", cols, rows });
-    });
-
-    const handleResize = () => {
-      fitAddon.fit();
-      const websocket = websocketRef.current;
-      const cols = terminal.cols;
-      const rows = terminal.rows;
-      if (!websocket || websocket.readyState !== WebSocket.OPEN || cols <= 0 || rows <= 0) {
-        return;
+      // Two passes: apply, let the renderer re-measure, correct once.
+      for (let pass = 0; pass < 2; pass += 1) {
+        const current = terminal.options.fontSize ?? 14;
+        const next = computeFitFontSize(container, current);
+        if (next === null || next === current) {
+          break;
+        }
+        terminal.options.fontSize = next;
       }
-      sendTerminalControl(websocket, { type: "resize", cols, rows });
     };
+    fitFontSize();
 
     const container = terminalContainerRef.current;
-    window.addEventListener("resize", handleResize);
+    window.addEventListener("resize", fitFontSize);
     const resizeObserver =
       typeof ResizeObserver !== "undefined" && container
         ? new ResizeObserver(() => {
-            handleResize();
+            fitFontSize();
           })
         : null;
     if (resizeObserver && container) {
       resizeObserver.observe(container);
     }
     resizeCleanupRef.current = () => {
-      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("resize", fitFontSize);
       resizeObserver?.disconnect();
     };
 
     terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
+    fitFontSizeRef.current = fitFontSize;
     return terminal;
   }, []);
 
@@ -248,7 +282,7 @@ export function WebSshTerminal({
       });
       websocketRef.current = websocket;
 
-      fitAddonRef.current?.fit();
+      fitFontSizeRef.current?.();
       terminal.writeln("[intar] Connected.");
       setStatus("connected");
     } catch (connectError) {
@@ -277,13 +311,13 @@ export function WebSshTerminal({
       resizeCleanupRef.current = null;
       terminalRef.current?.dispose();
       terminalRef.current = null;
-      fitAddonRef.current = null;
+      fitFontSizeRef.current = null;
     };
   }, [connect, disconnect]);
 
   if (variant === "embedded") {
     return (
-      <div className="flex min-h-[24rem] w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm sm:min-h-[32rem]">
+      <div className="flex w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{title}</p>
@@ -317,8 +351,13 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 bg-slate-950 p-2">
-          <div ref={terminalContainerRef} className="h-full w-full" />
+        <div className="bg-[#121314] p-2">
+          <div className="relative aspect-video w-full">
+            <div
+              ref={terminalContainerRef}
+              className="absolute inset-0 grid place-items-center overflow-hidden"
+            />
+          </div>
         </div>
 
         {error || status === "disconnected" ? (
@@ -338,7 +377,7 @@ export function WebSshTerminal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
-      <div className="flex h-[80vh] w-full max-w-7xl flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
+      <div className="flex w-full max-w-7xl flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">{title}</p>
@@ -372,8 +411,13 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 bg-slate-950 p-2">
-          <div ref={terminalContainerRef} className="h-full w-full" />
+        <div className="bg-[#121314] p-2">
+          <div className="relative mx-auto aspect-video w-full max-w-[calc(75dvh*16/9)]">
+            <div
+              ref={terminalContainerRef}
+              className="absolute inset-0 grid place-items-center overflow-hidden"
+            />
+          </div>
         </div>
 
         {error || status === "disconnected" ? (
@@ -562,8 +606,8 @@ async function connectBrowserTerminal(input: {
 
     sendTerminalControl(websocket, {
       type: "open",
-      cols: Math.max(input.terminal.cols, 80),
-      rows: Math.max(input.terminal.rows, 24),
+      cols: REPLAY_TERMINAL_COLS,
+      rows: REPLAY_TERMINAL_ROWS,
     });
     await ready;
     return websocket;
