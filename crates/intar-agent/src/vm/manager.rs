@@ -3930,19 +3930,23 @@ fn nft_string(value: &str) -> String {
 }
 
 async fn apply_vm_nft_ruleset(ruleset: &str) -> Result<()> {
-    for (family, table) in [
-        ("ip", NFT_VM_NET_TABLE),
-        ("ip6", NFT_VM_NET_TABLE),
-        ("ip", NFT_VM_NET_LEGACY_TABLE),
-    ] {
-        let _ = Command::new("nft")
-            .arg("delete")
-            .arg("table")
-            .arg(family)
-            .arg(table)
-            .output()
-            .await;
-    }
+    let _ = Command::new("nft")
+        .arg("delete")
+        .arg("table")
+        .arg("ip")
+        .arg(NFT_VM_NET_LEGACY_TABLE)
+        .output()
+        .await;
+
+    // Replace the rulesets atomically in one nft transaction: declaring the
+    // tables makes the flush valid on first run, the flush drops all previous
+    // rules, and the rendered tables re-add the current ones. A delete in a
+    // separate nft invocation would leave a window with no DNAT forwards and
+    // no isolation rules on every reconcile.
+    let transaction = format!(
+        "table ip {NFT_VM_NET_TABLE} {{}}\nflush table ip {NFT_VM_NET_TABLE}\ntable ip6 {NFT_VM_NET_TABLE} {{}}\nflush table ip6 {NFT_VM_NET_TABLE}\n{ruleset}"
+    );
+    let ruleset = transaction.as_str();
 
     let mut child = Command::new("nft")
         .arg("-f")
