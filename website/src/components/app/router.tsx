@@ -77,10 +77,9 @@ const scenarioBriefingRoute = createRoute({
   component: ScenarioBriefing,
 });
 
-// Run detail keeps its current path in Phase 0; Phase 1 moves it to /runs/$runId.
 const scenarioRunRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "scenarios/runs/$runId",
+  path: "runs/$runId",
   component: ScenarioRun,
 });
 
@@ -139,28 +138,6 @@ const adminScenarioDetailsRoute = createRoute({
   component: AdminScenarioDetails,
 });
 
-/* -------------------------------------------------------------------------- */
-/* Legacy path redirects                                                      */
-/* -------------------------------------------------------------------------- */
-
-const legacyDashboardRedirect = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dashboard",
-  beforeLoad: () => {
-    throw redirect({ to: "/admin" });
-  },
-  component: () => null,
-});
-
-const legacyDashboardOnboardingRedirect = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dashboard/onboarding",
-  beforeLoad: () => {
-    throw redirect({ to: "/admin/onboarding" });
-  },
-  component: () => null,
-});
-
 const routeTree = rootRoute.addChildren([
   marketingLayoutRoute.addChildren([
     indexRoute,
@@ -180,8 +157,6 @@ const routeTree = rootRoute.addChildren([
     adminScenariosRoute,
     adminScenarioDetailsRoute,
   ]),
-  legacyDashboardRedirect,
-  legacyDashboardOnboardingRedirect,
 ]);
 
 export const router = createRouter({

@@ -112,7 +112,7 @@ export function ScenarioBriefing() {
     mutationFn: () => requestScenarioStart(scenarioId),
     onSuccess: (runId) => {
       window.location.assign(
-        `/scenarios/runs/${encodeURIComponent(runId)}?pending=1`,
+        `/runs/${encodeURIComponent(runId)}?pending=1`,
       );
     },
   });
@@ -148,7 +148,7 @@ export function ScenarioBriefing() {
   const handlePrimaryAction = () => {
     if (scenarioData?.hasActiveRun && scenarioData.activeRunId) {
       void navigate({
-        to: "/scenarios/runs/$runId",
+        to: "/runs/$runId",
         params: { runId: scenarioData.activeRunId },
       });
       return;
@@ -314,7 +314,7 @@ export function ScenarioBriefing() {
                     <div key={run.runId} className="relative">
                       {run.hasReplay ? (
                         <Link
-                          to="/scenarios/runs/$runId"
+                          to="/runs/$runId"
                           params={{ runId: run.runId }}
                           className="block rounded-lg border p-4 pr-12 transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >

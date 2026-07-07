@@ -212,7 +212,7 @@ const POLL_INTERVALS: Record<ScenarioRunRecord["phase"], number> = {
 export function ScenarioRun() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { runId } = useParams({ from: "/app/scenarios/runs/$runId" });
+  const { runId } = useParams({ from: "/app/runs/$runId" });
   const [projectionPending, setProjectionPending] = useState(() => {
     if (typeof window === "undefined") {
       return false;
