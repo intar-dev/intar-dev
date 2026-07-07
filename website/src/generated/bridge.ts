@@ -184,6 +184,7 @@ export interface VmNetworkStateV1 {
   guest_ip: string;
   guest_cidr: string;
   gateway: string;
+  ssh_host?: string | null;
   ssh_host_port?: number | null;
 }
 
