@@ -94,7 +94,10 @@ pub fn normalize_relative_path(path: &str) -> Result<String, ScenarioError> {
 pub fn hash_field(hasher: &mut Sha256, key: &str, value: &[u8]) {
     hasher.update(key.as_bytes());
     hasher.update([0]);
-    hasher.update(value.len().to_le_bytes());
+    // Explicit u64: usize::to_le_bytes() is 4 bytes on wasm32 but 8 on
+    // x86_64, which made the hash architecture-dependent. u64 matches the
+    // bytes every 64-bit native build has always produced.
+    hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value);
     hasher.update([0xff]);
 }

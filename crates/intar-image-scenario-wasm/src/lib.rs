@@ -211,10 +211,7 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
         Err(error) => return fail(error),
     };
 
-    let entries = vec![(
-        "scenario.hcl".to_string(),
-        scenario_hcl.as_bytes().to_vec(),
-    )];
+    let entries = vec![("scenario.hcl".to_string(), scenario_hcl.as_bytes().to_vec())];
     let content_hash = match scenario_content_hash_from_entries(
         &ScenarioContentHashParams {
             scenario_id: &scenario.name,
@@ -246,9 +243,8 @@ fn prepare_build_impl(scenario_hcl: &str) -> PrepareBuildOutput {
 #[wasm_bindgen]
 pub fn prepare_build(scenario_hcl: &str) -> String {
     let output = prepare_build_impl(scenario_hcl);
-    serde_json::to_string(&output).unwrap_or_else(|_| {
-        r#"{"ok":false,"errors":["serialization failed"]}"#.to_string()
-    })
+    serde_json::to_string(&output)
+        .unwrap_or_else(|_| r#"{"ok":false,"errors":["serialization failed"]}"#.to_string())
 }
 
 #[cfg(test)]
