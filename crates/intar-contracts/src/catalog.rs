@@ -51,6 +51,7 @@ pub struct ScenarioManifestV2 {
     pub scenario_id: String,
     pub name: String,
     pub title: String,
+    pub category: String,
     pub description: String,
     pub difficulty: ScenarioDifficulty,
     pub estimated_minutes: u32,

@@ -124,6 +124,7 @@ fn build_manifest(input: ManifestInput<'_>) -> Result<ScenarioManifestV2> {
         scenario_id: input.scenario_name.to_string(),
         name: input.scenario_name.to_string(),
         title: input.scenario.title.clone(),
+        category: input.scenario.category.clone(),
         description: input.scenario_description.to_string(),
         difficulty: catalog_difficulty(
             input
@@ -334,6 +335,7 @@ base_image "trixie" {
             scenario_id: "broken-nginx".to_string(),
             name: "broken-nginx".to_string(),
             title: "Broken Nginx".to_string(),
+            category: "web".to_string(),
             description: "Fix nginx".to_string(),
             difficulty: intar_contracts::catalog::ScenarioDifficulty::Easy,
             estimated_minutes: 15,

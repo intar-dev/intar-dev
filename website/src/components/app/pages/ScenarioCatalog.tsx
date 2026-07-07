@@ -27,6 +27,7 @@ interface ScenarioCatalogEntry {
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
   tags: string[];
+  category: string;
   scenarioName: string;
   enabledAt: number;
   vmCount: number;
@@ -52,6 +53,7 @@ const DIFFICULTIES: ScenarioDifficulty[] = ["easy", "medium", "hard"];
 export function ScenarioCatalog() {
   const [search, setSearch] = useState("");
   const [difficulty, setDifficulty] = useState<ScenarioDifficulty | null>(null);
+  const [category, setCategory] = useState<string | null>(null);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
 
   const scenarios = useQuery({
@@ -100,10 +102,23 @@ export function ScenarioCatalog() {
     [allEntries],
   );
 
+  const allCategories = useMemo(
+    () =>
+      [
+        ...new Set(
+          allEntries
+            .map((scenario) => scenario.category)
+            .filter((value) => value.trim()),
+        ),
+      ].sort(),
+    [allEntries],
+  );
+
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return allEntries.filter((scenario) => {
       if (difficulty && scenario.difficulty !== difficulty) return false;
+      if (category && scenario.category !== category) return false;
       if (
         selectedTags.length &&
         !selectedTags.every((tag) => scenario.tags.includes(tag))
@@ -117,7 +132,7 @@ export function ScenarioCatalog() {
         scenario.tags.some((tag) => tag.toLowerCase().includes(needle))
       );
     });
-  }, [allEntries, difficulty, search, selectedTags]);
+  }, [allEntries, category, difficulty, search, selectedTags]);
 
   const toggleTag = (tag: string) => {
     setSelectedTags((current) =>
@@ -127,7 +142,9 @@ export function ScenarioCatalog() {
     );
   };
 
-  const filtersActive = Boolean(search.trim() || difficulty || selectedTags.length);
+  const filtersActive = Boolean(
+    search.trim() || difficulty || category || selectedTags.length,
+  );
 
   return (
     <PageShell title="Scenarios" description="" showHeader={false}>
@@ -198,6 +215,23 @@ export function ScenarioCatalog() {
                 </FilterChip>
               ))}
             </div>
+            {allCategories.length ? (
+              <div className="flex items-center gap-1">
+                {allCategories.map((entry) => (
+                  <FilterChip
+                    key={entry}
+                    active={category === entry}
+                    onClick={() =>
+                      setCategory((current) =>
+                        current === entry ? null : entry,
+                      )
+                    }
+                  >
+                    {entry}
+                  </FilterChip>
+                ))}
+              </div>
+            ) : null}
           </div>
           {allTags.length ? (
             <div className="flex flex-wrap items-center gap-1.5">

@@ -15,6 +15,7 @@ describe("scenario model", () => {
     const briefing = deriveScenarioBriefing({
       scenarioId: "broken-nginx",
       title: " Broken Nginx ",
+      category: "web",
       description: " Repair nginx without leaking hints. ",
       difficulty: "hard",
       estimatedMinutes: 42,
@@ -58,6 +59,7 @@ describe("scenario model", () => {
     expect(briefing).toEqual({
       title: "Broken Nginx",
       tagline: "Repair nginx without leaking hints.",
+      category: "web",
       difficulty: "hard",
       estimatedMinutes: 42,
       briefingMarkdown: "Line one\nLine two\nLine three",

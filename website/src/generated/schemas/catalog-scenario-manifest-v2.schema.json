@@ -6,6 +6,9 @@
     "briefing_markdown": {
       "type": "string"
     },
+    "category": {
+      "type": "string"
+    },
     "description": {
       "type": "string"
     },
@@ -59,6 +62,7 @@
     "scenario_id",
     "name",
     "title",
+    "category",
     "description",
     "difficulty",
     "estimated_minutes",

@@ -16,6 +16,7 @@ import { AdminBuilds } from "./pages/AdminBuilds";
 import { Scenarios as AdminScenarios } from "./pages/Scenarios";
 import { ScenarioDetails as AdminScenarioDetails } from "./pages/ScenarioDetails";
 import { AdminPeople } from "./pages/AdminPeople";
+import { AdminAuthoring } from "./pages/AdminAuthoring";
 import { ScenarioCatalog } from "./pages/ScenarioCatalog";
 import { ScenarioBriefing } from "./pages/ScenarioBriefing";
 import { ScenarioRun } from "./pages/ScenarioRun";
@@ -153,6 +154,13 @@ const adminPeopleRoute = createRoute({
   component: AdminPeople,
 });
 
+const adminAuthoringRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "admin/authoring",
+  beforeLoad: requireAdminRoute,
+  component: AdminAuthoring,
+});
+
 const routeTree = rootRoute.addChildren([
   marketingLayoutRoute.addChildren([
     indexRoute,
@@ -173,6 +181,7 @@ const routeTree = rootRoute.addChildren([
     adminScenariosRoute,
     adminScenarioDetailsRoute,
     adminPeopleRoute,
+    adminAuthoringRoute,
   ]),
 ]);
 

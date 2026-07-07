@@ -2101,7 +2101,18 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
+]
+
+[[package]]
+name = "intar-image-scenario-wasm"
+version = "0.1.0"
+dependencies = [
+ "intar-image-scenario",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 mod base_image;
 mod build_tools;
+mod content_hash;
 mod error;
 mod kino;
 mod probe;
@@ -7,6 +8,7 @@ mod scenario;
 
 pub use base_image::*;
 pub use build_tools::*;
+pub use content_hash::*;
 pub use error::*;
 pub use kino::*;
 pub use probe::*;

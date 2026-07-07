@@ -275,6 +275,7 @@ export interface ScenarioManifestV2 {
   scenario_id: string;
   name: string;
   title: string;
+  category: string;
   description: string;
   difficulty: ScenarioDifficulty;
   estimated_minutes: number;

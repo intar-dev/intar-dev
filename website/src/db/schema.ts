@@ -522,6 +522,7 @@ export const vmScenarios = sqliteTable(
   {
     scenarioId: text("scenario_id").primaryKey(),
     title: text("title").notNull(),
+    category: text("category").default("").notNull(),
     description: text("description").notNull(),
     difficulty: text("difficulty").notNull(),
     estimatedMinutes: integer("estimated_minutes").notNull(),
@@ -811,6 +812,30 @@ export const accessRequests = sqliteTable(
   (table) => [
     uniqueIndex("access_requests_username_uidx").on(table.githubUsername),
     index("access_requests_status_idx").on(table.status, table.createdAt),
+  ],
+);
+
+// Authoring drafts: the HCL system-of-record for scenarios written in the
+// app (repo/CI-authored scenarios don't appear here).
+export const scenarioSources = sqliteTable(
+  "scenario_sources",
+  {
+    id: text("id").primaryKey(),
+    scenarioId: text("scenario_id").notNull(),
+    hcl: text("hcl").notNull(),
+    status: text("status", {
+      enum: ["draft", "published"],
+    })
+      .default("draft")
+      .notNull(),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_sources_scenario_uidx").on(table.scenarioId),
   ],
 );
 

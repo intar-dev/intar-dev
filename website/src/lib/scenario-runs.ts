@@ -91,6 +91,7 @@ export interface ScenarioCatalogEntry {
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
   tags: string[];
+  category: string;
   scenarioName: string;
   enabledAt: number;
   vmCount: number;
@@ -180,6 +181,7 @@ export async function listEnabledScenariosForUser(): Promise<
     difficulty: scenario.briefing.difficulty,
     estimatedMinutes: scenario.briefing.estimatedMinutes,
     tags: scenario.briefing.tags,
+    category: scenario.briefing.category,
     scenarioName: scenario.scenarioId,
     enabledAt: scenario.enabledAt,
     vmCount: scenario.launchSpecs.length,
