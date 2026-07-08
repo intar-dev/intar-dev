@@ -8,96 +8,197 @@ import {
   canonicalRevealedScenarioRunHintKeys,
   decideScenarioRunHintReveal,
   isScenarioRunSolved,
-  nextScenarioRunHintKey,
 } from "@/lib/scenario-run-content";
 
+function hint(
+  key: string,
+  scope: "scenario" | "probe",
+  probeName: string | null,
+): ScenarioRunHintSnapshot {
+  const id = key.split(":").at(-1) ?? key;
+  return {
+    key,
+    scope,
+    probeName,
+    id,
+    title: `Title of ${id}`,
+    bodyMarkdown: `Body of ${id}.`,
+  };
+}
+
+// Two scenario-level hints plus two probes with two hints each — three
+// independent sequential ladders.
 const hints: ScenarioRunHintSnapshot[] = [
-  {
-    key: "scenario:look-around",
-    scope: "scenario",
-    probeName: null,
-    id: "look-around",
-    title: "Look around",
-    bodyMarkdown: "Check `/etc/nginx/sites-enabled/default`.",
-  },
-  {
-    key: "probe:http-ok:curl",
-    scope: "probe",
-    probeName: "http-ok",
-    id: "curl",
-    title: "Curl locally",
-    bodyMarkdown: "Run `curl -i http://127.0.0.1`.",
-  },
+  hint("scenario:look-around", "scenario", null),
+  hint("scenario:read-logs", "scenario", null),
+  hint("probe:http-ok:curl", "probe", "http-ok"),
+  hint("probe:http-ok:config", "probe", "http-ok"),
+  hint("probe:cert-valid:openssl", "probe", "cert-valid"),
+  hint("probe:cert-valid:renew", "probe", "cert-valid"),
 ];
 
 describe("scenario run content gating", () => {
-  it("redacts unrevealed hint bodies from serialized run content", () => {
-    expect(
-      buildScenarioRunHintViews({
-        hints,
-        revealedHintKeys: [],
-      }),
-    ).toEqual([
-      {
-        key: "scenario:look-around",
-        scope: "scenario",
-        probeName: null,
-        id: "look-around",
-        title: "Look around",
-        revealed: false,
-        bodyMarkdown: null,
-      },
-      {
-        key: "probe:http-ok:curl",
-        scope: "probe",
-        probeName: "http-ok",
-        id: "curl",
-        title: "Curl locally",
-        revealed: false,
-        bodyMarkdown: null,
-      },
-    ]);
+  it("seals unrevealed hints: no title, no body, one unlocked per group", () => {
+    const views = buildScenarioRunHintViews({
+      hints,
+      revealedHintKeys: [],
+    });
 
-    expect(
-      buildScenarioRunHintViews({
-        hints,
-        revealedHintKeys: ["scenario:look-around"],
-      }).map((hint) => hint.bodyMarkdown),
-    ).toEqual(["Check `/etc/nginx/sites-enabled/default`.", null]);
+    for (const view of views) {
+      expect(view.revealed).toBe(false);
+      expect(view.title).toBeNull();
+      expect(view.bodyMarkdown).toBeNull();
+    }
+    expect(views.filter((view) => view.unlocked).map((view) => view.key)).toEqual([
+      "scenario:look-around",
+      "probe:http-ok:curl",
+      "probe:cert-valid:openssl",
+    ]);
   });
 
-  it("ignores out-of-order stored hint keys when serializing hint bodies", () => {
+  it("reveals title and body only for revealed hints and advances the group unlock", () => {
+    const views = buildScenarioRunHintViews({
+      hints,
+      revealedHintKeys: ["probe:http-ok:curl"],
+    });
+    const byKey = new Map(views.map((view) => [view.key, view]));
+
+    expect(byKey.get("probe:http-ok:curl")).toMatchObject({
+      revealed: true,
+      unlocked: false,
+      title: "Title of curl",
+      bodyMarkdown: "Body of curl.",
+    });
+    expect(byKey.get("probe:http-ok:config")).toMatchObject({
+      revealed: false,
+      unlocked: true,
+      title: null,
+      bodyMarkdown: null,
+    });
+    // Other groups are untouched: their first hints stay unlocked.
+    expect(byKey.get("scenario:look-around")?.unlocked).toBe(true);
+    expect(byKey.get("probe:cert-valid:openssl")?.unlocked).toBe(true);
+  });
+
+  it("marks no hint unlocked in an exhausted group", () => {
+    const views = buildScenarioRunHintViews({
+      hints,
+      revealedHintKeys: ["probe:http-ok:curl", "probe:http-ok:config"],
+    });
+    const httpViews = views.filter((view) => view.probeName === "http-ok");
+    expect(httpViews.every((view) => view.revealed)).toBe(true);
+    expect(httpViews.every((view) => !view.unlocked)).toBe(true);
+  });
+
+  it("allows each group ladder to progress independently", () => {
+    // Probe hint with zero scenario hints revealed.
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: [],
+        requestedHintKey: "probe:cert-valid:openssl",
+      }),
+    ).toEqual({
+      allowed: true,
+      hintKey: "probe:cert-valid:openssl",
+    });
+
+    // Second hint of a group is blocked until the first is revealed.
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: [],
+        requestedHintKey: "probe:http-ok:config",
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "not_next",
+      nextHintKey: "probe:http-ok:curl",
+    });
+
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: ["probe:http-ok:curl"],
+        requestedHintKey: "probe:http-ok:config",
+      }),
+    ).toEqual({
+      allowed: true,
+      hintKey: "probe:http-ok:config",
+    });
+  });
+
+  it("rejects unknown and already revealed hint keys", () => {
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: [],
+        requestedHintKey: "probe:missing:nope",
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "unknown",
+      nextHintKey: null,
+    });
+
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: ["scenario:look-around"],
+        requestedHintKey: "scenario:look-around",
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "already_revealed",
+      nextHintKey: "scenario:read-logs",
+    });
+
+    expect(
+      decideScenarioRunHintReveal({
+        hints,
+        revealedHintKeys: ["scenario:look-around", "scenario:read-logs"],
+        requestedHintKey: "scenario:read-logs",
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "already_revealed",
+      nextHintKey: null,
+    });
+  });
+
+  it("canonicalizes stored keys to per-group prefixes in manifest order", () => {
+    // A group's later hint without its earlier one is dropped.
     expect(
       canonicalRevealedScenarioRunHintKeys({
         hints,
-        revealedHintKeys: ["probe:http-ok:curl"],
+        revealedHintKeys: ["probe:http-ok:config"],
       }),
     ).toEqual([]);
 
-    expect(
-      buildScenarioRunHintViews({
-        hints,
-        revealedHintKeys: ["probe:http-ok:curl"],
-      }).map((hint) => hint.bodyMarkdown),
-    ).toEqual([null, null]);
-
+    // Interleaved, stale, and duplicate keys collapse per group and are
+    // re-emitted in overall manifest order.
     expect(
       canonicalRevealedScenarioRunHintKeys({
         hints,
         revealedHintKeys: [
-          "scenario:look-around",
-          "probe:http-ok:curl",
+          "probe:cert-valid:openssl",
           "unknown:stale",
+          "scenario:look-around",
+          "probe:cert-valid:openssl",
           "probe:http-ok:curl",
         ],
       }),
-    ).toEqual(["scenario:look-around", "probe:http-ok:curl"]);
+    ).toEqual([
+      "scenario:look-around",
+      "probe:http-ok:curl",
+      "probe:cert-valid:openssl",
+    ]);
   });
 
-  it("deduplicates stored hint keys before serializing or revealing bodies", () => {
+  it("deduplicates manifest hints before serializing or revealing bodies", () => {
     const firstHint = hints[0];
-    const secondHint = hints[1];
-    if (!firstHint || !secondHint) {
+    const thirdHint = hints[2];
+    if (!firstHint || !thirdHint) {
       throw new Error("expected hint fixtures");
     }
     const duplicatedHints = [
@@ -107,87 +208,44 @@ describe("scenario run content gating", () => {
         title: "Duplicate",
         bodyMarkdown: "This duplicate body must not be exposed.",
       },
-      secondHint,
+      thirdHint,
     ];
 
     expect(
       buildScenarioRunHintViews({
         hints: duplicatedHints,
         revealedHintKeys: ["scenario:look-around"],
-      }).map((hint) => hint.bodyMarkdown),
-    ).toEqual(["Check `/etc/nginx/sites-enabled/default`.", null]);
-
-    expect(
-      nextScenarioRunHintKey(duplicatedHints, ["scenario:look-around"]),
-    ).toBe("probe:http-ok:curl");
-
-    expect(
-      appendRevealedScenarioRunHintKey({
-        hints: duplicatedHints,
-        revealedHintKeys: ["scenario:look-around"],
-        hintKey: "probe:http-ok:curl",
-      }),
-    ).toEqual(["scenario:look-around", "probe:http-ok:curl"]);
+      }).map((view) => view.bodyMarkdown),
+    ).toEqual(["Body of look-around.", null]);
   });
 
-  it("reveals hints strictly in manifest order", () => {
-    expect(nextScenarioRunHintKey(hints, [])).toBe("scenario:look-around");
-    expect(
-      decideScenarioRunHintReveal({
-        hints,
-        revealedHintKeys: [],
-        requestedHintKey: "probe:http-ok:curl",
-      }),
-    ).toEqual({
-      allowed: false,
-      reason: "not_next",
-      nextHintKey: "scenario:look-around",
-    });
-
-    expect(
-      decideScenarioRunHintReveal({
-        hints,
-        revealedHintKeys: ["scenario:look-around"],
-        requestedHintKey: "probe:http-ok:curl",
-      }),
-    ).toEqual({
-      allowed: true,
-      hintKey: "probe:http-ok:curl",
-    });
-
-    expect(
-      decideScenarioRunHintReveal({
-        hints,
-        revealedHintKeys: ["scenario:look-around", "probe:http-ok:curl"],
-        requestedHintKey: "probe:http-ok:curl",
-      }),
-    ).toEqual({
-      allowed: false,
-      reason: "exhausted",
-      nextHintKey: null,
-    });
-  });
-
-  it("persists only the next revealed hint key in manifest order", () => {
+  it("persists only group-next reveals and re-canonicalizes the stored keys", () => {
+    // Non-next key is ignored; stale keys are scrubbed.
     expect(
       appendRevealedScenarioRunHintKey({
         hints,
-        revealedHintKeys: [
-          "probe:http-ok:curl",
-          "unknown:stale",
-          "probe:http-ok:curl",
-        ],
+        revealedHintKeys: ["unknown:stale"],
+        hintKey: "probe:http-ok:config",
+      }),
+    ).toEqual([]);
+
+    // Group-next reveal appends without touching other groups.
+    expect(
+      appendRevealedScenarioRunHintKey({
+        hints,
+        revealedHintKeys: ["probe:cert-valid:openssl"],
+        hintKey: "scenario:look-around",
+      }),
+    ).toEqual(["scenario:look-around", "probe:cert-valid:openssl"]);
+
+    // Already revealed is idempotent.
+    expect(
+      appendRevealedScenarioRunHintKey({
+        hints,
+        revealedHintKeys: ["scenario:look-around"],
         hintKey: "scenario:look-around",
       }),
     ).toEqual(["scenario:look-around"]);
-
-    expect(
-      appendRevealedScenarioRunHintKey({
-        hints,
-        revealedHintKeys: ["scenario:look-around", "unknown:stale"],
-        hintKey: "probe:http-ok:curl",
-      }),
-    ).toEqual(["scenario:look-around", "probe:http-ok:curl"]);
   });
 
   it("keeps solution bodies gated and marks pre-solve reveals as assisted", () => {

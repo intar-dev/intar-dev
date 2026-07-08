@@ -99,7 +99,6 @@ export interface ScenarioRunRecord {
   objectives: ScenarioObjective[];
   tags: string[];
   hints: ScenarioRunHint[];
-  nextHintKey: string | null;
   solution: ScenarioRunSolution;
   difficulty: "easy" | "medium" | "hard";
   estimatedMinutes: number;
@@ -127,6 +126,9 @@ export interface ScenarioObjective {
   hintCount: number;
 }
 
+// Hints unlock sequentially per group (the scenario-level ladder and one
+// ladder per probe). Sealed hints carry neither title nor body; `unlocked`
+// marks the single revealable hint of each group.
 export interface ScenarioRunHint {
   key: string;
   scope: "scenario" | "probe";
@@ -134,6 +136,7 @@ export interface ScenarioRunHint {
   id: string;
   title: string | null;
   revealed: boolean;
+  unlocked: boolean;
   bodyMarkdown: string | null;
 }
 

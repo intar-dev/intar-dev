@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { Button } from "@/components/ui/button";
 import {
   REPLAY_TERMINAL_BACKGROUND,
@@ -49,6 +50,7 @@ type SessionStatus =
 
 type TerminalControlMessage =
   | { type: "open"; cols: number; rows: number }
+  | { type: "resize"; cols: number; rows: number }
   | { type: "close" };
 
 type TerminalEventMessage =
@@ -58,10 +60,9 @@ type TerminalEventMessage =
 
 const SSH_CONNECT_RETRY_ATTEMPTS = 6;
 const SSH_CONNECT_RETRY_BASE_MS = 250;
-const TERMINAL_MIN_FONT_PX = 6;
-const TERMINAL_MAX_FONT_PX = 40;
-// Fallback glyph advance for the mono stack before a grid has rendered.
-const APPROX_CELL_ADVANCE_EM = 0.6;
+const TERMINAL_MIN_COLS = 20;
+const TERMINAL_MIN_ROWS = 5;
+const RESIZE_SEND_DEBOUNCE_MS = 200;
 const textEncoder = new TextEncoder();
 
 const sleep = (ms: number) =>
@@ -69,32 +70,6 @@ const sleep = (ms: number) =>
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function clampFontSize(value: number): number {
-  return Math.min(TERMINAL_MAX_FONT_PX, Math.max(TERMINAL_MIN_FONT_PX, value));
-}
-
-// The grid never changes (fixed 120x30); the font scales so it fills the
-// container. Uses the rendered `.xterm-screen` rect when available, else a
-// width-based estimate from the approximate glyph advance.
-function computeFitFontSize(
-  container: HTMLElement,
-  currentFontSize: number,
-): number | null {
-  const box = container.getBoundingClientRect();
-  if (box.width <= 0 || box.height <= 0) {
-    return null;
-  }
-  const screen = container.querySelector<HTMLElement>(".xterm-screen");
-  const grid = screen?.getBoundingClientRect();
-  if (grid && grid.width > 0 && grid.height > 0) {
-    const scale = Math.min(box.width / grid.width, box.height / grid.height);
-    return clampFontSize(Math.floor(currentFontSize * scale));
-  }
-  return clampFontSize(
-    Math.floor(box.width / (REPLAY_TERMINAL_COLS * APPROX_CELL_ADVANCE_EM)),
-  );
 }
 
 function isTransientBootstrapError(message: string): boolean {
@@ -130,9 +105,10 @@ export function WebSshTerminal({
 }: WebSshTerminalProps) {
   const terminalContainerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
-  const fitFontSizeRef = useRef<(() => void) | null>(null);
+  const fitGridRef = useRef<(() => void) | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const resizeSendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -151,6 +127,10 @@ export function WebSshTerminal({
   }, [sessionRequest?.body]);
 
   const disconnect = useCallback(async () => {
+    if (resizeSendTimerRef.current !== null) {
+      clearTimeout(resizeSendTimerRef.current);
+      resizeSendTimerRef.current = null;
+    }
     const websocket = websocketRef.current;
     websocketRef.current = null;
     if (websocket) {
@@ -174,8 +154,8 @@ export function WebSshTerminal({
       return terminalRef.current;
     }
 
-    // The grid is pinned to the shared replay dimensions so live sessions,
-    // recordings, and replays all share one layout; only the font scales.
+    // 120x30 is only the pre-fit fallback; the grid reflows to the container
+    // and every change is forwarded to the PTY as a resize control frame.
     const terminal = new Terminal({
       cols: REPLAY_TERMINAL_COLS,
       rows: REPLAY_TERMINAL_ROWS,
@@ -195,6 +175,8 @@ export function WebSshTerminal({
       throw new Error("terminal container not available");
     }
 
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
     terminal.open(terminalContainerRef.current);
 
     terminal.onData((data) => {
@@ -205,41 +187,63 @@ export function WebSshTerminal({
       websocket.send(textEncoder.encode(data));
     });
 
-    const fitFontSize = () => {
-      const container = terminalContainerRef.current;
-      if (!container) {
+    terminal.onResize(({ cols, rows }) => {
+      if (resizeSendTimerRef.current !== null) {
+        clearTimeout(resizeSendTimerRef.current);
+      }
+      resizeSendTimerRef.current = setTimeout(() => {
+        resizeSendTimerRef.current = null;
+        const websocket = websocketRef.current;
+        if (websocket && websocket.readyState === WebSocket.OPEN) {
+          sendTerminalControl(websocket, { type: "resize", cols, rows });
+        }
+      }, RESIZE_SEND_DEBOUNCE_MS);
+    });
+
+    const fitGrid = () => {
+      // proposeDimensions() returns undefined for hidden/zero-size containers.
+      const dims = fitAddon.proposeDimensions();
+      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) {
         return;
       }
-      // Two passes: apply, let the renderer re-measure, correct once.
-      for (let pass = 0; pass < 2; pass += 1) {
-        const current = terminal.options.fontSize ?? 14;
-        const next = computeFitFontSize(container, current);
-        if (next === null || next === current) {
-          break;
-        }
-        terminal.options.fontSize = next;
+      const cols = Math.max(TERMINAL_MIN_COLS, dims.cols);
+      const rows = Math.max(TERMINAL_MIN_ROWS, dims.rows);
+      if (cols !== terminal.cols || rows !== terminal.rows) {
+        terminal.resize(cols, rows);
       }
     };
-    fitFontSize();
+    fitGrid();
 
     const container = terminalContainerRef.current;
-    window.addEventListener("resize", fitFontSize);
+    let fitFrame: number | null = null;
+    const scheduleFit = () => {
+      if (fitFrame !== null) {
+        return;
+      }
+      fitFrame = requestAnimationFrame(() => {
+        fitFrame = null;
+        fitGrid();
+      });
+    };
+    window.addEventListener("resize", scheduleFit);
     const resizeObserver =
       typeof ResizeObserver !== "undefined" && container
-        ? new ResizeObserver(() => {
-            fitFontSize();
-          })
+        ? new ResizeObserver(scheduleFit)
         : null;
     if (resizeObserver && container) {
       resizeObserver.observe(container);
     }
     resizeCleanupRef.current = () => {
-      window.removeEventListener("resize", fitFontSize);
+      window.removeEventListener("resize", scheduleFit);
       resizeObserver?.disconnect();
+      if (fitFrame !== null) {
+        cancelAnimationFrame(fitFrame);
+        fitFrame = null;
+      }
     };
 
     terminalRef.current = terminal;
-    fitFontSizeRef.current = fitFontSize;
+    fitGridRef.current = fitGrid;
     return terminal;
   }, []);
 
@@ -252,6 +256,8 @@ export function WebSshTerminal({
     terminal.writeln("[intar] Creating terminal session...");
 
     await disconnect();
+    // Fit before the websocket dance so `open` carries the real grid.
+    fitGridRef.current?.();
 
     try {
       const sessionBundle = await createSessionWithRetries({
@@ -282,7 +288,14 @@ export function WebSshTerminal({
       });
       websocketRef.current = websocket;
 
-      fitFontSizeRef.current?.();
+      fitGridRef.current?.();
+      // Cover a container resize during the connect window; server-side this
+      // is an idempotent SIGWINCH.
+      sendTerminalControl(websocket, {
+        type: "resize",
+        cols: terminal.cols,
+        rows: terminal.rows,
+      });
       terminal.writeln("[intar] Connected.");
       setStatus("connected");
     } catch (connectError) {
@@ -311,14 +324,14 @@ export function WebSshTerminal({
       resizeCleanupRef.current = null;
       terminalRef.current?.dispose();
       terminalRef.current = null;
-      fitFontSizeRef.current = null;
+      fitGridRef.current = null;
     };
   }, [connect, disconnect]);
 
   if (variant === "embedded") {
     return (
-      <div className="flex w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
-        <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+        <div className="flex shrink-0 flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{title}</p>
             <p className="text-xs text-muted-foreground">Status: {status}</p>
@@ -351,17 +364,17 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="bg-[#121314] p-2">
-          <div className="relative aspect-video w-full">
+        <div className="min-h-0 flex-1 bg-[#121314] p-2">
+          <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
-              className="absolute inset-0 grid place-items-center overflow-hidden"
+              className="absolute inset-0 overflow-hidden"
             />
           </div>
         </div>
 
         {error || status === "disconnected" ? (
-          <div className="flex border-t px-4 py-3">
+          <div className="flex shrink-0 border-t px-4 py-3">
             <p
               className={`text-xs ${
                 error ? "text-destructive" : "text-muted-foreground"
@@ -412,10 +425,10 @@ export function WebSshTerminal({
         </div>
 
         <div className="bg-[#121314] p-2">
-          <div className="relative mx-auto aspect-video w-full max-w-[calc(75dvh*16/9)]">
+          <div className="relative h-[70dvh] w-full">
             <div
               ref={terminalContainerRef}
-              className="absolute inset-0 grid place-items-center overflow-hidden"
+              className="absolute inset-0 overflow-hidden"
             />
           </div>
         </div>
@@ -606,8 +619,8 @@ async function connectBrowserTerminal(input: {
 
     sendTerminalControl(websocket, {
       type: "open",
-      cols: REPLAY_TERMINAL_COLS,
-      rows: REPLAY_TERMINAL_ROWS,
+      cols: input.terminal.cols,
+      rows: input.terminal.rows,
     });
     await ready;
     return websocket;

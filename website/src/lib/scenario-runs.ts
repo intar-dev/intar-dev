@@ -43,7 +43,6 @@ import {
 import {
   buildScenarioRunHintViews,
   buildScenarioRunSolutionView,
-  nextScenarioRunHintKey,
   type ScenarioRunHintView,
   type ScenarioRunSolutionView,
 } from "@/lib/scenario-run-content";
@@ -147,7 +146,6 @@ export interface ScenarioRunRecord extends RunStateDocument {
   objectives: ScenarioObjective[];
   tags: string[];
   hints: ScenarioRunHintView[];
-  nextHintKey: string | null;
   solution: ScenarioRunSolutionView;
   difficulty: ScenarioDifficulty;
   estimatedMinutes: number;
@@ -1048,7 +1046,6 @@ function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
       hints: row.hintsJson,
       revealedHintKeys: row.revealedHintsJson,
     }),
-    nextHintKey: nextScenarioRunHintKey(row.hintsJson, row.revealedHintsJson),
     solution: buildScenarioRunSolutionView({
       solutionMarkdown: row.solutionMarkdown,
       solutionRevealedAt: row.solutionRevealedAt,
@@ -1080,7 +1077,6 @@ function toScenarioRunRecord(row: ReturnType<typeof fromDbRow>): ScenarioRunReco
     objectives: row.objectives,
     tags: row.tags,
     hints: row.hints,
-    nextHintKey: row.nextHintKey,
     solution: row.solution,
     difficulty: row.difficulty,
     estimatedMinutes: row.estimatedMinutes,

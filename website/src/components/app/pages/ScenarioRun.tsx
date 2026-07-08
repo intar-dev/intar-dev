@@ -17,15 +17,17 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { presentScenarioRun } from "@/lib/run-phase";
-import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { SessionTimeline } from "@/components/app/run/SessionTimeline";
 import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
+import { OpsConsoleRail } from "@/components/app/run/OpsConsoleRail";
+import { AssistDrawer } from "@/components/app/run/AssistDrawer";
 import {
-  ScenarioProbeRail,
-} from "@/components/app/run/ObjectivesRail";
-import { HintList, SolutionCard } from "@/components/app/run/Guidance";
+  ProbePassToasts,
+  useProbePassEvents,
+} from "@/components/app/run/ProbePassToasts";
+import { ResolutionCard } from "@/components/app/run/ResolutionCard";
 import {
   DeleteRunDialog,
   ScenarioCancelDialog,
@@ -34,7 +36,6 @@ import { ScenarioVmSelector } from "@/components/app/run/ScenarioVmSelector";
 import {
   ScenarioShellStatusCard,
   ScenarioStepScreen,
-  ScenarioSuccessOverlay,
 } from "@/components/app/run/StatusScreens";
 import {
   buildScenarioBootSteps,
@@ -286,10 +287,22 @@ export function ScenarioRun() {
     attemptData !== null &&
     attemptData.canDestroy &&
     attemptData.phase !== "solved";
-  const showCompletionOverlay =
+  const showResolutionCard =
     attemptData !== null &&
     attemptData.phase === "solved" &&
     attemptData.canDestroy;
+  const leaseDeadlineMs =
+    attemptData !== null && attemptData.outcome === "in_progress"
+      ? computeLeaseDeadline(
+          attemptData.createdAt,
+          attemptData.vms.map((vm) => vm.provisioning?.leaseDurationSeconds),
+        )
+      : null;
+  const probePassToasts = useProbePassEvents(
+    attemptData?.vms,
+    attemptData?.objectives,
+    attemptData?.phase === "running",
+  );
   const canDeleteRun =
     attemptData !== null &&
     (attemptData.phase === "completed" || attemptData.phase === "failed");
@@ -442,19 +455,6 @@ export function ScenarioRun() {
                   {formatScenarioDurationMs(attemptData.solveDurationMs)}
                 </MetaChip>
               ) : null}
-              {attemptData.outcome === "in_progress" ? (
-                <MetaChip variant="outline">
-                  <LeaseCountdown
-                    deadlineMs={computeLeaseDeadline(
-                      attemptData.createdAt,
-                      attemptData.vms.map(
-                        (vm) => vm.provisioning?.leaseDurationSeconds,
-                      ),
-                    )}
-                    className="text-xs"
-                  />
-                </MetaChip>
-              ) : null}
             </>
           ) : undefined
         }
@@ -509,7 +509,7 @@ export function ScenarioRun() {
       ) : null}
 
       {attemptData ? (
-        <div className="space-y-6">
+        <div className="flex min-h-0 flex-1 flex-col gap-6">
           {attemptData.phase === "completed" ? (
             <section className="mx-auto w-full max-w-5xl space-y-4">
               {attemptData.vms.length > 1 ? (
@@ -563,8 +563,8 @@ export function ScenarioRun() {
               />
             </div>
           ) : (
-            <div className="grid gap-8 xl:grid-cols-[minmax(0,1fr)_22rem]">
-              <div className="relative min-w-0 space-y-3">
+            <div className="grid min-h-0 flex-1 gap-8 xl:grid-cols-[minmax(0,1fr)_22rem] xl:grid-rows-[minmax(0,1fr)]">
+              <div className="relative flex min-h-0 min-w-0 flex-col gap-3">
                 <ScenarioVmSelector
                   vms={attemptData.vms}
                   selectedVmId={selectedVmId}
@@ -572,73 +572,83 @@ export function ScenarioRun() {
                 />
 
                 {selectedVm && selectedVmShellReady && terminalVisible ? (
-                  <WebSshTerminal
-                    vmName={selectedVm.scenarioVmName}
-                    sessionRequest={selectedVmSessionRequest!}
-                    variant="embedded"
-                    title={`${selectedVm.scenarioVmName} shell`}
-                    showCloseButton={false}
-                    onClose={() => setTerminalVisible(false)}
-                  />
+                  <div className="h-[65dvh] min-h-[24rem] xl:h-auto xl:min-h-0 xl:flex-1">
+                    <WebSshTerminal
+                      vmName={selectedVm.scenarioVmName}
+                      sessionRequest={selectedVmSessionRequest!}
+                      variant="embedded"
+                      title={`${selectedVm.scenarioVmName} shell`}
+                      showCloseButton={false}
+                      onClose={() => setTerminalVisible(false)}
+                    />
+                  </div>
                 ) : (
-                  <ScenarioShellStatusCard
-                    phase={selectedVm?.phase ?? attemptData.phase}
-                    title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
-                    description={
-                      selectedVm?.phaseDetail ?? attemptData.phaseDetail
-                    }
-                    pending={
-                      !selectedVmShellReady &&
-                      Boolean(selectedVm && selectedVm.phase !== "failed")
-                    }
-                  />
+                  <div className="xl:flex-1">
+                    <ScenarioShellStatusCard
+                      phase={selectedVm?.phase ?? attemptData.phase}
+                      title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
+                      description={
+                        selectedVm?.phaseDetail ?? attemptData.phaseDetail
+                      }
+                      pending={
+                        !selectedVmShellReady &&
+                        Boolean(selectedVm && selectedVm.phase !== "failed")
+                      }
+                    />
+                  </div>
                 )}
 
-                {showCompletionOverlay ? (
-                  <ScenarioSuccessOverlay
-                    scenarioName={attemptData.scenarioName}
-                    probes={selectedVm?.scenarioProbes ?? []}
-                    solveDurationMs={attemptData.solveDurationMs}
-                    pending={destroyScenario.isPending}
-                    onConfirm={requestDestroyScenario}
-                  />
-                ) : null}
+                <ProbePassToasts toasts={probePassToasts} />
               </div>
 
-              <aside className="space-y-4">
-                <ScenarioProbeRail
-                  title="Objectives"
-                  description={
-                    selectedVm
-                      ? `${selectedVm.scenarioVmName} scenario checks`
-                      : "These track the scenario goal."
-                  }
-                  probes={selectedVm?.scenarioProbes ?? []}
-                  objectives={attemptData.objectives}
-                />
-                <HintList
-                  hints={attemptData.hints}
-                  nextHintKey={attemptData.nextHintKey}
-                  onReveal={(hintKey) => revealHint.mutate(hintKey)}
-                  pendingHintKey={
-                    revealHint.isPending ? revealHint.variables ?? null : null
-                  }
-                  error={
-                    revealHint.error instanceof Error
-                      ? revealHint.error.message
-                      : null
-                  }
-                />
-                <SolutionCard
-                  solution={attemptData.solution}
-                  onReveal={() => revealSolution.mutate()}
-                  pending={revealSolution.isPending}
-                  error={
-                    revealSolution.error instanceof Error
-                      ? revealSolution.error.message
-                      : null
-                  }
-                />
+              <aside className="flex flex-col gap-4 xl:min-h-0 xl:overflow-y-auto xl:pr-1">
+                {showResolutionCard ? (
+                  <ResolutionCard
+                    runId={runId}
+                    scenarioName={attemptData.scenarioName}
+                    createdAt={attemptData.createdAt}
+                    solveDurationMs={attemptData.solveDurationMs}
+                    hints={attemptData.hints}
+                    objectives={attemptData.objectives}
+                    assisted={attemptData.solution.assisted}
+                    pending={destroyScenario.isPending}
+                    onEndScenario={requestDestroyScenario}
+                  />
+                ) : (
+                  <>
+                    <OpsConsoleRail
+                      vmName={selectedVm?.scenarioVmName ?? null}
+                      createdAt={attemptData.createdAt}
+                      solveDurationMs={attemptData.solveDurationMs}
+                      leaseDeadlineMs={leaseDeadlineMs}
+                      probes={selectedVm?.scenarioProbes ?? []}
+                      objectives={attemptData.objectives}
+                    />
+                    <AssistDrawer
+                      hints={attemptData.hints}
+                      objectives={attemptData.objectives}
+                      solution={attemptData.solution}
+                      onRevealHint={(hintKey) => revealHint.mutate(hintKey)}
+                      pendingHintKey={
+                        revealHint.isPending
+                          ? revealHint.variables ?? null
+                          : null
+                      }
+                      hintError={
+                        revealHint.error instanceof Error
+                          ? revealHint.error.message
+                          : null
+                      }
+                      onRevealSolution={() => revealSolution.mutate()}
+                      solutionPending={revealSolution.isPending}
+                      solutionError={
+                        revealSolution.error instanceof Error
+                          ? revealSolution.error.message
+                          : null
+                      }
+                    />
+                  </>
+                )}
                 <RunDetailsSection
                   runId={runId}
                   vmName={selectedVm?.scenarioVmName ?? null}

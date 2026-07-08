@@ -8,7 +8,24 @@ export interface ScenarioRunHintView {
   id: string;
   title: string | null;
   revealed: boolean;
+  unlocked: boolean;
   bodyMarkdown: string | null;
+}
+
+// Hints unlock sequentially per group: the scenario-level ladder and one
+// ladder per probe are independent, so being stuck on one objective never
+// forces revealing hints for another.
+type ScenarioRunHintGroupRef = {
+  key: string;
+  scope: "scenario" | "probe";
+  probeName: string | null;
+};
+
+function scenarioRunHintGroupKey(hint: {
+  scope: "scenario" | "probe";
+  probeName: string | null;
+}): string {
+  return hint.scope === "scenario" ? "scenario" : `probe:${hint.probeName ?? ""}`;
 }
 
 export interface ScenarioRunSolutionView {
@@ -26,7 +43,7 @@ export type ScenarioRunHintRevealDecision =
     }
   | {
       allowed: false;
-      reason: "exhausted" | "not_next";
+      reason: "unknown" | "already_revealed" | "not_next";
       nextHintKey: string | null;
     };
 
@@ -41,6 +58,17 @@ export function buildScenarioRunHintViews(input: {
       revealedHintKeys: input.revealedHintKeys,
     }),
   );
+  const unlockedKeys = new Set<string>();
+  for (const hint of hints) {
+    const groupNext = nextScenarioRunHintKeyForGroup(
+      hints,
+      revealed,
+      scenarioRunHintGroupKey(hint),
+    );
+    if (groupNext !== null) {
+      unlockedKeys.add(groupNext);
+    }
+  }
   return hints.map((hint) => {
     const isRevealed = revealed.has(hint.key);
     return {
@@ -48,24 +76,33 @@ export function buildScenarioRunHintViews(input: {
       scope: hint.scope,
       probeName: hint.probeName,
       id: hint.id,
-      title: hint.title,
+      // Sealed hints leak neither title nor body.
+      title: isRevealed ? hint.title : null,
       revealed: isRevealed,
+      unlocked: !isRevealed && unlockedKeys.has(hint.key),
       bodyMarkdown: isRevealed ? hint.bodyMarkdown : null,
     };
   });
 }
 
-export function nextScenarioRunHintKey(
-  hints: Array<{ key: string }>,
-  revealedHintKeys: string[],
+function nextScenarioRunHintKeyForGroup(
+  hints: ScenarioRunHintGroupRef[],
+  canonicalRevealed: ReadonlySet<string>,
+  groupKey: string,
 ): string | null {
-  const orderedHints = uniqueScenarioRunHints(hints);
-  const revealed = new Set(revealedHintKeys);
-  return orderedHints.find((hint) => !revealed.has(hint.key))?.key ?? null;
+  for (const hint of hints) {
+    if (scenarioRunHintGroupKey(hint) !== groupKey) {
+      continue;
+    }
+    if (!canonicalRevealed.has(hint.key)) {
+      return hint.key;
+    }
+  }
+  return null;
 }
 
 export function appendRevealedScenarioRunHintKey(input: {
-  hints: Array<{ key: string }>;
+  hints: ScenarioRunHintGroupRef[];
   revealedHintKeys: string[];
   hintKey: string;
 }): string[] {
@@ -74,20 +111,46 @@ export function appendRevealedScenarioRunHintKey(input: {
     hints,
     revealedHintKeys: input.revealedHintKeys,
   });
-  const nextHintKey = hints[current.length]?.key ?? null;
-  return nextHintKey === input.hintKey ? [...current, input.hintKey] : current;
+  const currentSet = new Set(current);
+  if (currentSet.has(input.hintKey)) {
+    return current;
+  }
+  const hint = hints.find((candidate) => candidate.key === input.hintKey);
+  if (!hint) {
+    return current;
+  }
+  const groupNext = nextScenarioRunHintKeyForGroup(
+    hints,
+    currentSet,
+    scenarioRunHintGroupKey(hint),
+  );
+  if (groupNext !== input.hintKey) {
+    return current;
+  }
+  // Re-canonicalize so stored keys stay in deterministic manifest order —
+  // the optimistic-concurrency UPDATE compares the raw JSON string.
+  return canonicalRevealedScenarioRunHintKeys({
+    hints,
+    revealedHintKeys: [...current, input.hintKey],
+  });
 }
 
 export function canonicalRevealedScenarioRunHintKeys(input: {
-  hints: Array<{ key: string }>;
+  hints: ScenarioRunHintGroupRef[];
   revealedHintKeys: string[];
 }): string[] {
   const hints = uniqueScenarioRunHints(input.hints);
   const revealed = new Set(input.revealedHintKeys);
+  const blockedGroups = new Set<string>();
   const keys: string[] = [];
   for (const hint of hints) {
+    const groupKey = scenarioRunHintGroupKey(hint);
+    if (blockedGroups.has(groupKey)) {
+      continue;
+    }
     if (!revealed.has(hint.key)) {
-      break;
+      blockedGroups.add(groupKey);
+      continue;
     }
     keys.push(hint.key);
   }
@@ -95,29 +158,47 @@ export function canonicalRevealedScenarioRunHintKeys(input: {
 }
 
 export function decideScenarioRunHintReveal(input: {
-  hints: Array<{ key: string }>;
+  hints: ScenarioRunHintGroupRef[];
   revealedHintKeys: string[];
   requestedHintKey: string;
 }): ScenarioRunHintRevealDecision {
   const hints = uniqueScenarioRunHints(input.hints);
-  const nextHintKey = nextScenarioRunHintKey(hints, input.revealedHintKeys);
-  if (!nextHintKey) {
+  const requested = hints.find((hint) => hint.key === input.requestedHintKey);
+  if (!requested) {
     return {
       allowed: false,
-      reason: "exhausted",
+      reason: "unknown",
       nextHintKey: null,
     };
   }
-  if (input.requestedHintKey !== nextHintKey) {
+  const revealed = new Set(
+    canonicalRevealedScenarioRunHintKeys({
+      hints,
+      revealedHintKeys: input.revealedHintKeys,
+    }),
+  );
+  const groupNext = nextScenarioRunHintKeyForGroup(
+    hints,
+    revealed,
+    scenarioRunHintGroupKey(requested),
+  );
+  if (revealed.has(requested.key)) {
+    return {
+      allowed: false,
+      reason: "already_revealed",
+      nextHintKey: groupNext,
+    };
+  }
+  if (groupNext !== requested.key) {
     return {
       allowed: false,
       reason: "not_next",
-      nextHintKey,
+      nextHintKey: groupNext,
     };
   }
   return {
     allowed: true,
-    hintKey: nextHintKey,
+    hintKey: requested.key,
   };
 }
 

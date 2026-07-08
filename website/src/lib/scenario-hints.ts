@@ -35,11 +35,22 @@ export async function revealScenarioRunHintForUser(input: {
     revealedHintKeys: row.revealedHintsJson,
     requestedHintKey: input.hintKey,
   });
-  if (!decision.allowed && decision.reason === "exhausted") {
-    throw appError(409, "scenario_hint_exhausted", "all hints are already revealed");
+  if (!decision.allowed && decision.reason === "unknown") {
+    throw appError(404, "scenario_hint_unknown", "hint not found");
+  }
+  if (!decision.allowed && decision.reason === "already_revealed") {
+    throw appError(
+      409,
+      "scenario_hint_already_revealed",
+      "hint is already revealed",
+    );
   }
   if (!decision.allowed) {
-    throw appError(409, "scenario_hint_not_next", "only the next hint can be revealed");
+    throw appError(
+      409,
+      "scenario_hint_not_next",
+      "only the next hint of its group can be revealed",
+    );
   }
 
   const now = Date.now();

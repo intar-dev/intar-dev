@@ -1,25 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import { formatTimestamp } from "../lib/format";
 import { cn } from "@/lib/utils";
-
-interface ProbeTransitionRow {
-  id: string;
-  vmId: string;
-  runtimeVmName: string;
-  observedAt: number;
-  probes: Array<{
-    id: string;
-    label: string;
-    kind: string;
-    phase: "boot" | "scenario";
-    status: string;
-  }>;
-}
-
-interface ProbeSnapshotsResponse {
-  snapshots: ProbeTransitionRow[];
-}
+import { useProbeSnapshots, type ProbeSnapshotRow } from "./probe-pass-times";
 
 interface ProbeChange {
   probeId: string;
@@ -36,7 +18,7 @@ interface TimelineEvent {
 }
 
 // Diff consecutive snapshots per VM into "probe X: fail → pass" events.
-function toTimelineEvents(rows: ProbeTransitionRow[]): TimelineEvent[] {
+function toTimelineEvents(rows: ProbeSnapshotRow[]): TimelineEvent[] {
   const lastByVm = new Map<string, Map<string, string>>();
   const events: TimelineEvent[] = [];
 
@@ -70,25 +52,7 @@ function toTimelineEvents(rows: ProbeTransitionRow[]): TimelineEvent[] {
 // Only mounted when the timeline section is expanded, so the fetch stays off
 // the run page's hot polling path.
 export function ObjectiveTimeline({ runId }: { runId: string }) {
-  const snapshots = useQuery({
-    queryKey: ["scenario-run", runId, "probe-snapshots"],
-    queryFn: async () => {
-      const response = await fetch(
-        `/api/scenarios/runs/${encodeURIComponent(runId)}/probe-snapshots`,
-        { method: "GET", credentials: "include" },
-      );
-      if (!response.ok) {
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(
-          body?.error ?? `Failed to load timeline (${response.status})`,
-        );
-      }
-      return (await response.json()) as ProbeSnapshotsResponse;
-    },
-    staleTime: 15_000,
-  });
+  const snapshots = useProbeSnapshots(runId);
 
   if (snapshots.isLoading) {
     return (

@@ -1,7 +1,5 @@
 import type { ReactNode } from "react";
-import { CheckCircle2, Clock3, LoaderCircle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { LoaderCircle } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -10,16 +8,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import {
-  describeProbeValue,
-  formatScenarioDurationMs,
-  formatScenarioStepState,
-} from "./run-support";
-import type {
-  ScenarioProbeStatus,
-  ScenarioRunRecord,
-  ScenarioStatusStep,
-} from "./run-types";
+import { formatScenarioStepState } from "./run-support";
+import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 
 export function ScenarioStepScreen(props: {
   title: string;
@@ -137,90 +127,6 @@ export function ScenarioStepScreen(props: {
         </ul>
       </CardContent>
     </Card>
-  );
-}
-
-export function ScenarioSuccessOverlay(props: {
-  scenarioName: string;
-  probes: ScenarioProbeStatus[];
-  solveDurationMs: number | null;
-  pending: boolean;
-  onConfirm: () => void;
-}) {
-  const solvedProbes = props.probes.filter((probe) => probe.status === "pass");
-
-  return (
-    <div className="fixed inset-0 z-40 bg-background p-4 sm:p-8">
-      <div className="mx-auto flex h-full w-full max-w-7xl items-center justify-center">
-        <div className="w-full space-y-6 rounded-xl border border-success/30 bg-success/[0.05] p-6 shadow-sm sm:p-8">
-          <div className="space-y-4">
-            <Badge
-              variant="outline"
-              className="w-fit border-success/30 bg-success/10 text-success"
-            >
-              <CheckCircle2 className="size-3.5" />
-              Success
-            </Badge>
-            <div className="space-y-2">
-              <h2 className="font-heading text-3xl font-bold tracking-tight text-foreground">
-                Nice work.
-              </h2>
-              <p className="max-w-xl text-sm leading-6 text-muted-foreground sm:text-base">
-                You solved {props.scenarioName}. End the scenario to save your
-                replay and wrap up this run.
-              </p>
-            </div>
-            {props.solveDurationMs !== null ? (
-              <div className="inline-flex items-center gap-2 rounded-full border border-success/20 bg-background/80 px-3 py-1 text-xs text-muted-foreground">
-                <Clock3 className="size-3.5" />
-                <span>Solved in {formatScenarioDurationMs(props.solveDurationMs)}</span>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="space-y-3">
-            <p className="text-sm font-medium text-foreground">Solved checks</p>
-            {solvedProbes.length ? (
-              <ul className="grid gap-2 sm:grid-cols-2">
-                {solvedProbes.map((probe) => (
-                  <li
-                    key={probe.id}
-                    className="flex items-start gap-3 rounded-lg border border-success/20 bg-background/80 px-3 py-3"
-                  >
-                    <CheckCircle2
-                      className="mt-0.5 size-4 shrink-0 text-success"
-                      aria-hidden="true"
-                    />
-                    <div className="min-w-0 space-y-1">
-                      <p className="text-sm font-medium text-foreground">
-                        {probe.label}
-                      </p>
-                      <p className="text-xs leading-5 text-muted-foreground">
-                        {probe.error ?? describeProbeValue(probe)}
-                      </p>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="rounded-lg border border-success/20 bg-background/80 px-4 py-3 text-sm text-muted-foreground">
-                All scenario checks are complete.
-              </div>
-            )}
-          </div>
-
-          <Button
-            size="lg"
-            className="h-12 w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success"
-            onClick={props.onConfirm}
-            disabled={props.pending}
-          >
-            <CheckCircle2 className="size-4" />
-            {props.pending ? "Ending scenario..." : "End scenario"}
-          </Button>
-        </div>
-      </div>
-    </div>
   );
 }
 
