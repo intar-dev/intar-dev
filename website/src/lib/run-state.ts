@@ -55,6 +55,10 @@ export interface SessionTimelineEntry {
   durationMs: number;
   exitCode: number | null;
   castFilename: string;
+  /// Resolved by the worker from the artifact ledger when the timeline is
+  /// submitted (after all cast uploads pass) — the UI must use this, not
+  /// `replayArtifacts`, whose concurrent-upload appends can drop entries.
+  castArtifactId: string | null;
   transcriptTruncated: boolean;
 }
 

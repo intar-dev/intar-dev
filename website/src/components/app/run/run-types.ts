@@ -30,6 +30,9 @@ export interface SessionTimelineEntry {
   durationMs: number;
   exitCode: number | null;
   castFilename: string;
+  /// Worker-resolved artifact id for the session's cast; null while the
+  /// cast has not finished uploading.
+  castArtifactId: string | null;
   transcriptTruncated: boolean;
 }
 

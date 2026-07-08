@@ -20,7 +20,6 @@ import {
 } from "@/lib/replay-command-log";
 import { formatScenarioDurationMs } from "@/components/app/run/run-support";
 import type {
-  ScenarioReplayArtifact,
   ScenarioRunVmRecord,
   SessionTimelineEntry,
 } from "@/components/app/run/run-types";
@@ -86,13 +85,6 @@ export function SessionTimeline({
               vmId={vm?.id ?? ""}
               session={session}
               sessionCount={sessions.length}
-              castArtifact={
-                vm?.replayArtifacts.find(
-                  (artifact) =>
-                    artifact.kind === "ssh_recording_segment" &&
-                    artifact.filename === session.castFilename,
-                ) ?? null
-              }
             />
           </div>
         );
@@ -128,19 +120,17 @@ function SessionRow({
   vmId,
   session,
   sessionCount,
-  castArtifact,
 }: {
   runId: string;
   vmId: string;
   session: SessionTimelineEntry;
   sessionCount: number;
-  castArtifact: ScenarioReplayArtifact | null;
 }) {
   const runSegment = encodeURIComponent(runId);
   const vmSegment = encodeURIComponent(vmId);
   const transcriptUrl = `/api/runs/${runSegment}/vms/${vmSegment}/sessions/${session.index}/transcript`;
-  const castUrl = castArtifact
-    ? `/api/runs/${runSegment}/artifacts/${encodeURIComponent(castArtifact.id)}/content`
+  const castUrl = session.castArtifactId
+    ? `/api/runs/${runSegment}/artifacts/${encodeURIComponent(session.castArtifactId)}/content`
     : null;
 
   const startedAt = new Date(session.startTimestampMs);

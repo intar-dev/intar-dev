@@ -599,6 +599,25 @@ async function handleRunTimeline(
     return jsonResponse({ error: "invalid timeline payload" }, 400);
   }
 
+  // Resolve each session's cast artifact id from the ledger. The timeline
+  // arrives after the cast uploads pass, so the rows exist; resolving here
+  // keeps the UI off `replayArtifacts`, whose concurrent read-modify-write
+  // appends can lose entries.
+  const artifactRows = await loadArtifactStatesForRunVm(
+    db,
+    runVm.runId,
+    runVm.vmId,
+  );
+  const castIdByFilename = new Map(
+    artifactRows
+      .filter((artifact) => artifact.kind === "ssh_recording_segment")
+      .map((artifact) => [artifact.filename, artifact.id]),
+  );
+  for (const session of sessions) {
+    session.entry.castArtifactId =
+      castIdByFilename.get(session.entry.castFilename) ?? null;
+  }
+
   const now = Date.now();
   for (const session of sessions) {
     await db
@@ -694,6 +713,7 @@ function normalizeTimelineSessions(
         durationMs,
         exitCode: input.exitCode ?? null,
         castFilename,
+        castArtifactId: null,
         transcriptTruncated: input.transcriptTruncated === true,
       },
       transcript,
