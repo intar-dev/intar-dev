@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
@@ -34,6 +34,9 @@ const BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const EXPECTED_BUILD_FORMAT_VERSION = "intar-image-build-v1";
 const TAR_BLOCK_SIZE = 512;
 const MAX_BUNDLE_TAR_BYTES = 64 * 1024 * 1024;
+const MAX_IMAGES_PER_KEY = 2;
+const IMAGE_OBJECT_SUFFIX = ".raw.zst";
+const IMAGE_COMPANION_SUFFIX = ".raw.zst.sha256";
 
 export async function handleImageRegistryRequest(
   request: Request,
@@ -247,15 +250,149 @@ async function handlePublish(
   });
   await bumpHostCachedImages(db, normalizedManifest);
 
+  let pruned: PrunedImages[] = [];
+  try {
+    pruned = await pruneStaleVmImages(env, db, images.prepared);
+  } catch (error) {
+    // Retention is best-effort; a prune failure must never fail the publish.
+    console.error("vm image registry prune failed", error);
+  }
+
   return jsonResponse(
     {
       ok: true,
       scenario_id: normalizedManifest.scenario_id,
       images: uploaded,
       artifacts: artifacts.uploaded,
+      pruned,
     },
     201,
   );
+}
+
+type PrunedImages = {
+  image_key: string;
+  deleted_sha256s: string[];
+};
+
+async function catalogReferencedImageShas(
+  db: DrizzleD1Database,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({
+      imageKey: vmScenarioVms.imageKeyJson,
+      imageSha256: vmScenarioVms.imageSha256,
+    })
+    .from(vmScenarioVms)
+    .where(isNotNull(vmScenarioVms.imageSha256));
+
+  const referenced = new Set<string>();
+  for (const row of rows) {
+    if (!isImageKey(row.imageKey)) continue;
+    const sha256 = normalizeSha256(row.imageSha256 ?? "");
+    if (!sha256) continue;
+    referenced.add(`${registryImageKey(row.imageKey)}:${sha256}`);
+  }
+  return referenced;
+}
+
+async function listImageKeyObjects(
+  env: Cloudflare.Env,
+  imageKey: string,
+): Promise<Array<{ key: string; uploaded: Date }>> {
+  const objects: Array<{ key: string; uploaded: Date }> = [];
+  let cursor: string | undefined;
+  do {
+    const result = await env.VM_IMAGE_REGISTRY_BUCKET.list({
+      prefix: `images/${imageKey}/`,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const object of result.objects) {
+      objects.push({ key: object.key, uploaded: object.uploaded });
+    }
+    cursor = result.truncated ? result.cursor : undefined;
+  } while (cursor);
+  return objects;
+}
+
+async function pruneStaleVmImages(
+  env: Cloudflare.Env,
+  db: DrizzleD1Database,
+  published: PreparedVmImage[],
+): Promise<PrunedImages[]> {
+  const publishedShasByImageKey = new Map<string, Set<string>>();
+  for (const image of published) {
+    const shas = publishedShasByImageKey.get(image.imageKey) ?? new Set();
+    shas.add(image.imageSha256);
+    publishedShasByImageKey.set(image.imageKey, shas);
+  }
+  if (publishedShasByImageKey.size === 0) return [];
+
+  const referenced = await catalogReferencedImageShas(db);
+  const pruned: PrunedImages[] = [];
+
+  for (const [imageKey, publishedShas] of publishedShasByImageKey) {
+    const prefix = `images/${imageKey}/`;
+    const entries = new Map<
+      string,
+      { uploaded: Date | null; companion: boolean }
+    >();
+    for (const object of await listImageKeyObjects(env, imageKey)) {
+      const basename = object.key.slice(prefix.length);
+      if (basename.endsWith(IMAGE_COMPANION_SUFFIX)) {
+        const sha256 = normalizeSha256(
+          basename.slice(0, -IMAGE_COMPANION_SUFFIX.length),
+        );
+        if (!sha256) continue;
+        const entry = entries.get(sha256) ?? { uploaded: null, companion: false };
+        entry.companion = true;
+        entries.set(sha256, entry);
+      } else if (basename.endsWith(IMAGE_OBJECT_SUFFIX)) {
+        const sha256 = normalizeSha256(
+          basename.slice(0, -IMAGE_OBJECT_SUFFIX.length),
+        );
+        if (!sha256) continue;
+        const entry = entries.get(sha256) ?? { uploaded: null, companion: false };
+        entry.uploaded = object.uploaded;
+        entries.set(sha256, entry);
+      }
+    }
+
+    const mostRecent = [...entries.entries()]
+      .filter(([, entry]) => entry.uploaded !== null)
+      .sort(
+        (a, b) =>
+          (b[1].uploaded?.getTime() ?? 0) - (a[1].uploaded?.getTime() ?? 0),
+      )
+      .slice(0, MAX_IMAGES_PER_KEY)
+      .map(([sha256]) => sha256);
+
+    // A reused image keeps its original R2 uploaded timestamp, so recency
+    // alone would evict the image that was just published or is still the
+    // live catalog pointer — both are always kept.
+    const keep = new Set([...publishedShas, ...mostRecent]);
+
+    const deleteKeys: string[] = [];
+    const deletedShas: string[] = [];
+    for (const [sha256, entry] of entries) {
+      if (keep.has(sha256) || referenced.has(`${imageKey}:${sha256}`)) {
+        continue;
+      }
+      if (entry.uploaded !== null) {
+        deleteKeys.push(imageObjectKey(imageKey, sha256));
+      }
+      if (entry.companion) {
+        deleteKeys.push(`${imageObjectKey(imageKey, sha256)}.sha256`);
+      }
+      deletedShas.push(sha256);
+    }
+    if (deleteKeys.length === 0) continue;
+
+    await env.VM_IMAGE_REGISTRY_BUCKET.delete(deleteKeys);
+    pruned.push({ image_key: imageKey, deleted_sha256s: deletedShas.sort() });
+  }
+
+  return pruned;
 }
 
 // Cloudflare caps request bodies well below typical image sizes, so images
