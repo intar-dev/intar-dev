@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, Check, ShieldCheck, UserPlus, Users, X } from "lucide-react";
+import { Ban, Check, ShieldCheck, Trash2, UserPlus, Users, X } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import { FilterBar } from "@/components/app/patterns/FilterBar";
@@ -481,6 +481,28 @@ interface AdminTeamRow {
 }
 
 function TeamsPanel() {
+  const queryClient = useQueryClient();
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const deleteTeam = useMutation({
+    mutationFn: async (orgId: string) => {
+      const response = await fetch(
+        `/api/admin/teams/${encodeURIComponent(orgId)}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      if (!response.ok && response.status !== 204) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error ?? `Failed to delete team (${response.status})`);
+      }
+    },
+    onSuccess: async () => {
+      setConfirmDeleteId(null);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
+    },
+  });
+
   const teams = useQuery({
     queryKey: ["admin", "teams"],
     queryFn: async () => {
@@ -535,6 +557,7 @@ function TeamsPanel() {
                 <TableHead>Members</TableHead>
                 <TableHead>Assignments</TableHead>
                 <TableHead>Created</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -569,6 +592,41 @@ function TeamsPanel() {
                   <TableCell className="text-xs text-muted-foreground">
                     {formatRelativeTime(team.createdAt)}
                   </TableCell>
+                  <TableCell className="text-right">
+                    {confirmDeleteId === team.id ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          disabled={deleteTeam.isPending}
+                          onClick={() => deleteTeam.mutate(team.id)}
+                        >
+                          {deleteTeam.isPending ? "Deleting…" : "Confirm"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={deleteTeam.isPending}
+                          onClick={() => setConfirmDeleteId(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => {
+                          deleteTeam.reset();
+                          setConfirmDeleteId(team.id);
+                        }}
+                      >
+                        <Trash2 className="size-3.5" />
+                        Delete
+                      </Button>
+                    )}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -581,6 +639,13 @@ function TeamsPanel() {
           description="Teams created by instructors show up here with their roster and assignment counts."
         />
       )}
+      {deleteTeam.error ? (
+        <p className="mt-3 text-sm text-destructive">
+          {deleteTeam.error instanceof Error
+            ? deleteTeam.error.message
+            : "Failed to delete team"}
+        </p>
+      ) : null}
     </Section>
   );
 }

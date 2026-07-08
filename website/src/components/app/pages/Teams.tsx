@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { Check, Plus, Users } from "lucide-react";
+import { Check, Plus, Users, X } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
 import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
@@ -105,6 +105,24 @@ export function Teams() {
     },
   });
 
+  const declineInvite = useMutation({
+    mutationFn: async (inviteId: string) => {
+      const response = await fetch(
+        `/api/teams/invites/${encodeURIComponent(inviteId)}/decline`,
+        { method: "POST", credentials: "include" },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new Error(body?.error ?? `Failed to decline invite (${response.status})`);
+      }
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["teams"] });
+    },
+  });
+
   const entries = teams.data?.teams ?? [];
   const invites = teams.data?.invites ?? [];
 
@@ -195,14 +213,25 @@ export function Teams() {
                   Invited {formatRelativeTime(invite.createdAt)}
                 </p>
               </div>
-              <Button
-                size="sm"
-                disabled={acceptInvite.isPending}
-                onClick={() => acceptInvite.mutate(invite.id)}
-              >
-                <Check className="size-3.5" />
-                Join team
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={acceptInvite.isPending || declineInvite.isPending}
+                  onClick={() => declineInvite.mutate(invite.id)}
+                >
+                  <X className="size-3.5" />
+                  Decline
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={acceptInvite.isPending || declineInvite.isPending}
+                  onClick={() => acceptInvite.mutate(invite.id)}
+                >
+                  <Check className="size-3.5" />
+                  Join team
+                </Button>
+              </div>
             </div>
           ))}
           {acceptInvite.error ? (
@@ -210,6 +239,13 @@ export function Teams() {
               {acceptInvite.error instanceof Error
                 ? acceptInvite.error.message
                 : "Failed to accept invite"}
+            </p>
+          ) : null}
+          {declineInvite.error ? (
+            <p className="text-sm text-destructive">
+              {declineInvite.error instanceof Error
+                ? declineInvite.error.message
+                : "Failed to decline invite"}
             </p>
           ) : null}
         </div>

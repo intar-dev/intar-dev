@@ -9,6 +9,9 @@ import migration0005 from "../../drizzle/0005_teams.sql?raw";
 import migration0006 from "../../drizzle/0006_scenario-sources.sql?raw";
 import migration0007 from "../../drizzle/0007_scenario-category.sql?raw";
 import migration0008 from "../../drizzle/0008_probe-kind.sql?raw";
+import migration0009 from "../../drizzle/0009_session-transcripts.sql?raw";
+import migration0010 from "../../drizzle/0010_drop-host-info.sql?raw";
+import migration0011 from "../../drizzle/0011_team-management.sql?raw";
 
 const migrations = [
   { name: "0000_oval_sasquatch.sql", queries: splitMigration(migration0000) },
@@ -23,6 +26,15 @@ const migrations = [
     queries: splitMigration(migration0007),
   },
   { name: "0008_probe-kind.sql", queries: splitMigration(migration0008) },
+  {
+    name: "0009_session-transcripts.sql",
+    queries: splitMigration(migration0009),
+  },
+  { name: "0010_drop-host-info.sql", queries: splitMigration(migration0010) },
+  {
+    name: "0011_team-management.sql",
+    queries: splitMigration(migration0011),
+  },
 ];
 
 export async function resetD1Database(): Promise<void> {

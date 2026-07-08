@@ -120,7 +120,6 @@ export const session = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     impersonatedBy: text("impersonated_by"),
-    activeOrganizationId: text("active_organization_id"),
   },
   (table) => [index("session_userId_idx").on(table.userId)],
 );
@@ -202,30 +201,7 @@ export const member = sqliteTable(
   (table) => [
     index("member_organizationId_idx").on(table.organizationId),
     index("member_userId_idx").on(table.userId),
-  ],
-);
-
-export const invitation = sqliteTable(
-  "invitation",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organization.id, { onDelete: "cascade" }),
-    email: text("email").notNull(),
-    role: text("role"),
-    status: text("status").default("pending").notNull(),
-    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
-      .notNull(),
-    inviterId: text("inviter_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    index("invitation_organizationId_idx").on(table.organizationId),
-    index("invitation_email_idx").on(table.email),
+    uniqueIndex("member_org_user_uidx").on(table.organizationId, table.userId),
   ],
 );
 
@@ -766,8 +742,7 @@ export const oauthConsent = sqliteTable(
   ],
 );
 
-// App-owned team invites keyed by GitHub username (the product identity),
-// unlike better-auth's email-keyed `invitation` table which stays unused.
+// App-owned team invites keyed by GitHub username (the product identity).
 export const teamInvites = sqliteTable(
   "team_invites",
   {
@@ -781,7 +756,7 @@ export const teamInvites = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     status: text("status", {
-      enum: ["pending", "accepted", "revoked"],
+      enum: ["pending", "accepted", "revoked", "declined"],
     })
       .default("pending")
       .notNull(),

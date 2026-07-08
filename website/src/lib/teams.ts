@@ -34,7 +34,7 @@ export interface TeamMemberRecord {
 export interface TeamInviteRecord {
   id: string;
   githubUsername: string;
-  status: "pending" | "accepted" | "revoked";
+  status: "pending" | "accepted" | "revoked" | "declined";
   createdAt: number;
 }
 
@@ -97,14 +97,19 @@ export async function requireTeamRole(params: {
   return role;
 }
 
+function validateTeamName(raw: string): string {
+  const name = raw.trim().slice(0, TEAM_NAME_MAX);
+  if (name.length < 2) {
+    throw appError(400, "invalid_team_name", "team name must be at least 2 characters");
+  }
+  return name;
+}
+
 export async function createTeam(params: {
   name: string;
   ownerUserId: string;
 }): Promise<TeamSummary> {
-  const name = params.name.trim().slice(0, TEAM_NAME_MAX);
-  if (name.length < 2) {
-    throw appError(400, "invalid_team_name", "team name must be at least 2 characters");
-  }
+  const name = validateTeamName(params.name);
 
   const db = drizzle(env.DB);
   const id = createAppId();
@@ -388,19 +393,208 @@ export async function acceptTeamInvite(params: {
   }
 
   const now = Date.now();
-  await db.insert(member).values({
-    id: createAppId(),
-    organizationId: invite.organizationId,
-    userId: params.userId,
-    role: "member",
-    createdAt: new Date(now),
-  });
+  // Idempotent under double-accept or accepting while already a member.
+  await db
+    .insert(member)
+    .values({
+      id: createAppId(),
+      organizationId: invite.organizationId,
+      userId: params.userId,
+      role: "member",
+      createdAt: new Date(now),
+    })
+    .onConflictDoNothing({ target: [member.organizationId, member.userId] });
   await db
     .update(teamInvites)
     .set({ status: "accepted", acceptedAt: now })
     .where(eq(teamInvites.id, params.inviteId));
 
   return { organizationId: invite.organizationId };
+}
+
+export async function declineTeamInvite(params: {
+  inviteId: string;
+  userId: string;
+  githubUsername: string | null;
+}): Promise<void> {
+  const username = toAllowlistKey(params.githubUsername);
+  if (!username) {
+    throw appError(400, "no_username", "your account has no GitHub username");
+  }
+
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select()
+    .from(teamInvites)
+    .where(eq(teamInvites.id, params.inviteId))
+    .limit(1);
+  const invite = rows[0];
+  if (!invite || invite.status !== "pending" || invite.githubUsername !== username) {
+    throw appError(404, "invite_not_found", "invite not found");
+  }
+
+  // Re-inviting after a decline reactivates the row via inviteToTeam's upsert.
+  await db
+    .update(teamInvites)
+    .set({ status: "declined" })
+    .where(eq(teamInvites.id, params.inviteId));
+}
+
+export async function updateTeamName(params: {
+  organizationId: string;
+  actorUserId: string;
+  name: string;
+}): Promise<{ id: string; name: string }> {
+  await requireTeamRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+    instructor: true,
+  });
+  const name = validateTeamName(params.name);
+
+  // The slug intentionally stays stable; nothing routes by it.
+  const db = drizzle(env.DB);
+  await db
+    .update(organization)
+    .set({ name })
+    .where(eq(organization.id, params.organizationId));
+
+  return { id: params.organizationId, name };
+}
+
+export async function deleteTeam(params: {
+  organizationId: string;
+  actorUserId: string;
+}): Promise<void> {
+  const role = await requireTeamRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+  });
+  if (role !== "owner") {
+    throw appError(403, "owner_required", "only the team owner can delete the team");
+  }
+
+  // Cascades wipe member, team_invites and scenario_assignments; scenario
+  // runs are user-owned and survive.
+  const db = drizzle(env.DB);
+  await db
+    .delete(organization)
+    .where(eq(organization.id, params.organizationId));
+}
+
+export async function leaveTeam(params: {
+  organizationId: string;
+  userId: string;
+}): Promise<void> {
+  const role = await requireTeamRole(params);
+  if (role === "owner") {
+    throw appError(
+      400,
+      "owner_cannot_leave",
+      "transfer ownership or delete the team first",
+    );
+  }
+
+  const db = drizzle(env.DB);
+  await db
+    .delete(member)
+    .where(
+      and(
+        eq(member.organizationId, params.organizationId),
+        eq(member.userId, params.userId),
+      ),
+    );
+}
+
+export async function transferTeamOwnership(params: {
+  organizationId: string;
+  actorUserId: string;
+  targetMemberId: string;
+}): Promise<void> {
+  const role = await requireTeamRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+  });
+  if (role !== "owner") {
+    throw appError(403, "owner_required", "only the team owner can transfer ownership");
+  }
+
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({ userId: member.userId })
+    .from(member)
+    .where(
+      and(
+        eq(member.id, params.targetMemberId),
+        eq(member.organizationId, params.organizationId),
+      ),
+    )
+    .limit(1);
+  const target = rows[0];
+  if (!target) {
+    throw appError(404, "member_not_found", "member not found");
+  }
+  if (target.userId === params.actorUserId) {
+    throw appError(400, "cannot_transfer_to_self", "you already own this team");
+  }
+
+  // D1 batches are transactional: never zero or two owners.
+  await db.batch([
+    db
+      .update(member)
+      .set({ role: "owner" })
+      .where(eq(member.id, params.targetMemberId)),
+    db
+      .update(member)
+      .set({ role: "admin" })
+      .where(
+        and(
+          eq(member.organizationId, params.organizationId),
+          eq(member.userId, params.actorUserId),
+        ),
+      ),
+  ]);
+}
+
+export async function updateTeamMemberRole(params: {
+  organizationId: string;
+  actorUserId: string;
+  memberId: string;
+  role: "admin" | "member";
+}): Promise<void> {
+  await requireTeamRole({
+    organizationId: params.organizationId,
+    userId: params.actorUserId,
+    instructor: true,
+  });
+
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({ role: member.role })
+    .from(member)
+    .where(
+      and(
+        eq(member.id, params.memberId),
+        eq(member.organizationId, params.organizationId),
+      ),
+    )
+    .limit(1);
+  const target = rows[0];
+  if (!target) {
+    throw appError(404, "member_not_found", "member not found");
+  }
+  if (target.role === "owner") {
+    throw appError(
+      400,
+      "cannot_change_owner_role",
+      "transfer ownership to change who owns the team",
+    );
+  }
+
+  await db
+    .update(member)
+    .set({ role: params.role })
+    .where(eq(member.id, params.memberId));
 }
 
 export async function removeTeamMember(params: {

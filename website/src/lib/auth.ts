@@ -4,13 +4,7 @@ import { betterAuth } from "better-auth";
 import type { BetterAuthPlugin } from "better-auth";
 import type { Session, User } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import {
-  admin,
-  jwt,
-  organization,
-  testUtils,
-  username,
-} from "better-auth/plugins";
+import { admin, jwt, testUtils, username } from "better-auth/plugins";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
 import { isAllowlisted } from "./allowlist";
@@ -158,7 +152,6 @@ function buildAuthInstance() {
     plugins: [
       username(),
       admin(),
-      organization(),
       jwt({
         disableSettingJwtHeader: true,
         jwks: {
