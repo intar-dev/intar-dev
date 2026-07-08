@@ -39,9 +39,23 @@ export interface ScenarioReplayArtifact {
   hostId: string;
   runId: string;
   vmId: string;
+  kind: string;
   filename: string;
   contentType: string;
   sizeBytes: number;
+}
+
+/// One SSH session in a VM's recording timeline. The transcript text lives
+/// in its own table (`scenario_run_session_transcripts`) — this metadata
+/// rides in the run state document, which the run page already polls.
+export interface SessionTimelineEntry {
+  index: number;
+  startTimestampMs: number;
+  /// Wall-clock session length; reconnect gaps derive from this.
+  durationMs: number;
+  exitCode: number | null;
+  castFilename: string;
+  transcriptTruncated: boolean;
 }
 
 export interface TerminalTarget {
@@ -87,10 +101,12 @@ export interface RunVmStateDocument {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  primaryReplayArtifactId: string | null;
-  /// True once a raw SSH recording uploaded — the composed replay renders
-  /// asynchronously afterwards, so `hasRecording && !replayArtifacts.length`
-  /// means "replay still rendering". Optional: older stored docs lack it.
+  /// Session metadata submitted by the agent after the render batch
+  /// uploads. Null until then, so `hasRecording && !sessionTimeline` means
+  /// "session timeline still rendering".
+  sessionTimeline: SessionTimelineEntry[] | null;
+  /// True once a raw SSH recording uploaded — the session media renders
+  /// asynchronously afterwards. Optional: older stored docs lack it.
   hasRecording?: boolean;
   terminalTarget: TerminalTarget;
   /// Reported guest IP inside the agent's VM network (not publicly routable).
@@ -113,7 +129,6 @@ export interface RunStateDocument {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  primaryReplayArtifactId: string | null;
   terminalTarget: TerminalTarget;
   vms: RunVmStateDocument[];
 }
@@ -166,7 +181,6 @@ export function buildInitialRunState(input: {
     bootProbes: [],
     scenarioProbes: [],
     replayArtifacts: [],
-    primaryReplayArtifactId: null,
     terminalTarget: defaultTerminalTarget(),
     vms,
   });
@@ -205,7 +219,7 @@ export function buildInitialVmState(input: {
     bootProbes,
     scenarioProbes,
     replayArtifacts: [],
-    primaryReplayArtifactId: null,
+    sessionTimeline: null,
     terminalTarget: defaultTerminalTarget(),
     guestIp: null,
     launchSummary: input.launchSummary,
@@ -232,10 +246,6 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
   const bootProbes = vms.flatMap((vm) => vm.bootProbes);
   const scenarioProbes = vms.flatMap((vm) => vm.scenarioProbes);
   const replayArtifacts = vms.flatMap((vm) => vm.replayArtifacts);
-  const primaryReplayArtifactId =
-    vms.find((vm) => vm.primaryReplayArtifactId)?.primaryReplayArtifactId ??
-    replayArtifacts.at(-1)?.id ??
-    null;
   const terminalVm =
     vms.find(
       (vm) =>
@@ -262,7 +272,6 @@ export function recomputeRunState(current: RunStateDocument): RunStateDocument {
     bootProbes,
     scenarioProbes,
     replayArtifacts,
-    primaryReplayArtifactId,
     terminalTarget,
     vms,
   };
@@ -287,8 +296,7 @@ export function decorateVmState(vm: RunVmStateDocument): RunVmStateDocument {
     runtimeObservedAt: vm.runtimeObservedAt ?? null,
     canOpenTerminal:
       vm.terminalPhase === "ready" && hasTerminalEndpoint(vm.terminalTarget),
-    primaryReplayArtifactId:
-      vm.replayArtifacts.at(-1)?.id ?? vm.primaryReplayArtifactId ?? null,
+    sessionTimeline: vm.sessionTimeline ?? null,
   };
 }
 

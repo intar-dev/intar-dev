@@ -18,9 +18,19 @@ export interface ScenarioReplayArtifact {
   hostId: string;
   runId: string;
   vmId: string;
+  kind: string;
   filename: string;
   contentType: string;
   sizeBytes: number;
+}
+
+export interface SessionTimelineEntry {
+  index: number;
+  startTimestampMs: number;
+  durationMs: number;
+  exitCode: number | null;
+  castFilename: string;
+  transcriptTruncated: boolean;
 }
 
 export interface ScenarioRunVmRecord {
@@ -48,9 +58,11 @@ export interface ScenarioRunVmRecord {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  primaryReplayArtifactId: string | null;
-  /// True once a raw recording uploaded; with no replay artifact yet it
-  /// means the composed replay is still rendering.
+  /// Session metadata in chronological order; null while the agent is
+  /// still rendering the session media.
+  sessionTimeline: SessionTimelineEntry[] | null;
+  /// True once a raw recording uploaded; with no timeline yet it means
+  /// the session media is still rendering.
   hasRecording?: boolean;
   provisioning: RunVmProvisioningSpec;
   terminalTarget: {
@@ -100,7 +112,6 @@ export interface ScenarioRunRecord {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  primaryReplayArtifactId: string | null;
   vms: ScenarioRunVmRecord[];
 }
 

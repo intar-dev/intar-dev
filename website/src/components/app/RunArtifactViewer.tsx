@@ -212,7 +212,12 @@ export function RunArtifactViewer({
             </div>
           </div>
         ) : isCast ? (
-          <AsciicastReplaySurface viewer={viewer} minimal />
+          <AsciicastReplaySurface
+            contentId={viewer.artifact.id}
+            content={viewer.content}
+            loading={viewer.loading}
+            minimal
+          />
         ) : (
           <div className="flex min-h-[22rem] items-center justify-center text-center">
             <p className="text-sm text-muted-foreground">Replay unavailable.</p>
@@ -340,7 +345,11 @@ export function RunArtifactViewer({
               </div>
             </div>
           ) : isCast && (hideViewerControls || castTab === "replay") ? (
-            <AsciicastReplaySurface viewer={viewer} />
+            <AsciicastReplaySurface
+              contentId={viewer.artifact.id}
+              content={viewer.content}
+              loading={viewer.loading}
+            />
           ) : (
             <ReadOnlyTextSurface
               content={viewer.content}
@@ -367,11 +376,16 @@ export function RunArtifactViewer({
   );
 }
 
-function AsciicastReplaySurface({
-  viewer,
+export function AsciicastReplaySurface({
+  contentId,
+  content,
+  loading,
   minimal = false,
 }: {
-  viewer: RunArtifactViewerState;
+  /** Stable identity of the cast (e.g. artifact id); resets error state. */
+  contentId: string;
+  content: string;
+  loading: boolean;
   minimal?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -380,10 +394,10 @@ function AsciicastReplaySurface({
 
   useEffect(() => {
     setPlayerError(null);
-  }, [viewer.artifact.id]);
+  }, [contentId]);
 
   useEffect(() => {
-    if (viewer.loading || !viewer.content.trim() || !containerRef.current) {
+    if (loading || !content.trim() || !containerRef.current) {
       return;
     }
 
@@ -400,7 +414,7 @@ function AsciicastReplaySurface({
         containerRef.current.innerHTML = "";
 
         playerRef.current = mod.create(
-          { data: viewer.content },
+          { data: content },
           containerRef.current,
           {
             autoPlay: false,
@@ -446,7 +460,7 @@ function AsciicastReplaySurface({
         containerRef.current.innerHTML = "";
       }
     };
-  }, [viewer.content, viewer.loading]);
+  }, [content, loading]);
 
   if (playerError) {
     return (
@@ -460,7 +474,7 @@ function AsciicastReplaySurface({
     );
   }
 
-  if (viewer.loading) {
+  if (loading) {
     return (
       <div className={minimal ? "p-0" : "p-4"}>
         <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-muted/20 px-6 text-center">
@@ -498,7 +512,7 @@ function AsciicastReplaySurface({
   );
 }
 
-function ReadOnlyTextSurface({
+export function ReadOnlyTextSurface({
   content,
   loading,
   wrapText,
@@ -634,7 +648,6 @@ function ToolbarTab({
 
 function isCastArtifact(artifact: RunArtifactFile) {
   return (
-    artifact.kind === "ssh_recording" ||
     artifact.kind === "ssh_recording_segment" ||
     artifact.contentType.includes("asciicast") ||
     artifact.filename.endsWith(".cast")
@@ -647,10 +660,8 @@ function artifactKindLabel(kind: string) {
       return "Console Log";
     case "serial_log":
       return "Serial Log";
-    case "ssh_recording":
-      return "Replay Cast";
     case "ssh_recording_segment":
-      return "Cast Segment";
+      return "Session Cast";
     case "ssh_recording_raw":
       return "Raw Recording";
     default:

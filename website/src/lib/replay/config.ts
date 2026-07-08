@@ -4,7 +4,8 @@ export const REPLAY_TERMINAL_FONT_FAMILY =
   '"SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace';
 
 // One fixed grid shared by the live web terminal, kino recordings, and the
-// replay compositor (crates/intar-agent/src/vm/replay_compose.rs must match).
+// per-session cast renderer (`compose_session` in
+// crates/intar-agent/src/vm/replay_compose.rs must match).
 // With the ~0.6em advance of the mono stack and this line height, a 4:1 grid
 // renders exactly 16:9: 120 * 0.6em : 30 * 1.35em = 72 : 40.5 = 16 : 9.
 export const REPLAY_TERMINAL_COLS = 120;

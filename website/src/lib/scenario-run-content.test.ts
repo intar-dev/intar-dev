@@ -274,7 +274,6 @@ function runState(input: {
       value: null,
     })),
     replayArtifacts: [],
-    primaryReplayArtifactId: null,
     terminalTarget: {
       host: null,
       port: 0,

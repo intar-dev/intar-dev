@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Composes per-session kino recordings into one fixed-grid asciicast.
+//! Composes one kino session recording into a fixed-grid asciicast.
 //!
 //! The canvas is pinned to 120x30 — the grid the live web terminal uses
 //! (`website/src/lib/replay/config.ts` must agree). Sessions recorded at
@@ -39,11 +39,10 @@ pub(crate) const CANVAS_ROWS: usize = 30;
 /// the timeline honest.
 const IDLE_TIME_LIMIT_S: f64 = 1.5;
 
-/// Duration of the "Session N of M" divider slide between sessions.
-const RECORDING_DIVIDER_DURATION_S: f64 = 2.0;
-
-/// Guard against absurd recorded widths.
-const MAX_NATIVE_COLS: usize = 512;
+/// Guard against absurd recorded geometry (also used by the transcript
+/// renderer).
+pub(crate) const MAX_NATIVE_COLS: usize = 512;
+pub(crate) const MAX_NATIVE_ROWS: usize = 512;
 
 /// Hide cursor, reset the pen, clear the canvas, and home the cursor.
 const CANVAS_RESET: &str = "\u{1b}[?25l\u{1b}[0m\u{1b}[2J\u{1b}[H";
@@ -52,40 +51,23 @@ const CANVAS_RESET: &str = "\u{1b}[?25l\u{1b}[0m\u{1b}[2J\u{1b}[H";
 /// PTY output, which assumes the freshly attached terminal shows a cursor.
 const PASSTHROUGH_RESET: &str = "\u{1b}[0m\u{1b}[2J\u{1b}[H\u{1b}[?25h";
 
-pub(crate) fn compose_sessions(sessions: &[ParsedKrec]) -> Result<String> {
-    let first = sessions
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("cannot combine an empty recording list"))?;
-
+pub(crate) fn compose_session(session: &ParsedKrec) -> Result<String> {
     let mut header = Map::new();
     header.insert("version".to_string(), json!(2));
     header.insert("width".to_string(), json!(CANVAS_COLS));
     header.insert("height".to_string(), json!(CANVAS_ROWS));
-    header.insert("timestamp".to_string(), json!(first.start_timestamp_s));
-    let mut out = serde_json::to_string(&Value::Object(header))
-        .context("failed to serialize combined cast header")?;
+    header.insert(
+        "timestamp".to_string(),
+        json!(session.start_timestamp_ms / 1000),
+    );
+    let mut out =
+        serde_json::to_string(&Value::Object(header)).context("failed to serialize cast header")?;
     out.push('\n');
 
-    let total_sessions = sessions.len();
-    let mut offset_s = 0.0_f64;
-    for (index, session) in sessions.iter().enumerate() {
-        if index > 0 {
-            write_cast_event(
-                &mut out,
-                offset_s,
-                "o",
-                &render_divider(index + 1, total_sessions),
-            )
-            .context("failed to write session divider")?;
-            offset_s += RECORDING_DIVIDER_DURATION_S;
-        }
-
-        let duration_s = if is_passthrough(session) {
-            compose_passthrough(&mut out, offset_s, session)?
-        } else {
-            compose_reflowed(&mut out, offset_s, session)?
-        };
-        offset_s += duration_s;
+    if is_passthrough(session) {
+        compose_passthrough(&mut out, session)?;
+    } else {
+        compose_reflowed(&mut out, session)?;
     }
 
     Ok(out)
@@ -117,31 +99,30 @@ fn clamped_times(events: &[KrecEvent]) -> Vec<f64> {
     times
 }
 
-fn compose_passthrough(out: &mut String, offset_s: f64, session: &ParsedKrec) -> Result<f64> {
-    write_cast_event(out, offset_s, "o", PASSTHROUGH_RESET)
+fn compose_passthrough(out: &mut String, session: &ParsedKrec) -> Result<()> {
+    write_cast_event(out, 0.0, "o", PASSTHROUGH_RESET)
         .context("failed to write session prelude")?;
 
     let times = clamped_times(&session.events);
     for (event, time_s) in session.events.iter().zip(&times) {
         match &event.data {
             KrecEventData::Output(data) => {
-                write_cast_event(out, offset_s + time_s, "o", data)
+                write_cast_event(out, *time_s, "o", data)
                     .context("failed to write passthrough event")?;
             }
             KrecEventData::Input(data) => {
-                write_cast_event(out, offset_s + time_s, "i", data)
+                write_cast_event(out, *time_s, "i", data)
                     .context("failed to write passthrough input event")?;
             }
             KrecEventData::Resize { .. } => {}
         }
     }
-    Ok(times.last().copied().unwrap_or(0.0))
+    Ok(())
 }
 
-fn compose_reflowed(out: &mut String, offset_s: f64, session: &ParsedKrec) -> Result<f64> {
+fn compose_reflowed(out: &mut String, session: &ParsedKrec) -> Result<()> {
     let mut renderer = ReflowRenderer::new(session.width);
-    write_cast_event(out, offset_s, "o", CANVAS_RESET)
-        .context("failed to write session prelude")?;
+    write_cast_event(out, 0.0, "o", CANVAS_RESET).context("failed to write session prelude")?;
 
     let events = &session.events;
     let times = clamped_times(events);
@@ -162,33 +143,26 @@ fn compose_reflowed(out: &mut String, offset_s: f64, session: &ParsedKrec) -> Re
                 }
                 let payload = renderer.feed_output(&data);
                 if !payload.is_empty() {
-                    write_cast_event(out, offset_s + time_s, "o", &payload)
+                    write_cast_event(out, time_s, "o", &payload)
                         .context("failed to write reflowed event")?;
                 }
             }
             KrecEventData::Input(data) => {
                 // Input never touches the terminal; it feeds the command log.
-                write_cast_event(out, offset_s + time_s, "i", data)
+                write_cast_event(out, time_s, "i", data)
                     .context("failed to write reflowed input event")?;
             }
             KrecEventData::Resize { cols, rows: _ } => {
                 let payload = renderer.apply_resize(*cols);
                 if !payload.is_empty() {
-                    write_cast_event(out, offset_s + time_s, "o", &payload)
+                    write_cast_event(out, time_s, "o", &payload)
                         .context("failed to write reflow resize repaint")?;
                 }
             }
         }
         index += 1;
     }
-    Ok(times.last().copied().unwrap_or(0.0))
-}
-
-fn render_divider(session_number: usize, total_sessions: usize) -> String {
-    let label = format!("Session {session_number} of {total_sessions}");
-    let row = CANVAS_ROWS / 2;
-    let col = (CANVAS_COLS.saturating_sub(label.chars().count()) / 2).max(1);
-    format!("{CANVAS_RESET}\u{1b}[{row};{col}H{label}")
+    Ok(())
 }
 
 /// Re-renders one session's PTY stream, reflowed onto the canvas grid.
@@ -364,13 +338,15 @@ mod tests {
 
     use super::super::krec::{KrecEvent, KrecEventData, ParsedKrec};
     use super::super::replay_media::parse_cast;
-    use super::{CANVAS_COLS, CANVAS_ROWS, compose_sessions, render_divider};
+    use super::{CANVAS_COLS, CANVAS_ROWS, compose_session};
 
     fn session(width: u16, height: u16, events: Vec<KrecEvent>) -> ParsedKrec {
         ParsedKrec {
             width,
             height,
-            start_timestamp_s: 1_700_000_000,
+            start_timestamp_ms: 1_700_000_000_000,
+            duration_ms: 0,
+            exit_code: None,
             events,
         }
     }
@@ -397,8 +373,8 @@ mod tests {
     }
 
     /// Feeds every output payload of a composed cast into a canvas-sized vt.
-    fn replay_composed(combined: &str) -> Result<avt::Vt> {
-        let parsed = parse_cast(combined)?;
+    fn replay_composed(composed: &str) -> Result<avt::Vt> {
+        let parsed = parse_cast(composed)?;
         assert_eq!(usize::from(parsed.width), CANVAS_COLS);
         assert_eq!(usize::from(parsed.height), CANVAS_ROWS);
         let mut vt = avt::Vt::builder()
@@ -416,9 +392,8 @@ mod tests {
     #[test]
     fn exact_grid_sessions_pass_through_verbatim() -> Result<()> {
         let payload = "\u{1b}[1;31mhello\u{1b}[0m world";
-        let sessions = vec![session(120, 30, vec![output(0.5, payload)])];
-        let combined = compose_sessions(&sessions)?;
-        let parsed = parse_cast(&combined)?;
+        let composed = compose_session(&session(120, 30, vec![output(0.5, payload)]))?;
+        let parsed = parse_cast(&composed)?;
 
         assert!(
             parsed
@@ -435,10 +410,9 @@ mod tests {
         // A 100-char line soft-wraps on an 80-col terminal. After reflow to
         // 120 cols the line must occupy a single row again — no letterbox.
         let long_line = "x".repeat(100);
-        let sessions = vec![session(80, 24, vec![output(0.0, &long_line)])];
-        let combined = compose_sessions(&sessions)?;
+        let composed = compose_session(&session(80, 24, vec![output(0.0, &long_line)]))?;
 
-        let vt = replay_composed(&combined)?;
+        let vt = replay_composed(&composed)?;
         assert_eq!(vt.line(0).text().trim_end(), long_line);
         assert!(vt.line(1).text().trim().is_empty());
         Ok(())
@@ -449,10 +423,9 @@ mod tests {
         // A 200-col terminal fits the line on one row; on the 120-col canvas
         // it wraps into two rows without losing content.
         let long_line = "y".repeat(200);
-        let sessions = vec![session(200, 50, vec![output(0.0, &long_line)])];
-        let combined = compose_sessions(&sessions)?;
+        let composed = compose_session(&session(200, 50, vec![output(0.0, &long_line)]))?;
 
-        let vt = replay_composed(&combined)?;
+        let vt = replay_composed(&composed)?;
         assert_eq!(vt.line(0).text(), "y".repeat(120));
         assert_eq!(vt.line(1).text().trim_end(), "y".repeat(80));
         Ok(())
@@ -466,14 +439,13 @@ mod tests {
         // appended junk rows.
         let first = format!("{} 10%", "#".repeat(146));
         let second = format!("{} 99%", "#".repeat(146));
-        let sessions = vec![session(
+        let composed = compose_session(&session(
             200,
             50,
             vec![output(0.0, &first), output(0.5, &format!("\r{second}"))],
-        )];
-        let combined = compose_sessions(&sessions)?;
+        ))?;
 
-        let vt = replay_composed(&combined)?;
+        let vt = replay_composed(&composed)?;
         let screen = (0..CANVAS_ROWS)
             .map(|row| vt.line(row).text())
             .collect::<Vec<_>>()
@@ -494,8 +466,7 @@ mod tests {
             "\u{1b}[4;7minverse underline\u{1b}[0m 日本語\r\n",
             "tail"
         );
-        let sessions = vec![session(40, 6, vec![output(0.0, payload)])];
-        let combined = compose_sessions(&sessions)?;
+        let composed = compose_session(&session(40, 6, vec![output(0.0, payload)]))?;
 
         let mut reference = avt::Vt::builder()
             .size(CANVAS_COLS, CANVAS_ROWS)
@@ -503,7 +474,7 @@ mod tests {
             .build();
         let _ = reference.feed_str(payload);
 
-        let vt = replay_composed(&combined)?;
+        let vt = replay_composed(&composed)?;
         for row in 0..CANVAS_ROWS {
             let rendered = vt.line(row).cells();
             let expected = reference.line(row).cells();
@@ -525,7 +496,7 @@ mod tests {
 
     #[test]
     fn resize_events_change_the_reflow_width_without_resize_output() -> Result<()> {
-        let sessions = vec![session(
+        let composed = compose_session(&session(
             80,
             24,
             vec![
@@ -533,28 +504,26 @@ mod tests {
                 resize(1.0, 100, 30),
                 output(2.0, " after"),
             ],
-        )];
-        let combined = compose_sessions(&sessions)?;
-        let parsed = parse_cast(&combined)?;
+        ))?;
+        let parsed = parse_cast(&composed)?;
 
         assert!(parsed.events.iter().all(|event| event.kind != "r"));
         assert_eq!(usize::from(parsed.width), CANVAS_COLS);
         assert_eq!(usize::from(parsed.height), CANVAS_ROWS);
 
-        let vt = replay_composed(&combined)?;
+        let vt = replay_composed(&composed)?;
         assert_eq!(vt.line(0).text().trim_end(), "before after");
         Ok(())
     }
 
     #[test]
     fn idle_gaps_are_clamped_in_the_data() -> Result<()> {
-        let sessions = vec![session(
+        let composed = compose_session(&session(
             120,
             30,
             vec![output(0.0, "a"), output(60.0, "b"), output(60.2, "c")],
-        )];
-        let combined = compose_sessions(&sessions)?;
-        let parsed = parse_cast(&combined)?;
+        ))?;
+        let parsed = parse_cast(&composed)?;
 
         let time_of = |needle: &str| {
             parsed
@@ -572,7 +541,7 @@ mod tests {
 
     #[test]
     fn no_op_repaints_are_skipped() -> Result<()> {
-        let sessions = vec![session(
+        let composed = compose_session(&session(
             80,
             24,
             vec![
@@ -582,9 +551,8 @@ mod tests {
                 output(1.0, "\r"),
                 output(1.2, "stable"),
             ],
-        )];
-        let combined = compose_sessions(&sessions)?;
-        let parsed = parse_cast(&combined)?;
+        ))?;
+        let parsed = parse_cast(&composed)?;
 
         let repaints = parsed
             .events
@@ -600,13 +568,12 @@ mod tests {
         // Both the passthrough and the reflow path must carry typed input —
         // the website derives its command log from `i` events.
         for dims in [(120, 30), (80, 24)] {
-            let sessions = vec![session(
+            let composed = compose_session(&session(
                 dims.0,
                 dims.1,
                 vec![input(0.0, "ls\r"), output(0.5, "listing")],
-            )];
-            let combined = compose_sessions(&sessions)?;
-            let parsed = parse_cast(&combined)?;
+            ))?;
+            let parsed = parse_cast(&composed)?;
             assert!(
                 parsed
                     .events
@@ -615,45 +582,6 @@ mod tests {
                 "input event missing for {dims:?}"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn divider_is_centered_on_the_canvas() {
-        let slide = render_divider(2, 3);
-        assert!(slide.contains("Session 2 of 3"));
-        // Row 15 of 30; "Session 2 of 3" is 14 chars -> column (120-14)/2 = 53.
-        assert!(slide.contains("\u{1b}[15;53H"));
-        assert!(slide.starts_with("\u{1b}[?25l\u{1b}[0m\u{1b}[2J\u{1b}[H"));
-    }
-
-    #[test]
-    fn sessions_concat_with_divider_timing() -> Result<()> {
-        let sessions = vec![
-            session(120, 30, vec![output(0.0, "alpha"), output(1.0, "omega")]),
-            session(80, 24, vec![output(0.5, "bravo")]),
-        ];
-        let combined = compose_sessions(&sessions)?;
-        let parsed = parse_cast(&combined)?;
-
-        let divider = parsed
-            .events
-            .iter()
-            .find(|event| event.payload.contains("Session 2 of 2"))
-            .expect("divider slide should exist");
-        // Session 1 lasts 1.0s, the divider holds for 2.0s, and session 2's
-        // event lands 0.5s after that.
-        assert_eq!(divider.time_s, 1.0);
-        assert!(
-            parsed
-                .events
-                .iter()
-                .any(|event| event.time_s == 3.5 && event.payload.contains("bravo"))
-        );
-
-        // Replaying ends on session 2's content, reflowed onto the canvas.
-        let vt = replay_composed(&combined)?;
-        assert_eq!(vt.line(0).text().trim_end(), "bravo");
         Ok(())
     }
 }

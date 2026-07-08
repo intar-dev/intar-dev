@@ -42,10 +42,8 @@ export const artifactKindLabel = (kind: string) => {
       return "Console";
     case "serial_log":
       return "Serial";
-    case "ssh_recording":
-      return "Replay";
     case "ssh_recording_segment":
-      return "Segment";
+      return "Session Cast";
     case "ssh_recording_raw":
       return "Raw";
     default:

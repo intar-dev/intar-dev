@@ -1,11 +1,7 @@
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Clock3 } from "lucide-react";
-import type {
-  RunArtifactFile,
-  RunArtifactViewerState,
-} from "@/components/app/RunArtifactViewer";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { PageHeader } from "@/components/app/patterns/PageHeader";
 import { MetaChip } from "@/components/app/patterns/MetaChip";
@@ -22,7 +18,7 @@ import {
 } from "@/components/ui/card";
 import { presentScenarioRun } from "@/lib/run-phase";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import { RunReplayPanel } from "@/components/app/run/RunReplayPanel";
+import { SessionTimeline } from "@/components/app/run/SessionTimeline";
 import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
@@ -45,7 +41,6 @@ import {
   buildScenarioShutdownSteps,
   formatScenarioElapsedTime,
   formatScenarioDurationMs,
-  formatScenarioReplayName,
   getScenarioBootScreenCopy,
   getScenarioShutdownScreenCopy,
   hasUsableTerminalTarget,
@@ -68,12 +63,7 @@ export function ScenarioRun() {
     }
     return new URLSearchParams(window.location.search).get("pending") === "1";
   });
-  const artifactStreamRef = useRef<AbortController | null>(null);
-  const [selectedReplayArtifactId, setSelectedReplayArtifactId] = useState<
-    string | null
-  >(null);
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
-  const [viewer, setViewer] = useState<RunArtifactViewerState | null>(null);
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
@@ -116,12 +106,12 @@ export function ScenarioRun() {
       if (!record) {
         return projectionPending ? 1_500 : false;
       }
-      // Poll eagerly while a replay is still rendering on the host so the
-      // player appears as soon as the composed cast uploads.
+      // Poll eagerly while the session media is still rendering on the host
+      // so the timeline appears as soon as the agent submits it.
       if (
         record.phase === "completed" &&
         record.vms.some(
-          (vm) => vm.hasRecording === true && vm.replayArtifacts.length === 0,
+          (vm) => vm.hasRecording === true && !vm.sessionTimeline,
         )
       ) {
         return 2_500;
@@ -321,38 +311,6 @@ export function ScenarioRun() {
     () => getScenarioShutdownScreenCopy(attemptData, shutdownRequested),
     [attemptData, shutdownRequested],
   );
-  const replayArtifact = useMemo(() => {
-    if (!selectedVm?.replayArtifacts.length) {
-      return null;
-    }
-    return (
-      selectedVm.replayArtifacts.find(
-        (artifact) => artifact.id === selectedReplayArtifactId,
-      ) ??
-      selectedVm.replayArtifacts.find(
-        (artifact) => artifact.id === selectedVm.primaryReplayArtifactId,
-      ) ??
-      selectedVm.replayArtifacts.at(-1) ??
-      null
-    );
-  }, [selectedReplayArtifactId, selectedVm]);
-  // The composed replay renders on the host after the run completes; a raw
-  // recording without a replay artifact means it is still on its way.
-  const replayRendering =
-    attemptData?.phase === "completed" &&
-    selectedVm?.hasRecording === true &&
-    selectedVm.replayArtifacts.length === 0;
-
-  const replayArtifactIndex = useMemo(() => {
-    if (!selectedVm || !replayArtifact) {
-      return -1;
-    }
-
-    return selectedVm.replayArtifacts.findIndex(
-      (artifact) => artifact.id === replayArtifact.id,
-    );
-  }, [replayArtifact, selectedVm]);
-
   const selectedVmSessionRequest = useMemo(
     () =>
       selectedVm
@@ -420,34 +378,6 @@ export function ScenarioRun() {
     });
   }, [attemptData?.vms, terminalVisible]);
 
-  useEffect(() => {
-    if (!selectedVm?.replayArtifacts.length) {
-      setSelectedReplayArtifactId(null);
-      return;
-    }
-
-    setSelectedReplayArtifactId((current) => {
-      if (
-        current &&
-        selectedVm.replayArtifacts.some((artifact) => artifact.id === current)
-      ) {
-        return current;
-      }
-      return (
-        selectedVm.primaryReplayArtifactId ??
-        selectedVm.replayArtifacts.at(-1)?.id ??
-        null
-      );
-    });
-  }, [selectedVm?.primaryReplayArtifactId, selectedVm?.replayArtifacts]);
-
-  useEffect(() => {
-    return () => {
-      artifactStreamRef.current?.abort();
-      artifactStreamRef.current = null;
-    };
-  }, []);
-
   const requestDestroyScenario = () => {
     destroyScenario.reset();
     setShutdownRequested(true);
@@ -477,122 +407,6 @@ export function ScenarioRun() {
     ) : (
       cancelScenarioAction
     );
-
-  useEffect(() => {
-    if (!attemptData || !selectedVm || !replayArtifact || attemptData.phase !== "completed") {
-      return;
-    }
-
-    artifactStreamRef.current?.abort();
-    const controller = new AbortController();
-    artifactStreamRef.current = controller;
-
-    const artifactFile: RunArtifactFile = {
-      id: replayArtifact.id,
-      ordinal: 0,
-      kind: "ssh_recording",
-      filename: formatScenarioReplayName(
-        replayArtifactIndex,
-        selectedVm.replayArtifacts.length,
-      ),
-      contentType: replayArtifact.contentType,
-      sizeBytes: replayArtifact.sizeBytes,
-      sha256: "",
-      uploadStatus: "uploaded",
-      uploadedAt: attemptData.updatedAt,
-    };
-
-    setViewer({
-      artifact: artifactFile,
-      loading: true,
-      error: null,
-      content: "",
-      receivedBytes: 0,
-    });
-
-    void (async () => {
-      try {
-        const response = await fetch(
-          `/api/runs/${encodeURIComponent(attemptData.id)}/artifacts/${encodeURIComponent(replayArtifact.id)}/content`,
-          {
-            method: "GET",
-            credentials: "include",
-            signal: controller.signal,
-          },
-        );
-
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
-            error?: string;
-          } | null;
-          throw new Error(
-            body?.error ??
-              `Failed to load replay artifact (${response.status})`,
-          );
-        }
-
-        if (!response.body) {
-          const text = await response.text();
-          setViewer({
-            artifact: artifactFile,
-            loading: false,
-            error: null,
-            content: text,
-            receivedBytes: new TextEncoder().encode(text).byteLength,
-          });
-          return;
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let accumulated = "";
-        let receivedBytes = 0;
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          receivedBytes += value.byteLength;
-          accumulated += decoder.decode(value, { stream: true });
-          startTransition(() => {
-            setViewer({
-              artifact: artifactFile,
-              loading: true,
-              error: null,
-              content: accumulated,
-              receivedBytes,
-            });
-          });
-        }
-
-        accumulated += decoder.decode();
-        setViewer({
-          artifact: artifactFile,
-          loading: false,
-          error: null,
-          content: accumulated,
-          receivedBytes: Math.max(receivedBytes, replayArtifact.sizeBytes),
-        });
-      } catch (error) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setViewer((current) => ({
-          artifact: artifactFile,
-          loading: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Failed to stream replay artifact",
-          content: current?.content ?? "",
-          receivedBytes: current?.receivedBytes ?? 0,
-        }));
-      } finally {
-        if (artifactStreamRef.current === controller) {
-          artifactStreamRef.current = null;
-        }
-      }
-    })();
-  }, [attemptData, replayArtifact, replayArtifactIndex, selectedVm]);
 
   return (
     <PageShell
@@ -703,7 +517,7 @@ export function ScenarioRun() {
                   onSelect={setSelectedVmId}
                 />
               ) : null}
-              <RunReplayPanel viewer={viewer} rendering={replayRendering} />
+              <SessionTimeline runId={runId} vm={selectedVm} />
               <Card size="sm">
                 <CardHeader>
                   <CardTitle className="font-heading text-base">

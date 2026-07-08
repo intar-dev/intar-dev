@@ -2374,13 +2374,16 @@ async fn upload_vm_run_artifacts(
     // completed for the user without waiting on replay rendering.
     complete_run_upload(inner, prepared, &access_token).await?;
 
-    // Render and attach the replay asynchronously after completion — the
-    // begin endpoint merges by ordinal, so registering it late is safe, and
-    // the projection picks it up when the upload finishes. A render failure
-    // only costs the replay, never the archived run.
-    match render_replay_artifact(&prepared.artifacts_dir, next_artifact_ordinal(&artifacts)).await {
-        Ok(Some(replay)) => {
-            artifacts.push(replay);
+    // Render and attach the session media asynchronously after completion —
+    // the begin endpoint merges by ordinal, so registering the casts late is
+    // safe, and the projection picks them up as their uploads finish. The
+    // timeline goes up last, once the casts it references are in place; a
+    // render failure only costs the replay media, never the archived run.
+    match render_replay_artifacts(&prepared.artifacts_dir, next_artifact_ordinal(&artifacts)).await
+    {
+        Ok(Some((casts, timeline))) => {
+            let new_start = artifacts.len();
+            artifacts.extend(casts);
             if !begin_run_upload(inner, prepared, &artifacts, &access_token).await? {
                 warn!(
                     vm = vm_name,
@@ -2389,8 +2392,23 @@ async fn upload_vm_run_artifacts(
                 );
                 return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
             }
-            let replay_slice = &artifacts[artifacts.len() - 1..];
-            upload_artifact_set(inner, vm_name, prepared, replay_slice, &access_token).await?;
+            upload_artifact_set(
+                inner,
+                vm_name,
+                prepared,
+                &artifacts[new_start..],
+                &access_token,
+            )
+            .await?;
+            if let Err(error) = submit_run_timeline(inner, prepared, &timeline, &access_token).await
+            {
+                warn!(
+                    error = %error,
+                    vm = vm_name,
+                    run_id = prepared.run_id,
+                    "failed to submit session timeline; archiving run without one"
+                );
+            }
         }
         Ok(None) => {}
         Err(error) => {
@@ -2398,7 +2416,7 @@ async fn upload_vm_run_artifacts(
                 error = %error,
                 vm = vm_name,
                 run_id = prepared.run_id,
-                "failed to render replay cast; archiving run without a replay"
+                "failed to render session media; archiving run without a replay"
             );
         }
     }
@@ -2512,22 +2530,58 @@ fn next_artifact_ordinal(artifacts: &[LocalArtifact]) -> u32 {
         .saturating_add(1)
 }
 
-async fn render_replay_artifact(
+async fn render_replay_artifacts(
     artifacts_dir: &Path,
-    ordinal: u32,
-) -> Result<Option<LocalArtifact>> {
-    let Some(path) = replay_media::create_primary_replay_cast(artifacts_dir).await? else {
+    first_ordinal: u32,
+) -> Result<Option<(Vec<LocalArtifact>, replay_media::TimelineDocument)>> {
+    let Some(rendered) = replay_media::render_session_media(artifacts_dir).await? else {
         return Ok(None);
     };
-    Ok(Some(
-        describe_local_artifact(
-            ordinal,
-            replay_media::PRIMARY_REPLAY_KIND,
-            &path,
-            "application/x-asciicast; charset=utf-8",
-        )
-        .await?,
-    ))
+    let mut artifacts = Vec::with_capacity(rendered.cast_paths.len());
+    let mut ordinal = first_ordinal;
+    for path in &rendered.cast_paths {
+        artifacts.push(
+            describe_local_artifact(
+                ordinal,
+                replay_media::SESSION_CAST_KIND,
+                path,
+                "application/x-asciicast; charset=utf-8",
+            )
+            .await?,
+        );
+        ordinal = ordinal.saturating_add(1);
+    }
+    Ok(Some((artifacts, rendered.timeline)))
+}
+
+/// Hands the rendered timeline (session metadata + transcripts) to the
+/// control plane, which stores it in its database — it never touches R2.
+async fn submit_run_timeline(
+    inner: &Inner,
+    prepared: &PreparedVmDeletion,
+    timeline: &replay_media::TimelineDocument,
+    access_token: &str,
+) -> Result<()> {
+    let run_id_segment = encode_url_path_segment(&prepared.run_id);
+    let vm_name_segment = encode_url_path_segment(&prepared.vm_name);
+    let timeline_url = format!(
+        "{}/agent/runs/{}/vms/{}/timeline",
+        inner.bridge.base_url, run_id_segment, vm_name_segment
+    );
+    let response = inner
+        .http
+        .post(&timeline_url)
+        .bearer_auth(access_token)
+        .json(timeline)
+        .send()
+        .await
+        .with_context(|| format!("failed to submit run timeline at {timeline_url}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("timeline submission failed with status {status}: {body}");
+    }
+    Ok(())
 }
 
 async fn upload_single_artifact(
@@ -2888,8 +2942,9 @@ fn extract_recordings_to_spool_blocking(
     Ok(())
 }
 
-/// Collects everything except the combined replay cast, which is rendered
-/// and registered separately after these artifacts are already uploaded.
+/// Collects everything except the rendered session casts, which are
+/// rendered and registered separately after these artifacts are already
+/// uploaded.
 async fn collect_local_artifacts(artifacts_dir: &Path) -> Result<Vec<LocalArtifact>> {
     let mut artifacts = Vec::new();
     let mut ordinal = 1_u32;

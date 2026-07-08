@@ -517,6 +517,31 @@ export const scenarioRunArtifactUploads = sqliteTable(
   },
 );
 
+/** Plain-text transcript of one SSH session, rendered agent-side from the
+ * raw recording. Session metadata lives in the run state document
+ * (`vm.sessionTimeline`); only the potentially large text sits here so the
+ * run page can lazy-load it per session. */
+export const scenarioRunSessionTranscripts = sqliteTable(
+  "scenario_run_session_transcripts",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => scenarioRuns.runId, { onDelete: "cascade" }),
+    vmId: text("vm_id").notNull(),
+    sessionIndex: integer("session_index").notNull(),
+    transcript: text("transcript").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    uniqueIndex("scenario_run_session_transcripts_session_uidx").on(
+      table.runId,
+      table.vmId,
+      table.sessionIndex,
+    ),
+  ],
+);
+
 export const vmScenarios = sqliteTable(
   "vm_scenarios",
   {

@@ -64,6 +64,13 @@
       "when": 1783443498822,
       "tag": "0008_probe-kind",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1783505191765,
+      "tag": "0009_session-transcripts",
+      "breakpoints": true
     }
   ]
 }

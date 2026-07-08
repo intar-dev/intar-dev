@@ -5,6 +5,7 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
+  scenarioRunSessionTranscripts,
 } from "@/db/schema";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
@@ -13,6 +14,7 @@ import {
   recomputeRunState,
   type RunStateDocument,
   type ScenarioReplayArtifact,
+  type SessionTimelineEntry,
 } from "@/lib/run-state";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 
@@ -33,6 +35,27 @@ interface AgentRunArtifactInput {
   sizeBytes?: number;
   sha256?: string;
 }
+
+interface AgentRunTimelineRequest {
+  version?: number;
+  sessions?: AgentRunTimelineSessionInput[];
+}
+
+interface AgentRunTimelineSessionInput {
+  index?: number;
+  startTimestampMs?: number;
+  durationMs?: number;
+  exitCode?: number | null;
+  castFilename?: string;
+  transcript?: string;
+  transcriptTruncated?: boolean;
+}
+
+const RUN_TIMELINE_VERSION = 1;
+const MAX_TIMELINE_SESSIONS = 500;
+/** The agent caps transcripts around 1 MB; leave headroom but stay well
+ * under D1's ~2 MB per-value limit. */
+const MAX_TRANSCRIPT_BYTES = 1_500_000;
 
 interface UploadedPartRecord {
   partNumber: number;
@@ -139,6 +162,18 @@ export async function handleAgentRunArtifactRequest(
       return jsonResponse({ error: "invalid run or vm path" }, 400);
     }
     return handleRunComplete(request, env, runId, vmName);
+  }
+
+  const timelineMatch = pathname.match(
+    /^\/agent\/runs\/([^/]+)\/vms\/([^/]+)\/timeline$/,
+  );
+  if (timelineMatch) {
+    const runId = decodePathSegment(timelineMatch[1] ?? "");
+    const vmName = decodePathSegment(timelineMatch[2] ?? "");
+    if (!runId || !vmName) {
+      return jsonResponse({ error: "invalid run or vm path" }, 400);
+    }
+    return handleRunTimeline(request, env, runId, vmName);
   }
 
   return null;
@@ -527,6 +562,146 @@ async function handleRunComplete(
   return jsonResponse({ ok: true });
 }
 
+/**
+ * Receives the rendered session timeline (metadata + transcripts) after the
+ * cast uploads pass. Transcripts land in their own table; the metadata is
+ * projected into the run state document as `vm.sessionTimeline`, which is
+ * what flips the run page from "rendering" to the timeline. Idempotent:
+ * retries upsert the same rows and overwrite the same state field.
+ */
+async function handleRunTimeline(
+  request: Request,
+  env: Cloudflare.Env,
+  runId: string,
+  vmName: string,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  if (!resolved.ok) {
+    return resolved.response;
+  }
+  const { db, runVm } = resolved;
+
+  let body: AgentRunTimelineRequest;
+  try {
+    body = (await request.json()) as AgentRunTimelineRequest;
+  } catch {
+    return jsonResponse({ error: "invalid json body" }, 400);
+  }
+  if (body.version !== RUN_TIMELINE_VERSION) {
+    return jsonResponse({ error: "unsupported timeline version" }, 400);
+  }
+  const sessions = normalizeTimelineSessions(body.sessions ?? []);
+  if (sessions === null) {
+    return jsonResponse({ error: "invalid timeline payload" }, 400);
+  }
+
+  const now = Date.now();
+  for (const session of sessions) {
+    await db
+      .insert(scenarioRunSessionTranscripts)
+      .values({
+        id: `${runVm.vmId}:session:${session.entry.index}`,
+        runId: runVm.runId,
+        vmId: runVm.vmId,
+        sessionIndex: session.entry.index,
+        transcript: session.transcript,
+        createdAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          scenarioRunSessionTranscripts.runId,
+          scenarioRunSessionTranscripts.vmId,
+          scenarioRunSessionTranscripts.sessionIndex,
+        ],
+        set: {
+          transcript: session.transcript,
+        },
+      });
+  }
+
+  const runRows = await db
+    .select({ stateJson: scenarioRuns.stateJson })
+    .from(scenarioRuns)
+    .where(eq(scenarioRuns.runId, runVm.runId))
+    .limit(1);
+  const run = runRows[0];
+  if (!run) {
+    return runPurgedResponse();
+  }
+
+  const state = parseRunState(run.stateJson);
+  const nextState = recomputeRunState({
+    ...state,
+    vms: state.vms.map((vm) =>
+      vm.id === runVm.vmId
+        ? { ...vm, sessionTimeline: sessions.map((session) => session.entry) }
+        : vm,
+    ),
+  });
+  await db
+    .update(scenarioRuns)
+    .set({
+      stateJson: JSON.stringify(nextState),
+      updatedAt: now,
+    })
+    .where(eq(scenarioRuns.runId, runVm.runId));
+
+  return jsonResponse({ ok: true });
+}
+
+function normalizeTimelineSessions(
+  inputs: AgentRunTimelineSessionInput[],
+): Array<{ entry: SessionTimelineEntry; transcript: string }> | null {
+  if (!Array.isArray(inputs) || inputs.length > MAX_TIMELINE_SESSIONS) {
+    return null;
+  }
+  const sessions: Array<{ entry: SessionTimelineEntry; transcript: string }> =
+    [];
+  for (const input of inputs) {
+    const index = input.index;
+    const startTimestampMs = input.startTimestampMs;
+    const durationMs = input.durationMs;
+    const castFilename = input.castFilename?.trim() ?? "";
+    const transcript = input.transcript;
+    if (
+      !Number.isInteger(index) ||
+      index === undefined ||
+      index < 1 ||
+      !Number.isFinite(startTimestampMs) ||
+      startTimestampMs === undefined ||
+      !Number.isFinite(durationMs) ||
+      durationMs === undefined ||
+      durationMs < 0 ||
+      !castFilename ||
+      typeof transcript !== "string" ||
+      transcript.length > MAX_TRANSCRIPT_BYTES
+    ) {
+      return null;
+    }
+    if (input.exitCode !== undefined && input.exitCode !== null) {
+      if (!Number.isInteger(input.exitCode)) {
+        return null;
+      }
+    }
+    sessions.push({
+      entry: {
+        index,
+        startTimestampMs,
+        durationMs,
+        exitCode: input.exitCode ?? null,
+        castFilename,
+        transcriptTruncated: input.transcriptTruncated === true,
+      },
+      transcript,
+    });
+  }
+  return sessions;
+}
+
 async function markArtifactUploaded(input: {
   db: ReturnType<typeof drizzle>;
   runId: string;
@@ -547,7 +722,7 @@ async function markArtifactUploaded(input: {
     .where(eq(scenarioRunArtifactUploads.artifactId, input.artifact.id));
 
   if (
-    input.artifact.kind !== "ssh_recording" &&
+    input.artifact.kind !== "ssh_recording_segment" &&
     input.artifact.kind !== "ssh_recording_raw"
   ) {
     return;
@@ -569,8 +744,8 @@ async function markArtifactUploaded(input: {
 
   const state = parseRunState(run.stateJson);
 
-  // A raw recording landing means a replay render is on its way — the run
-  // page shows a "rendering" state until the composed cast arrives.
+  // A raw recording landing means session media is on its way — the run
+  // page shows a "rendering" state until the timeline arrives.
   if (input.artifact.kind === "ssh_recording_raw") {
     const nextState = recomputeRunState({
       ...state,
@@ -593,11 +768,14 @@ async function markArtifactUploaded(input: {
     hostId: "",
     runId: input.runId,
     vmId: input.vmId,
+    kind: input.artifact.kind,
     filename: input.artifact.filename,
     contentType: input.artifact.contentType,
     sizeBytes: input.artifact.sizeBytes,
   };
 
+  // Segment uploads run concurrently, so this array's order is arbitrary —
+  // the ordering authority is `vm.sessionTimeline`.
   const nextState = recomputeRunState({
     ...state,
     vms: state.vms.map((vm) => {
@@ -614,7 +792,6 @@ async function markArtifactUploaded(input: {
       return {
         ...vm,
         replayArtifacts,
-        primaryReplayArtifactId: input.artifact.id,
       };
     }),
   });
@@ -1032,7 +1209,6 @@ function parseRunState(raw: string): RunStateDocument {
       bootProbes: [],
       scenarioProbes: [],
       replayArtifacts: [],
-      primaryReplayArtifactId: null,
       terminalTarget: {
         host: null,
         port: 22,

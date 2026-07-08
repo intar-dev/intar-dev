@@ -5,9 +5,10 @@
 //! The format is JSONL: a header line followed by event lines, written by
 //! `crates/kino/src/recording.rs`. The replay pipeline consumes the raw log
 //! directly — output bytes and resizes feed the compositor, typed input
-//! rides through for the command log, and the exit marker is dropped. A
-//! truncated final line is tolerated: kino syncs every 250ms, so a hard
-//! teardown (SIGHUP, host stop) can leave a partial trailing event behind.
+//! rides through for the command log, and the exit marker only contributes
+//! the session's exit code. A truncated final line is tolerated: kino syncs
+//! every 250ms, so a hard teardown (SIGHUP, host stop) can leave a partial
+//! trailing event behind.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
@@ -45,7 +46,6 @@ struct RawRecordingEvent {
     data_b64: Option<String>,
     width: Option<u16>,
     height: Option<u16>,
-    #[allow(dead_code)]
     exit_code: Option<i32>,
 }
 
@@ -53,7 +53,10 @@ struct RawRecordingEvent {
 pub(crate) struct ParsedKrec {
     pub(crate) width: u16,
     pub(crate) height: u16,
-    pub(crate) start_timestamp_s: u64,
+    pub(crate) start_timestamp_ms: u64,
+    /// Wall-clock session length: the offset of the last recorded event.
+    pub(crate) duration_ms: u64,
+    pub(crate) exit_code: Option<i32>,
     pub(crate) events: Vec<KrecEvent>,
 }
 
@@ -98,6 +101,7 @@ pub(crate) fn parse_krec<R: Read>(input: R) -> Result<ParsedKrec> {
     let mut output_decoder = Utf8StreamDecoder::new();
     let mut input_decoder = Utf8StreamDecoder::new();
     let mut last_offset_ms = 0_u64;
+    let mut exit_code = None;
 
     loop {
         line.clear();
@@ -167,8 +171,8 @@ pub(crate) fn parse_krec<R: Read>(input: R) -> Result<ParsedKrec> {
                     });
                 }
             }
-            // The exit marker carries no renderable state.
-            "x" => {}
+            // The exit marker carries no renderable state, only the code.
+            "x" => exit_code = event.exit_code,
             other => bail!("unsupported raw recording event '{other}'"),
         }
     }
@@ -189,7 +193,9 @@ pub(crate) fn parse_krec<R: Read>(input: R) -> Result<ParsedKrec> {
     Ok(ParsedKrec {
         width: header.width,
         height: header.height,
-        start_timestamp_s: header.start_timestamp_ms / 1000,
+        start_timestamp_ms: header.start_timestamp_ms,
+        duration_ms: last_offset_ms,
+        exit_code,
         events,
     })
 }
@@ -318,7 +324,9 @@ mod tests {
         let parsed = parse_krec(raw.as_bytes()).expect("krec should parse");
         assert_eq!(parsed.width, 120);
         assert_eq!(parsed.height, 40);
-        assert_eq!(parsed.start_timestamp_s, 1_700_000_000);
+        assert_eq!(parsed.start_timestamp_ms, 1_700_000_000_000);
+        assert_eq!(parsed.duration_ms, 750);
+        assert_eq!(parsed.exit_code, Some(0));
         assert_eq!(parsed.events.len(), 3);
 
         assert_eq!(parsed.events[0].time_s, 0.0);

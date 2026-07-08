@@ -9,16 +9,6 @@ import type {
   ScenarioStatusStep,
 } from "./run-types";
 
-export function formatScenarioReplayName(index: number, total: number) {
-  if (total <= 1) {
-    return "Terminal replay";
-  }
-  if (index === total - 1) {
-    return "Latest replay";
-  }
-  return `Replay ${index + 1}`;
-}
-
 export function formatScenarioElapsedTime(totalSeconds: number) {
   const hours = Math.floor(totalSeconds / 3_600);
   const minutes = Math.floor((totalSeconds % 3_600) / 60);
