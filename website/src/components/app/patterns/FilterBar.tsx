@@ -43,6 +43,7 @@ export function FilterBar({
   filtersActive = false,
   onClear,
   children,
+  end,
 }: {
   search: string;
   onSearchChange: (value: string) => void;
@@ -51,6 +52,7 @@ export function FilterBar({
   filtersActive?: boolean;
   onClear?: (() => void) | undefined;
   children?: ReactNode;
+  end?: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -65,6 +67,7 @@ export function FilterBar({
         />
       </div>
       {children}
+      {end ? <div className="ml-auto flex items-center gap-2">{end}</div> : null}
       {filtersActive && onClear ? (
         <Button variant="ghost" size="sm" onClick={onClear}>
           <X className="size-3.5" />

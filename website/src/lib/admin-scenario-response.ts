@@ -2,16 +2,19 @@ import type {
   ScenarioDetailRecord,
   ScenarioListRecord,
 } from "@/lib/scenarios";
+import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
 
-export function serializeAdminScenarioSummary(scenario: ScenarioListRecord) {
+export function serializeAdminScenarioSummary(
+  scenario: ScenarioListRecord,
+): AdminScenarioSummary {
   return {
     scenarioId: scenario.scenarioId,
     title: scenario.title,
+    category: scenario.category,
     description: scenario.description,
     difficulty: scenario.difficulty,
     estimatedMinutes: scenario.estimatedMinutes,
     tags: scenario.tags,
-    briefingMarkdown: scenario.briefingMarkdown,
     scenarioHintCount: scenario.hints.length,
     probeCount: scenario.probeCount,
     vmCount: scenario.vmCount,
@@ -25,10 +28,10 @@ export function serializeAdminScenarioSummary(scenario: ScenarioListRecord) {
 export function serializeAdminScenarioDetail(scenario: ScenarioDetailRecord) {
   return {
     ...serializeAdminScenarioSummary(scenario),
-    probes: scenario.probes.map(({ hints, ...probe }) => ({
-      ...probe,
-      hintCount: hints.length,
-    })),
+    briefingMarkdown: scenario.briefingMarkdown,
+    solutionMarkdown: scenario.solutionMarkdown,
+    hints: scenario.hints,
+    probes: scenario.probes,
     vms: scenario.vms,
   };
 }

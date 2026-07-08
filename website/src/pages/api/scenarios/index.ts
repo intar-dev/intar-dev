@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
-import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
+import { listScenarioCatalogForUser } from "@/lib/scenario-runs";
 
 export const prerender = false;
 
@@ -8,6 +8,6 @@ export const GET: APIRoute = async ({ request }) => {
   const authz = await requireUserContext(request);
   if (!authz.ok) return authz.response;
 
-  const scenarios = await listEnabledScenariosForUser();
+  const scenarios = await listScenarioCatalogForUser(authz.context.userId);
   return jsonResponse({ scenarios });
 };

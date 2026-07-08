@@ -6,23 +6,28 @@ import {
 import type { ScenarioDetailRecord } from "@/lib/scenarios";
 
 describe("admin scenario response serialization", () => {
-  it("omits gated solution and hint bodies from summary responses", () => {
+  it("keeps list responses lean while carrying catalog metadata", () => {
     const serialized = serializeAdminScenarioSummary(scenario);
 
+    expect(serialized.category).toBe("web");
     expect(serialized).not.toHaveProperty("solutionMarkdown");
+    expect(serialized).not.toHaveProperty("briefingMarkdown");
     expect(serialized).not.toHaveProperty("hints");
     expect(serialized.scenarioHintCount).toBe(1);
   });
 
-  it("omits gated solution and hint bodies from detail responses", () => {
+  it("includes gated content and full probe fields in detail responses", () => {
     const serialized = serializeAdminScenarioDetail(scenario);
 
-    expect(serialized).not.toHaveProperty("solutionMarkdown");
-    expect(serialized).not.toHaveProperty("hints");
+    expect(serialized.briefingMarkdown).toBe("The service is down.");
+    expect(serialized.solutionMarkdown).toBe("Run `systemctl restart nginx`.");
+    expect(serialized.hints).toEqual(scenario.hints);
     expect(serialized.scenarioHintCount).toBe(1);
-    expect(serialized.probes[0]).not.toHaveProperty("hints");
-    expect(serialized.probes[0]).not.toHaveProperty("body_markdown");
-    expect(serialized.probes[0]?.hintCount).toBe(1);
+    expect(serialized.probes[0]?.hints).toEqual(scenario.probes[0]?.hints);
+    expect(serialized.probes[0]?.bodyMarkdown).toBe(
+      "Make nginx respond on localhost.",
+    );
+    expect(serialized.probes[0]).not.toHaveProperty("hintCount");
     expect(serialized.vms[0]?.imageFormat).toBe("raw_zstd");
     expect(serialized.vms[0]?.kernelSha256).toMatch(/^[a-f0-9]{64}$/);
   });

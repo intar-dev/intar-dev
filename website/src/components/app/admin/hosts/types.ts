@@ -132,7 +132,13 @@ export interface HostRunsResponse {
 
 export interface AdminScenarioSummary {
   scenarioId: string;
+  title: string;
+  category: string;
   description: string;
+  difficulty: "easy" | "medium" | "hard";
+  estimatedMinutes: number;
+  tags: string[];
+  scenarioHintCount: number;
   probeCount: number;
   vmCount: number;
   enabled: boolean;

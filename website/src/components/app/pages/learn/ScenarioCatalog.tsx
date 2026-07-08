@@ -1,29 +1,40 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { ArrowRight, CircleDot, Search, ShieldCheck, Users } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
-import {
-  ScenarioCard,
-  type ScenarioCardData,
-} from "@/components/app/patterns/ScenarioCard";
-import type { ScenarioDifficulty } from "@/components/app/patterns/MetaChip";
+import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
+import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaChip";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
+import {
+  CATALOG_SORT_COMPARATORS,
+  CATALOG_SORT_OPTIONS,
+  compactCatalogSearch,
+  normalizeCatalogSearch,
+  type CatalogSort,
+  type NormalizedCatalogSearch,
+} from "./catalog-search";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-
-interface ScenarioCatalogEntry extends ScenarioCardData {
-  slug: string;
-  category: string;
-  scenarioName: string;
-  enabledAt: number;
-}
+import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
 
 interface ScenarioCatalogResponse {
-  scenarios: ScenarioCatalogEntry[];
+  scenarios: ScenarioCatalogWireEntry[];
 }
 
 interface MyAssignmentsResponse {
@@ -37,13 +48,14 @@ interface MyAssignmentsResponse {
   }>;
 }
 
-const DIFFICULTIES: ScenarioDifficulty[] = ["easy", "medium", "hard"];
-
 export function ScenarioCatalog() {
-  const [search, setSearch] = useState("");
-  const [difficulty, setDifficulty] = useState<ScenarioDifficulty | null>(null);
-  const [category, setCategory] = useState<string | null>(null);
-  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const routeSearch = useSearch({ from: "/app/scenarios" });
+  const searchState = useMemo(
+    () => normalizeCatalogSearch(routeSearch),
+    [routeSearch],
+  );
+  const navigate = useNavigate();
+  const [searchText, setSearchText] = useState(searchState.q);
 
   const scenarios = useQuery({
     queryKey: ["scenarios", "list"],
@@ -105,14 +117,36 @@ export function ScenarioCatalog() {
     [allEntries],
   );
 
+  useEffect(() => {
+    setSearchText((current) =>
+      current.trim() === searchState.q ? current : searchState.q,
+    );
+  }, [searchState.q]);
+
+  useEffect(() => {
+    const nextQuery = searchText.trim();
+    if (nextQuery === searchState.q) return;
+    const timeout = window.setTimeout(() => {
+      void navigateCatalogSearch(navigate, {
+        ...searchState,
+        q: nextQuery,
+      });
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [navigate, searchState, searchText]);
+
   const filtered = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return allEntries.filter((scenario) => {
-      if (difficulty && scenario.difficulty !== difficulty) return false;
-      if (category && scenario.category !== category) return false;
+    const needle = searchState.q.toLowerCase();
+    const filteredEntries = allEntries.filter((scenario) => {
+      if (searchState.difficulty && scenario.difficulty !== searchState.difficulty) {
+        return false;
+      }
+      if (searchState.category && scenario.category !== searchState.category) {
+        return false;
+      }
       if (
-        selectedTags.length &&
-        !selectedTags.every((tag) => scenario.tags.includes(tag))
+        searchState.tags.length &&
+        !searchState.tags.every((tag) => scenario.tags.includes(tag))
       ) {
         return false;
       }
@@ -120,28 +154,37 @@ export function ScenarioCatalog() {
       return (
         scenario.title.toLowerCase().includes(needle) ||
         scenario.tagline.toLowerCase().includes(needle) ||
+        scenario.category.toLowerCase().includes(needle) ||
         scenario.tags.some((tag) => tag.toLowerCase().includes(needle))
       );
     });
-  }, [allEntries, category, difficulty, search, selectedTags]);
+
+    return filteredEntries.sort(CATALOG_SORT_COMPARATORS[searchState.sort]);
+  }, [allEntries, searchState]);
 
   const toggleTag = (tag: string) => {
-    setSelectedTags((current) =>
-      current.includes(tag)
-        ? current.filter((entry) => entry !== tag)
-        : [...current, tag],
-    );
+    const nextTags = searchState.tags.includes(tag)
+      ? searchState.tags.filter((entry) => entry !== tag)
+      : [...searchState.tags, tag].sort();
+    void navigateCatalogSearch(navigate, { ...searchState, tags: nextTags });
   };
 
   const filtersActive = Boolean(
-    search.trim() || difficulty || category || selectedTags.length,
+    searchState.q ||
+      searchState.difficulty ||
+      searchState.category ||
+      searchState.tags.length,
   );
 
   const clearFilters = () => {
-    setSearch("");
-    setDifficulty(null);
-    setCategory(null);
-    setSelectedTags([]);
+    setSearchText("");
+    void navigateCatalogSearch(navigate, {
+      q: "",
+      difficulty: undefined,
+      category: undefined,
+      tags: [],
+      sort: searchState.sort,
+    });
   };
 
   return (
@@ -162,7 +205,7 @@ export function ScenarioCatalog() {
 
       {activeRuns.length || assignments.length ? (
         <section className="space-y-3">
-          <h2 className="text-eyebrow">Continue</h2>
+          <h2 className="text-eyebrow">Jump back in</h2>
           <div className="grid gap-3 lg:grid-cols-2">
             {activeRuns.map((run) => (
               <Link
@@ -213,22 +256,35 @@ export function ScenarioCatalog() {
       {allEntries.length ? (
         <div className="space-y-3">
           <FilterBar
-            search={search}
-            onSearchChange={setSearch}
+            search={searchText}
+            onSearchChange={setSearchText}
             searchPlaceholder="Search scenarios…"
             searchLabel="Search scenarios"
             filtersActive={filtersActive}
             onClear={clearFilters}
+            end={
+              <SortSelect
+                value={searchState.sort}
+                onChange={(sort) =>
+                  void navigateCatalogSearch(navigate, {
+                    ...searchState,
+                    sort,
+                  })
+                }
+              />
+            }
           >
             <div className="flex items-center gap-1.5">
-              {DIFFICULTIES.map((level) => (
+              {SCENARIO_DIFFICULTIES.map((level) => (
                 <FilterChip
                   key={level}
-                  active={difficulty === level}
+                  active={searchState.difficulty === level}
                   onClick={() =>
-                    setDifficulty((current) =>
-                      current === level ? null : level,
-                    )
+                    void navigateCatalogSearch(navigate, {
+                      ...searchState,
+                      difficulty:
+                        searchState.difficulty === level ? undefined : level,
+                    })
                   }
                 >
                   {level}
@@ -236,36 +292,74 @@ export function ScenarioCatalog() {
               ))}
             </div>
             {allCategories.length ? (
-              <div className="flex items-center gap-1.5">
-                {allCategories.map((entry) => (
-                  <FilterChip
-                    key={entry}
-                    active={category === entry}
-                    onClick={() =>
-                      setCategory((current) =>
-                        current === entry ? null : entry,
-                      )
+              <Select
+                value={searchState.category ?? "all"}
+                onValueChange={(value) =>
+                  void navigateCatalogSearch(navigate, {
+                    ...searchState,
+                    category:
+                      typeof value === "string" && value !== "all"
+                        ? value
+                        : undefined,
+                  })
+                }
+              >
+                <SelectTrigger size="sm" aria-label="Filter by category">
+                  Category: {searchState.category ?? "All"}
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  {allCategories.map((entry) => (
+                    <SelectItem key={entry} value={entry}>
+                      {entry}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : null}
+            {allTags.length > 1 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        aria-label="Filter by tags"
+                      />
                     }
                   >
-                    {entry}
+                    Tags
+                    {searchState.tags.length
+                      ? ` · ${searchState.tags.length}`
+                      : ""}
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="max-h-72 min-w-48">
+                    {allTags.map((tag) => (
+                      <DropdownMenuCheckboxItem
+                        key={tag}
+                        checked={searchState.tags.includes(tag)}
+                        onCheckedChange={() => toggleTag(tag)}
+                      >
+                        {tag}
+                      </DropdownMenuCheckboxItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                {searchState.tags.map((tag) => (
+                  <FilterChip
+                    key={tag}
+                    active
+                    onClick={() => toggleTag(tag)}
+                    className="normal-case"
+                  >
+                    {tag}
                   </FilterChip>
                 ))}
               </div>
             ) : null}
           </FilterBar>
-          {allTags.length > 1 ? (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {allTags.map((tag) => (
-                <FilterChip
-                  key={tag}
-                  active={selectedTags.includes(tag)}
-                  onClick={() => toggleTag(tag)}
-                >
-                  {tag}
-                </FilterChip>
-              ))}
-            </div>
-          ) : null}
         </div>
       ) : null}
 
@@ -307,4 +401,38 @@ export function ScenarioCatalog() {
       ) : null}
     </PageShell>
   );
+}
+
+function SortSelect({
+  value,
+  onChange,
+}: {
+  value: CatalogSort;
+  onChange: (value: CatalogSort) => void;
+}) {
+  return (
+    <Select value={value} onValueChange={(next) => onChange(next as CatalogSort)}>
+      <SelectTrigger size="sm" aria-label="Sort scenarios">
+        Sort: {CATALOG_SORT_OPTIONS.find((option) => option.value === value)?.label}
+      </SelectTrigger>
+      <SelectContent align="end">
+        {CATALOG_SORT_OPTIONS.map((option) => (
+          <SelectItem key={option.value} value={option.value}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function navigateCatalogSearch(
+  navigate: ReturnType<typeof useNavigate>,
+  next: NormalizedCatalogSearch,
+) {
+  return navigate({
+    to: ".",
+    replace: true,
+    search: compactCatalogSearch(next),
+  });
 }

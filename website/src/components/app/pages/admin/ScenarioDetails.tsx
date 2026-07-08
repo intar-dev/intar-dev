@@ -1,45 +1,48 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import {
   CircleCheckBig,
   CircleOff,
+  Clock3,
   HardDriveDownload,
   Radar,
+  Server,
 } from "lucide-react";
-import { PageShell } from "@/components/app/patterns/PageShell";
+import { Markdown } from "@/components/app/Markdown";
+import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
+import { formatBytes, formatTimestamp } from "@/components/app/lib/format";
 import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import { MetaChip } from "@/components/app/patterns/MetaChip";
+import {
+  DifficultyChip,
+  MetaChip,
+} from "@/components/app/patterns/MetaChip";
 import {
   ErrorState,
   LoadingState,
 } from "@/components/app/patterns/StateCard";
 import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
-import { formatTimestamp } from "@/components/app/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { ScenarioProbeRecord } from "@/lib/scenario-model";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import type { ScenarioHintManifestV2 } from "@/generated/catalog";
+import type {
+  ScenarioProbeRecord,
+  ScenarioVmRecord,
+} from "@/lib/scenario-model";
 
-interface ScenarioRecord {
-  scenarioId: string;
-  description: string;
-  probeCount: number;
-  vmCount: number;
-  enabled: boolean;
-  enabledAt: number | null;
-  createdAt: number;
-  updatedAt: number;
+interface ScenarioRecord extends AdminScenarioSummary {
+  briefingMarkdown: string;
+  solutionMarkdown: string;
+  hints: ScenarioHintManifestV2[];
   probes: ScenarioProbeRecord[];
-  vms: Array<{
-    id: string;
-    ordinal: number;
-    name: string;
-    image: string;
-    cpu: number;
-    memoryMib: number;
-    diskMib: number;
-  }>;
+  vms: ScenarioVmRecord[];
 }
 
 interface ScenarioDetailResponse {
@@ -156,7 +159,7 @@ export function ScenarioDetails() {
   const scenarioRecord = scenario.data ?? null;
   const enabled = scenarioRecord?.enabled ?? false;
 
-  useBreadcrumbLabel(scenarioRecord?.scenarioId);
+  useBreadcrumbLabel(scenarioRecord?.title);
 
   return (
     <PageShell admin title="Scenario details" showHeader={false}>
@@ -178,13 +181,18 @@ export function ScenarioDetails() {
             eyebrow="Admin"
             badge="Admin"
             backLink={{ to: "/admin/scenarios", label: "Registry" }}
-            title={scenarioRecord.scenarioId}
-            description="Read-only scenario record. The web UI reflects the current stored scenario and only controls whether it is enabled for learners."
+            title={scenarioRecord.title}
+            description={scenarioRecord.description}
             meta={
               <>
                 <Badge variant={enabled ? "success" : "outline"}>
                   {enabled ? "Enabled" : "Disabled"}
                 </Badge>
+                <DifficultyChip difficulty={scenarioRecord.difficulty} />
+                <MetaChip icon={<Clock3 />}>
+                  ~{scenarioRecord.estimatedMinutes} min
+                </MetaChip>
+                <MetaChip variant="outline">{scenarioRecord.category}</MetaChip>
                 <MetaChip icon={<HardDriveDownload />}>
                   {scenarioRecord.vmCount} VM
                   {scenarioRecord.vmCount === 1 ? "" : "s"}
@@ -193,33 +201,60 @@ export function ScenarioDetails() {
                   {scenarioRecord.probeCount} probe
                   {scenarioRecord.probeCount === 1 ? "" : "s"}
                 </MetaChip>
+                <MetaChip>
+                  {scenarioRecord.scenarioHintCount} hint
+                  {scenarioRecord.scenarioHintCount === 1 ? "" : "s"}
+                </MetaChip>
+                {scenarioRecord.tags.map((tag) => (
+                  <MetaChip key={tag} variant="outline">
+                    {tag}
+                  </MetaChip>
+                ))}
+                <MetaChip variant="outline" className="font-mono">
+                  {scenarioRecord.scenarioId}
+                </MetaChip>
               </>
             }
             actions={
-              enabled ? (
-                <Button
-                  variant="outline"
-                  onClick={() => disableScenario.mutate()}
-                  disabled={
-                    disableScenario.isPending || enableScenario.isPending
-                  }
-                >
-                  <CircleOff className="size-4" />
-                  {disableScenario.isPending
-                    ? "Disabling…"
-                    : "Disable scenario"}
-                </Button>
-              ) : (
-                <Button
-                  onClick={() => enableScenario.mutate()}
-                  disabled={
-                    enableScenario.isPending || disableScenario.isPending
-                  }
-                >
-                  <CircleCheckBig className="size-4" />
-                  {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
-                </Button>
-              )
+              <>
+                {enabled ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => disableScenario.mutate()}
+                    disabled={
+                      disableScenario.isPending || enableScenario.isPending
+                    }
+                  >
+                    <CircleOff className="size-4" />
+                    {disableScenario.isPending
+                      ? "Disabling…"
+                      : "Disable scenario"}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => enableScenario.mutate()}
+                    disabled={
+                      enableScenario.isPending || disableScenario.isPending
+                    }
+                  >
+                    <CircleCheckBig className="size-4" />
+                    {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
+                  </Button>
+                )}
+                {enabled ? (
+                  <Button
+                    variant="outline"
+                    render={
+                      <Link
+                        to="/scenarios/$scenarioId"
+                        params={{ scenarioId: scenarioRecord.scenarioId }}
+                      />
+                    }
+                  >
+                    View as learner
+                  </Button>
+                ) : null}
+              </>
             }
           />
 
@@ -248,42 +283,10 @@ export function ScenarioDetails() {
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
             <div className="space-y-6">
               <Section
-                title="Briefing preview"
-                description="How the scenario description reads to learners."
+                title="Briefing"
+                description="How the scenario briefing reads to learners."
               >
-                <p className="text-sm leading-6 whitespace-pre-wrap">
-                  {scenarioRecord.description}
-                </p>
-              </Section>
-
-              <Section
-                title="VM inventory"
-                description="Machines provisioned for every run of this scenario."
-              >
-                {scenarioRecord.vms.length ? (
-                  <div className="divide-y">
-                    {scenarioRecord.vms.map((vm) => (
-                      <div
-                        key={vm.id}
-                        className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0"
-                      >
-                        <p className="font-mono text-sm font-medium">
-                          {vm.name}
-                        </p>
-                        <Badge variant="outline">{vm.image}</Badge>
-                        <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
-                          <span>{vm.cpu} vCPU</span>
-                          <span>{formatMemory(vm.memoryMib)}</span>
-                          <span>{formatDisk(vm.diskMib)}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    No VMs are defined on this scenario.
-                  </p>
-                )}
+                <Markdown>{scenarioRecord.briefingMarkdown}</Markdown>
               </Section>
 
               <Section
@@ -293,33 +296,63 @@ export function ScenarioDetails() {
                 {scenarioRecord.probes.length ? (
                   <div className="divide-y">
                     {scenarioRecord.probes.map((probe, index) => (
-                      <div
+                      <ProbeRecord
                         key={`${scenarioRecord.scenarioId}-probe-${probe.ordinal}`}
-                        className="space-y-1.5 py-3 first:pt-0 last:pb-0"
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="text-sm font-medium">
-                            {index + 1}. {probe.name}
-                          </p>
-                          <Badge
-                            variant={
-                              probe.phase === "boot" ? "secondary" : "outline"
-                            }
-                          >
-                            {probe.phase === "boot"
-                              ? "Boot probe"
-                              : "Scenario probe"}
-                          </Badge>
-                        </div>
-                        <p className="text-sm leading-6 whitespace-pre-wrap text-muted-foreground">
-                          {probe.description}
-                        </p>
-                      </div>
+                        probe={probe}
+                        index={index}
+                      />
                     ))}
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">
                     No probes are defined on this scenario.
+                  </p>
+                )}
+              </Section>
+
+              {scenarioRecord.hints.length ? (
+                <Section title="Scenario hints">
+                  <div className="space-y-3">
+                    {scenarioRecord.hints.map((hint, index) => (
+                      <HintTile
+                        key={hint.id}
+                        hint={hint}
+                        fallbackTitle={`Hint ${index + 1}`}
+                      />
+                    ))}
+                  </div>
+                </Section>
+              ) : null}
+
+              <Section
+                title="Solution"
+                description="Learner-gated content — visible to admins for inspection."
+              >
+                <Collapsible>
+                  <CollapsibleTrigger
+                    render={<Button type="button" variant="outline" />}
+                  >
+                    Show solution
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-4">
+                    <Markdown>{scenarioRecord.solutionMarkdown}</Markdown>
+                  </CollapsibleContent>
+                </Collapsible>
+              </Section>
+
+              <Section
+                title="VM inventory"
+                description="Machines provisioned for every run of this scenario."
+              >
+                {scenarioRecord.vms.length ? (
+                  <div className="divide-y">
+                    {scenarioRecord.vms.map((vm) => (
+                      <VmRecord key={vm.id} vm={vm} />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No VMs are defined on this scenario.
                   </p>
                 )}
               </Section>
@@ -333,10 +366,22 @@ export function ScenarioDetails() {
             >
               <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} />
               <MetaRow label="State" value={enabled ? "Enabled" : "Disabled"} />
-              <MetaRow label="VM count" value={String(scenarioRecord.vmCount)} />
+              <MetaRow label="Category" value={scenarioRecord.category} />
               <MetaRow
-                label="Probe count"
-                value={String(scenarioRecord.probeCount)}
+                label="Difficulty"
+                value={scenarioRecord.difficulty}
+              />
+              <MetaRow
+                label="Estimated minutes"
+                value={String(scenarioRecord.estimatedMinutes)}
+              />
+              <MetaRow
+                label="Tags"
+                value={
+                  scenarioRecord.tags.length
+                    ? scenarioRecord.tags.join(", ")
+                    : "-"
+                }
               />
               <MetaRow
                 label="Enabled at"
@@ -347,6 +392,10 @@ export function ScenarioDetails() {
                 }
               />
               <MetaRow
+                label="Created"
+                value={formatTimestamp(scenarioRecord.createdAt)}
+              />
+              <MetaRow
                 label="Updated"
                 value={formatTimestamp(scenarioRecord.updatedAt)}
               />
@@ -355,6 +404,114 @@ export function ScenarioDetails() {
         </>
       )}
     </PageShell>
+  );
+}
+
+function ProbeRecord({
+  probe,
+  index,
+}: {
+  probe: ScenarioProbeRecord;
+  index: number;
+}) {
+  return (
+    <div className="space-y-3 py-4 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="font-mono text-sm font-medium">
+          {index + 1}. {probe.name}
+        </p>
+        <Badge variant={probe.phase === "boot" ? "secondary" : "outline"}>
+          {probe.phase === "boot" ? "Boot" : "Scenario"}
+        </Badge>
+        <Badge variant="outline" className="font-mono">
+          {probe.kind}
+        </Badge>
+        <MetaChip icon={<Server />} variant="outline">
+          {probe.scenarioVmName}
+        </MetaChip>
+      </div>
+      {probe.title ? <p className="text-sm font-medium">{probe.title}</p> : null}
+      {probe.bodyMarkdown ? <Markdown>{probe.bodyMarkdown}</Markdown> : null}
+      {probe.description ? (
+        <p className="text-caption">{probe.description}</p>
+      ) : null}
+      {probe.hints.length ? (
+        <Collapsible>
+          <CollapsibleTrigger
+            render={<Button type="button" variant="outline" size="sm" />}
+          >
+            Hints ({probe.hints.length})
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-3 space-y-3">
+            {probe.hints.map((hint, hintIndex) => (
+              <HintTile
+                key={hint.id}
+                hint={hint}
+                fallbackTitle={`Hint ${hintIndex + 1}`}
+              />
+            ))}
+          </CollapsibleContent>
+        </Collapsible>
+      ) : null}
+    </div>
+  );
+}
+
+function HintTile({
+  hint,
+  fallbackTitle,
+}: {
+  hint: ScenarioHintManifestV2;
+  fallbackTitle: string;
+}) {
+  return (
+    <div className="rounded-xl bg-muted/50 px-4 py-3">
+      <p className="text-sm font-medium">{hint.title?.trim() || fallbackTitle}</p>
+      <Markdown className="mt-2">{hint.body_markdown}</Markdown>
+    </div>
+  );
+}
+
+function VmRecord({
+  vm,
+}: {
+  vm: ScenarioVmRecord;
+}) {
+  return (
+    <div className="space-y-4 py-4 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <p className="font-mono text-sm font-medium">{vm.name}</p>
+        <Badge variant="outline">{vm.image}</Badge>
+        <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
+          <span>{vm.cpu} vCPU</span>
+          <span>{formatMemory(vm.memoryMib)}</span>
+          <span>{formatDisk(vm.diskMib)}</span>
+        </div>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <BootMeta label="Image SHA-256" value={vm.imageSha256 ?? "-"} />
+        <BootMeta label="Kernel SHA-256" value={vm.kernelSha256} />
+        <BootMeta label="Initrd SHA-256" value={vm.initrdSha256} />
+        <BootMeta
+          label="Virtual size"
+          value={formatBytes(vm.imageVirtualSizeBytes)}
+        />
+        <BootMeta label="Format" value={vm.imageFormat} />
+        <BootMeta label="Image key" value={formatImageKey(vm)} />
+      </div>
+      <div className="rounded-md border bg-muted/60 p-3 font-mono text-xs break-all">
+        {vm.bootCmdline}
+      </div>
+    </div>
+  );
+}
+
+function BootMeta({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-eyebrow">{label}</p>
+      <p className="font-mono text-xs break-all">{value}</p>
+    </div>
   );
 }
 
@@ -377,4 +534,9 @@ function formatDisk(value: number) {
   return Number.isInteger(gib)
     ? `${gib} GiB disk`
     : `${gib.toFixed(1)} GiB disk`;
+}
+
+function formatImageKey(vm: ScenarioVmRecord) {
+  if (!vm.imageKey) return "-";
+  return `${vm.imageKey.scenario}/${vm.imageKey.vm} (${vm.imageKey.arch})`;
 }

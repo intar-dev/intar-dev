@@ -156,6 +156,7 @@ export function ScenarioRun() {
       setCancelDialogOpen(false);
       setTerminalVisible(false);
       void queryClient.invalidateQueries({ queryKey: ["scenarios", "run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
     },
     onError: () => {
       setShutdownRequested(false);
@@ -183,6 +184,7 @@ export function ScenarioRun() {
     },
     onSuccess: async () => {
       setDeleteRunDialogOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
       if (attemptData?.scenarioId) {
         await navigate({
           to: "/scenarios/$scenarioId",

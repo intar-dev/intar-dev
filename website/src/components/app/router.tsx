@@ -18,6 +18,7 @@ import { ScenarioDetails as AdminScenarioDetails } from "./pages/admin/ScenarioD
 import { AdminPeople } from "./pages/AdminPeople";
 import { AdminAuthoring } from "./pages/AdminAuthoring";
 import { ScenarioCatalog } from "./pages/learn/ScenarioCatalog";
+import { validateSearch as validateCatalogSearch } from "./pages/learn/catalog-search";
 import { ScenarioBriefing } from "./pages/learn/ScenarioBriefing";
 import { ScenarioRun } from "./pages/ScenarioRun";
 import { RunsList } from "./pages/RunsList";
@@ -71,6 +72,7 @@ const appLayoutRoute = createRoute({
 const scenarioCatalogRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "scenarios",
+  validateSearch: validateCatalogSearch,
   component: ScenarioCatalog,
 });
 

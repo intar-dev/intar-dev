@@ -93,6 +93,19 @@ export interface ScenarioCatalogEntry {
   vmCount: number;
 }
 
+export interface ScenarioProgress {
+  status: "new" | "in_progress" | "attempted" | "completed";
+  activeRunId: string | null;
+  attemptCount: number;
+  completedCount: number;
+  bestSolveMs: number | null;
+  lastPlayedAt: number | null;
+}
+
+export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
+  progress: ScenarioProgress;
+}
+
 export interface ScenarioDetail {
   scenarioId: string;
   slug: string;
@@ -297,6 +310,111 @@ export async function listScenarioRunsForUser(params: {
     }),
     solutionAssisted: row.solutionAssisted,
     hasReplay: hasReplayArtifacts(row.stateJson),
+  }));
+}
+
+export async function getScenarioProgressByScenario(
+  userId: string,
+): Promise<Map<string, ScenarioProgress>> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      runId: scenarioRuns.runId,
+      scenarioId: scenarioRuns.scenarioId,
+      state: scenarioRuns.state,
+      activeKey: scenarioRuns.activeKey,
+      createdAt: scenarioRuns.createdAt,
+      updatedAt: scenarioRuns.updatedAt,
+      completedAt: scenarioRuns.completedAt,
+      solvedAt: scenarioRuns.solvedAt,
+      failedAt: scenarioRuns.failedAt,
+      deleteRequestedAt: scenarioRuns.deleteRequestedAt,
+    })
+    .from(scenarioRuns)
+    .where(eq(scenarioRuns.userId, userId));
+
+  const progressByScenario = new Map<string, ScenarioProgress>();
+  for (const row of rows) {
+    const current =
+      progressByScenario.get(row.scenarioId) ?? newScenarioProgress();
+    const outcome = deriveScenarioRunOutcome({
+      phase: row.state as RunPhase,
+      solvedAt: row.solvedAt,
+      deleteRequestedAt: row.deleteRequestedAt,
+      failedAt: row.failedAt,
+    });
+    const finished =
+      row.activeKey === null &&
+      (row.state === "completed" || row.state === "failed");
+    const finishedAt = row.completedAt ?? row.failedAt ?? null;
+    const solveDurationMs = deriveScenarioRunSolveDurationMs({
+      createdAt: row.createdAt,
+      solvedAt: row.solvedAt,
+    });
+
+    if (row.activeKey !== null) {
+      current.activeRunId = row.runId;
+    }
+    // A run cancelled before it was ever solved is not an attempt, and a
+    // genuine solve counts as completed even when teardown later failed or
+    // the user destroyed the run (outcome would report failed/cancelled).
+    const solved = row.solvedAt !== null;
+    if (finished && (outcome !== "cancelled" || solved)) {
+      current.attemptCount += 1;
+    }
+    if (finished && solved) {
+      current.completedCount += 1;
+      if (solveDurationMs !== null) {
+        current.bestSolveMs =
+          current.bestSolveMs === null
+            ? solveDurationMs
+            : Math.min(current.bestSolveMs, solveDurationMs);
+      }
+    }
+    current.lastPlayedAt = Math.max(
+      current.lastPlayedAt ?? 0,
+      row.updatedAt,
+      finishedAt ?? 0,
+      row.createdAt,
+    );
+    progressByScenario.set(row.scenarioId, current);
+  }
+
+  for (const progress of progressByScenario.values()) {
+    progress.status =
+      progress.activeRunId !== null
+        ? "in_progress"
+        : progress.completedCount > 0
+          ? "completed"
+          : progress.attemptCount > 0
+            ? "attempted"
+            : "new";
+  }
+
+  return progressByScenario;
+}
+
+function newScenarioProgress(): ScenarioProgress {
+  return {
+    status: "new",
+    activeRunId: null,
+    attemptCount: 0,
+    completedCount: 0,
+    bestSolveMs: null,
+    lastPlayedAt: null,
+  };
+}
+
+export async function listScenarioCatalogForUser(
+  userId: string,
+): Promise<ScenarioCatalogWireEntry[]> {
+  const [scenarios, progressByScenario] = await Promise.all([
+    listEnabledScenariosForUser(),
+    getScenarioProgressByScenario(userId),
+  ]);
+  return scenarios.map((scenario) => ({
+    ...scenario,
+    progress: progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
   }));
 }
 

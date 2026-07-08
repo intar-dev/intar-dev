@@ -3,6 +3,12 @@ import { cn } from "@/lib/utils";
 
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
 
+export const SCENARIO_DIFFICULTIES: readonly ScenarioDifficulty[] = [
+  "easy",
+  "medium",
+  "hard",
+];
+
 interface MetaChipProps {
   icon?: ReactNode;
   children: ReactNode;
