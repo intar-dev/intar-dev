@@ -420,10 +420,10 @@ export function AsciicastReplaySurface({
             autoPlay: false,
             preload: true,
             controls: true,
-            // The cast renders its native grid scaled to fill the 16:9 box.
-            // New recordings are all 120x30, so they share one font size;
-            // legacy or oversized casts shrink gracefully instead of cropping.
-            fit: "both",
+            // The cast plays at its recorded geometry: the player fills the
+            // container width and derives its height from the cast's rows,
+            // preserving the original aspect ratio.
+            fit: "width",
             terminalLineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
             idleTimeLimit: REPLAY_IDLE_TIME_LIMIT_SECONDS,
             terminalFontFamily: REPLAY_TERMINAL_FONT_FAMILY,
@@ -505,7 +505,7 @@ export function AsciicastReplaySurface({
       >
         <div
           ref={containerRef}
-          className="run-artifact-player aspect-video w-full overflow-hidden rounded-md bg-[#121314] [&_.ap-player]:h-full [&_.ap-player]:w-full"
+          className="run-artifact-player w-full overflow-hidden rounded-md bg-[#121314] [&_.ap-player]:w-full"
         />
       </div>
     </div>
@@ -516,10 +516,13 @@ export function ReadOnlyTextSurface({
   content,
   loading,
   wrapText,
+  compact = false,
 }: {
   content: string;
   loading: boolean;
   wrapText: boolean;
+  /** Slim variant for inline embeds: no outer padding or status bar. */
+  compact?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<EditorView | null>(null);
@@ -598,6 +601,17 @@ export function ReadOnlyTextSurface({
       ),
     });
   }, [wrapText]);
+
+  if (compact) {
+    return (
+      <div className="overflow-hidden rounded-md border bg-background">
+        <div
+          ref={containerRef}
+          className="max-h-[22rem] min-h-[4rem] overflow-auto"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="p-4">

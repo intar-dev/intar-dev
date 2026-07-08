@@ -14,7 +14,10 @@
 use avt::Vt;
 
 use super::krec::{KrecEventData, ParsedKrec};
-use super::replay_compose::{MAX_NATIVE_COLS, MAX_NATIVE_ROWS};
+
+/// Guard against absurd recorded geometry blowing up the emulation buffer.
+const MAX_NATIVE_COLS: usize = 512;
+const MAX_NATIVE_ROWS: usize = 512;
 
 /// Memory bound while feeding: scrollback lines beyond this are evicted
 /// oldest-first (and reported as truncation).

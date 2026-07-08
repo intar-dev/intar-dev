@@ -149,7 +149,8 @@ fn parse_krec_file(path: &Path) -> Result<ParsedKrec> {
     parse_krec(file).with_context(|| format!("failed to parse recording {}", path.display()))
 }
 
-/// Test-only asciicast reader used to verify composed output.
+/// Test-only asciicast v3 reader used to verify composed output. Event
+/// intervals are accumulated into absolute `time_s` for easy assertions.
 #[cfg(test)]
 pub(crate) struct ParsedCast {
     pub(crate) width: u16,
@@ -175,29 +176,35 @@ pub(crate) fn parse_cast(content: &str) -> Result<ParsedCast> {
     let header = serde_json::from_str::<Map<String, Value>>(header_line)
         .context("failed to parse cast header")?;
 
-    let width = header
-        .get("width")
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| anyhow::anyhow!("cast header is missing a valid width"))?;
-    let height = header
-        .get("height")
-        .and_then(Value::as_u64)
-        .and_then(|value| u16::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| anyhow::anyhow!("cast header is missing a valid height"))?;
+    if header.get("version").and_then(Value::as_u64) != Some(3) {
+        anyhow::bail!("expected an asciicast v3 header");
+    }
+    let term = header
+        .get("term")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("cast header is missing term"))?;
+    let dimension = |key: &str| {
+        term.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow::anyhow!("cast header is missing a valid term.{key}"))
+    };
+    let width = dimension("cols")?;
+    let height = dimension("rows")?;
 
     let mut events = Vec::new();
+    let mut elapsed_s = 0.0_f64;
     for raw_line in lines {
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
-        let (time_s, kind, payload) = serde_json::from_str::<(f64, String, String)>(line)
+        let (interval_s, kind, payload) = serde_json::from_str::<(f64, String, String)>(line)
             .context("failed to parse cast event")?;
+        elapsed_s += interval_s;
         events.push(CastEvent {
-            time_s,
+            time_s: (elapsed_s * 1000.0).round() / 1000.0,
             kind,
             payload,
         });
@@ -267,13 +274,19 @@ mod tests {
         assert_eq!(second.cast_filename, "session-02.cast");
         assert_eq!(second.transcript, "bravo\n");
 
-        // Each cast is a standalone fixed-grid recording that starts at zero
-        // and carries its own session's start timestamp.
-        for (path, session) in rendered.cast_paths.iter().zip(&rendered.timeline.sessions) {
+        // Each cast is a standalone recording at its session's native
+        // geometry, starting at zero with its own start timestamp.
+        let expected_dimensions = [(120, 30), (80, 24)];
+        for ((path, session), (cols, rows)) in rendered
+            .cast_paths
+            .iter()
+            .zip(&rendered.timeline.sessions)
+            .zip(expected_dimensions)
+        {
             let content = tokio::fs::read_to_string(path).await?;
             let parsed = parse_cast(&content)?;
-            assert_eq!(parsed.width, 120);
-            assert_eq!(parsed.height, 30);
+            assert_eq!(parsed.width, cols);
+            assert_eq!(parsed.height, rows);
             assert!(
                 content
                     .lines()

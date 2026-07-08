@@ -34,6 +34,20 @@ describe("parseReplayCommandLog", () => {
   it("returns empty for casts without input events", () => {
     expect(parseReplayCommandLog('[1,"o","output only"]')).toEqual([]);
   });
+
+  it("accumulates v3 interval times into absolute timestamps", () => {
+    const cast = [
+      '{"version":3,"term":{"cols":80,"rows":24}}',
+      '[0.5,"o","$ "]',
+      '[0.75,"i","ls\\r"]',
+      '[1.0,"o","listing\\r\\n"]',
+      '[2.0,"i","exit\\r"]',
+    ].join("\n");
+    expect(parseReplayCommandLog(cast)).toEqual([
+      { atSeconds: 1.25, text: "ls" },
+      { atSeconds: 4.25, text: "exit" },
+    ]);
+  });
 });
 
 describe("formatReplayTimestamp", () => {

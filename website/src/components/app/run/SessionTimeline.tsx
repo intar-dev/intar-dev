@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, TerminalSquare } from "lucide-react";
+import { ChevronDown, Play, TerminalSquare } from "lucide-react";
 import {
   AsciicastReplaySurface,
   ReadOnlyTextSurface,
@@ -7,13 +7,13 @@ import {
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { MetaChip } from "@/components/app/patterns/MetaChip";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   formatReplayTimestamp,
   parseReplayCommandLog,
@@ -31,11 +31,12 @@ import { cn } from "@/lib/utils";
 const MIN_VISIBLE_GAP_MS = 1_000;
 
 /**
- * The completed-run replay area: one card per SSH session in chronological
- * order, with the reconnect gap called out between cards. Session metadata
- * comes from `vm.sessionTimeline` (already part of the polled run record);
- * each session's cast and transcript are fetched lazily when their tab is
- * shown.
+ * The completed-run replay area: one compact row per SSH session in
+ * chronological order, with the reconnect gap called out between rows. The
+ * plain-text transcript is the default, inline view; the asciinema replay
+ * opens in a dialog and is only fetched once it is requested. Session
+ * metadata comes from `vm.sessionTimeline` (already part of the polled run
+ * record).
  */
 export function SessionTimeline({
   runId,
@@ -48,14 +49,12 @@ export function SessionTimeline({
 
   if (vm?.hasRecording && !sessions) {
     return (
-      <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-[#121314] px-6 text-center">
+      <div className="flex w-full flex-col items-center justify-center gap-3 rounded-md border bg-muted/20 px-6 py-10 text-center">
         <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
           <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
         </div>
-        <p className="text-sm font-medium text-white/85">
-          Rendering session timeline
-        </p>
-        <p className="max-w-md text-sm leading-6 text-white/55">
+        <p className="text-sm font-medium">Rendering session timeline</p>
+        <p className="max-w-md text-sm leading-6 text-muted-foreground">
           The recorded sessions are being rendered on the host. They appear
           here automatically once they are ready.
         </p>
@@ -82,7 +81,7 @@ export function SessionTimeline({
             {previous ? (
               <ReconnectDivider previous={previous} next={session} />
             ) : null}
-            <SessionCard
+            <SessionRow
               runId={runId}
               vmId={vm?.id ?? ""}
               session={session}
@@ -112,7 +111,7 @@ function ReconnectDivider({
   const gapMs =
     next.startTimestampMs - (previous.startTimestampMs + previous.durationMs);
   return (
-    <div className="flex items-center gap-3 px-2 py-2" role="separator">
+    <div className="flex items-center gap-3 px-2 py-1" role="separator">
       <span className="h-px flex-1 border-t border-dashed" />
       <span className="text-caption text-muted-foreground">
         {gapMs >= MIN_VISIBLE_GAP_MS
@@ -124,7 +123,7 @@ function ReconnectDivider({
   );
 }
 
-function SessionCard({
+function SessionRow({
   runId,
   vmId,
   session,
@@ -137,112 +136,134 @@ function SessionCard({
   sessionCount: number;
   castArtifact: ScenarioReplayArtifact | null;
 }) {
-  const [activeTab, setActiveTab] = useState<"replay" | "transcript">("replay");
-  const [visitedTranscript, setVisitedTranscript] = useState(false);
-
-  const startedAt = new Date(session.startTimestampMs);
   const runSegment = encodeURIComponent(runId);
   const vmSegment = encodeURIComponent(vmId);
-
+  const transcriptUrl = `/api/runs/${runSegment}/vms/${vmSegment}/sessions/${session.index}/transcript`;
   const castUrl = castArtifact
     ? `/api/runs/${runSegment}/artifacts/${encodeURIComponent(castArtifact.id)}/content`
     : null;
-  const transcriptUrl = `/api/runs/${runSegment}/vms/${vmSegment}/sessions/${session.index}/transcript`;
+
+  const startedAt = new Date(session.startTimestampMs);
+  const transcript = useStreamedText(transcriptUrl, true);
 
   return (
-    <Card size="sm">
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="font-heading text-base">
+    <section className="rounded-lg border">
+      <header className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/20 px-3 py-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium">
             {sessionCount === 1 ? "Terminal session" : `Session ${session.index}`}
-          </CardTitle>
-          <div className="flex flex-wrap items-center gap-2">
-            <MetaChip variant="outline">
-              {startedAt.toLocaleTimeString(undefined, {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </MetaChip>
-            <MetaChip>{formatScenarioDurationMs(session.durationMs)}</MetaChip>
-            {session.exitCode !== null && session.exitCode !== 0 ? (
-              <Badge variant="destructive">exit {session.exitCode}</Badge>
-            ) : null}
-          </div>
+          </span>
+          <MetaChip variant="outline">
+            {startedAt.toLocaleTimeString(undefined, {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })}
+          </MetaChip>
+          <MetaChip>{formatScenarioDurationMs(session.durationMs)}</MetaChip>
+          {session.exitCode !== null && session.exitCode !== 0 ? (
+            <Badge variant="destructive">exit {session.exitCode}</Badge>
+          ) : null}
         </div>
-      </CardHeader>
-      <CardContent>
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) => {
-            const tab = value === "transcript" ? "transcript" : "replay";
-            setActiveTab(tab);
-            if (tab === "transcript") {
-              setVisitedTranscript(true);
-            }
-          }}
-        >
-          <TabsList>
-            <TabsTrigger value="replay">Replay</TabsTrigger>
-            <TabsTrigger value="transcript">Transcript</TabsTrigger>
-          </TabsList>
-          <TabsContent value="replay">
-            <SessionReplayTab
-              castUrl={castUrl}
-              enabled={activeTab === "replay"}
-              contentId={`${vmId}:${session.index}`}
+        <ReplayDialog
+          castUrl={castUrl}
+          contentId={`${vmId}:${session.index}`}
+          title={
+            sessionCount === 1
+              ? "Terminal session replay"
+              : `Session ${session.index} replay`
+          }
+        />
+      </header>
+      <div className="p-2">
+        {transcript.error ? (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {transcript.error}
+          </div>
+        ) : (
+          <>
+            {session.transcriptTruncated ? (
+              <p className="pb-1.5 text-caption text-muted-foreground">
+                Long session — the earliest output was trimmed from this
+                transcript.
+              </p>
+            ) : null}
+            <ReadOnlyTextSurface
+              content={transcript.content}
+              loading={transcript.loading}
+              wrapText
+              compact
             />
-          </TabsContent>
-          <TabsContent value="transcript">
-            <SessionTranscriptTab
-              transcriptUrl={transcriptUrl}
-              enabled={visitedTranscript}
-              truncated={session.transcriptTruncated}
-            />
-          </TabsContent>
-        </Tabs>
-      </CardContent>
-    </Card>
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 
-function SessionReplayTab({
+function ReplayDialog({
   castUrl,
-  enabled,
   contentId,
+  title,
 }: {
   castUrl: string | null;
-  enabled: boolean;
+  contentId: string;
+  title: string;
+}) {
+  const [open, setOpen] = useState(false);
+  // Fetch once on first open; reopening reuses the streamed content.
+  const [requested, setRequested] = useState(false);
+  const cast = useStreamedText(castUrl, requested);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) {
+          setRequested(true);
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button type="button" variant="outline" size="sm">
+            <Play className="size-3.5" />
+            Replay
+          </Button>
+        }
+      />
+      <DialogContent className="sm:max-w-5xl">
+        <DialogTitle className="font-heading text-base">{title}</DialogTitle>
+        {castUrl === null ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            The replay for this session is still uploading.
+          </p>
+        ) : cast.error ? (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {cast.error}
+          </div>
+        ) : (
+          <ReplayDialogBody cast={cast} contentId={contentId} />
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ReplayDialogBody({
+  cast,
+  contentId,
+}: {
+  cast: ReturnType<typeof useStreamedText>;
   contentId: string;
 }) {
-  const cast = useStreamedText(castUrl, enabled);
   const [logOpen, setLogOpen] = useState(false);
   const commands = useMemo(
-    () => (cast.content && !cast.loading ? parseReplayCommandLog(cast.content) : []),
+    () =>
+      cast.content && !cast.loading ? parseReplayCommandLog(cast.content) : [],
     [cast.content, cast.loading],
   );
-
-  if (!castUrl) {
-    // The timeline landed before this session's cast finished uploading;
-    // the next poll of the run record fills it in.
-    return (
-      <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
-        <p className="text-sm text-muted-foreground">
-          The replay for this session is still uploading.
-        </p>
-      </div>
-    );
-  }
-
-  if (cast.error) {
-    return (
-      <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
-        <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
-          {cast.error}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-3">
@@ -276,7 +297,7 @@ function SessionReplayTab({
             />
           </button>
           {logOpen ? (
-            <ol className="space-y-1.5 border-t p-3">
+            <ol className="max-h-60 space-y-1.5 overflow-y-auto border-t p-3">
               {commands.map((entry, index) => (
                 <li
                   key={`${entry.atSeconds}-${index}`}
@@ -294,41 +315,6 @@ function SessionReplayTab({
           ) : null}
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function SessionTranscriptTab({
-  transcriptUrl,
-  enabled,
-  truncated,
-}: {
-  transcriptUrl: string;
-  enabled: boolean;
-  truncated: boolean;
-}) {
-  const transcript = useStreamedText(transcriptUrl, enabled);
-
-  if (transcript.error) {
-    return (
-      <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
-        {transcript.error}
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      {truncated ? (
-        <p className="pb-2 text-caption text-muted-foreground">
-          Long session — the earliest output was trimmed from this transcript.
-        </p>
-      ) : null}
-      <ReadOnlyTextSurface
-        content={transcript.content}
-        loading={transcript.loading}
-        wrapText
-      />
     </div>
   );
 }
