@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt as _;
 use std::path::Path;
@@ -35,6 +36,11 @@ const RETRY_MIN_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 const SERVER_HELLO_TIMEOUT_SECS: u64 = 10;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
+const PRIMARY_IPV4_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
+const PRIMARY_IPV6_PROBE: (Ipv6Addr, u16) = (
+    Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111),
+    80,
+);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -471,8 +477,28 @@ fn collect_builder_capacity(cfg: &BuilderConfig) -> HostCapacityV1 {
         load_avg_1m: load.map(|values| values.0),
         load_avg_5m: load.map(|values| values.1),
         load_avg_15m: load.map(|values| values.2),
-        primary_ipv4: None,
-        primary_ipv6: None,
+        primary_ipv4: detect_primary_ipv4(),
+        primary_ipv6: detect_primary_ipv6(),
+    }
+}
+
+// Same technique as intar-agent's host_profile: a connected UDP socket picks
+// the interface the default route would use, without sending any packets.
+fn detect_primary_ipv4() -> Option<String> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(PRIMARY_IPV4_PROBE).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() => Some(ip.to_string()),
+        _ => None,
+    }
+}
+
+fn detect_primary_ipv6() -> Option<String> {
+    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(PRIMARY_IPV6_PROBE).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V6(ip) if !ip.is_unspecified() => Some(ip.to_string()),
+        _ => None,
     }
 }
 
