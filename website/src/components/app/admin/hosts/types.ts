@@ -145,44 +145,6 @@ export interface AdminScenarioListResponse {
   scenarios: AdminScenarioSummary[];
 }
 
-export interface AdminScenarioDetail {
-  scenarioId: string;
-  description: string;
-  probeCount: number;
-  vmCount: number;
-  enabled: boolean;
-  enabledAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-  probes: Array<{
-    ordinal: number;
-    name: string;
-    description: string;
-    phase: "boot" | "scenario";
-  }>;
-  vms: Array<{
-    id: string;
-    ordinal: number;
-    name: string;
-    image: string;
-    cpu: number;
-    memoryMib: number;
-    diskMib: number;
-  }>;
-}
-
-export interface AdminScenarioDetailResponse {
-  scenario: AdminScenarioDetail;
-}
-
-export interface LaunchScenarioRunResponse {
-  accepted: true;
-  runId: string;
-  scenarioId: string;
-  acceptedAt: number;
-  reused: boolean;
-}
-
 export interface HostRecord {
   host: AgentHostApi;
   hostVms: VmStatus[];

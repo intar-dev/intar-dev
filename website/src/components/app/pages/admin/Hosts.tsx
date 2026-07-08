@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   EllipsisVertical,
   Plus,
   RefreshCw,
-  Rocket,
   Server,
   Trash2,
 } from "lucide-react";
@@ -30,60 +29,19 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatLoad, formatTimestamp } from "@/components/app/admin/hosts/format";
-import { HostScenarioLaunchPanel } from "@/components/app/admin/hosts/HostScenarioLaunchPanel";
-import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
-import type {
-  AgentHostApi,
-  LaunchScenarioRunResponse,
-} from "@/components/app/admin/hosts/types";
+import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 
-// The host fleet: one calm card per host, with launch and onboarding behind
-// explicit actions instead of ambient panels.
+// The host fleet: one calm card per host, with onboarding behind an explicit
+// action instead of ambient panels. Scenario runs launch from the scenario
+// pages; hosts are infrastructure only.
 export function AdminHosts() {
   const [vmError, setVmError] = useState<string | null>(null);
-  const [vmNotice, setVmNotice] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [selectedScenarioByHost, setSelectedScenarioByHost] = useState<
-    Record<string, string>
-  >({});
-  const [launchHostId, setLaunchHostId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentHostApi | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const { hosts, hostRecords, refreshHost, forgetHost } = useHostFleet();
-  const scenarios = useAdminScenarios();
-  const launchableScenarios = scenarios.data?.scenarios ?? [];
-  const defaultScenarioId =
-    launchableScenarios.find((scenario) => scenario.enabled)?.scenarioId ??
-    launchableScenarios[0]?.scenarioId ??
-    "";
-
-  useEffect(() => {
-    if (!hosts.data?.length || !defaultScenarioId) {
-      return;
-    }
-
-    setSelectedScenarioByHost((current) => {
-      const next = { ...current };
-      let changed = false;
-
-      for (const host of hosts.data) {
-        const selected = next[host.id];
-        if (
-          !selected ||
-          !launchableScenarios.some(
-            (scenario) => scenario.scenarioId === selected,
-          )
-        ) {
-          next[host.id] = defaultScenarioId;
-          changed = true;
-        }
-      }
-
-      return changed ? next : current;
-    });
-  }, [defaultScenarioId, hosts.data, launchableScenarios]);
 
   const deleteHost = useMutation({
     mutationFn: async (hostId: string) => {
@@ -103,65 +61,11 @@ export function AdminHosts() {
       return (await response.json()) as { ok: boolean; hostId: string };
     },
     onSuccess: (result) => {
-      setSelectedScenarioByHost((current) => {
-        const next = { ...current };
-        delete next[result.hostId];
-        return next;
-      });
-      setLaunchHostId((current) =>
-        current === result.hostId ? null : current,
-      );
       forgetHost(result.hostId);
       setDeleteTarget(null);
       void hosts.refetch();
     },
   });
-
-  const handleLaunchScenario = async (hostId: string, scenarioId: string) => {
-    const key = `${hostId}:launch`;
-    setBusyKey(key);
-    setVmError(null);
-    setVmNotice(null);
-    try {
-      const response = await fetch(
-        `/api/agent/hosts/${encodeURIComponent(hostId)}/runs`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ scenarioId }),
-        },
-      );
-
-      const body = (await response.json().catch(() => null)) as
-        | LaunchScenarioRunResponse
-        | { error?: string }
-        | null;
-      if (!response.ok) {
-        throw new Error(
-          (body as { error?: string } | null)?.error ??
-            `Failed to launch scenario (${response.status})`,
-        );
-      }
-
-      const result = body as LaunchScenarioRunResponse;
-      setVmNotice(
-        result.reused
-          ? `${result.scenarioId} is already active on ${hostId}.`
-          : `${result.scenarioId} queued on ${hostId}.`,
-      );
-      setLaunchHostId(null);
-      await Promise.all([hosts.refetch(), refreshHost(hostId)]);
-    } catch (error) {
-      setVmError(
-        error instanceof Error ? error.message : "failed to launch scenario",
-      );
-    } finally {
-      setBusyKey((current) => (current === key ? null : current));
-    }
-  };
 
   const handleRefreshHost = (hostId: string) => {
     const key = `${hostId}:refresh`;
@@ -179,17 +83,6 @@ export function AdminHosts() {
         setBusyKey((current) => (current === key ? null : current));
       });
   };
-
-  const launchRecord = launchHostId
-    ? (hostRecords.find(({ host }) => host.id === launchHostId) ?? null)
-    : null;
-
-  // Close the launch dialog if its host disappears (deleted elsewhere, poll).
-  useEffect(() => {
-    if (launchHostId && !launchRecord) {
-      setLaunchHostId(null);
-    }
-  }, [launchHostId, launchRecord]);
 
   return (
     <PageShell
@@ -228,12 +121,6 @@ export function AdminHosts() {
           <Alert variant="destructive">
             <AlertTitle>Host action failed</AlertTitle>
             <AlertDescription>{vmError}</AlertDescription>
-          </Alert>
-        ) : null}
-        {vmNotice ? (
-          <Alert>
-            <AlertTitle>Host update</AlertTitle>
-            <AlertDescription>{vmNotice}</AlertDescription>
           </Alert>
         ) : null}
       </div>
@@ -297,14 +184,6 @@ export function AdminHosts() {
                     </p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => setLaunchHostId(host.id)}
-                      disabled={!launchableScenarios.length}
-                    >
-                      <Rocket className="size-3.5" />
-                      Launch scenario
-                    </Button>
                     <DropdownMenu>
                       <DropdownMenuTrigger
                         render={
@@ -398,61 +277,6 @@ export function AdminHosts() {
           }
         />
       )}
-
-      <Dialog
-        open={launchHostId !== null}
-        onOpenChange={(open) => {
-          if (!open) setLaunchHostId(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-md">
-          {launchRecord ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>
-                  Launch scenario on {launchRecord.host.name}
-                </DialogTitle>
-                <DialogDescription>
-                  Queues a scenario run directly on this host.
-                </DialogDescription>
-              </DialogHeader>
-              {vmError ? (
-                <p className="text-sm text-destructive">{vmError}</p>
-              ) : null}
-              <HostScenarioLaunchPanel
-                host={launchRecord.host}
-                selectedScenarioId={
-                  selectedScenarioByHost[launchRecord.host.id] ??
-                  defaultScenarioId
-                }
-                selectedScenario={
-                  launchableScenarios.find(
-                    (scenario) =>
-                      scenario.scenarioId ===
-                      (selectedScenarioByHost[launchRecord.host.id] ??
-                        defaultScenarioId),
-                  ) ?? null
-                }
-                scenarios={launchableScenarios}
-                onScenarioChange={(scenarioId) => {
-                  setSelectedScenarioByHost((current) => ({
-                    ...current,
-                    [launchRecord.host.id]: scenarioId,
-                  }));
-                }}
-                onLaunch={() => {
-                  const scenarioId =
-                    selectedScenarioByHost[launchRecord.host.id] ??
-                    defaultScenarioId;
-                  if (!scenarioId) return;
-                  void handleLaunchScenario(launchRecord.host.id, scenarioId);
-                }}
-                isLaunching={busyKey === `${launchRecord.host.id}:launch`}
-              />
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
 
       <Dialog
         open={deleteTarget !== null}

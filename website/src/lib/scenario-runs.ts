@@ -64,10 +64,7 @@ import {
   type RequiredScenarioImage,
 } from "@/lib/scenario-host-readiness";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
-import {
-  isAvailableScenarioLaunchHost,
-  isScenarioLaunchHost,
-} from "@/lib/scenario-hosts";
+import { isAvailableScenarioLaunchHost } from "@/lib/scenario-hosts";
 import {
   deleteStargateRoute,
   issueStargateTerminalSession,
@@ -306,20 +303,6 @@ export async function listScenarioRunsForUser(params: {
 export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
-}): Promise<{
-  accepted: true;
-  runId: string;
-  scenarioId: string;
-  acceptedAt: number;
-  reused: boolean;
-}> {
-  return startScenarioRunInternal(params);
-}
-
-export async function startScenarioRunForUserOnHost(params: {
-  scenarioId: string;
-  userId: string;
-  hostId: string;
 }): Promise<{
   accepted: true;
   runId: string;
@@ -600,7 +583,6 @@ export async function listHostRunsForUser(params: {
 async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
-  hostId?: string;
 }): Promise<{
   accepted: true;
   runId: string;
@@ -625,32 +607,22 @@ async function startScenarioRunInternal(params: {
   }
 
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
-  let hostId: string;
-  if (params.hostId) {
-    await assertScenarioLaunchHostForUser(
-      params.hostId,
-      params.userId,
-      requiredImages,
-    );
-    hostId = params.hostId;
-  } else {
-    const selection = await selectScenarioHost(requiredImages);
-    if (!selection.ok) {
-      if (selection.reason === "image_not_ready") {
-        throw appError(
-          409,
-          "image_not_ready",
-          "scenario images are not ready on any available host",
-        );
-      }
+  const selection = await selectScenarioHost(requiredImages);
+  if (!selection.ok) {
+    if (selection.reason === "image_not_ready") {
       throw appError(
         409,
-        "scenario_host_unavailable",
-        "no scenario host available",
+        "image_not_ready",
+        "scenario images are not ready on any available host",
       );
     }
-    hostId = selection.hostId;
+    throw appError(
+      409,
+      "scenario_host_unavailable",
+      "no scenario host available",
+    );
   }
+  const hostId = selection.hostId;
 
   const runId = createAppId();
   const createdAt = Date.now();
@@ -788,75 +760,6 @@ async function startScenarioRunInternal(params: {
     acceptedAt: createdAt,
     reused: false,
   };
-}
-
-async function assertScenarioLaunchHostForUser(
-  hostId: string,
-  userId: string,
-  requiredImages: RequiredScenarioImage[],
-): Promise<void> {
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      role: agentHosts.role,
-      disabled: agentHosts.disabled,
-      scenarioEnabled: agentHosts.scenarioEnabled,
-      connected: agentHosts.connected,
-      lastHeartbeatAt: agentHosts.lastHeartbeatAt,
-      actualReportedAt: hostActualState.updatedAt,
-      actualReport: hostActualState.reportJson,
-    })
-    .from(agentHosts)
-    .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
-    .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
-    .limit(1);
-  const host = rows[0];
-  if (!host) {
-    throw appError(404, "scenario_host_not_found", "host not found");
-  }
-  if (host.disabled) {
-    throw appError(403, "scenario_host_disabled", "host is disabled");
-  }
-  if (
-    !isScenarioLaunchHost({
-      role: host.role,
-      disabled: host.disabled,
-      scenarioEnabled: host.scenarioEnabled,
-    })
-  ) {
-    throw appError(
-      403,
-      "scenario_host_not_launchable",
-      "host cannot run scenarios",
-    );
-  }
-  if (
-    !isAvailableScenarioLaunchHost(
-      {
-        role: host.role,
-        disabled: host.disabled,
-        scenarioEnabled: host.scenarioEnabled,
-        connected: host.connected,
-        lastHeartbeatAt: host.lastHeartbeatAt,
-      },
-      Date.now(),
-      HOST_HEARTBEAT_TTL_MS,
-    ) ||
-    hostHealth(host.actualReportedAt ?? null, Date.now()) !== "healthy"
-  ) {
-    throw appError(
-      409,
-      "scenario_host_unavailable",
-      "host is not connected",
-    );
-  }
-  if (!hostHasImagesReady(host.actualReport, requiredImages)) {
-    throw appError(
-      409,
-      "image_not_ready",
-      "scenario images are not ready on this host",
-    );
-  }
 }
 
 async function loadEnabledScenarioRows(scenarioId?: string) {
