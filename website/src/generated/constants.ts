@@ -5,7 +5,7 @@ export const RUNTIME_ENV_FILENAME = "runtime.env";
 export const GUEST_USERNAME = "user";
 export const BRIDGE_PROTOCOL_VERSION = 5;
 export const HOST_DESIRED_STATE_SCHEMA_VERSION = 2;
-export const HOST_STATE_REPORT_SCHEMA_VERSION = 1;
+export const HOST_STATE_REPORT_SCHEMA_VERSION = 2;
 export const BUILD_REPORT_SCHEMA_VERSION = 1;
 export const VM_REPORT_SCHEMA_VERSION = 1;
 

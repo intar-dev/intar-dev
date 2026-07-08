@@ -1,8 +1,9 @@
 // DTO types for the operator hosts console. These mirror the /api/agent and
 // /api/admin responses; extracted verbatim from the old Dashboard monolith.
 
-import type { AgentBridgeStatus, AgentHostInfo } from "@/lib/agent-bridge";
+import type { AgentBridgeStatus } from "@/lib/agent-bridge";
 import type { HostHealth } from "@/lib/host-health";
+import type { HostCapacityV1 } from "@/generated/bridge";
 
 export interface AgentHostApi {
   id: string;
@@ -12,12 +13,12 @@ export interface AgentHostApi {
   scenarioEnabled: boolean;
   createdAt: number;
   updatedAt: number;
-  hostInfo: AgentHostInfo | null;
   status: AgentBridgeStatus | null;
   actualState: {
     appliedDesiredVersion: number;
     observedAt: number;
     health: HostHealth;
+    capacity: HostCapacityV1;
   } | null;
 }
 
@@ -186,7 +187,7 @@ export interface HostRecord {
   host: AgentHostApi;
   hostVms: VmStatus[];
   hostRuns: AgentVmRunRecord[];
-  info: AgentHostInfo | null;
+  capacity: HostCapacityV1 | null;
 }
 
 export interface LiveScenarioRunRecord {

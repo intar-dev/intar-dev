@@ -460,13 +460,30 @@ fn can_open_char_device(_path: &Path) -> bool {
 fn collect_builder_capacity(cfg: &BuilderConfig) -> HostCapacityV1 {
     let (memory_total_mib, memory_available_mib) = read_memory_mib();
     let disk_probe_path = &cfg.builder.cache_root;
+    let load = read_load_averages();
     HostCapacityV1 {
         cpu_count: available_cpu_count(),
         memory_total_mib: Mib(memory_total_mib.unwrap_or(0)),
         memory_available_mib: Mib(memory_available_mib.unwrap_or(0)),
+        disk_probe_path: disk_probe_path.display().to_string(),
         disk_total_mib: Mib(read_disk_total_mib(disk_probe_path).unwrap_or(0)),
         disk_available_mib: Mib(read_disk_available_mib(disk_probe_path).unwrap_or(0)),
+        load_avg_1m: load.map(|values| values.0),
+        load_avg_5m: load.map(|values| values.1),
+        load_avg_15m: load.map(|values| values.2),
+        primary_ipv4: None,
+        primary_ipv6: None,
     }
+}
+
+fn read_load_averages() -> Option<(f64, f64, f64)> {
+    let loadavg = fs::read_to_string("/proc/loadavg").ok()?;
+    let mut parts = loadavg.split_whitespace();
+    Some((
+        parts.next()?.parse::<f64>().ok()?,
+        parts.next()?.parse::<f64>().ok()?,
+        parts.next()?.parse::<f64>().ok()?,
+    ))
 }
 
 fn read_memory_mib() -> (Option<u32>, Option<u32>) {

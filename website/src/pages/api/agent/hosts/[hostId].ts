@@ -12,7 +12,6 @@ import {
   buildStoredBridgeStatus,
   jsonResponse,
   loadHostForUser,
-  parseHostInfo,
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
@@ -55,7 +54,6 @@ export const GET: APIRoute = async ({ request, params }) => {
       scenarioEnabled: Boolean(host.scenario_enabled),
       createdAt: host.created_at,
       updatedAt: host.updated_at,
-      hostInfo: parseHostInfo(host.host_info_json),
       inventory: parseInventory(host.inventory_json),
       actualState,
       status: buildStoredBridgeStatus(host),

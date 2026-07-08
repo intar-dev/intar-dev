@@ -391,7 +391,7 @@ function vmReport(input: {
 
 function hostReport(vms: HostStateReportV1["vms"]): HostStateReportV1 {
   return {
-    schema_version: 1,
+    schema_version: 2,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 42,
@@ -399,6 +399,7 @@ function hostReport(vms: HostStateReportV1["vms"]): HostStateReportV1 {
       cpu_count: 8,
       memory_total_mib: 32768,
       memory_available_mib: 24576,
+      disk_probe_path: "/var/lib/intar-agent",
       disk_total_mib: 524288,
       disk_available_mib: 400000,
     },

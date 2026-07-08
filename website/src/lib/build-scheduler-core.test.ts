@@ -256,6 +256,7 @@ function builder(
       cpu_count: capacity.cpuCount ?? 4,
       memory_total_mib: 16_384,
       memory_available_mib: capacity.memoryAvailableMib ?? 8_192,
+      disk_probe_path: "/var/cache/intar-builder",
       disk_total_mib: 102_400,
       disk_available_mib: capacity.diskAvailableMib ?? 51_200,
     },

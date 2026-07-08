@@ -15,21 +15,6 @@ export interface AgentBridgeStatus {
   agentVersion: string | null;
   activeSessionId: string | null;
   inventoryVmCount: number;
-  hostInfo: AgentHostInfo | null;
-}
-
-export interface AgentHostInfo {
-  primaryIpv4?: string | null;
-  primaryIpv6?: string | null;
-  cpuCores?: number;
-  memoryTotalMib?: number | null;
-  memoryAvailableMib?: number | null;
-  diskProbePath?: string;
-  diskTotalMib?: number | null;
-  diskAvailableMib?: number | null;
-  loadAvg1m?: number | null;
-  loadAvg5m?: number | null;
-  loadAvg15m?: number | null;
 }
 
 export interface AgentInventorySnapshot {
@@ -52,7 +37,6 @@ export interface AgentHostRow {
   last_inventory_at: number | null;
   active_session_id: string | null;
   agent_version: string | null;
-  host_info_json: string | null;
   inventory_json: string | null;
   created_at: number;
   updated_at: number;
@@ -172,7 +156,6 @@ export async function loadHostForUser(
       last_inventory_at: agentHosts.lastInventoryAt,
       active_session_id: agentHosts.activeSessionId,
       agent_version: agentHosts.agentVersion,
-      host_info_json: agentHosts.hostInfoJson,
       inventory_json: agentHosts.inventoryJson,
       created_at: agentHosts.createdAt,
       updated_at: agentHosts.updatedAt,
@@ -184,10 +167,6 @@ export async function loadHostForUser(
   return rows[0] ?? null;
 }
 
-export function parseHostInfo(hostInfoJson: string | null): AgentHostInfo | null {
-  return parseJsonObject(hostInfoJson) as AgentHostInfo | null;
-}
-
 export function parseInventory(
   inventoryJson: string | null,
 ): AgentInventorySnapshot | null {
@@ -195,7 +174,6 @@ export function parseInventory(
 }
 
 export function buildStoredBridgeStatus(host: AgentHostRow): AgentBridgeStatus {
-  const hostInfo = parseHostInfo(host.host_info_json);
   const inventory = parseInventory(host.inventory_json);
   const nowMs = Date.now();
   const heartbeatFresh =
@@ -214,7 +192,6 @@ export function buildStoredBridgeStatus(host: AgentHostRow): AgentBridgeStatus {
     agentVersion: host.agent_version,
     activeSessionId: host.active_session_id,
     inventoryVmCount: Array.isArray(inventory?.vms) ? inventory.vms.length : 0,
-    hostInfo,
   };
 }
 

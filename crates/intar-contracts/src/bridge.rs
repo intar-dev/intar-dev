@@ -5,11 +5,11 @@ use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 
 pub const BRIDGE_PROTOCOL_VERSION: u16 = 5;
 pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 2;
-pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 1;
+pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 2;
 pub const BUILD_REPORT_SCHEMA_VERSION: u16 = 1;
 pub const VM_REPORT_SCHEMA_VERSION: u16 = 1;
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BridgeMessageV5 {
     ClientHello(ClientHelloV5),
@@ -49,7 +49,7 @@ pub struct DesiredStateV5 {
     pub desired_state: HostDesiredStateV1,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct StateReportV5 {
     pub protocol_version: u16,
@@ -156,7 +156,7 @@ pub struct VmResourcesV1 {
     pub disk_mib: Mib,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostStateReportV1 {
     pub schema_version: u16,
@@ -170,14 +170,26 @@ pub struct HostStateReportV1 {
     pub builds: Vec<BuildReportV1>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostCapacityV1 {
     pub cpu_count: u16,
     pub memory_total_mib: Mib,
     pub memory_available_mib: Mib,
+    /// Filesystem the disk figures were probed on (the VM/image data root).
+    pub disk_probe_path: String,
     pub disk_total_mib: Mib,
     pub disk_available_mib: Mib,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_avg_1m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_avg_5m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_avg_15m: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_ipv4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_ipv6: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

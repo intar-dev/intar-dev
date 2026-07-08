@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "host_id": "host-alpha",
   "observed_at_unix_ms": 1762041660000,
   "applied_desired_version": 42,
@@ -7,8 +7,14 @@
     "cpu_count": 8,
     "memory_total_mib": 32768,
     "memory_available_mib": 24576,
+    "disk_probe_path": "/var/lib/intar-agent",
     "disk_total_mib": 524288,
-    "disk_available_mib": 400000
+    "disk_available_mib": 400000,
+    "load_avg_1m": 0.42,
+    "load_avg_5m": 0.31,
+    "load_avg_15m": 0.18,
+    "primary_ipv4": "203.0.113.10",
+    "primary_ipv6": "2001:db8::10"
   },
   "capabilities": {
     "arch": "x86_64",

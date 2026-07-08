@@ -1,0 +1,1 @@
+ALTER TABLE `agent_hosts` DROP COLUMN `host_info_json`;

@@ -246,22 +246,16 @@ export function AdminHosts() {
         <LoadingState title="Loading hosts" />
       ) : hostRecords.length ? (
         <div className="grid gap-5 xl:grid-cols-2">
-          {hostRecords.map(({ host, hostVms, hostRuns, info }) => {
+          {hostRecords.map(({ host, hostVms, hostRuns, capacity }) => {
             const isDeletingThisHost =
               deleteHost.isPending && deleteHost.variables === host.id;
             const isRefreshing = busyKey === `${host.id}:refresh`;
-            const memorySummary =
-              info?.memoryAvailableMib != null && info?.memoryTotalMib != null
-                ? `${info.memoryAvailableMib} / ${info.memoryTotalMib} MiB`
-                : info?.memoryTotalMib != null
-                  ? `— / ${info.memoryTotalMib} MiB`
-                  : "—";
-            const diskSummary =
-              info?.diskAvailableMib != null && info?.diskTotalMib != null
-                ? `${info.diskAvailableMib} / ${info.diskTotalMib} MiB`
-                : info?.diskTotalMib != null
-                  ? `— / ${info.diskTotalMib} MiB`
-                  : "—";
+            const memorySummary = capacity
+              ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
+              : "—";
+            const diskSummary = capacity
+              ? `${capacity.disk_available_mib} / ${capacity.disk_total_mib} MiB`
+              : "—";
 
             return (
               <article
@@ -361,11 +355,13 @@ export function AdminHosts() {
                     size="sm"
                     label="CPU"
                     value={
-                      info?.cpuCores ? `${info.cpuCores} cores` : "Unknown"
+                      capacity?.cpu_count
+                        ? `${capacity.cpu_count} cores`
+                        : "Unknown"
                     }
-                    detail={`${formatLoad(info?.loadAvg1m)} / ${formatLoad(
-                      info?.loadAvg5m,
-                    )} / ${formatLoad(info?.loadAvg15m)}`}
+                    detail={`${formatLoad(capacity?.load_avg_1m)} / ${formatLoad(
+                      capacity?.load_avg_5m,
+                    )} / ${formatLoad(capacity?.load_avg_15m)}`}
                   />
                   <Stat
                     size="sm"
@@ -375,15 +371,15 @@ export function AdminHosts() {
                   />
                   <Stat
                     size="sm"
-                    label={`Disk ${info?.diskProbePath ?? "/"}`}
+                    label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
                     value={diskSummary}
                     detail="Available / total"
                   />
                 </div>
 
                 <p className="text-caption">
-                  Network: {info?.primaryIpv4 ?? "—"}
-                  {info?.primaryIpv6 ? ` · ${info.primaryIpv6}` : ""}
+                  Network: {capacity?.primary_ipv4 ?? "—"}
+                  {capacity?.primary_ipv6 ? ` · ${capacity.primary_ipv6}` : ""}
                 </p>
               </article>
             );

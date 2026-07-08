@@ -253,7 +253,6 @@ export const agentHosts = sqliteTable(
     lastClientHelloAt: integer("last_client_hello_at"),
     lastServerHelloAt: integer("last_server_hello_at"),
     agentVersion: text("agent_version"),
-    hostInfoJson: text("host_info_json"),
     inventoryJson: text("inventory_json"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),

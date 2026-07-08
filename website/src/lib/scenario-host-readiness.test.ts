@@ -51,7 +51,7 @@ function report(
   ],
 ): HostStateReportV1 {
   return {
-    schema_version: 1,
+    schema_version: 2,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 1,
@@ -59,6 +59,7 @@ function report(
       cpu_count: 8,
       memory_total_mib: 32_768,
       memory_available_mib: 24_576,
+      disk_probe_path: "/var/lib/intar-agent",
       disk_total_mib: 524_288,
       disk_available_mib: 400_000,
     },

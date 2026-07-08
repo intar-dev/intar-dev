@@ -440,10 +440,35 @@
           "format": "uint32",
           "minimum": 0
         },
+        "disk_probe_path": {
+          "description": "Filesystem the disk figures were probed on (the VM/image data root).",
+          "type": "string"
+        },
         "disk_total_mib": {
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "load_avg_15m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "load_avg_1m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "load_avg_5m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "memory_available_mib": {
           "type": "integer",
@@ -454,12 +479,25 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "primary_ipv4": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "primary_ipv6": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "cpu_count",
         "memory_total_mib",
         "memory_available_mib",
+        "disk_probe_path",
         "disk_total_mib",
         "disk_available_mib"
       ]

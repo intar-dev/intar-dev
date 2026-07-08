@@ -21,6 +21,7 @@ import type {
   VmReportV1,
 } from "@/generated/bridge";
 import type { ImageKey } from "@/generated/catalog";
+import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
 import { upsertDesiredCachedImage, upsertDesiredVm } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
@@ -679,7 +680,7 @@ function stateReport(
     protocol_version: 5,
     host_id: hostId,
     report: {
-      schema_version: 1,
+      schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
       host_id: hostId,
       observed_at_unix_ms: input.observedAt,
       applied_desired_version: input.appliedDesiredVersion,
@@ -687,6 +688,7 @@ function stateReport(
         cpu_count: 4,
         memory_total_mib: 8192,
         memory_available_mib: 4096,
+        disk_probe_path: "/var/lib/intar-agent",
         disk_total_mib: 100_000,
         disk_available_mib: 80_000,
       },

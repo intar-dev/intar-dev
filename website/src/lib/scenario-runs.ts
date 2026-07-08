@@ -10,7 +10,6 @@ import {
   scenarioRuns,
   type ScenarioRunHintSnapshot,
 } from "@/db/schema";
-import { parseHostInfo } from "@/lib/agent-bridge";
 import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
@@ -1309,7 +1308,6 @@ async function selectScenarioHost(
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
       lastInventoryAt: agentHosts.lastInventoryAt,
-      hostInfoJson: agentHosts.hostInfoJson,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
@@ -1327,20 +1325,20 @@ async function selectScenarioHost(
 
   const candidates = rows
     .map((row) => {
-      const hostInfo = parseHostInfo(row.hostInfoJson);
-      // The bridge v5 state report is the live source of per-host VM load;
-      // the legacy inventory upload no longer exists.
+      // The bridge v5 state report is the live source of per-host VM load
+      // and capacity; the legacy inventory upload no longer exists.
+      const capacity = row.actualReport?.capacity ?? null;
       const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
-      const cpuCores = Math.max(1, hostInfo?.cpuCores ?? 0);
+      const cpuCores = Math.max(1, capacity?.cpu_count ?? 0);
       const loadPerCpu =
-        typeof hostInfo?.loadAvg1m === "number" && hostInfo.loadAvg1m >= 0
-          ? hostInfo.loadAvg1m / cpuCores
+        typeof capacity?.load_avg_1m === "number" && capacity.load_avg_1m >= 0
+          ? capacity.load_avg_1m / cpuCores
           : Number.POSITIVE_INFINITY;
       return {
         ...row,
         inventoryVmCount,
         loadPerCpu,
-        memoryAvailableMib: hostInfo?.memoryAvailableMib ?? -1,
+        memoryAvailableMib: capacity?.memory_available_mib ?? -1,
       };
     })
     .filter(
@@ -1486,11 +1484,13 @@ async function loadHostTerminalAddress(hostId: string): Promise<string | null> {
   const db = drizzle(env.DB);
   const rows = await db
     .select({
-      hostInfoJson: agentHosts.hostInfoJson,
+      report: hostActualState.reportJson,
     })
-    .from(agentHosts)
-    .where(eq(agentHosts.id, hostId))
+    .from(hostActualState)
+    .where(eq(hostActualState.hostId, hostId))
     .limit(1);
-  const hostInfo = parseHostInfo(rows[0]?.hostInfoJson ?? null);
-  return hostInfo?.primaryIpv4?.trim() || hostInfo?.primaryIpv6?.trim() || null;
+  const capacity = rows[0]?.report?.capacity;
+  return (
+    capacity?.primary_ipv4?.trim() || capacity?.primary_ipv6?.trim() || null
+  );
 }

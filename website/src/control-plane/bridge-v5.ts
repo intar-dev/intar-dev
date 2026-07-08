@@ -388,8 +388,22 @@ function isHostCapacityPayload(value: unknown): boolean {
     isNonNegativeInteger(value.cpu_count) &&
     isNonNegativeInteger(value.memory_total_mib) &&
     isNonNegativeInteger(value.memory_available_mib) &&
+    readString(value.disk_probe_path) !== null &&
     isNonNegativeInteger(value.disk_total_mib) &&
-    isNonNegativeInteger(value.disk_available_mib)
+    isNonNegativeInteger(value.disk_available_mib) &&
+    isOptionalNonNegativeNumber(value.load_avg_1m) &&
+    isOptionalNonNegativeNumber(value.load_avg_5m) &&
+    isOptionalNonNegativeNumber(value.load_avg_15m) &&
+    isOptionalString(value.primary_ipv4) &&
+    isOptionalString(value.primary_ipv6)
+  );
+}
+
+function isOptionalNonNegativeNumber(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "number" && Number.isFinite(value) && value >= 0)
   );
 }
 

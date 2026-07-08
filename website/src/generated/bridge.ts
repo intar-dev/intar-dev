@@ -123,8 +123,14 @@ export interface HostCapacityV1 {
   cpu_count: number;
   memory_total_mib: Mib;
   memory_available_mib: Mib;
+  disk_probe_path: string;
   disk_total_mib: Mib;
   disk_available_mib: Mib;
+  load_avg_1m?: number | null;
+  load_avg_5m?: number | null;
+  load_avg_15m?: number | null;
+  primary_ipv4?: string | null;
+  primary_ipv6?: string | null;
 }
 
 export interface HostCapabilitiesV1 {

@@ -156,7 +156,7 @@ export function useHostFleet() {
           host,
           hostVms: vmListByHost[host.id] ?? [],
           hostRuns: runListByHost[host.id] ?? [],
-          info: host.status?.hostInfo ?? host.hostInfo ?? null,
+          capacity: host.actualState?.capacity ?? null,
         };
       }),
     [hosts.data, hostViewById, runListByHost, vmListByHost],
