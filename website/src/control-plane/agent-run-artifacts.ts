@@ -9,6 +9,7 @@ import {
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
   RUN_PHASE_ORDER,
+  canAdvanceVmPhase,
   recomputeRunState,
   type RunStateDocument,
   type ScenarioReplayArtifact,
@@ -500,6 +501,18 @@ async function handleRunComplete(
   }
 
   const { db, runVm } = resolved;
+
+  // Completion is idempotent: the replay artifact is registered and uploaded
+  // *after* the run completes, so an archive-job retry must not trip over its
+  // still-pending row.
+  const lifecycle = await loadStoredRunLifecycle(db, runId);
+  const alreadyCompleted = lifecycle?.state.vms.some(
+    (vm) => vm.id === runVm.vmId && vm.phase === "completed",
+  );
+  if (alreadyCompleted) {
+    return jsonResponse({ ok: true });
+  }
+
   const artifacts = await loadArtifactStatesForRunVm(db, runId, runVm.vmId);
   if (artifacts.some((artifact) => artifact.uploadStatus !== "uploaded")) {
     return jsonResponse(
@@ -533,7 +546,10 @@ async function markArtifactUploaded(input: {
     .delete(scenarioRunArtifactUploads)
     .where(eq(scenarioRunArtifactUploads.artifactId, input.artifact.id));
 
-  if (input.artifact.kind !== "ssh_recording") {
+  if (
+    input.artifact.kind !== "ssh_recording" &&
+    input.artifact.kind !== "ssh_recording_raw"
+  ) {
     return;
   }
 
@@ -552,6 +568,26 @@ async function markArtifactUploaded(input: {
   }
 
   const state = parseRunState(run.stateJson);
+
+  // A raw recording landing means a replay render is on its way — the run
+  // page shows a "rendering" state until the composed cast arrives.
+  if (input.artifact.kind === "ssh_recording_raw") {
+    const nextState = recomputeRunState({
+      ...state,
+      vms: state.vms.map((vm) =>
+        vm.id === input.vmId ? { ...vm, hasRecording: true } : vm,
+      ),
+    });
+    await input.db
+      .update(scenarioRuns)
+      .set({
+        stateJson: JSON.stringify(nextState),
+        updatedAt: input.uploadedAt,
+      })
+      .where(eq(scenarioRuns.runId, input.runId));
+    return;
+  }
+
   const replayArtifact: ScenarioReplayArtifact = {
     id: input.artifact.id,
     hostId: "",
@@ -725,10 +761,14 @@ async function transitionRunVmToArchiving(
     return;
   }
 
+  // The replay artifact is registered after completion; that late begin call
+  // must not drag an already-completed vm back to "archived".
   const nextState = recomputeRunState({
     ...run.state,
     vms: run.state.vms.map((vm) =>
-      vm.id === vmId && vm.phase !== "failed"
+      vm.id === vmId &&
+      vm.phase !== "failed" &&
+      canAdvanceVmPhase(vm.phase, "archived")
         ? {
             ...vm,
             phase: "archived",

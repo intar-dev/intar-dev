@@ -49,6 +49,9 @@ export interface ScenarioRunVmRecord {
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
+  /// True once a raw recording uploaded; with no replay artifact yet it
+  /// means the composed replay is still rendering.
+  hasRecording?: boolean;
   provisioning: RunVmProvisioningSpec;
   terminalTarget: {
     host: string | null;

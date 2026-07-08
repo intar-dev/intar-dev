@@ -21,14 +21,31 @@ import { cn } from "@/lib/utils";
 // parsed from the cast's input events.
 export function RunReplayPanel({
   viewer,
+  rendering = false,
 }: {
   viewer: RunArtifactViewerState | null;
+  rendering?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const commands = useMemo(
     () => (viewer?.content ? parseReplayCommandLog(viewer.content) : []),
     [viewer?.content],
   );
+
+  if (!viewer && rendering) {
+    return (
+      <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 rounded-md bg-[#121314] px-6 text-center">
+        <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
+          <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
+        </div>
+        <p className="text-sm font-medium text-white/85">Rendering replay</p>
+        <p className="max-w-md text-sm leading-6 text-white/55">
+          The recording is being composed on the host. It appears here
+          automatically once it is ready.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

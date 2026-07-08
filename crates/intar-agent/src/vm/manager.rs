@@ -37,7 +37,7 @@ use crate::kino_probe::{ProbeCollectionState, ProbeUpdateEnvelope};
 #[cfg(target_os = "linux")]
 use crate::kino_probe::{ProbePollResult, ProbeSnapshotView, decode_probe_snapshot};
 
-use super::{kino_recording, mac, replay_media, runtime_disk};
+use super::{mac, replay_media, runtime_disk};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2298,9 +2298,6 @@ async fn prepare_vm_for_delete(inner: &Inner, vm: &VmStatusResponse) -> Result<P
 
     if let Some(recording_disk_path) = details.recording_disk_path.as_deref() {
         extract_recordings_to_spool(Path::new(recording_disk_path), &artifacts_dir).await?;
-        replay_media::create_primary_replay_cast(&artifacts_dir)
-            .await
-            .context("failed to build primary replay cast")?;
         if let Err(e) = tokio::fs::remove_file(recording_disk_path).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -2361,8 +2358,89 @@ async fn upload_vm_run_artifacts(
     prepared: &PreparedVmDeletion,
 ) -> Result<ArchiveUploadOutcome> {
     let access_token = bootstrap_agent_access_token(&inner.bridge, &inner.http).await?;
-    let artifacts = collect_local_artifacts(&prepared.artifacts_dir).await?;
+    let mut artifacts = collect_local_artifacts(&prepared.artifacts_dir).await?;
 
+    if !begin_run_upload(inner, prepared, &artifacts, &access_token).await? {
+        warn!(
+            vm = vm_name,
+            run_id = prepared.run_id,
+            "remote run/vm missing during artifact upload begin; skipping upload and treating vm as orphaned local state"
+        );
+        return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
+    }
+    upload_artifact_set(inner, vm_name, prepared, &artifacts, &access_token).await?;
+
+    // Complete the run as soon as the raw artifacts are up: the run flips to
+    // completed for the user without waiting on replay rendering.
+    complete_run_upload(inner, prepared, &access_token).await?;
+
+    // Render and attach the replay asynchronously after completion — the
+    // begin endpoint merges by ordinal, so registering it late is safe, and
+    // the projection picks it up when the upload finishes. A render failure
+    // only costs the replay, never the archived run.
+    match render_replay_artifact(&prepared.artifacts_dir, next_artifact_ordinal(&artifacts)).await {
+        Ok(Some(replay)) => {
+            artifacts.push(replay);
+            if !begin_run_upload(inner, prepared, &artifacts, &access_token).await? {
+                warn!(
+                    vm = vm_name,
+                    run_id = prepared.run_id,
+                    "remote run/vm vanished during replay registration; treating vm as orphaned local state"
+                );
+                return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
+            }
+            let replay_slice = &artifacts[artifacts.len() - 1..];
+            upload_artifact_set(inner, vm_name, prepared, replay_slice, &access_token).await?;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            warn!(
+                error = %error,
+                vm = vm_name,
+                run_id = prepared.run_id,
+                "failed to render replay cast; archiving run without a replay"
+            );
+        }
+    }
+
+    Ok(ArchiveUploadOutcome::Uploaded)
+}
+
+async fn complete_run_upload(
+    inner: &Inner,
+    prepared: &PreparedVmDeletion,
+    access_token: &str,
+) -> Result<()> {
+    let run_id_segment = encode_url_path_segment(&prepared.run_id);
+    let vm_name_segment = encode_url_path_segment(&prepared.vm_name);
+    let complete_url = format!(
+        "{}/agent/runs/{}/vms/{}/complete",
+        inner.bridge.base_url, run_id_segment, vm_name_segment
+    );
+    let response = inner
+        .http
+        .post(&complete_url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .with_context(|| format!("failed to complete run upload at {complete_url}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("run complete failed with status {status}: {body}");
+    }
+    Ok(())
+}
+
+/// Registers `artifacts` with the run upload. The endpoint merges by
+/// ordinal, so calling this again with a superset only adds the new entries.
+/// Returns `false` when the remote run/vm no longer exists.
+async fn begin_run_upload(
+    inner: &Inner,
+    prepared: &PreparedVmDeletion,
+    artifacts: &[LocalArtifact],
+    access_token: &str,
+) -> Result<bool> {
     let begin_request = RunUploadBeginRequest {
         run_id: prepared.run_id.clone(),
         vm_name: prepared.vm_name.clone(),
@@ -2386,7 +2464,7 @@ async fn upload_vm_run_artifacts(
     let begin_response = inner
         .http
         .post(&begin_url)
-        .bearer_auth(&access_token)
+        .bearer_auth(access_token)
         .json(&begin_request)
         .send()
         .await
@@ -2395,21 +2473,24 @@ async fn upload_vm_run_artifacts(
         let status = begin_response.status();
         let body = begin_response.text().await.unwrap_or_default();
         if is_run_purged_remote_response(status, &body) {
-            warn!(
-                vm = vm_name,
-                run_id = prepared.run_id,
-                "remote run/vm missing during artifact upload begin; skipping upload and treating vm as orphaned local state"
-            );
-            return Ok(ArchiveUploadOutcome::DiscardedMissingRemote);
+            return Ok(false);
         }
         anyhow::bail!("run begin failed with status {status}: {body}");
     }
-    let prepared = prepared.clone();
-    let vm_name = vm_name.to_string();
-    stream::iter(artifacts.into_iter().map(|artifact| {
+    Ok(true)
+}
+
+async fn upload_artifact_set(
+    inner: &Inner,
+    vm_name: &str,
+    prepared: &PreparedVmDeletion,
+    artifacts: &[LocalArtifact],
+    access_token: &str,
+) -> Result<()> {
+    stream::iter(artifacts.iter().cloned().map(|artifact| {
         let prepared = prepared.clone();
-        let access_token = access_token.clone();
-        let vm_name = vm_name.clone();
+        let access_token = access_token.to_string();
+        let vm_name = vm_name.to_string();
         async move {
             upload_single_artifact(inner, &prepared, &artifact, &access_token)
                 .await
@@ -2419,27 +2500,34 @@ async fn upload_vm_run_artifacts(
     .buffer_unordered(ARTIFACT_UPLOAD_CONCURRENCY)
     .try_collect::<Vec<_>>()
     .await?;
+    Ok(())
+}
 
-    let run_id_segment = encode_url_path_segment(&prepared.run_id);
-    let vm_name_segment = encode_url_path_segment(&prepared.vm_name);
-    let complete_url = format!(
-        "{}/agent/runs/{}/vms/{}/complete",
-        inner.bridge.base_url, run_id_segment, vm_name_segment
-    );
-    let response = inner
-        .http
-        .post(&complete_url)
-        .bearer_auth(&access_token)
-        .send()
-        .await
-        .with_context(|| format!("failed to complete run upload at {complete_url}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("run complete failed with status {status}: {body}");
-    }
+fn next_artifact_ordinal(artifacts: &[LocalArtifact]) -> u32 {
+    artifacts
+        .iter()
+        .map(|artifact| artifact.ordinal)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
 
-    Ok(ArchiveUploadOutcome::Uploaded)
+async fn render_replay_artifact(
+    artifacts_dir: &Path,
+    ordinal: u32,
+) -> Result<Option<LocalArtifact>> {
+    let Some(path) = replay_media::create_primary_replay_cast(artifacts_dir).await? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        describe_local_artifact(
+            ordinal,
+            replay_media::PRIMARY_REPLAY_KIND,
+            &path,
+            "application/x-asciicast; charset=utf-8",
+        )
+        .await?,
+    ))
 }
 
 async fn upload_single_artifact(
@@ -2785,20 +2873,6 @@ fn extract_recordings_to_spool_blocking(
         }
 
         let file_name = entry.file_name();
-        if file_name.ends_with(".cast") {
-            let destination = artifacts_dir.join(&file_name);
-            if destination.exists() {
-                continue;
-            }
-
-            let mut source = entry.to_file();
-            let mut destination_file = std::fs::File::create(&destination)
-                .with_context(|| format!("failed to create {}", destination.display()))?;
-            std::io::copy(&mut source, &mut destination_file)
-                .with_context(|| format!("failed to extract {}", destination.display()))?;
-            continue;
-        }
-
         if file_name.ends_with(".krec") {
             let raw_destination = artifacts_dir.join(&file_name);
             if !raw_destination.exists() {
@@ -2808,39 +2882,17 @@ fn extract_recordings_to_spool_blocking(
                 std::io::copy(&mut source, &mut destination_file)
                     .with_context(|| format!("failed to extract {}", raw_destination.display()))?;
             }
-
-            let cast_destination_name = file_name.trim_end_matches(".krec").to_owned() + ".cast";
-            let cast_destination = artifacts_dir.join(cast_destination_name);
-            if !cast_destination.exists() {
-                let source = entry.to_file();
-                let destination_file = std::fs::File::create(&cast_destination)
-                    .with_context(|| format!("failed to create {}", cast_destination.display()))?;
-                kino_recording::convert_raw_recording_to_cast(source, destination_file)
-                    .with_context(|| format!("failed to convert {}", cast_destination.display()))?;
-            }
         }
     }
 
     Ok(())
 }
 
+/// Collects everything except the combined replay cast, which is rendered
+/// and registered separately after these artifacts are already uploaded.
 async fn collect_local_artifacts(artifacts_dir: &Path) -> Result<Vec<LocalArtifact>> {
     let mut artifacts = Vec::new();
     let mut ordinal = 1_u32;
-
-    let primary_replay_path = artifacts_dir.join(replay_media::PRIMARY_REPLAY_FILENAME);
-    if primary_replay_path.exists() {
-        artifacts.push(
-            describe_local_artifact(
-                ordinal,
-                replay_media::PRIMARY_REPLAY_KIND,
-                &primary_replay_path,
-                "application/x-asciicast; charset=utf-8",
-            )
-            .await?,
-        );
-        ordinal = ordinal.saturating_add(1);
-    }
 
     for (kind, path, content_type) in [
         (
@@ -2883,57 +2935,28 @@ async fn collect_local_artifacts(artifacts_dir: &Path) -> Result<Vec<LocalArtifa
         .context("failed to iterate artifact dir")?
     {
         let path = entry.path();
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("cast") | Some("krec")
-                if path.file_name().and_then(|value| value.to_str())
-                    != Some(replay_media::PRIMARY_REPLAY_FILENAME) =>
-            {
-                recording_paths.push(path)
-            }
-            _ => {}
+        if path.extension().and_then(|ext| ext.to_str()) == Some("krec") {
+            recording_paths.push(path);
         }
     }
-    recording_paths.sort_by(|a, b| {
-        recording_sort_key(a)
-            .cmp(&recording_sort_key(b))
-            .then_with(|| a.file_name().cmp(&b.file_name()))
-    });
+    // Session files are named ssh-session-<start-ms>-<pid>.krec, so the
+    // lexicographic order is the chronological order.
+    recording_paths.sort();
 
     for path in recording_paths {
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default();
-        let (kind, content_type) = match extension {
-            "cast" => (
-                replay_media::REPLAY_SEGMENT_KIND,
-                "application/x-asciicast; charset=utf-8",
-            ),
-            "krec" => (
+        artifacts.push(
+            describe_local_artifact(
+                ordinal,
                 "ssh_recording_raw",
+                &path,
                 "application/x-kino-raw-event-log; charset=utf-8",
-            ),
-            _ => continue,
-        };
-        artifacts.push(describe_local_artifact(ordinal, kind, &path, content_type).await?);
+            )
+            .await?,
+        );
         ordinal = ordinal.saturating_add(1);
     }
 
     Ok(artifacts)
-}
-
-fn recording_sort_key(path: &Path) -> (String, u8) {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let extension_rank = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("cast") => 0,
-        Some("krec") => 1,
-        _ => 2,
-    };
-    (stem, extension_rank)
 }
 
 async fn describe_local_artifact(

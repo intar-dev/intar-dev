@@ -88,6 +88,10 @@ export interface RunVmStateDocument {
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
   primaryReplayArtifactId: string | null;
+  /// True once a raw SSH recording uploaded — the composed replay renders
+  /// asynchronously afterwards, so `hasRecording && !replayArtifacts.length`
+  /// means "replay still rendering". Optional: older stored docs lack it.
+  hasRecording?: boolean;
   terminalTarget: TerminalTarget;
   /// Reported guest IP inside the agent's VM network (not publicly routable).
   guestIp: string | null;

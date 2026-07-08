@@ -116,6 +116,16 @@ export function ScenarioRun() {
       if (!record) {
         return projectionPending ? 1_500 : false;
       }
+      // Poll eagerly while a replay is still rendering on the host so the
+      // player appears as soon as the composed cast uploads.
+      if (
+        record.phase === "completed" &&
+        record.vms.some(
+          (vm) => vm.hasRecording === true && vm.replayArtifacts.length === 0,
+        )
+      ) {
+        return 2_500;
+      }
       return POLL_INTERVALS[record.phase];
     },
     staleTime: 1_000,
@@ -326,6 +336,12 @@ export function ScenarioRun() {
       null
     );
   }, [selectedReplayArtifactId, selectedVm]);
+  // The composed replay renders on the host after the run completes; a raw
+  // recording without a replay artifact means it is still on its way.
+  const replayRendering =
+    attemptData?.phase === "completed" &&
+    selectedVm?.hasRecording === true &&
+    selectedVm.replayArtifacts.length === 0;
 
   const replayArtifactIndex = useMemo(() => {
     if (!selectedVm || !replayArtifact) {
@@ -687,7 +703,7 @@ export function ScenarioRun() {
                   onSelect={setSelectedVmId}
                 />
               ) : null}
-              <RunReplayPanel viewer={viewer} />
+              <RunReplayPanel viewer={viewer} rendering={replayRendering} />
               <Card size="sm">
                 <CardHeader>
                   <CardTitle className="font-heading text-base">

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-mod kino_recording;
+mod krec;
 mod mac;
 mod manager;
 mod replay_compose;
