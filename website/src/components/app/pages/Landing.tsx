@@ -1,5 +1,4 @@
 import { useMutation } from "@tanstack/react-query";
-import { ArrowRight } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { startGithubSignIn } from "@/lib/auth-client";
@@ -82,14 +81,6 @@ export function Landing() {
             Real scenarios, live sandboxes, actual VMs to break and repair —
             not slideshows.
           </p>
-          <Button
-            onClick={() => signIn.mutate()}
-            disabled={signIn.isPending}
-            className="mt-1"
-          >
-            {signIn.isPending ? "Opening GitHub…" : "Sign in with GitHub"}
-            <ArrowRight className="size-4" />
-          </Button>
         </section>
 
         <section className="flex flex-col gap-3">
