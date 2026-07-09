@@ -285,6 +285,10 @@ export function canAdvanceRunPhase(current: RunPhase, next: RunPhase): boolean {
   return RUN_PHASE_ORDER[next] >= RUN_PHASE_ORDER[current];
 }
 
+export function runPhaseAcceptsTerminalSessions(phase: RunPhase): boolean {
+  return ["active_partial", "active_full", "solved"].includes(phase);
+}
+
 export function canAdvanceVmPhase(current: VmPhase, next: VmPhase): boolean {
   return VM_PHASE_ORDER[next] >= VM_PHASE_ORDER[current];
 }

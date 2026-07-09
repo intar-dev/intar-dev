@@ -172,5 +172,6 @@ Local verification should include:
 
 Release verification also requires a real KVM host proof: publish a scenario,
 pre-cache its image, start a run, verify terminal access with the reported host key,
-assert metadata/host/cross-run isolation, tear the run down, and confirm artifacts
-land in R2.
+verify metadata HTTP is unreachable, the host gateway rejects guest SSH, and
+same-run peers can reach each other over SSH; then tear the run down and confirm
+archive and replay artifacts land in R2.

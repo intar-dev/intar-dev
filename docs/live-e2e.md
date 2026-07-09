@@ -192,16 +192,6 @@ export INTAR_LIVE_HOST_ID="host-id-from-dashboard"
 just live-e2e
 ```
 
-For cross-run isolation, provide a second enabled scenario. The harness starts it
-on the same host, collects its guest IPs from the admin host API, and verifies the
-primary run cannot connect to those guest SSH ports. It also checks the reverse
-direction.
-
-```sh
-export INTAR_LIVE_CROSS_RUN_SCENARIO_ID="other-enabled-scenario"
-just live-e2e
-```
-
 To add extra forbidden guest-side TCP targets that must not be reachable:
 
 ```sh
@@ -233,13 +223,21 @@ The harness fails unless all of these are true:
 - A pre-solve solution reveal marks the run as solution-assisted.
 - Each VM has a reported SSH host key and gets a browser Stargate route.
 - VMs in the same run have distinct generated terminal public keys.
-- Guest terminal probes cannot reach link-local metadata or the host gateway.
+- Guest terminal probes cannot reach link-local metadata over HTTP or the host
+  gateway over TCP port 22.
 - Same-run peer VM IPs are reachable over TCP port 22.
-- Optional cross-run guest IPs are unreachable over TCP port 22.
 - Teardown reaches `completed`.
 - Fresh terminal session creation and old browser terminal websocket URLs are
   rejected after teardown.
 - At least one archived artifact is readable from the Worker/R2 artifact route.
+- Every probed VM produces a replay cast containing the probe's executed begin
+  and end markers.
+
+The platform permits only one active run per user. Cross-run network isolation
+therefore requires a multi-session harness with two authenticated users and
+concurrent runs deliberately placed on the same agent host. That proof is outside
+this single-session harness; do not claim it from sequential or different-host
+runs.
 
 The default warm-start budget is `10000` milliseconds. Override only when
 diagnosing:

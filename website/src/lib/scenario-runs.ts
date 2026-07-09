@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
@@ -43,7 +43,9 @@ import {
   buildInitialVmState,
   buildInitialRunState,
   recomputeRunState,
+  runPhaseAcceptsTerminalSessions,
   type RunPhase,
+  type ScenarioReplayArtifact,
   type RunStateDocument,
   type RunVmStateDocument,
 } from "@/lib/run-state";
@@ -266,7 +268,7 @@ export async function getScenarioRunForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
-  return toScenarioRunRecord(row);
+  return hydrateScenarioRunReplayArtifacts(toScenarioRunRecord(row));
 }
 
 export interface ScenarioRunListEntry {
@@ -305,13 +307,16 @@ export async function listScenarioRunsForUser(params: {
       failedAt: scenarioRuns.failedAt,
       deleteRequestedAt: scenarioRuns.deleteRequestedAt,
       solutionAssisted: scenarioRuns.solutionAssisted,
-      stateJson: scenarioRuns.stateJson,
     })
     .from(scenarioRuns)
     .where(eq(scenarioRuns.userId, params.userId))
     .orderBy(desc(scenarioRuns.createdAt))
     .limit(100);
 
+  const replayRunIds = await loadRunIdsWithUploadedReplayArtifacts(
+    db,
+    rows.map((row) => row.runId),
+  );
   return rows.map((row) => ({
     runId: row.runId,
     scenarioId: row.scenarioId,
@@ -334,7 +339,7 @@ export async function listScenarioRunsForUser(params: {
       solvedAt: row.solvedAt,
     }),
     solutionAssisted: row.solutionAssisted,
-    hasReplay: hasReplayArtifacts(row.stateJson),
+    hasReplay: replayRunIds.has(row.runId),
   }));
 }
 
@@ -670,11 +675,15 @@ export async function createScenarioSshSessionForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
-  if (row.completedAt !== null || row.failedAt !== null) {
+  if (
+    !runPhaseAcceptsTerminalSessions(row.state.phase) ||
+    row.completedAt !== null ||
+    row.failedAt !== null
+  ) {
     throw appError(
       409,
       "scenario_terminal_closed",
-      "terminal sessions are closed for finished runs",
+      "terminal sessions are closed unless the run is active",
     );
   }
   const vm = row.state.vms.find((candidate) => candidate.id === params.vmId);
@@ -1118,7 +1127,6 @@ async function loadFinishedRuns(userId: string, scenarioId: string) {
       solvedAt: scenarioRuns.solvedAt,
       failedAt: scenarioRuns.failedAt,
       deleteRequestedAt: scenarioRuns.deleteRequestedAt,
-      stateJson: scenarioRuns.stateJson,
       solutionAssisted: scenarioRuns.solutionAssisted,
     })
     .from(scenarioRuns)
@@ -1132,6 +1140,10 @@ async function loadFinishedRuns(userId: string, scenarioId: string) {
     )
     .orderBy(desc(scenarioRuns.createdAt));
 
+  const replayRunIds = await loadRunIdsWithUploadedReplayArtifacts(
+    db,
+    rows.map((row) => row.runId),
+  );
   return rows.map((row) => ({
     runId: row.runId,
     phase: row.state as "completed" | "failed",
@@ -1151,7 +1163,7 @@ async function loadFinishedRuns(userId: string, scenarioId: string) {
       solvedAt: row.solvedAt,
     }),
     solutionAssisted: row.solutionAssisted,
-    hasReplay: hasReplayArtifacts(row.stateJson),
+    hasReplay: replayRunIds.has(row.runId),
   }));
 }
 
@@ -1677,13 +1689,79 @@ function slugify(value: string) {
   );
 }
 
-function hasReplayArtifacts(rawStateJson: string): boolean {
-  try {
-    const parsed = JSON.parse(rawStateJson) as RunStateDocument;
-    return Array.isArray(parsed.replayArtifacts) && parsed.replayArtifacts.length > 0;
-  } catch {
-    return false;
+async function hydrateScenarioRunReplayArtifacts(
+  run: ScenarioRunRecord,
+): Promise<ScenarioRunRecord> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      id: scenarioRunArtifacts.id,
+      runId: scenarioRunArtifacts.runId,
+      vmId: scenarioRunArtifacts.vmId,
+      kind: scenarioRunArtifacts.kind,
+      filename: scenarioRunArtifacts.filename,
+      contentType: scenarioRunArtifacts.contentType,
+      sizeBytes: scenarioRunArtifacts.sizeBytes,
+    })
+    .from(scenarioRunArtifacts)
+    .where(
+      and(
+        eq(scenarioRunArtifacts.runId, run.id),
+        eq(scenarioRunArtifacts.uploadStatus, "uploaded"),
+        eq(scenarioRunArtifacts.kind, "ssh_recording_segment"),
+      ),
+    )
+    .orderBy(asc(scenarioRunArtifacts.vmId), asc(scenarioRunArtifacts.ordinal));
+
+  const artifactsByVm = new Map<string, ScenarioReplayArtifact[]>();
+  for (const row of rows) {
+    const artifact: ScenarioReplayArtifact = {
+      id: row.id,
+      hostId: "",
+      runId: row.runId,
+      vmId: row.vmId,
+      kind: row.kind,
+      filename: row.filename,
+      contentType: row.contentType,
+      sizeBytes: row.sizeBytes,
+    };
+    const artifacts = artifactsByVm.get(row.vmId) ?? [];
+    artifacts.push(artifact);
+    artifactsByVm.set(row.vmId, artifacts);
   }
+  const vms = run.vms.map((vm) => ({
+    ...vm,
+    replayArtifacts: artifactsByVm.get(vm.id) ?? [],
+  }));
+  return {
+    ...run,
+    vms,
+    replayArtifacts: vms.flatMap((vm) => vm.replayArtifacts),
+  };
+}
+
+async function loadRunIdsWithUploadedReplayArtifacts(
+  db: DrizzleD1Database,
+  runIds: string[],
+): Promise<Set<string>> {
+  const replayRunIds = new Set<string>();
+  // D1 permits at most 100 bound parameters. The two constant filters below
+  // leave room for 98 run IDs per query.
+  for (let index = 0; index < runIds.length; index += 98) {
+    const batch = runIds.slice(index, index + 98);
+    const rows = await db
+      .selectDistinct({ runId: scenarioRunArtifacts.runId })
+      .from(scenarioRunArtifacts)
+      .where(
+        and(
+          inArray(scenarioRunArtifacts.runId, batch),
+          eq(scenarioRunArtifacts.uploadStatus, "uploaded"),
+          eq(scenarioRunArtifacts.kind, "ssh_recording_segment"),
+        ),
+      );
+    for (const row of rows) replayRunIds.add(row.runId);
+  }
+  return replayRunIds;
 }
 
 async function loadHostTerminalAddress(hostId: string): Promise<string | null> {
