@@ -2,29 +2,13 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   Outlet,
   redirect,
 } from "@tanstack/react-router";
 import { MarketingShell } from "./shell/MarketingShell";
 import { AppShell } from "./shell/AppShell";
-import { Landing } from "./pages/Landing";
-import { RequestAccess } from "./pages/RequestAccess";
-import { OAuthConsent } from "./pages/OAuthConsent";
-import { Dashboard } from "./pages/Dashboard";
-import { AdminHosts } from "./pages/admin/Hosts";
-import { AdminBuilds } from "./pages/AdminBuilds";
-import { ScenarioRegistry as AdminScenarios } from "./pages/admin/ScenarioRegistry";
-import { ScenarioDetails as AdminScenarioDetails } from "./pages/admin/ScenarioDetails";
-import { AdminPeople } from "./pages/AdminPeople";
-import { AdminAuthoring } from "./pages/AdminAuthoring";
-import { ScenarioCatalog } from "./pages/learn/ScenarioCatalog";
 import { validateSearch as validateCatalogSearch } from "./pages/learn/catalog-search";
-import { ScenarioBriefing } from "./pages/learn/ScenarioBriefing";
-import { ScenarioRun } from "./pages/ScenarioRun";
-import { RunsList } from "./pages/RunsList";
-import { Teams } from "./pages/Teams";
-import { TeamDetail } from "./pages/TeamDetail";
-import { Profile } from "./pages/Profile";
 import { getClientSession } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 
@@ -43,19 +27,25 @@ const marketingLayoutRoute = createRoute({
 const indexRoute = createRoute({
   getParentRoute: () => marketingLayoutRoute,
   path: "/",
-  component: Landing,
+  component: lazyRouteComponent(() => import("./pages/Landing"), "Landing"),
 });
 
 const requestAccessRoute = createRoute({
   getParentRoute: () => marketingLayoutRoute,
   path: "request-access",
-  component: RequestAccess,
+  component: lazyRouteComponent(
+    () => import("./pages/RequestAccess"),
+    "RequestAccess",
+  ),
 });
 
 const oauthConsentRoute = createRoute({
   getParentRoute: () => marketingLayoutRoute,
   path: "oauth/consent",
-  component: OAuthConsent,
+  component: lazyRouteComponent(
+    () => import("./pages/OAuthConsent"),
+    "OAuthConsent",
+  ),
 });
 
 /* -------------------------------------------------------------------------- */
@@ -73,43 +63,55 @@ const scenarioCatalogRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "scenarios",
   validateSearch: validateCatalogSearch,
-  component: ScenarioCatalog,
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioCatalog"),
+    "ScenarioCatalog",
+  ),
 });
 
 const scenarioBriefingRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "scenarios/$scenarioId",
-  component: ScenarioBriefing,
+  component: lazyRouteComponent(
+    () => import("./pages/learn/ScenarioBriefing"),
+    "ScenarioBriefing",
+  ),
 });
 
 const scenarioRunRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "runs/$runId",
-  component: ScenarioRun,
+  component: lazyRouteComponent(
+    () => import("./pages/ScenarioRun"),
+    "ScenarioRun",
+  ),
 });
 
 const runsListRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "runs",
-  component: RunsList,
+  component: lazyRouteComponent(() => import("./pages/RunsList"), "RunsList"),
 });
 
 const teamsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "teams",
-  component: Teams,
+  component: lazyRouteComponent(() => import("./pages/Teams"), "Teams"),
 });
 
 const teamDetailRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "teams/$orgId",
-  component: TeamDetail,
+  component: lazyRouteComponent(
+    () => import("./pages/TeamDetail"),
+    "TeamDetail",
+  ),
 });
 
 const profileRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "profile",
-  component: Profile,
+  component: lazyRouteComponent(() => import("./pages/Profile"), "Profile"),
 });
 
 /* Admin routes — additionally require the admin role. */
@@ -118,58 +120,70 @@ const adminOverviewRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin",
   beforeLoad: requireAdminRoute,
-  component: Dashboard,
+  component: lazyRouteComponent(
+    () => import("./pages/Dashboard"),
+    "Dashboard",
+  ),
 });
 
 const adminHostsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/hosts",
   beforeLoad: requireAdminRoute,
-  component: AdminHosts,
-});
-
-// Old bookmark compatibility: onboarding folded into the Hosts page.
-const adminOnboardingRedirectRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "admin/onboarding",
-  beforeLoad: () => {
-    throw redirect({ to: "/admin/hosts" });
-  },
+  component: lazyRouteComponent(
+    () => import("./pages/admin/Hosts"),
+    "AdminHosts",
+  ),
 });
 
 const adminBuildsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/builds",
   beforeLoad: requireAdminRoute,
-  component: AdminBuilds,
+  component: lazyRouteComponent(
+    () => import("./pages/AdminBuilds"),
+    "AdminBuilds",
+  ),
 });
 
 const adminScenariosRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/scenarios",
   beforeLoad: requireAdminRoute,
-  component: AdminScenarios,
+  component: lazyRouteComponent(
+    () => import("./pages/admin/ScenarioRegistry"),
+    "ScenarioRegistry",
+  ),
 });
 
 const adminScenarioDetailsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/scenarios/$scenarioId",
   beforeLoad: requireAdminRoute,
-  component: AdminScenarioDetails,
+  component: lazyRouteComponent(
+    () => import("./pages/admin/ScenarioDetails"),
+    "ScenarioDetails",
+  ),
 });
 
 const adminPeopleRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/people",
   beforeLoad: requireAdminRoute,
-  component: AdminPeople,
+  component: lazyRouteComponent(
+    () => import("./pages/AdminPeople"),
+    "AdminPeople",
+  ),
 });
 
 const adminAuthoringRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "admin/authoring",
   beforeLoad: requireAdminRoute,
-  component: AdminAuthoring,
+  component: lazyRouteComponent(
+    () => import("./pages/AdminAuthoring"),
+    "AdminAuthoring",
+  ),
 });
 
 const routeTree = rootRoute.addChildren([
@@ -188,7 +202,6 @@ const routeTree = rootRoute.addChildren([
     profileRoute,
     adminOverviewRoute,
     adminHostsRoute,
-    adminOnboardingRedirectRoute,
     adminBuildsRoute,
     adminScenariosRoute,
     adminScenarioDetailsRoute,

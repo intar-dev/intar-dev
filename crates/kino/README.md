@@ -36,7 +36,7 @@ curl -sS http://127.0.0.1:8080/probes \
 ```sh
 kino --config /etc/kino/kino.hcl
 kino record-ssh --config /etc/kino/kino.hcl --command 'printf "hello\n"'
-kino record-command --config /etc/kino/kino.hcl --command 'netbird status --json'
+kino record-command --config /etc/kino/kino.hcl --command 'cat /etc/os-release'
 ```
 
 Probe configs support `file_exists`, `file_regex_capture`, `port_open`, `service`, `k8s_pod_state`, and `command_json_path`. Recorder output is written to `recording.output_dir`.

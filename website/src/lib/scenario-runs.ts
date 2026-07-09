@@ -7,6 +7,7 @@ import {
   agentHosts,
   hostActualState,
   scenarioRunArtifacts,
+  scenarioRunArtifactUploads,
   scenarioRuns,
   type ScenarioRunHintSnapshot,
 } from "@/db/schema";
@@ -23,6 +24,12 @@ import {
 import { hostHealth } from "@/lib/host-health";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
+import { revokeAllRoutes } from "@/lib/route-revocation";
+import { deleteScenarioArtifactStorage } from "@/lib/scenario-artifact-storage";
+import {
+  runVmsRequiringDesiredAbsence,
+  scenarioRunPurgeBlockReason,
+} from "@/lib/scenario-run-cleanup";
 import {
   buildScenarioLaunchSpecs,
   deriveScenarioBriefing,
@@ -454,25 +461,23 @@ export async function destroyScenarioRunForUser(params: {
   runId: string;
   acceptedAt: number;
 }> {
+  const db = drizzle(env.DB);
   const row = await loadRunRow(params.runId, params.userId);
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
 
   const acceptedAt = Date.now();
+  const teardownVms = runVmsRequiringDesiredAbsence(row.state);
   if (!["completed", "failed"].includes(row.state.phase)) {
-    const destroyableVmIds = new Set(
-      row.state.vms
-        .filter((vm) => !["destroying", "archived", "completed", "failed"].includes(vm.phase))
-        .map((vm) => vm.id),
-    );
+    const teardownVmIds = new Set(teardownVms.map((vm) => vm.id));
     const next = recomputeRunState({
       ...row.state,
       phase: "teardown_requested",
       phaseTitle: "Teardown requested",
       phaseDetail: "Waiting for the host to acknowledge teardown.",
       vms: row.state.vms.map((vm) =>
-        destroyableVmIds.has(vm.id)
+        teardownVmIds.has(vm.id)
           ? {
               ...vm,
               phaseDetail: "Teardown requested. Waiting for host delivery.",
@@ -487,22 +492,41 @@ export async function destroyScenarioRunForUser(params: {
       solvedAt: row.solvedAt,
       currentPhase: row.state.phase,
     });
-
-    const destroyableVms = row.state.vms.filter((vm) =>
-      destroyableVmIds.has(vm.id),
-    );
-    if (destroyableVms.length) {
-      await markRunVmsAbsentInDesiredState({
-        hostId: row.hostId,
-        runId: row.runId,
-        vms: destroyableVms,
-        nowUnixMs: acceptedAt,
-      });
-    }
+  } else if (teardownVms.length > 0) {
+    // A failed outcome is terminal for scoring, not for infrastructure. Keep
+    // the original failure state while recording that teardown was requested.
+    await db
+      .update(scenarioRuns)
+      .set({
+        deleteRequestedAt: row.deleteRequestedAt ?? acceptedAt,
+        updatedAt: acceptedAt,
+      })
+      .where(
+        and(
+          eq(scenarioRuns.runId, row.runId),
+          eq(scenarioRuns.userId, params.userId),
+        ),
+      );
   }
 
-  await revokeScenarioRunRoutes(row).catch(() => undefined);
+  if (teardownVms.length > 0) {
+    await markRunVmsAbsentInDesiredState({
+      hostId: row.hostId,
+      runId: row.runId,
+      vms: teardownVms,
+      nowUnixMs: acceptedAt,
+      db,
+    });
+  }
+
+  const routeRevocationFailure = await revokeScenarioRunRoutes(row).then(
+    () => null,
+    (error: unknown) => ({ error }),
+  );
   await tryWakeHostRuntime(row.hostId);
+  if (routeRevocationFailure) {
+    throw routeRevocationFailure.error;
+  }
 
   return {
     accepted: true,
@@ -527,8 +551,41 @@ export async function deleteFinishedScenarioRunForUser(params: {
       "scenario run is not in a terminal state",
     );
   }
-  await revokeScenarioRunRoutes(row).catch(() => undefined);
-  await db.delete(scenarioRunArtifacts).where(eq(scenarioRunArtifacts.runId, row.runId));
+  const storageRecords = await db
+    .select({
+      r2Key: scenarioRunArtifacts.r2Key,
+      r2UploadId: scenarioRunArtifactUploads.r2UploadId,
+      uploadStatus: scenarioRunArtifacts.uploadStatus,
+    })
+    .from(scenarioRunArtifacts)
+    .leftJoin(
+      scenarioRunArtifactUploads,
+      eq(scenarioRunArtifactUploads.artifactId, scenarioRunArtifacts.id),
+    )
+    .where(eq(scenarioRunArtifacts.runId, row.runId));
+  const purgeBlockReason = scenarioRunPurgeBlockReason(row.state, storageRecords);
+  if (purgeBlockReason) {
+    throw appError(
+      409,
+      "scenario_run_delete_conflict",
+      purgeBlockReason === "vm_teardown_pending"
+        ? "scenario run teardown is not complete"
+        : "scenario run artifact uploads are not complete",
+    );
+  }
+
+  await revokeScenarioRunRoutes(row);
+  const storageCleanup = await deleteScenarioArtifactStorage(
+    env.VM_RUN_ARTIFACTS_BUCKET,
+    storageRecords,
+  );
+  if (storageCleanup.failedMultipartAborts > 0) {
+    console.warn("scenario artifact multipart cleanup was incomplete", {
+      runId: row.runId,
+      failedMultipartAborts: storageCleanup.failedMultipartAborts,
+    });
+  }
+
   await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, row.runId));
 }
 
@@ -1313,11 +1370,7 @@ async function revokeScenarioRunRoutes(row: {
       ),
     ]),
   );
-  await Promise.allSettled(
-    [...routeUsernames].map((routeUsername) =>
-      deleteStargateRoute(routeUsername).catch(() => undefined),
-    ),
-  );
+  await revokeAllRoutes(routeUsernames, deleteStargateRoute);
 }
 
 export async function revokeScenarioNativeProfileRoutesForUser(
@@ -1354,9 +1407,7 @@ export async function revokeScenarioNativeProfileRoutesForUser(
     }
   }
 
-  await Promise.allSettled(
-    [...routeUsernames].map((routeUsername) => deleteStargateRoute(routeUsername)),
-  );
+  await revokeAllRoutes(routeUsernames, deleteStargateRoute);
 }
 
 async function selectScenarioHost(

@@ -53,17 +53,20 @@ struct ActiveBridge {
 
 pub async fn run_public_ssh_server(
     state: GatewayState,
-    bind: SocketAddr,
+    listener: tokio::net::TcpListener,
     host_key: russh::keys::PrivateKey,
 ) -> anyhow::Result<()> {
+    let bind = listener
+        .local_addr()
+        .context("failed to read public ssh listener address")?;
     let mut config = server_config();
     config.keys.push(host_key);
     let config = Arc::new(config);
     let mut server = SshProxyServer { state };
     server
-        .run_on_address(config, bind)
+        .run_on_socket(config, &listener)
         .await
-        .with_context(|| format!("failed to bind public ssh listener on {bind}"))?;
+        .with_context(|| format!("public ssh server failed on {bind}"))?;
     Ok(())
 }
 
@@ -130,14 +133,19 @@ impl server::Handler for SshConnection {
     async fn channel_open_session(
         &mut self,
         channel: russh::Channel<Msg>,
+        reply: server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if !self.channels.is_empty() {
-            return Ok(false);
+            reply
+                .reject(russh::ChannelOpenFailure::ResourceShortage)
+                .await;
+            return Ok(());
         }
         self.channels
             .insert(channel.id(), ChannelState::Pending { pty: None });
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn pty_request(
@@ -166,7 +174,7 @@ impl server::Handler for SshConnection {
             }
             ChannelState::Active(active) => {
                 if let BridgeController::Pty(controller) = &active.controller {
-                    controller.resize(col_width as u16, row_height as u16);
+                    controller.resize(col_width as u16, row_height as u16).await;
                     session.channel_success(channel)?;
                 } else {
                     session.channel_failure(channel)?;
@@ -273,8 +281,8 @@ impl server::Handler for SshConnection {
     ) -> Result<(), Self::Error> {
         if let Some(ChannelState::Active(active)) = self.channels.get(&channel) {
             match &active.controller {
-                BridgeController::Exec(controller) => controller.send_input(data.to_vec()),
-                BridgeController::Pty(controller) => controller.send_input(data.to_vec()),
+                BridgeController::Exec(controller) => controller.send_input(data.to_vec()).await,
+                BridgeController::Pty(controller) => controller.send_input(data.to_vec()).await,
             }
         }
         Ok(())
@@ -287,8 +295,8 @@ impl server::Handler for SshConnection {
     ) -> Result<(), Self::Error> {
         if let Some(ChannelState::Active(active)) = self.channels.get(&channel) {
             match &active.controller {
-                BridgeController::Exec(controller) => controller.send_eof(),
-                BridgeController::Pty(controller) => controller.send_eof(),
+                BridgeController::Exec(controller) => controller.send_eof().await,
+                BridgeController::Pty(controller) => controller.send_eof().await,
             }
         }
         Ok(())
@@ -320,7 +328,7 @@ impl server::Handler for SshConnection {
         if let Some(ChannelState::Active(active)) = self.channels.get(&channel)
             && let BridgeController::Pty(controller) = &active.controller
         {
-            controller.resize(col_width as u16, row_height as u16);
+            controller.resize(col_width as u16, row_height as u16).await;
         }
         Ok(())
     }
@@ -375,7 +383,7 @@ fn server_config() -> russh::server::Config {
 async fn forward_bridge_events(
     handle: server::Handle,
     channel: ChannelId,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<BridgeEvent>,
+    mut events: tokio::sync::mpsc::Receiver<BridgeEvent>,
 ) {
     while let Some(event) = events.recv().await {
         match event {

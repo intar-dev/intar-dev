@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -18,6 +19,9 @@ use stargate_core::RouteRecord;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 
+const BRIDGE_INPUT_CAPACITY: usize = 32;
+const BRIDGE_EVENT_CAPACITY: usize = 32;
+
 #[derive(Debug)]
 pub enum BridgeEvent {
     Stdout(Vec<u8>),
@@ -27,13 +31,13 @@ pub enum BridgeEvent {
 
 #[derive(Clone)]
 pub struct ExecBridgeControl {
-    tx: tokio_mpsc::UnboundedSender<BridgeInput>,
+    tx: tokio_mpsc::Sender<BridgeInput>,
     cancel: CancellationToken,
 }
 
 #[derive(Clone)]
 pub struct PtyBridgeControl {
-    tx: tokio_mpsc::UnboundedSender<BridgeInput>,
+    tx: tokio_mpsc::Sender<BridgeInput>,
     cancel: CancellationToken,
 }
 
@@ -59,13 +63,10 @@ pub fn spawn_exec_bridge(
     route: RouteRecord,
     command: String,
     cancel: CancellationToken,
-) -> anyhow::Result<(
-    ExecBridgeControl,
-    tokio_mpsc::UnboundedReceiver<BridgeEvent>,
-)> {
+) -> anyhow::Result<(ExecBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
     let target = PreparedSshTarget::new(&route)?;
-    let (events_tx, events_rx) = tokio_mpsc::unbounded_channel();
-    let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
+    let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
     tokio::spawn(run_bridge(
         route,
@@ -89,10 +90,10 @@ pub fn spawn_pty_bridge(
     route: RouteRecord,
     options: PtyBridgeOptions,
     cancel: CancellationToken,
-) -> anyhow::Result<(PtyBridgeControl, tokio_mpsc::UnboundedReceiver<BridgeEvent>)> {
+) -> anyhow::Result<(PtyBridgeControl, tokio_mpsc::Receiver<BridgeEvent>)> {
     let target = PreparedSshTarget::new(&route)?;
-    let (events_tx, events_rx) = tokio_mpsc::unbounded_channel();
-    let (input_tx, input_rx) = tokio_mpsc::unbounded_channel();
+    let (events_tx, events_rx) = tokio_mpsc::channel(BRIDGE_EVENT_CAPACITY);
+    let (input_tx, input_rx) = tokio_mpsc::channel(BRIDGE_INPUT_CAPACITY);
 
     tokio::spawn(run_bridge(
         route,
@@ -113,12 +114,12 @@ pub fn spawn_pty_bridge(
 }
 
 impl ExecBridgeControl {
-    pub fn send_input(&self, data: Vec<u8>) {
-        let _ = self.tx.send(BridgeInput::Data(data));
+    pub async fn send_input(&self, data: Vec<u8>) {
+        send_bridge_input(&self.tx, &self.cancel, BridgeInput::Data(data)).await;
     }
 
-    pub fn send_eof(&self) {
-        let _ = self.tx.send(BridgeInput::Eof);
+    pub async fn send_eof(&self) {
+        send_bridge_input(&self.tx, &self.cancel, BridgeInput::Eof).await;
     }
 
     pub fn terminate(&self) {
@@ -127,20 +128,31 @@ impl ExecBridgeControl {
 }
 
 impl PtyBridgeControl {
-    pub fn send_input(&self, data: Vec<u8>) {
-        let _ = self.tx.send(BridgeInput::Data(data));
+    pub async fn send_input(&self, data: Vec<u8>) {
+        send_bridge_input(&self.tx, &self.cancel, BridgeInput::Data(data)).await;
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let _ = self.tx.send(BridgeInput::Resize { cols, rows });
+    pub async fn resize(&self, cols: u16, rows: u16) {
+        send_bridge_input(&self.tx, &self.cancel, BridgeInput::Resize { cols, rows }).await;
     }
 
-    pub fn send_eof(&self) {
-        let _ = self.tx.send(BridgeInput::Eof);
+    pub async fn send_eof(&self) {
+        send_bridge_input(&self.tx, &self.cancel, BridgeInput::Eof).await;
     }
 
     pub fn terminate(&self) {
         self.cancel.cancel();
+    }
+}
+
+async fn send_bridge_input(
+    tx: &tokio_mpsc::Sender<BridgeInput>,
+    cancel: &CancellationToken,
+    input: BridgeInput,
+) {
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = tx.send(input) => {}
     }
 }
 
@@ -192,8 +204,8 @@ async fn run_bridge(
     route: RouteRecord,
     target: PreparedSshTarget,
     mode: BridgeMode,
-    input_rx: tokio_mpsc::UnboundedReceiver<BridgeInput>,
-    events_tx: tokio_mpsc::UnboundedSender<BridgeEvent>,
+    input_rx: tokio_mpsc::Receiver<BridgeInput>,
+    events_tx: tokio_mpsc::Sender<BridgeEvent>,
     cancel: CancellationToken,
 ) {
     let exit_status =
@@ -204,22 +216,38 @@ async fn run_bridge(
                 // context alone ("failed connecting to target …") hides the
                 // underlying russh/auth failure that operators need.
                 tracing::warn!(error = ?error, "outbound ssh bridge failed");
-                let _ = events_tx.send(BridgeEvent::Stderr(
-                    format!("stargate outbound ssh bridge failed: {error:#}\n").into_bytes(),
-                ));
+                send_bridge_event(
+                    &events_tx,
+                    &cancel,
+                    BridgeEvent::Stderr(
+                        format!("stargate outbound ssh bridge failed: {error:#}\n").into_bytes(),
+                    ),
+                )
+                .await;
                 255
             }
         };
 
-    let _ = events_tx.send(BridgeEvent::Exit(exit_status));
+    send_bridge_event(&events_tx, &cancel, BridgeEvent::Exit(exit_status)).await;
+}
+
+async fn send_bridge_event(
+    tx: &tokio_mpsc::Sender<BridgeEvent>,
+    cancel: &CancellationToken,
+    event: BridgeEvent,
+) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        result = tx.send(event) => result.is_ok(),
+    }
 }
 
 async fn run_bridge_inner(
     route: RouteRecord,
     target: PreparedSshTarget,
     mode: BridgeMode,
-    input_rx: tokio_mpsc::UnboundedReceiver<BridgeInput>,
-    events_tx: &tokio_mpsc::UnboundedSender<BridgeEvent>,
+    input_rx: tokio_mpsc::Receiver<BridgeInput>,
+    events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<u32> {
     let mut session = client::connect(
@@ -300,14 +328,37 @@ async fn configure_channel(channel: &russh::Channel<Msg>, mode: BridgeMode) -> a
 }
 
 async fn bridge_channel(
-    mut read_half: ChannelReadHalf,
+    read_half: ChannelReadHalf,
     write_half: ChannelWriteHalf<Msg>,
-    mut input_rx: tokio_mpsc::UnboundedReceiver<BridgeInput>,
-    events_tx: &tokio_mpsc::UnboundedSender<BridgeEvent>,
+    input_rx: tokio_mpsc::Receiver<BridgeInput>,
+    events_tx: &tokio_mpsc::Sender<BridgeEvent>,
     cancel: &CancellationToken,
 ) -> anyhow::Result<u32> {
-    let mut exit_status = None;
+    drive_bridge_pumps(
+        pump_bridge_input(write_half, input_rx, cancel),
+        pump_bridge_output(read_half, events_tx, cancel),
+    )
+    .await
+}
 
+async fn drive_bridge_pumps(
+    input: impl Future<Output = anyhow::Result<u32>>,
+    output: impl Future<Output = anyhow::Result<u32>>,
+) -> anyhow::Result<u32> {
+    tokio::pin!(input);
+    tokio::pin!(output);
+
+    tokio::select! {
+        result = &mut input => result,
+        result = &mut output => result,
+    }
+}
+
+async fn pump_bridge_input(
+    write_half: ChannelWriteHalf<Msg>,
+    mut input_rx: tokio_mpsc::Receiver<BridgeInput>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<u32> {
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -317,7 +368,7 @@ async fn bridge_channel(
             input = input_rx.recv() => {
                 let Some(input) = input else {
                     let _ = write_half.close().await;
-                    return Ok(exit_status.unwrap_or(0));
+                    return Ok(0);
                 };
                 match input {
                     BridgeInput::Data(data) => {
@@ -337,13 +388,39 @@ async fn bridge_channel(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn pump_bridge_output(
+    mut read_half: ChannelReadHalf,
+    events_tx: &tokio_mpsc::Sender<BridgeEvent>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<u32> {
+    let mut exit_status = None;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(255),
             message = read_half.wait() => {
                 match message {
                     Some(ChannelMsg::Data { data }) => {
-                        let _ = events_tx.send(BridgeEvent::Stdout(data.to_vec()));
+                        if !send_bridge_event(
+                            events_tx,
+                            cancel,
+                            BridgeEvent::Stdout(data.to_vec()),
+                        ).await {
+                            return Ok(255);
+                        }
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        let _ = events_tx.send(BridgeEvent::Stderr(data.to_vec()));
+                        if !send_bridge_event(
+                            events_tx,
+                            cancel,
+                            BridgeEvent::Stderr(data.to_vec()),
+                        ).await {
+                            return Ok(255);
+                        }
                     }
                     Some(ChannelMsg::ExitStatus { exit_status: status }) => {
                         exit_status = Some(status);
@@ -384,9 +461,110 @@ fn client_config() -> Arc<client::Config> {
 
 #[cfg(test)]
 mod tests {
-    use super::StrictHostKey;
+    use std::{future::pending, task::Poll, time::Duration};
+
+    use futures_util::{pin_mut, poll};
     use russh::client::Handler as _;
     use russh::keys::ssh_key::PublicKey;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        BridgeEvent, BridgeInput, ExecBridgeControl, StrictHostKey, drive_bridge_pumps,
+        send_bridge_event,
+    };
+
+    #[tokio::test]
+    async fn bridge_input_applies_backpressure_at_capacity() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let controller = ExecBridgeControl {
+            tx,
+            cancel: CancellationToken::new(),
+        };
+        controller.send_input(vec![1]).await;
+
+        let blocked_send = controller.send_input(vec![2]);
+        pin_mut!(blocked_send);
+        assert!(matches!(poll!(blocked_send.as_mut()), Poll::Pending));
+
+        let Some(BridgeInput::Data(first)) = rx.recv().await else {
+            panic!("expected first data message");
+        };
+        assert_eq!(first, vec![1]);
+        blocked_send.await;
+        let Some(BridgeInput::Data(second)) = rx.recv().await else {
+            panic!("expected second data message");
+        };
+        assert_eq!(second, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_bidirectional_saturation_makes_progress() {
+        let cancel = CancellationToken::new();
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let controller = ExecBridgeControl {
+            tx: input_tx,
+            cancel: cancel.clone(),
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+
+        controller.send_input(vec![1]).await;
+        assert!(send_bridge_event(&event_tx, &cancel, BridgeEvent::Stdout(vec![10]),).await);
+
+        let input_pump = async move {
+            let Some(BridgeInput::Data(first)) = input_rx.recv().await else {
+                anyhow::bail!("expected first input message");
+            };
+            if first != vec![1] {
+                anyhow::bail!("unexpected first input message");
+            }
+
+            let Some(BridgeInput::Data(second)) = input_rx.recv().await else {
+                anyhow::bail!("expected second input message");
+            };
+            if second != vec![2] {
+                anyhow::bail!("unexpected second input message");
+            }
+
+            pending::<anyhow::Result<u32>>().await
+        };
+        let output_cancel = cancel.clone();
+        let output_pump = async move {
+            if !send_bridge_event(&event_tx, &output_cancel, BridgeEvent::Stdout(vec![20])).await {
+                anyhow::bail!("second output message was not accepted");
+            }
+            Ok(0)
+        };
+        let browser = async move {
+            controller.send_input(vec![2]).await;
+
+            let Some(BridgeEvent::Stdout(first)) = event_rx.recv().await else {
+                anyhow::bail!("expected first output message");
+            };
+            if first != vec![10] {
+                anyhow::bail!("unexpected first output message");
+            }
+
+            let Some(BridgeEvent::Stdout(second)) = event_rx.recv().await else {
+                anyhow::bail!("expected second output message");
+            };
+            if second != vec![20] {
+                anyhow::bail!("unexpected second output message");
+            }
+
+            Ok::<(), anyhow::Error>(())
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let (bridge_result, browser_result) =
+                tokio::join!(drive_bridge_pumps(input_pump, output_pump), browser,);
+            bridge_result?;
+            browser_result
+        })
+        .await
+        .expect("independent bridge pumps must not deadlock")
+        .expect("saturated bridge should keep making progress");
+    }
 
     // The guest reports its host key from the `.pub` file with a `root@host`
     // comment; the key presented over the wire has none. The strict check

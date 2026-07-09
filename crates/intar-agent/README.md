@@ -45,7 +45,9 @@ If the configured bridge does not exist, `intar-agent` will create it, assign th
 
 `lease_duration_seconds` starts counting when the VM reaches `running`. After the timer expires, `intar-agent` will shut down/delete the VM and remove its record.
 
-The runtime disk passes the NetBird setup key, network settings, hostname, and Kino vsock configuration into the guest bootstrap path. `intar-agent` exposes a host-side Unix socket at `<work_dir>/vms/<vm>/kino.host.sock` that proxies to Kino.
+The runtime disk passes network settings, the hostname, and Kino vsock
+configuration into the guest bootstrap path. `intar-agent` exposes a host-side
+Unix socket at `<work_dir>/vms/<vm>/kino.host.sock` that proxies to Kino.
 
 Prune tracked VMs:
 

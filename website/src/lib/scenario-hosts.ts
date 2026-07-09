@@ -27,14 +27,6 @@ export function resolveScenarioEnabledForHostRole(
   return role === "agent" && currentScenarioEnabled;
 }
 
-export function bridgeSessionResetForHostRoleChange(nowUnixMs: number) {
-  return {
-    activeSessionId: null,
-    connected: false,
-    disconnectedAt: nowUnixMs,
-  } as const;
-}
-
 export interface ScenarioLaunchHostCandidate {
   role: ScenarioHostRole;
   disabled: boolean;

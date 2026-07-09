@@ -47,10 +47,17 @@ export function toErrorResponse(
     };
   }
 
+  console.error(
+    JSON.stringify({
+      message: fallbackMessage,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+
   return {
     status: fallbackStatus,
     body: {
-      error: error instanceof Error ? error.message : fallbackMessage,
+      error: fallbackMessage,
     },
   };
 }

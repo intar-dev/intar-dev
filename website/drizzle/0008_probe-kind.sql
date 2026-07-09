@@ -1,1 +1,0 @@
-ALTER TABLE `vm_scenario_probes` ADD `kind` text DEFAULT 'probe' NOT NULL;

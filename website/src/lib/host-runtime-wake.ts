@@ -22,8 +22,36 @@ export async function wakeHostRuntime(hostId: string): Promise<void> {
 export async function tryWakeHostRuntime(hostId: string): Promise<void> {
   try {
     await wakeHostRuntime(hostId);
-  } catch {
-    // Best-effort wake only; desired state remains authoritative.
+  } catch (error) {
+    // Best-effort wake only; desired state remains authoritative. Keep the
+    // failure observable so repeated DO routing or availability faults do not
+    // disappear behind a successful control-plane response.
+    console.warn(
+      JSON.stringify({
+        message: "host runtime wake failed",
+        hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+export async function retireHostRuntime(hostId: string): Promise<void> {
+  const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+  const response = await withTimeout(
+    stub.fetch(
+      new Request("https://host-runtime.internal/_internal/retire", {
+        method: "POST",
+        headers: { "x-agent-host-id": hostId },
+      }),
+    ),
+    HOST_RUNTIME_WAKE_TIMEOUT_MS,
+    `host runtime retirement timed out for ${hostId}`,
+  );
+  if (!response.ok) {
+    throw new Error(
+      `host runtime retirement failed for ${hostId}: ${response.status}`,
+    );
   }
 }
 

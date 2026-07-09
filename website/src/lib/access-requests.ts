@@ -1,11 +1,17 @@
 import { env } from "cloudflare:workers";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessRequests } from "@/db/schema";
 import {
-  addToAllowlist,
+  accessAllowlist,
+  accessRequests,
+  oauthAccessToken,
+  oauthConsent,
+  oauthRefreshToken,
+  session,
+  user,
+} from "@/db/schema";
+import {
   isValidGithubUsername,
-  removeFromAllowlist,
   toAllowlistKey,
 } from "@/lib/allowlist";
 import { appError } from "@/lib/app-error";
@@ -76,23 +82,64 @@ export async function decideAccessRequest(params: {
 
   const now = Date.now();
   if (params.decision === "approved") {
-    await addToAllowlist(request.githubUsername, {
-      approvedBy: params.adminUserId,
-      approvedAt: now,
-    });
-  } else if (request.status === "approved") {
-    // Rejecting a previously-approved request revokes the allowlist entry.
-    await removeFromAllowlist(request.githubUsername);
-  }
+    await db.batch([
+      db
+        .insert(accessAllowlist)
+        .values({
+          githubUsername: request.githubUsername,
+          approvedBy: params.adminUserId,
+          approvedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: accessAllowlist.githubUsername,
+          set: {
+            approvedBy: params.adminUserId,
+            approvedAt: now,
+          },
+        }),
+      db
+        .update(accessRequests)
+        .set({
+          status: params.decision,
+          decidedBy: params.adminUserId,
+          decidedAt: now,
+        })
+        .where(eq(accessRequests.id, params.id)),
+    ]);
+  } else {
+    const affectedUserIds = db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.username, request.githubUsername));
 
-  await db
-    .update(accessRequests)
-    .set({
-      status: params.decision,
-      decidedBy: params.adminUserId,
-      decidedAt: now,
-    })
-    .where(eq(accessRequests.id, params.id));
+    // Always apply the denied state, even when this decision raced with an
+    // approval that read an older request row. D1 executes the batch
+    // transactionally, so the final request decision and authorization state
+    // cannot diverge.
+    await db.batch([
+      db
+        .delete(accessAllowlist)
+        .where(eq(accessAllowlist.githubUsername, request.githubUsername)),
+      db
+        .delete(oauthAccessToken)
+        .where(inArray(oauthAccessToken.userId, affectedUserIds)),
+      db
+        .delete(oauthRefreshToken)
+        .where(inArray(oauthRefreshToken.userId, affectedUserIds)),
+      db
+        .delete(oauthConsent)
+        .where(inArray(oauthConsent.userId, affectedUserIds)),
+      db.delete(session).where(inArray(session.userId, affectedUserIds)),
+      db
+        .update(accessRequests)
+        .set({
+          status: params.decision,
+          decidedBy: params.adminUserId,
+          decidedAt: now,
+        })
+        .where(eq(accessRequests.id, params.id)),
+    ]);
+  }
 
   return {
     ...request,

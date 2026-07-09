@@ -63,10 +63,19 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
     let admin_listener = TcpListener::bind(settings.admin_bind)
         .await
         .with_context(|| format!("failed to bind admin listener on {}", settings.admin_bind))?;
+    let public_listener = TcpListener::bind(settings.web.bind)
+        .await
+        .with_context(|| format!("failed to bind public listener on {}", settings.web.bind))?;
+    let public_ssh_listener = TcpListener::bind(settings.ssh_bind)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to bind public ssh listener on {}",
+                settings.ssh_bind
+            )
+        })?;
     let admin_router = build_admin_router(gateway.clone());
     let public_router = build_public_router(gateway.clone());
-    let web_settings = settings.web.clone();
-    let ssh_bind = settings.ssh_bind;
     let public_ssh_gateway = gateway.clone();
 
     let admin_task = tokio::spawn(async move {
@@ -74,21 +83,16 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
             .await
             .context("admin server failed")
     });
-    let public_task = tokio::spawn(async move { serve_public(public_router, web_settings).await });
-    let public_ssh_task =
-        tokio::spawn(
-            async move { run_public_ssh_server(public_ssh_gateway, ssh_bind, host_key).await },
-        );
+    let public_task =
+        tokio::spawn(async move { serve_public(public_router, public_listener).await });
+    let public_ssh_task = tokio::spawn(async move {
+        run_public_ssh_server(public_ssh_gateway, public_ssh_listener, host_key).await
+    });
 
     let _ = sd_notify::notify(&[NotifyState::Ready]);
 
     tokio::select! {
-        result = async {
-            join_task(admin_task).await?;
-            join_task(public_task).await?;
-            join_task(public_ssh_task).await?;
-            Ok::<(), anyhow::Error>(())
-        } => result,
+        result = supervise_server_tasks(admin_task, public_task, public_ssh_task) => result,
         signal = tokio::signal::ctrl_c() => {
             if let Err(error) = signal {
                 tracing::warn!(error = %error, "failed to listen for ctrl-c");
@@ -219,13 +223,7 @@ async fn ensure_parent_dirs(settings: &ServerSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve_public(
-    router: axum::Router,
-    settings: stargate_core::WebSettings,
-) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(settings.bind)
-        .await
-        .with_context(|| format!("failed to bind public listener on {}", settings.bind))?;
+async fn serve_public(router: axum::Router, listener: TcpListener) -> anyhow::Result<()> {
     axum::serve(listener, router)
         .await
         .context("public http server failed")?;
@@ -311,4 +309,49 @@ fn init_tracing(settings: &ServerSettings) -> anyhow::Result<()> {
 
 async fn join_task<T>(handle: tokio::task::JoinHandle<anyhow::Result<T>>) -> anyhow::Result<T> {
     handle.await.context("task join failed")?
+}
+
+async fn supervise_server_tasks(
+    admin_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    public_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    public_ssh_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    tokio::select! {
+        result = join_task(admin_task) => server_task_result("admin", result),
+        result = join_task(public_task) => server_task_result("public", result),
+        result = join_task(public_ssh_task) => server_task_result("public ssh", result),
+    }
+}
+
+fn server_task_result(name: &str, result: anyhow::Result<()>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Err(anyhow!("{name} server exited unexpectedly")),
+        Err(error) => Err(error).with_context(|| format!("{name} server exited")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::pending, time::Duration};
+
+    use super::supervise_server_tasks;
+
+    #[tokio::test]
+    async fn supervisor_reports_any_server_failure_without_waiting_for_earlier_tasks() {
+        let admin_task = tokio::spawn(pending::<anyhow::Result<()>>());
+        let public_task = tokio::spawn(async { Err(anyhow::anyhow!("public failed")) });
+        let public_ssh_task = tokio::spawn(pending::<anyhow::Result<()>>());
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_server_tasks(admin_task, public_task, public_ssh_task),
+        )
+        .await
+        .expect("supervisor should observe the public server failure")
+        .expect_err("server failure should fail supervision");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("public server exited"));
+        assert!(message.contains("public failed"));
+    }
 }

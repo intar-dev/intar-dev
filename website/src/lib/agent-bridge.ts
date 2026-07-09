@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { agentHosts } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
+import { isAllowlisted } from "@/lib/allowlist";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
 const ONLINE_HEARTBEAT_TTL_MS = 90_000;
@@ -52,14 +53,17 @@ type AuthzResult =
   | { ok: true; context: UserContext }
   | { ok: false; response: Response };
 
-export const jsonResponse = (body: unknown, init?: ResponseInit) =>
-  new Response(JSON.stringify(body), {
+export const jsonResponse = (body: unknown, init?: ResponseInit) => {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/json; charset=utf-8");
+  }
+
+  return new Response(JSON.stringify(body), {
     ...init,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...(init?.headers ?? {}),
-    },
+    headers,
   });
+};
 
 export function resolveRequestOrigin(request: Request): string {
   const directUrl = safeOriginFromUrl(request.url);
@@ -100,11 +104,20 @@ export async function requireUserContext(
   request: Request,
 ): Promise<AuthzResult> {
   const session = await auth.api.getSession({ headers: request.headers });
-  const sessionUser = session?.user as ({ id: string; role?: string | null } | null);
+  const sessionUser = session?.user as
+    | { id: string; role?: string | null; username?: string | null }
+    | null;
   if (!session?.session || !sessionUser?.id) {
     return {
       ok: false,
       response: jsonResponse({ error: "unauthorized" }, { status: 401 }),
+    };
+  }
+
+  if (!(await isAllowlisted(sessionUser.username))) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "access revoked" }, { status: 403 }),
     };
   }
 

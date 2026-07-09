@@ -972,10 +972,10 @@ mod tests {
             Err(error) => panic!("failed to create tempdir: {error}"),
         };
 
-        let file_path = dir.path().join("netbird-status.json");
+        let file_path = dir.path().join("service-status.json");
         let write_result = fs::write(
             &file_path,
-            r#"{"peers":{"connected":1},"sshServer":{"enabled":true}}"#,
+            r#"{"peers":{"connected":1},"service":{"enabled":true}}"#,
         );
         assert!(write_result.is_ok());
 
@@ -984,7 +984,7 @@ mod tests {
                 "/bin/cat".to_owned(),
                 file_path.to_string_lossy().into_owned(),
             ],
-            json_path: "$.sshServer.enabled".to_owned(),
+            json_path: "$.service.enabled".to_owned(),
             expected: Some(json!(true)),
         };
 
@@ -1011,10 +1011,10 @@ mod tests {
             Err(error) => panic!("failed to create tempdir: {error}"),
         };
 
-        let file_path = dir.path().join("netbird-status.json");
+        let file_path = dir.path().join("service-status.json");
         let write_result = fs::write(
             &file_path,
-            r#"{"sshServer":{"sessions":[{"remoteAddress":"10.48.162.109:39148"}]}}"#,
+            r#"{"service":{"sessions":[{"remoteAddress":"10.48.162.109:39148"}]}}"#,
         );
         assert!(write_result.is_ok());
 
@@ -1023,7 +1023,7 @@ mod tests {
                 "/bin/cat".to_owned(),
                 file_path.to_string_lossy().into_owned(),
             ],
-            json_path: "$.sshServer.sessions[*].remoteAddress".to_owned(),
+            json_path: "$.service.sessions[*].remoteAddress".to_owned(),
             expected: None,
         };
 
@@ -1052,8 +1052,8 @@ mod tests {
             Err(error) => panic!("failed to create tempdir: {error}"),
         };
 
-        let file_path = dir.path().join("netbird-status.json");
-        let write_result = fs::write(&file_path, r#"{"sshServer":{"enabled":false}}"#);
+        let file_path = dir.path().join("service-status.json");
+        let write_result = fs::write(&file_path, r#"{"service":{"enabled":false}}"#);
         assert!(write_result.is_ok());
 
         let probe = CommandJsonPathProbe {
@@ -1061,7 +1061,7 @@ mod tests {
                 "/bin/cat".to_owned(),
                 file_path.to_string_lossy().into_owned(),
             ],
-            json_path: "$.sshServer.enabled".to_owned(),
+            json_path: "$.service.enabled".to_owned(),
             expected: Some(json!(true)),
         };
 

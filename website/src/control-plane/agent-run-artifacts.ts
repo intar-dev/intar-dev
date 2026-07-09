@@ -69,6 +69,7 @@ interface ResolvedRunVm {
   scenarioId: string;
   vmId: string;
   runtimeVmName: string;
+  artifactWritesSealed: boolean;
 }
 
 interface SourceArtifactState {
@@ -226,6 +227,20 @@ async function handleBeginRunUpload(
     runVm.runId,
     runVm.vmId,
   );
+  if (runVm.artifactWritesSealed) {
+    const isIdempotentRetry = artifacts.every((artifact) => {
+      const existing = existingArtifacts.find(
+        (candidate) => candidate.ordinal === artifact.ordinal,
+      );
+      return (
+        existing?.uploadStatus === "uploaded" &&
+        artifactMetadataMatches(existing, artifact)
+      );
+    });
+    return isIdempotentRetry
+      ? jsonResponse({ runId: runVm.runId, vmName: runVm.runtimeVmName })
+      : artifactWritesSealedResponse();
+  }
   const now = Date.now();
 
   for (const artifact of artifacts) {
@@ -245,13 +260,7 @@ async function handleBeginRunUpload(
       });
 
     if (existing) {
-      const matches =
-        existing.kind === artifact.kind &&
-        existing.filename === artifact.filename &&
-        existing.contentType === artifact.contentType &&
-        existing.sizeBytes === artifact.sizeBytes &&
-        existing.sha256 === artifact.sha256;
-      if (!matches) {
+      if (!artifactMetadataMatches(existing, artifact)) {
         return jsonResponse(
           {
             error: `artifact ${artifact.ordinal} metadata does not match existing upload`,
@@ -295,7 +304,9 @@ async function handleMultipartBegin(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName, {
+    allowSealed: true,
+  });
   if (!resolved.ok) {
     return resolved.response;
   }
@@ -308,6 +319,9 @@ async function handleMultipartBegin(
 
   if (artifact.uploadStatus === "uploaded") {
     return jsonResponse({ done: true, nextExpectedPart: 1 });
+  }
+  if (runVm.artifactWritesSealed) {
+    return artifactWritesSealedResponse();
   }
 
   const now = Date.now();
@@ -395,6 +409,9 @@ async function handleMultipartPart(
   }
 
   const { db, runVm } = resolved;
+  if (runVm.artifactWritesSealed) {
+    return artifactWritesSealedResponse();
+  }
   const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
@@ -454,7 +471,9 @@ async function handleArtifactComplete(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName, {
+    allowSealed: true,
+  });
   if (!resolved.ok) {
     return resolved.response;
   }
@@ -466,6 +485,9 @@ async function handleArtifactComplete(
   }
   if (artifact.uploadStatus === "uploaded") {
     return jsonResponse({ ok: true, uploaded: true });
+  }
+  if (runVm.artifactWritesSealed) {
+    return artifactWritesSealedResponse();
   }
 
   const now = Date.now();
@@ -530,16 +552,17 @@ async function handleRunComplete(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const resolved = await requireVerifiedRunVm(request, env, runId, vmName);
+  const resolved = await requireVerifiedRunVm(request, env, runId, vmName, {
+    allowSealed: true,
+  });
   if (!resolved.ok) {
     return resolved.response;
   }
 
   const { db, runVm } = resolved;
 
-  // Completion is idempotent: the replay artifact is registered and uploaded
-  // *after* the run completes, so an archive-job retry must not trip over its
-  // still-pending row.
+  // Completion is idempotent so a lost response does not strand the agent's
+  // durable archive job after artifact writes have been sealed.
   const lifecycle = await loadStoredRunLifecycle(db, runId);
   const alreadyCompleted = lifecycle?.state.vms.some(
     (vm) => vm.id === runVm.vmId && vm.phase === "completed",
@@ -584,6 +607,9 @@ async function handleRunTimeline(
     return resolved.response;
   }
   const { db, runVm } = resolved;
+  if (runVm.artifactWritesSealed) {
+    return artifactWritesSealedResponse();
+  }
 
   let body: AgentRunTimelineRequest;
   try {
@@ -830,6 +856,7 @@ async function requireVerifiedRunVm(
   env: Cloudflare.Env,
   runId: string,
   vmName: string,
+  options?: { allowSealed?: boolean },
 ): Promise<
   | { ok: true; db: ReturnType<typeof drizzle>; runVm: ResolvedRunVm }
   | { ok: false; response: Response }
@@ -849,6 +876,12 @@ async function requireVerifiedRunVm(
     return {
       ok: false,
       response: runPurgedResponse(),
+    };
+  }
+  if (runVm.artifactWritesSealed && !options?.allowSealed) {
+    return {
+      ok: false,
+      response: artifactWritesSealedResponse(),
     };
   }
 
@@ -902,6 +935,7 @@ async function resolveRunVm(input: {
     scenarioId: row.scenarioId,
     vmId: vm.id,
     runtimeVmName: vm.runtimeVmName,
+    artifactWritesSealed: vm.phase === "completed",
   };
 }
 
@@ -958,8 +992,7 @@ async function transitionRunVmToArchiving(
     return;
   }
 
-  // The replay artifact is registered after completion; that late begin call
-  // must not drag an already-completed vm back to "archived".
+  // An idempotent begin retry must not drag a completed VM back to archived.
   const nextState = recomputeRunState({
     ...run.state,
     vms: run.state.vms.map((vm) =>
@@ -1000,7 +1033,7 @@ async function transitionRunVmToCompleted(
   const nextState = recomputeRunState({
     ...run.state,
     vms: run.state.vms.map((vm) =>
-      vm.id === vmId && vm.phase !== "failed"
+      vm.id === vmId
         ? {
             ...vm,
             phase: "completed",
@@ -1120,6 +1153,25 @@ function deriveArchiveRunPhase(
     return "archiving";
   }
   return "tearing_down";
+}
+
+function artifactMetadataMatches(
+  existing: SourceArtifactState,
+  artifact: {
+    kind: string;
+    filename: string;
+    contentType: string;
+    sizeBytes: number;
+    sha256: string;
+  },
+): boolean {
+  return (
+    existing.kind === artifact.kind &&
+    existing.filename === artifact.filename &&
+    existing.contentType === artifact.contentType &&
+    existing.sizeBytes === artifact.sizeBytes &&
+    existing.sha256 === artifact.sha256
+  );
 }
 
 function normalizeArtifactInputs(inputs: AgentRunArtifactInput[]): Array<{
@@ -1291,5 +1343,15 @@ function runPurgedResponse(): Response {
   return jsonResponse(
     { code: "run_purged", error: "run VM not found" },
     410,
+  );
+}
+
+function artifactWritesSealedResponse(): Response {
+  return jsonResponse(
+    {
+      code: "run_artifacts_sealed",
+      error: "run artifact writes are sealed",
+    },
+    409,
   );
 }

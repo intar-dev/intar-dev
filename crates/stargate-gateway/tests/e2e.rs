@@ -162,7 +162,8 @@ impl Harness {
 
         let admin_addr = free_addr();
         let public_addr = free_addr();
-        let public_ssh_addr = free_addr();
+        let public_ssh_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+        let public_ssh_addr = public_ssh_listener.local_addr()?;
         let target_addr = free_addr();
         let allowed_origin = "https://stargate.example.test".to_owned();
 
@@ -206,7 +207,7 @@ impl Harness {
         let public_task = tokio::spawn(serve_router(public_listener, public_router));
         let public_gateway = gateway.clone();
         let public_ssh_task = tokio::spawn(async move {
-            run_public_ssh_server(public_gateway, public_ssh_addr, public_host_key)
+            run_public_ssh_server(public_gateway, public_ssh_listener, public_host_key)
                 .await
                 .expect("public ssh server");
         });
@@ -646,9 +647,11 @@ impl server::Handler for TestTargetServer {
     async fn channel_open_session(
         &mut self,
         _channel: russh::Channel<Msg>,
+        reply: server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
     }
 
     async fn pty_request(

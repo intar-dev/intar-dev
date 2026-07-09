@@ -9,12 +9,6 @@ import {
   scenarioRuns,
 } from "@/db/schema";
 import type { HostStateReportV1 } from "@/generated/bridge";
-import { releaseBuildAssignmentsForHostRoleChange } from "@/lib/build-scheduler";
-import {
-  clearDesiredCachedImages,
-  clearDesiredVms,
-} from "@/lib/desired-state";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -26,15 +20,12 @@ import {
 } from "@/lib/agent-bridge";
 import { createAppId, createShortAppId } from "@/lib/id";
 import {
-  bridgeSessionResetForHostRoleChange,
   resolveRequestedHostRole,
 } from "@/lib/scenario-hosts";
-import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 
 const BOOTSTRAP_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
-type AppDb = Parameters<typeof mutateStoredHostDesiredState>[0];
 
 interface CreateHostBody {
   name?: string;
@@ -164,30 +155,16 @@ export const POST: APIRoute = async ({ request, url }) => {
   }
 
   if (host && host.role !== requestedRole) {
-    const now = Date.now();
-    const previousRole = host.role;
-    await db
-      .update(agentHosts)
-      .set({
-        role: requestedRole,
-        scenarioEnabled: requestedRole === "agent",
-        ...bridgeSessionResetForHostRoleChange(now),
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(agentHosts.id, host.id),
-          eq(agentHosts.userId, authz.context.userId),
-        ),
-      );
-    await cleanupDesiredStateForRoleChange(
-      db,
-      host.id,
-      previousRole,
-      requestedRole,
-      now,
+    return jsonResponse(
+      {
+        error: "host roles are immutable; create a new host for the requested role",
+        code: "host_role_immutable",
+        hostId: host.id,
+        currentRole: host.role,
+        requestedRole,
+      },
+      { status: 409 },
     );
-    host = await loadHostForUser(host.id, authz.context.userId);
   }
 
   if (!host) {
@@ -310,29 +287,6 @@ async function allocateHostId(name: string): Promise<string> {
     }
   }
   throw new Error("failed to allocate host id");
-}
-
-async function cleanupDesiredStateForRoleChange(
-  db: AppDb,
-  hostId: string,
-  previousRole: "agent" | "builder",
-  requestedRole: "agent" | "builder",
-  now: number,
-): Promise<void> {
-  await db.delete(hostActualState).where(eq(hostActualState.hostId, hostId));
-
-  if (previousRole === "agent" && requestedRole === "builder") {
-    await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
-      clearDesiredCachedImages(draft);
-      clearDesiredVms(draft);
-    });
-    await tryWakeHostRuntime(hostId);
-    return;
-  }
-
-  if (previousRole === "builder" && requestedRole === "agent") {
-    await releaseBuildAssignmentsForHostRoleChange(db, hostId, now);
-  }
 }
 
 function toSafeKey(value: string): string {
