@@ -4,13 +4,24 @@ import type {
   ScenarioManifestV2,
   ScenarioVmManifestV2,
 } from "../src/generated/catalog";
+import type {
+  DashboardArchivedRun,
+  DashboardRunArtifact,
+} from "../src/lib/dashboard-host";
+import type { ScenarioRunRecord } from "../src/lib/scenario-runs";
+import { selectSequentialHintPair } from "./live-e2e-hints";
 import { scenarioStartRequest } from "./live-e2e-start";
+import {
+  advanceTerminalProbeLifecycle,
+  initialTerminalProbeLifecycle,
+  inspectReplayProbeOutput,
+  terminalProbeCommand,
+} from "./live-e2e-terminal";
 
 interface Options {
   baseUrl: string;
   cookie: string;
   scenarioId: string;
-  crossRunScenarioId: string | null;
   hostId: string | null;
   buildRev: string | null;
   publishToken: string | null;
@@ -85,6 +96,7 @@ interface HostRunsResponse {
       ssh_authorized_key_openssh?: string | null;
     } | null;
   }>;
+  archivedRuns: DashboardArchivedRun[];
 }
 
 interface AdminBuildsResponse {
@@ -131,61 +143,9 @@ interface RunResponse {
   run: ScenarioRun;
 }
 
-interface ScenarioRun {
-  id: string;
-  phase: string;
-  canOpenTerminal: boolean;
-  hints: ScenarioRunHint[];
-  nextHintKey: string | null;
-  solution: ScenarioRunSolution;
-  createdAt: number;
-  updatedAt: number;
-  replayArtifacts?: RunArtifact[];
-  vms: RunVm[];
-}
-
-interface ScenarioRunHint {
-  key: string;
-  scope: "scenario" | "probe";
-  probeName: string | null;
-  id: string;
-  title: string | null;
-  revealed: boolean;
-  bodyMarkdown: string | null;
-}
-
-interface ScenarioRunSolution {
-  unlocked: boolean;
-  revealed: boolean;
-  assisted: boolean;
-  revealedAt: number | null;
-  bodyMarkdown: string | null;
-}
-
-interface RunVm {
-  id: string;
-  ordinal: number;
-  scenarioVmName: string;
-  runtimeVmName: string;
-  phase: string;
-  terminalPhase: string;
-  canOpenTerminal: boolean;
-  phaseDetail: string;
-  replayArtifacts?: RunArtifact[];
-  terminalTarget: {
-    host: string | null;
-    port: number;
-    username: string;
-    hostKeyOpenssh: string | null;
-  };
-}
-
-interface RunArtifact {
-  id: string;
-  filename: string;
-  contentType: string;
-  sizeBytes: number;
-}
+type ScenarioRun = ScenarioRunRecord;
+type RunVm = ScenarioRun["vms"][number];
+type RunArtifact = ScenarioRun["replayArtifacts"][number];
 
 interface BrowserTerminalSessionResponse {
   routeUsername: string;
@@ -214,9 +174,9 @@ class HttpError extends Error {
   }
 }
 
-function main(): Promise<void> {
+async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2), process.env);
-  return runLiveE2e(options);
+  await runLiveE2e(options);
 }
 
 async function runLiveE2e(options: Options): Promise<void> {
@@ -226,13 +186,10 @@ async function runLiveE2e(options: Options): Promise<void> {
     ? combineManifests(loadedManifests)
     : null;
   let requiredImages: RequiredImage[] = manifest?.vms ?? [];
-  const scenarioIdsToVerify = unique(
-    [options.scenarioId, options.crossRunScenarioId].filter(
-      (value): value is string => typeof value === "string" && value.length > 0,
-    ),
-  );
+  const scenarioIdsToVerify = [options.scenarioId];
   const runIdsToTeardown: string[] = [];
   const terminalSessionsByRunId = new Map<string, VerifiedTerminalSession[]>();
+  let selectedHostId: string | null = null;
   let mainError: unknown = null;
 
   try {
@@ -260,21 +217,11 @@ async function runLiveE2e(options: Options): Promise<void> {
         logStep(
           `loaded ${requiredImages.length} image cache requirement(s) from admin scenarios ${scenarioIdsToVerify.join(",")}`,
         );
-      } else if (options.crossRunScenarioId) {
-        requiredImages = appendUniqueRequiredImages(
-          requiredImages,
-          await loadRequiredImagesFromAdminScenario(
-            client,
-            options.crossRunScenarioId,
-          ),
-        );
-        logStep(
-          `added cross-run image cache requirements from admin scenario ${options.crossRunScenarioId}`,
-        );
       }
     }
 
     const host = await waitForHostReady(client, options, requiredImages);
+    selectedHostId = host.id;
     logStep(`host ready: ${host.id}`);
 
     const startedAt = Date.now();
@@ -326,91 +273,16 @@ async function runLiveE2e(options: Options): Promise<void> {
       pollMs: options.pollMs,
     });
 
-    let primaryForbiddenIps = options.forbiddenIps;
-    let secondaryReadyRun: ScenarioRun | null = null;
-    let secondarySameRunPeerIpsByVmName = new Map<string, string[]>();
-    let secondaryForbiddenIps = options.forbiddenIps;
-    if (options.crossRunScenarioId) {
-      if (options.crossRunScenarioId === options.scenarioId) {
-        throw new Error("--cross-run-scenario must differ from --scenario");
-      }
-      const secondaryStart = await startRun(
-        client,
-        options,
-        host.id,
-        options.crossRunScenarioId,
-      );
-      const secondaryRunId = secondaryStart.runId;
-      runIdsToTeardown.push(secondaryRunId);
-      logStep(
-        `cross-run accepted: ${secondaryRunId}${secondaryStart.reused ? " (reused active run)" : ""}`,
-      );
-      secondaryReadyRun = await waitForRunReady(
-        client,
-        secondaryRunId,
-        options.waitReadyMs,
-        options.pollMs,
-      );
-      await verifyDistinctVmTerminalKeys({
-        client,
-        hostId: host.id,
-        run: secondaryReadyRun,
-        timeoutMs: options.waitReadyMs,
-        pollMs: options.pollMs,
-      });
-      secondarySameRunPeerIpsByVmName =
-        !options.skipTerminalProbe && secondaryReadyRun.vms.length > 1
-          ? await waitForSameRunPeerIps({
-              client,
-              hostId: host.id,
-              run: secondaryReadyRun,
-              timeoutMs: options.waitReadyMs,
-              pollMs: options.pollMs,
-            })
-          : new Map<string, string[]>();
-      const crossRunIps = await waitForCrossRunGuestIps({
-        client,
-        hostId: host.id,
-        primaryRunId,
-        secondaryRunId,
-        timeoutMs: options.waitReadyMs,
-        pollMs: options.pollMs,
-      });
-      primaryForbiddenIps = [
-        ...options.forbiddenIps,
-        ...crossRunIps.secondaryGuestIps,
-      ];
-      secondaryForbiddenIps = [
-        ...options.forbiddenIps,
-        ...crossRunIps.primaryGuestIps,
-      ];
-      logStep(
-        `cross-run guest IPs primary=${crossRunIps.primaryGuestIps.join(",")} secondary=${crossRunIps.secondaryGuestIps.join(",")}`,
-      );
-    }
-
     terminalSessionsByRunId.set(
       readyRun.id,
       await verifyTerminalSessions(
         client,
         readyRun,
         options,
-        primaryForbiddenIps,
+        options.forbiddenIps,
         primarySameRunPeerIpsByVmName,
       ),
     );
-    if (secondaryReadyRun) {
-      terminalSessionsByRunId.set(
-        secondaryReadyRun.id,
-        await verifyTerminalSessions(
-          client,
-          secondaryReadyRun,
-          options,
-          secondaryForbiddenIps,
-          secondarySameRunPeerIpsByVmName,
-        ),
-      );
-    }
     logStep("terminal routes and isolation probes verified");
   } catch (error) {
     mainError = error;
@@ -419,9 +291,13 @@ async function runLiveE2e(options: Options): Promise<void> {
     if (runIdsToTeardown.length && !options.skipTeardown) {
       let teardownFailure: unknown = null;
       try {
+        if (!selectedHostId) {
+          throw new Error("teardown host is unavailable");
+        }
         for (const teardownRunId of [...runIdsToTeardown].reverse()) {
           await teardownAndVerify(
             client,
+            selectedHostId,
             teardownRunId,
             options,
             terminalSessionsByRunId.get(teardownRunId) ?? [],
@@ -978,21 +854,11 @@ async function verifyRunContentGating(
     throw new Error("run has no authored hints to verify");
   }
 
-  const firstHint = run.hints[0];
-  if (!firstHint) {
-    throw new Error("run has no first hint");
-  }
-  const skipAheadHint = run.hints.find((hint) => hint.key !== firstHint.key);
-  if (!skipAheadHint) {
-    throw new Error(
-      "run needs at least two authored hints to verify skip-ahead gating",
-    );
-  }
-  if (run.nextHintKey !== firstHint.key) {
-    throw new Error(
-      `expected next hint ${firstHint.key}, got ${run.nextHintKey ?? "none"}`,
-    );
-  }
+  const { first: firstHint, skipAhead: skipAheadHint } =
+    selectSequentialHintPair(run.hints);
+  const initialUnlockState = new Map(
+    run.hints.map((hint) => [hint.key, hint.unlocked]),
+  );
 
   for (const hint of run.hints) {
     if (hint.revealed) {
@@ -1000,8 +866,8 @@ async function verifyRunContentGating(
         `hint ${hint.key} was revealed before the E2E reveal step`,
       );
     }
-    if (hint.bodyMarkdown !== null) {
-      throw new Error(`hint ${hint.key} body was exposed before reveal`);
+    if (hint.title !== null || hint.bodyMarkdown !== null) {
+      throw new Error(`hint ${hint.key} sealed content was exposed before reveal`);
     }
   }
   if (run.solution.revealed) {
@@ -1042,13 +908,15 @@ async function verifyRunContentGating(
     afterSkipAheadText,
     "post skip-ahead run response",
   );
-  if (afterSkipAhead.run.nextHintKey !== run.nextHintKey) {
-    throw new Error("skip-ahead hint rejection changed the next hint key");
-  }
   for (const hint of afterSkipAhead.run.hints) {
-    if (hint.revealed || hint.bodyMarkdown !== null) {
+    if (hint.revealed || hint.title !== null || hint.bodyMarkdown !== null) {
       throw new Error(
         `skip-ahead hint rejection leaked or revealed ${hint.key}`,
+      );
+    }
+    if (hint.unlocked !== initialUnlockState.get(hint.key)) {
+      throw new Error(
+        `skip-ahead hint rejection changed unlock state for ${hint.key}`,
       );
     }
   }
@@ -1057,23 +925,47 @@ async function verifyRunContentGating(
     `/api/scenarios/runs/${encodeURIComponent(run.id)}/hints/reveal`,
     {
       method: "POST",
-      json: { hintKey: run.nextHintKey },
+      json: { hintKey: firstHint.key },
     },
   );
   const revealedHint = hintReveal.run.hints.find(
-    (hint) => hint.key === run.nextHintKey,
+    (hint) => hint.key === firstHint.key,
   );
   if (!revealedHint) {
-    throw new Error(`revealed hint ${run.nextHintKey} missing from response`);
+    throw new Error(`revealed hint ${firstHint.key} missing from response`);
   }
-  if (!revealedHint.revealed || !hasBody(revealedHint.bodyMarkdown)) {
+  if (
+    !revealedHint.revealed ||
+    revealedHint.unlocked ||
+    !hasBody(revealedHint.title) ||
+    !hasBody(revealedHint.bodyMarkdown)
+  ) {
     throw new Error(
-      `hint ${revealedHint.key} did not expose its body after reveal`,
+      `hint ${revealedHint.key} did not expose sealed content cleanly after reveal`,
     );
   }
   for (const hint of hintReveal.run.hints) {
-    if (hint.key !== revealedHint.key && hint.bodyMarkdown !== null) {
-      throw new Error(`hint ${hint.key} body was exposed out of order`);
+    if (
+      hint.key !== revealedHint.key &&
+      (hint.title !== null || hint.bodyMarkdown !== null)
+    ) {
+      throw new Error(`hint ${hint.key} content was exposed out of order`);
+    }
+  }
+  const advancedHint = hintReveal.run.hints.find(
+    (hint) => hint.key === skipAheadHint.key,
+  );
+  if (!advancedHint?.unlocked) {
+    throw new Error(
+      `revealing ${firstHint.key} did not unlock ${skipAheadHint.key}`,
+    );
+  }
+  for (const hint of hintReveal.run.hints) {
+    if (hint.key === firstHint.key || hint.key === skipAheadHint.key) continue;
+    if (hint.unlocked !== initialUnlockState.get(hint.key)) {
+      throw new Error(
+        `revealing ${firstHint.key} changed an unrelated hint ladder at ${hint.key}`,
+      );
     }
   }
 
@@ -1231,39 +1123,56 @@ async function runTerminalProbe(input: {
   let output = "";
   let opened = false;
   let settled = false;
+  let lifecycle = initialTerminalProbeLifecycle();
 
   return new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
-      finish(() => reject(new Error("terminal probe timed out")));
+      abort(() =>
+        reject(
+          new Error(
+            "terminal probe timed out before recorder exit acknowledgement",
+          ),
+        ),
+      );
     }, input.timeoutMs);
 
-    const finish = (complete: () => void) => {
+    const cleanup = (complete: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      websocket.removeEventListener("open", handleOpen);
       websocket.removeEventListener("message", handleMessage);
       websocket.removeEventListener("error", handleError);
       websocket.removeEventListener("close", handleClose);
-      try {
-        if (websocket.readyState === WebSocket.OPEN) {
-          websocket.send(JSON.stringify({ type: "close" }));
-        }
-        websocket.close();
-      } catch {
-        // Best-effort close only.
-      }
       complete();
     };
 
+    const abort = (complete: () => void) => {
+      if (settled) return;
+      cleanup(() => {
+        try {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "close" }));
+          }
+          websocket.close();
+        } catch {
+          // Best-effort close only.
+        }
+        complete();
+      });
+    };
+
     const handleError = () => {
-      finish(() => reject(new Error("terminal websocket failed")));
+      abort(() => reject(new Error("terminal websocket failed")));
     };
 
     const handleClose = () => {
-      if (!settled) {
-        finish(() =>
-          reject(new Error("terminal websocket closed before probe completed")),
-        );
+      lifecycle = advanceTerminalProbeLifecycle(lifecycle, { type: "close" });
+      const result = lifecycle.result;
+      if (result.status === "passed") {
+        cleanup(() => resolve(output));
+      } else if (result.status === "failed") {
+        cleanup(() => reject(new Error(result.message)));
       }
     };
 
@@ -1283,7 +1192,9 @@ async function runTerminalProbe(input: {
               ),
             );
           } else if (control?.type === "error") {
-            finish(() => reject(new Error(control.message)));
+            abort(() => reject(new Error(control.message)));
+          } else if (control?.type === "exit") {
+            lifecycle = advanceTerminalProbeLifecycle(lifecycle, control);
           }
           return;
         }
@@ -1295,65 +1206,25 @@ async function runTerminalProbe(input: {
           // marker); the echoed script text is `${marker}_END\n'` with a
           // literal backslash, so echo alone can never satisfy this.
           if (output.includes(`${input.marker}_END\r`)) {
-            finish(() => resolve(output));
+            lifecycle = advanceTerminalProbeLifecycle(lifecycle, {
+              type: "marker",
+            });
           }
         }
       })().catch((error: unknown) => {
-        finish(() => reject(error));
+        abort(() => reject(error));
       });
     };
 
+    const handleOpen = () => {
+      websocket.send(JSON.stringify({ type: "open", cols: 120, rows: 40 }));
+    };
+
+    websocket.addEventListener("open", handleOpen, { once: true });
     websocket.addEventListener("message", handleMessage);
     websocket.addEventListener("error", handleError);
     websocket.addEventListener("close", handleClose);
-    websocket.addEventListener(
-      "open",
-      () => {
-        websocket.send(JSON.stringify({ type: "open", cols: 120, rows: 40 }));
-      },
-      { once: true },
-    );
   });
-}
-
-function terminalProbeCommand(
-  marker: string,
-  forbiddenIps: string[],
-  sameRunPeerIps: string[],
-): string {
-  const lines = [
-    `printf '\\n${marker}_BEGIN\\n'`,
-    "if command -v curl >/dev/null 2>&1; then",
-    `  timeout 4 curl -fsS --connect-timeout 2 --max-time 3 http://169.254.169.254/latest/meta-data/ >/dev/null 2>&1 && echo "${marker}:metadata=reachable" || echo "${marker}:metadata=blocked"`,
-    "else",
-    `  timeout 4 bash -lc ':</dev/tcp/169.254.169.254/80' >/dev/null 2>&1 && echo "${marker}:metadata=reachable" || echo "${marker}:metadata=blocked"`,
-    "fi",
-    "gateway=\"$(ip route show default 2>/dev/null | awk '/default/ { print $3; exit }')\"",
-    'if [ -n "$gateway" ]; then',
-    `  timeout 4 bash -lc ":</dev/tcp/$gateway/22" >/dev/null 2>&1 && echo "${marker}:host=reachable" || echo "${marker}:host=blocked"`,
-    "else",
-    `  echo "${marker}:host=unknown"`,
-    "fi",
-  ];
-
-  forbiddenIps.forEach((ip, index) => {
-    const variable = `forbidden_ip_${index}`;
-    lines.push(`${variable}=${shellQuote(ip)}`);
-    lines.push(
-      `timeout 4 bash -lc ":</dev/tcp/\${${variable}}/22" >/dev/null 2>&1 && echo "${marker}:forbidden_${index}=reachable" || echo "${marker}:forbidden_${index}=blocked"`,
-    );
-  });
-
-  sameRunPeerIps.forEach((ip, index) => {
-    const variable = `peer_ip_${index}`;
-    lines.push(`${variable}=${shellQuote(ip)}`);
-    lines.push(
-      `timeout 4 bash -lc ":</dev/tcp/\${${variable}}/22" >/dev/null 2>&1 && echo "${marker}:peer_${index}=reachable" || echo "${marker}:peer_${index}=blocked"`,
-    );
-  });
-
-  lines.push(`printf '${marker}_END\\n'`);
-  return `${lines.join("\n")}\n`;
 }
 
 // Executed result lines end with a real CR; the echoed script text quotes
@@ -1395,36 +1266,6 @@ function assertTerminalProbeOutput(
   });
 }
 
-async function waitForCrossRunGuestIps(input: {
-  client: ApiClient;
-  hostId: string;
-  primaryRunId: string;
-  secondaryRunId: string;
-  timeoutMs: number;
-  pollMs: number;
-}): Promise<{
-  primaryGuestIps: string[];
-  secondaryGuestIps: string[];
-}> {
-  const deadline = Date.now() + input.timeoutMs;
-  let lastDetail = "host runs not checked yet";
-
-  while (Date.now() <= deadline) {
-    const response = await input.client.json<HostRunsResponse>(
-      `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
-    );
-    const primaryGuestIps = guestIpsForRun(response, input.primaryRunId);
-    const secondaryGuestIps = guestIpsForRun(response, input.secondaryRunId);
-    if (primaryGuestIps.length && secondaryGuestIps.length) {
-      return { primaryGuestIps, secondaryGuestIps };
-    }
-    lastDetail = `primary=${primaryGuestIps.join(",") || "none"} secondary=${secondaryGuestIps.join(",") || "none"}`;
-    await sleep(input.pollMs);
-  }
-
-  throw new Error(`timed out waiting for cross-run guest IPs: ${lastDetail}`);
-}
-
 async function waitForSameRunPeerIps(input: {
   client: ApiClient;
   hostId: string;
@@ -1464,15 +1305,6 @@ async function waitForSameRunPeerIps(input: {
   }
 
   throw new Error(`timed out waiting for same-run guest IPs: ${lastDetail}`);
-}
-
-function guestIpsForRun(response: HostRunsResponse, runId: string): string[] {
-  return unique(
-    response.liveVms
-      .filter((vm) => vm.run_id === runId)
-      .map((vm) => vm.details?.guest_ip?.trim() ?? "")
-      .filter(Boolean),
-  );
 }
 
 function guestIpMapForRun(
@@ -1522,6 +1354,7 @@ function sameRunPeerIpsByVmName(
 
 async function teardownAndVerify(
   client: ApiClient,
+  hostId: string,
   runId: string,
   options: Options,
   terminalSessions: VerifiedTerminalSession[],
@@ -1533,46 +1366,126 @@ async function teardownAndVerify(
     },
   );
   logStep(`teardown requested: ${runId}`);
+  const tearingDown = (
+    await client.json<RunResponse>(
+      `/api/scenarios/runs/${encodeURIComponent(runId)}`,
+    )
+  ).run;
+  // The destroy response is returned only after Stargate route revocation.
+  // Prove revocation now, while the original five-minute token is still live,
+  // rather than letting teardown/archive time make token expiry pass the test.
+  await assertTerminalSessionsRevoked(
+    client,
+    tearingDown,
+    terminalSessions,
+    options,
+  );
   let completed = await waitForRunComplete(
     client,
     runId,
     options.waitCompleteMs,
     options.pollMs,
   );
-  let artifacts = collectArtifacts(completed);
-  // The agent registers archive artifacts moments after the run reaches
-  // completed; poll briefly instead of failing on that race.
-  const artifactDeadline = Date.now() + 90_000;
-  while (
-    !options.allowNoArtifacts &&
-    artifacts.length === 0 &&
-    Date.now() < artifactDeadline
-  ) {
-    await sleep(options.pollMs);
-    completed = await waitForRunComplete(
-      client,
-      runId,
-      options.pollMs,
-      options.pollMs,
-    );
-    artifacts = collectArtifacts(completed);
-  }
-  if (!options.allowNoArtifacts && artifacts.length === 0) {
-    throw new Error("completed run has no artifacts");
-  }
-  if (artifacts[0]) {
-    await assertArtifactReadable(client, completed.id, artifacts[0]);
-  }
+  let archiveArtifacts: DashboardRunArtifact[] = [];
   if (!options.allowNoArtifacts) {
+    const archived = await waitForCompletedArchive({
+      client,
+      hostId,
+      runId,
+      timeoutMs: 90_000,
+      pollMs: options.pollMs,
+    });
+    archiveArtifacts = archived.artifacts.filter(isUploadedArchiveEvidence);
+    const readableArtifact =
+      archiveArtifacts.find((artifact) => artifact.sizeBytes > 0) ??
+      archiveArtifacts[0];
+    if (readableArtifact) {
+      await assertArtifactReadable(client, completed.id, readableArtifact);
+    }
+    completed = (
+      await client.json<RunResponse>(
+        `/api/scenarios/runs/${encodeURIComponent(runId)}`,
+      )
+    ).run;
+    assertReplayCastsPresent(completed, terminalSessions, archived);
     await assertReplaysContainProbeOutput(client, completed, terminalSessions);
   }
-  await assertTerminalSessionsRevoked(
-    client,
-    completed,
-    terminalSessions,
-    options,
+  const replayCount = collectReplayArtifacts(completed).length;
+  logStep(
+    `teardown complete with ${archiveArtifacts.length} archive artifact(s) and ${replayCount} replay artifact(s)`,
   );
-  logStep(`teardown complete with ${artifacts.length} artifact(s)`);
+}
+
+async function waitForCompletedArchive(input: {
+  client: ApiClient;
+  hostId: string;
+  runId: string;
+  timeoutMs: number;
+  pollMs: number;
+}): Promise<DashboardArchivedRun> {
+  const deadline = Date.now() + input.timeoutMs;
+  let lastDetail = "run not present in the host archive";
+
+  while (Date.now() <= deadline) {
+    const response = await input.client.json<HostRunsResponse>(
+      `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
+    );
+    const archived = response.archivedRuns.find(
+      (candidate) => candidate.id === input.runId,
+    );
+    const uploadedArchives =
+      archived?.artifacts.filter(isUploadedArchiveEvidence) ?? [];
+    if (archived?.uploadStatus === "complete" && uploadedArchives.length > 0) {
+      return archived;
+    }
+    lastDetail = archived
+      ? `upload_status=${archived.uploadStatus} artifacts=${archived.artifacts
+          .map((artifact) => `${artifact.kind}:${artifact.uploadStatus}`)
+          .join(",") || "none"}`
+      : lastDetail;
+    await sleep(input.pollMs);
+  }
+
+  throw new Error(
+    `completed run has no uploaded archive artifacts: ${lastDetail}`,
+  );
+}
+
+function isUploadedArchiveEvidence(artifact: DashboardRunArtifact): boolean {
+  return (
+    artifact.uploadStatus === "uploaded" &&
+    artifact.kind !== "ssh_recording_raw" &&
+    artifact.kind !== "ssh_recording_segment"
+  );
+}
+
+function assertReplayCastsPresent(
+  run: ScenarioRun,
+  terminalSessions: VerifiedTerminalSession[],
+  archived: DashboardArchivedRun,
+): void {
+  const expectedVmIds = new Set(
+    terminalSessions
+      .filter((session) => session.probeMarker !== null)
+      .map((session) => session.vmId),
+  );
+  const missing = run.vms
+    .filter((vm) => expectedVmIds.has(vm.id))
+    .filter(
+      (vm) =>
+        !vm.replayArtifacts.some((artifact) =>
+          artifact.filename.endsWith(".cast"),
+        ),
+    )
+    .map((vm) => vm.runtimeVmName);
+  if (!missing.length) return;
+
+  const inventory = archived.artifacts
+    .map((artifact) => `${artifact.kind}:${artifact.uploadStatus}`)
+    .join(",");
+  throw new Error(
+    `completed archive has no replay cast for ${missing.join(",")}; artifacts=${inventory || "none"}`,
+  );
 }
 
 async function assertTerminalSessionsRevoked(
@@ -1694,7 +1607,7 @@ async function assertOldTerminalWebSocketRejected(
   });
 }
 
-function collectArtifacts(run: ScenarioRun): RunArtifact[] {
+function collectReplayArtifacts(run: ScenarioRun): RunArtifact[] {
   const byId = new Map<string, RunArtifact>();
   for (const artifact of run.replayArtifacts ?? []) {
     byId.set(artifact.id, artifact);
@@ -1717,61 +1630,61 @@ async function assertReplaysContainProbeOutput(
   terminalSessions: VerifiedTerminalSession[],
 ): Promise<void> {
   for (const session of terminalSessions) {
-    if (!session.probeMarker) continue;
+    const probeMarker = session.probeMarker;
+    if (!probeMarker) continue;
     const vm = run.vms.find((candidate) => candidate.id === session.vmId);
-    const replay = vm?.replayArtifacts?.find((artifact) =>
-      artifact.filename.endsWith(".cast"),
-    );
-    if (!replay) {
+    const replays =
+      vm?.replayArtifacts.filter((artifact) =>
+        artifact.filename.endsWith(".cast"),
+      ) ?? [];
+    if (!replays.length) {
       throw new Error(
         `no replay cast artifact for ${session.runtimeVmName} after teardown`,
       );
     }
-    const response = await client.raw(
-      `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(replay.id)}/content`,
-    );
-    if (!response.ok) {
-      const body = await parseResponseBody(response);
-      throw new HttpError(
-        `replay cast ${replay.id} is not readable`,
-        response.status,
-        body,
+    let matchedReplayId: string | null = null;
+    const checkedReplayIds: string[] = [];
+    for (const replay of replays) {
+      checkedReplayIds.push(replay.id);
+      const response = await client.raw(
+        `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(replay.id)}/content`,
       );
-    }
-    const cast = await response.text();
-    let beginSeen = false;
-    let endSeen = false;
-    for (const line of cast.split("\n").slice(1)) {
-      if (!line.trim()) continue;
-      const event = JSON.parse(line) as unknown;
-      if (!Array.isArray(event) || event[1] !== "o") continue;
-      if (typeof event[2] !== "string") continue;
-      if (event[2].includes(`${session.probeMarker}_BEGIN\r`)) {
-        beginSeen = true;
+      if (!response.ok) {
+        const body = await parseResponseBody(response);
+        throw new HttpError(
+          `replay cast ${replay.id} is not readable`,
+          response.status,
+          body,
+        );
       }
-      if (event[2].includes(`${session.probeMarker}_END\r`)) {
-        endSeen = true;
+      const inspection = inspectReplayProbeOutput(
+        await response.text(),
+        probeMarker,
+      );
+      if (inspection.beginSeen && inspection.endSeen) {
+        matchedReplayId = replay.id;
+        break;
       }
     }
-    if (!beginSeen || !endSeen) {
+    if (!matchedReplayId) {
       throw new Error(
-        `replay cast for ${session.runtimeVmName} is missing the probe's executed output (begin=${beginSeen} end=${endSeen}); the recording lost the session tail`,
+        `replay casts for ${session.runtimeVmName} are missing the probe's executed output; checked=${checkedReplayIds.join(",")}`,
       );
     }
-    logStep(`replay cast verified for ${session.runtimeVmName}`);
+    logStep(
+      `replay cast ${matchedReplayId} verified for ${session.runtimeVmName}`,
+    );
   }
 }
 
 async function assertArtifactReadable(
   client: ApiClient,
   runId: string,
-  artifact: RunArtifact,
+  artifact: { id: string; sizeBytes: number },
 ): Promise<void> {
   const response = await client.raw(
     `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}/content`,
-    {
-      headers: { range: "bytes=0-0" },
-    },
+    artifact.sizeBytes > 0 ? { headers: { range: "bytes=0-0" } } : {},
   );
   if (!response.ok) {
     const body = await parseResponseBody(response);
@@ -2033,16 +1946,19 @@ function stripManifestSuffix(path: string): string {
     : path;
 }
 
-function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
+export function parseOptions(
+  argv: string[],
+  env: Readonly<Record<string, string | undefined>>,
+): Options {
+  if (argv.some((arg) => arg === "--help" || arg === "-h")) {
+    printHelp();
+    process.exit(0);
+  }
   const values = new Map<string, string[]>();
   const flags = new Set<string>();
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? "";
-    if (arg === "--help" || arg === "-h") {
-      printHelp();
-      process.exit(0);
-    }
     if (!arg.startsWith("--")) {
       throw new Error(`unexpected positional argument: ${arg}`);
     }
@@ -2050,8 +1966,14 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
     const key = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
     const inlineValue = eq >= 0 ? arg.slice(eq + 1) : null;
     if (booleanFlags.has(key)) {
+      if (inlineValue !== null) {
+        throw new Error(`--${key} does not accept a value`);
+      }
       flags.add(key);
       continue;
+    }
+    if (!valueOptions.has(key)) {
+      throw new Error(`unknown option: --${key}`);
     }
     const value = inlineValue ?? argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
@@ -2065,14 +1987,16 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
     values.set(key, list);
   }
 
+  if (env.INTAR_LIVE_CROSS_RUN_SCENARIO_ID) {
+    throw new Error(
+      "INTAR_LIVE_CROSS_RUN_SCENARIO_ID was removed: cross-run proof requires a multi-session harness with two authenticated users and concurrent runs on the same agent host",
+    );
+  }
+
   const baseUrl = last(values, "base-url") ?? env.INTAR_LIVE_BASE_URL ?? "";
   const cookie = last(values, "cookie") ?? env.INTAR_LIVE_COOKIE ?? "";
   const scenarioId =
     last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "pair-ping";
-  const crossRunScenarioId =
-    last(values, "cross-run-scenario") ??
-    env.INTAR_LIVE_CROSS_RUN_SCENARIO_ID ??
-    null;
   const hostId = last(values, "host") ?? env.INTAR_LIVE_HOST_ID ?? null;
   const buildRev =
     last(values, "build-rev") ?? env.INTAR_LIVE_BUILD_REV ?? null;
@@ -2102,7 +2026,6 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv): Options {
     baseUrl,
     cookie,
     scenarioId,
-    crossRunScenarioId,
     hostId,
     buildRev,
     publishToken,
@@ -2133,6 +2056,26 @@ const booleanFlags = new Set([
   "skip-teardown",
   "skip-terminal-probe",
   "allow-no-artifacts",
+]);
+
+const valueOptions = new Set([
+  "base-url",
+  "cookie",
+  "scenario",
+  "host",
+  "build-rev",
+  "publish-token",
+  "manifest",
+  "image",
+  "artifact",
+  "forbidden-ip",
+  "wait-cache-ms",
+  "wait-build-ms",
+  "wait-ready-ms",
+  "wait-complete-ms",
+  "poll-ms",
+  "warm-start-ms",
+  "terminal-probe-timeout-ms",
 ]);
 
 function parseImageSpecs(specs: string[]): Map<string, string> {
@@ -2206,7 +2149,6 @@ Required unless skipped:
 
 Useful options:
   --scenario ID                  Scenario to start. Defaults to pair-ping.
-  --cross-run-scenario ID        Optional second scenario for cross-run isolation.
   --host HOST_ID                 Pin the run to a specific host.
   --build-rev REV                Wait for admin image build rows for this bundle revision.
   --image VM=PATH                Override inferred raw.zst path for a VM manifest.
@@ -2306,11 +2248,18 @@ function assertRawPayloadDoesNotContain(
 
 function parseControlMessage(
   raw: string,
-): { type: "ready" } | { type: "error"; message: string } | null {
+):
+  | { type: "ready" }
+  | { type: "exit"; code: number }
+  | { type: "error"; message: string }
+  | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed) || typeof parsed.type !== "string") return null;
     if (parsed.type === "ready") return { type: "ready" };
+    if (parsed.type === "exit" && Number.isSafeInteger(parsed.code)) {
+      return { type: "exit", code: parsed.code as number };
+    }
     if (parsed.type === "error" && typeof parsed.message === "string") {
       return { type: "error", message: parsed.message };
     }
@@ -2375,10 +2324,6 @@ function errorBodyCode(body: unknown): string | null {
   return isRecord(body) && typeof body.code === "string" ? body.code : null;
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\"'\"'")}'`;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2394,7 +2339,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-main().catch((error: unknown) => {
-  console.error(`[live-e2e] ${errorMessage(error)}`);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error(`[live-e2e] ${errorMessage(error)}`);
+    process.exitCode = 1;
+  });
+}
