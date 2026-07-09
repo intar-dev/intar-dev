@@ -52,7 +52,7 @@ jobs:
       - name: Set up Namespace cache
         uses: namespacelabs/nscloud-cache-action@v1
         with:
-          cache: bun
+          path: ~/.bun/install/cache
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -95,7 +95,7 @@ jobs:
       - name: Set up Namespace cache
         uses: namespacelabs/nscloud-cache-action@v1
         with:
-          cache: bun
+          path: ~/.bun/install/cache
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
