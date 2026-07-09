@@ -4,6 +4,7 @@ import type {
   ScenarioManifestV2,
   ScenarioVmManifestV2,
 } from "../src/generated/catalog";
+import { scenarioStartRequest } from "./live-e2e-start";
 
 interface Options {
   baseUrl: string;
@@ -880,22 +881,11 @@ async function startRun(
   hostId: string,
   scenarioId: string,
 ): Promise<StartRunResponse> {
-  if (options.hostId) {
-    return client.json<StartRunResponse>(
-      `/api/agent/hosts/${encodeURIComponent(hostId)}/runs`,
-      {
-        method: "POST",
-        json: { scenarioId },
-      },
-    );
-  }
-
-  return client.json<StartRunResponse>(
-    `/api/scenarios/${encodeURIComponent(scenarioId)}/start`,
-    {
-      method: "POST",
-    },
+  const request = scenarioStartRequest(
+    scenarioId,
+    options.hostId ? hostId : null,
   );
+  return client.json<StartRunResponse>(request.path, request.init);
 }
 
 async function waitForRunReady(
