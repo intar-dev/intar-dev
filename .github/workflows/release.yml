@@ -32,7 +32,7 @@ concurrency:
 jobs:
   release:
     name: Bump, tag, and build
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Ensure main
@@ -43,7 +43,7 @@ jobs:
           fi
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: namespacelabs/nscloud-checkout-action@v9
         with:
           fetch-depth: 0
 
@@ -130,6 +130,11 @@ jobs:
           rustup component add rustfmt clippy
           rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           rustup show active-toolchain
+
+      - name: Set up Namespace caches
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
 
       - name: Install tools
         uses: taiki-e/install-action@v2

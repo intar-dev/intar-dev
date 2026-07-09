@@ -33,11 +33,11 @@ defaults:
 jobs:
   validate:
     name: Test and build
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: namespacelabs/nscloud-checkout-action@v9
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -48,6 +48,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      - name: Set up Namespace cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -70,12 +75,12 @@ jobs:
     name: Deploy production
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready
     needs: validate
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-intar-dev
     environment: production
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: namespacelabs/nscloud-checkout-action@v9
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -86,6 +91,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+
+      - name: Set up Namespace cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
