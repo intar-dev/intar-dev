@@ -621,7 +621,7 @@ async function seedRun(input: {
     vmCount: vms.length,
     state: state.phase,
     stateRank: RUN_PHASE_ORDER[state.phase],
-    activeKey: "user-1:broken-nginx",
+    activeKey: "user-1",
     stateJson: JSON.stringify(state),
     createdAt: input.now,
     updatedAt: input.now,

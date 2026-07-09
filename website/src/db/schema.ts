@@ -369,6 +369,8 @@ export const scenarioRuns = sqliteTable(
     vmCount: integer("vm_count").notNull(),
     state: text("state").notNull(),
     stateRank: integer("state_rank").notNull(),
+    // The owning user id while the run is active, null once terminal; the
+    // unique index enforces one active run per user across all scenarios.
     activeKey: text("active_key"),
     stateJson: text("state_json").notNull(),
     deleteRequestedAt: integer("delete_requested_at"),

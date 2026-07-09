@@ -76,7 +76,11 @@ export function ScenarioBriefing() {
     queryFn: () => fetchScenarioDetail(scenarioId),
     staleTime: 10_000,
     refetchInterval: (query) =>
-      query.state.data?.scenario.hasActiveRun ? 1_500 : false,
+      query.state.data?.scenario.hasActiveRun
+        ? 1_500
+        : query.state.data?.scenario.blockingRun
+          ? 5_000
+          : false,
   });
 
   const startScenario = useMutation({
@@ -302,6 +306,7 @@ export function ScenarioBriefing() {
                     onClick={handlePrimaryAction}
                     disabled={
                       startScenario.isPending ||
+                      scenarioData.blockingRun !== null ||
                       (scenarioData.hasActiveRun && !scenarioData.activeRunId)
                     }
                   >
@@ -312,6 +317,32 @@ export function ScenarioBriefing() {
                         : "Start scenario"}
                     <ArrowRight className="size-4" />
                   </Button>
+                  {scenarioData.blockingRun ? (
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        You already have an active run on{" "}
+                        <span className="font-medium text-foreground">
+                          {scenarioData.blockingRun.title}
+                        </span>
+                        . Finish or destroy it before starting this scenario.
+                      </p>
+                      <Button
+                        variant="outline"
+                        className="w-full"
+                        onClick={() =>
+                          void navigate({
+                            to: "/runs/$runId",
+                            params: {
+                              runId: scenarioData.blockingRun?.runId ?? "",
+                            },
+                          })
+                        }
+                      >
+                        Go to active run
+                        <ArrowRight className="size-4" />
+                      </Button>
+                    </div>
+                  ) : null}
                   {startScenario.error ? (
                     <p className="text-sm text-destructive">
                       {startScenario.error instanceof Error

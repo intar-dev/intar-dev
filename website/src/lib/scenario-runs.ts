@@ -123,6 +123,12 @@ export interface ScenarioDetail {
     terminalPhase: RunStateDocument["terminalPhase"];
     updatedAt: number;
   } | null;
+  blockingRun: {
+    runId: string;
+    scenarioId: string;
+    slug: string;
+    title: string;
+  } | null;
   finishedRuns: Array<{
     runId: string;
     phase: "completed" | "failed";
@@ -205,7 +211,9 @@ export async function loadEnabledScenarioForUser(params: {
     return null;
   }
 
-  const active = await loadActiveRunRow(params.userId, enabled.scenarioId);
+  const active = await loadActiveRunRow(params.userId);
+  const activeHere =
+    active && active.scenarioId === enabled.scenarioId ? active : null;
   const finishedRuns = await loadFinishedRuns(params.userId, enabled.scenarioId);
   return {
     scenarioId: enabled.scenarioId,
@@ -214,19 +222,28 @@ export async function loadEnabledScenarioForUser(params: {
     scenarioName: enabled.scenarioId,
     briefing: enabled.briefing,
     vmCount: enabled.launchSpecs.length,
-    hasActiveRun: active !== null,
-    activeRunId: active?.runId ?? null,
-    activeRun: active
+    hasActiveRun: activeHere !== null,
+    activeRunId: activeHere?.runId ?? null,
+    activeRun: activeHere
       ? {
-          runId: active.runId,
-          phase: active.state.phase,
-          phaseTitle: active.state.phaseTitle,
-          phaseDetail: active.state.phaseDetail,
-          canOpenTerminal: active.state.canOpenTerminal,
-          terminalPhase: active.state.terminalPhase,
-          updatedAt: active.updatedAt,
+          runId: activeHere.runId,
+          phase: activeHere.state.phase,
+          phaseTitle: activeHere.state.phaseTitle,
+          phaseDetail: activeHere.state.phaseDetail,
+          canOpenTerminal: activeHere.state.canOpenTerminal,
+          terminalPhase: activeHere.state.terminalPhase,
+          updatedAt: activeHere.updatedAt,
         }
       : null,
+    blockingRun:
+      active && !activeHere
+        ? {
+            runId: active.runId,
+            scenarioId: active.scenarioId,
+            slug: slugify(active.scenarioId),
+            title: active.title,
+          }
+        : null,
     finishedRuns,
   };
 }
@@ -711,15 +728,18 @@ async function startScenarioRunInternal(params: {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
 
-  const active = await loadActiveRunRow(params.userId, scenario.scenarioId);
+  const active = await loadActiveRunRow(params.userId);
   if (active) {
-    return {
-      accepted: true,
-      runId: active.runId,
-      scenarioId: active.scenarioId,
-      acceptedAt: Date.now(),
-      reused: true,
-    };
+    if (active.scenarioId === scenario.scenarioId) {
+      return {
+        accepted: true,
+        runId: active.runId,
+        scenarioId: active.scenarioId,
+        acceptedAt: Date.now(),
+        reused: true,
+      };
+    }
+    throw activeRunConflictError(active.title);
   }
 
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
@@ -842,7 +862,7 @@ async function startScenarioRunInternal(params: {
       vmCount: provisionedState.vms.length,
       state: provisionedState.phase,
       stateRank: RUN_PHASE_ORDER[provisionedState.phase],
-      activeKey: activeKeyFor(params.userId, scenario.scenarioId),
+      activeKey: activeKeyFor(params.userId),
       stateJson: JSON.stringify(provisionedState),
       deleteRequestedAt: null,
       completedAt: null,
@@ -864,6 +884,11 @@ async function startScenarioRunInternal(params: {
     await Promise.allSettled([
       db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId)),
     ]);
+    // Two concurrent starts race past the pre-check; the unique index on
+    // active_key rejects the loser.
+    if (isActiveKeyUniqueViolation(error)) {
+      throw activeRunConflictError();
+    }
     throw error;
   }
 
@@ -923,12 +948,12 @@ function scenarioRunContentSnapshot(
   };
 }
 
-async function loadActiveRunRow(userId: string, scenarioId: string) {
+async function loadActiveRunRow(userId: string) {
   const db = drizzle(env.DB);
   const rows = await db
     .select()
     .from(scenarioRuns)
-    .where(eq(scenarioRuns.activeKey, activeKeyFor(userId, scenarioId)))
+    .where(eq(scenarioRuns.activeKey, activeKeyFor(userId)))
     .limit(1);
   return rows[0] ? fromDbRow(rows[0]) : null;
 }
@@ -1111,8 +1136,29 @@ function parseRunState(raw: string): RunStateDocument {
   }
 }
 
-function activeKeyFor(userId: string, scenarioId: string) {
-  return `${userId}:${scenarioId}`;
+// The unique index on active_key allows one active run per user across all
+// scenarios; the key is the user id while a run is active, null once finished.
+function activeKeyFor(userId: string) {
+  return userId;
+}
+
+function activeRunConflictError(activeRunTitle?: string) {
+  return appError(
+    409,
+    "scenario_run_active_conflict",
+    activeRunTitle
+      ? `you already have an active run for "${activeRunTitle}" — finish or destroy it before starting another scenario`
+      : "you already have an active scenario run — finish or destroy it before starting another scenario",
+  );
+}
+
+function isActiveKeyUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx/.test(
+      error.message,
+    )
+  );
 }
 
 function deterministicRuntimeVmName(prefix: string, runId: string, index: number) {
