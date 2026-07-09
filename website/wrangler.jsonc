@@ -1,5 +1,6 @@
 {
-  "compatibility_date": "2026-03-01",
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-07-09",
   "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
   "name": "intar-dev",
   "main": "src/worker.ts",
@@ -32,27 +33,30 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_id": "11e7e922-cf7b-4001-964e-e93af25167f9",
-      "database_name": "app",
-      "migrations_dir": "drizzle",
+      "database_id": "6e715506-88ce-4565-85bc-66a9cf2a3c5e",
+      "database_name": "intar-dev-app-20260709",
     },
   ],
   "r2_buckets": [
     {
       "binding": "VM_IMAGE_REGISTRY_BUCKET",
-      "bucket_name": "intar-dev-vm-image-registry",
+      "bucket_name": "intar-dev-vm-image-registry-20260709",
       "jurisdiction": "eu",
     },
     {
       "binding": "VM_RUN_ARTIFACTS_BUCKET",
-      "bucket_name": "intar-dev-vm-run-artifacts",
+      "bucket_name": "intar-dev-vm-run-artifacts-20260709",
       "jurisdiction": "eu",
     },
   ],
-  "kv_namespaces": [
+  "ratelimits": [
     {
-      "binding": "ALLOWLIST",
-      "id": "44c2cb3f79034c3fbc98065693c8fa9a",
+      "name": "ACCESS_REQUEST_RATE_LIMITER",
+      "namespace_id": "88427091",
+      "simple": {
+        "limit": 20,
+        "period": 60,
+      },
     },
   ],
   "durable_objects": {

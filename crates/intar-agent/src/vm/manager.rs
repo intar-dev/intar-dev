@@ -465,6 +465,7 @@ struct Inner {
     ssh_access: SshAccessConfig,
     db: Db,
     http: HttpClient,
+    registry_http: HttpClient,
     image_registry: ImageRegistryConfig,
     defaults: VmDefaultsConfig,
     states: RwLock<BTreeMap<String, VmStatusResponse>>,
@@ -482,7 +483,7 @@ struct Inner {
 }
 
 impl VmManager {
-    pub fn new(cfg: &AgentConfig, db: Db, persisted: Vec<VmRow>) -> Self {
+    pub fn new(cfg: &AgentConfig, db: Db, persisted: Vec<VmRow>) -> Result<Self> {
         let mut states = BTreeMap::new();
         for row in persisted {
             match vm_status_from_row(row) {
@@ -497,6 +498,7 @@ impl VmManager {
 
         let (probe_updates_tx, _) = broadcast::channel(256);
         let (terminal_updates_tx, _) = broadcast::channel(256);
+        let registry_http = image_cache::registry_http_client()?;
         let inner = Inner {
             ch_binary: cfg.cloud_hypervisor.binary.clone(),
             ch_spawn_timeout_seconds: cfg.cloud_hypervisor.spawn_timeout_seconds,
@@ -504,6 +506,7 @@ impl VmManager {
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::new(),
+            registry_http,
             image_registry: cfg.image_registry.clone(),
             defaults: cfg.vm_defaults.clone(),
             states: RwLock::new(states),
@@ -519,9 +522,9 @@ impl VmManager {
             cleanup_locks: Mutex::new(BTreeMap::new()),
             archive_jobs_lock: Mutex::new(()),
         };
-        Self {
+        Ok(Self {
             inner: Arc::new(inner),
-        }
+        })
     }
 
     pub async fn ensure_host_networking(&self) -> Result<()> {
@@ -1322,7 +1325,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         &inner.image_registry,
         Some(&inner.bridge),
         &cache_root,
-        &inner.http,
+        &inner.registry_http,
     )
     .await
     .context("failed to ensure image and boot artifacts are cached")?;
@@ -2370,15 +2373,9 @@ async fn upload_vm_run_artifacts(
     }
     upload_artifact_set(inner, vm_name, prepared, &artifacts, &access_token).await?;
 
-    // Complete the run as soon as the raw artifacts are up: the run flips to
-    // completed for the user without waiting on replay rendering.
-    complete_run_upload(inner, prepared, &access_token).await?;
-
-    // Render and attach the session media asynchronously after completion —
-    // the begin endpoint merges by ordinal, so registering the casts late is
-    // safe, and the projection picks them up as their uploads finish. The
-    // timeline goes up last, once the casts it references are in place; a
-    // render failure only costs the replay media, never the archived run.
+    // Render and attach session media before sealing the run. Once completion
+    // is acknowledged the control plane rejects every new artifact mutation,
+    // which makes hard deletion race-free with respect to this archive job.
     match render_replay_artifacts(&prepared.artifacts_dir, next_artifact_ordinal(&artifacts)).await
     {
         Ok(Some((casts, timeline))) => {
@@ -2420,6 +2417,8 @@ async fn upload_vm_run_artifacts(
             );
         }
     }
+
+    complete_run_upload(inner, prepared, &access_token).await?;
 
     Ok(ArchiveUploadOutcome::Uploaded)
 }

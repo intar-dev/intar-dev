@@ -79,8 +79,8 @@ with development values:
 
 ```dotenv
 BETTER_AUTH_URL="http://127.0.0.1:8788"
-BETTER_AUTH_SECRET="local-better-auth-secret"
-AGENT_JWT_SECRET="local-agent-jwt-secret"
+BETTER_AUTH_SECRET="local-better-auth-secret-at-least-32-bytes"
+AGENT_JWT_SECRET="local-agent-jwt-secret-at-least-32-bytes"
 REGISTRY_PUBLISH_TOKEN="local-registry-publish-token"
 GITHUB_CLIENT_ID="github-oauth-client-id"
 GITHUB_CLIENT_SECRET="github-oauth-client-secret"
@@ -92,17 +92,16 @@ The GitHub OAuth app callback URL for this local Worker is:
 http://127.0.0.1:8788/api/auth/callback/github
 ```
 
-Then initialize local D1/KV state and run the Worker:
+Then initialize local D1 state, approve your GitHub username, and run the
+Worker:
 
 ```sh
 export GITHUB_USERNAME="your-github-username"
 cd website
 fnm exec bun run build
-fnm exec bunx wrangler d1 migrations apply DB --local --config wrangler.jsonc
-fnm exec bunx wrangler kv key put "$GITHUB_USERNAME" "1" \
-  --binding ALLOWLIST \
-  --local \
-  --config wrangler.jsonc
+fnm exec bun run db:bootstrap:local
+fnm exec bunx wrangler d1 execute DB --local --config wrangler.jsonc \
+  --command "INSERT INTO access_allowlist (github_username, approved_by, approved_at) VALUES (lower('${GITHUB_USERNAME}'), NULL, cast(unixepoch('subsecond') * 1000 as integer)) ON CONFLICT(github_username) DO UPDATE SET approved_by = NULL, approved_at = excluded.approved_at;"
 fnm exec bunx wrangler dev --config dist/server/wrangler.json --port 8788
 ```
 

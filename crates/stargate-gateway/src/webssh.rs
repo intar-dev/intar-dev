@@ -9,13 +9,16 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt, future::pending};
+use futures_util::{
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use stargate_core::{RouteRecord, SessionKind, StargateError};
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::{
-    sync::mpsc::UnboundedReceiver,
+    sync::mpsc::{self, Receiver, Sender},
     time::{self as tokio_time, Instant},
 };
 
@@ -25,6 +28,7 @@ use crate::{
 };
 
 const MAX_FRAME_BYTES: usize = 64 * 1024;
+const SOCKET_OUTPUT_CAPACITY: usize = 32;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 5 * 60;
@@ -49,6 +53,27 @@ enum ServerControlMessage<'a> {
     Ready,
     Exit { code: u32 },
     Error { message: &'a str },
+}
+
+struct SocketOutput {
+    message: Message,
+    close_after: bool,
+}
+
+impl SocketOutput {
+    fn message(message: Message) -> Self {
+        Self {
+            message,
+            close_after: false,
+        }
+    }
+
+    fn final_message(message: Message) -> Self {
+        Self {
+            message,
+            close_after: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -111,22 +136,14 @@ pub(crate) fn build_terminal_websocket_url(
     Ok(url.to_string())
 }
 
-async fn handle_socket(mut socket: WebSocket, state: GatewayState, route: RouteRecord) {
-    if let Err(error) = run_terminal_socket(&mut socket, &state, route).await {
+async fn handle_socket(socket: WebSocket, state: GatewayState, route: RouteRecord) {
+    if let Err(error) = run_terminal_socket(socket, &state, route).await {
         tracing::warn!(error = %error, "browser terminal websocket failed");
-        let _ = send_control(
-            &mut socket,
-            &ServerControlMessage::Error {
-                message: "terminal session failed",
-            },
-        )
-        .await;
-        let _ = socket.close().await;
     }
 }
 
 async fn run_terminal_socket(
-    socket: &mut WebSocket,
+    socket: WebSocket,
     state: &GatewayState,
     route: RouteRecord,
 ) -> Result<(), StargateError> {
@@ -136,86 +153,202 @@ async fn run_terminal_socket(
         None,
     );
     let cancel = lease.token();
-    let mut bridge: Option<(PtyBridgeControl, UnboundedReceiver<BridgeEvent>)> = None;
+    let (socket_sink, socket_stream) = socket.split();
+    let (output_tx, output_rx) = mpsc::channel(SOCKET_OUTPUT_CAPACITY);
+    let (activity_tx, activity_rx) = mpsc::channel(1);
+
+    let input = pump_socket_input(
+        socket_stream,
+        route,
+        cancel.clone(),
+        output_tx.clone(),
+        activity_tx,
+    );
+    let output = pump_socket_output(socket_sink, output_rx, cancel.clone());
+    let idle = wait_for_idle(activity_rx, cancel.clone());
+    tokio::pin!(input);
+    tokio::pin!(output);
+    tokio::pin!(idle);
+
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Ok(()),
+        result = &mut input => result,
+        result = &mut output => result,
+        _ = &mut idle => Ok(()),
+    };
+    cancel.cancel();
+    result
+}
+
+async fn pump_socket_input(
+    mut socket: SplitStream<WebSocket>,
+    route: RouteRecord,
+    cancel: tokio_util::sync::CancellationToken,
+    output_tx: Sender<SocketOutput>,
+    activity_tx: Sender<()>,
+) -> Result<(), StargateError> {
+    let result =
+        pump_socket_input_inner(&mut socket, &route, &cancel, &output_tx, &activity_tx).await;
+
+    if result.is_err()
+        && send_control(
+            &output_tx,
+            &cancel,
+            &ServerControlMessage::Error {
+                message: "terminal session failed",
+            },
+            true,
+        )
+        .await
+        .is_ok()
+    {
+        cancel.cancelled().await;
+    }
+
+    result
+}
+
+async fn pump_socket_input_inner(
+    socket: &mut SplitStream<WebSocket>,
+    route: &RouteRecord,
+    cancel: &tokio_util::sync::CancellationToken,
+    output_tx: &Sender<SocketOutput>,
+    activity_tx: &Sender<()>,
+) -> Result<(), StargateError> {
+    let mut bridge: Option<PtyBridgeControl> = None;
+
+    loop {
+        let message = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            message = socket.next() => message,
+        };
+
+        match message {
+            Some(Ok(Message::Binary(data))) => {
+                let Some(controller) = bridge.as_ref() else {
+                    return Err(StargateError::Validation(
+                        "terminal must be opened before input".to_owned(),
+                    ));
+                };
+                controller.send_input(data.to_vec()).await;
+                record_activity(activity_tx);
+            }
+            Some(Ok(Message::Text(text))) => {
+                handle_client_control(
+                    route,
+                    cancel,
+                    output_tx,
+                    activity_tx,
+                    &mut bridge,
+                    text.as_str(),
+                )
+                .await?;
+                record_activity(activity_tx);
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                send_socket_output(
+                    output_tx,
+                    cancel,
+                    SocketOutput::message(Message::Pong(payload)),
+                )
+                .await?;
+                record_activity(activity_tx);
+            }
+            Some(Ok(Message::Pong(_))) => record_activity(activity_tx),
+            Some(Ok(Message::Close(_))) | None => return Ok(()),
+            Some(Err(error)) => return Err(StargateError::Internal(error.to_string())),
+        }
+    }
+}
+
+async fn pump_socket_output(
+    mut socket: SplitSink<WebSocket, Message>,
+    mut output_rx: Receiver<SocketOutput>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<(), StargateError> {
     let mut ping_interval = tokio_time::interval(PING_INTERVAL);
     ping_interval.set_missed_tick_behavior(tokio_time::MissedTickBehavior::Delay);
-
-    let idle_deadline = tokio_time::sleep(IDLE_TIMEOUT);
-    tokio::pin!(idle_deadline);
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            _ = &mut idle_deadline => return Ok(()),
             _ = ping_interval.tick() => {
                 socket
                     .send(Message::Ping(Bytes::new()))
                     .await
                     .map_err(|error| StargateError::Internal(error.to_string()))?;
             }
-            message = socket.next() => {
-                match message {
-                    Some(Ok(Message::Binary(data))) => {
-                        let Some((controller, _)) = bridge.as_ref() else {
-                            return Err(StargateError::Validation(
-                                "terminal must be opened before input".to_owned(),
-                            ));
-                        };
-                        controller.send_input(data.to_vec());
-                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        handle_client_control(socket, &route, &cancel, &mut bridge, text.as_str()).await?;
-                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        socket
-                            .send(Message::Pong(payload))
-                            .await
-                            .map_err(|error| StargateError::Internal(error.to_string()))?;
-                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                    }
-                    Some(Ok(Message::Pong(_))) => {
-                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                    }
-                    Some(Ok(Message::Close(_))) | None => return Ok(()),
-                    Some(Err(error)) => return Err(StargateError::Internal(error.to_string())),
-                }
-            }
-            event = next_bridge_event(&mut bridge) => {
-                match event {
-                    Some(BridgeEvent::Stdout(data)) | Some(BridgeEvent::Stderr(data)) => {
-                        socket
-                            .send(Message::Binary(Bytes::from(data)))
-                            .await
-                            .map_err(|error| StargateError::Internal(error.to_string()))?;
-                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
-                    }
-                    Some(BridgeEvent::Exit(code)) => {
-                        send_control(socket, &ServerControlMessage::Exit { code }).await?;
-                        return Ok(());
-                    }
-                    None => return Ok(()),
+            output = output_rx.recv() => {
+                let Some(output) = output else {
+                    return Ok(());
+                };
+                socket
+                    .send(output.message)
+                    .await
+                    .map_err(|error| StargateError::Internal(error.to_string()))?;
+                if output.close_after {
+                    let _ = socket.close().await;
+                    cancel.cancel();
+                    return Ok(());
                 }
             }
         }
     }
 }
 
-async fn next_bridge_event(
-    bridge: &mut Option<(PtyBridgeControl, UnboundedReceiver<BridgeEvent>)>,
-) -> Option<BridgeEvent> {
-    match bridge {
-        Some((_, events)) => events.recv().await,
-        None => pending().await,
+async fn forward_bridge_events(
+    mut events: Receiver<BridgeEvent>,
+    output_tx: Sender<SocketOutput>,
+    activity_tx: Sender<()>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = cancel.cancelled() => return,
+            event = events.recv() => event,
+        };
+        match event {
+            Some(BridgeEvent::Stdout(data)) | Some(BridgeEvent::Stderr(data)) => {
+                record_activity(&activity_tx);
+                if send_socket_output(
+                    &output_tx,
+                    &cancel,
+                    SocketOutput::message(Message::Binary(Bytes::from(data))),
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
+            }
+            Some(BridgeEvent::Exit(code)) => {
+                let Ok(message) = control_message(&ServerControlMessage::Exit { code }) else {
+                    return;
+                };
+                let _ =
+                    send_socket_output(&output_tx, &cancel, SocketOutput::final_message(message))
+                        .await;
+                return;
+            }
+            None => {
+                let _ = send_socket_output(
+                    &output_tx,
+                    &cancel,
+                    SocketOutput::final_message(Message::Close(None)),
+                )
+                .await;
+                return;
+            }
+        }
     }
 }
 
 async fn handle_client_control(
-    socket: &mut WebSocket,
     route: &RouteRecord,
     cancel: &tokio_util::sync::CancellationToken,
-    bridge: &mut Option<(PtyBridgeControl, UnboundedReceiver<BridgeEvent>)>,
+    output_tx: &Sender<SocketOutput>,
+    activity_tx: &Sender<()>,
+    bridge: &mut Option<PtyBridgeControl>,
     raw: &str,
 ) -> Result<(), StargateError> {
     let message = serde_json::from_str::<ClientControlMessage>(raw)?;
@@ -237,17 +370,23 @@ async fn handle_client_control(
                 cancel.clone(),
             )
             .map_err(|error| StargateError::Internal(error.to_string()))?;
-            *bridge = Some((controller, events));
-            send_control(socket, &ServerControlMessage::Ready).await?;
+            send_control(output_tx, cancel, &ServerControlMessage::Ready, false).await?;
+            std::mem::drop(tokio::spawn(forward_bridge_events(
+                events,
+                output_tx.clone(),
+                activity_tx.clone(),
+                cancel.clone(),
+            )));
+            *bridge = Some(controller);
         }
         ClientControlMessage::Resize { cols, rows } => {
-            let Some((controller, _)) = bridge.as_ref() else {
+            let Some(controller) = bridge.as_ref() else {
                 return Err(StargateError::Validation("terminal is not open".to_owned()));
             };
-            controller.resize(cols.max(1), rows.max(1));
+            controller.resize(cols.max(1), rows.max(1)).await;
         }
         ClientControlMessage::Close => {
-            if let Some((controller, _)) = bridge.as_ref() {
+            if let Some(controller) = bridge.as_ref() {
                 controller.terminate();
             }
         }
@@ -256,14 +395,56 @@ async fn handle_client_control(
 }
 
 async fn send_control(
-    socket: &mut WebSocket,
+    output_tx: &Sender<SocketOutput>,
+    cancel: &tokio_util::sync::CancellationToken,
     message: &ServerControlMessage<'_>,
+    close_after: bool,
 ) -> Result<(), StargateError> {
-    let payload = serde_json::to_string(message)?;
-    socket
-        .send(Message::Text(payload.into()))
-        .await
-        .map_err(|error| StargateError::Internal(error.to_string()))
+    let message = control_message(message)?;
+    let output = if close_after {
+        SocketOutput::final_message(message)
+    } else {
+        SocketOutput::message(message)
+    };
+    send_socket_output(output_tx, cancel, output).await
+}
+
+fn control_message(message: &ServerControlMessage<'_>) -> Result<Message, StargateError> {
+    Ok(Message::Text(serde_json::to_string(message)?.into()))
+}
+
+async fn send_socket_output(
+    output_tx: &Sender<SocketOutput>,
+    cancel: &tokio_util::sync::CancellationToken,
+    output: SocketOutput,
+) -> Result<(), StargateError> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(StargateError::Internal("terminal session cancelled".to_owned())),
+        result = output_tx.send(output) => result
+            .map_err(|_| StargateError::Internal("terminal websocket output closed".to_owned())),
+    }
+}
+
+fn record_activity(activity_tx: &Sender<()>) {
+    let _ = activity_tx.try_send(());
+}
+
+async fn wait_for_idle(mut activity_rx: Receiver<()>, cancel: tokio_util::sync::CancellationToken) {
+    let deadline = tokio_time::sleep(IDLE_TIMEOUT);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = &mut deadline => return,
+            activity = activity_rx.recv() => {
+                if activity.is_none() {
+                    return;
+                }
+                deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
+            }
+        }
+    }
 }
 
 async fn validate_terminal_token(
@@ -327,5 +508,57 @@ fn validate_origin(headers: &HeaderMap, state: &GatewayState) -> Result<(), Gate
         Ok(())
     } else {
         Err(GatewayHttpError(StargateError::Unauthorized))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{task::Poll, time::Duration};
+
+    use futures_util::{pin_mut, poll};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{BridgeEvent, Message, forward_bridge_events};
+
+    #[tokio::test]
+    async fn browser_output_progresses_while_target_input_is_permanently_blocked() {
+        let (target_input_tx, _blocked_target_input_rx) = mpsc::channel(1);
+        target_input_tx
+            .send(vec![1_u8])
+            .await
+            .expect("target input queue should accept its first message");
+        let blocked_input = target_input_tx.send(vec![2_u8]);
+        pin_mut!(blocked_input);
+        assert!(matches!(poll!(blocked_input.as_mut()), Poll::Pending));
+
+        let (bridge_event_tx, bridge_event_rx) = mpsc::channel(1);
+        bridge_event_tx
+            .send(BridgeEvent::Stdout(vec![42]))
+            .await
+            .expect("bridge event queue should accept output");
+        let (socket_output_tx, mut socket_output_rx) = mpsc::channel(1);
+        let (activity_tx, _activity_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let forwarder_cancel = cancel.clone();
+        let forwarder = tokio::spawn(forward_bridge_events(
+            bridge_event_rx,
+            socket_output_tx,
+            activity_tx,
+            forwarder_cancel,
+        ));
+
+        let output = tokio::time::timeout(Duration::from_secs(1), socket_output_rx.recv())
+            .await
+            .expect("browser output must not wait for target input")
+            .expect("browser output channel should stay open");
+        let Message::Binary(data) = output.message else {
+            panic!("expected binary terminal output");
+        };
+        assert_eq!(data.as_ref(), &[42]);
+        assert!(matches!(poll!(blocked_input.as_mut()), Poll::Pending));
+
+        cancel.cancel();
+        forwarder.await.expect("bridge event forwarder should stop");
     }
 }

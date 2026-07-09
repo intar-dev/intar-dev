@@ -4,6 +4,7 @@ import { agentBootstrapTokens, agentHosts } from "@/db/schema";
 import { createAppId } from "@/lib/id";
 
 const JWT_TTL_SECONDS = 15 * 60;
+const MIN_AGENT_JWT_SECRET_BYTES = 32;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -34,6 +35,11 @@ export async function handleAgentBootstrap(
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
+  }
+
+  const jwtSecret = validAgentJwtSecret(env.AGENT_JWT_SECRET);
+  if (!jwtSecret) {
+    return agentAuthenticationUnavailable();
   }
 
   let body: BootstrapRequest;
@@ -102,7 +108,7 @@ export async function handleAgentBootstrap(
     jti: createAppId(),
   };
 
-  const accessToken = await signJwt(payload, env.AGENT_JWT_SECRET);
+  const accessToken = await signJwt(payload, jwtSecret);
   const wsUrl = new URL(request.url);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
   wsUrl.pathname = "/agent/connect";
@@ -161,6 +167,14 @@ export async function requireVerifiedAgentRequest(
 ): Promise<
   { ok: true; agent: VerifiedAgentHost } | { ok: false; response: Response }
 > {
+  const jwtSecret = validAgentJwtSecret(env.AGENT_JWT_SECRET);
+  if (!jwtSecret) {
+    return {
+      ok: false,
+      response: agentAuthenticationUnavailable(),
+    };
+  }
+
   const authHeader = request.headers.get("authorization") ?? "";
   const bearer = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7).trim()
@@ -174,7 +188,7 @@ export async function requireVerifiedAgentRequest(
 
   const payload = await verifyJwt(
     bearer,
-    env.AGENT_JWT_SECRET,
+    jwtSecret,
     env.AGENT_JWT_ISSUER ?? "intar-agent-bridge",
     env.AGENT_JWT_AUDIENCE ?? "agent-connect",
   );
@@ -331,6 +345,21 @@ async function importHmacKey(secret: string): Promise<CryptoKey> {
     false,
     ["sign"],
   );
+}
+
+function validAgentJwtSecret(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  const secret = value.trim();
+  if (textEncoder.encode(secret).byteLength < MIN_AGENT_JWT_SECRET_BYTES) {
+    return null;
+  }
+
+  return secret;
+}
+
+function agentAuthenticationUnavailable(): Response {
+  return jsonResponse({ error: "agent authentication unavailable" }, 500);
 }
 
 function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {

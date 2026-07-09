@@ -38,6 +38,30 @@ describe("HostRuntimeDO workers integration", () => {
     await resetD1Database();
   });
 
+  it("retires durable runtime state and cancels its alarm", async () => {
+    const hostId = "host-retired";
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    const wake = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+      body: JSON.stringify({ hostId }),
+    });
+    expect(wake.status).toBe(202);
+
+    const retired = await stub.fetch("http://host-runtime/_internal/retire", {
+      method: "POST",
+      headers: { "x-agent-host-id": hostId },
+    });
+    expect(retired.status).toBe(200);
+    await expect(retired.json()).resolves.toEqual({ ok: true, hostId });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(false);
+    const wakeWithoutIdentity = await stub.fetch(
+      "http://host-runtime/_internal/wake",
+      { method: "POST" },
+    );
+    expect(wakeWithoutIdentity.status).toBe(409);
+  });
+
   it("dispatches a changed desired state on alarm to the active bridge socket", async () => {
     const hostId = "host-alarm-dispatch";
     await seedHost(hostId);

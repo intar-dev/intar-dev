@@ -4,8 +4,6 @@ import {
   queueImageBuildsFromBundle,
   recordHostBuildReports,
   recordImageBuildReport,
-  releaseBuildAssignmentsForHostRemoval,
-  releaseBuildAssignmentsForHostRoleChange,
 } from "@/lib/build-scheduler";
 import type { BuildReportV1, HostDesiredStateV1 } from "@/generated/bridge";
 
@@ -369,96 +367,6 @@ describe("build scheduler", () => {
     }
   });
 
-  it("releases assigned and building work when a builder host role changes", async () => {
-    const now = 1_762_041_660_000;
-    const db = roleChangeReleaseDb({
-      assignedRows: [{ id: "build-assigned" }],
-      buildingRows: [{ id: "build-building" }],
-      queuedRows: [],
-      builderRows: [],
-      activeBuildRows: [],
-    });
-
-    await expect(
-      releaseBuildAssignmentsForHostRoleChange(db as never, "builder-1", now),
-    ).resolves.toEqual({
-      requeuedAssignedBuildIds: ["build-assigned"],
-      staleBuildingBuildIds: ["build-building"],
-      reassigned: [],
-    });
-
-    expect(db.updateSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hostId: null,
-        status: "queued",
-        phase: "queued",
-        error: "builder host role changed before starting build",
-        updatedAt: now,
-      }),
-    );
-    expect(db.updateSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: "stale",
-        error: "builder host role changed while build was running",
-        updatedAt: now,
-      }),
-    );
-    expect(
-      desiredStateStoreMock.mutateStoredHostDesiredState,
-    ).toHaveBeenCalledWith(db, "builder-1", now, expect.any(Function));
-    expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
-      "builder-1",
-    );
-
-    const mutator =
-      desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[0]?.[3];
-    const draft = desiredStateWithBuilds(["build-assigned", "build-building"]);
-    mutator?.(draft);
-    expect(draft.builds).toEqual([]);
-  });
-
-  it("releases deleted builder work without reassigning before host deletion", async () => {
-    const now = 1_762_041_660_000;
-    const db = roleChangeReleaseDb({
-      assignedRows: [{ id: "build-assigned" }],
-      buildingRows: [{ id: "build-building" }],
-      queuedRows: [],
-      builderRows: [],
-      activeBuildRows: [],
-    });
-
-    await expect(
-      releaseBuildAssignmentsForHostRemoval(db as never, "builder-1", now),
-    ).resolves.toEqual({
-      requeuedAssignedBuildIds: ["build-assigned"],
-      staleBuildingBuildIds: ["build-building"],
-      reassigned: [],
-    });
-
-    expect(db.select).toHaveBeenCalledTimes(2);
-    expect(db.updateSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hostId: null,
-        status: "queued",
-        phase: "queued",
-        error: "builder host was deleted before starting build",
-        updatedAt: now,
-      }),
-    );
-    expect(db.updateSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: "stale",
-        error: "builder host was deleted while build was running",
-        updatedAt: now,
-      }),
-    );
-    expect(
-      desiredStateStoreMock.mutateStoredHostDesiredState,
-    ).toHaveBeenCalledWith(db, "builder-1", now, expect.any(Function));
-    expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
-      "builder-1",
-    );
-  });
 });
 
 function buildSchedulerDb(input: {
@@ -611,56 +519,6 @@ function builderCandidateRow(
         disk_available_mib: capacity.diskAvailableMib,
       },
     },
-  };
-}
-
-function roleChangeReleaseDb(input: {
-  assignedRows: Array<{ id: string }>;
-  buildingRows: Array<{ id: string }>;
-  queuedRows: Array<{
-    id: string;
-    scenarioId: string;
-    arch: "x86_64";
-    rev: string;
-    contentHash: string;
-    kinoVersion: string;
-    bundleRef: string;
-  }>;
-  builderRows: Array<{
-    hostId: string;
-    role: "builder";
-    connected: boolean;
-    disabled: boolean;
-    reportJson: null;
-  }>;
-  activeBuildRows: Array<{ hostId: string | null }>;
-}) {
-  const selectResults = [
-    input.assignedRows,
-    input.buildingRows,
-    input.queuedRows,
-    input.builderRows,
-    input.activeBuildRows,
-  ];
-  const nextSelectRows = vi.fn(() => Promise.resolve(selectResults.shift() ?? []));
-  const select = vi.fn(() => {
-    const chain = {
-      from: vi.fn(() => chain),
-      innerJoin: vi.fn(() => chain),
-      leftJoin: vi.fn(() => chain),
-      where: nextSelectRows,
-    };
-    return chain;
-  });
-
-  const updateWhere = vi.fn().mockResolvedValue(undefined);
-  const updateSet = vi.fn(() => ({ where: updateWhere }));
-  const update = vi.fn(() => ({ set: updateSet }));
-
-  return {
-    select,
-    update,
-    updateSet,
   };
 }
 

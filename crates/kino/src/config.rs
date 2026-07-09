@@ -748,10 +748,10 @@ mod tests {
               protocol = "tcp"
             }
 
-            probe "netbird_ssh" {
+            probe "ssh_status" {
               kind = "command_json_path"
-              argv = ["netbird", "status", "--json"]
-              json_path = "$.sshServer.enabled"
+              argv = ["statusctl", "ssh", "--json"]
+              json_path = "$.enabled"
               expected = true
             }
         "#;
@@ -973,7 +973,7 @@ mod tests {
               bind = "tcp://127.0.0.1:9000"
             }
 
-            probe "netbird" {
+            probe "service_status" {
               kind = "command_json_path"
               argv = []
               json_path = "$.sshServer.enabled"
@@ -1003,9 +1003,9 @@ mod tests {
               bind = "tcp://127.0.0.1:9000"
             }
 
-            probe "netbird" {
+            probe "service_status" {
               kind = "command_json_path"
-              argv = ["netbird", "status", "--json"]
+              argv = ["statusctl", "ssh", "--json"]
               json_path = "   "
             }
         "#;
@@ -1032,9 +1032,9 @@ mod tests {
               bind = "tcp://127.0.0.1:9000"
             }
 
-            probe "netbird" {
+            probe "service_status" {
               kind = "command_json_path"
-              argv = ["netbird", "status", "--json"]
+              argv = ["statusctl", "ssh", "--json"]
               json_path = "$["
             }
         "#;

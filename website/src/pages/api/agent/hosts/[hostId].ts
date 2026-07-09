@@ -1,13 +1,15 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { and, eq } from "drizzle-orm";
+import { and, eq, notExists } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts, hostActualState } from "@/db/schema";
-import type { HostStateReportV1 } from "@/generated/bridge";
 import {
-  assignQueuedImageBuilds,
-  releaseBuildAssignmentsForHostRemoval,
-} from "@/lib/build-scheduler";
+  agentHosts,
+  hostActualState,
+  imageBuilds,
+  scenarioRuns,
+} from "@/db/schema";
+import type { HostStateReportV1 } from "@/generated/bridge";
+import { assignQueuedImageBuilds } from "@/lib/build-scheduler";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -16,6 +18,7 @@ import {
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
+import { retireHostRuntime } from "@/lib/host-runtime-wake";
 
 export const prerender = false;
 
@@ -78,21 +81,111 @@ export const DELETE: APIRoute = async ({ request, params }) => {
   }
 
   const db = drizzle(env.DB);
-  const now = Date.now();
-  if (host.role === "builder") {
-    await releaseBuildAssignmentsForHostRemoval(db, host.id, now);
+  const referencedRuns = await db
+    .select({ runId: scenarioRuns.runId })
+    .from(scenarioRuns)
+    .where(eq(scenarioRuns.hostId, host.id))
+    .limit(1);
+  if (referencedRuns.length > 0) {
+    return hostHasRunHistoryResponse(host.id);
   }
-  await db
+
+  const now = Date.now();
+  const runGuard = () =>
+    notExists(
+      db
+        .select({ runId: scenarioRuns.runId })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.hostId, host.id)),
+    );
+  const deleteHost = db
     .delete(agentHosts)
     .where(
-      and(eq(agentHosts.id, hostId), eq(agentHosts.userId, authz.context.userId)),
+      and(
+        eq(agentHosts.id, hostId),
+        eq(agentHosts.userId, authz.context.userId),
+        runGuard(),
+      ),
+    )
+    .returning({ id: agentHosts.id });
+  const deletedHosts =
+    host.role === "builder"
+      ? (
+          await db.batch([
+            db
+              .update(imageBuilds)
+              .set({
+                hostId: null,
+                status: "queued",
+                phase: "queued",
+                error: "builder host was deleted before starting build",
+                updatedAt: now,
+              })
+              .where(
+                and(
+                  eq(imageBuilds.hostId, host.id),
+                  eq(imageBuilds.status, "assigned"),
+                  runGuard(),
+                ),
+              ),
+            db
+              .update(imageBuilds)
+              .set({
+                status: "stale",
+                error: "builder host was deleted while build was running",
+                updatedAt: now,
+              })
+              .where(
+                and(
+                  eq(imageBuilds.hostId, host.id),
+                  eq(imageBuilds.status, "building"),
+                  runGuard(),
+                ),
+              ),
+            deleteHost,
+          ])
+        )[2]
+      : await deleteHost;
+  if (deletedHosts.length === 0) {
+    return jsonResponse(
+      {
+        error: "host deletion conflicted with a new run or concurrent update",
+        code: "host_delete_conflict",
+        hostId: host.id,
+      },
+      { status: 409 },
     );
+  }
+
+  try {
+    await retireHostRuntime(host.id);
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        message: "host runtime retirement failed after host deletion",
+        hostId: host.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+
   if (host.role === "builder") {
     await assignQueuedImageBuilds(db, now);
   }
 
   return jsonResponse({ ok: true, hostId });
 };
+
+function hostHasRunHistoryResponse(hostId: string): Response {
+  return jsonResponse(
+    {
+      error: "host has scenario run history and cannot be deleted",
+      code: "host_has_run_history",
+      hostId,
+    },
+    { status: 409 },
+  );
+}
 
 async function loadHostActualStateSummary(
   hostId: string,

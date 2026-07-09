@@ -77,7 +77,8 @@ async fn main() -> Result<()> {
         cfg.image_cache.clone(),
         db.clone(),
     );
-    let vm = vm::VmManager::new(&cfg, db.clone(), persisted);
+    let vm = vm::VmManager::new(&cfg, db.clone(), persisted)
+        .context("failed to initialize VM manager HTTP clients")?;
     vm.ensure_host_networking()
         .await
         .context("failed to reconcile vm host networking")?;

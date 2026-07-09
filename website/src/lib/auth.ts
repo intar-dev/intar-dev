@@ -4,10 +4,14 @@ import { betterAuth } from "better-auth";
 import type { BetterAuthPlugin } from "better-auth";
 import type { Session, User } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { admin, jwt, testUtils, username } from "better-auth/plugins";
+import { admin, jwt, username } from "better-auth/plugins";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
-import { isAllowlisted } from "./allowlist";
+import {
+  isAllowlisted,
+  isValidGithubUsername,
+  toAllowlistKey,
+} from "./allowlist";
 import { getUserRole, isAdminRole } from "./authz";
 
 const runtimeEnv =
@@ -18,7 +22,6 @@ const runtimeEnv =
 
 const baseURL =
   runtimeEnv?.BETTER_AUTH_URL ?? env.BETTER_AUTH_URL ?? "http://localhost:4321";
-
 
 const oauthScopes = [
   "openid",
@@ -65,19 +68,6 @@ const getOAuthRoleClaims = (user: User, scopes: readonly string[]) => {
   };
 };
 
-
-interface AuthRuntimeConfig {
-  allowContextlessSessionCreate: boolean;
-  extraPlugins: BetterAuthPlugin[];
-}
-
-const defaultAuthRuntimeConfig = (): AuthRuntimeConfig => ({
-  allowContextlessSessionCreate: false,
-  extraPlugins: [],
-});
-
-let authRuntimeConfig = defaultAuthRuntimeConfig();
-
 function buildAuthInstance() {
   const oauthProviderPlugin = oauthProvider({
     loginPage: "/",
@@ -107,8 +97,16 @@ function buildAuthInstance() {
       runtimeEnv?.BETTER_AUTH_APP_NAME ?? env.BETTER_AUTH_APP_NAME ?? "Astro App",
     baseURL,
     database: drizzleAdapter(db, { provider: "sqlite", schema }),
+    disabledPaths: [
+      "/sign-up/email",
+      "/sign-in/email",
+      "/delete-user",
+      "/delete-user/callback",
+      "/admin/remove-user",
+    ],
     emailAndPassword: {
-      enabled: true,
+      enabled: false,
+      disableSignUp: true,
     },
     socialProviders: {
       github: {
@@ -134,9 +132,7 @@ function buildAuthInstance() {
         create: {
           before: async (session: Session, context) => {
             if (!context) {
-              return authRuntimeConfig.allowContextlessSessionCreate
-                ? undefined
-                : false;
+              return false;
             }
 
             const user = (await context.context.adapter.findOne({
@@ -150,7 +146,14 @@ function buildAuthInstance() {
       },
     },
     plugins: [
-      username(),
+      username({
+        minUsernameLength: 1,
+        maxUsernameLength: 39,
+        usernameValidator: isValidGithubUsername,
+        usernameNormalization: (value) => toAllowlistKey(value) ?? value,
+        validationOrder: { username: "post-normalization" },
+        immutableUsername: true,
+      }),
       admin(),
       jwt({
         disableSettingJwtHeader: true,
@@ -159,7 +162,6 @@ function buildAuthInstance() {
         },
       }),
       oauthProviderPlugin,
-      ...authRuntimeConfig.extraPlugins,
     ],
     secret: runtimeEnv?.BETTER_AUTH_SECRET ?? env.BETTER_AUTH_SECRET,
   });
@@ -174,19 +176,6 @@ function getAuthInstance(): AuthInstance {
     authInstance = buildAuthInstance();
   }
   return authInstance;
-}
-
-export function installAuthTestSupport(): void {
-  authRuntimeConfig = {
-    allowContextlessSessionCreate: true,
-    extraPlugins: [testUtils({ captureOTP: true }) as unknown as BetterAuthPlugin],
-  };
-  authInstance = null;
-}
-
-export function resetAuthRuntimeConfig(): void {
-  authRuntimeConfig = defaultAuthRuntimeConfig();
-  authInstance = null;
 }
 
 export const auth = new Proxy({} as AuthInstance, {

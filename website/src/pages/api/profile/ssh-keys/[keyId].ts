@@ -16,15 +16,13 @@ export const DELETE: APIRoute = async ({ request, params }) => {
   }
 
   try {
+    // Revoke the materialized routes first. If Stargate is unavailable, the
+    // key remains present and the client can safely retry the whole operation.
+    await revokeScenarioNativeProfileRoutesForUser(authz.context.userId);
     await deleteUserSshKeyForUser({
       userId: authz.context.userId,
       keyId,
     });
-    await revokeScenarioNativeProfileRoutesForUser(authz.context.userId).catch(
-      (error) => {
-        console.error("failed to revoke native profile routes after key delete", error);
-      },
-    );
     return jsonResponse({ deleted: true });
   } catch (error) {
     const { status, body } = toErrorResponse(error, "failed to delete SSH key");

@@ -21,6 +21,14 @@ use crate::db::{Db, ImageCacheAccessRow};
 
 const MAX_CONCURRENT_DOWNLOADS: usize = 2;
 const RAW_CACHE_MARKER_VERSION: u8 = 1;
+
+pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("failed to build registry HTTP client")
+}
+
 #[derive(Debug, Clone)]
 struct RegistryImageRecord {
     image_key: String,
@@ -137,7 +145,13 @@ pub fn spawn_warm_cache_with_bridge(
             }
         };
 
-        let client = reqwest::Client::new();
+        let client = match registry_http_client() {
+            Ok(client) => client,
+            Err(error) => {
+                error!(error = %error, "failed to initialize image registry HTTP client");
+                return;
+            }
+        };
         info!(
             cache_root = %cache_root.display(),
             poll_interval_minutes = registry.refresh_interval_minutes,
@@ -185,7 +199,13 @@ pub fn spawn_log_cache_state_with_bridge(registry: ImageRegistryConfig, bridge: 
             }
         };
 
-        let client = reqwest::Client::new();
+        let client = match registry_http_client() {
+            Ok(client) => client,
+            Err(error) => {
+                error!(error = %error, "failed to initialize image registry HTTP client");
+                return;
+            }
+        };
         let images = match list_registry_images(&registry, Some(&bridge), &client).await {
             Ok(images) => images,
             Err(e) => {
@@ -856,9 +876,9 @@ async fn ensure_cached_entry(
         }
     }
 
-    let image_url = build_registry_url(registry, &image.download_url);
+    let image_url = build_registry_url(registry, &image.download_url)?;
     let (tmp_path, mut tmp_file) = create_tmp_file(&image_dir, &image.image_filename).await?;
-    info!(tmp_path = %tmp_path.display(), url = %redact_url_userinfo(&image_url), "download start");
+    info!(tmp_path = %tmp_path.display(), url = %redact_url_userinfo(image_url.as_str()), "download start");
 
     let download_start = std::time::Instant::now();
     let download_result =
@@ -1009,13 +1029,19 @@ async fn list_registry_images(
     bridge: Option<&BridgeConfig>,
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryImageRecord>> {
-    let index_url = registry.url.clone();
-    let display_url = redact_url_userinfo(&index_url);
-    let response = apply_registry_auth(client.get(&index_url), registry, bridge, client)
-        .await?
-        .send()
-        .await
-        .with_context(|| format!("GET {display_url}"))?;
+    let index_url = registry_base_url(registry)?;
+    let display_url = redact_url_userinfo(index_url.as_str());
+    let response = apply_registry_auth(
+        client.get(index_url.clone()),
+        &index_url,
+        registry,
+        bridge,
+        client,
+    )
+    .await?
+    .send()
+    .await
+    .with_context(|| format!("GET {display_url}"))?;
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("registry listing failed with HTTP {status}");
@@ -1289,31 +1315,58 @@ fn decompress_raw_zstd_sparse(
     Ok(())
 }
 
-fn build_registry_url(registry: &ImageRegistryConfig, path_or_url: &str) -> String {
-    if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
-        return path_or_url.to_owned();
+fn registry_base_url(registry: &ImageRegistryConfig) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(registry.url.trim())
+        .with_context(|| "image registry URL is invalid")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        anyhow::bail!("image registry URL must be an absolute HTTP(S) URL");
     }
+    Ok(url)
+}
 
-    if path_or_url.starts_with('/')
-        && let Ok(base) = reqwest::Url::parse(&registry.url)
-    {
-        let origin = base.origin().ascii_serialization();
-        return format!("{}{}", origin.trim_end_matches('/'), path_or_url);
+fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host_str() == right.host_str()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn ensure_registry_origin(registry: &ImageRegistryConfig, candidate: &reqwest::Url) -> Result<()> {
+    let base = registry_base_url(registry)?;
+    if !same_origin(&base, candidate) {
+        anyhow::bail!(
+            "registry resource URL origin {} does not match configured registry origin {}",
+            candidate.origin().ascii_serialization(),
+            base.origin().ascii_serialization()
+        );
     }
+    Ok(())
+}
 
-    format!(
-        "{}/{}",
-        registry.url.trim_end_matches('/'),
-        path_or_url.trim_start_matches('/')
-    )
+fn build_registry_url(registry: &ImageRegistryConfig, path_or_url: &str) -> Result<reqwest::Url> {
+    let base = registry_base_url(registry)?;
+    let mut join_base = base.clone();
+    join_base.set_query(None);
+    join_base.set_fragment(None);
+    if !path_or_url.starts_with('/') && !join_base.path().ends_with('/') {
+        let path = format!("{}/", join_base.path());
+        join_base.set_path(&path);
+    }
+    let candidate = join_base
+        .join(path_or_url)
+        .with_context(|| "registry resource URL is invalid")?;
+    ensure_registry_origin(registry, &candidate)?;
+    Ok(candidate)
 }
 
 async fn apply_registry_auth(
     builder: reqwest::RequestBuilder,
+    request_url: &reqwest::Url,
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
     client: &reqwest::Client,
 ) -> Result<reqwest::RequestBuilder> {
+    ensure_registry_origin(registry, request_url)?;
+
     if let Some(username) = registry.username.as_deref() {
         return Ok(builder.basic_auth(username, registry.password.clone()));
     }
@@ -1422,9 +1475,9 @@ async fn download_to_file(
     image_url_or_path: &str,
     file: &mut tokio::fs::File,
 ) -> Result<DownloadResult> {
-    let url = build_registry_url(registry, image_url_or_path);
-    let display_url = redact_url_userinfo(&url);
-    let response = apply_registry_auth(client.get(&url), registry, bridge, client)
+    let url = build_registry_url(registry, image_url_or_path)?;
+    let display_url = redact_url_userinfo(url.as_str());
+    let response = apply_registry_auth(client.get(url.clone()), &url, registry, bridge, client)
         .await?
         .send()
         .await
@@ -1450,7 +1503,7 @@ async fn download_to_file(
     Ok(DownloadResult {
         bytes,
         sha256: to_hex_lower(&hasher.finalize()),
-        source_url: url,
+        source_url: url.to_string(),
     })
 }
 
@@ -1517,6 +1570,15 @@ mod tests {
         }
     }
 
+    fn registry_config_for_url(url: &str) -> ImageRegistryConfig {
+        ImageRegistryConfig {
+            url: url.to_string(),
+            username: None,
+            password: None,
+            refresh_interval_minutes: 15,
+        }
+    }
+
     fn registry_index(entries: &[(&str, &str, &str)]) -> Vec<u8> {
         registry_index_with_boot(entries, &"b".repeat(64), &"c".repeat(64), 11)
     }
@@ -1556,6 +1618,108 @@ mod tests {
             },
             download_url: "/agent/registry/images/ubuntu/sha".to_string(),
         }
+    }
+
+    #[test]
+    fn registry_urls_resolve_relative_to_the_configured_endpoint() -> Result<()> {
+        let registry = registry_config_for_url("https://registry.example/api/images");
+
+        assert_eq!(
+            build_registry_url(&registry, "ubuntu/image.raw.zst")?.as_str(),
+            "https://registry.example/api/images/ubuntu/image.raw.zst"
+        );
+        assert_eq!(
+            build_registry_url(&registry, "/artifacts/kernel")?.as_str(),
+            "https://registry.example/artifacts/kernel"
+        );
+        assert_eq!(
+            build_registry_url(&registry, "https://registry.example:443/artifacts/initrd")?
+                .as_str(),
+            "https://registry.example/artifacts/initrd"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn registry_urls_reject_every_cross_origin_variant() {
+        let registry = registry_config_for_url("https://registry.example:8443/api/images");
+        for candidate in [
+            "http://registry.example:8443/image.raw.zst",
+            "https://registry.example/image.raw.zst",
+            "https://registry.example:9443/image.raw.zst",
+            "https://cdn.example:8443/image.raw.zst",
+            "//cdn.example:8443/image.raw.zst",
+        ] {
+            let error = build_registry_url(&registry, candidate)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(
+                error.contains("does not match configured registry origin"),
+                "unexpected result for {candidate}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_auth_is_rejected_before_credentials_reach_an_off_origin_request() -> Result<()>
+    {
+        ensure_ring_provider()?;
+        let mut registry = registry_config_for_url("https://registry.example/api/images");
+        registry.username = Some("registry-user".to_string());
+        registry.password = Some("registry-password".to_string());
+        let client = reqwest::Client::new();
+        let request_url = reqwest::Url::parse("https://attacker.example/image.raw.zst")?;
+
+        let error = apply_registry_auth(
+            client.get(request_url.clone()),
+            &request_url,
+            &registry,
+            None,
+            &client,
+        )
+        .await
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+
+        assert!(error.contains("does not match configured registry origin"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_registry_client_does_not_follow_redirects() -> Result<()> {
+        ensure_ring_provider()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_bg = Arc::clone(&requests);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let request_number = requests_bg.fetch_add(1, Ordering::SeqCst);
+                let response = if request_number == 0 {
+                    "HTTP/1.1 302 Found\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let client = registry_http_client()?;
+        let response = client.get(format!("http://{addr}/start")).send().await?;
+
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 
     #[test]

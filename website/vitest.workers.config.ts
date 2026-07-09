@@ -7,12 +7,12 @@ export default defineConfig({
     cloudflareTest({
       main: "./src/test/host-runtime-worker.ts",
       miniflare: {
-        compatibilityDate: "2026-03-01",
+        compatibilityDate: "2026-07-09",
         compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
         bindings: {
           AGENT_JWT_AUDIENCE: "agent-connect",
           AGENT_JWT_ISSUER: "intar-agent-bridge",
-          AGENT_JWT_SECRET: "test-agent-secret",
+          AGENT_JWT_SECRET: "test-agent-jwt-secret-0123456789abcdef",
           BETTER_AUTH_APP_NAME: "intar.dev",
           BETTER_AUTH_SECRET: "test-better-auth-secret",
           BETTER_AUTH_URL: "http://localhost",
@@ -33,7 +33,6 @@ export default defineConfig({
             useSQLite: true,
           },
         },
-        kvNamespaces: ["ALLOWLIST"],
         r2Buckets: ["VM_IMAGE_REGISTRY_BUCKET", "VM_RUN_ARTIFACTS_BUCKET"],
       },
     }),

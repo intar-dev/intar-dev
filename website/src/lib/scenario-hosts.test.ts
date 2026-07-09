@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  bridgeSessionResetForHostRoleChange,
   isAvailableScenarioLaunchHost,
   isFreshHostHeartbeat,
   isReportedHostRoleAllowed,
@@ -33,14 +32,6 @@ describe("scenario host launch eligibility", () => {
     expect(resolveScenarioEnabledForHostRole("agent", true)).toBe(true);
     expect(resolveScenarioEnabledForHostRole("agent", false)).toBe(false);
     expect(resolveScenarioEnabledForHostRole("builder", true)).toBe(false);
-  });
-
-  it("invalidates active bridge sessions when a host role changes", () => {
-    expect(bridgeSessionResetForHostRoleChange(1_762_041_660_000)).toEqual({
-      activeSessionId: null,
-      connected: false,
-      disconnectedAt: 1_762_041_660_000,
-    });
   });
 
   it("allows enabled agent hosts to launch scenarios", () => {

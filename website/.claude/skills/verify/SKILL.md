@@ -1,42 +1,42 @@
 ---
 name: verify
-description: Drive the website's API surface end-to-end locally — mint real sessions without GitHub OAuth, then curl authenticated endpoints.
+description: Build and exercise the website Worker locally with the reset-only D1 baseline and real GitHub authentication.
 ---
 
-# Verifying website/ changes at the running server
+# Verifying website changes locally
 
 ## Launch
 
+Use the pinned Node and Bun versions. Create a gitignored `.dev.vars` with the
+local Better Auth URL, strong development secrets, and GitHub OAuth credentials,
+then run:
+
 ```bash
-# Node: repo pins website/.node-version; run tools through it
-fnm exec --using=$(cat .node-version) bun run dev   # daemonizes (astro dev), port 4321
-fnm exec --using=$(cat .node-version) bunx astro dev stop   # stop the daemon
+export GITHUB_USERNAME="your-github-username"
+fnm exec --using=$(cat .node-version) bun run build
+fnm exec --using=$(cat .node-version) bun run db:bootstrap:local
+fnm exec --using=$(cat .node-version) bunx wrangler d1 execute DB --local --config wrangler.jsonc \
+  --command "INSERT INTO access_allowlist (github_username, approved_by, approved_at) VALUES (lower('${GITHUB_USERNAME}'), NULL, cast(unixepoch('subsecond') * 1000 as integer)) ON CONFLICT(github_username) DO UPDATE SET approved_at = excluded.approved_at;"
+fnm exec --using=$(cat .node-version) bunx wrangler dev --config dist/server/wrangler.json --port 8788
 ```
 
-`bun run db:migrate:local` applies migrations to the local D1 first.
+The GitHub OAuth callback must be
+`http://127.0.0.1:8788/api/auth/callback/github`. Credential sign-up/sign-in and
+Better Auth's direct user-deletion routes are intentionally disabled.
 
-## Auth without GitHub OAuth
+## Authenticated checks
 
-better-auth has `emailAndPassword` enabled and the `username()` plugin, and the
-sign-up allowlist is a local KV namespace — so you can mint real sessions:
+Sign in through GitHub at `http://127.0.0.1:8788`, then use the resulting
+`better-auth.session_token` cookie for API calls. Every mutating request should
+send `Origin: http://127.0.0.1:8788`.
 
-1. Origin checks: better-auth trusts `BETTER_AUTH_URL` (wrangler var =
-   `https://intar.dev`). Override for dev via gitignored `website/.dev.vars`:
-   `BETTER_AUTH_URL=http://localhost:4321`, then restart the dev server.
-2. Allowlist the GitHub-username you'll sign up with:
-   `bunx wrangler kv key put <name> '{}' --binding=ALLOWLIST --local --config wrangler.jsonc`
-3. Sign up (cookie jar holds the session):
-   ```bash
-   curl -s -c user.jar -X POST http://localhost:4321/api/auth/sign-up/email \
-     -H 'content-type: application/json' -H 'Origin: http://localhost:4321' \
-     -d '{"email":"u@example.com","password":"…12+ chars…","name":"U","username":"<name>"}'
-   ```
-4. Every subsequent POST/PATCH/DELETE needs `-H 'Origin: http://localhost:4321'`
-   (Astro CSRF blocks bodyless cross-site POSTs; browsers send Origin automatically).
-5. Site admin: `bunx wrangler d1 execute DB --local --config wrangler.jsonc \
-   --command "UPDATE user SET role='admin' WHERE username='<name>'"`.
+To grant the local user admin access after the first sign-in:
 
-## Cleanup
+```bash
+fnm exec --using=$(cat .node-version) bunx wrangler d1 execute DB --local --config wrangler.jsonc \
+  --command "UPDATE user SET role = 'admin' WHERE username = lower('${GITHUB_USERNAME}');"
+```
 
-Delete test users (`DELETE FROM user WHERE username IN (...)` — memberships
-cascade), delete the KV allowlist keys, stop the dev daemon.
+Use a dedicated local Wrangler state directory when isolation matters. Never
+reuse or directly delete production users: user rows own hosts and run history,
+and cleanup must go through the application lifecycle.

@@ -1,5 +1,5 @@
 // Pure GitHub-username helpers, safe for both the client bundle and the
-// worker. The allowlist KV key is the normalized (lowercased) username.
+// worker. The D1 allowlist key is the normalized (lowercased) username.
 
 export const GITHUB_USERNAME_PATTERN =
   /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;

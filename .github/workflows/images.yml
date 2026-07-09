@@ -63,6 +63,11 @@ on:
       - "website/src/db/schema.ts"
       - "website/src/pages/api/agent/hosts.ts"
   workflow_dispatch:
+    inputs:
+      reset_generation_ready:
+        description: Confirm the reset Worker generation is live and ready for image bundle upload
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -107,7 +112,9 @@ jobs:
         run: just render-images "" builder.sample.amd64.hcl
 
       - name: Verify bundle upload token
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
@@ -117,7 +124,9 @@ jobs:
           fi
 
       - name: Upload scenario source bundle
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: just bundle-images "" builder.sample.amd64.hcl "${GITHUB_SHA::12}" false "https://intar.dev/registry/v1/bundles"

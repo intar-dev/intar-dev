@@ -122,7 +122,7 @@ async function handleBundleUpload(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const authz = requireBundleUploadAuth(request, env);
+  const authz = await requireBundleUploadAuth(request, env);
   if (authz) return authz;
 
   let form: FormData;
@@ -1214,7 +1214,7 @@ async function requirePublishAuth(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
-  if (hasRegistryPublishToken(request, env)) {
+  if (await hasRegistryPublishToken(request, env)) {
     return null;
   }
 
@@ -1229,26 +1229,57 @@ async function requirePublishAuth(
   return jsonResponse({ error: "unauthorized" }, 401);
 }
 
-function requireBundleUploadAuth(
+async function requireBundleUploadAuth(
   request: Request,
   env: Cloudflare.Env,
-): Response | null {
-  if (hasRegistryPublishToken(request, env)) {
+): Promise<Response | null> {
+  if (await hasRegistryPublishToken(request, env)) {
     return null;
   }
   return jsonResponse({ error: "unauthorized" }, 401);
 }
 
-function hasRegistryPublishToken(
+async function hasRegistryPublishToken(
   request: Request,
   env: Cloudflare.Env,
-): boolean {
+): Promise<boolean> {
   const expected = env.REGISTRY_PUBLISH_TOKEN?.trim();
   const authHeader = request.headers.get("authorization") ?? "";
   const bearer = authHeader.startsWith("Bearer ")
     ? authHeader.slice("Bearer ".length).trim()
     : "";
-  return Boolean(expected && bearer === expected);
+  if (!expected || !bearer) {
+    return false;
+  }
+
+  const [expectedHash, bearerHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", textEncoder.encode(expected)),
+    crypto.subtle.digest("SHA-256", textEncoder.encode(bearer)),
+  ]);
+  return timingSafeHashEqual(expectedHash, bearerHash);
+}
+
+function timingSafeHashEqual(expected: ArrayBuffer, actual: ArrayBuffer): boolean {
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual?: (
+      left: ArrayBuffer | ArrayBufferView,
+      right: ArrayBuffer | ArrayBufferView,
+    ) => boolean;
+  };
+  if (typeof subtle.timingSafeEqual === "function") {
+    return subtle.timingSafeEqual(expected, actual);
+  }
+
+  // Node's Web Crypto test runtime does not yet expose timingSafeEqual. Both
+  // inputs are fixed-size SHA-256 digests, so this loop preserves the same
+  // constant-work comparison without leaking the original token length.
+  const left = new Uint8Array(expected);
+  const right = new Uint8Array(actual);
+  let mismatch = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    mismatch |= left[index]! ^ right[index]!;
+  }
+  return mismatch === 0;
 }
 
 function isSafeBuildId(value: string): boolean {

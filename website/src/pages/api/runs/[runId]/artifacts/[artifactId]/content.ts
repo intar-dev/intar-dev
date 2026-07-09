@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { and, eq, isNull } from "drizzle-orm";
 import { scenarioRunArtifacts, scenarioRuns } from "@/db/schema";
 import { jsonResponse, requireUserContext } from "@/lib/agent-bridge";
+import { applyArtifactDeliveryHeaders } from "@/lib/artifact-delivery";
 
 export const prerender = false;
 
@@ -13,10 +14,8 @@ export const GET: APIRoute = async ({ request, params }) => {
     return authz.response;
   }
 
-  const disposition =
-    new URL(request.url).searchParams.get("download") === "1"
-      ? "attachment"
-      : "inline";
+  const forceDownload =
+    new URL(request.url).searchParams.get("download") === "1";
 
   const rawRunId = params.runId?.trim() ?? "";
   const rawArtifactId = params.artifactId?.trim() ?? "";
@@ -84,13 +83,13 @@ export const GET: APIRoute = async ({ request, params }) => {
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
-  headers.set("content-type", artifact.contentType);
   headers.set("etag", object.httpEtag);
   headers.set("accept-ranges", "bytes");
-  headers.set(
-    "content-disposition",
-    `${disposition}; filename="${artifact.filename.replace(/"/g, "")}"`,
-  );
+  applyArtifactDeliveryHeaders(headers, {
+    contentType: artifact.contentType,
+    filename: artifact.filename,
+    forceDownload,
+  });
 
   let status = 200;
   if (object.range && "offset" in object.range) {

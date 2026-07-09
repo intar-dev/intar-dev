@@ -3,7 +3,7 @@
 This document describes the post-refactor platform shape. The repository is a single
 monorepo with shared Rust contracts, a Cloudflare control plane, a KVM host agent,
 guest-side Kino probes/recording, a Stargate SSH gateway, image tooling, scenario
-content, and mothballed Stardrive cluster tooling that remains testable.
+content, and the desired-state runtime that connects those components.
 
 ## Repository Layout
 
@@ -11,9 +11,8 @@ content, and mothballed Stardrive cluster tooling that remains testable.
   image tooling, Cloud Hypervisor client code, and shared contract crates.
 - `website/` is the Astro and Cloudflare Worker control plane.
 - `scenarios/` contains scenario HCL content and base image catalog data.
-- `stardrive/` contains the Go cluster tooling retained for maintenance only.
-- `.github/workflows/` contains the consolidated Rust, website, image, Stardrive,
-  and release workflows.
+- `.github/workflows/` contains the consolidated Rust, website, image, and release
+  workflows.
 
 ## Shared Contracts
 
@@ -46,6 +45,9 @@ Host orchestration is desired-state based:
 Run lifecycle state is derived in `website/src/lib/run-lifecycle.ts`. Reports only
 advance matching `(run_id, vm_name)` entries, which avoids cross-VM or cross-run
 state bleed.
+
+The D1 schema is intentionally reset-only. `website/drizzle/0000_baseline.sql`
+describes a fresh control plane; schema changes do not preserve an older database.
 
 ## Image Registry
 
@@ -129,11 +131,9 @@ VM networking is isolated per run:
   host egress IPv4 address.
 - Guest-to-host input is dropped; control traffic uses vsock.
 
-## Mothballed Host Rotation
+## Host Rotation
 
-`stardrive/` and other mothballed VM hosts are retained for maintenance, not as
-implicit capacity for the desired-state runtime. Safe rotation is a drain-first
-operation:
+Agent and builder host rotation is a drain-first operation:
 
 - Disable scenario scheduling on the host before changing cluster membership or
   host identity.
@@ -147,11 +147,6 @@ operation:
 
 If those conditions cannot be proven, treat rotation as destructive maintenance
 and expect active runs on that host to fail.
-
-The local `infrastructure/cluster/.env` file is gitignored and must stay
-untracked. It may contain root credentials for mothballed Talos infrastructure;
-the operator should rotate those credentials before reusing or retiring that
-cluster state.
 
 ## Terminal Access
 
@@ -174,7 +169,6 @@ Local verification should include:
 - `cargo test --workspace`
 - `bun --cwd website test`
 - `bun --cwd website run build`
-- `go test ./...` from `stardrive/`
 
 Release verification also requires a real KVM host proof: publish a scenario,
 pre-cache its image, start a run, verify terminal access with the reported host key,

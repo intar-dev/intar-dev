@@ -72,6 +72,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       return this.handleWake(request);
     }
 
+    if (url.pathname === "/_internal/retire") {
+      return this.handleRetire(request);
+    }
+
     return jsonResponse({ error: "not found" }, 404);
   }
 
@@ -178,6 +182,27 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     await this.ctx.storage.setAlarm(Math.max(0, Date.now() - 1));
     return jsonResponse({ ok: true, hostId }, 202);
+  }
+
+  private async handleRetire(request: Request): Promise<Response> {
+    if (request.method !== "POST") {
+      return jsonResponse({ error: "method not allowed" }, 405);
+    }
+
+    const hostId =
+      request.headers.get("x-agent-host-id")?.trim() ??
+      (await this.loadKnownHostId()) ??
+      "";
+    for (const socket of this.ctx.getWebSockets()) {
+      try {
+        socket.close(1001, "host retired");
+      } catch {
+        // The socket may already be closing; retirement remains idempotent.
+      }
+    }
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    return jsonResponse({ ok: true, hostId });
   }
 
   private async handleBridgeMessageV5(
