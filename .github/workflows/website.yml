@@ -104,6 +104,7 @@ jobs:
       - name: Run UI release gate
         env:
           CI: "true"
+          HOME: /root
         run: bun run test:ui
 
       - name: Upload Playwright report and diffs
