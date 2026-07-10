@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
 import {
   ArrowLeftRight,
   AtSign,
@@ -14,6 +19,7 @@ import {
 import { PageShell } from "../patterns/PageShell";
 import { PageHeader } from "../patterns/PageHeader";
 import { Section } from "../patterns/Section";
+import { InlineFeedback } from "../patterns/InlineFeedback";
 import { ErrorState, LoadingState } from "../patterns/StateCard";
 import { DifficultyChip, MetaChip, type ScenarioDifficulty } from "../patterns/MetaChip";
 import { formatDurationMs, formatRelativeTime } from "../lib/format";
@@ -33,6 +39,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   Table,
   TableBody,
   TableCell,
@@ -41,6 +53,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import type { TeamDetailTab } from "./tab-search";
 
 type TeamRole = "owner" | "admin" | "member";
 
@@ -118,6 +131,8 @@ function initials(name: string): string {
 
 export function TeamDetail() {
   const { orgId } = useParams({ from: "/app/teams/$orgId" });
+  const routeSearch = useSearch({ from: "/app/teams/$orgId" });
+  const navigate = useNavigate();
 
   const team = useQuery({
     queryKey: ["teams", orgId, "detail"],
@@ -126,10 +141,30 @@ export function TeamDetail() {
   });
 
   useBreadcrumbLabel(team.data?.team.name);
+  const requestedTab = routeSearch.tab ?? "overview";
+  const canViewProgress = team.data?.team.role !== "member";
+  const activeTab: TeamDetailTab =
+    requestedTab === "progress" && !canViewProgress
+      ? "overview"
+      : requestedTab;
+
+  useEffect(() => {
+    if (requestedTab !== activeTab) {
+      void navigate({ to: ".", replace: true, search: {} });
+    }
+  }, [activeTab, navigate, requestedTab]);
+
+  const setTab = (tab: TeamDetailTab) => {
+    void navigate({
+      to: ".",
+      replace: true,
+      search: tab === "overview" ? {} : { tab },
+    });
+  };
 
   if (team.error) {
     return (
-      <PageShell title="Team" showHeader={false}>
+      <PageShell title="Team" showHeader={false} width="content">
         <PageHeader title="Team" backLink={BACK_LINK} compact />
         <ErrorState
           title="Could not load team"
@@ -142,7 +177,7 @@ export function TeamDetail() {
   }
   if (team.isLoading || !team.data) {
     return (
-      <PageShell title="Team" showHeader={false}>
+      <PageShell title="Team" showHeader={false} width="content">
         <PageHeader title="Team" backLink={BACK_LINK} compact />
         <LoadingState title="Loading team" />
       </PageShell>
@@ -151,9 +186,15 @@ export function TeamDetail() {
 
   const detail = team.data.team;
   const instructor = detail.role !== "member";
+  const roleLabel =
+    detail.role === "owner"
+      ? "Owner"
+      : detail.role === "admin"
+        ? "Instructor"
+        : "Member";
 
   return (
-    <PageShell title={detail.name} showHeader={false}>
+    <PageShell title={detail.name} showHeader={false} width="content">
       <PageHeader
         backLink={BACK_LINK}
         title={detail.name}
@@ -161,7 +202,7 @@ export function TeamDetail() {
         meta={
           <>
             <Badge variant={instructor ? "secondary" : "outline"}>
-              {instructor ? "Instructor" : "Member"}
+              {roleLabel}
             </Badge>
             <MetaChip icon={<Users />}>
               {detail.members.length} member
@@ -169,13 +210,116 @@ export function TeamDetail() {
             </MetaChip>
           </>
         }
-        actions={instructor ? <InviteMemberDialog orgId={orgId} /> : undefined}
       />
-      <MembersSection orgId={orgId} detail={detail} instructor={instructor} />
-      <AssignmentsSection orgId={orgId} instructor={instructor} />
-      {instructor ? <ProgressSection orgId={orgId} /> : null}
-      <TeamSettingsSection orgId={orgId} detail={detail} instructor={instructor} />
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setTab(value as TeamDetailTab)}
+        className="gap-6"
+      >
+        <div className="overflow-x-auto border-b">
+          <TabsList variant="line" className="min-w-max pb-1">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="people">People</TabsTrigger>
+            <TabsTrigger value="assignments">Assignments</TabsTrigger>
+            {instructor ? (
+              <TabsTrigger value="progress">Progress</TabsTrigger>
+            ) : null}
+            <TabsTrigger value="settings">Settings</TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="overview">
+          <TeamOverview detail={detail} instructor={instructor} setTab={setTab} />
+        </TabsContent>
+        <TabsContent value="people" className="space-y-4">
+          {instructor ? (
+            <div className="flex justify-end">
+              <InviteMemberDialog orgId={orgId} />
+            </div>
+          ) : null}
+          <MembersSection orgId={orgId} detail={detail} instructor={instructor} />
+        </TabsContent>
+        <TabsContent value="assignments">
+          <AssignmentsSection orgId={orgId} instructor={instructor} />
+        </TabsContent>
+        {instructor ? (
+          <TabsContent value="progress">
+            <ProgressSection orgId={orgId} />
+          </TabsContent>
+        ) : null}
+        <TabsContent value="settings">
+          <TeamSettingsSection
+            orgId={orgId}
+            detail={detail}
+            instructor={instructor}
+          />
+        </TabsContent>
+      </Tabs>
     </PageShell>
+  );
+}
+
+function TeamOverview({
+  detail,
+  instructor,
+  setTab,
+}: {
+  detail: TeamDetailResponse["team"];
+  instructor: boolean;
+  setTab: (tab: TeamDetailTab) => void;
+}) {
+  return (
+    <Section
+      variant="flat"
+      title="Workshop roster"
+      description="The people and learning work connected to this team."
+    >
+      <dl className="grid gap-4 sm:grid-cols-3">
+        <div className="border-l-2 border-primary pl-4">
+          <dt className="text-eyebrow">Members</dt>
+          <dd>
+            <span className="mt-1 block text-section-title tabular-nums">
+              {detail.members.length}
+            </span>
+            <Button
+              type="button"
+              variant="link"
+              className="mt-1 h-auto p-0"
+              onClick={() => setTab("people")}
+            >
+              Review roster
+            </Button>
+          </dd>
+        </div>
+        <div className="border-l-2 border-border pl-4">
+          <dt className="text-eyebrow">Pending invites</dt>
+          <dd>
+            <span className="mt-1 block text-section-title tabular-nums">
+              {detail.invites.length}
+            </span>
+            <span className="mt-1 block text-metadata">
+              {instructor ? "Waiting for a response" : "Managed by instructors"}
+            </span>
+          </dd>
+        </div>
+        <div className="border-l-2 border-border pl-4">
+          <dt className="text-eyebrow">Your role</dt>
+          <dd>
+            <span className="mt-1 block text-section-title capitalize">
+              {detail.role === "admin" ? "Instructor" : detail.role}
+            </span>
+            <Button
+              type="button"
+              variant="link"
+              className="mt-1 h-auto p-0"
+              onClick={() => setTab("assignments")}
+            >
+              Open assignments
+            </Button>
+          </dd>
+        </div>
+      </dl>
+    </Section>
   );
 }
 
@@ -385,7 +529,7 @@ function MembersSection({
                   })
                 }
                 disabled={changeRole.isPending}
-                className="h-8 rounded-md border bg-background px-2 text-sm"
+                className="h-11 rounded-lg border bg-card px-3 text-sm"
                 aria-label={`Role for ${entry.name}`}
               >
                 <option value="admin">Instructor</option>
@@ -447,9 +591,9 @@ function MembersSection({
         ))}
       </ul>
       {actionError ? (
-        <p className="mt-3 text-sm text-destructive">
+        <InlineFeedback tone="error" className="mt-3">
           {actionError instanceof Error ? actionError.message : "Action failed"}
-        </p>
+        </InlineFeedback>
       ) : null}
     </Section>
   );
@@ -556,7 +700,7 @@ function AssignmentsSection({
             <select
               value={scenarioId}
               onChange={(event) => setScenarioId(event.target.value)}
-              className="h-9 rounded-md border bg-background px-3 text-sm"
+              className="h-11 rounded-lg border bg-card px-3 text-sm"
               aria-label="Scenario to assign"
             >
               <option value="">Choose a scenario…</option>
@@ -632,9 +776,9 @@ function AssignmentsSection({
         </p>
       )}
       {actionError ? (
-        <p className="mt-3 text-sm text-destructive">
+        <InlineFeedback tone="error" className="mt-3">
           {actionError instanceof Error ? actionError.message : "Action failed"}
-        </p>
+        </InlineFeedback>
       ) : null}
     </Section>
   );
@@ -656,9 +800,11 @@ function TeamSettingsSection({
   const [name, setName] = useState(detail.name);
   const [transferOpen, setTransferOpen] = useState(false);
   const [transferTarget, setTransferTarget] = useState("");
+  const [transferConfirm, setTransferConfirm] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [leaveConfirm, setLeaveConfirm] = useState("");
 
   const rename = useMutation({
     mutationFn: async () => {
@@ -783,11 +929,15 @@ function TeamSettingsSection({
               {rename.isPending ? "Saving…" : "Rename"}
             </Button>
             {rename.error ? (
-              <p className="w-full text-sm text-destructive">
+              <InlineFeedback tone="error" className="w-full">
                 {rename.error instanceof Error
                   ? rename.error.message
                   : "Failed to rename team"}
-              </p>
+              </InlineFeedback>
+            ) : rename.isSuccess ? (
+              <InlineFeedback tone="success" className="w-full">
+                Team name updated.
+              </InlineFeedback>
             ) : null}
           </form>
         ) : null}
@@ -802,6 +952,7 @@ function TeamSettingsSection({
                   setTransferOpen(next);
                   if (!next) {
                     setTransferTarget("");
+                    setTransferConfirm("");
                     transfer.reset();
                   }
                 }}
@@ -825,7 +976,7 @@ function TeamSettingsSection({
                   <select
                     value={transferTarget}
                     onChange={(event) => setTransferTarget(event.target.value)}
-                    className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                    className="h-11 w-full rounded-lg border bg-card px-3 text-sm"
                     aria-label="New owner"
                   >
                     <option value="">Choose the new owner…</option>
@@ -836,6 +987,17 @@ function TeamSettingsSection({
                       </option>
                     ))}
                   </select>
+                  <div className="space-y-2">
+                    <label htmlFor="transfer-team-confirm" className="text-sm font-medium">
+                      Type <span className="font-semibold">{detail.name}</span> to confirm
+                    </label>
+                    <Input
+                      id="transfer-team-confirm"
+                      value={transferConfirm}
+                      onChange={(event) => setTransferConfirm(event.target.value)}
+                      autoComplete="off"
+                    />
+                  </div>
                   {transfer.error ? (
                     <p className="text-sm text-destructive">
                       {transfer.error instanceof Error
@@ -852,7 +1014,11 @@ function TeamSettingsSection({
                       Cancel
                     </Button>
                     <Button
-                      disabled={!transferTarget || transfer.isPending}
+                      disabled={
+                        !transferTarget ||
+                        transferConfirm !== detail.name ||
+                        transfer.isPending
+                      }
                       onClick={() => transfer.mutate()}
                     >
                       {transfer.isPending ? "Transferring…" : "Transfer ownership"}
@@ -931,7 +1097,10 @@ function TeamSettingsSection({
               open={leaveOpen}
               onOpenChange={(next) => {
                 setLeaveOpen(next);
-                if (!next) leave.reset();
+                if (!next) {
+                  setLeaveConfirm("");
+                  leave.reset();
+                }
               }}
             >
               <DialogTrigger
@@ -951,6 +1120,17 @@ function TeamSettingsSection({
                     back later.
                   </DialogDescription>
                 </DialogHeader>
+                <div className="space-y-2">
+                  <label htmlFor="leave-team-confirm" className="text-sm font-medium">
+                    Type <span className="font-semibold">{detail.name}</span> to confirm
+                  </label>
+                  <Input
+                    id="leave-team-confirm"
+                    value={leaveConfirm}
+                    onChange={(event) => setLeaveConfirm(event.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
                 {leave.error ? (
                   <p className="text-sm text-destructive">
                     {leave.error instanceof Error
@@ -968,7 +1148,7 @@ function TeamSettingsSection({
                   </Button>
                   <Button
                     variant="destructive"
-                    disabled={leave.isPending}
+                    disabled={leaveConfirm !== detail.name || leave.isPending}
                     onClick={() => leave.mutate()}
                   >
                     {leave.isPending ? "Leaving…" : "Leave team"}
@@ -985,9 +1165,9 @@ function TeamSettingsSection({
 
 const PROGRESS_TONE: Record<string, string> = {
   not_started: "bg-muted/50 text-muted-foreground",
-  in_progress: "bg-primary/15 text-primary",
-  solved: "bg-success/15 text-success",
-  assisted: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+  in_progress: "border-brand-border bg-brand-subtle text-brand-text",
+  solved: "border-success-border bg-success-subtle text-success",
+  assisted: "border-warning-border bg-warning-subtle text-warning",
 };
 
 const PROGRESS_LABEL: Record<string, string> = {
@@ -1054,13 +1234,13 @@ function ProgressSection({ orgId }: { orgId: string }) {
                     <TableCell key={cell.scenarioId}>
                       <span
                         className={cn(
-                          "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium",
+                          "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium",
                           PROGRESS_TONE[cell.status],
                         )}
                       >
                         {PROGRESS_LABEL[cell.status]}
                         {cell.solveDurationMs !== null ? (
-                          <span className="font-normal opacity-75">
+                          <span className="font-normal">
                             {formatDurationMs(cell.solveDurationMs)}
                           </span>
                         ) : null}

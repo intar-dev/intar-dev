@@ -71,10 +71,60 @@ jobs:
           path: website/dist
           if-no-files-found: error
 
+  ui:
+    name: UI visual, accessibility, and smoke
+    runs-on: namespace-profile-intar-dev
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      options: --ipc=host
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: website/.node-version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Set up Namespace cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install pinned Playwright browsers
+        run: bun run ui:install
+
+      - name: Run UI release gate
+        env:
+          CI: "true"
+        run: bun run test:ui
+
+      - name: Upload Playwright report and diffs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: website-ui-report-${{ github.run_attempt }}
+          path: |
+            .tmp/website-playwright/playwright-report
+            .tmp/website-playwright/test-results
+          if-no-files-found: warn
+          retention-days: 14
+
   deploy:
     name: Deploy production
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready
-    needs: validate
+    needs:
+      - validate
+      - ui
     runs-on: namespace-profile-intar-dev
     environment: production
 

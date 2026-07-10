@@ -30,13 +30,10 @@ export function ResolutionCard(props: {
   const hintsUsed = props.hints.filter((hint) => hint.revealed).length;
 
   return (
-    <Card size="sm" className="motion-safe:animate-in motion-safe:fade-in">
-      {/* The brand gradient is the confetti. */}
-      <div
-        className="mx-6 h-1 rounded-full"
-        style={{ backgroundImage: "var(--gradient-brand)" }}
-        aria-hidden="true"
-      />
+    <Card
+      size="sm"
+      className="border-success-border bg-success-subtle motion-safe:animate-in motion-safe:fade-in"
+    >
       <CardHeader className="gap-3">
         <div className="flex items-center justify-between gap-3">
           <CardTitle className="font-heading text-base">
@@ -100,7 +97,7 @@ export function ResolutionCard(props: {
         )}
         <p className="text-sm leading-6 text-muted-foreground">
           You fixed {props.scenarioName}. The shell stays open if you want to
-          look around — end the scenario to save your replay.
+          look around — end the run to save your replay.
         </p>
         <Button
           className="w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success"
@@ -108,7 +105,7 @@ export function ResolutionCard(props: {
           disabled={props.pending}
         >
           <CheckCircle2 className="size-4" />
-          {props.pending ? "Ending scenario..." : "End scenario"}
+          {props.pending ? "Ending run…" : "End run"}
         </Button>
       </CardContent>
     </Card>

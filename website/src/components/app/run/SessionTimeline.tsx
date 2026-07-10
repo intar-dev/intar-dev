@@ -48,7 +48,7 @@ export function SessionTimeline({
 
   if (vm?.hasRecording && !sessions) {
     return (
-      <div className="flex w-full flex-col items-center justify-center gap-3 rounded-md border bg-muted/20 px-6 py-10 text-center">
+      <div className="flex w-full flex-col items-center justify-center gap-3 rounded-md border bg-muted/20 px-6 py-8 text-center">
         <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
           <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
         </div>

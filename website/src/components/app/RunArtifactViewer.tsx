@@ -11,7 +11,6 @@ import {
   type KeyBinding,
 } from "@codemirror/view";
 import type { AsciinemaPlayerInstance } from "asciinema-player";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -27,6 +26,7 @@ import {
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_THEME,
 } from "@/lib/replay/config";
+import { cn } from "@/lib/utils";
 
 export interface RunArtifactFile {
   id: string;
@@ -65,13 +65,13 @@ const editorTheme = EditorView.theme(
   {
     "&": {
       height: "100%",
-      color: "#e5e7eb",
-      background: "#111827",
+      color: "var(--terminal-foreground)",
+      background: "var(--terminal-background)",
       fontSize: "0.79rem",
     },
     ".cm-scroller": {
       fontFamily:
-        '"SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace',
+        '"Recursive Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace',
       lineHeight: "1.65",
     },
     ".cm-content": {
@@ -85,39 +85,42 @@ const editorTheme = EditorView.theme(
       padding: "0 1rem 0 0.875rem",
     },
     ".cm-gutters": {
-      background: "#1f2937",
-      color: "#9ca3af",
-      border: "none",
+      background: "var(--terminal-surface)",
+      color: "var(--terminal-muted)",
+      borderRight: "1px solid var(--terminal-border)",
       paddingRight: "0.25rem",
     },
     ".cm-activeLine, .cm-activeLineGutter": {
       background: "transparent",
     },
     ".cm-selectionBackground, ::selection": {
-      background: "rgba(148, 163, 184, 0.3)",
+      background:
+        "color-mix(in oklch, var(--terminal-brand) 24%, transparent)",
     },
     ".cm-searchMatch": {
-      background: "rgba(255, 255, 255, 0.08)",
-      outline: "1px solid rgba(255, 255, 255, 0.14)",
+      background:
+        "color-mix(in oklch, var(--terminal-brand) 12%, transparent)",
+      outline: "1px solid var(--terminal-border)",
     },
     ".cm-searchMatch.cm-searchMatch-selected": {
-      background: "rgba(255, 255, 255, 0.14)",
+      background:
+        "color-mix(in oklch, var(--terminal-brand) 24%, transparent)",
     },
     ".cm-panels": {
-      background: "#1f2937",
-      color: "#e5e7eb",
-      borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+      background: "var(--terminal-surface)",
+      color: "var(--terminal-foreground)",
+      borderBottom: "1px solid var(--terminal-border)",
     },
     ".cm-button": {
-      color: "inherit",
-      background: "#374151",
-      border: "1px solid rgba(255, 255, 255, 0.14)",
+      color: "var(--terminal-foreground)",
+      background: "var(--terminal-surface)",
+      border: "1px solid var(--terminal-border)",
       borderRadius: "0.375rem",
     },
     ".cm-textfield": {
-      background: "#111827",
-      color: "inherit",
-      border: "1px solid rgba(255, 255, 255, 0.14)",
+      background: "var(--terminal-background)",
+      color: "var(--terminal-foreground)",
+      border: "1px solid var(--terminal-border)",
       borderRadius: "0.375rem",
     },
   },
@@ -246,19 +249,19 @@ export function RunArtifactViewer({
           </div>
 
           {viewer ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <MetaPill label={formatBytes(viewer.artifact.sizeBytes)} />
+            <dl className="flex max-w-2xl flex-wrap items-start gap-x-4 gap-y-2 text-xs">
+              <ArtifactMeta label="Size" value={formatBytes(viewer.artifact.sizeBytes)} />
               {!hideInternalMetadata ? (
                 <>
-                  <MetaPill label={`#${viewer.artifact.ordinal}`} />
-                  <MetaPill label={artifactKindLabel(viewer.artifact.kind)} />
-                  <MetaPill label={viewer.artifact.contentType} subdued />
+                  <ArtifactMeta label="Order" value={`#${viewer.artifact.ordinal}`} />
+                  <ArtifactMeta label="Kind" value={artifactKindLabel(viewer.artifact.kind)} />
+                  <ArtifactMeta label="Type" value={viewer.artifact.contentType} subdued />
                 </>
               ) : null}
               {!isCast || castTab === "raw" ? (
-                <MetaPill label={`${lineCount} lines`} subdued />
+                <ArtifactMeta label="Length" value={`${lineCount} lines`} subdued />
               ) : null}
-            </div>
+            </dl>
           ) : null}
         </div>
 
@@ -309,6 +312,18 @@ export function RunArtifactViewer({
                       ? "Copy failed"
                       : "Copy file"}
                 </Button>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  className="sr-only"
+                >
+                  {copyState === "copied"
+                    ? "File content copied."
+                    : copyState === "error"
+                      ? "File content could not be copied."
+                      : ""}
+                </span>
                 <Button
                   type="button"
                   variant={wrapText ? "secondary" : "outline"}
@@ -331,7 +346,7 @@ export function RunArtifactViewer({
       <CardContent className="pt-0">
         <div className="min-h-[22rem] rounded-lg border bg-muted/20">
           {!viewer ? (
-            <div className="flex min-h-[22rem] flex-col items-center justify-center px-6 py-10 text-center">
+            <div className="flex min-h-[22rem] flex-col items-center justify-center px-6 py-8 text-center">
               <p className="text-sm font-medium">Artifacts open inline.</p>
               <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
                 Logs use a read-only text viewer and cast files replay inline,
@@ -339,8 +354,8 @@ export function RunArtifactViewer({
               </p>
             </div>
           ) : viewer.error ? (
-            <div className="flex min-h-[22rem] items-center justify-center px-6 py-10">
-              <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
+            <div className="flex min-h-[22rem] items-center justify-center px-6 py-8">
+              <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-sm text-destructive">
                 {viewer.error}
               </div>
             </div>
@@ -466,7 +481,7 @@ export function AsciicastReplaySurface({
     return (
       <div className={minimal ? "p-0" : "p-4"}>
         <div className="flex aspect-video w-full items-center justify-center rounded-md bg-muted/20 px-6">
-          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-5 py-4 text-sm text-destructive">
+          <div className="max-w-lg rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-4 text-sm text-destructive">
             {playerError}
           </div>
         </div>
@@ -505,7 +520,7 @@ export function AsciicastReplaySurface({
       >
         <div
           ref={containerRef}
-          className="run-artifact-player w-full overflow-hidden rounded-md bg-[#121314] [&_.ap-player]:w-full"
+          className="run-artifact-player w-full overflow-hidden rounded-md bg-terminal-background [&_.ap-player]:w-full"
         />
       </div>
     </div>
@@ -556,7 +571,7 @@ export function ReadOnlyTextSurface({
       editorRef.current?.destroy();
       editorRef.current = null;
     };
-  }, [deferredContent, wrapText]);
+  }, []);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -628,14 +643,28 @@ export function ReadOnlyTextSurface({
   );
 }
 
-function MetaPill({
+function ArtifactMeta({
   label,
+  value,
   subdued = false,
 }: {
   label: string;
+  value: string;
   subdued?: boolean;
 }) {
-  return <Badge variant={subdued ? "outline" : "secondary"}>{label}</Badge>;
+  return (
+    <div className="flex min-w-0 items-baseline gap-1.5">
+      <dt className="font-semibold text-foreground">{label}</dt>
+      <dd
+        className={cn(
+          "min-w-0 break-all",
+          subdued ? "text-muted-foreground" : "text-foreground",
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
 }
 
 function ToolbarTab({

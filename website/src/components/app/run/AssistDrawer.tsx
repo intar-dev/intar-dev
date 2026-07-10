@@ -127,7 +127,7 @@ export function AssistDrawer(props: {
         </button>
       </CardHeader>
       {open ? (
-        <CardContent className="space-y-5">
+        <CardContent className="space-y-6">
           {props.hintError ? (
             <p className="text-xs text-destructive">{props.hintError}</p>
           ) : null}
@@ -217,7 +217,7 @@ function HintLadder(props: {
         return (
           <div
             key={hint.key}
-            className="flex items-center gap-2.5 px-3 py-1.5 text-muted-foreground/70"
+            className="flex items-center gap-2.5 px-3 py-1.5 text-muted-foreground"
           >
             <LockKeyhole className="size-3.5 shrink-0" aria-hidden="true" />
             <p className="min-w-0 truncate text-sm">{ordinal}</p>

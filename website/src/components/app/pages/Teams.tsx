@@ -4,9 +4,11 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { Check, Plus, Users, X } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
 import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
+import { InlineFeedback } from "../patterns/InlineFeedback";
 import { formatRelativeTime } from "../lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -134,8 +136,9 @@ export function Teams() {
 
   return (
     <PageShell
+      width="content"
       title="Teams"
-      description="Learn together — gather your group, assign scenarios, and follow everyone's progress."
+      description="Join an invitation or open a team to coordinate scenarios and progress."
       actions={
         <Button onClick={openCreateDialog}>
           <Plus className="size-4" />
@@ -197,10 +200,19 @@ export function Teams() {
 
       {invites.length ? (
         <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <p className="text-eyebrow text-primary">Invitations</p>
+              <h2 className="mt-1 text-section-title">Your next team is waiting</h2>
+            </div>
+            <span className="text-metadata tabular-nums">
+              {invites.length} pending
+            </span>
+          </div>
           {invites.map((invite) => (
             <div
               key={invite.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/5 p-4"
+              className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:p-6"
             >
               <div className="min-w-0">
                 <p className="text-sm">
@@ -221,7 +233,10 @@ export function Teams() {
                   onClick={() => declineInvite.mutate(invite.id)}
                 >
                   <X className="size-3.5" />
-                  Decline
+                  {declineInvite.isPending &&
+                  declineInvite.variables === invite.id
+                    ? "Declining…"
+                    : "Decline"}
                 </Button>
                 <Button
                   size="sm"
@@ -229,24 +244,27 @@ export function Teams() {
                   onClick={() => acceptInvite.mutate(invite.id)}
                 >
                   <Check className="size-3.5" />
-                  Join team
+                  {acceptInvite.isPending &&
+                  acceptInvite.variables === invite.id
+                    ? "Joining…"
+                    : "Join team"}
                 </Button>
               </div>
             </div>
           ))}
           {acceptInvite.error ? (
-            <p className="text-sm text-destructive">
+            <InlineFeedback tone="error">
               {acceptInvite.error instanceof Error
                 ? acceptInvite.error.message
                 : "Failed to accept invite"}
-            </p>
+            </InlineFeedback>
           ) : null}
           {declineInvite.error ? (
-            <p className="text-sm text-destructive">
+            <InlineFeedback tone="error">
               {declineInvite.error instanceof Error
                 ? declineInvite.error.message
                 : "Failed to decline invite"}
-            </p>
+            </InlineFeedback>
           ) : null}
         </div>
       ) : null}
@@ -275,27 +293,44 @@ export function Teams() {
           }
         />
       ) : entries.length ? (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <h2 className="text-section-title">Your teams</h2>
+            <span className="text-metadata tabular-nums">
+              {entries.length} total
+            </span>
+          </div>
           {entries.map((team) => (
             <Link
               key={team.id}
               to="/teams/$orgId"
               params={{ orgId: team.id }}
-              className="group flex flex-col gap-3 rounded-2xl border bg-card p-6 shadow-xs transition-colors hover:border-primary/40"
+              className="group block rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
             >
-              <div className="flex items-start justify-between gap-3">
-                <h2 className="font-heading font-semibold transition-colors group-hover:text-primary">
-                  {team.name}
-                </h2>
-                <Badge variant={team.role === "member" ? "outline" : "secondary"}>
-                  {team.role === "member" ? "Member" : "Instructor"}
-                </Badge>
-              </div>
-              <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                <Users className="size-4" />
-                {team.memberCount} member{team.memberCount === 1 ? "" : "s"} ·
-                created {formatRelativeTime(team.createdAt)}
-              </p>
+              <Card
+                as="article"
+                variant="interactive"
+                className="gap-3 px-(--card-spacing) group-focus-visible:border-ring"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="text-card-title transition-colors group-hover:text-primary">
+                      {team.name}
+                    </h3>
+                    <p className="mt-1 flex items-center gap-1.5 text-metadata">
+                      <Users className="size-4" />
+                      {team.memberCount} member
+                      {team.memberCount === 1 ? "" : "s"} · created{" "}
+                      {formatRelativeTime(team.createdAt)}
+                    </p>
+                  </div>
+                  <Badge
+                    variant={team.role === "member" ? "outline" : "secondary"}
+                  >
+                    {team.role === "member" ? "Member" : "Instructor"}
+                  </Badge>
+                </div>
+              </Card>
             </Link>
           ))}
         </div>

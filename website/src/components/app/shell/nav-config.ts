@@ -36,7 +36,8 @@ export interface NavSection {
 // item — it lives in the sidebar user menu.
 export const NAV_SECTIONS: NavSection[] = [
   {
-    id: "main",
+    id: "learn",
+    label: "Learn",
     requires: "signedIn",
     items: [
       {
@@ -66,8 +67,8 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
-    id: "admin",
-    label: "Admin",
+    id: "operations",
+    label: "Operations",
     requires: "admin",
     items: [
       {
@@ -91,6 +92,13 @@ export const NAV_SECTIONS: NavSection[] = [
         icon: Hammer,
         requires: "admin",
       },
+    ],
+  },
+  {
+    id: "content-access",
+    label: "Content & access",
+    requires: "admin",
+    items: [
       {
         id: "admin-scenarios",
         label: "Scenarios",

@@ -35,7 +35,7 @@ export function groupVmProbesByScenario(
 export function ProbeRows(props: { probes: VmProbe[] }) {
   if (!props.probes.length) {
     return (
-      <div className="rounded-xl border border-dashed bg-background/70 px-4 py-5 text-center text-muted-foreground">
+      <div className="rounded-xl border border-dashed bg-background/70 px-4 py-6 text-center text-muted-foreground">
         No probes in this section yet.
       </div>
     );

@@ -23,7 +23,7 @@ interface MyRunsResponse {
 
 // The signed-in user's runs — shared by the runs list and the catalog's
 // "continue" strip.
-export function useMyRuns() {
+export function useMyRuns(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["scenario-runs", "list"],
     queryFn: async () => {
@@ -44,5 +44,6 @@ export function useMyRuns() {
       return (await response.json()) as MyRunsResponse;
     },
     staleTime: 5_000,
+    enabled: options?.enabled ?? true,
   });
 }

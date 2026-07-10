@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { KeyRound, LoaderCircle } from "lucide-react";
@@ -222,11 +222,14 @@ function CopyableTextBlock(props: {
   rows?: number;
 }) {
   const [copyError, setCopyError] = useState<string | null>(null);
+  const fieldId = useId();
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium">{props.label}</p>
+        <label htmlFor={fieldId} className="text-sm font-medium">
+          {props.label}
+        </label>
         <Button
           type="button"
           size="sm"
@@ -242,12 +245,20 @@ function CopyableTextBlock(props: {
         </Button>
       </div>
       <Textarea
+        id={fieldId}
         value={props.value}
         readOnly
         rows={props.rows ?? 3}
         className="font-mono text-xs"
       />
-      {copyError ? <p className="text-xs text-destructive">{copyError}</p> : null}
+      <span role="status" aria-live="polite" className="sr-only">
+        {props.copied ? `${props.label} copied.` : ""}
+      </span>
+      {copyError ? (
+        <p role="alert" className="text-xs text-destructive">
+          {copyError}
+        </p>
+      ) : null}
     </div>
   );
 }

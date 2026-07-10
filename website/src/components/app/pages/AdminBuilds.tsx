@@ -9,7 +9,7 @@ import {
 import { useState } from "react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import { MetaChip } from "@/components/app/patterns/MetaChip";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import {
   EmptyState,
   ErrorState,
@@ -19,7 +19,6 @@ import {
   formatRelativeTime,
   formatTimestamp,
 } from "@/components/app/lib/format";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type { BuildPhase } from "@/generated/bridge";
@@ -136,30 +135,29 @@ export function AdminBuilds() {
   return (
     <PageShell
       admin
+      width="workspace"
+      density="compact"
       title="Image builds"
       description="Builder job queue, assignment, reports, and logs."
-      meta={
-        <>
-          <MetaChip>{records.length} total</MetaChip>
-          <MetaChip variant="accent">{activeCount} active</MetaChip>
-          <MetaChip>{succeededCount} succeeded</MetaChip>
-          <MetaChip
-            className={failedCount > 0 ? "bg-destructive/10 text-destructive" : ""}
-          >
-            {failedCount} failed
-          </MetaChip>
-        </>
-      }
     >
+      <Section
+        variant="flat"
+        density="compact"
+        title="Queue posture"
+        bodyClassName="grid grid-cols-2 gap-4 border-y py-4 sm:grid-cols-4"
+      >
+        <BuildCount label="Total" value={records.length} />
+        <BuildCount label="Active" value={activeCount} tone="brand" />
+        <BuildCount label="Succeeded" value={succeededCount} tone="success" />
+        <BuildCount label="Failed" value={failedCount} tone={failedCount ? "error" : "default"} />
+      </Section>
+
       {retryBuild.error ? (
-        <Alert variant="destructive">
-          <AlertTitle>Could not retry build</AlertTitle>
-          <AlertDescription>
-            {retryBuild.error instanceof Error
-              ? retryBuild.error.message
-              : "Failed to retry build"}
-          </AlertDescription>
-        </Alert>
+        <InlineFeedback tone="error">
+          {retryBuild.error instanceof Error
+            ? retryBuild.error.message
+            : "Failed to retry build"}
+        </InlineFeedback>
       ) : null}
 
       {builds.error ? (
@@ -182,6 +180,7 @@ export function AdminBuilds() {
         />
       ) : (
         <Section
+          density="compact"
           title="Build queue"
           description="Content-addressed scenario image builds reported by builder hosts."
           bodyClassName="divide-y"
@@ -230,14 +229,15 @@ function BuildRow(props: {
   onRetry: () => void;
 }) {
   const { build } = props;
+  const detailId = `build-details-${build.id}`;
   return (
     <div className="grid gap-4 py-4 first:pt-0 last:pb-0 lg:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <StatusBadge status={build.status} />
-          <MetaChip>{build.phase}</MetaChip>
-          <MetaChip>{build.arch}</MetaChip>
-          <MetaChip>kino {build.kinoVersion}</MetaChip>
+          <span className="text-metadata"><span className="text-eyebrow">Phase</span> {build.phase}</span>
+          <span className="font-mono text-xs text-muted-foreground">{build.arch}</span>
+          <span className="font-mono text-xs text-muted-foreground">kino {build.kinoVersion}</span>
         </div>
 
         <div className="min-w-0">
@@ -266,13 +266,14 @@ function BuildRow(props: {
         </div>
 
         {build.error ? (
-          <p className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-md border border-destructive-border bg-destructive-subtle px-3 py-2 text-sm text-destructive">
             {build.error}
           </p>
         ) : null}
 
         {props.detailOpen ? (
           <BuildDetails
+            id={detailId}
             detail={props.detail}
             loading={props.detailLoading}
             error={props.detailError}
@@ -285,6 +286,8 @@ function BuildRow(props: {
           type="button"
           size="sm"
           variant={props.detailOpen ? "secondary" : "outline"}
+          aria-expanded={props.detailOpen}
+          aria-controls={detailId}
           onClick={props.onToggleDetails}
           className="lg:w-full"
         >
@@ -372,13 +375,14 @@ async function fetchBuildDetail(
 }
 
 function BuildDetails(props: {
+  id: string;
   detail: ImageBuildDetailRecord | null | undefined;
   loading: boolean;
   error: unknown;
 }) {
   if (props.loading) {
     return (
-      <div className="border-t pt-3 text-sm text-muted-foreground">
+      <div id={props.id} className="border-t pt-3 text-sm text-muted-foreground">
         Loading build details…
       </div>
     );
@@ -386,7 +390,7 @@ function BuildDetails(props: {
 
   if (props.error) {
     return (
-      <div className="border-t pt-3 text-sm text-destructive">
+      <div id={props.id} className="border-t pt-3 text-sm text-destructive">
         {props.error instanceof Error
           ? props.error.message
           : "Failed to load build details"}
@@ -396,11 +400,11 @@ function BuildDetails(props: {
 
   const detail = props.detail;
   if (!detail) {
-    return null;
+    return <div id={props.id} />;
   }
 
   return (
-    <div className="border-t pt-3">
+    <div id={props.id} className="border-t pt-3">
       <div className="grid gap-x-6 gap-y-2 text-sm md:grid-cols-2 xl:grid-cols-4">
         <BuildMeta label="Bundle" value={detail.bundle.r2Key ?? detail.rev} />
         <BuildMeta
@@ -416,7 +420,7 @@ function BuildDetails(props: {
           value={formatTimestamp(detail.timings.startedAt)}
         />
       </div>
-      <dl className="mt-3 grid gap-x-6 gap-y-2 text-xs md:grid-cols-2">
+      <dl className="terminal-surface mt-3 grid gap-x-6 gap-y-3 rounded-lg border p-3 text-xs md:grid-cols-2">
         <DetailPair label="Created" value={formatTimestamp(detail.createdAt)} />
         <DetailPair
           label="Finished"
@@ -428,6 +432,32 @@ function BuildDetails(props: {
           value={formatTimestamp(detail.host?.lastHeartbeatAt)}
         />
       </dl>
+    </div>
+  );
+}
+
+function BuildCount({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: number;
+  tone?: "default" | "brand" | "success" | "error";
+}) {
+  return (
+    <div>
+      <p className="text-eyebrow">{label}</p>
+      <p
+        className={cn(
+          "mt-1 text-section-title tabular-nums",
+          tone === "brand" && "text-primary",
+          tone === "success" && "text-success",
+          tone === "error" && "text-destructive",
+        )}
+      >
+        {value}
+      </p>
     </div>
   );
 }

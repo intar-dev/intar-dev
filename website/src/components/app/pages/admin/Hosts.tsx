@@ -8,12 +8,13 @@ import {
   Trash2,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { Stat } from "@/components/app/patterns/Stat";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { EmptyState, LoadingState } from "@/components/app/patterns/StateCard";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -39,6 +40,7 @@ export function AdminHosts() {
   const [vmError, setVmError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentHostApi | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const { hosts, hostRecords, refreshHost, forgetHost } = useHostFleet();
@@ -63,6 +65,7 @@ export function AdminHosts() {
     onSuccess: (result) => {
       forgetHost(result.hostId);
       setDeleteTarget(null);
+      setDeleteConfirm("");
       void hosts.refetch();
     },
   });
@@ -87,6 +90,8 @@ export function AdminHosts() {
   return (
     <PageShell
       admin
+      width="workspace"
+      density="compact"
       title="Hosts"
       description="Agent and builder hosts running scenario workloads."
       actions={
@@ -132,7 +137,7 @@ export function AdminHosts() {
       {hosts.isLoading ? (
         <LoadingState title="Loading hosts" />
       ) : hostRecords.length ? (
-        <div className="grid gap-5 xl:grid-cols-2">
+        <div className="divide-y overflow-hidden rounded-xl border bg-card">
           {hostRecords.map(({ host, hostVms, hostRuns, capacity }) => {
             const isDeletingThisHost =
               deleteHost.isPending && deleteHost.variables === host.id;
@@ -147,7 +152,7 @@ export function AdminHosts() {
             return (
               <article
                 key={host.id}
-                className="space-y-5 rounded-2xl border bg-card p-6 shadow-xs"
+                className="space-y-4 p-4 sm:p-6"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1.5">
@@ -217,49 +222,35 @@ export function AdminHosts() {
                   </div>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
-                  <Stat
-                    size="sm"
+                <dl className="grid gap-x-6 gap-y-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-5">
+                  <HostMetric
                     label="Heartbeat"
                     value={formatTimestamp(host.status?.lastHeartbeatAt)}
                     detail={
                       host.actualState?.health === "degraded"
-                        ? "No state report for over 60 seconds"
+                        ? "State report overdue"
                         : host.status?.connected
-                          ? "Connected via bridge"
-                          : "No fresh bridge heartbeat"
+                          ? "Bridge connected"
+                          : "No fresh heartbeat"
                     }
                   />
-                  <Stat
-                    size="sm"
-                    label="CPU"
-                    value={
-                      capacity?.cpu_count
-                        ? `${capacity.cpu_count} cores`
-                        : "Unknown"
-                    }
-                    detail={`${formatLoad(capacity?.load_avg_1m)} / ${formatLoad(
-                      capacity?.load_avg_5m,
-                    )} / ${formatLoad(capacity?.load_avg_15m)}`}
+                  <HostMetric
+                    label="CPU / load"
+                    value={capacity?.cpu_count ? `${capacity.cpu_count} cores` : "Unknown"}
+                    detail={`${formatLoad(capacity?.load_avg_1m)} / ${formatLoad(capacity?.load_avg_5m)} / ${formatLoad(capacity?.load_avg_15m)}`}
                   />
-                  <Stat
-                    size="sm"
-                    label="Memory"
-                    value={memorySummary}
-                    detail="Available / total"
-                  />
-                  <Stat
-                    size="sm"
+                  <HostMetric label="Memory" value={memorySummary} detail="Available / total" />
+                  <HostMetric
                     label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
                     value={diskSummary}
                     detail="Available / total"
                   />
-                </div>
-
-                <p className="text-caption">
-                  Network: {capacity?.primary_ipv4 ?? "—"}
-                  {capacity?.primary_ipv6 ? ` · ${capacity.primary_ipv6}` : ""}
-                </p>
+                  <HostMetric
+                    label="Network"
+                    value={capacity?.primary_ipv4 ?? "—"}
+                    detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
+                  />
+                </dl>
               </article>
             );
           })}
@@ -281,7 +272,10 @@ export function AdminHosts() {
       <Dialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            setDeleteTarget(null);
+            setDeleteConfirm("");
+          }
         }}
       >
         <DialogContent>
@@ -293,6 +287,24 @@ export function AdminHosts() {
                 : null}
             </DialogDescription>
           </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor="delete-host-confirm" className="text-sm font-medium">
+              Type <span className="font-semibold">{deleteTarget?.name}</span> to confirm
+            </label>
+            <Input
+              id="delete-host-confirm"
+              value={deleteConfirm}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          {deleteHost.error ? (
+            <InlineFeedback tone="error">
+              {deleteHost.error instanceof Error
+                ? deleteHost.error.message
+                : "Host deletion failed"}
+            </InlineFeedback>
+          ) : null}
           <DialogFooter>
             <Button
               variant="outline"
@@ -308,7 +320,11 @@ export function AdminHosts() {
                   deleteHost.mutate(deleteTarget.id);
                 }
               }}
-              disabled={deleteHost.isPending || !deleteTarget}
+              disabled={
+                deleteHost.isPending ||
+                !deleteTarget ||
+                deleteConfirm !== deleteTarget.name
+              }
             >
               <Trash2 className="size-4" />
               {deleteHost.isPending ? "Deleting…" : "Delete host"}
@@ -317,5 +333,23 @@ export function AdminHosts() {
         </DialogContent>
       </Dialog>
     </PageShell>
+  );
+}
+
+function HostMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-eyebrow">{label}</dt>
+      <dd className="mt-1 truncate text-sm font-medium tabular-nums">{value}</dd>
+      <dd className="mt-0.5 truncate text-metadata">{detail}</dd>
+    </div>
   );
 }

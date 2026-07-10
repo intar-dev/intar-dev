@@ -3,7 +3,6 @@ import { Link } from "@tanstack/react-router";
 import { ArrowRight, CircleCheck, CircleDot, Clock3, PlayCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { formatDurationMs, formatRelativeTime } from "../lib/format";
 
 export interface RunListItemData {
@@ -57,14 +56,13 @@ export function RunListItem({
   trailing?: ReactNode;
 }) {
   return (
-    <Card size="sm" className="py-0 transition-colors hover:border-primary/40">
-      <CardContent className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3.5">
+    <article className="flex flex-col gap-3 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-2">
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <Link
               to="/runs/$runId"
               params={{ runId: run.runId }}
-              className="truncate text-sm font-semibold hover:underline"
+              className="inline-flex min-h-11 items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline"
             >
               {run.title}
             </Link>
@@ -83,10 +81,11 @@ export function RunListItem({
             ) : null}
           </p>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2 self-stretch sm:self-auto">
           <Button
             variant={run.active ? "default" : "outline"}
             size="sm"
+            className="flex-1 sm:flex-none"
             render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
           >
             {run.active ? (
@@ -108,7 +107,6 @@ export function RunListItem({
           </Button>
           {trailing}
         </div>
-      </CardContent>
-    </Card>
+    </article>
   );
 }

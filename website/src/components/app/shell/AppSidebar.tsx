@@ -14,6 +14,7 @@ import { isAdminUser } from "@/lib/authz";
 import { useSession } from "../hooks/useSession";
 import { NAV_SECTIONS, findActiveNavItem } from "./nav-config";
 import { SidebarUserMenu } from "./SidebarUserMenu";
+import { BrandMark } from "../patterns/BrandMark";
 
 export function AppSidebar() {
   const pathname = useRouterState({
@@ -30,15 +31,10 @@ export function AppSidebar() {
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
-        <Link
+        <BrandMark
           to="/scenarios"
-          className="flex items-center gap-2.5 px-1.5 py-1.5"
-        >
-          <img src="/favicon.svg" alt="" className="size-8 shrink-0" />
-          <span className="font-heading text-base font-bold tracking-tight group-data-[collapsible=icon]:hidden">
-            intar
-          </span>
-        </Link>
+          className="px-1.5 group-data-[collapsible=icon]:[&_span]:hidden"
+        />
       </SidebarHeader>
 
       <SidebarContent>
@@ -50,7 +46,7 @@ export function AppSidebar() {
           return (
             <SidebarGroup key={section.id}>
               {section.label ? (
-                <SidebarGroupLabel className="text-eyebrow text-[0.68rem] text-sidebar-foreground/60">
+                <SidebarGroupLabel className="text-eyebrow text-[0.68rem] text-sidebar-foreground/75">
                   {section.label}
                 </SidebarGroupLabel>
               ) : null}

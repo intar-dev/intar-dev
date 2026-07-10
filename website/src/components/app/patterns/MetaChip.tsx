@@ -27,10 +27,10 @@ export function MetaChip({
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium whitespace-nowrap",
-        variant === "default" && "bg-muted text-muted-foreground",
+        "inline-flex min-h-6 items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold whitespace-nowrap",
+        variant === "default" && "border bg-muted text-muted-foreground",
         variant === "outline" && "border text-muted-foreground",
-        variant === "accent" && "bg-primary/10 text-primary",
+        variant === "accent" && "border-brand-border bg-brand-subtle text-brand-text",
         "[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:shrink-0",
         className,
       )}
@@ -43,9 +43,9 @@ export function MetaChip({
 
 const DIFFICULTY_STYLES: Record<ScenarioDifficulty, string> = {
   // A challenge scale following the brand gradient: gold → orange → red.
-  easy: "bg-secondary text-secondary-foreground",
-  medium: "bg-primary/15 text-primary",
-  hard: "bg-destructive/15 text-destructive",
+  easy: "border border-success-border bg-success-subtle text-success",
+  medium: "border border-warning-border bg-warning-subtle text-warning",
+  hard: "border border-destructive-border bg-destructive-subtle text-destructive",
 };
 
 const DIFFICULTY_LABELS: Record<ScenarioDifficulty, string> = {
@@ -64,7 +64,7 @@ export function DifficultyChip({
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-full px-2.5 text-xs font-semibold",
+        "inline-flex h-6 items-center rounded-md px-2 text-xs font-semibold",
         DIFFICULTY_STYLES[difficulty],
         className,
       )}

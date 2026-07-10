@@ -22,16 +22,16 @@ export function ScenarioCancelDialog(props: {
         render={
           <Button size="sm" variant="destructive" className="w-full sm:w-auto">
             <Trash2 className="size-4" />
-            Cancel scenario
+            End run
           </Button>
         }
       />
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Cancel this scenario?</DialogTitle>
+          <DialogTitle>End this run?</DialogTitle>
           <DialogDescription>
-            This ends the current run and saves the replay after cleanup
-            finishes.
+            The sandbox will shut down and the terminal session will close.
+            Run history and replay data are kept after cleanup finishes.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -44,7 +44,7 @@ export function ScenarioCancelDialog(props: {
             disabled={props.pending}
           >
             <Trash2 className="size-4" />
-            {props.pending ? "Canceling..." : "Cancel scenario"}
+            {props.pending ? "Ending run…" : "End run"}
           </Button>
         </DialogFooter>
       </DialogContent>

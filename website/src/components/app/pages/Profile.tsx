@@ -3,6 +3,7 @@ import { KeyRound, LoaderCircle } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { useSession } from "@/components/app/hooks/useSession";
 import { formatTimestamp } from "@/components/app/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -130,7 +131,7 @@ export function Profile() {
       }
     },
     onSuccess: async () => {
-      setFormNotice(null);
+      setFormNotice("SSH key removed. Existing VMs are unchanged.");
       setFormError(null);
       await queryClient.invalidateQueries({ queryKey: ["profile", "ssh-keys"] });
     },
@@ -140,12 +141,13 @@ export function Profile() {
 
   return (
     <PageShell
+      width="content"
       title="Profile"
-      description="Who you are on intar, and how your own machine gets into scenario VMs."
+      description="Your GitHub identity owns your run history. SSH keys let your own machine enter future lab VMs."
     >
       <Section
         title="Account"
-        description="The identity attached to your scenario runs and SSH access."
+        description="This identity is recorded on every scenario run you start."
       >
         <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
           <Avatar size="lg">
@@ -178,11 +180,25 @@ export function Profile() {
             </div>
           </dl>
         </div>
+        <dl className="mt-6 grid gap-4 border-t pt-6 sm:grid-cols-3">
+          <div>
+            <dt className="text-eyebrow">1. Identity</dt>
+            <dd className="mt-1 text-sm">Sign in with GitHub.</dd>
+          </div>
+          <div>
+            <dt className="text-eyebrow">2. Public key</dt>
+            <dd className="mt-1 text-sm">Add only the public half of your SSH key.</dd>
+          </div>
+          <div>
+            <dt className="text-eyebrow">3. Future runs</dt>
+            <dd className="mt-1 text-sm">New VMs trust that key at launch.</dd>
+          </div>
+        </dl>
       </Section>
 
       <Section
         title="SSH keys"
-        description="Public keys added here are injected into new scenario VMs at launch, so native SSH through Stargate can use your existing local identity instead of a copied temporary key."
+        description="Public keys added here are injected into new scenario VMs at launch. Existing runs keep the keys they started with."
       >
         <div className="space-y-6">
           {sshKeys.isLoading ? (
@@ -247,7 +263,7 @@ export function Profile() {
               })}
             </ul>
           ) : (
-            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-10 text-center">
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-8 text-center">
               <KeyRound className="size-6 text-muted-foreground" />
               <div>
                 <p className="text-sm font-medium">No public keys yet</p>
@@ -259,6 +275,14 @@ export function Profile() {
               </div>
             </div>
           )}
+
+          {deleteKey.error ? (
+            <InlineFeedback tone="error">
+              {deleteKey.error instanceof Error
+                ? deleteKey.error.message
+                : "Could not remove SSH key"}
+            </InlineFeedback>
+          ) : null}
 
           <form
             className="space-y-4 border-t pt-6"
@@ -306,20 +330,17 @@ export function Profile() {
             </div>
 
             {formError ? (
-              <Alert variant="destructive">
-                <AlertTitle>Could not save key</AlertTitle>
-                <AlertDescription>{formError}</AlertDescription>
-              </Alert>
+              <InlineFeedback tone="error">{formError}</InlineFeedback>
             ) : null}
 
             {formNotice ? (
-              <Alert>
-                <AlertTitle>Key saved</AlertTitle>
-                <AlertDescription>{formNotice}</AlertDescription>
-              </Alert>
+              <InlineFeedback tone="success">{formNotice}</InlineFeedback>
             ) : null}
 
-            <Button type="submit" disabled={addKey.isPending}>
+            <Button
+              type="submit"
+              disabled={addKey.isPending || !publicKey.trim()}
+            >
               {addKey.isPending ? "Saving key…" : "Save public key"}
             </Button>
           </form>

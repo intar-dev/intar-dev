@@ -12,7 +12,6 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import {
   DifficultyChip,
-  MetaChip,
   SCENARIO_DIFFICULTIES,
   type ScenarioDifficulty,
 } from "@/components/app/patterns/MetaChip";
@@ -23,14 +22,33 @@ import {
   LoadingState,
 } from "@/components/app/patterns/StateCard";
 import { formatRelativeTime } from "@/components/app/lib/format";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import type {
   AdminScenarioListResponse,
   AdminScenarioSummary,
 } from "@/components/app/admin/hosts/types";
+import { cn } from "@/lib/utils";
 
 type StateFilter = "enabled" | "disabled" | null;
+
+interface ScenarioSourceSummary {
+  scenarioId: string;
+  status: "draft" | "published";
+}
+
+type ScenarioBuildStatus =
+  | "queued"
+  | "assigned"
+  | "building"
+  | "succeeded"
+  | "failed"
+  | "stale";
+
+interface ScenarioBuildSummary {
+  scenarioId: string;
+  status: ScenarioBuildStatus;
+  updatedAt: number;
+}
 
 export function ScenarioRegistry() {
   const queryClient = useQueryClient();
@@ -59,6 +77,16 @@ export function ScenarioRegistry() {
       return (await response.json()) as AdminScenarioListResponse;
     },
     staleTime: 10_000,
+  });
+  const sources = useQuery({
+    queryKey: ["admin", "authoring", "sources"],
+    queryFn: fetchScenarioSources,
+    staleTime: 5_000,
+  });
+  const builds = useQuery({
+    queryKey: ["admin-builds"],
+    queryFn: fetchScenarioBuilds,
+    staleTime: 2_000,
   });
 
   const setEnabled = useMutation({
@@ -104,6 +132,26 @@ export function ScenarioRegistry() {
       ].sort(),
     [scenarioList],
   );
+  const sourceByScenarioId = useMemo(
+    () =>
+      new Map(
+        (sources.data?.sources ?? []).map((source) => [
+          source.scenarioId,
+          source,
+        ]),
+      ),
+    [sources.data],
+  );
+  const latestBuildByScenarioId = useMemo(() => {
+    const latestBuilds = new Map<string, ScenarioBuildSummary>();
+    for (const build of builds.data?.builds ?? []) {
+      const current = latestBuilds.get(build.scenarioId);
+      if (!current || build.updatedAt > current.updatedAt) {
+        latestBuilds.set(build.scenarioId, build);
+      }
+    }
+    return latestBuilds;
+  }, [builds.data]);
   const filteredScenarios = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return scenarioList
@@ -134,12 +182,26 @@ export function ScenarioRegistry() {
   return (
     <PageShell
       admin
+      width="workspace"
+      density="compact"
       title="Scenarios"
       description="Inspect uploaded scenarios and control which ones are live for learners."
-      meta={
+      actions={
         <>
-          <MetaChip>{scenarioList.length} total</MetaChip>
-          <MetaChip variant="accent">{enabledCount} enabled</MetaChip>
+          <Button
+            size="sm"
+            variant="outline"
+            render={<Link to="/admin/authoring" />}
+          >
+            Authoring drafts
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            render={<Link to="/admin/builds" />}
+          >
+            Image builds
+          </Button>
         </>
       }
     >
@@ -159,10 +221,24 @@ export function ScenarioRegistry() {
         <EmptyState
           icon={<HardDriveDownload />}
           title="No scenarios uploaded"
-          description="Scenario authoring lives outside the web UI. Upload a scenario through the external pipeline and it appears here with its description, VM inventory, probes, and enabled state."
+          description="Create and validate a draft in Authoring, or upload one through the external pipeline. Published scenarios appear here with their VM inventory, checks, and learner availability."
         />
       ) : (
         <div className="space-y-4">
+          <dl className="grid gap-4 border-y py-4 sm:grid-cols-3">
+            <div>
+              <dt className="text-eyebrow">Registry</dt>
+              <dd className="mt-1 text-section-title tabular-nums">{scenarioList.length}</dd>
+            </div>
+            <div>
+              <dt className="text-eyebrow">Enabled for learners</dt>
+              <dd className="mt-1 text-section-title text-success tabular-nums">{enabledCount}</dd>
+            </div>
+            <div>
+              <dt className="text-eyebrow">Unavailable</dt>
+              <dd className="mt-1 text-section-title tabular-nums">{scenarioList.length - enabledCount}</dd>
+            </div>
+          </dl>
           <FilterBar
             search={search}
             onSearchChange={setSearch}
@@ -247,6 +323,7 @@ export function ScenarioRegistry() {
             />
           ) : (
             <Section
+              density="compact"
               title="Registry"
               description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
               bodyClassName="divide-y"
@@ -262,6 +339,14 @@ export function ScenarioRegistry() {
                 <ScenarioRegistryRow
                   key={scenario.scenarioId}
                   scenario={scenario}
+                  source={sourceByScenarioId.get(scenario.scenarioId) ?? null}
+                  sourceLoading={sources.isLoading}
+                  sourceUnavailable={Boolean(sources.error && !sources.data)}
+                  latestBuild={
+                    latestBuildByScenarioId.get(scenario.scenarioId) ?? null
+                  }
+                  buildLoading={builds.isLoading}
+                  buildUnavailable={Boolean(builds.error && !builds.data)}
                   pending={
                     setEnabled.isPending &&
                     setEnabled.variables?.scenarioId === scenario.scenarioId
@@ -285,56 +370,102 @@ export function ScenarioRegistry() {
 
 function ScenarioRegistryRow({
   scenario,
+  source,
+  sourceLoading,
+  sourceUnavailable,
+  latestBuild,
+  buildLoading,
+  buildUnavailable,
   pending,
   disabled,
   onToggle,
 }: {
   scenario: AdminScenarioSummary;
+  source: ScenarioSourceSummary | null;
+  sourceLoading: boolean;
+  sourceUnavailable: boolean;
+  latestBuild: ScenarioBuildSummary | null;
+  buildLoading: boolean;
+  buildUnavailable: boolean;
   pending: boolean;
   disabled: boolean;
   onToggle: () => void;
 }) {
-  const visibleTags = scenario.tags.slice(0, 3);
-  const overflowTags = scenario.tags.length - visibleTags.length;
+  const sourceValue = sourceLoading
+    ? "Checking source…"
+    : sourceUnavailable
+      ? "Status unavailable"
+      : source?.status === "draft"
+        ? "Draft saved"
+        : source?.status === "published"
+          ? "Published source"
+          : "Published record";
+  const buildValue = buildLoading
+    ? "Checking builds…"
+    : buildUnavailable
+      ? "Status unavailable"
+      : latestBuild
+        ? BUILD_STATUS_LABELS[latestBuild.status]
+        : "No build";
 
   return (
-    <div className="flex flex-col gap-3 py-3.5 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0 space-y-1.5">
-        <div className="flex flex-wrap items-center gap-2">
+    <div className="grid gap-4 py-4 first:pt-0 last:pb-0 xl:grid-cols-[minmax(13rem,1fr)_minmax(20rem,1.4fr)_minmax(13rem,0.8fr)_auto] xl:items-center">
+      <div className="min-w-0 space-y-1">
+        <h3>
           <Link
             to="/admin/scenarios/$scenarioId"
             params={{ scenarioId: scenario.scenarioId }}
-            className="text-sm font-semibold hover:underline"
+            className="inline-flex min-h-11 items-center text-sm font-semibold hover:underline"
           >
             {scenario.title}
           </Link>
-          <DifficultyChip difficulty={scenario.difficulty} />
-          <Badge variant={scenario.enabled ? "success" : "outline"}>
-            {scenario.enabled ? "Enabled" : "Disabled"}
-          </Badge>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="font-mono text-xs text-muted-foreground">
-            {scenario.scenarioId}
-          </p>
-          <MetaChip variant="outline">{scenario.category}</MetaChip>
-          {visibleTags.map((tag) => (
-            <MetaChip key={tag} variant="outline">
-              {tag}
-            </MetaChip>
-          ))}
-          {overflowTags > 0 ? (
-            <MetaChip variant="outline">+{overflowTags}</MetaChip>
-          ) : null}
-        </div>
-        <p className="text-caption">
-          {scenario.vmCount} VMs · {scenario.probeCount} probes ·{" "}
-          {scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes} min
-          · updated {formatRelativeTime(scenario.updatedAt)}
+        </h3>
+        <p className="truncate font-mono text-xs text-muted-foreground">
+          {scenario.scenarioId}
         </p>
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <DifficultyChip difficulty={scenario.difficulty} />
+          <span className="text-sm">{scenario.category}</span>
+        </div>
+        {scenario.tags.length ? (
+          <p className="truncate text-metadata">{scenario.tags.join(", ")}</p>
+        ) : null}
       </div>
 
-      <div className="flex shrink-0 items-center gap-2">
+      <dl
+        className="grid grid-cols-3 gap-3 border-y py-3 text-sm xl:border-y-0 xl:py-0"
+        aria-label={`${scenario.title} status`}
+      >
+        <StatusDefinition
+          label="Availability"
+          value={scenario.enabled ? "Enabled for learners" : "Unavailable"}
+          tone={scenario.enabled ? "success" : "muted"}
+        />
+        <StatusDefinition
+          label="Source"
+          value={sourceValue}
+          tone={
+            sourceLoading || sourceUnavailable
+              ? "muted"
+              : source?.status === "draft"
+                ? "warning"
+                : "default"
+          }
+        />
+        <StatusDefinition
+          label="Latest build"
+          value={buildValue}
+          tone={buildTone(latestBuild?.status, buildLoading || buildUnavailable)}
+        />
+      </dl>
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <div><dt className="text-eyebrow">Inventory</dt><dd className="mt-0.5 tabular-nums">{scenario.vmCount} VM · {scenario.probeCount} probes</dd></div>
+        <div><dt className="text-eyebrow">Guidance</dt><dd className="mt-0.5 tabular-nums">{scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes} min</dd></div>
+        <div className="col-span-2"><dt className="text-eyebrow">Updated</dt><dd className="mt-0.5 text-metadata">{formatRelativeTime(scenario.updatedAt)}</dd></div>
+      </dl>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-2 xl:flex-col xl:items-stretch">
         <Button
           size="sm"
           variant="outline"
@@ -346,7 +477,11 @@ function ScenarioRegistryRow({
           ) : (
             <CircleCheckBig className="size-4" />
           )}
-          {pending ? "Updating…" : scenario.enabled ? "Disable" : "Enable"}
+          {pending
+            ? "Updating…"
+            : scenario.enabled
+              ? "Disable scenario"
+              : "Enable scenario"}
         </Button>
         <Button
           size="sm"
@@ -364,4 +499,79 @@ function ScenarioRegistryRow({
       </div>
     </div>
   );
+}
+
+const BUILD_STATUS_LABELS: Record<ScenarioBuildStatus, string> = {
+  queued: "Queued",
+  assigned: "Assigned",
+  building: "Building",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  stale: "Stale",
+};
+
+type StatusTone = "default" | "muted" | "success" | "warning" | "error";
+
+function StatusDefinition({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: StatusTone;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-eyebrow">{label}</dt>
+      <dd
+        className={cn(
+          "mt-1 text-sm font-medium break-words",
+          tone === "muted" && "text-muted-foreground",
+          tone === "success" && "text-success",
+          tone === "warning" && "text-warning",
+          tone === "error" && "text-destructive",
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function buildTone(
+  status: ScenarioBuildStatus | undefined,
+  unavailable: boolean,
+): StatusTone {
+  if (unavailable || !status) return "muted";
+  if (status === "succeeded") return "success";
+  if (status === "failed") return "error";
+  if (status === "building" || status === "stale") return "warning";
+  return "default";
+}
+
+async function fetchScenarioSources(): Promise<{
+  sources: ScenarioSourceSummary[];
+}> {
+  const response = await fetch("/api/admin/authoring/sources", {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load source status (${response.status})`);
+  }
+  return (await response.json()) as { sources: ScenarioSourceSummary[] };
+}
+
+async function fetchScenarioBuilds(): Promise<{
+  builds: ScenarioBuildSummary[];
+}> {
+  const response = await fetch("/api/admin/builds", {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load build status (${response.status})`);
+  }
+  return (await response.json()) as { builds: ScenarioBuildSummary[] };
 }

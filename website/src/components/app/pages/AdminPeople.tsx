@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { Ban, Check, ShieldCheck, Trash2, UserPlus, Users, X } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import { FilterBar } from "@/components/app/patterns/FilterBar";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import { authClient, type AppAuthUser } from "@/lib/auth-client";
@@ -15,6 +17,21 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   Table,
   TableBody,
   TableCell,
@@ -23,6 +40,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import type { AdminPeopleTab } from "./tab-search";
 
 interface AccessRequestRecord {
   id: string;
@@ -39,15 +57,48 @@ interface AccessRequestsResponse {
 }
 
 export function AdminPeople() {
+  const routeSearch = useSearch({ from: "/app/admin/people" });
+  const navigate = useNavigate();
+  const activeTab = routeSearch.tab ?? "requests";
+
+  const setTab = (tab: AdminPeopleTab) => {
+    void navigate({
+      to: ".",
+      replace: true,
+      search: tab === "requests" ? {} : { tab },
+    });
+  };
+
   return (
     <PageShell
       admin
+      width="workspace"
+      density="compact"
       title="People"
-      description="Approve access requests and manage existing accounts."
+      description="Review access, account roles, and instructor-created teams."
     >
-      <AccessRequestsPanel />
-      <UsersPanel />
-      <TeamsPanel />
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setTab(value as AdminPeopleTab)}
+        className="gap-6"
+      >
+        <div className="overflow-x-auto border-b">
+          <TabsList variant="line" className="min-w-max pb-1">
+            <TabsTrigger value="requests">Access requests</TabsTrigger>
+            <TabsTrigger value="users">Users</TabsTrigger>
+            <TabsTrigger value="teams">Teams</TabsTrigger>
+          </TabsList>
+        </div>
+        <TabsContent value="requests">
+          <AccessRequestsPanel />
+        </TabsContent>
+        <TabsContent value="users">
+          <UsersPanel />
+        </TabsContent>
+        <TabsContent value="teams">
+          <TeamsPanel />
+        </TabsContent>
+      </Tabs>
     </PageShell>
   );
 }
@@ -129,6 +180,8 @@ function AccessRequestsPanel() {
   return (
     <>
       <Section
+        density="compact"
+        variant={pending.length ? "default" : "flat"}
         title={
           pending.length ? `Access requests (${pending.length})` : "Access requests"
         }
@@ -150,16 +203,18 @@ function AccessRequestsPanel() {
           </p>
         )}
         {decide.error ? (
-          <p className="mt-3 text-sm text-destructive">
+          <InlineFeedback tone="error" className="mt-3">
             {decide.error instanceof Error
               ? decide.error.message
               : "Failed to update request"}
-          </p>
+          </InlineFeedback>
         ) : null}
       </Section>
 
       {decided.length ? (
         <Section
+          density="compact"
+          variant="flat"
           title="Decided requests"
           description="Approvals can be revoked and rejections reversed at any time."
         >
@@ -183,6 +238,12 @@ interface AdminListedUser extends AppAuthUser {
 function UsersPanel() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const [confirmation, setConfirmation] = useState<{
+    entry: AdminListedUser;
+    kind: "role" | "ban";
+    nextRole?: "user" | "admin";
+    nextBanned?: boolean;
+  } | null>(null);
 
   const users = useQuery({
     queryKey: ["admin", "users"],
@@ -215,6 +276,7 @@ function UsersPanel() {
       }
     },
     onSuccess: async () => {
+      setConfirmation(null);
       await queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
     },
   });
@@ -230,6 +292,7 @@ function UsersPanel() {
       }
     },
     onSuccess: async () => {
+      setConfirmation(null);
       await queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
     },
   });
@@ -263,8 +326,10 @@ function UsersPanel() {
   const actionError = setBanned.error ?? setRole.error;
 
   return (
-    <Section
-      title="Roster"
+    <>
+      <Section
+      density="compact"
+      title="Users"
       description="Banning revokes all sessions and blocks sign-in. To fully revoke someone, also reject their access request so the allowlist entry is removed."
       bodyClassName="space-y-4"
     >
@@ -330,9 +395,10 @@ function UsersPanel() {
                     variant="outline"
                     disabled={setRole.isPending}
                     onClick={() =>
-                      setRole.mutate({
-                        userId: entry.id,
-                        role: isAdmin ? "user" : "admin",
+                      setConfirmation({
+                        entry,
+                        kind: "role",
+                        nextRole: isAdmin ? "user" : "admin",
                       })
                     }
                   >
@@ -345,9 +411,10 @@ function UsersPanel() {
                     className="text-muted-foreground hover:text-destructive"
                     disabled={setBanned.isPending}
                     onClick={() =>
-                      setBanned.mutate({
-                        userId: entry.id,
-                        banned: !entry.banned,
+                      setConfirmation({
+                        entry,
+                        kind: "ban",
+                        nextBanned: !entry.banned,
                       })
                     }
                   >
@@ -372,13 +439,83 @@ function UsersPanel() {
       )}
 
       {actionError ? (
-        <p className="text-sm text-destructive">
+        <InlineFeedback tone="error">
           {actionError instanceof Error
             ? actionError.message
             : "Failed to update user"}
-        </p>
+        </InlineFeedback>
       ) : null}
-    </Section>
+      </Section>
+
+      <Dialog
+        open={confirmation !== null}
+        onOpenChange={(open) => {
+          if (!open && !setBanned.isPending && !setRole.isPending) {
+            setConfirmation(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {confirmation?.kind === "ban"
+                ? confirmation.nextBanned
+                  ? "Ban this user?"
+                  : "Restore this user?"
+                : confirmation?.nextRole === "admin"
+                  ? "Grant admin access?"
+                  : "Remove admin access?"}
+            </DialogTitle>
+            <DialogDescription>
+              {confirmation?.kind === "ban" && confirmation.nextBanned
+                ? "This revokes active sessions and blocks sign-in. Their allowlist request remains unchanged."
+                : confirmation?.kind === "role"
+                  ? "Role changes take effect immediately for protected admin routes."
+                  : "This restores sign-in access; the allowlist still applies."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg border bg-muted/40 p-3">
+            <p className="text-sm font-medium">{confirmation?.entry.name}</p>
+            <p className="text-metadata">{confirmation?.entry.email}</p>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmation(null)}
+              disabled={setBanned.isPending || setRole.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant={
+                confirmation?.kind === "ban" && confirmation.nextBanned
+                  ? "destructive"
+                  : "default"
+              }
+              disabled={setBanned.isPending || setRole.isPending}
+              onClick={() => {
+                if (!confirmation) return;
+                if (confirmation.kind === "ban") {
+                  setBanned.mutate({
+                    userId: confirmation.entry.id,
+                    banned: Boolean(confirmation.nextBanned),
+                  });
+                } else if (confirmation.nextRole) {
+                  setRole.mutate({
+                    userId: confirmation.entry.id,
+                    role: confirmation.nextRole,
+                  });
+                }
+              }}
+            >
+              {setBanned.isPending || setRole.isPending
+                ? "Updating…"
+                : "Confirm change"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -482,7 +619,8 @@ interface AdminTeamRow {
 
 function TeamsPanel() {
   const queryClient = useQueryClient();
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AdminTeamRow | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
 
   const deleteTeam = useMutation({
     mutationFn: async (orgId: string) => {
@@ -498,7 +636,8 @@ function TeamsPanel() {
       }
     },
     onSuccess: async () => {
-      setConfirmDeleteId(null);
+      setDeleteTarget(null);
+      setDeleteConfirm("");
       await queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
     },
   });
@@ -543,7 +682,9 @@ function TeamsPanel() {
   const entries = teams.data?.teams ?? [];
 
   return (
-    <Section
+    <>
+      <Section
+      density="compact"
       title="Teams"
       description="Teams created by instructors, with their roster and assignment counts."
     >
@@ -593,39 +734,19 @@ function TeamsPanel() {
                     {formatRelativeTime(team.createdAt)}
                   </TableCell>
                   <TableCell className="text-right">
-                    {confirmDeleteId === team.id ? (
-                      <div className="flex items-center justify-end gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          disabled={deleteTeam.isPending}
-                          onClick={() => deleteTeam.mutate(team.id)}
-                        >
-                          {deleteTeam.isPending ? "Deleting…" : "Confirm"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={deleteTeam.isPending}
-                          onClick={() => setConfirmDeleteId(null)}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => {
-                          deleteTeam.reset();
-                          setConfirmDeleteId(team.id);
-                        }}
-                      >
-                        <Trash2 className="size-3.5" />
-                        Delete
-                      </Button>
-                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() => {
+                        deleteTeam.reset();
+                        setDeleteConfirm("");
+                        setDeleteTarget(team);
+                      }}
+                    >
+                      <Trash2 className="size-3.5" />
+                      Delete team
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -640,12 +761,73 @@ function TeamsPanel() {
         />
       )}
       {deleteTeam.error ? (
-        <p className="mt-3 text-sm text-destructive">
+        <InlineFeedback tone="error" className="mt-3">
           {deleteTeam.error instanceof Error
             ? deleteTeam.error.message
             : "Failed to delete team"}
-        </p>
+        </InlineFeedback>
       ) : null}
-    </Section>
+      </Section>
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleteTeam.isPending) {
+            setDeleteTarget(null);
+            setDeleteConfirm("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this team?</DialogTitle>
+            <DialogDescription>
+              Members, invitations, and assignments are removed permanently.
+              Individual run history is kept. Type the team name to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor="admin-delete-team-confirm" className="text-sm font-medium">
+              {deleteTarget?.name}
+            </label>
+            <Input
+              id="admin-delete-team-confirm"
+              value={deleteConfirm}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          {deleteTeam.error ? (
+            <InlineFeedback tone="error">
+              {deleteTeam.error instanceof Error
+                ? deleteTeam.error.message
+                : "Failed to delete team"}
+            </InlineFeedback>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleteTeam.isPending}
+            >
+              Keep team
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={
+                !deleteTarget ||
+                deleteConfirm !== deleteTarget.name ||
+                deleteTeam.isPending
+              }
+              onClick={() => {
+                if (deleteTarget) deleteTeam.mutate(deleteTarget.id);
+              }}
+            >
+              {deleteTeam.isPending ? "Deleting…" : "Delete team"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
