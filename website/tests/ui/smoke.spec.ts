@@ -1,7 +1,10 @@
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
-test("public workshop entry stays focused on sign in", async ({ page, ui }) => {
+test("public workshop entry keeps sign in focused and sponsors prominent", async ({
+  page,
+  ui,
+}) => {
   await ui.open({ ...routeCase("landing"), theme: "light" });
   await expect(
     page.getByRole("button", { name: /Sign in with GitHub/i }),
@@ -17,14 +20,28 @@ test("public workshop entry stays focused on sign in", async ({ page, ui }) => {
   );
   const heading = page.getByRole("heading", { level: 1 });
   await expect(sponsorRow).toBeVisible();
-  await expect(page.getByRole("link", { name: "Hetzner" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "namespace" })).toBeVisible();
+  const hetznerLogo = page
+    .getByRole("link", { name: "Hetzner" })
+    .locator("img");
+  const namespaceLogo = page
+    .getByRole("link", { name: "namespace" })
+    .locator("img");
+  await expect(hetznerLogo).toBeVisible();
+  await expect(namespaceLogo).toBeVisible();
 
-  const sponsorBox = await sponsorRow.boundingBox();
-  const headingBox = await heading.boundingBox();
+  const [sponsorBox, headingBox, hetznerBox, namespaceBox] = await Promise.all([
+    sponsorRow.boundingBox(),
+    heading.boundingBox(),
+    hetznerLogo.boundingBox(),
+    namespaceLogo.boundingBox(),
+  ]);
   expect(sponsorBox).not.toBeNull();
   expect(headingBox).not.toBeNull();
+  expect(hetznerBox).not.toBeNull();
+  expect(namespaceBox).not.toBeNull();
   expect(sponsorBox!.y).toBeLessThan(headingBox!.y);
+  expect(hetznerBox!.height).toBeGreaterThanOrEqual(48);
+  expect(namespaceBox!.height).toBeGreaterThanOrEqual(40);
 });
 
 test("transactional access request submits deterministically", async ({
