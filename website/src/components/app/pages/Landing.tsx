@@ -171,7 +171,7 @@ function SponsorMarks() {
   return (
     <aside
       aria-labelledby="landing-sponsors-heading"
-      className="flex w-full flex-wrap items-center gap-x-5 gap-y-3 border-b pb-5"
+      className="flex w-full flex-col items-start gap-3 border-b pb-6"
     >
       <p
         id="landing-sponsors-heading"
@@ -179,7 +179,7 @@ function SponsorMarks() {
       >
         Infrastructure by
       </p>
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex w-full flex-wrap items-center gap-x-6 gap-y-3">
         <a
           href="https://www.hetzner.com/?mtm_campaign=intar-dev&mtm_medium=referral&mtm_content=sponsoring_link"
           target="_blank"
@@ -191,7 +191,7 @@ function SponsorMarks() {
             width={hetznerLogo.width}
             height={hetznerLogo.height}
             alt="Hetzner"
-            className="h-6 w-auto rounded"
+            className="h-12 w-auto rounded-md"
           />
         </a>
         <a
@@ -205,7 +205,7 @@ function SponsorMarks() {
             width={namespaceLogo.width}
             height={namespaceLogo.height}
             alt="namespace"
-            className="h-5 w-auto dark:invert"
+            className="h-10 w-auto dark:invert"
           />
         </a>
       </div>
@@ -296,7 +296,7 @@ const footerLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center underline decoration-border underline-offset-4 transition-colors hover:text-foreground";
 
 const sponsorLinkClassName =
-  "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-2 opacity-75 outline-none transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-1 opacity-90 outline-none transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 function normalizeErrorCode(value?: string | null) {
   if (!value) return null;
