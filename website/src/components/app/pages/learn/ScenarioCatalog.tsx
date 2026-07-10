@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { ArrowRight, CircleDot, Search, ShieldCheck, Users } from "lucide-react";
+import {
+  ArrowRight,
+  CircleDot,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
+  Users,
+} from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
@@ -187,10 +194,102 @@ export function ScenarioCatalog() {
     });
   };
 
+  const renderFilterControls = () => (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-metadata mr-1">Difficulty</span>
+        {SCENARIO_DIFFICULTIES.map((level) => (
+          <FilterChip
+            key={level}
+            active={searchState.difficulty === level}
+            onClick={() =>
+              void navigateCatalogSearch(navigate, {
+                ...searchState,
+                difficulty:
+                  searchState.difficulty === level ? undefined : level,
+              })
+            }
+          >
+            {level}
+          </FilterChip>
+        ))}
+      </div>
+      {allCategories.length ? (
+        <Select
+          value={searchState.category ?? "all"}
+          onValueChange={(value) =>
+            void navigateCatalogSearch(navigate, {
+              ...searchState,
+              category:
+                typeof value === "string" && value !== "all"
+                  ? value
+                  : undefined,
+            })
+          }
+        >
+          <SelectTrigger size="sm" aria-label="Filter by category">
+            Category: {searchState.category ?? "All"}
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All categories</SelectItem>
+            {allCategories.map((entry) => (
+              <SelectItem key={entry} value={entry}>
+                {entry}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
+      {allTags.length > 1 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label="Filter by tags"
+                />
+              }
+            >
+              Tags
+              {searchState.tags.length ? ` · ${searchState.tags.length}` : ""}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="max-h-72 min-w-48">
+              {allTags.map((tag) => (
+                <DropdownMenuCheckboxItem
+                  key={tag}
+                  checked={searchState.tags.includes(tag)}
+                  onCheckedChange={() => toggleTag(tag)}
+                >
+                  {tag}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {searchState.tags.map((tag) => (
+            <FilterChip
+              key={tag}
+              active
+              onClick={() => toggleTag(tag)}
+              className="normal-case"
+            >
+              {tag}
+            </FilterChip>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+
   return (
     <PageShell
       title="Scenarios"
-      description="Real broken systems. Pick one and go fix it."
+      eyebrow="Learn"
+      description="Choose a live system, read the work order, and make the repair."
+      width="default"
+      density="comfortable"
     >
       {scenarios.error ? (
         <Alert variant="destructive">
@@ -203,46 +302,75 @@ export function ScenarioCatalog() {
         </Alert>
       ) : null}
 
-      {activeRuns.length || assignments.length ? (
-        <section className="space-y-3">
-          <h2 className="text-eyebrow">Jump back in</h2>
-          <div className="grid gap-3 lg:grid-cols-2">
+      {activeRuns.length ? (
+        <section className="space-y-4" aria-labelledby="active-work-heading">
+          <div className="flex flex-wrap items-baseline justify-between gap-3">
+            <div>
+              <p className="text-eyebrow">Continue</p>
+              <h2 id="active-work-heading" className="mt-2 text-section-title">
+                Active work
+              </h2>
+            </div>
+            <Link
+              to="/runs"
+              className="inline-flex min-h-11 items-center text-sm font-semibold text-brand-text underline-offset-4 hover:underline"
+            >
+              View all runs
+            </Link>
+          </div>
+          <div className="divide-y rounded-xl border bg-card">
             {activeRuns.map((run) => (
               <Link
                 key={run.runId}
                 to="/runs/$runId"
                 params={{ runId: run.runId }}
-                className="group flex items-center gap-4 rounded-2xl border border-primary/30 bg-primary/5 p-4 shadow-xs transition-colors hover:border-primary/50"
+                className="group flex min-h-20 items-center gap-4 px-4 py-3 transition-colors hover:bg-brand-subtle sm:px-6"
               >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
-                  <CircleDot className="size-4.5 motion-safe:animate-pulse" />
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-subtle text-brand-text">
+                  <CircleDot className="size-4 motion-safe:animate-pulse" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold">
+                  <span className="block text-card-title text-balance">
                     {run.title}
                   </span>
-                  <span className="text-xs text-muted-foreground">
-                    Run in progress — jump back in
+                  <span className="text-metadata">
+                    Repair in progress · resume the live shell
                   </span>
                 </span>
-                <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+                <span className="hidden text-sm font-semibold text-brand-text sm:inline">
+                  Resume
+                </span>
+                <ArrowRight className="size-4 text-brand-text transition-transform group-hover:translate-x-0.5" />
               </Link>
             ))}
+          </div>
+        </section>
+      ) : null}
+
+      {assignments.length ? (
+        <section className="space-y-4" aria-labelledby="assignments-heading">
+          <div>
+            <p className="text-eyebrow">From your teams</p>
+            <h2 id="assignments-heading" className="mt-2 text-section-title">
+              Assignments
+            </h2>
+          </div>
+          <div className="divide-y border-y">
             {assignments.map((assignment) => (
               <Link
                 key={assignment.assignmentId}
                 to="/scenarios/$scenarioId"
                 params={{ scenarioId: assignment.scenarioId }}
-                className="group flex items-center gap-4 rounded-2xl border bg-card p-4 shadow-xs transition-colors hover:border-primary/40"
+                className="group flex min-h-16 items-center gap-4 px-1 py-3 transition-colors hover:bg-muted/60 sm:px-3"
               >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-secondary-foreground">
-                  <Users className="size-4.5" />
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+                  <Users className="size-4" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-semibold">
+                  <span className="block text-sm font-semibold text-balance">
                     {assignment.scenarioTitle ?? assignment.scenarioId}
                   </span>
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-metadata">
                     Assigned by {assignment.teamName}
                   </span>
                 </span>
@@ -254,7 +382,13 @@ export function ScenarioCatalog() {
       ) : null}
 
       {allEntries.length ? (
-        <div className="space-y-3">
+        <section className="space-y-4" aria-labelledby="catalog-heading">
+          <div>
+            <p className="text-eyebrow">Workshop catalog</p>
+            <h2 id="catalog-heading" className="mt-2 text-section-title">
+              Choose the next system
+            </h2>
+          </div>
           <FilterBar
             search={searchText}
             onSearchChange={setSearchText}
@@ -263,110 +397,45 @@ export function ScenarioCatalog() {
             filtersActive={filtersActive}
             onClear={clearFilters}
             end={
-              <SortSelect
-                value={searchState.sort}
-                onChange={(sort) =>
-                  void navigateCatalogSearch(navigate, {
-                    ...searchState,
-                    sort,
-                  })
-                }
-              />
-            }
-          >
-            <div className="flex items-center gap-1.5">
-              {SCENARIO_DIFFICULTIES.map((level) => (
-                <FilterChip
-                  key={level}
-                  active={searchState.difficulty === level}
-                  onClick={() =>
+              <>
+                <span className="text-metadata tabular-nums">
+                  {filtered.length} of {allEntries.length}
+                </span>
+                <SortSelect
+                  value={searchState.sort}
+                  onChange={(sort) =>
                     void navigateCatalogSearch(navigate, {
                       ...searchState,
-                      difficulty:
-                        searchState.difficulty === level ? undefined : level,
+                      sort,
                     })
                   }
-                >
-                  {level}
-                </FilterChip>
-              ))}
+                />
+              </>
+            }
+          >
+            <div className="hidden flex-wrap items-center gap-3 md:flex">
+              {renderFilterControls()}
             </div>
-            {allCategories.length ? (
-              <Select
-                value={searchState.category ?? "all"}
-                onValueChange={(value) =>
-                  void navigateCatalogSearch(navigate, {
-                    ...searchState,
-                    category:
-                      typeof value === "string" && value !== "all"
-                        ? value
-                        : undefined,
-                  })
-                }
-              >
-                <SelectTrigger size="sm" aria-label="Filter by category">
-                  Category: {searchState.category ?? "All"}
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  {allCategories.map((entry) => (
-                    <SelectItem key={entry} value={entry}>
-                      {entry}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-            {allTags.length > 1 ? (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        aria-label="Filter by tags"
-                      />
-                    }
-                  >
-                    Tags
-                    {searchState.tags.length
-                      ? ` · ${searchState.tags.length}`
-                      : ""}
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent className="max-h-72 min-w-48">
-                    {allTags.map((tag) => (
-                      <DropdownMenuCheckboxItem
-                        key={tag}
-                        checked={searchState.tags.includes(tag)}
-                        onCheckedChange={() => toggleTag(tag)}
-                      >
-                        {tag}
-                      </DropdownMenuCheckboxItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                {searchState.tags.map((tag) => (
-                  <FilterChip
-                    key={tag}
-                    active
-                    onClick={() => toggleTag(tag)}
-                    className="normal-case"
-                  >
-                    {tag}
-                  </FilterChip>
-                ))}
-              </div>
-            ) : null}
           </FilterBar>
-        </div>
+          <details className="rounded-lg border bg-card md:hidden">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
+              <SlidersHorizontal className="size-4" />
+              Refine results
+              {filtersActive ? (
+                <span className="ml-auto text-brand-text">Filters active</span>
+              ) : null}
+            </summary>
+            <div className="flex flex-col items-start gap-4 border-t p-4">
+              {renderFilterControls()}
+            </div>
+          </details>
+        </section>
       ) : null}
 
       {scenarios.error ? null : scenarios.isLoading ? (
-        <div className="grid gap-6 lg:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }, (_, index) => (
-            <Skeleton key={index} className="h-52 rounded-2xl" />
+            <Skeleton key={index} className="h-52 rounded-xl" />
           ))}
         </div>
       ) : !allEntries.length ? (
@@ -387,18 +456,12 @@ export function ScenarioCatalog() {
           }
         />
       ) : (
-        <div className="grid gap-6 lg:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filtered.map((scenario) => (
             <ScenarioCard key={scenario.scenarioId} scenario={scenario} />
           ))}
         </div>
       )}
-
-      {filtersActive && filtered.length ? (
-        <p className="text-caption">
-          Showing {filtered.length} of {allEntries.length} scenarios.
-        </p>
-      ) : null}
     </PageShell>
   );
 }

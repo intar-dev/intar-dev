@@ -11,6 +11,7 @@ interface StateShellProps {
   action?: ReactNode;
   className?: string | undefined;
   contentClassName?: string | undefined;
+  headingLevel?: 1 | 2 | 3 | undefined;
 }
 
 function StateShell({
@@ -20,7 +21,11 @@ function StateShell({
   action,
   className,
   contentClassName,
+  headingLevel = 2,
 }: StateShellProps) {
+  const Heading =
+    headingLevel === 1 ? "h1" : headingLevel === 3 ? "h3" : "h2";
+
   return (
     <Card className={className}>
       <CardContent
@@ -35,7 +40,7 @@ function StateShell({
           </div>
         ) : null}
         <div className="space-y-2">
-          <h2 className="text-section-title">{title}</h2>
+          <Heading className="text-section-title">{title}</Heading>
           {description ? (
             <p className="max-w-xl text-sm leading-6 text-muted-foreground">
               {description}
@@ -56,10 +61,12 @@ export function LoadingState({
   title = "Loading…",
   description,
   className,
+  headingLevel,
 }: {
   title?: string;
   description?: string;
   className?: string;
+  headingLevel?: 1 | 2 | 3 | undefined;
 }) {
   return (
     <StateShell
@@ -67,6 +74,7 @@ export function LoadingState({
       icon={<LoaderCircle className="motion-safe:animate-spin" />}
       title={title}
       description={description}
+      headingLevel={headingLevel}
     />
   );
 }
@@ -77,12 +85,14 @@ export function ErrorState({
   onRetry,
   retryLabel = "Try again",
   className,
+  headingLevel,
 }: {
   title?: string;
   description?: string;
   onRetry?: () => void;
   retryLabel?: string;
   className?: string;
+  headingLevel?: 1 | 2 | 3 | undefined;
 }) {
   return (
     <StateShell
@@ -90,6 +100,7 @@ export function ErrorState({
       icon={<TriangleAlert className="text-destructive" />}
       title={title}
       description={description}
+      headingLevel={headingLevel}
       action={
         onRetry ? (
           <Button variant="outline" size="sm" onClick={onRetry}>

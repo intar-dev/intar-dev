@@ -1,9 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { SquareTerminal } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, ShieldCheck } from "lucide-react";
 import { useSession } from "../hooks/useSession";
+import { AuthShell } from "../patterns/AuthShell";
+import { InlineFeedback } from "../patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 interface OAuthClientSummary {
@@ -31,6 +32,15 @@ function parseScopes(scopeValue?: string | null) {
     .split(" ")
     .map((scope) => scope.trim())
     .filter(Boolean);
+}
+
+function safeHost(value?: string | null) {
+  if (!value) return null;
+  try {
+    return new URL(value).host;
+  } catch {
+    return null;
+  }
 }
 
 function getErrorMessage(payload: unknown, fallback: string) {
@@ -151,34 +161,15 @@ export function OAuthConsent() {
   const canRespond =
     hasSignedInUser && !oauthQueryMissing && !consentMutation.isPending;
   const clientName = clientQuery.data?.client_name ?? clientId ?? "OAuth client";
-  const redirectHost = clientQuery.data?.redirect_uris[0]
-    ? new URL(clientQuery.data.redirect_uris[0]).host
-    : null;
+  const redirectHost = safeHost(clientQuery.data?.redirect_uris[0]);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center px-6 py-16">
-      <Link
-        to="/"
-        className="mb-8 flex items-center gap-2.5 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <span className="flex size-8 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-          <SquareTerminal className="size-5" aria-hidden="true" />
-        </span>
-        <span className="font-heading text-lg font-bold tracking-tight">
-          intar
-        </span>
-      </Link>
-
-      <div className="w-full max-w-md rounded-2xl border bg-card p-6 shadow-xs">
-        <div className="space-y-2">
-          <h1 className="text-page-title">Authorize access</h1>
-          <p className="text-sm leading-6 text-muted-foreground">
-            Review the client and the scopes it is requesting before continuing
-            the OAuth flow.
-          </p>
-        </div>
-
-        <div className="mt-6 space-y-6">
+    <AuthShell
+      eyebrow="Authorization relay"
+      title="Authorize access"
+      description="Review who is asking, which capabilities they need, and where you will return."
+    >
+      <div className="space-y-6">
           {oauthQueryMissing ? (
             <Alert variant="destructive">
               <AlertTitle>Missing OAuth request</AlertTitle>
@@ -200,88 +191,131 @@ export function OAuthConsent() {
           ) : null}
 
           {clientError ? (
-            <Alert variant="destructive">
-              <AlertTitle>Unable to load client</AlertTitle>
-              <AlertDescription>{clientError}</AlertDescription>
-            </Alert>
+            <InlineFeedback tone="error">{clientError}</InlineFeedback>
           ) : null}
 
           {consentError ? (
-            <Alert variant="destructive">
-              <AlertTitle>Consent failed</AlertTitle>
-              <AlertDescription>{consentError}</AlertDescription>
-            </Alert>
+            <InlineFeedback tone="error">{consentError}</InlineFeedback>
+          ) : null}
+
+          {!oauthQueryMissing ? (
+            <section className="space-y-6 rounded-lg border bg-background p-4">
+              <div className="flex items-start gap-3">
+                <ShieldCheck
+                  className="mt-0.5 size-5 shrink-0 text-brand-text"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0 space-y-1">
+                  <h2 className="text-section-title break-words">{clientName}</h2>
+                  <p className="text-sm text-muted-foreground">
+                    External OAuth client
+                  </p>
+                </div>
+              </div>
+
+              <dl className="divide-y border-y text-sm">
+                <ConsentDetail label="Client ID">
+                  <code className="break-all">{clientId}</code>
+                </ConsentDetail>
+                {session?.user ? (
+                  <ConsentDetail label="Signed in as">
+                    <span className="break-all">{session.user.email}</span>
+                  </ConsentDetail>
+                ) : null}
+                {redirectHost ? (
+                  <ConsentDetail label="Returns to">
+                    <span className="inline-flex items-center gap-1 break-all">
+                      {redirectHost}
+                      <ArrowUpRight className="size-3.5 shrink-0" />
+                    </span>
+                  </ConsentDetail>
+                ) : null}
+              </dl>
+            </section>
           ) : null}
 
           <section className="space-y-3">
-            <div className="flex flex-wrap items-center gap-3">
-              <h2 className="font-heading text-xl font-semibold tracking-tight">
-                {clientName}
-              </h2>
-              {redirectHost ? <Badge variant="outline">{redirectHost}</Badge> : null}
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-section-title">Requested access</h2>
+              <span className="text-metadata tabular-nums">
+                {scopes.length} {scopes.length === 1 ? "scope" : "scopes"}
+              </span>
             </div>
-
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <p>
-                Client ID:{" "}
-                <span className="font-mono text-foreground">{clientId}</span>
-              </p>
-              {session?.user ? (
-                <p>
-                  Signed in as{" "}
-                  <span className="font-medium text-foreground">
-                    {session.user.email}
-                  </span>
-                </p>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="space-y-3">
-            <h3 className="text-eyebrow">Requested scopes</h3>
             {scopes.length ? (
-              <div className="flex flex-wrap gap-2">
+              <ul className="divide-y border-y">
                 {scopes.map((scope) => (
-                  <Badge key={scope} variant="secondary">
-                    {scope}
-                  </Badge>
+                  <li
+                    key={scope}
+                    className="flex min-h-11 items-center gap-3 py-2 text-sm"
+                  >
+                    <CheckCircle2
+                      className="size-4 shrink-0 text-success"
+                      aria-hidden="true"
+                    />
+                    <code className="break-all">{scope}</code>
+                  </li>
                 ))}
-              </div>
+              </ul>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="rounded-lg bg-muted p-4 text-sm text-muted-foreground">
                 No scopes were requested.
               </p>
             )}
           </section>
 
           {clientQuery.data?.client_uri ? (
-            <section className="space-y-1 text-sm text-muted-foreground">
-              <h3 className="text-eyebrow">Client URL</h3>
-              <p className="break-all">{clientQuery.data.client_uri}</p>
-            </section>
+            <p className="text-sm text-muted-foreground">
+              Client website:{" "}
+              <span className="break-all text-foreground">
+                {clientQuery.data.client_uri}
+              </span>
+            </p>
           ) : null}
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+          {consentMutation.isPending ? (
+            <InlineFeedback tone="pending">
+              Recording your authorization choice…
+            </InlineFeedback>
+          ) : null}
+
+          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <Button variant="ghost" render={<Link to="/" />}>
+              Back to intar.dev
+            </Button>
+            <div className="flex flex-col-reverse gap-3 sm:flex-row">
             <Button
               type="button"
               variant="outline"
-              className="w-full sm:w-auto"
               disabled={!canRespond}
               onClick={() => consentMutation.mutate(false)}
             >
-              {consentMutation.isPending ? "Working..." : "Deny"}
+              Deny access
             </Button>
             <Button
               type="button"
-              className="w-full sm:w-auto"
               disabled={!canRespond}
               onClick={() => consentMutation.mutate(true)}
             >
-              {consentMutation.isPending ? "Working..." : "Allow access"}
+              Allow access
             </Button>
+            </div>
           </div>
-        </div>
       </div>
-    </main>
+    </AuthShell>
+  );
+}
+
+function ConsentDetail({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-1 py-3 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 font-medium sm:text-right">{children}</dd>
+    </div>
   );
 }

@@ -12,12 +12,19 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Button } from "@/components/ui/button";
 import {
-  REPLAY_TERMINAL_BACKGROUND,
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   REPLAY_TERMINAL_COLS,
   REPLAY_TERMINAL_FONT_FAMILY,
-  REPLAY_TERMINAL_FOREGROUND,
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
+  REPLAY_TERMINAL_XTERM_THEME,
+  loadReplayTerminalFont,
 } from "@/lib/replay/config";
 
 interface WebSshTerminalProps {
@@ -112,6 +119,7 @@ export function WebSshTerminal({
 
   const [status, setStatus] = useState<SessionStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [modalOpen, setModalOpen] = useState(true);
 
   const title = useMemo(
     () => titleOverride ?? `Web SSH · ${vmName}`,
@@ -164,11 +172,7 @@ export function WebSshTerminal({
       fontFamily: REPLAY_TERMINAL_FONT_FAMILY,
       fontSize: 14,
       lineHeight: REPLAY_TERMINAL_LINE_HEIGHT,
-      theme: {
-        background: REPLAY_TERMINAL_BACKGROUND,
-        foreground: REPLAY_TERMINAL_FOREGROUND,
-        cursor: "#f8fafc",
-      },
+      theme: REPLAY_TERMINAL_XTERM_THEME,
     });
 
     if (!terminalContainerRef.current) {
@@ -251,6 +255,9 @@ export function WebSshTerminal({
     setError(null);
     setStatus("connecting");
 
+    // xterm measures and rasterizes text onto a canvas at construction time.
+    // Wait for the self-hosted face so it never locks in fallback metrics.
+    await loadReplayTerminalFont();
     const terminal = ensureTerminal();
     terminal.clear();
     terminal.writeln("[intar] Creating terminal session...");
@@ -315,6 +322,13 @@ export function WebSshTerminal({
     sessionRequestUrl,
   ]);
 
+  const closeTerminal = useCallback(() => {
+    void disconnect();
+    // Let the dialog commit its closed state before the parent removes it so
+    // Base UI can restore focus to the element that opened the terminal.
+    window.setTimeout(() => onClose?.(), 0);
+  }, [disconnect, onClose]);
+
   useEffect(() => {
     void connect();
 
@@ -334,7 +348,14 @@ export function WebSshTerminal({
         <div className="flex shrink-0 flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{title}</p>
-            <p className="text-xs text-muted-foreground">Status: {status}</p>
+            <p
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className="text-xs text-muted-foreground"
+            >
+              Terminal status: {status}
+            </p>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
             <Button
@@ -354,9 +375,7 @@ export function WebSshTerminal({
                 size="sm"
                 variant="outline"
                 className="w-full sm:w-auto"
-                onClick={() => {
-                  void disconnect().finally(() => onClose?.());
-                }}
+                onClick={closeTerminal}
               >
                 Close
               </Button>
@@ -364,7 +383,7 @@ export function WebSshTerminal({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 bg-[#121314] p-2">
+        <div className="min-h-0 flex-1 bg-terminal-background p-2">
           <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
@@ -376,6 +395,9 @@ export function WebSshTerminal({
         {error || status === "disconnected" ? (
           <div className="flex shrink-0 border-t px-4 py-3">
             <p
+              role={error ? "alert" : "status"}
+              aria-live={error ? "assertive" : "polite"}
+              aria-atomic="true"
               className={`text-xs ${
                 error ? "text-destructive" : "text-muted-foreground"
               }`}
@@ -389,12 +411,30 @@ export function WebSshTerminal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
-      <div className="flex w-full max-w-7xl flex-col overflow-hidden rounded-lg border bg-card shadow-lg">
+    <Dialog
+      open={modalOpen}
+      onOpenChange={(open) => {
+        setModalOpen(open);
+        if (!open) closeTerminal();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden rounded-lg bg-card p-0 sm:max-w-7xl"
+      >
         <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">{title}</p>
-            <p className="text-xs text-muted-foreground">Status: {status}</p>
+            <DialogTitle className="truncate text-sm font-semibold">
+              {title}
+            </DialogTitle>
+            <DialogDescription
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              className="text-xs"
+            >
+              Terminal status: {status}
+            </DialogDescription>
           </div>
           <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
             <Button
@@ -410,22 +450,23 @@ export function WebSshTerminal({
             </Button>
             {headerActions}
             {showCloseButton ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className="w-full sm:w-auto"
-                onClick={() => {
-                  void disconnect().finally(() => onClose?.());
-                }}
+              <DialogClose
+                render={
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full sm:w-auto"
+                  />
+                }
               >
                 Close
-              </Button>
+              </DialogClose>
             ) : null}
           </div>
         </div>
 
-        <div className="bg-[#121314] p-2">
-          <div className="relative h-[70dvh] w-full">
+        <div className="min-h-0 flex-1 bg-terminal-background p-2">
+          <div className="relative h-full w-full">
             <div
               ref={terminalContainerRef}
               className="absolute inset-0 overflow-hidden"
@@ -436,6 +477,9 @@ export function WebSshTerminal({
         {error || status === "disconnected" ? (
           <div className="flex border-t px-4 py-3">
             <p
+              role={error ? "alert" : "status"}
+              aria-live={error ? "assertive" : "polite"}
+              aria-atomic="true"
               className={`text-xs ${
                 error ? "text-destructive" : "text-muted-foreground"
               }`}
@@ -444,8 +488,8 @@ export function WebSshTerminal({
             </p>
           </div>
         ) : null}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

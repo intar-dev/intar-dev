@@ -5,7 +5,7 @@ import { formatCountdown, leaseInfo, type LeaseState } from "@/lib/run-lease";
 
 const TONE: Record<LeaseState, string> = {
   ok: "text-muted-foreground",
-  warning: "text-amber-600 dark:text-amber-400",
+  warning: "text-warning",
   critical: "text-destructive motion-safe:animate-pulse",
   expired: "text-destructive",
 };

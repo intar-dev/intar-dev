@@ -45,7 +45,7 @@ export function PageHeader({
           <Link
             to={backLink.to}
             params={backLink.params ?? {}}
-            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <ArrowLeft className="size-3.5" />
             {backLink.label}
@@ -71,7 +71,7 @@ export function PageHeader({
           {title}
         </h1>
         {description ? (
-          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+          <p className="prose-measure text-body text-muted-foreground">
             {description}
           </p>
         ) : null}

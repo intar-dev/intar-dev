@@ -2,17 +2,29 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+export type CardVariant = "default" | "flat" | "interactive"
+
 function Card({
   className,
   size = "default",
+  variant = "default",
+  as: Component = "div",
   ...props
-}: React.ComponentProps<"div"> & { size?: "default" | "sm" }) {
+}: React.ComponentProps<"div"> & {
+  size?: "default" | "sm"
+  variant?: CardVariant
+  as?: "div" | "section" | "article"
+}) {
   return (
-    <div
+    <Component
       data-slot="card"
       data-size={size}
+      data-variant={variant}
       className={cn(
-        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-2xl border border-border bg-card py-(--card-spacing) text-sm text-card-foreground shadow-xs [--card-spacing:--spacing(6)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(4)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-2xl *:[img:last-child]:rounded-b-2xl",
+        "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl border border-border bg-card py-(--card-spacing) text-sm text-card-foreground [--card-spacing:--spacing(6)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(4)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+        variant === "default" && "shadow-xs",
+        variant === "flat" && "rounded-lg bg-transparent shadow-none",
+        variant === "interactive" && "shadow-xs transition-[border-color,box-shadow,transform] duration-150 hover:border-brand-border hover:shadow-sm motion-reduce:transition-none",
         className
       )}
       {...props}
@@ -33,9 +45,15 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+function CardTitle({
+  className,
+  as: Component = "div",
+  ...props
+}: React.ComponentProps<"div"> & {
+  as?: "div" | "h2" | "h3" | "h4"
+}) {
   return (
-    <div
+    <Component
       data-slot="card-title"
       className={cn(
         "text-card-title group-data-[size=sm]/card:text-sm",

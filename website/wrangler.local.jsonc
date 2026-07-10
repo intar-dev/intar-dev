@@ -1,0 +1,62 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-06-24",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "name": "intar-dev-local",
+  "main": "src/worker.ts",
+  "vars": {
+    "BETTER_AUTH_APP_NAME": "intar.dev local",
+    "BETTER_AUTH_URL": "http://localhost:4321",
+    "AGENT_JWT_ISSUER": "intar-agent-bridge",
+    "AGENT_JWT_AUDIENCE": "agent-connect",
+    "STARGATE_ROUTE_TTL_SECONDS": "14400",
+    "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
+    "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
+    "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin"
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "database_name": "intar-dev-local"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "VM_IMAGE_REGISTRY_BUCKET",
+      "bucket_name": "intar-dev-local-vm-image-registry"
+    },
+    {
+      "binding": "VM_RUN_ARTIFACTS_BUCKET",
+      "bucket_name": "intar-dev-local-run-artifacts"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "ACCESS_REQUEST_RATE_LIMITER",
+      "namespace_id": "88427091",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HOST_RUNTIME",
+        "class_name": "HostRuntimeDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["HostRuntimeDO"]
+    }
+  ]
+}

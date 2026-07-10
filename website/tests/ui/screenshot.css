@@ -1,0 +1,17 @@
+*,
+*::before,
+*::after {
+  animation-delay: 0s !important;
+  animation-duration: 0s !important;
+  caret-color: transparent !important;
+  scroll-behavior: auto !important;
+  transition-delay: 0s !important;
+  transition-duration: 0s !important;
+}
+
+.xterm-cursor-layer,
+.xterm-helper-textarea,
+.asciinema-player .cursor,
+astro-dev-toolbar {
+  visibility: hidden !important;
+}

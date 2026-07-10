@@ -30,17 +30,22 @@ export function ScenarioRunArchiveCard(props: {
   const outcome = runOutcomeTone(props.run.outcome);
 
   return (
-    <article className="overflow-hidden rounded-2xl border bg-card shadow-xs">
+    <article className="overflow-hidden rounded-xl border bg-card shadow-xs">
       <div className={`h-1 w-full ${tone.rail}`} />
-      <div className="flex flex-col gap-4 px-5 py-5 xl:flex-row xl:items-start xl:justify-between">
+      <div className="flex flex-col gap-4 px-4 py-4 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={tone.badgeVariant}>{tone.label}</Badge>
             <Badge variant={outcome.badgeVariant}>{outcome.label}</Badge>
-            <Badge variant="outline">
+            <span className="text-xs font-semibold text-foreground">
               {props.run.scenarioMeta?.scenarioName ?? "Legacy run"}
-            </Badge>
-            <Badge variant="outline">{props.host.name}</Badge>
+            </span>
+            <span aria-hidden="true" className="text-muted-foreground">
+              ·
+            </span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {props.host.name}
+            </span>
           </div>
 
           <div>
@@ -108,12 +113,12 @@ export function ScenarioRunArchiveCard(props: {
       </div>
 
       <div
-        className={`grid transition-all duration-300 ease-out ${
+        className={`grid transition-all duration-300 ease-out motion-reduce:transition-none ${
           props.isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
         }`}
       >
         <div className="overflow-hidden">
-          <div className="grid gap-6 border-t px-5 py-5 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
+          <div className="grid gap-6 border-t px-4 py-4 xl:grid-cols-[minmax(0,0.4fr)_minmax(0,0.6fr)]">
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
                 <Stat size="sm"

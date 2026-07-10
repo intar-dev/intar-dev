@@ -34,23 +34,40 @@ export function LiveScenarioRunCard(props: {
   };
 
   return (
-    <article className="overflow-hidden rounded-2xl border bg-card shadow-xs">
-      <div className="flex flex-col gap-4 px-5 py-5 xl:flex-row xl:items-start xl:justify-between">
+    <article className="overflow-hidden rounded-xl border bg-card shadow-xs">
+      <div className="flex flex-col gap-4 px-4 py-4 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{props.vmItem.state}</Badge>
-            <Badge variant="outline">
-              {scenarioMeta?.scenarioName ?? "Legacy run"}
+            <Badge
+              variant={
+                props.vmItem.state.trim().toLowerCase() === "running"
+                  ? "success"
+                  : "warning"
+              }
+            >
+              {props.vmItem.state}
             </Badge>
-            <Badge variant="outline">{props.host.name}</Badge>
+            <span className="text-xs font-semibold text-foreground">
+              {scenarioMeta?.scenarioName ?? "Legacy run"}
+            </span>
+            <span aria-hidden="true" className="text-muted-foreground">
+              ·
+            </span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {props.host.name}
+            </span>
             {summary ? (
-              <>
-                <Badge variant="secondary">{summary.pass} pass</Badge>
-                <Badge variant="destructive">{summary.fail} fail</Badge>
-                <Badge variant="outline">{summary.unknown} unknown</Badge>
-              </>
+              <span
+                data-numeric
+                className="ml-1 inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+                aria-label={`${summary.pass} passing, ${summary.fail} failing, ${summary.unknown} unknown checks`}
+              >
+                <span><strong className="text-success">{summary.pass}</strong> pass</span>
+                <span><strong className="text-destructive">{summary.fail}</strong> fail</span>
+                <span><strong className="text-foreground">{summary.unknown}</strong> unknown</span>
+              </span>
             ) : (
-              <Badge variant="outline">Probes pending</Badge>
+              <span className="text-xs text-muted-foreground">Probes pending</span>
             )}
           </div>
 
@@ -147,18 +164,18 @@ export function LiveScenarioRunCard(props: {
             onClick={props.onDelete}
             disabled={!props.vmItem.run_id || props.isDeleting}
           >
-            {props.isDeleting ? "Requesting..." : "Teardown run"}
+            {props.isDeleting ? "Ending…" : "End run"}
           </Button>
         </div>
       </div>
 
       <div
-        className={`grid transition-all duration-300 ease-out ${
+        className={`grid transition-all duration-300 ease-out motion-reduce:transition-none ${
           props.isExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
         }`}
       >
         <div className="overflow-hidden">
-          <div className="grid gap-4 border-t px-5 py-5 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
+          <div className="grid gap-4 border-t px-4 py-4 xl:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
             <div className="space-y-4">
               {probeState ? (
                 <div

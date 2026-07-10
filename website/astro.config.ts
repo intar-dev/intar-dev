@@ -5,16 +5,36 @@ import react from "@astrojs/react";
 
 import tailwindcss from "@tailwindcss/vite";
 
+const isLocalDevelopment = process.argv.includes("dev");
+
 // https://astro.build/config
 export default defineConfig({
+  devToolbar: { enabled: false },
   adapter: cloudflare({
     imageService: "compile",
+    configPath: isLocalDevelopment
+      ? "./wrangler.local.jsonc"
+      : "./wrangler.jsonc",
+    persistState: isLocalDevelopment
+      ? process.env.PLAYWRIGHT_UI === "1"
+        ? false
+        : { path: ".wrangler/local-ui-state" }
+      : true,
     remoteBindings: false,
   }),
 
   output: "server",
 
   vite: {
+    server: {
+      watch: {
+        ignored: [
+          "**/tests/ui/__screenshots__/**",
+          "**/playwright-report/**",
+          "**/test-results/**",
+        ],
+      },
+    },
     build: {
       rolldownOptions: {
         output: {

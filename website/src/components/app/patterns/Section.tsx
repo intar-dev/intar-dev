@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { Card, type CardVariant } from "@/components/ui/card";
 
 interface SectionProps {
   title?: ReactNode;
@@ -8,6 +9,8 @@ interface SectionProps {
   children: ReactNode;
   className?: string;
   bodyClassName?: string;
+  variant?: CardVariant;
+  density?: "comfortable" | "compact";
 }
 
 // THE card/section idiom: solid card fill, hairline border, soft shadow.
@@ -18,17 +21,22 @@ export function Section({
   children,
   className,
   bodyClassName,
+  variant = "default",
+  density = "comfortable",
 }: SectionProps) {
   return (
-    <section
-      className={cn("rounded-2xl border bg-card p-6 shadow-xs", className)}
+    <Card
+      as="section"
+      variant={variant}
+      size={density === "compact" ? "sm" : "default"}
+      className={cn("block", className)}
     >
       {title || actions || description ? (
-        <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className={cn("flex flex-col gap-2 px-(--card-spacing) sm:flex-row sm:items-start sm:justify-between", density === "comfortable" ? "mb-6" : "mb-4")}>
           <div className="space-y-1">
             {title ? <h2 className="text-section-title">{title}</h2> : null}
             {description ? (
-              <p className="text-sm text-muted-foreground">{description}</p>
+              <p className="text-metadata prose-measure">{description}</p>
             ) : null}
           </div>
           {actions ? (
@@ -36,7 +44,7 @@ export function Section({
           ) : null}
         </div>
       ) : null}
-      <div className={bodyClassName}>{children}</div>
-    </section>
+      <div className={cn("px-(--card-spacing)", bodyClassName)}>{children}</div>
+    </Card>
   );
 }

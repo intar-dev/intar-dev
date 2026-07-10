@@ -3,9 +3,6 @@ import { Link, useParams } from "@tanstack/react-router";
 import {
   CircleCheckBig,
   CircleOff,
-  Clock3,
-  HardDriveDownload,
-  Radar,
   Server,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
@@ -162,9 +159,16 @@ export function ScenarioDetails() {
   useBreadcrumbLabel(scenarioRecord?.title);
 
   return (
-    <PageShell admin title="Scenario details" showHeader={false}>
+    <PageShell
+      admin
+      title="Scenario details"
+      showHeader={false}
+      width="workspace"
+      density="compact"
+    >
       {scenario.error ? (
         <ErrorState
+          headingLevel={1}
           title="Could not load scenario"
           description={
             scenario.error instanceof Error
@@ -174,12 +178,11 @@ export function ScenarioDetails() {
           onRetry={() => void scenario.refetch()}
         />
       ) : !scenarioRecord ? (
-        <LoadingState title="Loading scenario" />
+        <LoadingState headingLevel={1} title="Loading scenario" />
       ) : (
         <>
           <PageHeader
             eyebrow="Admin"
-            badge="Admin"
             backLink={{ to: "/admin/scenarios", label: "Registry" }}
             title={scenarioRecord.title}
             description={scenarioRecord.description}
@@ -189,27 +192,6 @@ export function ScenarioDetails() {
                   {enabled ? "Enabled" : "Disabled"}
                 </Badge>
                 <DifficultyChip difficulty={scenarioRecord.difficulty} />
-                <MetaChip icon={<Clock3 />}>
-                  ~{scenarioRecord.estimatedMinutes} min
-                </MetaChip>
-                <MetaChip variant="outline">{scenarioRecord.category}</MetaChip>
-                <MetaChip icon={<HardDriveDownload />}>
-                  {scenarioRecord.vmCount} VM
-                  {scenarioRecord.vmCount === 1 ? "" : "s"}
-                </MetaChip>
-                <MetaChip icon={<Radar />}>
-                  {scenarioRecord.probeCount} probe
-                  {scenarioRecord.probeCount === 1 ? "" : "s"}
-                </MetaChip>
-                <MetaChip>
-                  {scenarioRecord.scenarioHintCount} hint
-                  {scenarioRecord.scenarioHintCount === 1 ? "" : "s"}
-                </MetaChip>
-                {scenarioRecord.tags.map((tag) => (
-                  <MetaChip key={tag} variant="outline">
-                    {tag}
-                  </MetaChip>
-                ))}
                 <MetaChip variant="outline" className="font-mono">
                   {scenarioRecord.scenarioId}
                 </MetaChip>
@@ -283,6 +265,7 @@ export function ScenarioDetails() {
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
             <div className="space-y-6">
               <Section
+                density="compact"
                 title="Briefing"
                 description="How the scenario briefing reads to learners."
               >
@@ -290,6 +273,7 @@ export function ScenarioDetails() {
               </Section>
 
               <Section
+                density="compact"
                 title="Probes"
                 description="Checks that grade a run, in order."
               >
@@ -311,7 +295,7 @@ export function ScenarioDetails() {
               </Section>
 
               {scenarioRecord.hints.length ? (
-                <Section title="Scenario hints">
+                <Section density="compact" title="Scenario hints">
                   <div className="space-y-3">
                     {scenarioRecord.hints.map((hint, index) => (
                       <HintTile
@@ -325,6 +309,7 @@ export function ScenarioDetails() {
               ) : null}
 
               <Section
+                density="compact"
                 title="Solution"
                 description="Learner-gated content — visible to admins for inspection."
               >
@@ -341,6 +326,7 @@ export function ScenarioDetails() {
               </Section>
 
               <Section
+                density="compact"
                 title="VM inventory"
                 description="Machines provisioned for every run of this scenario."
               >
@@ -359,46 +345,23 @@ export function ScenarioDetails() {
             </div>
 
             <Section
+              density="compact"
               title="Record"
               description="Always reflects the current stored scenario for this scenario ID."
-              className="h-fit"
-              bodyClassName="space-y-4"
+              className="h-fit lg:sticky lg:top-24"
             >
-              <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} />
-              <MetaRow label="State" value={enabled ? "Enabled" : "Disabled"} />
-              <MetaRow label="Category" value={scenarioRecord.category} />
-              <MetaRow
-                label="Difficulty"
-                value={scenarioRecord.difficulty}
-              />
-              <MetaRow
-                label="Estimated minutes"
-                value={String(scenarioRecord.estimatedMinutes)}
-              />
-              <MetaRow
-                label="Tags"
-                value={
-                  scenarioRecord.tags.length
-                    ? scenarioRecord.tags.join(", ")
-                    : "-"
-                }
-              />
-              <MetaRow
-                label="Enabled at"
-                value={
-                  scenarioRecord.enabledAt
-                    ? formatTimestamp(scenarioRecord.enabledAt)
-                    : "Not enabled"
-                }
-              />
-              <MetaRow
-                label="Created"
-                value={formatTimestamp(scenarioRecord.createdAt)}
-              />
-              <MetaRow
-                label="Updated"
-                value={formatTimestamp(scenarioRecord.updatedAt)}
-              />
+              <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
+                <MetaRow label="Scenario ID" value={scenarioRecord.scenarioId} mono />
+                <MetaRow label="Availability" value={enabled ? "Enabled for learners" : "Unavailable"} />
+                <MetaRow label="Category" value={scenarioRecord.category} />
+                <MetaRow label="Difficulty" value={scenarioRecord.difficulty} />
+                <MetaRow label="Estimated time" value={`~${scenarioRecord.estimatedMinutes} min`} />
+                <MetaRow label="Inventory" value={`${scenarioRecord.vmCount} VM · ${scenarioRecord.probeCount} probes · ${scenarioRecord.scenarioHintCount} hints`} />
+                <MetaRow label="Tags" value={scenarioRecord.tags.length ? scenarioRecord.tags.join(", ") : "—"} />
+                <MetaRow label="Enabled at" value={scenarioRecord.enabledAt ? formatTimestamp(scenarioRecord.enabledAt) : "Not enabled"} />
+                <MetaRow label="Created" value={formatTimestamp(scenarioRecord.createdAt)} />
+                <MetaRow label="Updated" value={formatTimestamp(scenarioRecord.updatedAt)} />
+              </dl>
             </Section>
           </div>
         </>
@@ -499,7 +462,7 @@ function VmRecord({
         <BootMeta label="Format" value={vm.imageFormat} />
         <BootMeta label="Image key" value={formatImageKey(vm)} />
       </div>
-      <div className="rounded-md border bg-muted/60 p-3 font-mono text-xs break-all">
+      <div className="terminal-surface rounded-md border p-3 font-mono text-xs break-all">
         {vm.bootCmdline}
       </div>
     </div>
@@ -515,11 +478,13 @@ function BootMeta({ label, value }: { label: string; value: string }) {
   );
 }
 
-function MetaRow(props: { label: string; value: string }) {
+function MetaRow(props: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="space-y-1">
-      <p className="text-eyebrow">{props.label}</p>
-      <p className="text-sm font-medium break-all">{props.value}</p>
+    <div>
+      <dt className="text-eyebrow">{props.label}</dt>
+      <dd className={props.mono ? "mt-1 font-mono text-xs break-all" : "mt-1 text-sm font-medium break-words"}>
+        {props.value}
+      </dd>
     </div>
   );
 }

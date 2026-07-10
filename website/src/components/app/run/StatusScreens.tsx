@@ -115,7 +115,7 @@ export function ScenarioStepScreen(props: {
                   className={cn(
                     "leading-6",
                     step.state === "done"
-                      ? "text-success/80"
+                      ? "text-success"
                       : "text-muted-foreground",
                   )}
                 >

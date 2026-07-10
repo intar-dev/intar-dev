@@ -41,6 +41,7 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onKeyDown,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
@@ -54,6 +55,40 @@ function DialogContent({
           "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-2xl border border-border bg-popover p-6 text-sm text-popover-foreground shadow-lg duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
+        onKeyDown={(event) => {
+          onKeyDown?.(event)
+          if (event.defaultPrevented || event.key !== "Tab") return
+
+          const popup = event.currentTarget
+          const focusable = [...popup.querySelectorAll<HTMLElement>(
+            "a[href], button:not(:disabled), input:not(:disabled):not([type='hidden']), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"
+          )].filter((element) => {
+            const style = window.getComputedStyle(element)
+            return (
+              element.getClientRects().length > 0 &&
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              element.getAttribute("aria-hidden") !== "true"
+            )
+          })
+
+          if (!focusable.length) {
+            event.preventDefault()
+            popup.focus()
+            return
+          }
+
+          const first = focusable[0]
+          const last = focusable[focusable.length - 1]
+          const active = document.activeElement
+          if (event.shiftKey && (active === first || !popup.contains(active))) {
+            event.preventDefault()
+            last?.focus()
+          } else if (!event.shiftKey && (active === last || !popup.contains(active))) {
+            event.preventDefault()
+            first?.focus()
+          }
+        }}
         {...props}
       >
         {children}

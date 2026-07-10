@@ -1,13 +1,23 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { Activity, Archive, CircleAlert, Server, Shapes } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import { Stat } from "@/components/app/patterns/Stat";
 import { EmptyState, LoadingState } from "@/components/app/patterns/StateCard";
 import { type RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   SCENARIO_RUNS_PAGE_SIZE,
   buildVisiblePages,
@@ -44,6 +54,16 @@ export function Dashboard() {
     vmId: string;
     vmName: string;
   } | null>(null);
+  const [endTarget, setEndTarget] = useState<{
+    hostId: string;
+    runId: string;
+    vmName: string;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    hostId: string;
+    runId: string;
+  } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
 
   const { hosts, hostRecords, refreshHost, forgetArchivedRun } = useHostFleet();
   const scenarios = useAdminScenarios();
@@ -193,10 +213,11 @@ export function Dashboard() {
           error?: string;
         } | null;
         throw new Error(
-          body?.error ?? `Failed to request teardown (${response.status})`,
+          body?.error ?? `Failed to request end run (${response.status})`,
         );
       }
-      setVmNotice(`Teardown requested for ${vmName}`);
+      setVmNotice(`End requested for ${vmName}`);
+      setEndTarget(null);
       setExpandedActiveVms((current) => {
         const next = { ...current };
         delete next[`${hostId}:${vmName}`];
@@ -210,7 +231,7 @@ export function Dashboard() {
       await Promise.all([hosts.refetch(), refreshHost(hostId)]);
     } catch (error) {
       setVmError(
-        error instanceof Error ? error.message : "failed to request teardown",
+        error instanceof Error ? error.message : "failed to request end run",
       );
     } finally {
       setVmBusyKey((current) => (current === busyKey ? null : current));
@@ -254,6 +275,8 @@ export function Dashboard() {
       });
       forgetArchivedRun(hostId, runId);
       setVmNotice(`Deleted archived run ${runId}`);
+      setDeleteTarget(null);
+      setDeleteConfirm("");
       await Promise.all([hosts.refetch(), refreshHost(hostId)]);
     } catch (error) {
       setVmError(
@@ -277,6 +300,12 @@ export function Dashboard() {
   );
   const enabledScenarioCount = launchableScenarios.filter(
     (scenario) => scenario.enabled,
+  ).length;
+  const attentionHostCount = hostRecords.filter(
+    ({ host }) =>
+      !host.status?.connected ||
+      host.disabled ||
+      host.actualState?.health === "degraded",
   ).length;
   const liveScenarioRuns = useMemo<LiveScenarioRunRecord[]>(
     () =>
@@ -340,35 +369,54 @@ export function Dashboard() {
   return (
     <PageShell
       admin
+      width="workspace"
+      density="compact"
       title="Overview"
-      description="Live scenario runs and the run archive across the fleet."
+      description="Exceptions first, then the live work and retained run history across the fleet."
     >
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Stat
-          label="Hosts"
-          value={String(hostRecords.length)}
-          detail={`${connectedHostCount} online`}
+      <Section
+        title="Operational ledger"
+        description="Current fleet posture from the latest host reports."
+        variant="flat"
+        density="compact"
+        bodyClassName="divide-y border-y"
+      >
+        <LedgerRow
+          icon={<CircleAlert />}
+          label="Needs attention"
+          value={String(attentionHostCount)}
+          detail={attentionHostCount ? "Offline, degraded, or disabled hosts" : "No host exceptions"}
+          tone={attentionHostCount ? "warning" : "success"}
+          action={<Button size="sm" variant="outline" render={<Link to="/admin/hosts" />}>Review hosts</Button>}
         />
-        <Stat
-          label="Live runs"
+        <LedgerRow
+          icon={<Server />}
+          label="Fleet connectivity"
+          value={`${connectedHostCount}/${hostRecords.length}`}
+          detail="Hosts connected"
+        />
+        <LedgerRow
+          icon={<Activity />}
+          label="Live work"
           value={String(activeVmCount)}
-          detail="Active VMs"
+          detail="Active scenario VMs"
+          action={<Button size="sm" variant="ghost" render={<a href="#live-runs" />}>Inspect live work</Button>}
         />
-        <Stat
+        <LedgerRow
+          icon={<Archive />}
           label="Run archive"
           value={String(archivedRunCount)}
-          detail="Archived sessions"
+          detail="Retained sessions"
         />
-        <Stat
-          label="Scenarios"
-          value={String(launchableScenarios.length)}
-          detail={
-            enabledScenarioCount > 0
-              ? `${enabledScenarioCount} enabled`
-              : "No launchable scenarios"
-          }
+        <LedgerRow
+          icon={<Shapes />}
+          label="Scenario availability"
+          value={`${enabledScenarioCount}/${launchableScenarios.length}`}
+          detail="Enabled for learners"
+          tone={enabledScenarioCount ? "default" : "warning"}
+          action={<Button size="sm" variant="ghost" render={<Link to="/admin/scenarios" />}>Open registry</Button>}
         />
-      </div>
+      </Section>
 
       <div className="space-y-3 empty:hidden">
         {scenarios.error ? (
@@ -405,11 +453,13 @@ export function Dashboard() {
         ) : null}
       </div>
 
-      <Section
-        title="Live scenario runs"
-        description="Everything currently running across the fleet."
-        actions={<Badge variant="outline">{liveScenarioRuns.length} active</Badge>}
-      >
+      <div id="live-runs" className="scroll-mt-24">
+        <Section
+          density="compact"
+          title="Live scenario runs"
+          description="Everything currently running across the fleet."
+          actions={<Badge variant="outline">{liveScenarioRuns.length} active</Badge>}
+        >
         {hosts.isLoading ? (
           <LoadingState title="Loading active runs" className="border-0 bg-transparent shadow-none" />
         ) : liveScenarioRuns.length ? (
@@ -439,7 +489,11 @@ export function Dashboard() {
                   }}
                   onDelete={() => {
                     if (!vm.run_id) return;
-                    void handleDestroyRun(host.id, vm.run_id, vm.name);
+                    setEndTarget({
+                      hostId: host.id,
+                      runId: vm.run_id,
+                      vmName: vm.name,
+                    });
                   }}
                   isDeleting={
                     vmBusyKey === `${host.id}:destroy-run:${vm.run_id}`
@@ -456,9 +510,11 @@ export function Dashboard() {
             contentClassName="min-h-[10rem]"
           />
         )}
-      </Section>
+        </Section>
+      </div>
 
       <Section
+        density="compact"
         title="Run archive"
         description="Finished runs with their captured artifacts."
         actions={
@@ -513,7 +569,8 @@ export function Dashboard() {
                     }));
                   }}
                   onDelete={() => {
-                    void handleDeleteRun(host.id, run.id);
+                    setDeleteConfirm("");
+                    setDeleteTarget({ hostId: host.id, runId: run.id });
                   }}
                   onStreamArtifact={(artifact) => {
                     void streamArtifactContent(host.id, run.id, artifact);
@@ -564,6 +621,94 @@ export function Dashboard() {
           onClose={() => setActiveWebSsh(null)}
         />
       ) : null}
+
+      <Dialog open={endTarget !== null} onOpenChange={(open) => !open && setEndTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>End this run?</DialogTitle>
+            <DialogDescription>
+              This stops active work on {endTarget?.vmName}. Captured history remains available after archival.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEndTarget(null)} disabled={vmBusyKey !== null}>Keep running</Button>
+            <Button
+              variant="destructive"
+              disabled={!endTarget || vmBusyKey !== null}
+              onClick={() => {
+                if (endTarget) {
+                  void handleDestroyRun(endTarget.hostId, endTarget.runId, endTarget.vmName);
+                }
+              }}
+            >
+              {vmBusyKey ? "Ending…" : "End run"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeleteTarget(null);
+            setDeleteConfirm("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this run?</DialogTitle>
+            <DialogDescription>
+              This permanently removes the archived history and captured artifacts. Type the run ID to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor="delete-run-confirm" className="font-mono text-sm">{deleteTarget?.runId}</label>
+            <Input id="delete-run-confirm" value={deleteConfirm} onChange={(event) => setDeleteConfirm(event.target.value)} autoComplete="off" />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={vmBusyKey !== null}>Keep history</Button>
+            <Button
+              variant="destructive"
+              disabled={!deleteTarget || deleteConfirm !== deleteTarget.runId || vmBusyKey !== null}
+              onClick={() => {
+                if (deleteTarget) void handleDeleteRun(deleteTarget.hostId, deleteTarget.runId);
+              }}
+            >
+              {vmBusyKey ? "Deleting…" : "Delete run"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </PageShell>
+  );
+}
+
+function LedgerRow({
+  icon,
+  label,
+  value,
+  detail,
+  tone = "default",
+  action,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+  tone?: "default" | "success" | "warning";
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1.4rem_minmax(10rem,0.8fr)_minmax(0,1fr)_auto] sm:items-center">
+      <span className={tone === "warning" ? "text-warning" : tone === "success" ? "text-success" : "text-muted-foreground"}>{icon}</span>
+      <div>
+        <p className="text-sm font-medium">{label}</p>
+        <p className="text-metadata">{detail}</p>
+      </div>
+      <p className="text-section-title tabular-nums sm:text-right">{value}</p>
+      <div>{action}</div>
+    </div>
   );
 }

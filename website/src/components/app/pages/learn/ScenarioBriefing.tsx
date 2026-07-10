@@ -13,12 +13,12 @@ import {
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import {
   DifficultyChip,
   MetaChip,
 } from "@/components/app/patterns/MetaChip";
 import { RunListItem } from "@/components/app/patterns/RunListItem";
-import { Stat } from "@/components/app/patterns/Stat";
 import { ErrorState, LoadingState } from "@/components/app/patterns/StateCard";
 import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
 import {
@@ -50,6 +50,12 @@ import {
 } from "@/components/ui/dialog";
 
 type PresentedScenarioDetail = ReturnType<typeof presentScenarioDetail>;
+type FinishedRun = PresentedScenarioDetail["finishedRuns"][number];
+
+interface DeleteTarget {
+  run: FinishedRun;
+  attemptNumber: number;
+}
 
 interface ScenarioDetailResponse {
   scenario: PresentedScenarioDetail;
@@ -67,9 +73,7 @@ export function ScenarioBriefing() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { scenarioId } = useParams({ from: "/app/scenarios/$scenarioId" });
-  const [deleteTarget, setDeleteTarget] = useState<
-    PresentedScenarioDetail["finishedRuns"][number] | null
-  >(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
 
   const scenarioQuery = useQuery({
     queryKey: ["scenarios", "detail", scenarioId],
@@ -114,6 +118,7 @@ export function ScenarioBriefing() {
       await Promise.all([
         scenarioQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] }),
+        queryClient.invalidateQueries({ queryKey: ["scenario-runs", "list"] }),
       ]);
     },
   });
@@ -155,7 +160,13 @@ export function ScenarioBriefing() {
   };
 
   return (
-    <PageShell title="Scenario briefing" description="" showHeader={false}>
+    <PageShell
+      title="Scenario briefing"
+      description=""
+      showHeader={false}
+      width="content"
+      density="comfortable"
+    >
       {scenarioQuery.error ? (
         <ErrorState
           title="Could not load scenario"
@@ -165,9 +176,10 @@ export function ScenarioBriefing() {
               : "Failed to load scenario briefing"
           }
           onRetry={() => void scenarioQuery.refetch()}
+          headingLevel={1}
         />
       ) : !scenarioData ? (
-        <LoadingState title="Loading briefing" />
+        <LoadingState title="Loading briefing" headingLevel={1} />
       ) : (
         <>
           <PageHeader
@@ -197,50 +209,44 @@ export function ScenarioBriefing() {
                     ? "1 machine"
                     : `${scenarioData.vmCount} machines`}
                 </MetaChip>
-                {scenarioData.briefing.tags.slice(0, 5).map((tag) => (
-                  <MetaChip key={tag} variant="outline">
-                    {tag}
-                  </MetaChip>
-                ))}
               </>
             }
           />
 
-          <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
-            <div className="space-y-10">
-              <div className="max-w-3xl text-[0.95rem] leading-7">
-                <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
-              </div>
-
+          <div className="grid items-start gap-12 lg:grid-cols-[minmax(0,1fr)_21rem]">
+            <div className="space-y-12">
               {scenarioData.briefing.objectives.length ? (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Objectives</CardTitle>
+                <Card as="section" aria-labelledby="objectives-heading">
+                  <CardHeader className="gap-2 border-b">
+                    <p className="text-eyebrow">Work order</p>
+                    <CardTitle as="h2" id="objectives-heading" className="text-section-title">
+                      Repair objectives
+                    </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <ol className="space-y-3">
+                    <ol className="divide-y">
                       {scenarioData.briefing.objectives.map(
                         (objective, index) => (
                           <li
                             key={`${objective.probeName}-${index}`}
-                            className="flex items-start gap-3"
+                            className="grid grid-cols-[2rem_minmax(0,1fr)] gap-3 py-4 first:pt-0 last:pb-0"
                           >
-                            <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-secondary-foreground">
-                              {index + 1}
+                            <span className="font-heading text-sm font-semibold text-brand-text tabular-nums">
+                              {String(index + 1).padStart(2, "0")}
                             </span>
-                            <div className="min-w-0 space-y-0.5 pt-0.5">
+                            <div className="min-w-0 space-y-1">
                               <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                                <p className="text-sm font-medium">
+                                <p className="font-semibold">
                                   {objective.title?.trim() || objective.label}
                                 </p>
                                 {scenarioData.vmCount > 1 ? (
-                                  <p className="font-mono text-caption">
+                                  <code className="text-caption">
                                     {objective.vmName}
-                                  </p>
+                                  </code>
                                 ) : null}
                               </div>
                               {objective.hintCount > 0 ? (
-                                <p className="text-caption">
+                                <p className="text-metadata">
                                   {objective.hintCount} hint
                                   {objective.hintCount === 1 ? "" : "s"}{" "}
                                   available
@@ -255,159 +261,200 @@ export function ScenarioBriefing() {
                 </Card>
               ) : null}
 
-              {finishedRuns.length ? (
-                <section className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    <History className="size-4 text-muted-foreground" />
-                    <h2 className="text-section-title">Previous runs</h2>
+              <section className="space-y-4" aria-labelledby="briefing-heading">
+                <div>
+                  <p className="text-eyebrow">Incident context</p>
+                  <h2 id="briefing-heading" className="mt-2 text-section-title">
+                    Briefing
+                  </h2>
+                </div>
+                <div className="prose-measure text-body leading-7">
+                  <Markdown>{scenarioData.briefing.briefingMarkdown}</Markdown>
+                </div>
+              </section>
+
+              <details className="rounded-lg border bg-card">
+                <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2 text-sm font-semibold marker:hidden">
+                  <ChevronDown className="size-4 text-muted-foreground" />
+                  Technical details
+                </summary>
+                <div className="border-t px-4 py-2">
+                  <dl className="divide-y text-sm">
+                    <TechnicalDetail label="Scenario ID">
+                      <code className="break-all">{scenarioData.scenarioId}</code>
+                    </TechnicalDetail>
+                    <TechnicalDetail label="Definition">
+                      <code className="break-all">{scenarioData.scenarioName}</code>
+                    </TechnicalDetail>
+                    <TechnicalDetail label="Published">
+                      {formatTimestamp(scenarioData.enabledAt)}
+                    </TechnicalDetail>
+                    <TechnicalDetail label="Tags">
+                      {scenarioData.briefing.tags.length
+                        ? scenarioData.briefing.tags.join(", ")
+                        : "None"}
+                    </TechnicalDetail>
+                  </dl>
+                </div>
+              </details>
+            </div>
+
+            <aside className="space-y-6 lg:sticky lg:top-24">
+              <section className="space-y-4 rounded-xl border border-brand-border bg-brand-subtle p-6">
+                <div>
+                  <p className="text-eyebrow text-brand-text">Next action</p>
+                  <h2 className="mt-2 text-section-title">
+                    {scenarioData.hasActiveRun
+                      ? "Continue the repair"
+                      : "Open a fresh sandbox"}
+                  </h2>
+                </div>
+                <Button
+                  size="lg"
+                  className="w-full"
+                  onClick={handlePrimaryAction}
+                  disabled={
+                    startScenario.isPending ||
+                    scenarioData.blockingRun !== null ||
+                    (scenarioData.hasActiveRun && !scenarioData.activeRunId)
+                  }
+                >
+                  {startScenario.isPending
+                    ? "Starting sandbox…"
+                    : scenarioData.hasActiveRun
+                      ? "Resume run"
+                      : "Start scenario"}
+                  <ArrowRight className="size-4" />
+                </Button>
+                {scenarioData.blockingRun ? (
+                  <div className="space-y-3 border-t border-brand-border pt-4">
+                    <p className="text-sm leading-6 text-muted-foreground">
+                      An active run on{" "}
+                      <span className="font-semibold text-foreground">
+                        {scenarioData.blockingRun.title}
+                      </span>{" "}
+                      must end before another sandbox can start.
+                    </p>
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={() =>
+                        void navigate({
+                          to: "/runs/$runId",
+                          params: { runId: scenarioData.blockingRun?.runId ?? "" },
+                        })
+                      }
+                    >
+                      Go to active run
+                      <ArrowRight className="size-4" />
+                    </Button>
                   </div>
-                  <div className="space-y-2.5">
-                    {recentRuns.map(({ run, attemptNumber }) => (
+                ) : null}
+                {startScenario.error ? (
+                  <InlineFeedback tone="error">
+                    {startScenario.error instanceof Error
+                      ? startScenario.error.message
+                      : "The scenario could not be started."}
+                  </InlineFeedback>
+                ) : startScenario.isPending ? (
+                  <InlineFeedback tone="pending">
+                    Allocating the scenario run…
+                  </InlineFeedback>
+                ) : null}
+              </section>
+
+              {scenarioData.activeRun ? (
+                <section className="space-y-2 border-y py-4">
+                  <p className="text-eyebrow">Live status</p>
+                  <p className="font-semibold">{scenarioData.activeRun.phaseTitle}</p>
+                  <p className="text-metadata">{scenarioData.activeRun.phaseDetail}</p>
+                  <p className="text-caption">
+                    Updated {formatTimestamp(scenarioData.activeRun.updatedAt)}
+                  </p>
+                </section>
+              ) : null}
+
+              {finishedRuns.length ? (
+                <dl className="grid grid-cols-2 gap-4 border-y py-4">
+                  <div>
+                    <dt className="text-eyebrow">Best time</dt>
+                    <dd className="mt-2 inline-flex items-center gap-2 font-semibold tabular-nums">
+                      {bestSolveMs !== null ? (
+                        <>
+                          <Trophy className="size-4 text-warning" />
+                          {formatDurationMs(bestSolveMs)}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-eyebrow">Attempts</dt>
+                    <dd>
+                      <span className="mt-2 block font-semibold tabular-nums">
+                        {finishedRuns.length}
+                      </span>
+                      <span className="block text-caption">
+                        {succeededRuns.length} solved
+                      </span>
+                    </dd>
+                  </div>
+                </dl>
+              ) : null}
+
+              {!finishedRuns.length && !scenarioData.activeRun ? (
+                <p className="border-y py-4 text-sm text-muted-foreground">
+                  The browser shell needs no local installation. Native SSH is
+                  also available after launch.
+                </p>
+              ) : null}
+            </aside>
+          </div>
+
+          {finishedRuns.length ? (
+            <section className="space-y-4" aria-labelledby="previous-runs-heading">
+              <div className="flex items-center gap-3 border-b pb-4">
+                <History className="size-4 text-muted-foreground" />
+                <div>
+                  <p className="text-eyebrow">History</p>
+                  <h2 id="previous-runs-heading" className="mt-1 text-section-title">
+                    Previous runs
+                  </h2>
+                </div>
+              </div>
+              <div className="divide-y border-y">
+                {recentRuns.map(({ run, attemptNumber }) => (
+                  <PreviousRunRow
+                    key={run.runId}
+                    run={run}
+                    attemptNumber={attemptNumber}
+                    onDelete={() => setDeleteTarget({ run, attemptNumber })}
+                  />
+                ))}
+              </div>
+              {olderRuns.length ? (
+                <Collapsible>
+                  <CollapsibleTrigger
+                    render={<Button type="button" variant="outline" size="sm" />}
+                  >
+                    Show all {finishedRuns.length} runs
+                    <ChevronDown className="size-3.5" />
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="mt-3 divide-y border-y">
+                    {olderRuns.map(({ run, attemptNumber }) => (
                       <PreviousRunRow
                         key={run.runId}
                         run={run}
                         attemptNumber={attemptNumber}
-                        onDelete={() => setDeleteTarget(run)}
+                        onDelete={() => setDeleteTarget({ run, attemptNumber })}
                       />
                     ))}
-                    {olderRuns.length ? (
-                      <Collapsible>
-                        <CollapsibleTrigger
-                          render={
-                            <Button type="button" variant="outline" size="sm" />
-                          }
-                        >
-                          Show all {finishedRuns.length} runs
-                          <ChevronDown className="size-3.5" />
-                        </CollapsibleTrigger>
-                        <CollapsibleContent className="mt-2.5 space-y-2.5">
-                          {olderRuns.map(({ run, attemptNumber }) => (
-                            <PreviousRunRow
-                              key={run.runId}
-                              run={run}
-                              attemptNumber={attemptNumber}
-                              onDelete={() => setDeleteTarget(run)}
-                            />
-                          ))}
-                        </CollapsibleContent>
-                      </Collapsible>
-                    ) : null}
-                  </div>
-                </section>
+                  </CollapsibleContent>
+                </Collapsible>
               ) : null}
-            </div>
-
-            <aside className="top-24 space-y-4 lg:sticky">
-              <Card>
-                <CardContent className="space-y-4">
-                  <Button
-                    size="lg"
-                    className="w-full"
-                    onClick={handlePrimaryAction}
-                    disabled={
-                      startScenario.isPending ||
-                      scenarioData.blockingRun !== null ||
-                      (scenarioData.hasActiveRun && !scenarioData.activeRunId)
-                    }
-                  >
-                    {startScenario.isPending
-                      ? "Starting…"
-                      : scenarioData.hasActiveRun
-                        ? "Resume run"
-                        : "Start scenario"}
-                    <ArrowRight className="size-4" />
-                  </Button>
-                  {scenarioData.blockingRun ? (
-                    <div className="space-y-3">
-                      <p className="text-sm text-muted-foreground">
-                        You already have an active run on{" "}
-                        <span className="font-medium text-foreground">
-                          {scenarioData.blockingRun.title}
-                        </span>
-                        . Finish or destroy it before starting this scenario.
-                      </p>
-                      <Button
-                        variant="outline"
-                        className="w-full"
-                        onClick={() =>
-                          void navigate({
-                            to: "/runs/$runId",
-                            params: {
-                              runId: scenarioData.blockingRun?.runId ?? "",
-                            },
-                          })
-                        }
-                      >
-                        Go to active run
-                        <ArrowRight className="size-4" />
-                      </Button>
-                    </div>
-                  ) : null}
-                  {startScenario.error ? (
-                    <p className="text-sm text-destructive">
-                      {startScenario.error instanceof Error
-                        ? startScenario.error.message
-                        : "Failed to start scenario"}
-                    </p>
-                  ) : null}
-                </CardContent>
-              </Card>
-
-              {scenarioData.activeRun ? (
-                <Card>
-                  <CardContent>
-                    <div className="space-y-1 rounded-xl bg-muted/50 px-4 py-3">
-                      <p className="text-sm font-medium">
-                        {scenarioData.activeRun.phaseTitle}
-                      </p>
-                      <p className="text-caption">
-                        {scenarioData.activeRun.phaseDetail}
-                      </p>
-                      <p className="text-caption">
-                        Updated{" "}
-                        {formatTimestamp(scenarioData.activeRun.updatedAt)}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              ) : null}
-
-              {finishedRuns.length ? (
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-                  <Stat
-                    size="sm"
-                    label="Best time"
-                    value={
-                      bestSolveMs !== null ? (
-                        <span className="inline-flex items-center gap-1.5">
-                          <Trophy className="size-4 text-warning" />
-                          {formatDurationMs(bestSolveMs)}
-                        </span>
-                      ) : (
-                        "—"
-                      )
-                    }
-                  />
-                  <Stat
-                    size="sm"
-                    label="Attempts"
-                    value={finishedRuns.length}
-                    detail={`${succeededRuns.length} of ${finishedRuns.length} solved`}
-                  />
-                </div>
-              ) : null}
-
-              {!finishedRuns.length && !scenarioData.activeRun ? (
-                <Card>
-                  <CardContent>
-                    <p className="text-sm text-muted-foreground">
-                      Runs in your browser — nothing to install.
-                    </p>
-                  </CardContent>
-                </Card>
-              ) : null}
-            </aside>
-          </div>
+            </section>
+          ) : null}
 
           <Dialog
             open={deleteTarget !== null}
@@ -419,10 +466,12 @@ export function ScenarioBriefing() {
           >
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Delete this run?</DialogTitle>
+                <DialogTitle>
+                  Delete attempt {deleteTarget?.attemptNumber ?? ""}?
+                </DialogTitle>
                 <DialogDescription>
-                  This removes the run and everything saved with it from your
-                  history. This action cannot be undone.
+                  This permanently removes this run, its checks, and its replay
+                  from your history. This action cannot be undone.
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
@@ -437,7 +486,7 @@ export function ScenarioBriefing() {
                   variant="destructive"
                   onClick={() => {
                     if (deleteTarget) {
-                      deleteRun.mutate(deleteTarget.runId);
+                      deleteRun.mutate(deleteTarget.run.runId);
                     }
                   }}
                   disabled={deleteRun.isPending || !deleteTarget}
@@ -511,12 +560,27 @@ async function requestScenarioStart(scenarioId: string) {
   return body.runId;
 }
 
+function TechnicalDetail({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-1 py-3 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-4">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 font-medium sm:text-right">{children}</dd>
+    </div>
+  );
+}
+
 function PreviousRunRow({
   run,
   attemptNumber,
   onDelete,
 }: {
-  run: PresentedScenarioDetail["finishedRuns"][number];
+  run: FinishedRun;
   attemptNumber: number;
   onDelete: () => void;
 }) {

@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  CheckCircle2,
   FileCode2,
   Hammer,
   Save,
-  ShieldAlert,
   Trash2,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { EmptyState, ErrorState } from "../patterns/StateCard";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { ScenarioSourceEditor } from "@/components/app/admin/authoring/ScenarioSourceEditor";
+import { EmptyState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import {
   prepareScenarioBuild,
@@ -25,7 +25,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 
 interface SourceSummary {
   id: string;
@@ -40,10 +49,13 @@ export function AdminAuthoring() {
   const queryClient = useQueryClient();
   const [hcl, setHcl] = useState("");
   const [result, setResult] = useState<ScenarioValidationResult | null>(null);
+  const [validatedHcl, setValidatedHcl] = useState<string | null>(null);
   const [validating, setValidating] = useState(false);
   const [validationFailure, setValidationFailure] = useState<string | null>(
     null,
   );
+  const [deleteTarget, setDeleteTarget] = useState<SourceSummary | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
 
   const sources = useQuery({
     queryKey: ["admin", "authoring", "sources"],
@@ -68,8 +80,10 @@ export function AdminAuthoring() {
     setValidationFailure(null);
     try {
       setResult(await validateScenarioHcl(nextHcl));
+      setValidatedHcl(nextHcl);
     } catch (error) {
       setResult(null);
+      setValidatedHcl(null);
       setValidationFailure(
         error instanceof Error ? error.message : "Validator failed to load",
       );
@@ -78,7 +92,8 @@ export function AdminAuthoring() {
     }
   };
 
-  const scenarioId = result?.preview?.name ?? null;
+  const currentResult = validatedHcl === hcl ? result : null;
+  const scenarioId = currentResult?.preview?.name ?? null;
 
   const saveDraft = useMutation({
     mutationFn: async () => {
@@ -166,6 +181,8 @@ export function AdminAuthoring() {
       }
     },
     onSuccess: async () => {
+      setDeleteTarget(null);
+      setDeleteConfirm("");
       await queryClient.invalidateQueries({
         queryKey: ["admin", "authoring", "sources"],
       });
@@ -175,7 +192,8 @@ export function AdminAuthoring() {
   return (
     <PageShell
       admin
-      width="wide"
+      width="workspace"
+      density="compact"
       compactHeader
       title="Authoring"
       description="Write scenario HCL, validate it with the exact build-pipeline rules (in your browser), preview, and save drafts."
@@ -184,20 +202,45 @@ export function AdminAuthoring() {
         <div className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Scenario HCL</CardTitle>
+              <CardTitle as="h2" className="text-base">Scenario HCL</CardTitle>
               <CardDescription>
                 Paste a scenario.hcl — validation runs the same Rust code the
                 image builder uses, compiled to WebAssembly.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <Textarea
-                value={hcl}
-                onChange={(event) => setHcl(event.target.value)}
-                placeholder={'scenario "my-scenario" {\n  …\n}'}
-                rows={18}
-                className="font-mono text-xs"
-              />
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,0.38fr)]">
+                <ScenarioSourceEditor value={hcl} onChange={setHcl} />
+                <aside className="space-y-3 rounded-lg border bg-muted/30 p-4" aria-label="Validation results">
+                  <div>
+                    <p className="text-eyebrow">WASM validation</p>
+                    <h3 className="mt-1 text-card-title">Pipeline result</h3>
+                  </div>
+                  {validating ? (
+                    <InlineFeedback tone="pending">Validating scenario source…</InlineFeedback>
+                  ) : validationFailure ? (
+                    <InlineFeedback tone="error">{validationFailure}</InlineFeedback>
+                  ) : currentResult?.ok ? (
+                    <InlineFeedback tone="success">Scenario is valid.</InlineFeedback>
+                  ) : currentResult ? (
+                    <div className="space-y-2">
+                      <InlineFeedback tone="error">
+                        {currentResult.errors.length} validation error
+                        {currentResult.errors.length === 1 ? "" : "s"}
+                      </InlineFeedback>
+                      <ul className="max-h-72 list-disc space-y-1 overflow-auto pl-5 text-xs text-destructive">
+                        {currentResult.errors.map((error) => (
+                          <li key={error}>{error}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : validatedHcl && validatedHcl !== hcl ? (
+                    <p className="text-metadata">Source changed. Validate again before saving or building.</p>
+                  ) : (
+                    <p className="text-metadata">Run validation to inspect this source with the same Rust rules used by builders.</p>
+                  )}
+                </aside>
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   onClick={() => void runValidation(hcl)}
@@ -209,7 +252,7 @@ export function AdminAuthoring() {
                 <Button
                   variant="outline"
                   onClick={() => saveDraft.mutate()}
-                  disabled={!result?.ok || !scenarioId || saveDraft.isPending}
+                  disabled={!currentResult?.ok || !scenarioId || saveDraft.isPending}
                 >
                   <Save className="size-4" />
                   {saveDraft.isPending ? "Saving…" : "Save draft"}
@@ -218,7 +261,7 @@ export function AdminAuthoring() {
                   variant="outline"
                   onClick={() => queueBuild.mutate()}
                   disabled={
-                    !result?.ok ||
+                    !currentResult?.ok ||
                     !scenarioId ||
                     queueBuild.isPending ||
                     saveDraft.isPending
@@ -228,17 +271,17 @@ export function AdminAuthoring() {
                   {queueBuild.isPending ? "Queueing…" : "Build images"}
                 </Button>
                 {saveDraft.isSuccess && !queueBuild.isSuccess ? (
-                  <span className="text-xs text-success">Draft saved.</span>
+                  <InlineFeedback tone="success">Draft saved.</InlineFeedback>
                 ) : null}
                 {saveDraft.error ? (
-                  <span className="text-xs text-destructive">
+                  <InlineFeedback tone="error">
                     {saveDraft.error instanceof Error
                       ? saveDraft.error.message
                       : "Failed to save"}
-                  </span>
+                  </InlineFeedback>
                 ) : null}
                 {queueBuild.isSuccess ? (
-                  <span className="text-xs text-success">
+                  <InlineFeedback tone="success">
                     {queueBuild.data.queued === 0
                       ? "Images for this exact content already exist — nothing to build."
                       : `Build queued as ${queueBuild.data.rev}${
@@ -246,50 +289,28 @@ export function AdminAuthoring() {
                             ? ` — assigned to ${queueBuild.data.assigned.length} builder(s); watch Builds.`
                             : " — waiting for a builder; watch Builds."
                         }`}
-                  </span>
+                  </InlineFeedback>
                 ) : null}
                 {queueBuild.error ? (
-                  <span className="text-xs text-destructive">
+                  <InlineFeedback tone="error">
                     {queueBuild.error instanceof Error
                       ? queueBuild.error.message
                       : "Failed to queue build"}
-                  </span>
+                  </InlineFeedback>
                 ) : null}
               </div>
             </CardContent>
           </Card>
 
-          {validationFailure ? (
-            <ErrorState title="Validator error" description={validationFailure} />
-          ) : result ? (
-            result.ok ? (
-              <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/[0.06] px-4 py-3 text-sm text-success">
-                <CheckCircle2 className="size-4" />
-                Scenario is valid.
-              </div>
-            ) : (
-              <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
-                <p className="flex items-center gap-2 text-sm font-medium text-destructive">
-                  <ShieldAlert className="size-4" />
-                  {result.errors.length} validation error
-                  {result.errors.length === 1 ? "" : "s"}
-                </p>
-                <ul className="list-disc space-y-1 pl-5 text-xs text-destructive">
-                  {result.errors.map((error) => (
-                    <li key={error}>{error}</li>
-                  ))}
-                </ul>
-              </div>
-            )
+          {currentResult?.preview ? (
+            <ScenarioPreviewCard preview={currentResult.preview} />
           ) : null}
-
-          {result?.preview ? <ScenarioPreviewCard preview={result.preview} /> : null}
         </div>
 
         <div className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Drafts</CardTitle>
+              <CardTitle as="h2" className="text-base">Drafts</CardTitle>
               <CardDescription>Saved scenario sources.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -334,8 +355,12 @@ export function AdminAuthoring() {
                         variant="ghost"
                         className="text-muted-foreground hover:text-destructive"
                         disabled={deleteDraft.isPending}
-                        onClick={() => deleteDraft.mutate(source.scenarioId)}
-                        aria-label="Delete draft"
+                        onClick={() => {
+                          deleteDraft.reset();
+                          setDeleteConfirm("");
+                          setDeleteTarget(source);
+                        }}
+                        aria-label={`Delete ${source.scenarioId} draft`}
                       >
                         <Trash2 className="size-3.5" />
                       </Button>
@@ -349,6 +374,13 @@ export function AdminAuthoring() {
                   description="Validate a scenario and save it to start iterating here."
                 />
               )}
+              {deleteDraft.error ? (
+                <InlineFeedback tone="error" className="mt-3">
+                  {deleteDraft.error instanceof Error
+                    ? deleteDraft.error.message
+                    : "Failed to delete draft"}
+                </InlineFeedback>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -363,6 +395,57 @@ export function AdminAuthoring() {
           </Card>
         </div>
       </div>
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleteDraft.isPending) {
+            setDeleteTarget(null);
+            setDeleteConfirm("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this draft?</DialogTitle>
+            <DialogDescription>
+              This permanently removes the saved source. Published scenario records and existing builds are unchanged. Type the scenario ID to confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <label htmlFor="delete-draft-confirm" className="font-mono text-sm">
+              {deleteTarget?.scenarioId}
+            </label>
+            <Input
+              id="delete-draft-confirm"
+              value={deleteConfirm}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              autoComplete="off"
+            />
+          </div>
+          {deleteDraft.error ? (
+            <InlineFeedback tone="error">
+              {deleteDraft.error instanceof Error
+                ? deleteDraft.error.message
+                : "Failed to delete draft"}
+            </InlineFeedback>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteDraft.isPending}>
+              Keep draft
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!deleteTarget || deleteConfirm !== deleteTarget.scenarioId || deleteDraft.isPending}
+              onClick={() => {
+                if (deleteTarget) deleteDraft.mutate(deleteTarget.scenarioId);
+              }}
+            >
+              {deleteDraft.isPending ? "Deleting…" : "Delete draft"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </PageShell>
   );
 }
@@ -378,29 +461,32 @@ function ScenarioPreviewCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Preview</CardTitle>
+        <CardTitle as="h2" className="text-base">Preview</CardTitle>
         <CardDescription>How the scenario will read to learners.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">{preview.name}</Badge>
-          {preview.difficulty ? (
-            <Badge variant="secondary" className="capitalize">
-              {preview.difficulty}
-            </Badge>
-          ) : null}
-          {preview.estimated_minutes ? (
-            <Badge variant="outline">~{preview.estimated_minutes} min</Badge>
-          ) : null}
-          {preview.category ? (
-            <Badge variant="outline">{preview.category}</Badge>
-          ) : null}
-          {preview.tags.map((tag) => (
-            <Badge key={tag} variant="outline">
-              {tag}
-            </Badge>
-          ))}
-        </div>
+        <dl className="grid gap-x-6 gap-y-3 border-y py-3 sm:grid-cols-2">
+          <PreviewMeta label="Scenario ID" value={preview.name} mono />
+          <PreviewMeta
+            label="Difficulty"
+            value={preview.difficulty ?? "Not set"}
+            capitalize
+          />
+          <PreviewMeta
+            label="Estimated time"
+            value={
+              preview.estimated_minutes
+                ? `~${preview.estimated_minutes} min`
+                : "Not set"
+            }
+          />
+          <PreviewMeta label="Category" value={preview.category || "Not set"} />
+          <PreviewMeta
+            label="Tags"
+            value={preview.tags.length ? preview.tags.join(", ") : "None"}
+            className="sm:col-span-2"
+          />
+        </dl>
         <div>
           <h3 className="text-lg font-semibold tracking-tight">
             {preview.title || preview.name}
@@ -449,5 +535,34 @@ function ScenarioPreviewCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function PreviewMeta({
+  label,
+  value,
+  mono = false,
+  capitalize = false,
+  className,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  capitalize?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={className}>
+      <dt className="text-eyebrow">{label}</dt>
+      <dd
+        className={cn(
+          "mt-1 break-words",
+          mono && "font-mono text-xs",
+          capitalize && "capitalize",
+        )}
+      >
+        {value}
+      </dd>
+    </div>
   );
 }

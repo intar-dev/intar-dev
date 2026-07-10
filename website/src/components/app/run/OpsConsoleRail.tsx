@@ -169,13 +169,13 @@ function ProbeHealthRow(props: {
   const row = (
     <div
       className={cn(
-        "rounded-lg px-3 py-3",
-        focused ? "rounded-[7px] bg-card" : "border",
+        "rounded-lg border px-3 py-3",
+        focused ? "border-brand-border bg-brand-subtle" : "border-border",
         failed && !focused && "border-destructive/30 bg-destructive/5",
       )}
     >
       {focused ? (
-        <p className="text-eyebrow mb-1.5 text-gradient-brand">Current focus</p>
+        <p className="text-eyebrow mb-1.5 text-brand-text">Current focus</p>
       ) : null}
       <div className="flex items-start gap-2.5">
         {failed ? (
@@ -216,19 +216,7 @@ function ProbeHealthRow(props: {
     </div>
   );
 
-  if (!focused) {
-    return row;
-  }
-
-  // Brand-gradient focus ring on the first incomplete objective.
-  return (
-    <div
-      className="rounded-lg p-px"
-      style={{ backgroundImage: "var(--gradient-brand)" }}
-    >
-      {row}
-    </div>
-  );
+  return row;
 }
 
 // A plain-language description of what the probe verifies — trust that

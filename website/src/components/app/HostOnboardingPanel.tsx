@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Hammer, Server } from "lucide-react";
+import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -81,9 +81,9 @@ export function HostOnboardingPanel({
 
     try {
       await navigator.clipboard.writeText(generated.bridgeConfigToml);
-      setCopyFeedback("Copied");
+      setCopyFeedback("Configuration copied.");
     } catch {
-      setCopyFeedback("Copy failed");
+      setCopyFeedback("Configuration could not be copied.");
     }
   };
 
@@ -97,9 +97,14 @@ export function HostOnboardingPanel({
           <h2 className="text-section-title">{title}</h2>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-2">
+        <div
+          role="group"
+          aria-label="Host role"
+          className="grid gap-2 sm:grid-cols-2"
+        >
           <Button
             type="button"
+            aria-pressed={hostRole === "agent"}
             variant={hostRole === "agent" ? "default" : "outline"}
             onClick={() => setHostRole("agent")}
             disabled={onboard.isPending}
@@ -110,6 +115,7 @@ export function HostOnboardingPanel({
           </Button>
           <Button
             type="button"
+            aria-pressed={hostRole === "builder"}
             variant={hostRole === "builder" ? "default" : "outline"}
             onClick={() => setHostRole("builder")}
             disabled={onboard.isPending}
@@ -127,7 +133,12 @@ export function HostOnboardingPanel({
             onboard.mutate();
           }}
         >
+          <label htmlFor="host-onboarding-name" className="sr-only">
+            Host name
+          </label>
           <Input
+            id="host-onboarding-name"
+            name="hostName"
             placeholder="Host name"
             value={hostName}
             onChange={(event) => setHostName(event.currentTarget.value)}
@@ -165,12 +176,14 @@ export function HostOnboardingPanel({
           </div>
           <div className="rounded-xl bg-muted/40 px-4 py-3">
             Output
-            <div className="mt-1 font-medium text-foreground">`config.toml`</div>
+            <div className="mt-1 font-medium text-foreground">
+              <code>config.toml</code>
+            </div>
           </div>
           <div className="rounded-xl bg-muted/40 px-4 py-3">
             Install
             <div className="mt-1 font-medium text-foreground">
-              `{hostRole === "builder" ? "intar-builder" : "intar-agent"}`
+              <code>{hostRole === "builder" ? "intar-builder" : "intar-agent"}</code>
             </div>
           </div>
         </div>
@@ -180,23 +193,40 @@ export function HostOnboardingPanel({
         {generated ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary">{generated.host.id}</Badge>
-                <Badge variant="outline" className="capitalize">
-                  {generated.host.role}
-                </Badge>
-                <Badge variant="outline">
-                  Expires{" "}
-                  {new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}
-                </Badge>
-                {copyFeedback ? (
-                  <Badge variant="outline">{copyFeedback}</Badge>
-                ) : null}
-              </div>
+              <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+                <div>
+                  <dt className="text-eyebrow">Host ID</dt>
+                  <dd className="mt-1 font-mono text-xs break-all">
+                    {generated.host.id}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-eyebrow">Role</dt>
+                  <dd className="mt-1 font-medium capitalize">
+                    {generated.host.role}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-eyebrow">Bootstrap expires</dt>
+                  <dd className="mt-1 font-medium">
+                    {new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}
+                  </dd>
+                </div>
+              </dl>
               <Button type="button" variant="outline" onClick={copyGeneratedConfig}>
                 Copy config
               </Button>
             </div>
+
+            {copyFeedback ? (
+              <InlineFeedback
+                tone={
+                  copyFeedback === "Configuration copied." ? "success" : "error"
+                }
+              >
+                {copyFeedback}
+              </InlineFeedback>
+            ) : null}
 
             <ScrollArea className="h-[24rem] rounded-xl border bg-muted/30">
               <pre className="p-4 text-xs leading-6 text-foreground">
@@ -206,16 +236,20 @@ export function HostOnboardingPanel({
 
             <ol className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
               <li className="rounded-xl bg-muted/40 px-4 py-3">
-                Replace `[bridge]` in{" "}
-                {generated.host.role === "builder"
-                  ? "`/etc/intar-builder/config.toml`"
-                  : "`/etc/intar-agent/config.toml`"}
+                Replace <code>[bridge]</code> in{" "}
+                <code>
+                  {generated.host.role === "builder"
+                    ? "/etc/intar-builder/config.toml"
+                    : "/etc/intar-agent/config.toml"}
+                </code>
               </li>
               <li className="rounded-xl bg-muted/40 px-4 py-3">
                 Restart with{" "}
-                {generated.host.role === "builder"
-                  ? "`sudo systemctl restart intar-builder`"
-                  : "`sudo systemctl restart intar-agent`"}
+                <code>
+                  {generated.host.role === "builder"
+                    ? "sudo systemctl restart intar-builder"
+                    : "sudo systemctl restart intar-agent"}
+                </code>
               </li>
               <li className="rounded-xl bg-muted/40 px-4 py-3">
                 Confirm the heartbeat in the Hosts tab.

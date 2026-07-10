@@ -21,7 +21,7 @@ export function FilterChip({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "h-7 rounded-full border px-3 text-xs font-medium capitalize transition-colors",
+        "min-h-9 rounded-lg border px-3 text-xs font-semibold capitalize transition-colors",
         active
           ? "border-primary bg-primary text-primary-foreground"
           : "border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground",

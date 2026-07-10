@@ -27,9 +27,16 @@ Run from `website/`:
 bun dev
 bun run test
 bun run build
-bunx wrangler d1 execute DB --local --file drizzle/0000_baseline.sql --config wrangler.jsonc
+bun run db:bootstrap:local
 bunx wrangler dev --config dist/server/wrangler.json --port 8788
 ```
+
+`astro dev` automatically uses `wrangler.local.jsonc`. Its D1, R2, Durable
+Object, and rate-limit bindings are simulated locally and it intentionally has
+no production route or VPC service binding. Production checks and builds keep
+using `wrangler.jsonc`. The bootstrap script deliberately uses the Wrangler
+version bundled with the Cloudflare Vite plugin so its persisted SQLite state
+stays compatible with the local workerd runtime.
 
 `drizzle/0000_baseline.sql` is reset-only. Schema changes intentionally do not
 support in-place upgrades. The committed all-zero D1 ID is a deployment guard;
