@@ -1,30 +1,19 @@
 name: Website
-run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_dispatch' && format('Website deploy {0}', github.ref_name) || format('Website validate {0}', github.ref_name) }}"
+run-name: "Website validate PR #${{ github.event.pull_request.number }}"
 
 on:
   pull_request:
     paths:
+      - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
       - "website/**"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/website.yml"
-      - "website/**"
-  workflow_dispatch:
-    inputs:
-      reset_generation_ready:
-        description: Confirm the new D1 baseline and both rotated R2 bindings are ready
-        required: true
-        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: website-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: website-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -62,14 +51,6 @@ jobs:
 
       - name: Build
         run: bun run build
-
-      - name: Upload deploy artifact
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready
-        uses: actions/upload-artifact@v7
-        with:
-          name: website-dist
-          path: website/dist
-          if-no-files-found: error
 
   ui:
     name: UI visual, accessibility, and smoke
@@ -117,46 +98,3 @@ jobs:
             .tmp/website-playwright/test-results
           if-no-files-found: warn
           retention-days: 14
-
-  deploy:
-    name: Deploy production
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready
-    needs:
-      - validate
-      - ui
-    runs-on: namespace-profile-intar-dev
-    environment: production
-
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: website/.node-version
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.14
-
-      - name: Set up Namespace cache
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          path: ~/.bun/install/cache
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Download deploy artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: website-dist
-          path: website/dist
-
-      - name: Deploy
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: bunx wrangler deploy --config dist/server/wrangler.json

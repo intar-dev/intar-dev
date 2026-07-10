@@ -42,8 +42,12 @@ stays compatible with the local workerd runtime.
 support in-place upgrades. The committed all-zero D1 ID is a deployment guard;
 replace it only as part of the complete remote cutover below.
 
-Production deploys run only through the manually confirmed `Website` workflow
-on `main`; do not deploy an ignored local `dist/` artifact directly.
+Pull requests run the test/build and UI quality gates. A merge to `main` that
+changes the website automatically builds that exact commit and deploys it
+through the `Website production` workflow; do not deploy an ignored local
+`dist/` artifact directly. The production workflow creates the deployable Astro
+artifact but does not repeat the pull request quality gates. Treat `main` as
+deploy-only: a direct website push bypasses those gates and deploys immediately.
 
 ## Breaking remote reset cutover
 
@@ -75,9 +79,11 @@ bunx wrangler d1 execute DB --remote --config wrangler.jsonc \
 bun run build
 ```
 
-Commit the new resource bindings, merge them to `main`, then manually dispatch
-the `Website` workflow with `reset_generation_ready` confirmed. The `production`
-environment deploys exactly the artifact built by that workflow.
+Commit the new resource bindings and open a pull request, but do not merge it
+until the new D1 baseline and both rotated R2 bindings are ready. After the pull
+request quality gates pass, merge it to `main`. The `Website production`
+workflow builds the exact merged commit and deploys it automatically through
+the `production` environment.
 
 After the reset Worker is live, manually dispatch the `Images` workflow from
 `main` with `reset_generation_ready` confirmed. This deliberately uploads the
