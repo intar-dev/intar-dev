@@ -1,0 +1,58 @@
+name: Website production
+run-name: "Website deploy ${{ github.ref_name }} @ ${{ github.sha }}"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/website-deploy.yml"
+      - "website/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: website
+
+jobs:
+  deploy:
+    name: Deploy production
+    runs-on: namespace-profile-intar-dev
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: website/.node-version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Set up Namespace cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build deployment artifact
+        run: bun run build:deploy
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bunx wrangler deploy --config dist/server/wrangler.json
