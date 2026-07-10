@@ -87,6 +87,9 @@ jobs:
         with:
           node-version-file: website/.node-version
 
+      - name: Install Bun setup prerequisite
+        run: apt-get update && apt-get install --yes --no-install-recommends unzip
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
