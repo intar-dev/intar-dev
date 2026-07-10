@@ -1,17 +1,30 @@
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 
-test("public workshop entry exposes both access paths", async ({ page, ui }) => {
+test("public workshop entry stays focused on sign in", async ({ page, ui }) => {
   await ui.open({ ...routeCase("landing"), theme: "light" });
+  await expect(
+    page.getByRole("button", { name: /Sign in with GitHub/i }),
+  ).toBeVisible();
   await expect(
     page
       .getByRole("link", { name: /Request access/i })
-      .or(page.getByRole("button", { name: /Request access/i }))
-      .first(),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /Sign in/i }).first(),
-  ).toBeVisible();
+      .or(page.getByRole("button", { name: /Request access/i })),
+  ).toHaveCount(0);
+
+  const sponsorRow = page.locator(
+    'aside[aria-labelledby="landing-sponsors-heading"]',
+  );
+  const heading = page.getByRole("heading", { level: 1 });
+  await expect(sponsorRow).toBeVisible();
+  await expect(page.getByRole("link", { name: "Hetzner" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "namespace" })).toBeVisible();
+
+  const sponsorBox = await sponsorRow.boundingBox();
+  const headingBox = await heading.boundingBox();
+  expect(sponsorBox).not.toBeNull();
+  expect(headingBox).not.toBeNull();
+  expect(sponsorBox!.y).toBeLessThan(headingBox!.y);
 });
 
 test("transactional access request submits deterministically", async ({

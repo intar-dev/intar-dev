@@ -64,32 +64,7 @@ export function Landing() {
     <div className="flex min-h-svh flex-col">
       <header className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between gap-4 px-[var(--page-inset)]">
         <BrandMark />
-        <div className="flex items-center gap-1">
-          {signedIn ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              render={
-                <Link
-                  to={activeRun ? "/runs/$runId" : "/scenarios"}
-                  params={activeRun ? { runId: activeRun.runId } : {}}
-                />
-              }
-            >
-              {activeRun ? "Resume lab" : "Open workshop"}
-            </Button>
-          ) : (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => signIn.mutate()}
-              disabled={signIn.isPending}
-            >
-              {signIn.isPending ? "Opening GitHub…" : "Sign in"}
-            </Button>
-          )}
-          <ThemeToggle />
-        </div>
+        <ThemeToggle />
       </header>
 
       {errorMessage ? (
@@ -112,20 +87,22 @@ export function Landing() {
       ) : null}
 
       <main className="flex-1">
-        <section className="mx-auto grid w-full max-w-7xl items-center gap-12 px-[var(--page-inset)] py-16 sm:py-24 lg:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)] lg:gap-16 lg:py-28">
+        <section className="mx-auto grid w-full max-w-7xl items-center gap-12 px-[var(--page-inset)] py-12 sm:py-20 lg:grid-cols-[minmax(0,1.05fr)_minmax(24rem,0.95fr)] lg:gap-16 lg:py-24">
           <div className="flex flex-col items-start gap-8">
-            <div className="space-y-6">
-              <p className="text-eyebrow">Hands-on DevOps training</p>
+            <SponsorMarks />
+
+            <div className="space-y-5">
+              <p className="text-eyebrow">Hands-on DevOps labs</p>
               <h1 className="text-display max-w-[12ch] text-balance">
-                Repair real systems. Build operational instinct.
+                Repair real systems. Prove the fix.
               </h1>
-              <p className="prose-measure text-body max-w-2xl text-muted-foreground sm:text-lg sm:leading-8">
-                Enter a live sandbox, diagnose the failure, and prove the repair
-                against continuously running checks. No slides. No simulation.
+              <p className="prose-measure text-body max-w-xl text-muted-foreground sm:text-lg sm:leading-8">
+                Diagnose a live sandbox, repair it in the shell, and watch the
+                checks turn green.
               </p>
             </div>
 
-            <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+            <div className="w-full sm:w-auto">
               {signedIn ? (
                 <Button
                   size="lg"
@@ -148,25 +125,15 @@ export function Landing() {
                   {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                 </Button>
               ) : (
-                <>
-                  <Button
-                    size="lg"
-                    className="w-full sm:w-auto"
-                    render={<Link to="/request-access" />}
-                  >
-                    Request access
-                    <ArrowRight className="size-4" />
-                  </Button>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    className="w-full sm:w-auto"
-                    onClick={() => signIn.mutate()}
-                    disabled={signIn.isPending}
-                  >
-                    {signIn.isPending ? "Opening GitHub…" : "Sign in"}
-                  </Button>
-                </>
+                <Button
+                  size="lg"
+                  className="w-full sm:w-auto"
+                  onClick={() => signIn.mutate()}
+                  disabled={signIn.isPending}
+                >
+                  {signIn.isPending ? "Opening GitHub…" : "Sign in with GitHub"}
+                  {!signIn.isPending ? <ArrowRight className="size-4" /> : null}
+                </Button>
               )}
             </div>
 
@@ -180,90 +147,6 @@ export function Landing() {
           </div>
 
           <WorkOrder />
-        </section>
-
-        <section
-          aria-labelledby="proof-heading"
-          className="border-y bg-card/45"
-        >
-          <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] py-12 sm:py-16">
-            <div className="grid gap-8 lg:grid-cols-[0.8fr_1fr_1fr_1fr] lg:gap-0">
-              <div className="lg:pr-8">
-                <p className="text-eyebrow">Workshop method</p>
-                <h2 id="proof-heading" className="mt-3 text-section-title">
-                  Learn through the repair loop.
-                </h2>
-              </div>
-              {[
-                [
-                  "Brief the incident",
-                  "Start with objectives, system context, and a real machine you can inspect.",
-                ],
-                [
-                  "Work in the shell",
-                  "Use browser SSH or your native terminal. The environment behaves like infrastructure, because it is.",
-                ],
-                [
-                  "Verify continuously",
-                  "Checks change as the system changes, then the completed run becomes a replay you can study.",
-                ],
-              ].map(([title, description], index) => (
-                <article
-                  key={title}
-                  className="border-t pt-6 lg:border-t-0 lg:border-l lg:px-8 lg:pt-0"
-                >
-                  <span className="font-heading text-xs font-semibold text-brand-text tabular-nums">
-                    0{index + 1}
-                  </span>
-                  <h3 className="mt-3 text-card-title">{title}</h3>
-                  <p className="mt-2 text-body text-muted-foreground">
-                    {description}
-                  </p>
-                </article>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="mx-auto w-full max-w-7xl px-[var(--page-inset)] py-12 sm:py-16">
-          <div className="flex flex-col gap-6 border-y py-6 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-eyebrow">Workshop infrastructure</p>
-              <p className="mt-2 text-sm text-muted-foreground">
-                Supported by teams that make real sandboxes practical.
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-8 gap-y-5">
-              <a
-                href="https://www.hetzner.com/?mtm_campaign=intar-dev&mtm_medium=referral&mtm_content=sponsoring_link"
-                target="_blank"
-                rel="noreferrer"
-                className={sponsorLinkClassName}
-              >
-                <img
-                  src={hetznerLogo.src}
-                  width={hetznerLogo.width}
-                  height={hetznerLogo.height}
-                  alt="Hetzner"
-                  className="h-8 w-auto rounded"
-                />
-              </a>
-              <a
-                href="https://namespace.so"
-                target="_blank"
-                rel="noreferrer"
-                className={sponsorLinkClassName}
-              >
-                <img
-                  src={namespaceLogo.src}
-                  width={namespaceLogo.width}
-                  height={namespaceLogo.height}
-                  alt="namespace"
-                  className="h-7 w-auto dark:invert"
-                />
-              </a>
-            </div>
-          </div>
         </section>
       </main>
 
@@ -281,6 +164,52 @@ export function Landing() {
         </a>
       </footer>
     </div>
+  );
+}
+
+function SponsorMarks() {
+  return (
+    <aside
+      aria-labelledby="landing-sponsors-heading"
+      className="flex w-full flex-wrap items-center gap-x-5 gap-y-3 border-b pb-5"
+    >
+      <p
+        id="landing-sponsors-heading"
+        className="text-caption text-muted-foreground"
+      >
+        Infrastructure by
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <a
+          href="https://www.hetzner.com/?mtm_campaign=intar-dev&mtm_medium=referral&mtm_content=sponsoring_link"
+          target="_blank"
+          rel="noreferrer"
+          className={sponsorLinkClassName}
+        >
+          <img
+            src={hetznerLogo.src}
+            width={hetznerLogo.width}
+            height={hetznerLogo.height}
+            alt="Hetzner"
+            className="h-6 w-auto rounded"
+          />
+        </a>
+        <a
+          href="https://namespace.so"
+          target="_blank"
+          rel="noreferrer"
+          className={sponsorLinkClassName}
+        >
+          <img
+            src={namespaceLogo.src}
+            width={namespaceLogo.width}
+            height={namespaceLogo.height}
+            alt="namespace"
+            className="h-5 w-auto dark:invert"
+          />
+        </a>
+      </div>
+    </aside>
   );
 }
 
@@ -367,7 +296,7 @@ const footerLinkClassName =
   "inline-flex min-h-11 min-w-11 items-center justify-center underline decoration-border underline-offset-4 transition-colors hover:text-foreground";
 
 const sponsorLinkClassName =
-  "rounded-lg p-2 outline-none transition-opacity hover:opacity-75 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  "inline-flex min-h-11 min-w-11 items-center justify-center rounded-md px-2 opacity-75 outline-none transition-opacity hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 function normalizeErrorCode(value?: string | null) {
   if (!value) return null;
