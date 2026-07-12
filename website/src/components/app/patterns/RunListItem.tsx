@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, CircleCheck, CircleDot, Clock3, PlayCircle } from "lucide-react";
+import { ArrowRight, PlayCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { formatDurationMs, formatRelativeTime } from "../lib/format";
+import { formatDurationMs } from "../lib/format";
+import { RelativeTime } from "./RelativeTime";
+import { StatusToken } from "./StatusToken";
 
 export interface RunListItemData {
   runId: string;
@@ -16,37 +18,27 @@ export interface RunListItemData {
   hasReplay?: boolean;
 }
 
-export function RunOutcomeChip({
+export function RunOutcomeToken({
   run,
 }: {
   run: Pick<RunListItemData, "active" | "outcome">;
 }) {
   if (run.active) {
-    return (
-      <Badge variant="success" className="gap-1">
-        <CircleDot className="size-3 motion-safe:animate-pulse" aria-hidden />
-        In progress
-      </Badge>
-    );
+    return <StatusToken tone="live" word="In progress" />;
   }
   switch (run.outcome) {
     case "succeeded":
-      return (
-        <Badge variant="success" className="gap-1">
-          <CircleCheck className="size-3" aria-hidden />
-          Solved
-        </Badge>
-      );
+      return <StatusToken tone="success" word="Solved" />;
     case "failed":
-      return <Badge variant="destructive">Failed</Badge>;
+      return <StatusToken tone="danger" word="Failed" />;
     case "cancelled":
-      return <Badge variant="outline">Ended early</Badge>;
+      return <StatusToken tone="muted" word="Ended early" />;
     default:
-      return <Badge variant="outline">In progress</Badge>;
+      return <StatusToken tone="muted" word="In progress" />;
   }
 }
 
-// The one horizontal run row: outcome chip, title, meta line, trailing action.
+// The one horizontal run row: status token, title, meta line, trailing action.
 export function RunListItem({
   run,
   trailing,
@@ -66,18 +58,17 @@ export function RunListItem({
             >
               {run.title}
             </Link>
-            <RunOutcomeChip run={run} />
+            <RunOutcomeToken run={run} />
             {run.solutionAssisted ? (
               <Badge variant="outline">Solution used</Badge>
             ) : null}
           </div>
-          <p className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
-            <span>Started {formatRelativeTime(run.createdAt)}</span>
+          <p className="flex flex-wrap items-center gap-x-3 font-mono text-xs text-muted-foreground">
+            <span>
+              Started <RelativeTime at={run.createdAt} />
+            </span>
             {run.solveDurationMs !== null ? (
-              <span className="inline-flex items-center gap-1">
-                <Clock3 className="size-3" />
-                Solved in {formatDurationMs(run.solveDurationMs)}
-              </span>
+              <span>Solved in {formatDurationMs(run.solveDurationMs)}</span>
             ) : null}
           </p>
         </div>

@@ -31,7 +31,7 @@ export function Stat({ label, value, detail, size = "lg", className }: StatProps
       )}
     >
       <p className="text-eyebrow">{label}</p>
-      <p className="mt-2 font-heading text-3xl font-bold tracking-tight">
+      <p className="mt-2 font-heading text-2xl font-bold tracking-tight">
         {value}
       </p>
       {detail ? (

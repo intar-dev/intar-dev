@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Check, Plus, Users, X } from "lucide-react";
+import { usePageChrome } from "../shell/page-chrome";
 import { PageShell } from "../patterns/PageShell";
-import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
+import { CardGridSkeleton } from "../patterns/Skeletons";
+import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { InlineFeedback } from "../patterns/InlineFeedback";
 import { formatRelativeTime } from "../lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -128,24 +130,27 @@ export function Teams() {
   const entries = teams.data?.teams ?? [];
   const invites = teams.data?.invites ?? [];
 
-  const openCreateDialog = () => {
+  const createTeamReset = createTeam.reset;
+  const openCreateDialog = useCallback(() => {
     setTeamName("");
-    createTeam.reset();
+    createTeamReset();
     setCreateOpen(true);
-  };
+  }, [createTeamReset]);
 
-  return (
-    <PageShell
-      width="content"
-      title="Teams"
-      description="Join an invitation or open a team to coordinate scenarios and progress."
-      actions={
-        <Button onClick={openCreateDialog}>
-          <Plus className="size-4" />
+  usePageChrome({
+    action: useMemo(
+      () => (
+        <Button size="sm" onClick={openCreateDialog}>
+          <Plus className="size-3.5" />
           New team
         </Button>
-      }
-    >
+      ),
+      [openCreateDialog],
+    ),
+  });
+
+  return (
+    <PageShell width="content">
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
@@ -278,8 +283,8 @@ export function Teams() {
               : "Failed to load teams"
           }
         />
-      ) : teams.isLoading ? (
-        <LoadingState title="Loading teams" />
+      ) : teams.isPending ? (
+        <CardGridSkeleton cards={3} cardClassName="h-20" className="sm:grid-cols-1" />
       ) : !entries.length && !invites.length ? (
         <EmptyState
           icon={<Users />}

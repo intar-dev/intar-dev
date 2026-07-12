@@ -2,7 +2,8 @@ import { Link } from "@tanstack/react-router";
 import { ArrowRight, BookOpen, CircleDot, History } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
 import { RunListItem } from "../patterns/RunListItem";
-import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
+import { ListSkeleton } from "../patterns/Skeletons";
+import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { useMyRuns, type MyRunEntry } from "../hooks/useMyRuns";
 import { formatRelativeTime } from "../lib/format";
 import { Button } from "@/components/ui/button";
@@ -36,13 +37,7 @@ export function RunsList() {
   }
 
   return (
-    <PageShell
-      title="My runs"
-      eyebrow="Learn"
-      description="Resume live work or study the record of a completed repair."
-      width="content"
-      density="comfortable"
-    >
+    <PageShell width="content" density="comfortable">
       {runs.error ? (
         <ErrorState
           title="Could not load runs"
@@ -53,13 +48,13 @@ export function RunsList() {
           }
           onRetry={() => void runs.refetch()}
         />
-      ) : runs.isLoading ? (
-        <LoadingState title="Loading your runs" />
+      ) : runs.isPending ? (
+        <ListSkeleton />
       ) : !entries.length ? (
         <EmptyState
           icon={<BookOpen />}
           title="No runs yet"
-          description="Start a scenario to launch your first sandbox — it will show up here, along with the replay once you finish."
+          description="Launch a scenario to get a VM-backed environment — finished runs keep their replay here."
           action={
             <Button render={<Link to="/scenarios" />}>
               <BookOpen className="size-4" />

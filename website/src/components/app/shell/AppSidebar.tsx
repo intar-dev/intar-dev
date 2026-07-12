@@ -7,10 +7,12 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { isAdminUser } from "@/lib/authz";
+import { useMyRuns } from "../hooks/useMyRuns";
 import { useSession } from "../hooks/useSession";
 import { NAV_SECTIONS, findActiveNavItem } from "./nav-config";
 import { SidebarUserMenu } from "./SidebarUserMenu";
@@ -23,6 +25,9 @@ export function AppSidebar() {
   const { data } = useSession();
   const isAdmin = isAdminUser(data?.user ?? null);
   const activeId = findActiveNavItem(pathname)?.id ?? null;
+  const runs = useMyRuns();
+  const activeRunCount =
+    runs.data?.runs.filter((run) => run.active).length ?? 0;
 
   const sections = NAV_SECTIONS.filter(
     (section) => section.requires !== "admin" || isAdmin,
@@ -53,6 +58,8 @@ export function AppSidebar() {
               <SidebarMenu>
                 {items.map((item) => {
                   const Icon = item.icon;
+                  const badgeCount =
+                    item.id === "runs" ? activeRunCount : 0;
                   return (
                     <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton
@@ -62,7 +69,17 @@ export function AppSidebar() {
                       >
                         <Icon />
                         <span>{item.label}</span>
+                        {badgeCount > 0 ? (
+                          <span className="sr-only">
+                            , {badgeCount} active
+                          </span>
+                        ) : null}
                       </SidebarMenuButton>
+                      {badgeCount > 0 ? (
+                        <SidebarMenuBadge className="text-primary">
+                          {badgeCount}
+                        </SidebarMenuBadge>
+                      ) : null}
                     </SidebarMenuItem>
                   );
                 })}

@@ -15,17 +15,21 @@ export function ScenarioCancelDialog(props: {
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   pending: boolean;
+  /** Render the inline trigger button; false when the app bar opens it. */
+  trigger?: boolean;
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogTrigger
-        render={
-          <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-            <Trash2 className="size-4" />
-            End run
-          </Button>
-        }
-      />
+      {(props.trigger ?? true) ? (
+        <DialogTrigger
+          render={
+            <Button size="sm" variant="destructive" className="w-full sm:w-auto">
+              <Trash2 className="size-4" />
+              End run
+            </Button>
+          }
+        />
+      ) : null}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>End this run?</DialogTitle>
@@ -57,17 +61,21 @@ export function DeleteRunDialog(props: {
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   pending: boolean;
+  /** Render the inline trigger button; false when the app bar opens it. */
+  trigger?: boolean;
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogTrigger
-        render={
-          <Button size="sm" variant="destructive" className="w-full sm:w-auto">
-            <Trash2 className="size-4" />
-            Delete run
-          </Button>
-        }
-      />
+      {(props.trigger ?? true) ? (
+        <DialogTrigger
+          render={
+            <Button size="sm" variant="destructive" className="w-full sm:w-auto">
+              <Trash2 className="size-4" />
+              Delete run
+            </Button>
+          }
+        />
+      ) : null}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete this run?</DialogTitle>

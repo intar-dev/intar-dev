@@ -3,7 +3,8 @@ import { Link } from "@tanstack/react-router";
 import { Activity, Archive, CircleAlert, Server, Shapes } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
-import { EmptyState, LoadingState } from "@/components/app/patterns/StateCard";
+import { TableSkeleton } from "@/components/app/patterns/Skeletons";
+import { EmptyState } from "@/components/app/patterns/StateCard";
 import { type RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -367,13 +368,7 @@ export function Dashboard() {
   }, [totalRunPages]);
 
   return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      title="Overview"
-      description="Exceptions first, then the live work and retained run history across the fleet."
-    >
+    <PageShell width="workspace" density="compact">
       <Section
         title="Operational ledger"
         description="Current fleet posture from the latest host reports."
@@ -460,8 +455,8 @@ export function Dashboard() {
           description="Everything currently running across the fleet."
           actions={<Badge variant="outline">{liveScenarioRuns.length} active</Badge>}
         >
-        {hosts.isLoading ? (
-          <LoadingState title="Loading active runs" className="border-0 bg-transparent shadow-none" />
+        {hosts.isPending ? (
+          <TableSkeleton rows={2} />
         ) : liveScenarioRuns.length ? (
           <div className="space-y-4">
             {liveScenarioRuns.map(({ host, vm }) => {
@@ -549,8 +544,8 @@ export function Dashboard() {
           </div>
         }
       >
-        {hosts.isLoading ? (
-          <LoadingState title="Loading archived runs" className="border-0 bg-transparent shadow-none" />
+        {hosts.isPending ? (
+          <TableSkeleton rows={2} />
         ) : pagedArchivedScenarioRuns.length ? (
           <div className="space-y-4">
             {pagedArchivedScenarioRuns.map(({ host, run }) => {

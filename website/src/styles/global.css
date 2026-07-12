@@ -167,6 +167,7 @@
   --space-24: 6rem;
   --page-inset: 1rem;
   --workspace-inset: 0.75rem;
+  --app-bar-h: 3rem;
   --background: oklch(0.975 0.008 77);
   --foreground: oklch(0.225 0.018 48);
   --card: oklch(0.992 0.004 80);
@@ -323,19 +324,19 @@
 
 @utility text-page-title {
   font-family: var(--font-heading);
-  font-size: 2rem;
-  line-height: 1.1;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-size: 1.125rem;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.025em;
   font-variation-settings: "MONO" 0, "CASL" 0.1, "CRSV" 0;
 }
 
 @utility text-section-title {
   font-family: var(--font-heading);
-  font-size: 1.25rem;
-  line-height: 1.25;
-  font-weight: 680;
-  letter-spacing: -0.015em;
+  font-size: 1rem;
+  line-height: 1.45;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   font-variation-settings: "MONO" 0, "CASL" 0.05;
 }
 

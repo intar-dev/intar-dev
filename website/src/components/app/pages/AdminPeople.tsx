@@ -6,7 +6,8 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import { FilterBar } from "@/components/app/patterns/FilterBar";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
-import { EmptyState, ErrorState, LoadingState } from "../patterns/StateCard";
+import { TableSkeleton } from "../patterns/Skeletons";
+import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
 import { authClient, type AppAuthUser } from "@/lib/auth-client";
 import {
@@ -70,13 +71,7 @@ export function AdminPeople() {
   };
 
   return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      title="People"
-      description="Review access, account roles, and instructor-created teams."
-    >
+    <PageShell width="workspace" density="compact">
       <Tabs
         value={activeTab}
         onValueChange={(value) => setTab(value as AdminPeopleTab)}
@@ -169,8 +164,8 @@ function AccessRequestsPanel() {
       />
     );
   }
-  if (requests.isLoading) {
-    return <LoadingState title="Loading access requests" />;
+  if (requests.isPending) {
+    return <TableSkeleton />;
   }
 
   const entries = requests.data?.requests ?? [];
@@ -310,8 +305,8 @@ function UsersPanel() {
       />
     );
   }
-  if (users.isLoading) {
-    return <LoadingState title="Loading users" />;
+  if (users.isPending) {
+    return <TableSkeleton />;
   }
 
   const entries = (users.data?.users ?? []) as AdminListedUser[];
@@ -675,8 +670,8 @@ function TeamsPanel() {
       />
     );
   }
-  if (teams.isLoading) {
-    return <LoadingState title="Loading teams" />;
+  if (teams.isPending) {
+    return <TableSkeleton />;
   }
 
   const entries = teams.data?.teams ?? [];

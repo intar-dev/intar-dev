@@ -1,31 +1,27 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   ArrowRight,
   ChevronDown,
-  Clock3,
   History,
-  Server,
   Trash2,
   Trophy,
 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
-import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { ContentHeader } from "@/components/app/patterns/ContentHeader";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
-import {
-  DifficultyChip,
-  MetaChip,
-} from "@/components/app/patterns/MetaChip";
+import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
 import { RunListItem } from "@/components/app/patterns/RunListItem";
-import { ErrorState, LoadingState } from "@/components/app/patterns/StateCard";
-import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
+import { ErrorState } from "@/components/app/patterns/StateCard";
+import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
   formatDurationMs,
   formatTimestamp,
 } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
   CardContent,
@@ -135,7 +131,14 @@ export function ScenarioBriefing() {
   }));
   const recentRuns = runsWithAttemptNumbers.slice(0, 5);
   const olderRuns = runsWithAttemptNumbers.slice(5);
-  useBreadcrumbLabel(scenarioData?.briefing.title);
+  const solved = succeededRuns.length > 0;
+  usePageChrome({
+    title: scenarioData?.briefing.title,
+    status: useMemo(
+      () => (solved ? <Badge variant="success">Solved</Badge> : undefined),
+      [solved],
+    ),
+  });
 
   const bestSolveMs = succeededRuns
     .filter((run) => run.solveDurationMs !== null)
@@ -160,13 +163,7 @@ export function ScenarioBriefing() {
   };
 
   return (
-    <PageShell
-      title="Scenario briefing"
-      description=""
-      showHeader={false}
-      width="content"
-      density="comfortable"
-    >
+    <PageShell width="content" density="comfortable">
       {scenarioQuery.error ? (
         <ErrorState
           title="Could not load scenario"
@@ -176,40 +173,40 @@ export function ScenarioBriefing() {
               : "Failed to load scenario briefing"
           }
           onRetry={() => void scenarioQuery.refetch()}
-          headingLevel={1}
         />
       ) : !scenarioData ? (
-        <LoadingState title="Loading briefing" headingLevel={1} />
+        <div role="status" className="space-y-8">
+          <span className="sr-only">Loading…</span>
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-72 max-w-full" />
+            <Skeleton className="h-4 w-96 max-w-full" />
+            <Skeleton className="h-3 w-64" />
+          </div>
+          <div className="grid items-start gap-12 lg:grid-cols-[minmax(0,1fr)_21rem]">
+            <Skeleton className="h-64 rounded-xl" />
+            <Skeleton className="h-48 rounded-xl" />
+          </div>
+        </div>
       ) : (
         <>
-          <PageHeader
-            backLink={{ to: "/scenarios", label: "All scenarios" }}
-            title={
-              <span className="inline-flex flex-wrap items-center gap-3">
-                {scenarioData.briefing.title}
-                {succeededRuns.length ? (
-                  <Badge variant="success">Solved</Badge>
-                ) : null}
-              </span>
-            }
-            description={scenarioData.briefing.tagline}
+          <ContentHeader
+            title={scenarioData.briefing.title}
+            badge={solved ? <Badge variant="success">Solved</Badge> : undefined}
+            summary={scenarioData.briefing.tagline}
             meta={
-              <>
-                <MetaChip variant="outline">
-                  {scenarioData.briefing.category}
-                </MetaChip>
-                <DifficultyChip
-                  difficulty={scenarioData.briefing.difficulty}
-                />
-                <MetaChip icon={<Clock3 />}>
-                  ~{scenarioData.briefing.estimatedMinutes} min
-                </MetaChip>
-                <MetaChip icon={<Server />}>
-                  {scenarioData.vmCount === 1
+              <MetaLine
+                items={[
+                  scenarioData.briefing.category,
+                  <MetaDifficulty
+                    key="difficulty"
+                    difficulty={scenarioData.briefing.difficulty}
+                  />,
+                  `~${scenarioData.briefing.estimatedMinutes} min`,
+                  scenarioData.vmCount === 1
                     ? "1 machine"
-                    : `${scenarioData.vmCount} machines`}
-                </MetaChip>
-              </>
+                    : `${scenarioData.vmCount} machines`,
+                ]}
+              />
             }
           />
 

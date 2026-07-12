@@ -140,11 +140,7 @@ export function Profile() {
   const user = session?.user ?? null;
 
   return (
-    <PageShell
-      width="content"
-      title="Profile"
-      description="Your GitHub identity owns your run history. SSH keys let your own machine enter future lab VMs."
-    >
+    <PageShell width="content">
       <Section
         title="Account"
         description="This identity is recorded on every scenario run you start."

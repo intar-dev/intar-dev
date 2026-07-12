@@ -74,9 +74,6 @@ export function OpsConsoleRail(props: {
                       : probe.status === "fail"
                         ? "bg-destructive/70"
                         : "bg-muted",
-                    probe.id === focusProbeId &&
-                      probe.status !== "fail" &&
-                      "motion-safe:animate-pulse",
                   )}
                 />
               ))}

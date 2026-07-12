@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -8,21 +9,20 @@ import {
 import { Markdown } from "@/components/app/Markdown";
 import type { AdminScenarioSummary } from "@/components/app/admin/hosts/types";
 import { formatBytes, formatTimestamp } from "@/components/app/lib/format";
-import { PageHeader } from "@/components/app/patterns/PageHeader";
+import { ContentHeader } from "@/components/app/patterns/ContentHeader";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import {
-  DifficultyChip,
-  MetaChip,
-} from "@/components/app/patterns/MetaChip";
-import {
-  ErrorState,
-  LoadingState,
-} from "@/components/app/patterns/StateCard";
-import { useBreadcrumbLabel } from "@/components/app/shell/breadcrumbs";
+  MetaDifficulty,
+  MetaLine,
+} from "@/components/app/patterns/MetaLine";
+import { ErrorState } from "@/components/app/patterns/StateCard";
+import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Collapsible,
   CollapsibleContent,
@@ -156,19 +156,72 @@ export function ScenarioDetails() {
   const scenarioRecord = scenario.data ?? null;
   const enabled = scenarioRecord?.enabled ?? false;
 
-  useBreadcrumbLabel(scenarioRecord?.title);
+  usePageChrome({
+    title: scenarioRecord?.title,
+    status: useMemo(
+      () =>
+        scenarioRecord ? (
+          <Badge variant={enabled ? "success" : "outline"}>
+            {enabled ? "Enabled" : "Disabled"}
+          </Badge>
+        ) : undefined,
+      [scenarioRecord, enabled],
+    ),
+    action: useMemo(
+      () =>
+        scenarioRecord ? (
+          enabled ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => disableScenario.mutate()}
+              disabled={disableScenario.isPending || enableScenario.isPending}
+            >
+              <CircleOff className="size-3.5" />
+              {disableScenario.isPending ? "Disabling…" : "Disable scenario"}
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => enableScenario.mutate()}
+              disabled={enableScenario.isPending || disableScenario.isPending}
+            >
+              <CircleCheckBig className="size-3.5" />
+              {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
+            </Button>
+          )
+        ) : undefined,
+      [
+        scenarioRecord,
+        enabled,
+        enableScenario.isPending,
+        enableScenario.mutate,
+        disableScenario.isPending,
+        disableScenario.mutate,
+      ],
+    ),
+    menu: useMemo(
+      () =>
+        scenarioRecord && enabled ? (
+          <DropdownMenuItem
+            render={
+              <Link
+                to="/scenarios/$scenarioId"
+                params={{ scenarioId: scenarioRecord.scenarioId }}
+              />
+            }
+          >
+            View as learner
+          </DropdownMenuItem>
+        ) : undefined,
+      [scenarioRecord, enabled],
+    ),
+  });
 
   return (
-    <PageShell
-      admin
-      title="Scenario details"
-      showHeader={false}
-      width="workspace"
-      density="compact"
-    >
+    <PageShell width="workspace" density="compact">
       {scenario.error ? (
         <ErrorState
-          headingLevel={1}
           title="Could not load scenario"
           description={
             scenario.error instanceof Error
@@ -178,65 +231,31 @@ export function ScenarioDetails() {
           onRetry={() => void scenario.refetch()}
         />
       ) : !scenarioRecord ? (
-        <LoadingState headingLevel={1} title="Loading scenario" />
+        <div role="status" className="space-y-6">
+          <span className="sr-only">Loading…</span>
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-72 max-w-full" />
+            <Skeleton className="h-4 w-80 max-w-full" />
+            <Skeleton className="h-3 w-56" />
+          </div>
+          <Skeleton className="h-48 rounded-xl" />
+          <Skeleton className="h-48 rounded-xl" />
+        </div>
       ) : (
         <>
-          <PageHeader
-            eyebrow="Admin"
-            backLink={{ to: "/admin/scenarios", label: "Registry" }}
+          <ContentHeader
             title={scenarioRecord.title}
-            description={scenarioRecord.description}
+            summary={scenarioRecord.description}
             meta={
-              <>
-                <Badge variant={enabled ? "success" : "outline"}>
-                  {enabled ? "Enabled" : "Disabled"}
-                </Badge>
-                <DifficultyChip difficulty={scenarioRecord.difficulty} />
-                <MetaChip variant="outline" className="font-mono">
-                  {scenarioRecord.scenarioId}
-                </MetaChip>
-              </>
-            }
-            actions={
-              <>
-                {enabled ? (
-                  <Button
-                    variant="outline"
-                    onClick={() => disableScenario.mutate()}
-                    disabled={
-                      disableScenario.isPending || enableScenario.isPending
-                    }
-                  >
-                    <CircleOff className="size-4" />
-                    {disableScenario.isPending
-                      ? "Disabling…"
-                      : "Disable scenario"}
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={() => enableScenario.mutate()}
-                    disabled={
-                      enableScenario.isPending || disableScenario.isPending
-                    }
-                  >
-                    <CircleCheckBig className="size-4" />
-                    {enableScenario.isPending ? "Enabling…" : "Enable scenario"}
-                  </Button>
-                )}
-                {enabled ? (
-                  <Button
-                    variant="outline"
-                    render={
-                      <Link
-                        to="/scenarios/$scenarioId"
-                        params={{ scenarioId: scenarioRecord.scenarioId }}
-                      />
-                    }
-                  >
-                    View as learner
-                  </Button>
-                ) : null}
-              </>
+              <MetaLine
+                items={[
+                  scenarioRecord.scenarioId,
+                  <MetaDifficulty
+                    key="difficulty"
+                    difficulty={scenarioRecord.difficulty}
+                  />,
+                ]}
+              />
             }
           />
 
@@ -389,9 +408,10 @@ function ProbeRecord({
         <Badge variant="outline" className="font-mono">
           {probe.kind}
         </Badge>
-        <MetaChip icon={<Server />} variant="outline">
+        <Badge variant="outline" className="font-mono">
+          <Server className="size-3" />
           {probe.scenarioVmName}
-        </MetaChip>
+        </Badge>
       </div>
       {probe.title ? <p className="text-sm font-medium">{probe.title}</p> : null}
       {probe.bodyMarkdown ? <Markdown>{probe.bodyMarkdown}</Markdown> : null}

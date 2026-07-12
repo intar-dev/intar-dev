@@ -2,8 +2,8 @@ import { useEffect, useRef } from "react";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./AppSidebar";
-import { BreadcrumbProvider } from "./breadcrumbs";
-import { TopBar } from "./TopBar";
+import { AppBar } from "./AppBar";
+import { PageChromeProvider } from "./page-chrome";
 
 // The authenticated app surface. Theme follows the user's choice (or system
 // preference) via the `.dark` class on <html> — no per-surface mood forcing.
@@ -25,7 +25,7 @@ export function AppShell() {
   }, [pathname]);
 
   return (
-    <BreadcrumbProvider>
+    <PageChromeProvider>
       <SidebarProvider>
         <a
           href="#main-content"
@@ -35,7 +35,7 @@ export function AppShell() {
         </a>
         <AppSidebar />
         <SidebarInset>
-          <TopBar />
+          <AppBar />
           <main
             id="main-content"
             tabIndex={-1}
@@ -45,6 +45,6 @@ export function AppShell() {
           </main>
         </SidebarInset>
       </SidebarProvider>
-    </BreadcrumbProvider>
+    </PageChromeProvider>
   );
 }

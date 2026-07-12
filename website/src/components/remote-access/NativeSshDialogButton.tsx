@@ -23,6 +23,34 @@ interface NativeSshDialogButtonProps {
   className?: string;
 }
 
+// Controlled variant with no trigger of its own — opened from a menu item.
+export function NativeSshDialog({
+  vmName,
+  sessionRequest,
+  open,
+  onOpenChange,
+}: {
+  vmName: string;
+  sessionRequest: NativeSshSessionRequest;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Native SSH for {vmName}</DialogTitle>
+          <DialogDescription>
+            This route accepts one of the Ed25519 keys saved on your profile.
+            Use your own local SSH identity and connect through Stargate.
+          </DialogDescription>
+        </DialogHeader>
+        {open ? <NativeSshConnectPanel sessionRequest={sessionRequest} /> : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // Thin dialog wrapper around NativeSshConnectPanel — the panel issues the
 // session when the dialog content mounts.
 export function NativeSshDialogButton({
