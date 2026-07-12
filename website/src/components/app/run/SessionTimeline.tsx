@@ -5,7 +5,7 @@ import {
   ReadOnlyTextSurface,
 } from "@/components/app/RunArtifactViewer";
 import { EmptyState } from "@/components/app/patterns/StateCard";
-import { MetaChip } from "@/components/app/patterns/MetaChip";
+import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -143,14 +143,16 @@ function SessionRow({
           <span className="text-sm font-medium">
             {sessionCount === 1 ? "Terminal session" : `Session ${session.index}`}
           </span>
-          <MetaChip variant="outline">
-            {startedAt.toLocaleTimeString(undefined, {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            })}
-          </MetaChip>
-          <MetaChip>{formatScenarioDurationMs(session.durationMs)}</MetaChip>
+          <MetaLine
+            items={[
+              startedAt.toLocaleTimeString(undefined, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              }),
+              formatScenarioDurationMs(session.durationMs),
+            ]}
+          />
           {session.exitCode !== null && session.exitCode !== 0 ? (
             <Badge variant="destructive">exit {session.exitCode}</Badge>
           ) : null}

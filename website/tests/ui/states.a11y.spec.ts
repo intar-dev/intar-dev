@@ -93,7 +93,8 @@ test.describe("focused state accessibility", () => {
       theme: "dark",
       runState: "running",
     });
-    await page.getByRole("button", { name: "SSH command" }).click();
+    await page.getByRole("button", { name: "Page actions" }).click();
+    await page.getByRole("menuitem", { name: "SSH command" }).click();
 
     const dialog = page.getByRole("dialog");
     await expect(

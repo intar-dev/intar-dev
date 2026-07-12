@@ -14,16 +14,20 @@ import {
   Plus,
   Trash2,
   UserMinus,
-  Users,
 } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
-import { PageHeader } from "../patterns/PageHeader";
+import { ContentHeader } from "../patterns/ContentHeader";
 import { Section } from "../patterns/Section";
 import { InlineFeedback } from "../patterns/InlineFeedback";
-import { ErrorState, LoadingState } from "../patterns/StateCard";
-import { DifficultyChip, MetaChip, type ScenarioDifficulty } from "../patterns/MetaChip";
+import { ErrorState } from "../patterns/StateCard";
+import {
+  MetaDifficulty,
+  MetaLine,
+  type ScenarioDifficulty,
+} from "../patterns/MetaLine";
+import { RelativeTime } from "../patterns/RelativeTime";
 import { formatDurationMs, formatRelativeTime } from "../lib/format";
-import { useBreadcrumbLabel } from "../shell/breadcrumbs";
+import { usePageChrome } from "../shell/page-chrome";
 import { isValidGithubUsername } from "@/lib/github-username";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +42,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Tabs,
   TabsContent,
@@ -118,7 +123,6 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-const BACK_LINK = { to: "/teams", label: "All teams" };
 
 function initials(name: string): string {
   const parts = name.split(/\s+/).filter(Boolean);
@@ -140,7 +144,7 @@ export function TeamDetail() {
     staleTime: 5_000,
   });
 
-  useBreadcrumbLabel(team.data?.team.name);
+  usePageChrome({ title: team.data?.team.name });
   const requestedTab = routeSearch.tab ?? "overview";
   const canViewProgress = team.data?.team.role !== "member";
   const activeTab: TeamDetailTab =
@@ -164,8 +168,7 @@ export function TeamDetail() {
 
   if (team.error) {
     return (
-      <PageShell title="Team" showHeader={false} width="content">
-        <PageHeader title="Team" backLink={BACK_LINK} compact />
+      <PageShell width="content">
         <ErrorState
           title="Could not load team"
           description={
@@ -175,11 +178,18 @@ export function TeamDetail() {
       </PageShell>
     );
   }
-  if (team.isLoading || !team.data) {
+  if (team.isPending || !team.data) {
     return (
-      <PageShell title="Team" showHeader={false} width="content">
-        <PageHeader title="Team" backLink={BACK_LINK} compact />
-        <LoadingState title="Loading team" />
+      <PageShell width="content">
+        <div role="status" className="space-y-6">
+          <span className="sr-only">Loading…</span>
+          <div className="space-y-2">
+            <Skeleton className="h-7 w-64 max-w-full" />
+            <Skeleton className="h-4 w-40" />
+          </div>
+          <Skeleton className="h-10 w-full max-w-md" />
+          <Skeleton className="h-40 w-full rounded-xl" />
+        </div>
       </PageShell>
     );
   }
@@ -194,21 +204,23 @@ export function TeamDetail() {
         : "Member";
 
   return (
-    <PageShell title={detail.name} showHeader={false} width="content">
-      <PageHeader
-        backLink={BACK_LINK}
+    <PageShell width="content">
+      <ContentHeader
         title={detail.name}
-        description={`Created ${formatRelativeTime(detail.createdAt)}`}
+        badge={
+          <Badge variant={instructor ? "secondary" : "outline"}>
+            {roleLabel}
+          </Badge>
+        }
         meta={
-          <>
-            <Badge variant={instructor ? "secondary" : "outline"}>
-              {roleLabel}
-            </Badge>
-            <MetaChip icon={<Users />}>
-              {detail.members.length} member
-              {detail.members.length === 1 ? "" : "s"}
-            </MetaChip>
-          </>
+          <MetaLine
+            items={[
+              `${detail.members.length} member${detail.members.length === 1 ? "" : "s"}`,
+              <span key="created">
+                created <RelativeTime at={detail.createdAt} />
+              </span>,
+            ]}
+          />
         }
       />
       <Tabs
@@ -751,7 +763,7 @@ function AssignmentsSection({
                     Assigned {formatRelativeTime(entry.createdAt)}
                   </p>
                 </div>
-                {difficulty ? <DifficultyChip difficulty={difficulty} /> : null}
+                {difficulty ? <MetaDifficulty difficulty={difficulty} className="text-xs text-muted-foreground" /> : null}
                 {instructor ? (
                   <Button
                     size="sm"

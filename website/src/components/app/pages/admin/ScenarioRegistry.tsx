@@ -11,15 +11,15 @@ import {
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import {
-  DifficultyChip,
+  MetaDifficulty,
   SCENARIO_DIFFICULTIES,
   type ScenarioDifficulty,
-} from "@/components/app/patterns/MetaChip";
+} from "@/components/app/patterns/MetaLine";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
+import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import {
   EmptyState,
   ErrorState,
-  LoadingState,
 } from "@/components/app/patterns/StateCard";
 import { formatRelativeTime } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
@@ -180,31 +180,7 @@ export function ScenarioRegistry() {
   };
 
   return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      title="Scenarios"
-      description="Inspect uploaded scenarios and control which ones are live for learners."
-      actions={
-        <>
-          <Button
-            size="sm"
-            variant="outline"
-            render={<Link to="/admin/authoring" />}
-          >
-            Authoring drafts
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            render={<Link to="/admin/builds" />}
-          >
-            Image builds
-          </Button>
-        </>
-      }
-    >
+    <PageShell width="workspace" density="compact">
       {scenarios.error ? (
         <ErrorState
           title="Could not load scenarios"
@@ -215,8 +191,8 @@ export function ScenarioRegistry() {
           }
           onRetry={() => void scenarios.refetch()}
         />
-      ) : scenarios.isLoading ? (
-        <LoadingState title="Loading scenarios" />
+      ) : scenarios.isPending ? (
+        <TableSkeleton />
       ) : !scenarioList.length ? (
         <EmptyState
           icon={<HardDriveDownload />}
@@ -424,7 +400,10 @@ function ScenarioRegistryRow({
           {scenario.scenarioId}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          <DifficultyChip difficulty={scenario.difficulty} />
+          <MetaDifficulty
+            difficulty={scenario.difficulty}
+            className="text-xs text-muted-foreground"
+          />
           <span className="text-sm">{scenario.category}</span>
         </div>
         {scenario.tags.length ? (

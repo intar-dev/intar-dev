@@ -13,7 +13,7 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
-import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaChip";
+import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaLine";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
 import {
   CATALOG_SORT_COMPARATORS,
@@ -284,13 +284,7 @@ export function ScenarioCatalog() {
   );
 
   return (
-    <PageShell
-      title="Scenarios"
-      eyebrow="Learn"
-      description="Choose a live system, read the work order, and make the repair."
-      width="default"
-      density="comfortable"
-    >
+    <PageShell width="default" density="comfortable">
       {scenarios.error ? (
         <Alert variant="destructive">
           <AlertTitle>Could not load scenarios</AlertTitle>

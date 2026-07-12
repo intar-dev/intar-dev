@@ -10,10 +10,10 @@ import { useState } from "react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { Section } from "@/components/app/patterns/Section";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
+import { TableSkeleton } from "@/components/app/patterns/Skeletons";
 import {
   EmptyState,
   ErrorState,
-  LoadingState,
 } from "@/components/app/patterns/StateCard";
 import {
   formatRelativeTime,
@@ -133,13 +133,7 @@ export function AdminBuilds() {
   ).length;
 
   return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      title="Image builds"
-      description="Builder job queue, assignment, reports, and logs."
-    >
+    <PageShell width="workspace" density="compact">
       <Section
         variant="flat"
         density="compact"
@@ -170,8 +164,8 @@ export function AdminBuilds() {
           }
           onRetry={() => void builds.refetch()}
         />
-      ) : builds.isLoading ? (
-        <LoadingState title="Loading builds" />
+      ) : builds.isPending ? (
+        <TableSkeleton />
       ) : !records.length ? (
         <EmptyState
           icon={<PackageOpen />}

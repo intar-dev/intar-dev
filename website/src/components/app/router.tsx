@@ -88,6 +88,9 @@ const appLayoutRoute = createRoute({
   beforeLoad: requireSignedInRoute,
   pendingComponent: FullPageRoutePending,
   component: AppShell,
+  // Renders inside AppShell's <main>, whose bar already owns the h1 — the
+  // root RouteNotFound would nest a second main/h1 here.
+  notFoundComponent: AppRouteNotFound,
 });
 
 const scenarioCatalogRoute = createRoute({
@@ -378,6 +381,25 @@ function RouteError({ reset }: ErrorComponentProps) {
           </Button>
         </div>
       </main>
+    </>
+  );
+}
+
+function AppRouteNotFound() {
+  return (
+    <>
+      <title>Page not found · intar.dev</title>
+      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 px-[var(--page-inset)] py-16 text-center">
+        <div className="space-y-2">
+          <p className="text-eyebrow">Unknown work order</p>
+          <p className="text-page-title">That route is not in the manual</p>
+          <p className="text-sm leading-6 text-muted-foreground">
+            Check the address, or return to the scenario catalog to choose
+            your next repair.
+          </p>
+        </div>
+        <Button render={<Link to="/scenarios" />}>Browse scenarios</Button>
+      </div>
     </>
   );
 }

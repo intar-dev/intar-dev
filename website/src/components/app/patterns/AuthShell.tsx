@@ -13,9 +13,9 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] py-4 sm:py-8 lg:py-16">
+    <main className="relative min-h-svh overflow-hidden px-[var(--page-inset)] py-4 sm:py-6 lg:py-10">
       <div
-        className="pointer-events-none absolute inset-x-0 top-24 border-t opacity-60"
+        className="pointer-events-none absolute inset-x-0 top-16 border-t opacity-60"
         aria-hidden="true"
       />
       <div
@@ -23,10 +23,10 @@ export function AuthShell({
         aria-hidden="true"
       />
       <div className="relative mx-auto w-full max-w-5xl">
-        <BrandMark className="mb-4 sm:mb-6 lg:mb-12" />
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-16">
+        <BrandMark className="mb-4 sm:mb-6" />
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-12">
           <section className="order-1 rounded-xl border bg-card p-4 shadow-sm sm:p-8 lg:order-2">
-            <header className="space-y-3">
+            <header className="space-y-2">
               <p className="text-eyebrow">{eyebrow}</p>
               <h1 className="text-page-title">{title}</h1>
               <p className="text-body text-muted-foreground">{description}</p>

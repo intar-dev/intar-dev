@@ -35,6 +35,14 @@ export function formatDurationMs(ms: number | null | undefined): string {
   return `${seconds}s`;
 }
 
+export function formatClockSeconds(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = hours > 0 ? [hours, minutes, seconds] : [minutes, seconds];
+  return parts.map((value) => String(value).padStart(2, "0")).join(":");
+}
+
 export function formatRelativeTime(ms: number | null | undefined): string {
   if (!ms || !Number.isFinite(ms)) return "—";
   const diff = Date.now() - ms;

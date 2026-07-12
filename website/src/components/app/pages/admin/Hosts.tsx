@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   EllipsisVertical,
@@ -7,9 +7,11 @@ import {
   Server,
   Trash2,
 } from "lucide-react";
+import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
-import { EmptyState, LoadingState } from "@/components/app/patterns/StateCard";
+import { CardGridSkeleton } from "@/components/app/patterns/Skeletons";
+import { EmptyState } from "@/components/app/patterns/StateCard";
 import { HostOnboardingPanel } from "@/components/app/HostOnboardingPanel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -87,20 +89,23 @@ export function AdminHosts() {
       });
   };
 
-  return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      title="Hosts"
-      description="Agent and builder hosts running scenario workloads."
-      actions={
-        <Button onClick={() => setShowOnboarding((current) => !current)}>
-          <Plus className="size-4" />
+  usePageChrome({
+    action: useMemo(
+      () => (
+        <Button
+          size="sm"
+          onClick={() => setShowOnboarding((current) => !current)}
+        >
+          <Plus className="size-3.5" />
           Add host
         </Button>
-      }
-    >
+      ),
+      [],
+    ),
+  });
+
+  return (
+    <PageShell width="workspace" density="compact">
       <div className="space-y-3 empty:hidden">
         {hosts.error ? (
           <Alert variant="destructive">
@@ -134,8 +139,8 @@ export function AdminHosts() {
         <HostOnboardingPanel eyebrow="New host" title="Bridge config" />
       ) : null}
 
-      {hosts.isLoading ? (
-        <LoadingState title="Loading hosts" />
+      {hosts.isPending ? (
+        <CardGridSkeleton cards={4} cardClassName="h-40" />
       ) : hostRecords.length ? (
         <div className="divide-y overflow-hidden rounded-xl border bg-card">
           {hostRecords.map(({ host, hostVms, hostRuns, capacity }) => {

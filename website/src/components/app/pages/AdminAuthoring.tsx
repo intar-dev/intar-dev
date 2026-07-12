@@ -190,14 +190,7 @@ export function AdminAuthoring() {
   });
 
   return (
-    <PageShell
-      admin
-      width="workspace"
-      density="compact"
-      compactHeader
-      title="Authoring"
-      description="Write scenario HCL, validate it with the exact build-pipeline rules (in your browser), preview, and save drafts."
-    >
+    <PageShell width="workspace" density="compact">
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,24rem)]">
         <div className="space-y-4">
           <Card>

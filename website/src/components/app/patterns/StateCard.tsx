@@ -9,9 +9,12 @@ interface StateShellProps {
   title: string;
   description?: string | undefined;
   action?: ReactNode;
+  /** A keyboard hint rendered under the action, e.g. a <kbd> chip. */
+  hint?: ReactNode;
   className?: string | undefined;
   contentClassName?: string | undefined;
-  headingLevel?: 1 | 2 | 3 | undefined;
+  /** The app bar owns every route's h1 — states start at h2. */
+  headingLevel?: 2 | 3 | undefined;
 }
 
 function StateShell({
@@ -19,35 +22,40 @@ function StateShell({
   title,
   description,
   action,
+  hint,
   className,
   contentClassName,
   headingLevel = 2,
 }: StateShellProps) {
-  const Heading =
-    headingLevel === 1 ? "h1" : headingLevel === 3 ? "h3" : "h2";
+  const Heading = headingLevel === 3 ? "h3" : "h2";
 
   return (
     <Card className={className}>
       <CardContent
         className={cn(
-          "flex min-h-[16rem] flex-col items-center justify-center gap-4 text-center",
+          "flex flex-col items-center justify-center gap-3 px-6 py-10 text-center",
           contentClassName,
         )}
       >
-        {icon ? (
-          <div className="flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground [&_svg:not([class*='size-'])]:size-6">
-            {icon}
-          </div>
-        ) : null}
-        <div className="space-y-2">
-          <Heading className="text-section-title">{title}</Heading>
+        <div className="space-y-1.5">
+          <Heading className="inline-flex items-center gap-2 text-base font-semibold">
+            {icon ? (
+              <span className="text-muted-foreground [&_svg:not([class*='size-'])]:size-5">
+                {icon}
+              </span>
+            ) : null}
+            {title}
+          </Heading>
           {description ? (
-            <p className="max-w-xl text-sm leading-6 text-muted-foreground">
+            <p className="max-w-md text-sm leading-6 text-muted-foreground">
               {description}
             </p>
           ) : null}
         </div>
         {action}
+        {hint ? (
+          <p className="text-xs text-muted-foreground">{hint}</p>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -66,7 +74,7 @@ export function LoadingState({
   title?: string;
   description?: string;
   className?: string;
-  headingLevel?: 1 | 2 | 3 | undefined;
+  headingLevel?: 2 | 3 | undefined;
 }) {
   return (
     <StateShell
@@ -92,7 +100,7 @@ export function ErrorState({
   onRetry?: () => void;
   retryLabel?: string;
   className?: string;
-  headingLevel?: 1 | 2 | 3 | undefined;
+  headingLevel?: 2 | 3 | undefined;
 }) {
   return (
     <StateShell

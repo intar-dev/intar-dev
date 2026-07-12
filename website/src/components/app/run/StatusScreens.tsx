@@ -24,7 +24,7 @@ export function ScenarioStepScreen(props: {
       <CardHeader className="space-y-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-2">
-            <CardTitle className="font-heading text-xl font-semibold tracking-tight">
+            <CardTitle className="font-heading text-lg font-semibold tracking-tight">
               {props.title}
             </CardTitle>
             <CardDescription className="leading-6">

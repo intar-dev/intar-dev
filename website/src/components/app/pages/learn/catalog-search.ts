@@ -2,7 +2,7 @@ import type {
   ScenarioCatalogWireEntry,
   ScenarioProgress,
 } from "@/lib/scenario-runs";
-import type { ScenarioDifficulty } from "@/components/app/patterns/MetaChip";
+import type { ScenarioDifficulty } from "@/components/app/patterns/MetaLine";
 import { parseScenarioDifficulty } from "@/lib/scenario-model";
 
 export type CatalogSort =
