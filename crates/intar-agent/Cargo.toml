@@ -2,9 +2,9 @@
 name = "intar-agent"
 version = "0.8.1"
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -38,8 +38,6 @@ zstd.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
 
 [lints]
 workspace = true
