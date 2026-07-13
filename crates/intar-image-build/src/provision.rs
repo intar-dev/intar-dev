@@ -664,11 +664,20 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "  cat >/etc/hosts <<EOF_HOSTS").context("format error")?;
     writeln!(script, "127.0.0.1 localhost").context("format error")?;
-    writeln!(script, "127.0.1.1 $INTAR_VM_HOSTNAME").context("format error")?;
+    // Map the VM's own name to its run-network address (not 127.0.1.1) so
+    // every VM in a run resolves a given VM name to the same address —
+    // cluster software that advertises the resolved hostname address needs
+    // this to hand out a peer-reachable IP.
+    writeln!(script, "${{INTAR_GUEST_IP_CIDR%%/*}} $INTAR_VM_HOSTNAME").context("format error")?;
     writeln!(script, "::1 localhost ip6-localhost ip6-loopback").context("format error")?;
     writeln!(script, "ff02::1 ip6-allnodes").context("format error")?;
     writeln!(script, "ff02::2 ip6-allrouters").context("format error")?;
     writeln!(script, "EOF_HOSTS").context("format error")?;
+    writeln!(
+        script,
+        "  if [ -n \"${{INTAR_PEER_HOSTS_B64:-}}\" ]; then printf '%s' \"$INTAR_PEER_HOSTS_B64\" | base64 -d >>/etc/hosts; fi"
+    )
+    .context("format error")?;
     writeln!(script, "  chmod 0644 /etc/hosts").context("format error")?;
     writeln!(script, "  hostname \"$INTAR_VM_HOSTNAME\"").context("format error")?;
     writeln!(script, "  guest_iface=\"$(find_guest_interface)\"").context("format error")?;
@@ -1445,7 +1454,12 @@ scenario "broken-nginx" {
                 assert!(!script.contains("show_motd() {"));
                 assert!(!script.contains("cat /etc/motd"));
                 assert!(script.contains("cat >/etc/hosts <<EOF_HOSTS"));
-                assert!(script.contains("127.0.1.1 $INTAR_VM_HOSTNAME"));
+                assert!(script.contains("${INTAR_GUEST_IP_CIDR%%/*} $INTAR_VM_HOSTNAME"));
+                assert!(!script.contains("127.0.1.1"));
+                assert!(
+                    script
+                        .contains("printf '%s' \"$INTAR_PEER_HOSTS_B64\" | base64 -d >>/etc/hosts")
+                );
                 assert!(script.contains("grep -qxF '/usr/local/bin/kino-shell' /etc/shells"));
                 assert!(script.contains("usermod -s '/usr/local/bin/kino-shell' 'ubuntu'"));
                 assert!(script.contains("install -m 0755 /tmp/kino /usr/local/bin/kino"));

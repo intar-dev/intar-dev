@@ -18,4 +18,5 @@ export const runtimeEnvKeys = {
   guestIpCidr: "INTAR_GUEST_IP_CIDR",
   gateway: "INTAR_GATEWAY",
   dnsServers: "INTAR_DNS_SERVERS",
+  peerHostsB64: "INTAR_PEER_HOSTS_B64",
 } as const;

@@ -19,6 +19,7 @@ pub const ENV_GATEWAY: &str = "INTAR_GATEWAY";
 pub const ENV_DNS_SERVERS: &str = "INTAR_DNS_SERVERS";
 pub const ENV_PEER_PREFIX: &str = "INTAR_PEER_";
 pub const ENV_PEER_SUFFIX: &str = "_IP";
+pub const ENV_PEER_HOSTS_B64: &str = "INTAR_PEER_HOSTS_B64";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,20 @@ impl RuntimeEnv {
             render_line(ENV_GUEST_IP_CIDR, &self.guest_ip_cidr),
             render_line(ENV_GATEWAY, &self.gateway),
             render_line(ENV_DNS_SERVERS, &self.dns_servers.join(" ")),
+            // The canonical peer map: a base64-encoded /etc/hosts fragment.
+            // The per-peer INTAR_PEER_<VM>_IP variables below sanitize VM
+            // names into env-var keys, which is lossy (`redis-cache` and
+            // `redis_cache` collide) — this fragment preserves exact names so
+            // the guest can install them as resolvable hostnames.
+            render_line(
+                ENV_PEER_HOSTS_B64,
+                &BASE64_STANDARD.encode(
+                    self.peer_guest_ips
+                        .iter()
+                        .map(|(peer_name, ip)| format!("{ip} {peer_name}\n"))
+                        .collect::<String>(),
+                ),
+            ),
         ]
         .into_iter()
         .collect::<Vec<_>>();
@@ -85,7 +100,7 @@ impl RuntimeEnv {
                 .split_whitespace()
                 .map(ToOwned::to_owned)
                 .collect(),
-            peer_guest_ips: parse_peer_guest_ips(&values),
+            peer_guest_ips: parse_peer_guest_ips(&values)?,
         })
     }
 }
@@ -179,16 +194,24 @@ fn parse_authorized_keys(
         .collect())
 }
 
-fn parse_peer_guest_ips(values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    values
-        .iter()
-        .filter_map(|(key, value)| {
-            let peer = key
-                .strip_prefix(ENV_PEER_PREFIX)?
-                .strip_suffix(ENV_PEER_SUFFIX)?;
-            Some((peer.to_ascii_lowercase(), value.clone()))
+fn parse_peer_guest_ips(
+    values: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, RuntimeEnvParseError> {
+    let raw = required(values, ENV_PEER_HOSTS_B64)?;
+    let decoded = BASE64_STANDARD
+        .decode(raw)
+        .map_err(|_| RuntimeEnvParseError::InvalidBase64(ENV_PEER_HOSTS_B64))?;
+    let decoded = String::from_utf8(decoded)
+        .map_err(|_| RuntimeEnvParseError::InvalidUtf8(ENV_PEER_HOSTS_B64))?;
+    Ok(decoded
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let ip = fields.next()?;
+            let peer_name = fields.next()?;
+            Some((peer_name.to_owned(), ip.to_owned()))
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -209,13 +232,27 @@ mod tests {
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),
             dns_servers: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
-            peer_guest_ips: BTreeMap::from([("db".to_owned(), "10.200.0.3".to_owned())]),
+            peer_guest_ips: BTreeMap::from([
+                ("db".to_owned(), "10.200.0.3".to_owned()),
+                ("redis-cache".to_owned(), "10.200.0.4".to_owned()),
+            ]),
         };
 
         let rendered = env.render();
         assert!(rendered.contains("INTAR_SSH_AUTHORIZED_KEYS_B64='"));
         assert!(rendered.contains("KINO_HOST_READY_PORT='18081'"));
         assert!(rendered.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
+        assert!(rendered.contains("INTAR_PEER_REDIS_CACHE_IP='10.200.0.4'"));
+        // The hosts fragment keeps the exact hyphenated VM name that the
+        // env-var key form has to sanitize away.
+        let hosts_b64 = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix("INTAR_PEER_HOSTS_B64='"))
+            .and_then(|value| value.strip_suffix('\''))
+            .expect("peer hosts line present");
+        let hosts = String::from_utf8(BASE64_STANDARD.decode(hosts_b64).expect("valid base64"))
+            .expect("valid utf8");
+        assert_eq!(hosts, "10.200.0.3 db\n10.200.0.4 redis-cache\n");
         assert_eq!(RuntimeEnv::parse(&rendered), Ok(env));
     }
 
