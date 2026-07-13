@@ -270,7 +270,13 @@ impl SystemdHostBackend {
             "failed" | "inactive" => SandboxHealth::Exited,
             _ => SandboxHealth::Quarantined,
         };
-        let control_group: String = unit.get_property("ControlGroup")?;
+        let service = zbus::blocking::Proxy::new(
+            &connection,
+            "org.freedesktop.systemd1",
+            unit.path(),
+            "org.freedesktop.systemd1.Service",
+        )?;
+        let control_group: String = service.get_property("ControlGroup")?;
         let cpu_stat = read_cpu_stat(&control_group).ok();
         let vmm_pid = if matches!(health, SandboxHealth::Healthy | SandboxHealth::Stopping) {
             find_verified_vmm_pid(&control_group, &self.cloud_hypervisor_sha256)?
@@ -410,13 +416,13 @@ impl HostBackend for SystemdHostBackend {
         let Some(path) = Self::get_unit_path(&manager, unit_name)? else {
             return Ok(false);
         };
-        let unit = zbus::blocking::Proxy::new(
+        let service = zbus::blocking::Proxy::new(
             &connection,
             "org.freedesktop.systemd1",
             path,
-            "org.freedesktop.systemd1.Unit",
+            "org.freedesktop.systemd1.Service",
         )?;
-        let control_group: String = unit.get_property("ControlGroup")?;
+        let control_group: String = service.get_property("ControlGroup")?;
         let _: zbus::zvariant::OwnedObjectPath = manager
             .call("StopUnit", &(unit_name, "replace"))
             .with_context(|| format!("stop transient unit {unit_name}"))?;
@@ -1249,13 +1255,13 @@ fn stop_orphan_generation(generation: &ValidatedId) -> Result<()> {
     let Ok(path) = path else {
         return Ok(());
     };
-    let unit = zbus::blocking::Proxy::new(
+    let service = zbus::blocking::Proxy::new(
         &connection,
         "org.freedesktop.systemd1",
         path,
-        "org.freedesktop.systemd1.Unit",
+        "org.freedesktop.systemd1.Service",
     )?;
-    let control_group: String = unit.get_property("ControlGroup")?;
+    let control_group: String = service.get_property("ControlGroup")?;
     let _: zbus::zvariant::OwnedObjectPath =
         manager.call("StopUnit", &(unit_name.as_str(), "replace"))?;
     if !wait_cgroup_drained(&control_group, Duration::from_secs(5))? {
