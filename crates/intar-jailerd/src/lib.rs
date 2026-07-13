@@ -590,9 +590,11 @@ fn wait_cgroup_drained(control_group: &str, timeout: Duration) -> Result<bool> {
 #[cfg(target_os = "linux")]
 fn ping_cloud_hypervisor(socket: &Path) -> Result<()> {
     use std::io::{Read as _, Write as _};
-    use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket)
+    let endpoint = cloud_hypervisor_client::UnixSocketEndpoint::new(socket.to_path_buf())
+        .with_context(|| format!("anchor Cloud Hypervisor API {}", socket.display()))?;
+    let mut stream = endpoint
+        .connect()
         .with_context(|| format!("connect Cloud Hypervisor API {}", socket.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     stream.set_write_timeout(Some(Duration::from_secs(1)))?;

@@ -1,6 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::io;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +18,10 @@ pub const DEFAULT_SOCKET_PATH: &str = "/run/cloud-hypervisor/cloud-hypervisor.so
 #[derive(Debug)]
 pub enum Error {
     Http(reqwest::Error),
+    SocketPath {
+        path: PathBuf,
+        source: io::Error,
+    },
     /// Non-2xx status code with (optional) response body.
     HttpStatus {
         status: u16,
@@ -21,6 +33,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Http(e) => write!(f, "request error: {e}"),
+            Error::SocketPath { path, source } => {
+                write!(f, "invalid unix socket path {}: {source}", path.display())
+            }
             Error::HttpStatus { status, body } => {
                 write!(f, "http status {status} from cloud-hypervisor: {body}")
             }
@@ -33,6 +48,81 @@ impl std::error::Error for Error {}
 impl From<reqwest::Error> for Error {
     fn from(value: reqwest::Error) -> Self {
         Self::Http(value)
+    }
+}
+
+/// A Unix socket endpoint whose parent directory stays pinned by file
+/// descriptor on Linux.
+///
+/// Linux limits the pathname supplied to `connect(2)` to `sockaddr_un.sun_path`
+/// even when the socket itself lives at a valid, longer host-visible path. We
+/// open the parent with `openat2(2)` and connect through the short,
+/// process-local `/proc/self/fd/<fd>/<name>` spelling instead. The original
+/// path remains available for persistence and diagnostics, and no symlink is
+/// followed while the parent directory is opened.
+#[derive(Clone, Debug)]
+pub struct UnixSocketEndpoint {
+    logical_path: PathBuf,
+    connection_path: PathBuf,
+    #[cfg(target_os = "linux")]
+    _parent: Arc<std::os::fd::OwnedFd>,
+}
+
+impl UnixSocketEndpoint {
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        let logical_path = path.into();
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+
+            let file_name = logical_path
+                .file_name()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| Error::SocketPath {
+                    path: logical_path.clone(),
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "socket path must have a file name",
+                    ),
+                })?;
+            let parent_path = logical_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let parent = openat2(
+                rustix::fs::CWD,
+                parent_path,
+                OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+            )
+            .map_err(|source| Error::SocketPath {
+                path: logical_path.clone(),
+                source: io::Error::from(source),
+            })?;
+            let connection_path =
+                PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join(file_name);
+            Ok(Self {
+                logical_path,
+                connection_path,
+                _parent: Arc::new(parent),
+            })
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        Ok(Self {
+            connection_path: logical_path.clone(),
+            logical_path,
+        })
+    }
+
+    pub fn logical_path(&self) -> &Path {
+        &self.logical_path
+    }
+
+    pub fn connect(&self) -> io::Result<UnixStream> {
+        UnixStream::connect(&self.connection_path)
     }
 }
 
@@ -188,16 +278,22 @@ pub struct VsockConfig {
 #[derive(Debug, Clone)]
 pub struct Client {
     socket_path: String,
+    _socket_endpoint: UnixSocketEndpoint,
     http: reqwest::Client,
 }
 
 impl Client {
     pub fn new(socket_path: impl Into<String>) -> Result<Self, Error> {
         let socket_path = socket_path.into();
+        let socket_endpoint = UnixSocketEndpoint::new(PathBuf::from(&socket_path))?;
         let http = reqwest::Client::builder()
-            .unix_socket(socket_path.clone())
+            .unix_socket(socket_endpoint.connection_path.clone())
             .build()?;
-        Ok(Self { socket_path, http })
+        Ok(Self {
+            socket_path,
+            _socket_endpoint: socket_endpoint,
+            http,
+        })
     }
 
     pub fn new_default() -> Result<Self, Error> {
@@ -331,6 +427,15 @@ impl Client {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::io::{Read as _, Write as _};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixListener;
+    #[cfg(target_os = "linux")]
+    use std::thread;
+
     #[test]
     fn vm_config_serializes_vsock() {
         let vm = VmConfig {
@@ -372,5 +477,71 @@ mod tests {
             value.get("landlock_enable").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fd_anchored_endpoint_connects_beyond_sun_path_limit() {
+        let temp = tempfile::tempdir().expect("create socket test directory");
+        let short_socket = temp.path().join("short.sock");
+        let listener = UnixListener::bind(&short_socket).expect("bind short unix socket");
+
+        let mut long_parent = temp.path().to_path_buf();
+        while long_parent.join("cloud-hypervisor.sock").as_os_str().len() <= 140 {
+            long_parent.push("long-configurable-jail-root-segment");
+        }
+        fs::create_dir_all(&long_parent).expect("create long socket parent");
+        let long_socket = long_parent.join("cloud-hypervisor.sock");
+        fs::hard_link(&short_socket, &long_socket).expect("hard-link unix socket");
+
+        assert!(UnixStream::connect(&long_socket).is_err());
+        let endpoint = UnixSocketEndpoint::new(&long_socket).expect("anchor long socket path");
+        assert_eq!(endpoint.logical_path(), long_socket);
+        let _client = endpoint
+            .connect()
+            .expect("connect through pinned parent fd");
+        let _server = listener.accept().expect("accept fd-relative connection");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept HTTP connection");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1_024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let length = stream.read(&mut buffer).expect("read HTTP request");
+                assert_ne!(length, 0, "HTTP client closed before sending headers");
+                request.extend_from_slice(&buffer[..length]);
+            }
+            assert!(request.starts_with(b"GET /api/v1/vmm.ping HTTP/1.1\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .expect("write HTTP response");
+        });
+        let logical_path = long_socket.to_str().expect("test path is UTF-8");
+        let client = Client::new(logical_path).expect("create client for long socket path");
+        assert_eq!(client.socket_path(), logical_path);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        runtime.block_on(client.ping()).expect("ping long socket");
+        server.join().expect("HTTP server thread");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fd_anchored_endpoint_rejects_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create socket test directory");
+        let target = temp.path().join("target");
+        fs::create_dir(&target).expect("create target directory");
+        let link = temp.path().join("link");
+        symlink(&target, &link).expect("create parent symlink");
+
+        let error = UnixSocketEndpoint::new(link.join("cloud-hypervisor.sock"))
+            .expect_err("symlinked socket parent must fail closed");
+        assert!(matches!(error, Error::SocketPath { .. }));
     }
 }

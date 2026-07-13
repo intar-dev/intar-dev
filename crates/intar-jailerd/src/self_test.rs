@@ -172,7 +172,6 @@ mod linux {
     use std::os::unix::fs::{
         FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
     };
-    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
     use std::thread;
@@ -181,7 +180,8 @@ mod linux {
     use anyhow::{Context as _, Result, bail, ensure};
     use cloud_hypervisor_client::{
         Client as CloudHypervisorClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType,
-        MemoryConfig, NetConfig, PayloadConfig, SerialConfig, VmConfig, VmState,
+        MemoryConfig, NetConfig, PayloadConfig, SerialConfig, UnixSocketEndpoint, VmConfig,
+        VmState,
     };
     use intar_jailer_protocol::{
         ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
@@ -2642,7 +2642,8 @@ mod linux {
     }
 
     fn prove_cloud_hypervisor_landlock(socket_path: &Path) -> Result<()> {
-        let mut stream = UnixStream::connect(socket_path)?;
+        let endpoint = UnixSocketEndpoint::new(socket_path.to_path_buf())?;
+        let mut stream = endpoint.connect()?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let body = serde_json::json!({
