@@ -1,9 +1,9 @@
 import type {
-  HostStateReportV1,
-  VmActualStateV1,
+  HostStateReportV2,
+  VmActualStateV2,
   VmNetworkStateV1,
   VmPhase as BridgeVmPhase,
-  VmReportV1,
+  VmReportV2,
 } from "@/generated/bridge";
 import {
   applyProbeSnapshotToVm,
@@ -63,7 +63,7 @@ export function deriveVmPhase(input: {
 export function applyVmReportToRunState(input: {
   runId: string;
   current: RunStateDocument;
-  report: VmReportV1;
+  report: VmReportV2;
 }): RunStateDocument {
   const next = {
     ...input.current,
@@ -90,7 +90,7 @@ export function applyVmReportToRunState(input: {
 export function applyHostReportToRunState(input: {
   runId: string;
   current: RunStateDocument;
-  report: HostStateReportV1;
+  report: HostStateReportV2;
 }): RunStateDocument {
   let next = input.current;
   for (const report of input.report.vms) {
@@ -143,7 +143,7 @@ function applyReportedVmState(input: {
   runId: string;
   vm: RunVmStateDocument;
   report: Pick<
-    VmActualStateV1,
+    VmActualStateV2,
     | "run_id"
     | "vm_name"
     | "phase"

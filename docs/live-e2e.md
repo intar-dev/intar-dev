@@ -10,9 +10,13 @@ guest terminal path, network isolation, teardown, and R2 run artifacts.
 - For the builder path, at least one Linux/KVM builder host is registered,
   connected, and visible on the admin Builds page.
 - At least one Linux/KVM agent host is registered, connected, enabled for
-  scenarios, and reporting KVM, vsock, nftables, and reflink support.
+  scenarios, and reporting jailer-v1, hard CPU quota, Landlock, unified
+  cgroup-v2 CPU accounting, KVM, nftables, and reflink support.
 - `intar-agent --config /etc/intar-agent/config.toml --doctor` exits 0 on that
   agent host.
+- `sudo /usr/lib/intar/intar-jailerd-self-test` exits 0 on that host. Doctor is
+  read-only; only this artifact-backed root test boots the pinned VMM and
+  proves disposable unit/cgroup/jail/network setup, quota, and cleanup.
 - You have an authenticated admin browser cookie for the deployed website.
 - For direct publish mode, you have the registry publish token and the scenario
   image manifest plus matching kernel/initrd boot artifacts.
@@ -176,6 +180,17 @@ export INTAR_LIVE_ARTIFACTS="<kernel_sha256_hex>=/path/to/vmlinuz,<initrd_sha256
 
 Use environment variables so shell history does not capture the cookie or token.
 
+For the fractional-CPU release proof, publish a V3 scenario whose VM contains:
+
+```hcl
+cpu = 0.125
+vcpus = 1
+```
+
+The catalog must report `cpu_millis = 125` and `vcpu_count = 1`. After proving
+one busy VM is capped, run eight busy 125-millicore VMs on a host with one
+schedulable CPU and verify the ninth reservation is refused.
+
 ```sh
 export INTAR_LIVE_BASE_URL="https://intar.dev"
 export INTAR_LIVE_COOKIE="__Secure-better-auth.session_token=..."
@@ -210,10 +225,14 @@ The harness fails unless all of these are true:
   `succeeded` before the run starts.
 - Published manifests and admin scenario metadata use `raw_zstd`, include
   kernel/initrd hashes, advertise a positive virtual size, and direct-boot
-  `root=/dev/vda`.
+  `root=/dev/vda`. The manifest contract is V3 and carries `cpu_millis` plus
+  `vcpu_count`.
 - The host reports the published image as cache `ready`.
-- The host reports KVM, vsock, nftables, and reflink support, with an
-  architecture matching the required images.
+- The V6 bridge reports KVM, nftables, reflink, jailer-v1, hard-quota, Landlock,
+  and cgroup-v2 support, with an architecture matching the required images.
+- The VM report shows the requested quota/topology, `cpu.stat` usage and
+  throttling counters, and healthy sandbox state; the complete process tree is
+  in the VM unit/cgroup.
 - The two-VM `pair-ping` run starts and reaches terminal-ready inside the
   warm-start budget.
 - Run payloads redact unrevealed hint bodies and solution markdown.
@@ -246,7 +265,7 @@ diagnosing:
 just live-e2e "--warm-start-ms 15000"
 ```
 
-## Direct-Boot Risk Checklist
+## Jailed Runtime Risk Checklist
 
 Record these values in the release notes or staging ticket before retiring the
 old self-hosted image builder:
@@ -255,12 +274,22 @@ old self-hosted image builder:
   Linux/KVM builder host; attach the printed checklist.
 - `intar-agent --config /etc/intar-agent/config.toml --doctor` exits 0 on the
   Linux/KVM scenario host; attach the printed checklist.
+- `sudo /usr/lib/intar/intar-jailerd-self-test` exits 0 on that host; attach its
+  jailed-v53 lifecycle, quota, and disposable-state cleanup proof.
 - `just build-images broken-nginx builder.sample.amd64.hcl true` on a Linux/KVM
   host emits one `*.raw.zst`, one manifest, and the matching kernel/initrd
   artifacts.
 - The built root disk boots with direct `-kernel`/`-initrd` under QEMU/KVM.
-- The same published image direct-boots under Cloud Hypervisor through
-  `intar-agent`; no firmware or partition-table boot path is used.
+- Jailerd hash-verifies, copies, and launches the bundled Cloud Hypervisor v53.0
+  runtime inside the VM unit and jail; `intar-agent` has no direct spawn path.
+- The jailed package smoke test boots with only the allowlisted devices and
+  proves seccomp and Landlock fail closed.
+- A busy `cpu = 0.125`, `vcpus = 1` guest exposes
+  `cpu.max = 12500 100000`, `cpu.max.burst = 0`, increments `nr_throttled`, and
+  stays within the documented elapsed-time bound after warm-up.
+- Eight 125-millicore VMs consume exactly one schedulable CPU; a ninth launch is
+  rejected, and every VMM descendant and attributable KVM helper is accounted
+  to the correct unit.
 - `workshop-cluster` reaches solved state, proving the selected cloud kernel
   carries the k3s modules needed by the scenario.
 - The guest reports a larger filesystem after `disk_mib` expansion when the

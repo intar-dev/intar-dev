@@ -1,0 +1,21 @@
+[package]
+name = "intar-jailer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+intar-jailer-protocol = { path = "../intar-jailer-protocol" }
+nix.workspace = true
+rustix.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -11,10 +11,10 @@ use anyhow::{Context as _, Result};
 use fs2::{available_space, total_space};
 use futures_util::{Sink, SinkExt, StreamExt};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV5, BuildPhase,
-    BuildReportV1, ClientHelloV5, DesiredStateV5, HOST_DESIRED_STATE_SCHEMA_VERSION,
-    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV1, HostCapacityV1, HostDesiredStateV1,
-    HostRoleV1, HostStateReportV1, StateReportV5, SyncRequestReason, SyncRequestV5,
+    BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV6, BuildPhase,
+    BuildReportV1, ClientHelloV6, DesiredStateV6, HOST_DESIRED_STATE_SCHEMA_VERSION,
+    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
+    HostRoleV1, HostStateReportV2, StateReportV6, SyncRequestReason, SyncRequestV6,
 };
 use intar_contracts::catalog::{ImageArchitecture, Mib};
 use reqwest::Client as HttpClient;
@@ -105,7 +105,7 @@ async fn connect_once(
     http: &HttpClient,
     db: &BuilderDb,
     build_reports: &mut mpsc::Receiver<BuildReportV1>,
-    current_desired_state: &mut Option<HostDesiredStateV1>,
+    current_desired_state: &mut Option<HostDesiredStateV2>,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_builder_access(&cfg.bridge, http).await?;
@@ -151,7 +151,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.bridge.host_id)?;
                 match message {
-                    BridgeMessageV5::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV6::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -164,7 +164,7 @@ async fn connect_once(
     info!(
         host_id = %server_hello.host_id,
         desired_version = server_hello.desired_version,
-        "builder bridge v5 handshake complete"
+        "builder bridge v6 handshake complete"
     );
 
     send_sync_request(
@@ -224,38 +224,38 @@ async fn handle_server_message<W>(
     write: &mut W,
     cfg: &BuilderConfig,
     db: &BuilderDb,
-    current_desired_state: &mut Option<HostDesiredStateV1>,
-    message: BridgeMessageV5,
+    current_desired_state: &mut Option<HostDesiredStateV2>,
+    message: BridgeMessageV6,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        BridgeMessageV5::DesiredState(message) => {
+        BridgeMessageV6::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
             apply_desired_state(&cfg.bridge, db, &message)
                 .context("failed to apply builder desired state")?;
             *current_desired_state = Some(desired_state);
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV5::SyncRequest(_) => {
+        BridgeMessageV6::SyncRequest(_) => {
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
         }
-        BridgeMessageV5::ServerHello(_) => {
+        BridgeMessageV6::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV5::ClientHello(_)
-        | BridgeMessageV5::StateReport(_)
-        | BridgeMessageV5::VmReport(_)
-        | BridgeMessageV5::BuildReport(_) => {
+        BridgeMessageV6::ClientHello(_)
+        | BridgeMessageV6::StateReport(_)
+        | BridgeMessageV6::VmReport(_)
+        | BridgeMessageV6::BuildReport(_) => {
             anyhow::bail!("server sent builder-originated bridge message");
         }
     }
     Ok(())
 }
 
-fn load_cached_desired_state(cfg: &BridgeConfig, db: &BuilderDb) -> Option<HostDesiredStateV1> {
+fn load_cached_desired_state(cfg: &BridgeConfig, db: &BuilderDb) -> Option<HostDesiredStateV2> {
     let row = match db.load_desired_state() {
         Ok(Some(row)) => row,
         Ok(None) => return None,
@@ -265,7 +265,7 @@ fn load_cached_desired_state(cfg: &BridgeConfig, db: &BuilderDb) -> Option<HostD
         }
     };
 
-    let desired_state = match serde_json::from_str::<HostDesiredStateV1>(&row.doc_json) {
+    let desired_state = match serde_json::from_str::<HostDesiredStateV2>(&row.doc_json) {
         Ok(value) => value,
         Err(error) => {
             warn!(error = %error, "cached builder desired state is invalid JSON");
@@ -288,7 +288,7 @@ fn load_cached_desired_state(cfg: &BridgeConfig, db: &BuilderDb) -> Option<HostD
 
 fn reconcile_cached_desired_state(
     db: &BuilderDb,
-    desired_state: &HostDesiredStateV1,
+    desired_state: &HostDesiredStateV2,
 ) -> Result<()> {
     let inserted = reconcile_desired_builds(db, &desired_state.builds, now_ms())?;
     if inserted > 0 {
@@ -300,7 +300,7 @@ fn reconcile_cached_desired_state(
     Ok(())
 }
 
-fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV5) -> Result<()> {
+fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStateV6) -> Result<()> {
     validate_desired_state(&cfg.host_id, &message.desired_state)?;
     cache_desired_state(db, &message.desired_state)?;
     let inserted = reconcile_desired_builds(db, &message.desired_state.builds, now_ms())?;
@@ -313,7 +313,7 @@ fn apply_desired_state(cfg: &BridgeConfig, db: &BuilderDb, message: &DesiredStat
     Ok(())
 }
 
-fn cache_desired_state(db: &BuilderDb, desired_state: &HostDesiredStateV1) -> Result<()> {
+fn cache_desired_state(db: &BuilderDb, desired_state: &HostDesiredStateV2) -> Result<()> {
     let doc_json = serde_json::to_string(desired_state)
         .context("failed to serialize builder desired state")?;
     db.save_desired_state(desired_state.version, &doc_json, now_ms())
@@ -323,7 +323,7 @@ async fn send_state_report<W>(
     write: &mut W,
     cfg: &BuilderConfig,
     db: &BuilderDb,
-    desired: Option<&HostDesiredStateV1>,
+    desired: Option<&HostDesiredStateV2>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
@@ -332,7 +332,7 @@ where
     let report = build_host_state_report(cfg, db, desired)?;
     send_bridge_message(
         write,
-        &BridgeMessageV5::StateReport(StateReportV5 {
+        &BridgeMessageV6::StateReport(StateReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.bridge.host_id.clone(),
             report,
@@ -348,7 +348,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV5::BuildReport(intar_contracts::bridge::BuildReportV5 {
+        &BridgeMessageV6::BuildReport(intar_contracts::bridge::BuildReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -364,7 +364,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV5::SyncRequest(SyncRequestV5 {
+        &BridgeMessageV6::SyncRequest(SyncRequestV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -376,8 +376,8 @@ where
 fn build_host_state_report(
     cfg: &BuilderConfig,
     db: &BuilderDb,
-    desired: Option<&HostDesiredStateV1>,
-) -> Result<HostStateReportV1> {
+    desired: Option<&HostDesiredStateV2>,
+) -> Result<HostStateReportV2> {
     let now = now_ms();
     let builds = db
         .list_build_jobs()?
@@ -385,7 +385,7 @@ fn build_host_state_report(
         .map(|row| build_report_from_job(&cfg.bridge.host_id, row))
         .collect();
 
-    Ok(HostStateReportV1 {
+    Ok(HostStateReportV2 {
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
         host_id: cfg.bridge.host_id.clone(),
         observed_at_unix_ms: now,
@@ -433,13 +433,17 @@ fn build_phase_from_str(value: &str) -> (BuildPhase, Option<String>) {
     }
 }
 
-fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV1 {
-    HostCapabilitiesV1 {
+fn collect_builder_capabilities(cfg: &BuilderConfig) -> HostCapabilitiesV2 {
+    HostCapabilitiesV2 {
         arch: host_architecture(),
         supports_kvm: cfg.qemu.accelerator == "kvm" && can_open_char_device(Path::new("/dev/kvm")),
         supports_vsock: can_open_char_device(Path::new("/dev/vhost-vsock")),
         supports_reflink: false,
         supports_nftables: false,
+        supports_jailer_v1: false,
+        supports_hard_cpu_quota: false,
+        supports_landlock: false,
+        supports_cgroup_v2: false,
     }
 }
 
@@ -463,12 +467,16 @@ fn can_open_char_device(_path: &Path) -> bool {
     false
 }
 
-fn collect_builder_capacity(cfg: &BuilderConfig) -> HostCapacityV1 {
+fn collect_builder_capacity(cfg: &BuilderConfig) -> HostCapacityV2 {
     let (memory_total_mib, memory_available_mib) = read_memory_mib();
     let disk_probe_path = &cfg.builder.cache_root;
     let load = read_load_averages();
-    HostCapacityV1 {
-        cpu_count: available_cpu_count(),
+    let total_cpu_millis = u32::from(available_cpu_count()) * 1_000;
+    HostCapacityV2 {
+        total_cpu_millis,
+        reserved_cpu_millis: 0,
+        schedulable_cpu_millis: total_cpu_millis,
+        committed_cpu_millis: 0,
         memory_total_mib: Mib(memory_total_mib.unwrap_or(0)),
         memory_available_mib: Mib(memory_available_mib.unwrap_or(0)),
         disk_probe_path: disk_probe_path.display().to_string(),
@@ -559,19 +567,23 @@ fn bytes_to_mib_u32(bytes: u64) -> Option<u32> {
         .filter(|value| *value > 0)
 }
 
-pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV5 {
-    BridgeMessageV5::ClientHello(ClientHelloV5 {
+pub fn builder_client_hello(input: BuilderClientHelloInput<'_>) -> BridgeMessageV6 {
+    BridgeMessageV6::ClientHello(ClientHelloV6 {
         protocol_version: BRIDGE_PROTOCOL_VERSION,
         host_id: input.host_id.to_string(),
         agent_version: input.agent_version.to_string(),
         role: HostRoleV1::Builder,
         last_applied_desired_version: input.last_applied_desired_version,
-        capabilities: HostCapabilitiesV1 {
+        capabilities: HostCapabilitiesV2 {
             arch: input.arch,
             supports_kvm: input.supports_kvm,
             supports_vsock: input.supports_vsock,
             supports_reflink: false,
             supports_nftables: false,
+            supports_jailer_v1: false,
+            supports_hard_cpu_quota: false,
+            supports_landlock: false,
+            supports_cgroup_v2: false,
         },
     })
 }
@@ -641,7 +653,7 @@ fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/agent/connect?hostId={host_id}")
 }
 
-async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV5) -> Result<()>
+async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV6) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -653,7 +665,7 @@ where
         .context("failed to send builder bridge websocket message")
 }
 
-fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV5>> {
+fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV6>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -667,18 +679,18 @@ fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV5>> {
     }
 }
 
-fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV5> {
+fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV6> {
     let message =
-        serde_json::from_str::<BridgeMessageV5>(raw).context("invalid bridge v5 JSON message")?;
-    if !message_has_v5_protocol(&message) {
-        anyhow::bail!("invalid bridge protocol version; expected v5");
+        serde_json::from_str::<BridgeMessageV6>(raw).context("invalid bridge v6 JSON message")?;
+    if !message_has_v6_protocol(&message) {
+        anyhow::bail!("invalid bridge protocol version; expected v6");
     }
     Ok(message)
 }
 
-fn validate_bridge_message(message: &BridgeMessageV5, host_id: &str) -> Result<()> {
-    if !message_has_v5_protocol(message) {
-        anyhow::bail!("invalid bridge protocol version; expected v5");
+fn validate_bridge_message(message: &BridgeMessageV6, host_id: &str) -> Result<()> {
+    if !message_has_v6_protocol(message) {
+        anyhow::bail!("invalid bridge protocol version; expected v6");
     }
     let message_host_id = bridge_message_host_id(message);
     if message_host_id != host_id {
@@ -687,7 +699,7 @@ fn validate_bridge_message(message: &BridgeMessageV5, host_id: &str) -> Result<(
     Ok(())
 }
 
-fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV1) -> Result<()> {
+fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result<()> {
     if desired.schema_version != HOST_DESIRED_STATE_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported desired state schema version {}; expected {}",
@@ -707,51 +719,51 @@ fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV1) -> Result
     Ok(())
 }
 
-fn message_has_v5_protocol(message: &BridgeMessageV5) -> bool {
+fn message_has_v6_protocol(message: &BridgeMessageV6) -> bool {
     match message {
-        BridgeMessageV5::ClientHello(message) => {
+        BridgeMessageV6::ClientHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::ServerHello(message) => {
+        BridgeMessageV6::ServerHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::DesiredState(message) => {
+        BridgeMessageV6::DesiredState(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::StateReport(message) => {
+        BridgeMessageV6::StateReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV5::BuildReport(message) => {
+        BridgeMessageV6::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
+        BridgeMessageV6::BuildReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::SyncRequest(message) => {
+        BridgeMessageV6::SyncRequest(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
     }
 }
 
-fn bridge_message_host_id(message: &BridgeMessageV5) -> &str {
+fn bridge_message_host_id(message: &BridgeMessageV6) -> &str {
     match message {
-        BridgeMessageV5::ClientHello(message) => &message.host_id,
-        BridgeMessageV5::ServerHello(message) => &message.host_id,
-        BridgeMessageV5::DesiredState(message) => &message.host_id,
-        BridgeMessageV5::StateReport(message) => &message.host_id,
-        BridgeMessageV5::VmReport(message) => &message.host_id,
-        BridgeMessageV5::BuildReport(message) => &message.host_id,
-        BridgeMessageV5::SyncRequest(message) => &message.host_id,
+        BridgeMessageV6::ClientHello(message) => &message.host_id,
+        BridgeMessageV6::ServerHello(message) => &message.host_id,
+        BridgeMessageV6::DesiredState(message) => &message.host_id,
+        BridgeMessageV6::StateReport(message) => &message.host_id,
+        BridgeMessageV6::VmReport(message) => &message.host_id,
+        BridgeMessageV6::BuildReport(message) => &message.host_id,
+        BridgeMessageV6::SyncRequest(message) => &message.host_id,
     }
 }
 
-fn bridge_message_type(message: &BridgeMessageV5) -> &'static str {
+fn bridge_message_type(message: &BridgeMessageV6) -> &'static str {
     match message {
-        BridgeMessageV5::ClientHello(_) => "client_hello",
-        BridgeMessageV5::ServerHello(_) => "server_hello",
-        BridgeMessageV5::DesiredState(_) => "desired_state",
-        BridgeMessageV5::StateReport(_) => "state_report",
-        BridgeMessageV5::VmReport(_) => "vm_report",
-        BridgeMessageV5::BuildReport(_) => "build_report",
-        BridgeMessageV5::SyncRequest(_) => "sync_request",
+        BridgeMessageV6::ClientHello(_) => "client_hello",
+        BridgeMessageV6::ServerHello(_) => "server_hello",
+        BridgeMessageV6::DesiredState(_) => "desired_state",
+        BridgeMessageV6::StateReport(_) => "state_report",
+        BridgeMessageV6::VmReport(_) => "vm_report",
+        BridgeMessageV6::BuildReport(_) => "build_report",
+        BridgeMessageV6::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -776,7 +788,7 @@ mod tests {
 
     use std::path::Path;
 
-    use intar_contracts::bridge::{BridgeMessageV5, HostRoleV1};
+    use intar_contracts::bridge::{BridgeMessageV6, HostRoleV1};
     use intar_contracts::catalog::ImageArchitecture;
 
     use crate::config::{BridgeConfig, BuilderConfig};
@@ -814,7 +826,7 @@ mod tests {
             last_applied_desired_version: Some(7),
         });
 
-        let BridgeMessageV5::ClientHello(hello) = message else {
+        let BridgeMessageV6::ClientHello(hello) = message else {
             panic!("expected client hello");
         };
         assert_eq!(hello.role, HostRoleV1::Builder);
@@ -884,14 +896,18 @@ mod tests {
 
         let report = build_host_state_report(&cfg, &db, None).unwrap();
 
-        assert!(report.capacity.cpu_count > 0);
+        assert!(report.capacity.total_cpu_millis >= 1_000);
+        assert_eq!(
+            report.capacity.schedulable_cpu_millis,
+            report.capacity.total_cpu_millis
+        );
         assert!(report.capacity.disk_total_mib.0 > 0);
         assert!(report.capacity.disk_available_mib.0 > 0);
     }
 
     #[test]
     fn desired_state_rejects_invalid_build_identity() {
-        let mut desired = intar_contracts::bridge::HostDesiredStateV1 {
+        let mut desired = intar_contracts::bridge::HostDesiredStateV2 {
             schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "builder-1".to_string(),
             version: 1,

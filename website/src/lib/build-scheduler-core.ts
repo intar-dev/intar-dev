@@ -1,7 +1,7 @@
 import type {
   BuildPhase,
   DesiredBuildV1,
-  HostCapacityV1,
+  HostCapacityV2,
 } from "@/generated/bridge";
 import type { ImageArchitecture } from "@/generated/catalog";
 import type { ImageBuildStatus, ImageBuildTimings } from "@/db/schema";
@@ -16,7 +16,7 @@ export interface BuilderCandidate {
   connected: boolean;
   disabled: boolean;
   activeBuildCount: number;
-  capacity: HostCapacityV1 | null;
+  capacity: HostCapacityV2 | null;
 }
 
 export interface DesiredBuildSource {
@@ -118,7 +118,8 @@ function compareBuilderCapacity(
   const leftCapacity = left.capacity;
   const rightCapacity = right.capacity;
   const metrics = [
-    (rightCapacity?.cpu_count ?? 0) - (leftCapacity?.cpu_count ?? 0),
+    (rightCapacity?.schedulable_cpu_millis ?? 0) -
+      (leftCapacity?.schedulable_cpu_millis ?? 0),
     (rightCapacity?.memory_available_mib ?? 0) -
       (leftCapacity?.memory_available_mib ?? 0),
     (rightCapacity?.disk_available_mib ?? 0) -

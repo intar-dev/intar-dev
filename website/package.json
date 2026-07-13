@@ -11,7 +11,7 @@
     "dev": "astro dev",
     "build": "bun run types:cf:check && astro check && astro build",
     "build:deploy": "astro build",
-    "test": "vitest run && vitest run --config vitest.workers.config.ts",
+    "test": "bun scripts/check-v6-migration.ts && vitest run && vitest run --config vitest.workers.config.ts",
     "test:node": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "ui:install": "playwright install --with-deps chromium firefox webkit",
@@ -25,7 +25,8 @@
     "e2e:live": "bun scripts/live-e2e.ts",
     "preview": "astro preview",
     "astro": "astro",
-    "db:bootstrap:local": "node node_modules/@cloudflare/vite-plugin/node_modules/wrangler/bin/wrangler.js d1 execute DB --local --persist-to .wrangler/local-ui-state --file drizzle/0000_baseline.sql --config wrangler.local.jsonc"
+    "db:bootstrap:local": "bun scripts/apply-d1-sql.ts",
+    "db:migrate:remote": "bun scripts/apply-d1-sql.ts --remote"
   },
   "overrides": {
     "@better-auth/core": "1.7.0-beta.10",

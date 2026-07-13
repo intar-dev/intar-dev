@@ -499,7 +499,8 @@ function ScenarioPreviewCard({
                   <code>{vm.name}</code>
                   <span className="text-muted-foreground">
                     {" "}
-                    · {vm.image} · {vm.cpu} vCPU · {vm.memory} MiB
+                    · {vm.image} · {vm.cpu_millis / 1000} CPU ·{" "}
+                    {vm.vcpu_count} vCPU · {vm.memory} MiB
                   </span>
                 </li>
               ))}

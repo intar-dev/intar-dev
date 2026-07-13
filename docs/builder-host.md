@@ -143,9 +143,9 @@ sudo intar-builder doctor --config /etc/intar-builder/config.toml
 The command exits nonzero if required image-build prerequisites are missing:
 `/dev/kvm`, `accelerator = "kvm"`, the configured QEMU/mmdebstrap/e2fsprogs
 binaries, required work/cache/state directories, bridge credentials, or the
-single-worker limit. It prints a warning, not a hard failure, when
-`/dev/vhost-vsock` is absent because the builder reports that capability but does
-not need vsock for the QEMU/SSH image build path.
+single-worker limit. Builder doctor covers the QEMU/SSH image-build path only;
+it is not a substitute for agent doctor or the privileged jailerd self-test on
+a scenario host.
 
 Watch the logs:
 

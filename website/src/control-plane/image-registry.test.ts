@@ -4,7 +4,7 @@ import {
   handleImageRegistryRequest,
   isRuntimeImageCacheHost,
 } from "@/control-plane/image-registry";
-import type { ScenarioManifestV2 } from "@/generated/catalog";
+import type { ScenarioManifestV3 } from "@/generated/catalog";
 
 const authMock = vi.hoisted(() => ({
   requireVerifiedAgentRequest: vi.fn(),
@@ -114,7 +114,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -174,8 +174,8 @@ describe("image registry routes", () => {
           meta: {
             rev: "abc123",
             kino_version: "0.4.0",
-            build_format_version: "intar-image-build-v2",
-            buildFormatVersion: "intar-image-build-v2",
+            build_format_version: "intar-image-build-v3",
+            buildFormatVersion: "intar-image-build-v3",
             scenarios: [
               {
                 scenarioId: "broken-nginx",
@@ -203,7 +203,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -249,7 +249,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -295,7 +295,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -345,7 +345,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -395,7 +395,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -445,7 +445,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -491,7 +491,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -536,7 +536,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -581,7 +581,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "..",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -621,7 +621,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v2",
+        build_format_version: "intar-image-build-v3",
         scenarios: [
           {
             scenario_id: "..",
@@ -700,7 +700,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v0",
+        build_format_version: "intar-image-build-v2",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -1030,7 +1030,7 @@ describe("image registry routes", () => {
       imageSha256: "a".repeat(64),
       artifactSha256: "b".repeat(64),
     });
-    delete (manifest as Partial<ScenarioManifestV2>).title;
+    delete (manifest as Partial<ScenarioManifestV3>).title;
     const form = new FormData();
     form.set("manifest", JSON.stringify(manifest));
 
@@ -1155,7 +1155,20 @@ describe("image registry routes", () => {
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
 
-  it("rejects publish manifests with invalid vm resources", async () => {
+  it.each([
+    ["zero CPU", { cpu_millis: 0 }],
+    [
+      "u32-overflow CPU",
+      { cpu_millis: 0x1_0000_0000, vcpu_count: 0xffff },
+    ],
+    ["u16-overflow vCPU count", { vcpu_count: 0x1_0000 }],
+    ["u32-overflow memory", { memory_mib: 0x1_0000_0000 }],
+    ["u32-overflow disk", { disk_mib: 0x1_0000_0000 }],
+    [
+      "unsafe integer CPU",
+      { cpu_millis: Number.MAX_SAFE_INTEGER + 1, vcpu_count: 0xffff },
+    ],
+  ])("rejects publish manifests with invalid vm resources: %s", async (_, invalid) => {
     const manifest = publishManifest({
       imageSha256: "a".repeat(64),
       artifactSha256: "b".repeat(64),
@@ -1167,7 +1180,7 @@ describe("image registry routes", () => {
     manifest.vms = [
       {
         ...vm,
-        cpu_count: 0,
+        ...invalid,
       },
     ];
     const form = new FormData();
@@ -2238,7 +2251,7 @@ describe("image registry routes", () => {
     expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
 
-  it("targets published image cache desired state only at scenario-enabled agent hosts", () => {
+  it("targets non-disabled agents even while scenario starts are disabled", () => {
     expect(
       isRuntimeImageCacheHost({
         role: "agent",
@@ -2259,7 +2272,7 @@ describe("image registry routes", () => {
         disabled: false,
         scenarioEnabled: false,
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isRuntimeImageCacheHost({
         role: "agent",
@@ -2269,7 +2282,7 @@ describe("image registry routes", () => {
     ).toBe(false);
   });
 
-  it("does not wake builder hosts when published images update runtime cache desired state", async () => {
+  it("prewarms maintenance-paused agents without waking builder hosts", async () => {
     const now = 1_762_041_660_000;
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     const imagePayload = new Uint8Array([1, 2, 3]);
@@ -2342,13 +2355,19 @@ describe("image registry routes", () => {
       );
       expect(
         desiredStateStoreMock.mutateStoredHostDesiredState,
-      ).toHaveBeenCalledOnce();
+      ).toHaveBeenCalledTimes(2);
       expect(
         desiredStateStoreMock.mutateStoredHostDesiredState,
       ).toHaveBeenCalledWith(db, "agent-1", now, expect.any(Function));
-      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledOnce();
+      expect(
+        desiredStateStoreMock.mutateStoredHostDesiredState,
+      ).toHaveBeenCalledWith(db, "agent-paused", now, expect.any(Function));
+      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledTimes(2);
       expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
         "agent-1",
+      );
+      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
+        "agent-paused",
       );
     } finally {
       dateSpy.mockRestore();
@@ -3130,9 +3149,9 @@ function imageIndexRow(overrides: Partial<ImageIndexRow> = {}): ImageIndexRow {
 function publishManifest(input: {
   imageSha256: string;
   artifactSha256: string;
-}): ScenarioManifestV2 {
+}): ScenarioManifestV3 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     scenario_id: "broken-nginx",
     name: "broken-nginx",
     title: "Broken Nginx",
@@ -3161,7 +3180,8 @@ function publishManifest(input: {
           cmdline:
             "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false",
         },
-        cpu_count: 2,
+        cpu_millis: 2_000,
+        vcpu_count: 2,
         memory_mib: 2048,
         disk_mib: 8192,
         probes: [],

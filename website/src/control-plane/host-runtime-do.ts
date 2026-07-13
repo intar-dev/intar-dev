@@ -2,14 +2,21 @@ import { DurableObject } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  parseBridgeMessageV5,
-  serializeBridgeMessageV5,
-} from "@/control-plane/bridge-v5";
+  parseBridgeMessageV6,
+  serializeBridgeMessageV6,
+} from "@/control-plane/bridge-v6";
 import {
   agentHosts,
   hostActualState,
   scenarioRuns,
 } from "@/db/schema";
+import {
+  commitHostCpuReservation,
+  nextPendingHostCpuReservationExpiry,
+  reconcileHostCpuReservations,
+  reserveHostCpuInD1,
+  rollbackPendingHostCpuReservation,
+} from "@/control-plane/host-cpu-reservations";
 import { createAppId } from "@/lib/id";
 import {
   RUN_PHASE_ORDER,
@@ -38,7 +45,7 @@ import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
-import type { BridgeMessageV5, HostDesiredStateV1 } from "@/generated/bridge";
+import type { BridgeMessageV6, HostDesiredStateV2 } from "@/generated/bridge";
 
 const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
@@ -48,12 +55,14 @@ interface SocketAttachment {
   sessionId: string | null;
   connectedAt: number;
   helloReceived: boolean;
-  bridgeProtocol: "v5" | null;
+  bridgeProtocol: "v6" | null;
   lastDesiredVersionSent: number | null;
   lastDesiredDispatchAtMs: number | null;
 }
 
 export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
+  private cpuReservationQueue: Promise<void> = Promise.resolve();
+
   constructor(
     ctx: DurableObjectState,
     override readonly env: Cloudflare.Env,
@@ -74,6 +83,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     if (url.pathname === "/_internal/retire") {
       return this.handleRetire(request);
+    }
+
+    if (url.pathname.startsWith("/_internal/cpu-reservations/")) {
+      return this.handleCpuReservationRequest(request, url.pathname);
     }
 
     return jsonResponse({ error: "not found" }, 404);
@@ -103,14 +116,14 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       return;
     }
 
-    const bridgeMessage = parseBridgeMessageV5(message);
+    const bridgeMessage = parseBridgeMessageV6(message);
     if (bridgeMessage) {
-      await this.handleBridgeMessageV5(ws, attachment, bridgeMessage);
+      await this.handleBridgeMessageV6(ws, attachment, bridgeMessage);
       return;
     }
 
     try {
-      ws.close(1003, "invalid bridge v5 message");
+      ws.close(1003, "invalid bridge v6 message");
     } catch {
       // ignore
     }
@@ -205,10 +218,80 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     return jsonResponse({ ok: true, hostId });
   }
 
-  private async handleBridgeMessageV5(
+  private async handleCpuReservationRequest(
+    request: Request,
+    pathname: string,
+  ): Promise<Response> {
+    if (request.method !== "POST") {
+      return jsonResponse({ error: "method not allowed" }, 405);
+    }
+    const input = await parseCpuReservationRequest(request);
+    if (!input) {
+      return jsonResponse({ error: "invalid CPU reservation request" }, 400);
+    }
+    const knownHostId = await this.loadKnownHostId();
+    if (knownHostId && knownHostId !== input.hostId) {
+      return jsonResponse({ error: "host id does not match durable object" }, 409);
+    }
+    try {
+      await this.loadRequiredHost(input.hostId);
+    } catch {
+      return jsonResponse({ error: "host not found" }, 404);
+    }
+    await this.persistKnownHostId(input.hostId);
+
+    return this.withCpuReservationLock(async () => {
+      const db = drizzle(this.env.DB);
+      const now = Date.now();
+      if (pathname.endsWith("/reserve")) {
+        if (input.cpuMillis === null) {
+          return jsonResponse({ error: "cpuMillis is required" }, 400);
+        }
+        const result = await reserveHostCpuInD1(db, {
+          hostId: input.hostId,
+          runId: input.runId,
+          cpuMillis: input.cpuMillis,
+          nowUnixMs: now,
+        });
+        await this.scheduleNextAlarm(input.hostId);
+        return jsonResponse(result, result.ok ? 201 : 409);
+      }
+      if (pathname.endsWith("/commit")) {
+        const ok = await commitHostCpuReservation(db, {
+          hostId: input.hostId,
+          runId: input.runId,
+          nowUnixMs: now,
+        });
+        await this.scheduleNextAlarm(input.hostId);
+        return jsonResponse({ ok });
+      }
+      if (pathname.endsWith("/rollback")) {
+        const rolledBack = await rollbackPendingHostCpuReservation(db, input);
+        await this.scheduleNextAlarm(input.hostId);
+        return jsonResponse({ ok: true, rolledBack });
+      }
+      return jsonResponse({ error: "not found" }, 404);
+    });
+  }
+
+  private async withCpuReservationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.cpuReservationQueue;
+    let release!: () => void;
+    this.cpuReservationQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async handleBridgeMessageV6(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: BridgeMessageV5,
+    message: BridgeMessageV6,
   ): Promise<void> {
     if (message.type === "client_hello") {
       await this.handleBridgeClientHello(ws, attachment, message);
@@ -216,7 +299,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
 
     if (
-      attachment.bridgeProtocol !== "v5" ||
+      attachment.bridgeProtocol !== "v6" ||
       !attachment.helloReceived ||
       !attachment.sessionId
     ) {
@@ -265,7 +348,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private async handleBridgeClientHello(
     ws: WebSocket,
     attachment: SocketAttachment,
-    message: Extract<BridgeMessageV5, { type: "client_hello" }>,
+    message: Extract<BridgeMessageV6, { type: "client_hello" }>,
   ): Promise<void> {
     if (message.host_id !== attachment.hostId) {
       try {
@@ -293,12 +376,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       message.host_id,
       now,
     );
-    const sessionId = `v5:${createAppId()}`;
+    const sessionId = `v6:${createAppId()}`;
     const nextAttachment: SocketAttachment = {
       ...attachment,
       sessionId,
       helloReceived: true,
-      bridgeProtocol: "v5",
+      bridgeProtocol: "v6",
       lastDesiredVersionSent:
         message.last_applied_desired_version === desiredState.version
           ? desiredState.version
@@ -326,7 +409,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     await this.closeOlderSockets(message.host_id, ws, sessionId);
 
     ws.send(
-      serializeBridgeMessageV5({
+      serializeBridgeMessageV6({
         type: "server_hello",
         protocol_version: message.protocol_version,
         host_id: message.host_id,
@@ -350,7 +433,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws: WebSocket,
     attachment: SocketAttachment,
     hostId: string,
-    desiredState?: HostDesiredStateV1,
+    desiredState?: HostDesiredStateV2,
   ): Promise<void> {
     const state =
       desiredState ??
@@ -360,9 +443,9 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         Date.now(),
       ));
     ws.send(
-      serializeBridgeMessageV5({
+      serializeBridgeMessageV6({
         type: "desired_state",
-        protocol_version: 5,
+        protocol_version: 6,
         host_id: hostId,
         desired_state: state,
       }),
@@ -376,7 +459,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
   private async applyBridgeStateReport(
     hostId: string,
-    report: Extract<BridgeMessageV5, { type: "state_report" }>["report"],
+    report: Extract<BridgeMessageV6, { type: "state_report" }>["report"],
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
@@ -432,11 +515,14 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         { keepDeleteRequestedAt: true },
       );
     }
+    await this.withCpuReservationLock(() =>
+      reconcileHostCpuReservations(db, hostId, now),
+    );
   }
 
   private async applyBridgeVmReport(
     hostId: string,
-    report: Extract<BridgeMessageV5, { type: "vm_report" }>["report"],
+    report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"],
   ): Promise<void> {
     const run = await this.loadRun(report.run_id);
     if (!run || run.hostId !== hostId) {
@@ -464,7 +550,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
   private async applyBridgeBuildReport(
     hostId: string,
-    report: Extract<BridgeMessageV5, { type: "build_report" }>["report"],
+    report: Extract<BridgeMessageV6, { type: "build_report" }>["report"],
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
@@ -490,9 +576,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       db,
       wakeHostRuntime: false,
     });
+    await this.withCpuReservationLock(() =>
+      reconcileHostCpuReservations(db, hostId, now),
+    );
 
     const activeSocket = await this.findActiveSocket(hostId);
-    if (activeSocket?.attachment.bridgeProtocol === "v5") {
+    if (activeSocket?.attachment.bridgeProtocol === "v6") {
       const lag = await this.loadDesiredVersionLag(hostId, now);
       const shouldRepushLaggingVersion =
         lag.lagging &&
@@ -517,7 +606,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     options?: { force?: boolean },
   ): Promise<void> {
     if (
-      attachment.bridgeProtocol !== "v5" ||
+      attachment.bridgeProtocol !== "v6" ||
       !attachment.sessionId ||
       attachment.hostId !== hostId
     ) {
@@ -668,11 +757,16 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       .filter((vm) => vm.desired_phase === "running")
       .map((vm) => vm.lease_expires_at_unix_ms)
       .sort((left, right) => left - right)[0];
+    const nextReservationExpiry = await nextPendingHostCpuReservationExpiry(
+      drizzle(this.env.DB),
+      hostId,
+    );
 
     if (
       !activeSocket &&
       !undeliveredDesired &&
       typeof nextLeaseExpiry !== "number" &&
+      typeof nextReservationExpiry !== "number" &&
       desiredState.builds.length === 0
     ) {
       // A lagging applied version alone does not keep the alarm armed:
@@ -686,6 +780,9 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       // Overdue selection is strict (`expiry < now`), so aim one tick past
       // the expiry to avoid a no-op alarm fire exactly on the boundary.
       candidates.push(Math.max(now + 1, nextLeaseExpiry + 1));
+    }
+    if (typeof nextReservationExpiry === "number") {
+      candidates.push(Math.max(now + 1, nextReservationExpiry + 1));
     }
     if (lag.lagging && activeSocket) {
       candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
@@ -815,7 +912,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
             ? Math.floor(parsed.connectedAt)
             : 0,
         helloReceived: Boolean(parsed.helloReceived),
-        bridgeProtocol: parsed.bridgeProtocol === "v5" ? "v5" : null,
+        bridgeProtocol: parsed.bridgeProtocol === "v6" ? "v6" : null,
         lastDesiredVersionSent:
           typeof parsed.lastDesiredVersionSent === "number" &&
           Number.isFinite(parsed.lastDesiredVersionSent) &&
@@ -837,7 +934,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private async loadDesiredVersionLag(
     hostId: string,
     nowUnixMs: number,
-    desiredState?: HostDesiredStateV1,
+    desiredState?: HostDesiredStateV2,
   ): Promise<{ lagging: boolean; desiredVersion: number; appliedVersion: number | null }> {
     const db = drizzle(this.env.DB);
     const desired =
@@ -1000,5 +1097,38 @@ function parseRunState(raw: string): RunStateDocument {
     return recomputeRunState(JSON.parse(raw) as RunStateDocument);
   } catch {
     return buildInitialRunState({ vms: [] });
+  }
+}
+
+async function parseCpuReservationRequest(request: Request): Promise<{
+  hostId: string;
+  runId: string;
+  cpuMillis: number | null;
+} | null> {
+  try {
+    const value = (await request.json()) as Record<string, unknown>;
+    const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
+    const runId = typeof value.runId === "string" ? value.runId.trim() : "";
+    const cpuMillis = value.cpuMillis;
+    if (
+      !hostId ||
+      hostId.length > 128 ||
+      !runId ||
+      runId.length > 128 ||
+      (cpuMillis !== undefined &&
+        (typeof cpuMillis !== "number" ||
+          !Number.isSafeInteger(cpuMillis) ||
+          cpuMillis <= 0 ||
+          cpuMillis > 4_294_967_295))
+    ) {
+      return null;
+    }
+    return {
+      hostId,
+      runId,
+      cpuMillis: typeof cpuMillis === "number" ? cpuMillis : null,
+    };
+  } catch {
+    return null;
   }
 }

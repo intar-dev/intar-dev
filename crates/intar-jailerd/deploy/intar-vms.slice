@@ -1,0 +1,7 @@
+[Unit]
+Description=Intar jailed virtual machines
+
+[Slice]
+CPUAccounting=true
+MemoryAccounting=true
+TasksAccounting=true

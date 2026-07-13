@@ -1,6 +1,9 @@
 # intar-agent
 
-`intar-agent` is a small HTTP service that proxies Cloud Hypervisor operations (over the local unix socket) and launches scenario VMs via an Intar runtime disk.
+`intar-agent` is the unprivileged scenario-host reconciler. It prepares typed VM
+resources and talks to the root-owned `intar-jailerd` supervisor over a local
+`SOCK_SEQPACKET` socket. The agent does not spawn Cloud Hypervisor or mutate
+host networking, namespaces, cgroups, or devices directly.
 
 ## Usage
 
@@ -15,10 +18,21 @@ intar-agent --config /etc/intar-agent/config.toml --doctor
 ```
 
 `--doctor` loads the normal config and exits without starting the HTTP service.
-It fails if the host is not a Linux x86_64 direct-boot agent candidate, KVM or
-vhost-vsock is missing, `cloud-hypervisor`/`nft`/`cp` are unavailable, the VM
-work directory or image cache root is not ready, the bridge is disabled, or the
-image registry URL is missing.
+It is a read-only readiness gate for the unprivileged side: Linux x86_64 and
+kernel baseline, required device presence, unified cgroup v2 with its CPU
+controller, the jailerd socket, nftables, trusted cache/work roots, bridge
+configuration, and the image registry.
+
+Doctor does not create a disposable systemd unit, cgroup, jail, or network
+namespace. Before enabling a host, also run the distinct privileged proof:
+
+```bash
+sudo /usr/lib/intar/intar-jailerd-self-test
+```
+
+Both checks must pass. A failed jailerd handshake, runtime hash mismatch, or
+missing hard-quota, seccomp, Landlock, cgroup-v2, namespace, or network support
+keeps the host unschedulable; there is no direct-spawn fallback.
 
 Then:
 
@@ -40,14 +54,17 @@ Get one VM:
 curl -fsS http://127.0.0.1:8080/vms/demo-1
 ```
 
-VM creation is expected to happen via control-plane commands (`vm.create_scenario`). Network settings are allocated by the agent from `[vm_defaults.network]`.
-If the configured bridge does not exist, `intar-agent` will create it, assign the configured gateway/prefix, and bring it up automatically.
+VM creation is expected to happen via desired-state commands from the control
+plane. The agent allocates addresses from `[vm_defaults.network]` and sends the
+complete topology in a typed jailerd request. Only jailerd creates the per-run
+network namespace, bridge, TAPs, routes, and nftables rules.
 
 `lease_duration_seconds` starts counting when the VM reaches `running`. After the timer expires, `intar-agent` will shut down/delete the VM and remove its record.
 
 The runtime disk passes network settings, the hostname, and Kino vsock
-configuration into the guest bootstrap path. `intar-agent` exposes a host-side
-Unix socket at `<work_dir>/vms/<vm>/kino.host.sock` that proxies to Kino.
+configuration into the guest bootstrap path. Narrow ACLs let `intar-agent`
+reach the jailed API/vsock/log paths that it needs without granting access to
+the VM identity or the rest of the jail.
 
 Prune tracked VMs:
 
@@ -69,7 +86,13 @@ Tracked VMs now use an explicit monotonic local lifecycle:
 - archive begin/complete requests are the stable completion facts
 - a late delete success does not rewrite the canonical command status
 
-This is a clean break from the old local sqlite state model. If you still have persisted agent rows with legacy VM states, remove the agent sqlite db and let it rebuild.
+This is a clean break from the old local SQLite state model. Do not remove the
+database by hand. After draining and stopping the V5 agent, use the jailed host
+package's `deploy/install.sh --breaking-v6-cutover`. It rejects active or
+malformed VM state and desired builds, permits only well-formed absent VM
+tombstones, creates a root-only config/database archive, removes only the
+obsolete `cloud_hypervisor.binary` key, and resets the proven-drained legacy
+database before installing V6.
 
 ## Configuration
 
@@ -81,9 +104,9 @@ Example config: `crates/intar-agent/deploy/config.example.toml`
 [server]
 bind = "127.0.0.1:8080"
 
-[cloud_hypervisor]
-binary = "cloud-hypervisor"
-spawn_timeout_seconds = 10
+[jailer]
+socket = "/run/intar-jailerd/control.sock"
+request_timeout_seconds = 10
 
 [bridge]
 enabled = false
@@ -97,6 +120,8 @@ tap = "tap"
 work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
+# Fallback topology for local requests. Scenario manifests carry their own
+# cpu_millis and vcpu_count values.
 vcpus = 1
 memory_mib = 512
 
@@ -117,4 +142,25 @@ compressed `image_sha256`, `image_format = "raw_zstd"`, `image_virtual_size_byte
 boot artifact hashes, boot cmdline, and `download_url` entries. `intar-agent` polls
 the registry every `refresh_interval_minutes`, downloads `.raw.zst` images, verifies
 the compressed SHA-256, decompresses sparse raw disks, downloads kernel/initrd
-artifacts, and direct-boots VMs from that metadata.
+artifacts, and passes verified source descriptors to jailerd. The pinned
+Cloud Hypervisor v53.0 path and SHA-256 belong only in the root-owned
+`/etc/intar-jailerd/config.toml`.
+
+## Scenario CPU resources
+
+Scenario HCL separates its aggregate CPU ceiling from guest topology:
+
+```hcl
+cpu = 0.125
+# Optional; defaults to ceil(cpu), minimum 1.
+vcpus = 1
+```
+
+`cpu` is exact fixed-point millicores: positive integer or decimal literals
+with at most three fractional digits are accepted. Thus `0.125` becomes 125
+millicores and `2` remains 2000 millicores. Zero, exponent notation, excess
+precision, and values greater than `vcpus * 1000` millicores are rejected.
+Catalog manifests use V3 (`cpu_millis`, `vcpu_count`) and the coordinated bridge
+uses V6 with V2 desired-state/resource/report documents. No old-version shim is
+provided. See [Scenario Host Jailer](../../docs/scenario-host-jailer.md) for the
+privileged configuration and drain-first rollout.

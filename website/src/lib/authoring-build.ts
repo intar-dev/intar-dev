@@ -90,8 +90,8 @@ export async function queueDraftBuild(params: {
   const meta: ImageBuildBundleMeta = {
     rev,
     kino_version: kinoVersion,
-    build_format_version: "intar-image-build-v2",
-    buildFormatVersion: "intar-image-build-v2",
+    build_format_version: "intar-image-build-v3",
+    buildFormatVersion: "intar-image-build-v3",
     scenarios: [
       {
         scenarioId: params.scenarioId,

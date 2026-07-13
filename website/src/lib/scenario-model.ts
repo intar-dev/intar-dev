@@ -1,4 +1,4 @@
-import type { ImageKey, ScenarioHintManifestV2 } from "@/generated/catalog";
+import type { ImageKey, ScenarioHintManifestV3 } from "@/generated/catalog";
 
 export type ScenarioDifficulty = "easy" | "medium" | "hard";
 
@@ -18,7 +18,7 @@ export interface ScenarioProbeRecord {
   description: string;
   title: string | null;
   bodyMarkdown: string | null;
-  hints: ScenarioHintManifestV2[];
+  hints: ScenarioHintManifestV3[];
   phase: "boot" | "scenario";
   kind: string;
 }
@@ -35,7 +35,8 @@ export interface ScenarioVmRecord {
   kernelSha256: string;
   initrdSha256: string;
   bootCmdline: string;
-  cpu: number;
+  cpuMillis: number;
+  vcpuCount: number;
   memoryMib: number;
   diskMib: number;
 }
@@ -128,7 +129,8 @@ export interface ScenarioLaunchSpec {
   imageSha256: string | null;
   hostname: string;
   resources: {
-    vcpus: number;
+    cpuMillis: number;
+    vcpuCount: number;
     memoryMib: number;
     diskMib: number;
   };
@@ -204,7 +206,8 @@ export function buildScenarioLaunchSpecs(input: {
       imageSha256: vm.imageSha256,
       hostname: scenarioVmName,
       resources: {
-        vcpus: vm.cpu,
+        cpuMillis: vm.cpuMillis,
+        vcpuCount: vm.vcpuCount,
         memoryMib: vm.memoryMib,
         diskMib: vm.diskMib,
       },

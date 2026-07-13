@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HostStateReportV1, VmReportV1 } from "@/generated/bridge";
+import type { HostStateReportV2, VmReportV2 } from "@/generated/bridge";
 import {
   applyHostReportToRunState,
   applyVmReportToRunState,
@@ -366,15 +366,15 @@ function initialRunState(): RunStateDocument {
 function vmReport(input: {
   runId: string;
   vmName: string;
-  phase: VmReportV1["phase"];
-  network?: VmReportV1["network"];
+  phase: VmReportV2["phase"];
+  network?: VmReportV2["network"];
   sshHostKeysOpenssh?: string[];
-  probes?: VmReportV1["probes"];
+  probes?: VmReportV2["probes"];
   error?: string | null;
   observedAt?: number;
-}): VmReportV1 {
+}): VmReportV2 {
   return {
-    schema_version: 1,
+    schema_version: 2,
     host_id: "host-alpha",
     run_id: input.runId,
     vm_name: input.vmName,
@@ -389,14 +389,17 @@ function vmReport(input: {
   };
 }
 
-function hostReport(vms: HostStateReportV1["vms"]): HostStateReportV1 {
+function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 42,
     capacity: {
-      cpu_count: 8,
+      total_cpu_millis: 8_000,
+      reserved_cpu_millis: 1_000,
+      schedulable_cpu_millis: 7_000,
+      committed_cpu_millis: 1_000,
       memory_total_mib: 32768,
       memory_available_mib: 24576,
       disk_probe_path: "/var/lib/intar-agent",
@@ -409,6 +412,10 @@ function hostReport(vms: HostStateReportV1["vms"]): HostStateReportV1 {
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
+      supports_jailer_v1: true,
+      supports_hard_cpu_quota: true,
+      supports_landlock: true,
+      supports_cgroup_v2: true,
     },
     cached_images: [],
     vms,

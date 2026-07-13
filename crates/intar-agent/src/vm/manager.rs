@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,11 +15,16 @@ use cloud_hypervisor_client::{
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
 use intar_contracts::guest::RECORDING_DISK_LABEL;
+use intar_jailer_protocol::{
+    ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, DestroyRunNetworkRequest,
+    EnsureRunNetworkRequest, JailPathMap, JailerCapabilities, Request as JailerRequest,
+    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
+    ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt as _;
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore, broadcast};
@@ -42,6 +46,7 @@ use super::{mac, replay_media, runtime_disk};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateVmResources {
+    pub cpu_millis: u32,
     pub vcpus: u32,
     pub memory_mib: u32,
     pub disk_mib: Option<u32>,
@@ -127,6 +132,8 @@ pub struct VmDetails {
     pub recording_disk_path: Option<String>,
     pub spool_dir: Option<String>,
     pub mac: String,
+    pub cpu_millis: Option<u32>,
+    pub vcpu_count: Option<u16>,
     pub guest_ip: Option<String>,
     pub guest_ip_cidr: Option<String>,
     pub gateway: Option<String>,
@@ -135,6 +142,17 @@ pub struct VmDetails {
     pub tap_name: Option<String>,
     pub ch_socket_path: Option<String>,
     pub ch_pid: Option<u32>,
+    pub ch_start_time_ticks: Option<u64>,
+    pub host_boot_id: Option<String>,
+    pub ch_executable_sha256: Option<String>,
+    pub jail_generation: Option<String>,
+    pub jail_unit_name: Option<String>,
+    pub jail_cgroup_path: Option<String>,
+    pub jail_root_path: Option<String>,
+    pub jail_root_inode: Option<u64>,
+    pub jail_uid: Option<u32>,
+    pub jail_gid: Option<u32>,
+    pub jail_netns_name: Option<String>,
     pub kino_vsock_cid: Option<u32>,
     pub kino_vsock_port: Option<u32>,
     pub kino_vsock_path: Option<String>,
@@ -217,6 +235,16 @@ impl VmStatusResponse {
             root_disk_path: self.details.as_ref().map(|d| d.root_disk_path.clone()),
             seed_disk_path: self.details.as_ref().map(|d| d.seed_disk_path.clone()),
             mac: self.details.as_ref().map(|d| d.mac.clone()),
+            cpu_millis: self
+                .details
+                .as_ref()
+                .and_then(|d| d.cpu_millis)
+                .map(i64::from),
+            vcpu_count: self
+                .details
+                .as_ref()
+                .and_then(|d| d.vcpu_count)
+                .map(i64::from),
             lease_duration_seconds: self.lease_duration_seconds.map(|v| v as i64),
             guest_ip: self.details.as_ref().and_then(|d| d.guest_ip.clone()),
             guest_ip_cidr: self.details.as_ref().and_then(|d| d.guest_ip_cidr.clone()),
@@ -230,6 +258,45 @@ impl VmStatusResponse {
             tap_name: self.details.as_ref().and_then(|d| d.tap_name.clone()),
             ch_socket_path: self.details.as_ref().and_then(|d| d.ch_socket_path.clone()),
             ch_pid: self.details.as_ref().and_then(|d| d.ch_pid).map(i64::from),
+            ch_start_time_ticks: self
+                .details
+                .as_ref()
+                .and_then(|d| d.ch_start_time_ticks)
+                .and_then(|value| i64::try_from(value).ok()),
+            host_boot_id: self.details.as_ref().and_then(|d| d.host_boot_id.clone()),
+            ch_executable_sha256: self
+                .details
+                .as_ref()
+                .and_then(|d| d.ch_executable_sha256.clone()),
+            jail_generation: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_generation.clone()),
+            jail_unit_name: self.details.as_ref().and_then(|d| d.jail_unit_name.clone()),
+            jail_cgroup_path: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_cgroup_path.clone()),
+            jail_root_path: self.details.as_ref().and_then(|d| d.jail_root_path.clone()),
+            jail_root_inode: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_root_inode)
+                .and_then(|value| i64::try_from(value).ok()),
+            jail_uid: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_uid)
+                .map(i64::from),
+            jail_gid: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_gid)
+                .map(i64::from),
+            jail_netns_name: self
+                .details
+                .as_ref()
+                .and_then(|d| d.jail_netns_name.clone()),
             kino_vsock_cid: self
                 .details
                 .as_ref()
@@ -287,8 +354,6 @@ struct QueueVmCreateRequest {
 }
 
 const LEASE_EXPIRY_ERROR_LOG_INTERVAL_S: i64 = 60;
-const NFT_VM_NET_TABLE: &str = "intar";
-const NFT_VM_NET_LEGACY_TABLE: &str = "intar_agent_vm_net";
 const RUN_SUBNET_PREFIX: u8 = 28;
 const KINO_VSOCK_PORT: u32 = 18_080;
 const KINO_HOST_READY_PORT: u32 = 18_081;
@@ -459,8 +524,9 @@ pub struct VmManager {
 
 #[derive(Debug)]
 struct Inner {
-    ch_binary: String,
     ch_spawn_timeout_seconds: u64,
+    jailer_socket: PathBuf,
+    jailer_request_timeout_seconds: u64,
     bridge: BridgeConfig,
     ssh_access: SshAccessConfig,
     db: Db,
@@ -500,8 +566,9 @@ impl VmManager {
         let (terminal_updates_tx, _) = broadcast::channel(256);
         let registry_http = image_cache::registry_http_client()?;
         let inner = Inner {
-            ch_binary: cfg.cloud_hypervisor.binary.clone(),
             ch_spawn_timeout_seconds: cfg.cloud_hypervisor.spawn_timeout_seconds,
+            jailer_socket: cfg.jailer.socket.clone(),
+            jailer_request_timeout_seconds: cfg.jailer.request_timeout_seconds,
             bridge: cfg.bridge.clone(),
             ssh_access: cfg.ssh_access.clone(),
             db,
@@ -550,6 +617,22 @@ impl VmManager {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
+    }
+
+    pub async fn jailer_capabilities(&self) -> Result<JailerCapabilities> {
+        match request_jailerd(&self.inner, JailerRequest::Capabilities).await? {
+            JailerResponse::Capabilities(capabilities) => Ok(capabilities),
+            JailerResponse::Error(error) => {
+                anyhow::bail!("jailerd {}: {}", error.code, error.message)
+            }
+            response => anyhow::bail!(
+                "jailerd returned unexpected response to capabilities request: {response:?}"
+            ),
+        }
+    }
+
+    pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
+        jailer_identity_request(&self.inner, generation, JailerIdentityOperation::Inspect).await
     }
 
     pub async fn reconcile_tracked_vms(&self) -> Result<()> {
@@ -740,12 +823,21 @@ impl VmManager {
         }
 
         let resources = requested_resources.unwrap_or(CreateVmResources {
+            cpu_millis: self.inner.defaults.resources.vcpus.saturating_mul(1_000),
             vcpus: self.inner.defaults.resources.vcpus,
             memory_mib: self.inner.defaults.resources.memory_mib,
             disk_mib: None,
         });
         if resources.vcpus == 0 {
             return Err(ApiError::bad_request("resources.vcpus must be >= 1"));
+        }
+        if resources.cpu_millis == 0 {
+            return Err(ApiError::bad_request("resources.cpu_millis must be >= 1"));
+        }
+        if resources.cpu_millis > resources.vcpus.saturating_mul(1_000) {
+            return Err(ApiError::bad_request(
+                "resources.cpu_millis must not exceed resources.vcpus * 1000",
+            ));
         }
         if resources.memory_mib == 0 {
             return Err(ApiError::bad_request("resources.memory_mib must be >= 1"));
@@ -853,7 +945,6 @@ impl VmManager {
         let root_disk_path = vm_dir.join("root.raw");
         let config_disk_path = vm_dir.join(RUNTIME_DISK_FILENAME);
         let ch_socket_path = vm_dir.join("cloud-hypervisor.sock");
-        let ch_stderr_path = vm_dir.join(CLOUD_HYPERVISOR_STDERR_LOG_NAME);
         let kino_vsock_path = vm_dir.join("kino.vsock");
         let recording_disk_path_for_create = recording_disk_path.clone();
         tokio::task::spawn_blocking(move || create_recording_disk(&recording_disk_path_for_create))
@@ -887,6 +978,11 @@ impl VmManager {
         }
 
         let mac = mac::generate_local_unicast_mac();
+        let ssh_public_port = if self.inner.ssh_access.enabled {
+            Some(allocate_ssh_public_port(&self.inner).await?)
+        } else {
+            None
+        };
 
         let details = VmDetails {
             image_key: Some(image_key.clone()),
@@ -897,18 +993,27 @@ impl VmManager {
             recording_disk_path: Some(recording_disk_path.display().to_string()),
             spool_dir: Some(spool_dir.display().to_string()),
             mac: mac.clone(),
+            cpu_millis: Some(resources.cpu_millis),
+            vcpu_count: u16::try_from(resources.vcpus).ok(),
             guest_ip: Some(guest_ip.clone()),
             guest_ip_cidr: Some(network.guest_ip_cidr.clone()),
             gateway: Some(network.gateway.clone()),
             bridge_name: Some(bridge_name.clone()),
-            ssh_public_port: if self.inner.ssh_access.enabled {
-                Some(allocate_ssh_public_port(&self.inner).await?)
-            } else {
-                None
-            },
+            ssh_public_port,
             tap_name: Some(tap_name.clone()),
             ch_socket_path: Some(ch_socket_path.display().to_string()),
             ch_pid: None,
+            ch_start_time_ticks: None,
+            host_boot_id: None,
+            ch_executable_sha256: None,
+            jail_generation: None,
+            jail_unit_name: None,
+            jail_cgroup_path: None,
+            jail_root_path: None,
+            jail_root_inode: None,
+            jail_uid: None,
+            jail_gid: None,
+            jail_netns_name: None,
             kino_vsock_cid: Some(kino_vsock_cid),
             kino_vsock_port: Some(kino_vsock_port),
             kino_vsock_path: Some(kino_vsock_path.display().to_string()),
@@ -950,15 +1055,11 @@ impl VmManager {
         let inner = Arc::clone(&self.inner);
         let network_for_task = network.clone();
         let peer_guest_ips_for_task = peer_guest_ips.clone();
-        let bridge_name_for_task = bridge_name.clone();
         let name_for_task = name.clone();
         let image_key_for_task = image_key.clone();
         let hostname_for_task = hostname.clone();
         let runtime_for_task = runtime.clone();
         let tap_for_task = tap_name.clone();
-        let ch_socket_path_for_task = ch_socket_path.clone();
-        let ch_stderr_path_for_task = ch_stderr_path.clone();
-        let kino_vsock_path_for_task = kino_vsock_path.clone();
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -968,15 +1069,15 @@ impl VmManager {
 
             let create_input = RunCreateInput {
                 name: &name_for_task,
+                run_id: &run_id,
                 image_key: &image_key_for_task,
                 runtime: &runtime_for_task,
                 tap: &tap_for_task,
-                ch_socket_path: &ch_socket_path_for_task,
-                ch_stderr_path: &ch_stderr_path_for_task,
+                ssh_public_port,
                 kino_vsock_cid,
                 kino_vsock_port,
                 kino_host_ready_port: KINO_HOST_READY_PORT,
-                kino_vsock_path: &kino_vsock_path_for_task,
+                cpu_millis: resources.cpu_millis,
                 vcpus: resources.vcpus,
                 memory_mib: resources.memory_mib,
                 disk_mib: resources.disk_mib,
@@ -987,7 +1088,6 @@ impl VmManager {
                 recording_disk_path: &recording_disk_path,
                 network: &network_for_task,
                 peer_guest_ips: &peer_guest_ips_for_task,
-                bridge_name: &bridge_name_for_task,
             };
 
             let create_result = run_create(&inner, create_input).await;
@@ -1017,6 +1117,16 @@ impl VmManager {
             if let Err(e) = create_result {
                 let err = error_chain_to_string(&e);
                 stop_booting_vm(&inner, &name_for_task).await;
+                if let Err(cleanup_error) =
+                    cleanup_failed_jailed_launch(&inner, &run_id, &name_for_task).await
+                {
+                    error!(
+                        error = %cleanup_error,
+                        vm = name_for_task,
+                        run_id,
+                        "failed to destroy jailed runtime after VM create failure"
+                    );
+                }
                 error!(error = %err, error_debug = ?e, "vm create failed");
                 mark_vm_failed(&inner, &name_for_task, err).await;
             }
@@ -1211,15 +1321,15 @@ impl VmManager {
 
 struct RunCreateInput<'a> {
     name: &'a str,
+    run_id: &'a str,
     image_key: &'a str,
     runtime: &'a CreateScenarioVmRuntime,
     tap: &'a str,
-    ch_socket_path: &'a Path,
-    ch_stderr_path: &'a Path,
+    ssh_public_port: Option<u16>,
     kino_vsock_cid: u32,
     kino_vsock_port: u32,
     kino_host_ready_port: u32,
-    kino_vsock_path: &'a Path,
+    cpu_millis: u32,
     vcpus: u32,
     memory_mib: u32,
     disk_mib: Option<u32>,
@@ -1230,29 +1340,20 @@ struct RunCreateInput<'a> {
     recording_disk_path: &'a Path,
     network: &'a CreateVmNetwork,
     peer_guest_ips: &'a BTreeMap<String, String>,
-    bridge_name: &'a str,
 }
 
 struct CloudHypervisorVmConfigInput<'a> {
     name: &'a str,
-    cached_image: &'a image_cache::CachedImage,
+    cmdline: &'a str,
+    paths: &'a JailPathMap,
     vcpus: u32,
     memory_mib: u32,
     tap: &'a str,
     mac: &'a str,
-    root_disk_path: &'a Path,
-    config_disk_path: &'a Path,
-    recording_disk_path: &'a Path,
     kino_vsock_cid: u32,
-    kino_vsock_path: &'a Path,
 }
 
 fn build_cloud_hypervisor_vm_config(input: CloudHypervisorVmConfigInput<'_>) -> Result<VmConfig> {
-    let vm_dir = input
-        .root_disk_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("root disk path has no parent"))?;
-
     Ok(VmConfig {
         cpus: Some(CpusConfig {
             boot_vcpus: input.vcpus,
@@ -1262,38 +1363,42 @@ fn build_cloud_hypervisor_vm_config(input: CloudHypervisorVmConfigInput<'_>) -> 
             size: (input.memory_mib as i64) * 1024 * 1024,
         }),
         payload: PayloadConfig {
-            kernel: Some(input.cached_image.kernel_path.display().to_string()),
-            initramfs: Some(input.cached_image.initrd_path.display().to_string()),
-            cmdline: Some(input.cached_image.cmdline.clone()),
+            kernel: Some(input.paths.jailed_kernel.display().to_string()),
+            initramfs: input
+                .paths
+                .jailed_initrd
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            cmdline: Some(input.cmdline.to_string()),
             ..PayloadConfig::default()
         },
         serial: Some(SerialConfig {
-            file: Some(vm_dir.join("serial.log").display().to_string()),
+            file: Some(input.paths.jailed_serial_log.display().to_string()),
             mode: "File".to_string(),
             iommu: false,
             socket: None,
         }),
         console: Some(ConsoleConfig {
-            file: Some(vm_dir.join("console.log").display().to_string()),
+            file: Some(input.paths.jailed_console_log.display().to_string()),
             mode: "File".to_string(),
             iommu: false,
             socket: None,
         }),
         disks: Some(vec![
             DiskConfig {
-                path: input.root_disk_path.display().to_string(),
+                path: input.paths.jailed_root_disk.display().to_string(),
                 readonly: false,
                 id: Some(format!("{}-root", input.name)),
                 image_type: Some(DiskImageType::Raw),
             },
             DiskConfig {
-                path: input.config_disk_path.display().to_string(),
+                path: input.paths.jailed_runtime_disk.display().to_string(),
                 readonly: true,
                 id: Some(format!("{}-{RUNTIME_DISK_ID_SUFFIX}", input.name)),
                 image_type: Some(DiskImageType::Raw),
             },
             DiskConfig {
-                path: input.recording_disk_path.display().to_string(),
+                path: input.paths.jailed_recording_disk.display().to_string(),
                 readonly: false,
                 id: Some(format!("{}-recordings", input.name)),
                 image_type: Some(DiskImageType::Raw),
@@ -1307,12 +1412,285 @@ fn build_cloud_hypervisor_vm_config(input: CloudHypervisorVmConfigInput<'_>) -> 
         }]),
         vsock: Some(VsockConfig {
             cid: u64::from(input.kino_vsock_cid),
-            socket: input.kino_vsock_path.display().to_string(),
+            socket: input.paths.jailed_vsock_socket.display().to_string(),
             iommu: false,
             pci_segment: None,
             id: Some(format!("{}-kino-vsock", input.name)),
         }),
+        landlock_enable: Some(true),
     })
+}
+
+async fn launch_jailed_cloud_hypervisor(
+    inner: &Inner,
+    req: &RunCreateInput<'_>,
+    cached_image: &image_cache::CachedImage,
+) -> Result<(VmLaunchResult, RunNetworkResult)> {
+    let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
+    let vm_id = ValidatedId::parse(req.name.to_string()).context("validate jailer VM ID")?;
+    let (guest_ip, prefix) = parse_ipv4_cidr(&req.network.guest_ip_cidr, "network.guest_ip_cidr")?;
+    let run_cidr = format!(
+        "{}/{prefix}",
+        Ipv4Addr::from(ipv4_network_u32(guest_ip, prefix))
+    );
+
+    let capabilities = match request_jailerd(inner, JailerRequest::Capabilities).await? {
+        JailerResponse::Capabilities(capabilities) => capabilities,
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to capabilities request: {response:?}"
+        ),
+    };
+
+    let run_network = match request_jailerd(
+        inner,
+        JailerRequest::EnsureRunNetwork(EnsureRunNetworkRequest {
+            run_id: run_id.clone(),
+            guest_cidr: run_cidr,
+            gateway: req.network.gateway.clone(),
+        }),
+    )
+    .await?
+    {
+        JailerResponse::EnsureRunNetwork(result) => result,
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to ensure_run_network: {response:?}"
+        ),
+    };
+
+    let request = VmLaunchRequest {
+        run_id,
+        vm_id,
+        cpu_millis: req.cpu_millis,
+        vcpu_count: u16::try_from(req.vcpus).context("vCPU count exceeds jailer contract")?,
+        memory_mib: req.memory_mib,
+        tap_name: req.tap.to_string(),
+        mac_address: req.mac.to_string(),
+        guest_ip_cidr: req.network.guest_ip_cidr.clone(),
+        ssh_public_port: req.ssh_public_port,
+        vsock_cid: req.kino_vsock_cid,
+        artifacts: SourceArtifacts {
+            kernel: artifact_source(
+                &cached_image.kernel_path,
+                &capabilities.allowed_source_roots,
+                Some(&cached_image.kernel_sha256),
+                ArtifactAccess::ReadOnly,
+            )?,
+            initrd: Some(artifact_source(
+                &cached_image.initrd_path,
+                &capabilities.allowed_source_roots,
+                Some(&cached_image.initrd_sha256),
+                ArtifactAccess::ReadOnly,
+            )?),
+            root_disk: artifact_source(
+                req.root_disk_path,
+                &capabilities.allowed_source_roots,
+                None,
+                ArtifactAccess::ReadWrite,
+            )?,
+            runtime_disk: artifact_source(
+                req.config_disk_path,
+                &capabilities.allowed_source_roots,
+                None,
+                ArtifactAccess::ReadOnly,
+            )?,
+            recording_disk: artifact_source(
+                req.recording_disk_path,
+                &capabilities.allowed_source_roots,
+                None,
+                ArtifactAccess::ReadWrite,
+            )?,
+        },
+    };
+    request
+        .validate()
+        .context("validate jailer launch request")?;
+
+    let launch_response = match request_jailerd(
+        inner,
+        JailerRequest::LaunchVm(Box::new(request.clone())),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(launch_error) => {
+            // A SOCK_SEQPACKET timeout can happen after jailerd committed the
+            // idempotent logical VM but before the response reached us. Resolve
+            // by (run_id, vm_id) before deciding that the launch failed.
+            let selector =
+                VmIdentityRequest::by_logical_id(request.run_id.clone(), request.vm_id.clone());
+            match request_jailerd(inner, JailerRequest::InspectVm(selector)).await {
+                Ok(JailerResponse::InspectVm(inspection)) => {
+                    if inspection.health != SandboxHealth::Healthy {
+                        anyhow::bail!(
+                            "jailerd launch outcome is {:?} after the request failed: {launch_error:#}",
+                            inspection.health
+                        )
+                    }
+                    return Ok((launch_result_from_inspection(inspection), run_network));
+                }
+                Ok(JailerResponse::Error(error)) if error.code == "not_found" => {
+                    anyhow::bail!(
+                        "jailerd launch request failed and no logical VM was committed: {launch_error:#}"
+                    )
+                }
+                Ok(JailerResponse::Error(error)) => anyhow::bail!(
+                    "jailerd launch request failed ({launch_error:#}); outcome inspection failed with {}: {}",
+                    error.code,
+                    error.message
+                ),
+                Ok(response) => anyhow::bail!(
+                    "jailerd launch request failed ({launch_error:#}); outcome inspection returned {response:?}"
+                ),
+                Err(inspect_error) => anyhow::bail!(
+                    "jailerd launch request failed ({launch_error:#}); outcome inspection also failed: {inspect_error:#}"
+                ),
+            }
+        }
+    };
+
+    match launch_response {
+        JailerResponse::LaunchVm(result) => Ok((result, run_network)),
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => {
+            anyhow::bail!("jailerd returned unexpected response to launch_vm: {response:?}")
+        }
+    }
+}
+
+fn launch_result_from_inspection(inspection: VmInspection) -> VmLaunchResult {
+    VmLaunchResult {
+        generation: inspection.generation,
+        unit_name: inspection.unit_name,
+        pid: inspection.pid,
+        cgroup_path: inspection.cgroup_path,
+        uid: inspection.uid,
+        gid: inspection.gid,
+        netns_name: inspection.netns_name,
+        netns_inode: inspection.netns_inode,
+        host_boot_id: inspection.host_boot_id,
+        pid_start_time_ticks: inspection.pid_start_time_ticks,
+        jail_root_inode: inspection.jail_root_inode,
+        cloud_hypervisor_sha256: inspection.cloud_hypervisor_sha256,
+        paths: inspection.paths,
+    }
+}
+
+fn artifact_source(
+    path: &Path,
+    allowed_source_roots: &[PathBuf],
+    sha256: Option<&str>,
+    access: ArtifactAccess,
+) -> Result<ArtifactSource> {
+    let (source_root, relative_path) = allowed_source_roots
+        .iter()
+        .enumerate()
+        .find_map(|(index, root)| {
+            let relative = path.strip_prefix(root).ok()?;
+            (!relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))))
+            .then(|| (index, relative.to_path_buf()))
+        })
+        .context("jailer artifact path is outside the configured trusted source roots")?;
+    let source_root = u16::try_from(source_root).context("too many jailer source roots")?;
+    let sha256 = sha256
+        .map(|value| Sha256Digest::parse(value.to_ascii_lowercase()))
+        .transpose()
+        .context("validate jailer artifact SHA-256")?;
+    Ok(ArtifactSource {
+        source_root,
+        relative_path,
+        sha256,
+        access,
+    })
+}
+
+async fn persist_jail_launch(
+    inner: &Inner,
+    name: &str,
+    launch: &VmLaunchResult,
+    run_network: &RunNetworkResult,
+) -> Result<()> {
+    let persisted = {
+        let mut states = inner.states.write().await;
+        let vm = states
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM state disappeared during jailed launch"))?;
+        let details = vm
+            .details
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("VM details disappeared during jailed launch"))?;
+        details.root_disk_path = launch.paths.host_root_disk.display().to_string();
+        details.seed_disk_path = launch.paths.host_runtime_disk.display().to_string();
+        // Keep the trusted agent-side export path. Jailerd owns the live disk
+        // and copies it back to this path only after StopVm has drained the
+        // unit; the unprivileged agent never opens a jail disk directly.
+        details.ch_socket_path = Some(launch.paths.host_api_socket.display().to_string());
+        details.ch_pid = launch.pid;
+        details.ch_start_time_ticks = launch.pid_start_time_ticks;
+        details.host_boot_id = launch.host_boot_id.clone();
+        details.ch_executable_sha256 = Some(launch.cloud_hypervisor_sha256.clone());
+        details.jail_generation = Some(launch.generation.as_str().to_string());
+        details.jail_unit_name = Some(launch.unit_name.clone());
+        details.jail_cgroup_path = launch
+            .cgroup_path
+            .as_ref()
+            .map(|path| path.display().to_string());
+        details.jail_root_path = Some(launch.paths.host_jail_root.display().to_string());
+        details.jail_root_inode = launch.jail_root_inode;
+        details.jail_uid = Some(launch.uid);
+        details.jail_gid = Some(launch.gid);
+        details.jail_netns_name = Some(launch.netns_name.clone());
+        details.bridge_name = Some(run_network.bridge_name.clone());
+        details.kino_vsock_path = Some(launch.paths.host_vsock_socket.display().to_string());
+        vm.clone()
+    };
+    inner
+        .db
+        .upsert_vm(persisted.to_db_row())
+        .await
+        .context("persist jailed VM runtime identity")
+}
+
+async fn remove_agent_launch_sources(req: &RunCreateInput<'_>) -> Result<()> {
+    let root_parent = req
+        .root_disk_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("root disk staging path has no parent"))?;
+    if req.config_disk_path.parent() != Some(root_parent) {
+        anyhow::bail!("root and runtime disk staging paths do not share a VM directory");
+    }
+
+    match tokio::fs::remove_dir_all(root_parent).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "failed to remove staged VM sources {}: {error}",
+                root_parent.display()
+            ));
+        }
+    }
+    match tokio::fs::remove_file(req.recording_disk_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "failed to remove staged recording disk {}: {error}",
+                req.recording_disk_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
@@ -1427,42 +1805,29 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
 
     set_state(inner, req.name, VmLifecycleState::CreatingVm).await;
 
-    ensure_tap_ready(req.bridge_name, req.tap).await?;
+    let (launch, run_network) = launch_jailed_cloud_hypervisor(inner, &req, &cached_image).await?;
+    persist_jail_launch(inner, req.name, &launch, &run_network).await?;
+    remove_agent_launch_sources(&req)
+        .await
+        .context("remove unprivileged launch staging files")?;
     ensure_create_not_deleted(inner, req.name).await?;
 
     let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
         name: req.name,
-        cached_image: &cached_image,
+        cmdline: &cached_image.cmdline,
+        paths: &launch.paths,
         vcpus: req.vcpus,
         memory_mib: req.memory_mib,
         tap: req.tap,
         mac: req.mac,
-        root_disk_path: req.root_disk_path,
-        config_disk_path: req.config_disk_path,
-        recording_disk_path: req.recording_disk_path,
         kino_vsock_cid: req.kino_vsock_cid,
-        kino_vsock_path: req.kino_vsock_path,
     })?;
 
-    let ch_pid =
-        spawn_cloud_hypervisor(&inner.ch_binary, req.ch_socket_path, req.ch_stderr_path).await?;
-    {
-        let persisted = {
-            let mut states = inner.states.write().await;
-            let Some(vm) = states.get_mut(req.name) else {
-                return Ok(());
-            };
-            if let Some(details) = vm.details.as_mut() {
-                details.ch_pid = Some(ch_pid);
-            }
-            vm.clone()
-        };
-        if let Err(e) = inner.db.upsert_vm(persisted.to_db_row()).await {
-            warn!(error = %e, vm = req.name, "failed to persist vm runtime pid");
-        }
-    }
-
-    let ch = wait_for_ch_ready(req.ch_socket_path, inner.ch_spawn_timeout_seconds).await?;
+    let ch = wait_for_ch_ready(
+        &launch.paths.host_api_socket,
+        inner.ch_spawn_timeout_seconds,
+    )
+    .await?;
 
     debug!("calling cloud-hypervisor vm.create");
     ch.vm_create(&vm_cfg)
@@ -1477,58 +1842,14 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         .context("cloud-hypervisor vm.boot failed")?;
     ensure_create_not_deleted(inner, req.name).await?;
 
-    let details = VmDetails {
-        image_key: {
-            let states = inner.states.read().await;
-            states
-                .get(req.name)
-                .and_then(|vm| vm.details.as_ref())
-                .and_then(|details| details.image_key.clone())
-        },
-        image_sha256: {
-            let states = inner.states.read().await;
-            states
-                .get(req.name)
-                .and_then(|vm| vm.details.as_ref())
-                .and_then(|details| details.image_sha256.clone())
-        },
-        run_id: {
-            let states = inner.states.read().await;
-            states
-                .get(req.name)
-                .and_then(|vm| vm.details.as_ref())
-                .and_then(|details| details.run_id.clone())
-        },
-        root_disk_path: req.root_disk_path.display().to_string(),
-        seed_disk_path: req.config_disk_path.display().to_string(),
-        recording_disk_path: Some(req.recording_disk_path.display().to_string()),
-        spool_dir: {
-            let states = inner.states.read().await;
-            states
-                .get(req.name)
-                .and_then(|vm| vm.details.as_ref())
-                .and_then(|details| details.spool_dir.clone())
-        },
-        mac: req.mac.to_string(),
-        guest_ip: Some(extract_guest_ip(&req.network.guest_ip_cidr)?),
-        guest_ip_cidr: Some(req.network.guest_ip_cidr.clone()),
-        gateway: Some(req.network.gateway.clone()),
-        bridge_name: Some(req.bridge_name.to_string()),
-        ssh_public_port: {
-            let states = inner.states.read().await;
-            states
-                .get(req.name)
-                .and_then(|vm| vm.details.as_ref())
-                .and_then(|details| details.ssh_public_port)
-        },
-        tap_name: Some(req.tap.to_string()),
-        ch_socket_path: Some(req.ch_socket_path.display().to_string()),
-        ch_pid: None,
-        kino_vsock_cid: Some(req.kino_vsock_cid),
-        kino_vsock_port: Some(req.kino_vsock_port),
-        kino_vsock_path: Some(req.kino_vsock_path.display().to_string()),
-        ssh_host_keys_openssh: current_ssh_host_keys(inner, req.name).await,
+    let mut details = {
+        let states = inner.states.read().await;
+        states
+            .get(req.name)
+            .and_then(|vm| vm.details.clone())
+            .ok_or_else(|| anyhow::anyhow!("VM state disappeared after jailed launch"))?
     };
+    details.ssh_host_keys_openssh = current_ssh_host_keys(inner, req.name).await;
     // The probe worker owns the per-VM Kino readiness push listener, so it
     // must be running before we wait for the first readiness snapshot.
     start_probe_worker(inner, req.name, &details)
@@ -1718,7 +2039,47 @@ async fn stop_booting_vm(inner: &Arc<Inner>, vm_name: &str) {
     };
 
     if let Some(details) = details.as_ref() {
-        stop_cloud_hypervisor(details, vm_name).await;
+        stop_cloud_hypervisor(inner, details, vm_name).await;
+    }
+}
+
+async fn cleanup_failed_jailed_launch(inner: &Inner, run_id: &str, vm_name: &str) -> Result<()> {
+    let selector = VmIdentityRequest::by_logical_id(
+        ValidatedId::parse(run_id.to_owned()).context("validate failed launch run ID")?,
+        ValidatedId::parse(vm_name.to_owned()).context("validate failed launch VM ID")?,
+    );
+    let stop_error = match request_jailerd(inner, JailerRequest::StopVm(selector.clone())).await {
+        Ok(JailerResponse::StopVm(_)) => None,
+        Ok(JailerResponse::Error(error)) if error.code == "not_found" => return Ok(()),
+        Ok(JailerResponse::Error(error)) => Some(format!(
+            "jailerd {} while stopping failed launch: {}",
+            error.code, error.message
+        )),
+        Ok(response) => Some(format!(
+            "jailerd returned unexpected failed-launch stop response: {response:?}"
+        )),
+        Err(error) => Some(format!("failed-launch stop request failed: {error:#}")),
+    };
+
+    let destroy = request_jailerd(inner, JailerRequest::DestroyVm(selector)).await;
+    let destroy_error = match destroy {
+        Ok(JailerResponse::DestroyVm(_)) => None,
+        Ok(JailerResponse::Error(error)) if error.code == "not_found" => None,
+        Ok(JailerResponse::Error(error)) => Some(format!(
+            "jailerd {} while destroying failed launch: {}",
+            error.code, error.message
+        )),
+        Ok(response) => Some(format!(
+            "jailerd returned unexpected failed-launch destroy response: {response:?}"
+        )),
+        Err(error) => Some(format!("failed-launch destroy request failed: {error:#}")),
+    };
+
+    match (stop_error, destroy_error) {
+        (None, None) => Ok(()),
+        (Some(stop), None) => anyhow::bail!("{stop}"),
+        (None, Some(destroy)) => anyhow::bail!("{destroy}"),
+        (Some(stop), Some(destroy)) => anyhow::bail!("{stop}; {destroy}"),
     }
 }
 
@@ -1776,6 +2137,9 @@ async fn cleanup_tracked_vm_with_mode(
 
     if cleanup_mode == CleanupMode::LocalOnly {
         teardown_vm_runtime(inner, &vm).await;
+        release_jailed_runtime(inner, &vm)
+            .await
+            .context("release jailed VM runtime during local cleanup")?;
         local_cleanup_tracked_vm(inner, &vm, true).await;
         return Ok(CleanupOutcome::Deleted);
     }
@@ -1899,6 +2263,34 @@ async fn detect_tracked_vm_runtime(
         return Ok(TrackedVmRuntimeStatus::Dead);
     };
 
+    let Some(generation) = details.jail_generation.as_deref() else {
+        // VMs created before the V6 jailer boundary are deliberately not
+        // adoptable. The coordinated rollout drains them before upgrading;
+        // incomplete pre-launch rows are safe to clean as dead state.
+        return Ok(TrackedVmRuntimeStatus::Dead);
+    };
+
+    let Some(inspection) =
+        jailer_identity_request(inner, generation, JailerIdentityOperation::Inspect).await?
+    else {
+        return Ok(TrackedVmRuntimeStatus::Dead);
+    };
+
+    if !inspection_matches_persisted(details, &inspection) {
+        warn!(
+            vm = vm.name,
+            generation,
+            "jailerd runtime identity does not match persisted VM identity; refusing reattach"
+        );
+        return Ok(TrackedVmRuntimeStatus::Inconclusive);
+    }
+
+    match inspection.health {
+        SandboxHealth::Exited => return Ok(TrackedVmRuntimeStatus::Dead),
+        SandboxHealth::Quarantined => return Ok(TrackedVmRuntimeStatus::Inconclusive),
+        SandboxHealth::Preparing | SandboxHealth::Healthy | SandboxHealth::Stopping => {}
+    }
+
     if let Some(ch_socket_path) = details.ch_socket_path.as_deref()
         && Path::new(ch_socket_path).exists()
     {
@@ -1946,13 +2338,61 @@ async fn detect_tracked_vm_runtime(
         }
     }
 
-    if let Some(ch_pid) = details.ch_pid
-        && process_looks_like(ch_pid, &inner.ch_binary).await?
-    {
-        return Ok(TrackedVmRuntimeStatus::Inconclusive);
-    }
+    // jailerd still owns a matching unit/cgroup, but its API did not prove VM
+    // identity and health. Keep the generation for quarantine/retry instead of
+    // inferring liveness from a reusable numeric PID.
+    Ok(TrackedVmRuntimeStatus::Inconclusive)
+}
 
-    Ok(TrackedVmRuntimeStatus::Dead)
+fn inspection_matches_persisted(details: &VmDetails, inspection: &VmInspection) -> bool {
+    let same_optional_path = |persisted: Option<&str>, actual: Option<&Path>| match persisted {
+        Some(persisted) => actual.is_some_and(|actual| actual == Path::new(persisted)),
+        None => true,
+    };
+
+    details
+        .jail_generation
+        .as_deref()
+        .is_some_and(|value| value == inspection.generation.as_str())
+        && details
+            .jail_unit_name
+            .as_deref()
+            .is_none_or(|value| value == inspection.unit_name)
+        && same_optional_path(
+            details.jail_cgroup_path.as_deref(),
+            inspection.cgroup_path.as_deref(),
+        )
+        && details
+            .ch_pid
+            .is_none_or(|value| Some(value) == inspection.pid)
+        && details
+            .ch_start_time_ticks
+            .is_none_or(|value| Some(value) == inspection.pid_start_time_ticks)
+        && details
+            .host_boot_id
+            .as_deref()
+            .is_none_or(|value| inspection.host_boot_id.as_deref() == Some(value))
+        && details
+            .ch_executable_sha256
+            .as_deref()
+            .is_some_and(|value| value == inspection.cloud_hypervisor_sha256)
+        && details
+            .jail_root_inode
+            .is_none_or(|value| inspection.jail_root_inode == Some(value))
+        && details.jail_uid.is_none_or(|value| value == inspection.uid)
+        && details.jail_gid.is_none_or(|value| value == inspection.gid)
+        && details
+            .jail_netns_name
+            .as_deref()
+            .is_none_or(|value| value == inspection.netns_name)
+        && details
+            .jail_root_path
+            .as_deref()
+            .is_none_or(|value| Path::new(value) == inspection.paths.host_jail_root)
+        && details
+            .ch_socket_path
+            .as_deref()
+            .is_none_or(|value| Path::new(value) == inspection.paths.host_api_socket)
 }
 
 async fn resume_tracked_vm_on_startup(
@@ -2300,33 +2740,19 @@ async fn prepare_vm_for_delete(inner: &Inner, vm: &VmStatusResponse) -> Result<P
     .await?;
 
     if let Some(recording_disk_path) = details.recording_disk_path.as_deref() {
-        extract_recordings_to_spool(Path::new(recording_disk_path), &artifacts_dir).await?;
-        if let Err(e) = tokio::fs::remove_file(recording_disk_path).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            warn!(
-                error = %e,
-                vm = vm.name,
-                path = recording_disk_path,
-                "failed to remove extracted recording disk"
+        if details.jail_generation.is_some() && !Path::new(recording_disk_path).is_file() {
+            anyhow::bail!(
+                "jailerd did not publish the drained recording export at {}",
+                recording_disk_path
             );
         }
+        extract_recordings_to_spool(Path::new(recording_disk_path), &artifacts_dir).await?;
     }
 
-    if let Some(vm_dir) = vm_dir_for_status(vm) {
-        match tokio::fs::remove_dir_all(&vm_dir).await {
-            Ok(()) => {
-                info!(vm = vm.name, path = %vm_dir.display(), "deleted vm dir");
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to delete vm dir {}: {e}",
-                    vm_dir.display()
-                ));
-            }
-        }
-    }
+    // Root-owned jail contents, TAPs, unit/cgroup state, and credentials are
+    // destroyed only by jailerd after the VM has drained and its artifacts
+    // have been copied. The agent never recursively deletes a jail path.
+    release_jailed_runtime(inner, vm).await?;
 
     Ok(PreparedVmDeletion {
         run_id,
@@ -2346,12 +2772,53 @@ async fn teardown_vm_runtime(inner: &Inner, vm: &VmStatusResponse) {
         return;
     };
 
-    stop_cloud_hypervisor(details, &vm.name).await;
+    stop_cloud_hypervisor(inner, details, &vm.name).await;
+}
 
-    if let Some(tap_name) = details.tap_name.as_deref()
-        && let Err(e) = destroy_tap(tap_name).await
+async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse) -> Result<()> {
+    let Some(details) = vm.details.as_ref() else {
+        return Ok(());
+    };
+
+    if let Some(generation) = details.jail_generation.as_deref() {
+        jailer_identity_request(inner, generation, JailerIdentityOperation::Destroy)
+            .await
+            .with_context(|| format!("destroy jail generation {generation}"))?;
+    }
+
+    let Some(run_id) = details.run_id.as_deref() else {
+        return Ok(());
+    };
+    let has_other_vm = {
+        let states = inner.states.read().await;
+        states.iter().any(|(name, status)| {
+            name != &vm.name
+                && status
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.run_id.as_deref())
+                    == Some(run_id)
+        })
+    };
+    if has_other_vm {
+        return Ok(());
+    }
+
+    let run_id = ValidatedId::parse(run_id.to_string()).context("validate persisted run ID")?;
+    match request_jailerd(
+        inner,
+        JailerRequest::DestroyRunNetwork(DestroyRunNetworkRequest { run_id }),
+    )
+    .await?
     {
-        warn!(error = %e, vm = vm.name, tap = tap_name, "failed to remove tap device");
+        JailerResponse::DestroyRunNetwork(_) => Ok(()),
+        JailerResponse::Error(error) if error.code == "not_found" => Ok(()),
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to destroy_run_network: {response:?}"
+        ),
     }
 }
 
@@ -2708,7 +3175,7 @@ async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_s
     clear_delete_request(inner, &vm.name).await;
     stop_terminal_worker(inner, &vm.name).await;
 
-    if let Some(vm_dir) = vm_dir_for_status(vm) {
+    if let Some(vm_dir) = agent_owned_vm_dir_for_status(vm) {
         match tokio::fs::remove_dir_all(&vm_dir).await {
             Ok(_) => {
                 info!(vm = vm.name, path = %vm_dir.display(), "deleted vm dir");
@@ -2721,7 +3188,8 @@ async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_s
     }
 
     if let Some(details) = vm.details.as_ref() {
-        if let Some(recording_disk_path) = details.recording_disk_path.as_deref()
+        if details.jail_generation.is_none()
+            && let Some(recording_disk_path) = details.recording_disk_path.as_deref()
             && let Err(e) = tokio::fs::remove_file(recording_disk_path).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
@@ -2758,14 +3226,6 @@ async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_s
     if let Err(e) = inner.db.delete_vm(vm.name.clone()).await {
         error!(error = %e, vm = vm.name, "failed to delete vm row from sqlite");
     }
-    if let Err(error) = ensure_vm_network_reconciled(inner).await {
-        warn!(
-            error = %error,
-            vm = vm.name,
-            "failed to reconcile ssh forwarding after vm cleanup"
-        );
-    }
-
     info!(vm = vm.name, "cleaned up tracked vm");
 }
 
@@ -2820,7 +3280,7 @@ async fn ensure_create_not_deleted(inner: &Inner, name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn stop_cloud_hypervisor(details: &VmDetails, vm_name: &str) {
+async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm_name: &str) {
     if let Some(ch_socket_path) = details.ch_socket_path.as_deref()
         && Path::new(ch_socket_path).exists()
     {
@@ -2848,15 +3308,16 @@ async fn stop_cloud_hypervisor(details: &VmDetails, vm_name: &str) {
         }
     }
 
-    if let Some(ch_pid) = details.ch_pid
-        && let Err(e) = kill_process_force(ch_pid).await
-    {
-        warn!(
-            error = %e,
-            vm = vm_name,
-            ch_pid,
-            "failed to kill cloud-hypervisor process"
-        );
+    if let Some(generation) = details.jail_generation.as_deref() {
+        match jailer_identity_request(inner, generation, JailerIdentityOperation::Stop).await {
+            Ok(_) => {}
+            Err(error) => warn!(
+                error = %error,
+                vm = vm_name,
+                generation,
+                "failed to stop jailed cloud-hypervisor cgroup"
+            ),
+        }
     }
 }
 
@@ -2869,10 +3330,16 @@ async fn copy_vm_log_to_spool(
         return Ok(());
     }
 
-    let Some(vm_dir) = vm_dir_for_status(vm) else {
+    let Some(details) = vm.details.as_ref() else {
         return Ok(());
     };
-    let source = vm_dir.join(source_name);
+    let source = if let Some(jail_root) = details.jail_root_path.as_deref() {
+        PathBuf::from(jail_root).join("logs").join(source_name)
+    } else if let Some(vm_dir) = agent_owned_vm_dir_for_status(vm) {
+        vm_dir.join(source_name)
+    } else {
+        return Ok(());
+    };
     match tokio::fs::copy(&source, destination).await {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -3090,9 +3557,10 @@ async fn bootstrap_agent_access_token(cfg: &BridgeConfig, http: &HttpClient) -> 
     Ok(payload.access_token)
 }
 
-fn vm_dir_for_status(vm: &VmStatusResponse) -> Option<PathBuf> {
+fn agent_owned_vm_dir_for_status(vm: &VmStatusResponse) -> Option<PathBuf> {
     vm.details
         .as_ref()
+        .filter(|details| details.jail_generation.is_none())
         .map(|details| PathBuf::from(&details.root_disk_path))
         .and_then(|root_disk_path| root_disk_path.parent().map(Path::to_path_buf))
 }
@@ -3589,48 +4057,69 @@ fn probe_update_from_state_row(row: &VmProbeStateRow) -> Option<ProbeUpdateEnvel
     })
 }
 
-async fn spawn_cloud_hypervisor(
-    binary: &str,
-    socket_path: &Path,
-    stderr_path: &Path,
-) -> Result<u32> {
-    if let Err(e) = tokio::fs::remove_file(socket_path).await
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        warn!(
-            error = %e,
-            path = %socket_path.display(),
-            "failed to remove stale cloud-hypervisor socket"
-        );
+async fn request_jailerd(inner: &Inner, request: JailerRequest) -> Result<JailerResponse> {
+    let socket = inner.jailer_socket.clone();
+    let timeout_duration = Duration::from_secs(inner.jailer_request_timeout_seconds);
+    timeout(timeout_duration, async move {
+        let mut client = AsyncSeqpacketClient::connect(&socket)
+            .with_context(|| format!("connect to intar-jailerd at {}", socket.display()))?;
+        client
+            .request(request)
+            .await
+            .context("send intar-jailerd request")
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "intar-jailerd request timed out after {} seconds",
+            inner.jailer_request_timeout_seconds
+        )
+    })?
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JailerIdentityOperation {
+    Inspect,
+    Stop,
+    Destroy,
+}
+
+async fn jailer_identity_request(
+    inner: &Inner,
+    generation: &str,
+    operation: JailerIdentityOperation,
+) -> Result<Option<VmInspection>> {
+    let identity = VmIdentityRequest::by_generation(
+        ValidatedId::parse(generation.to_string()).context("validate persisted jail generation")?,
+    );
+    let request = match operation {
+        JailerIdentityOperation::Inspect => JailerRequest::InspectVm(identity),
+        JailerIdentityOperation::Stop => JailerRequest::StopVm(identity),
+        JailerIdentityOperation::Destroy => JailerRequest::DestroyVm(identity),
+    };
+
+    match (operation, request_jailerd(inner, request).await?) {
+        (JailerIdentityOperation::Inspect, JailerResponse::InspectVm(inspection)) => {
+            Ok(Some(inspection))
+        }
+        (JailerIdentityOperation::Stop, JailerResponse::StopVm(_))
+        | (JailerIdentityOperation::Destroy, JailerResponse::DestroyVm(_)) => Ok(None),
+        (JailerIdentityOperation::Inspect, JailerResponse::Error(error))
+            if error.code == "not_found" =>
+        {
+            Ok(None)
+        }
+        (
+            JailerIdentityOperation::Stop | JailerIdentityOperation::Destroy,
+            JailerResponse::Error(error),
+        ) if error.code == "not_found" => Ok(None),
+        (_, JailerResponse::Error(error)) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        (_, response) => {
+            anyhow::bail!("jailerd returned unexpected response to {operation:?}: {response:?}")
+        }
     }
-
-    let stderr = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(stderr_path)
-        .with_context(|| {
-            format!(
-                "failed to open cloud-hypervisor stderr log at {}",
-                stderr_path.display()
-            )
-        })?;
-
-    let mut command = Command::new(binary);
-    command
-        .arg("--api-socket")
-        .arg(socket_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr));
-
-    let child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn {binary}"))?;
-
-    child
-        .id()
-        .ok_or_else(|| anyhow::anyhow!("spawned cloud-hypervisor process has no pid"))
 }
 
 async fn wait_for_ch_ready(socket_path: &Path, timeout_seconds: u64) -> Result<ChClient> {
@@ -3658,26 +4147,6 @@ async fn wait_for_ch_ready(socket_path: &Path, timeout_seconds: u64) -> Result<C
     }
 }
 
-async fn ensure_tap_ready(bridge: &str, tap_name: &str) -> Result<()> {
-    let _ = destroy_tap(tap_name).await;
-
-    run_command(
-        "ip",
-        &["tuntap", "add", "dev", tap_name, "mode", "tap"],
-        "create tap device",
-    )
-    .await?;
-    run_command(
-        "ip",
-        &["link", "set", tap_name, "master", bridge],
-        "attach tap to bridge",
-    )
-    .await?;
-    run_command("ip", &["link", "set", tap_name, "up"], "bring tap up").await?;
-
-    Ok(())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunNftNetwork {
     run_id: String,
@@ -3685,54 +4154,35 @@ struct RunNftNetwork {
     subnet_cidr: String,
     gateway: Ipv4Addr,
     prefix: u8,
-    ssh_forwards: Vec<SshForwardRule>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SshForwardRule {
-    vm_name: String,
-    public_port: u16,
-    guest_ip: Ipv4Addr,
 }
 
 async fn ensure_vm_network_reconciled(inner: &Inner) -> Result<()> {
     let run_networks = collect_run_networks(inner).await?;
     for network in &run_networks {
-        ensure_bridge_ready(&network.bridge_name, network.gateway, network.prefix).await?;
+        let run_id = ValidatedId::parse(network.run_id.clone())
+            .with_context(|| format!("validate persisted run ID {}", network.run_id))?;
+        match request_jailerd(
+            inner,
+            JailerRequest::EnsureRunNetwork(EnsureRunNetworkRequest {
+                run_id,
+                guest_cidr: network.subnet_cidr.clone(),
+                gateway: network.gateway.to_string(),
+            }),
+        )
+        .await?
+        {
+            JailerResponse::EnsureRunNetwork(_) => {}
+            JailerResponse::Error(error) => {
+                anyhow::bail!("jailerd {}: {}", error.code, error.message)
+            }
+            response => anyhow::bail!(
+                "jailerd returned unexpected response to ensure_run_network: {response:?}"
+            ),
+        }
     }
-
-    ensure_ipv4_forwarding_enabled().await?;
-    let egress_if = detect_default_interface().await?;
-    let egress_ipv4 = detect_interface_ipv4(&egress_if).await?;
-    if inner.ssh_access.enabled && egress_ipv4.is_none() {
-        warn!(
-            egress_if,
-            "default egress interface has no IPv4 address; SSH DNAT will be constrained by interface only"
-        );
-    }
-    let ruleset = render_vm_nft_ruleset(
-        &run_networks,
-        &egress_if,
-        egress_ipv4,
-        inner.ssh_access.enabled,
-    );
-    apply_vm_nft_ruleset(&ruleset).await?;
-
-    let ssh_forward_count: usize = run_networks
-        .iter()
-        .map(|network| network.ssh_forwards.len())
-        .sum();
-
-    info!(
+    debug!(
         run_network_count = run_networks.len(),
-        egress_if,
-        egress_ipv4 = egress_ipv4.map(|ip| ip.to_string()),
-        ssh_forward_count = if inner.ssh_access.enabled {
-            ssh_forward_count
-        } else {
-            0
-        },
-        "reconciled vm host networking for guest egress and ssh forwarding"
+        "reconciled run networks through intar-jailerd"
     );
     Ok(())
 }
@@ -3792,7 +4242,6 @@ async fn collect_run_networks(inner: &Inner) -> Result<Vec<RunNftNetwork>> {
                 subnet_cidr: subnet_cidr.clone(),
                 gateway,
                 prefix,
-                ssh_forwards: Vec::new(),
             });
         if entry.bridge_name != bridge_name
             || entry.subnet_cidr != subnet_cidr
@@ -3803,300 +4252,12 @@ async fn collect_run_networks(inner: &Inner) -> Result<Vec<RunNftNetwork>> {
                 "run {run_id} has inconsistent network state across VMs; refusing to render nftables"
             );
         }
-
-        if let Some(public_port) = details.ssh_public_port {
-            entry.ssh_forwards.push(SshForwardRule {
-                vm_name: vm.name.clone(),
-                public_port,
-                guest_ip,
-            });
-        }
     }
 
     Ok(networks.into_values().collect())
 }
 
-async fn ensure_bridge_ready(bridge: &str, gateway: Ipv4Addr, prefix: u8) -> Result<()> {
-    let link_status = Command::new("ip")
-        .arg("link")
-        .arg("show")
-        .arg("dev")
-        .arg(bridge)
-        .output()
-        .await
-        .context("failed to execute ip link show")?;
-    if !link_status.status.success() {
-        let stderr = String::from_utf8_lossy(&link_status.stderr)
-            .trim()
-            .to_string();
-        if stderr.contains("does not exist") || stderr.contains("Cannot find device") {
-            run_command(
-                "ip",
-                &["link", "add", bridge, "type", "bridge"],
-                "create vm bridge",
-            )
-            .await?;
-            info!(bridge, "created vm bridge");
-        } else {
-            anyhow::bail!("failed to inspect vm bridge {bridge}: {stderr}");
-        }
-    }
-
-    let cidr = format!("{gateway}/{prefix}");
-    let addr_status = Command::new("ip")
-        .arg("-4")
-        .arg("addr")
-        .arg("show")
-        .arg("dev")
-        .arg(bridge)
-        .output()
-        .await
-        .context("failed to execute ip -4 addr show")?;
-    if !addr_status.status.success() {
-        let stderr = String::from_utf8_lossy(&addr_status.stderr)
-            .trim()
-            .to_string();
-        anyhow::bail!("failed to inspect bridge address for {bridge}: {stderr}");
-    }
-    let stdout = String::from_utf8_lossy(&addr_status.stdout);
-    if !stdout.contains(&format!("inet {cidr}")) {
-        run_command(
-            "ip",
-            &["addr", "add", &cidr, "dev", bridge],
-            "assign vm bridge gateway",
-        )
-        .await?;
-        info!(bridge, gateway = %cidr, "assigned vm bridge gateway");
-    }
-
-    run_command("ip", &["link", "set", bridge, "up"], "bring vm bridge up").await?;
-    Ok(())
-}
-
-async fn ensure_ipv4_forwarding_enabled() -> Result<()> {
-    const IPV4_FORWARD_PATH: &str = "/proc/sys/net/ipv4/ip_forward";
-
-    let current = tokio::fs::read_to_string(IPV4_FORWARD_PATH)
-        .await
-        .context("failed to read IPv4 forwarding kernel setting")?;
-    if current.trim() == "1" {
-        return Ok(());
-    }
-
-    tokio::fs::write(IPV4_FORWARD_PATH, b"1\n")
-        .await
-        .context("failed to enable IPv4 forwarding")?;
-
-    let updated = tokio::fs::read_to_string(IPV4_FORWARD_PATH)
-        .await
-        .context("failed to verify IPv4 forwarding kernel setting")?;
-    if updated.trim() != "1" {
-        anyhow::bail!(
-            "failed to enable IPv4 forwarding; expected 1 at {IPV4_FORWARD_PATH}, got {}",
-            updated.trim()
-        );
-    }
-
-    Ok(())
-}
-
-fn render_vm_nft_ruleset(
-    run_networks: &[RunNftNetwork],
-    egress_if: &str,
-    egress_ipv4: Option<Ipv4Addr>,
-    ssh_access_enabled: bool,
-) -> String {
-    const BLOCKED_GUEST_DESTINATIONS: &[&str] = &[
-        "169.254.0.0/16",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "100.64.0.0/10",
-    ];
-
-    let egress_if = nft_string(egress_if);
-    let mut out = String::new();
-    out.push_str(&format!("table ip {NFT_VM_NET_TABLE} {{\n"));
-    out.push_str("  chain forward {\n");
-    out.push_str("    type filter hook forward priority filter; policy accept;\n");
-    out.push_str("    ct state established,related accept\n");
-    for network in run_networks {
-        let bridge = nft_string(&network.bridge_name);
-        let intra_run_comment = nft_string(&format!("intar run {} intra-run", network.run_id));
-        out.push_str(&format!(
-            "    iifname {bridge} oifname {bridge} accept comment {intra_run_comment}\n"
-        ));
-        for destination in BLOCKED_GUEST_DESTINATIONS {
-            out.push_str(&format!(
-                "    iifname {bridge} ip daddr {destination} drop\n"
-            ));
-        }
-        out.push_str(&format!(
-            "    iifname {bridge} oifname {egress_if} accept\n"
-        ));
-        out.push_str(&format!(
-            "    iifname {egress_if} oifname {bridge} ct status dnat accept\n"
-        ));
-        out.push_str(&format!("    iifname {bridge} drop\n"));
-        out.push_str(&format!("    oifname {bridge} drop\n"));
-    }
-    out.push_str("  }\n\n");
-
-    out.push_str("  chain input {\n");
-    out.push_str("    type filter hook input priority filter; policy accept;\n");
-    for network in run_networks {
-        out.push_str(&format!(
-            "    iifname {} drop\n",
-            nft_string(&network.bridge_name)
-        ));
-    }
-    out.push_str("  }\n\n");
-
-    out.push_str("  chain prerouting {\n");
-    out.push_str("    type nat hook prerouting priority dstnat; policy accept;\n");
-    if ssh_access_enabled {
-        for network in run_networks {
-            for forward in &network.ssh_forwards {
-                let daddr = egress_ipv4
-                    .map(|ip| format!(" ip daddr {ip}"))
-                    .unwrap_or_default();
-                let ssh_comment = nft_string(&format!("intar ssh {}", forward.vm_name));
-                out.push_str(&format!(
-                    "    iifname {egress_if}{daddr} tcp dport {} dnat to {}:22 comment {ssh_comment}\n",
-                    forward.public_port, forward.guest_ip
-                ));
-            }
-        }
-    }
-    out.push_str("  }\n\n");
-
-    out.push_str("  chain postrouting {\n");
-    out.push_str("    type nat hook postrouting priority srcnat; policy accept;\n");
-    for network in run_networks {
-        out.push_str(&format!(
-            "    ip saddr {} oifname {egress_if} masquerade\n",
-            network.subnet_cidr
-        ));
-    }
-    out.push_str("  }\n");
-    out.push_str("}\n\n");
-
-    out.push_str(&format!("table ip6 {NFT_VM_NET_TABLE} {{\n"));
-    out.push_str("  chain forward {\n");
-    out.push_str("    type filter hook forward priority filter; policy accept;\n");
-    for network in run_networks {
-        let bridge = nft_string(&network.bridge_name);
-        out.push_str(&format!("    iifname {bridge} drop\n"));
-        out.push_str(&format!("    oifname {bridge} drop\n"));
-    }
-    out.push_str("  }\n\n");
-    out.push_str("  chain input {\n");
-    out.push_str("    type filter hook input priority filter; policy accept;\n");
-    for network in run_networks {
-        out.push_str(&format!(
-            "    iifname {} drop\n",
-            nft_string(&network.bridge_name)
-        ));
-    }
-    out.push_str("  }\n");
-    out.push_str("}\n");
-
-    out
-}
-
-fn nft_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-async fn apply_vm_nft_ruleset(ruleset: &str) -> Result<()> {
-    let _ = Command::new("nft")
-        .arg("delete")
-        .arg("table")
-        .arg("ip")
-        .arg(NFT_VM_NET_LEGACY_TABLE)
-        .output()
-        .await;
-
-    // Replace the rulesets atomically in one nft transaction: declaring the
-    // tables makes the flush valid on first run, the flush drops all previous
-    // rules, and the rendered tables re-add the current ones. A delete in a
-    // separate nft invocation would leave a window with no DNAT forwards and
-    // no isolation rules on every reconcile.
-    let transaction = format!(
-        "table ip {NFT_VM_NET_TABLE} {{}}\nflush table ip {NFT_VM_NET_TABLE}\ntable ip6 {NFT_VM_NET_TABLE} {{}}\nflush table ip6 {NFT_VM_NET_TABLE}\n{ruleset}"
-    );
-    let ruleset = transaction.as_str();
-
-    let mut child = Command::new("nft")
-        .arg("-f")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to execute nft -f -")?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to open nft stdin"))?;
-    stdin
-        .write_all(ruleset.as_bytes())
-        .await
-        .context("failed to write nft ruleset")?;
-    drop(stdin);
-
-    let output = child
-        .wait_with_output()
-        .await
-        .context("failed to wait for nft ruleset apply")?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    anyhow::bail!("nft ruleset apply failed: {stderr}\n{ruleset}");
-}
-
-async fn detect_default_interface() -> Result<String> {
-    let output = Command::new("ip")
-        .arg("-4")
-        .arg("route")
-        .arg("show")
-        .arg("default")
-        .output()
-        .await
-        .context("failed to execute ip -4 route show default")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!("ip -4 route show default failed: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if let Some(iface) = parse_default_route_interface(&stdout) {
-        return Ok(iface);
-    }
-
-    let output = Command::new("ip")
-        .arg("-4")
-        .arg("route")
-        .arg("get")
-        .arg("1.1.1.1")
-        .output()
-        .await
-        .context("failed to execute ip -4 route get 1.1.1.1")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!("ip -4 route get 1.1.1.1 failed: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_default_route_interface(&stdout)
-        .ok_or_else(|| anyhow::anyhow!("failed to detect default route interface"))
-}
-
+#[cfg(test)]
 fn parse_default_route_interface(raw_routes: &str) -> Option<String> {
     for line in raw_routes.lines() {
         let mut parts = line.split_whitespace();
@@ -4110,125 +4271,6 @@ fn parse_default_route_interface(raw_routes: &str) -> Option<String> {
         }
     }
     None
-}
-
-async fn detect_interface_ipv4(interface: &str) -> Result<Option<Ipv4Addr>> {
-    let output = Command::new("ip")
-        .arg("-4")
-        .arg("-o")
-        .arg("addr")
-        .arg("show")
-        .arg("dev")
-        .arg(interface)
-        .output()
-        .await
-        .with_context(|| format!("failed to execute ip -4 -o addr show dev {interface}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!("ip -4 -o addr show dev {interface} failed: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let mut parts = line.split_whitespace();
-        while let Some(part) = parts.next() {
-            if part == "inet"
-                && let Some(cidr) = parts.next()
-                && let Some((ip, _prefix)) = cidr.split_once('/')
-                && let Ok(parsed) = ip.parse::<Ipv4Addr>()
-            {
-                return Ok(Some(parsed));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-async fn destroy_tap(tap_name: &str) -> Result<()> {
-    let output = Command::new("ip")
-        .arg("link")
-        .arg("del")
-        .arg(tap_name)
-        .output()
-        .await
-        .context("failed to execute ip link del")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.contains("Cannot find device") {
-        return Ok(());
-    }
-
-    anyhow::bail!("ip link del failed: {stderr}");
-}
-
-async fn run_command(bin: &str, args: &[&str], context: &str) -> Result<()> {
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to execute {bin} for {context}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    anyhow::bail!("{context} failed: {stderr}");
-}
-
-async fn kill_process_force(pid: u32) -> Result<()> {
-    let output = Command::new("kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .output()
-        .await
-        .context("failed to execute kill -9")?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.contains("No such process") {
-        return Ok(());
-    }
-
-    anyhow::bail!("kill -9 failed: {stderr}");
-}
-
-async fn process_looks_like(pid: u32, binary: &str) -> Result<bool> {
-    let cmdline_path = format!("/proc/{pid}/cmdline");
-    let raw = match tokio::fs::read(&cmdline_path).await {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "failed to read process cmdline {cmdline_path}: {error}"
-            ));
-        }
-    };
-    if raw.is_empty() {
-        return Ok(false);
-    }
-
-    let process_name = raw
-        .split(|byte| *byte == 0)
-        .next()
-        .and_then(|value| std::str::from_utf8(value).ok())
-        .and_then(|value| Path::new(value).file_name().and_then(|name| name.to_str()))
-        .unwrap_or_default();
-    let expected_name = Path::new(binary)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(binary);
-
-    Ok(process_name == expected_name)
 }
 
 fn random_hex_suffix(bytes_len: usize) -> String {
@@ -4850,6 +4892,8 @@ fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             recording_disk_path: row.recording_disk_path.clone(),
             spool_dir: row.spool_dir.clone(),
             mac: mac.clone(),
+            cpu_millis: row.cpu_millis.and_then(|value| u32::try_from(value).ok()),
+            vcpu_count: row.vcpu_count.and_then(|value| u16::try_from(value).ok()),
             guest_ip: row.guest_ip.clone(),
             guest_ip_cidr: row.guest_ip_cidr.clone(),
             gateway: row.gateway.clone(),
@@ -4858,6 +4902,21 @@ fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             tap_name: row.tap_name.clone(),
             ch_socket_path: row.ch_socket_path.clone(),
             ch_pid: row.ch_pid.and_then(|v| u32::try_from(v).ok()),
+            ch_start_time_ticks: row
+                .ch_start_time_ticks
+                .and_then(|value| u64::try_from(value).ok()),
+            host_boot_id: row.host_boot_id.clone(),
+            ch_executable_sha256: row.ch_executable_sha256.clone(),
+            jail_generation: row.jail_generation.clone(),
+            jail_unit_name: row.jail_unit_name.clone(),
+            jail_cgroup_path: row.jail_cgroup_path.clone(),
+            jail_root_path: row.jail_root_path.clone(),
+            jail_root_inode: row
+                .jail_root_inode
+                .and_then(|value| u64::try_from(value).ok()),
+            jail_uid: row.jail_uid.and_then(|value| u32::try_from(value).ok()),
+            jail_gid: row.jail_gid.and_then(|value| u32::try_from(value).ok()),
+            jail_netns_name: row.jail_netns_name.clone(),
             kino_vsock_cid: row.kino_vsock_cid.and_then(|v| u32::try_from(v).ok()),
             kino_vsock_port: row
                 .kino_vsock_port
@@ -5234,6 +5293,8 @@ mod tests {
                 recording_disk_path: None,
                 spool_dir: None,
                 mac: "02:00:00:00:00:01".to_string(),
+                cpu_millis: Some(125),
+                vcpu_count: Some(1),
                 guest_ip: None,
                 guest_ip_cidr: None,
                 gateway: None,
@@ -5242,6 +5303,17 @@ mod tests {
                 tap_name: None,
                 ch_socket_path: None,
                 ch_pid: None,
+                ch_start_time_ticks: None,
+                host_boot_id: None,
+                ch_executable_sha256: None,
+                jail_generation: None,
+                jail_unit_name: None,
+                jail_cgroup_path: None,
+                jail_root_path: None,
+                jail_root_inode: None,
+                jail_uid: None,
+                jail_gid: None,
+                jail_netns_name: None,
                 kino_vsock_cid: None,
                 kino_vsock_port: None,
                 kino_vsock_path: None,
@@ -5328,42 +5400,6 @@ mod tests {
             .collect::<Vec<_>>(),
             vec!["db".to_string(), "redis-cache".to_string()]
         );
-    }
-
-    #[test]
-    fn render_vm_nft_ruleset_isolates_runs_and_constrains_ssh_dnat() {
-        let ruleset = render_vm_nft_ruleset(
-            &[RunNftNetwork {
-                run_id: "run-1".to_string(),
-                bridge_name: "intarabc123".to_string(),
-                subnet_cidr: "10.77.12.0/28".to_string(),
-                gateway: Ipv4Addr::new(10, 77, 12, 1),
-                prefix: 28,
-                ssh_forwards: vec![SshForwardRule {
-                    vm_name: "web".to_string(),
-                    public_port: 2201,
-                    guest_ip: Ipv4Addr::new(10, 77, 12, 2),
-                }],
-            }],
-            "eth0",
-            Some(Ipv4Addr::new(203, 0, 113, 10)),
-            true,
-        );
-
-        assert!(ruleset.contains("table ip intar"));
-        assert!(ruleset.contains("table ip6 intar"));
-        assert!(ruleset.contains("iifname \"intarabc123\" oifname \"intarabc123\" accept"));
-        assert!(ruleset.contains("ip daddr 169.254.0.0/16 drop"));
-        assert!(ruleset.contains("ip daddr 10.0.0.0/8 drop"));
-        assert!(ruleset.contains("ip daddr 172.16.0.0/12 drop"));
-        assert!(ruleset.contains("ip daddr 192.168.0.0/16 drop"));
-        assert!(ruleset.contains("ip daddr 100.64.0.0/10 drop"));
-        assert!(ruleset.contains("iifname \"eth0\" oifname \"intarabc123\" ct status dnat accept"));
-        assert!(ruleset.contains(
-            "iifname \"eth0\" ip daddr 203.0.113.10 tcp dport 2201 dnat to 10.77.12.2:22"
-        ));
-        assert!(ruleset.contains("ip saddr 10.77.12.0/28 oifname \"eth0\" masquerade"));
-        assert!(ruleset.contains("iifname \"intarabc123\" drop"));
     }
 
     #[test]
@@ -5624,31 +5660,46 @@ mod tests {
             cmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4".to_string(),
             virtual_size_bytes: 2 * 1024 * 1024 * 1024,
         };
+        let paths = JailPathMap {
+            host_jail_root: PathBuf::from("/work/jails/vm-demo/root"),
+            host_api_socket: PathBuf::from("/work/jails/vm-demo/root/run/cloud-hypervisor.sock"),
+            host_vsock_socket: PathBuf::from("/work/jails/vm-demo/root/run/kino.vsock"),
+            host_kernel: cached_image.kernel_path.clone(),
+            host_initrd: Some(cached_image.initrd_path.clone()),
+            host_root_disk: PathBuf::from("/work/vms/vm-demo/root.raw"),
+            host_runtime_disk: PathBuf::from("/work/vms/vm-demo/runtime.vfat"),
+            host_recording_disk: PathBuf::from("/work/runs/run-1/vm-demo/recordings.vfat"),
+            jailed_api_socket: PathBuf::from("/run/cloud-hypervisor.sock"),
+            jailed_vsock_socket: PathBuf::from("/run/kino.vsock"),
+            jailed_kernel: PathBuf::from("/boot/kernel"),
+            jailed_initrd: Some(PathBuf::from("/boot/initrd")),
+            jailed_root_disk: PathBuf::from("/disks/root.raw"),
+            jailed_runtime_disk: PathBuf::from("/disks/runtime.vfat"),
+            jailed_recording_disk: PathBuf::from("/disks/recordings.vfat"),
+            host_serial_log: PathBuf::from("/work/jails/vm-demo/root/logs/serial.log"),
+            host_console_log: PathBuf::from("/work/jails/vm-demo/root/logs/console.log"),
+            host_stderr_log: PathBuf::from(
+                "/work/jails/vm-demo/root/logs/cloud-hypervisor.stderr.log",
+            ),
+            jailed_serial_log: PathBuf::from("/logs/serial.log"),
+            jailed_console_log: PathBuf::from("/logs/console.log"),
+        };
 
         let cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
             name: "vm-demo",
-            cached_image: &cached_image,
+            cmdline: &cached_image.cmdline,
+            paths: &paths,
             vcpus: 2,
             memory_mib: 768,
             tap: "intar-tap0",
             mac: "02:00:00:00:00:01",
-            root_disk_path: Path::new("/work/vms/vm-demo/root.raw"),
-            config_disk_path: Path::new("/work/vms/vm-demo/runtime.vfat"),
-            recording_disk_path: Path::new("/work/runs/run-1/vm-demo/recordings.vfat"),
             kino_vsock_cid: 10_042,
-            kino_vsock_path: Path::new("/work/vms/vm-demo/kino.vsock"),
         })
         .expect("vm config should render");
 
         assert_eq!(cfg.payload.firmware, None);
-        assert_eq!(
-            cfg.payload.kernel.as_deref(),
-            Some("/cache/artifacts/vmlinuz")
-        );
-        assert_eq!(
-            cfg.payload.initramfs.as_deref(),
-            Some("/cache/artifacts/initrd.img")
-        );
+        assert_eq!(cfg.payload.kernel.as_deref(), Some("/boot/kernel"));
+        assert_eq!(cfg.payload.initramfs.as_deref(), Some("/boot/initrd"));
         assert_eq!(
             cfg.payload.cmdline.as_deref(),
             Some("root=/dev/vda rw console=ttyS0 quiet loglevel=4")
@@ -5665,32 +5716,32 @@ mod tests {
             cfg.serial
                 .as_ref()
                 .and_then(|serial| serial.file.as_deref()),
-            Some("/work/vms/vm-demo/serial.log")
+            Some("/logs/serial.log")
         );
         assert_eq!(
             cfg.console
                 .as_ref()
                 .and_then(|console| console.file.as_deref()),
-            Some("/work/vms/vm-demo/console.log")
+            Some("/logs/console.log")
         );
 
         let disks = cfg.disks.as_ref().expect("disks");
         assert_eq!(disks.len(), 3);
-        assert_eq!(disks[0].path, "/work/vms/vm-demo/root.raw");
+        assert_eq!(disks[0].path, "/disks/root.raw");
         assert!(!disks[0].readonly);
         assert_eq!(disks[0].id.as_deref(), Some("vm-demo-root"));
         assert!(matches!(
             disks[0].image_type.as_ref(),
             Some(DiskImageType::Raw)
         ));
-        assert_eq!(disks[1].path, "/work/vms/vm-demo/runtime.vfat");
+        assert_eq!(disks[1].path, "/disks/runtime.vfat");
         assert!(disks[1].readonly);
         assert_eq!(disks[1].id.as_deref(), Some("vm-demo-runtime"));
         assert!(matches!(
             disks[1].image_type.as_ref(),
             Some(DiskImageType::Raw)
         ));
-        assert_eq!(disks[2].path, "/work/runs/run-1/vm-demo/recordings.vfat");
+        assert_eq!(disks[2].path, "/disks/recordings.vfat");
         assert!(!disks[2].readonly);
         assert_eq!(disks[2].id.as_deref(), Some("vm-demo-recordings"));
         assert!(matches!(
@@ -5703,7 +5754,7 @@ mod tests {
         assert_eq!(net[0].mac.as_deref(), Some("02:00:00:00:00:01"));
         let vsock = cfg.vsock.as_ref().expect("vsock");
         assert_eq!(vsock.cid, 10_042);
-        assert_eq!(vsock.socket, "/work/vms/vm-demo/kino.vsock");
+        assert_eq!(vsock.socket, "/run/kino.vsock");
         assert_eq!(vsock.id.as_deref(), Some("vm-demo-kino-vsock"));
     }
 

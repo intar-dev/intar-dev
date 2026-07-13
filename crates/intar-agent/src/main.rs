@@ -32,7 +32,7 @@ struct Cli {
     /// Path to the TOML configuration file.
     #[arg(long, value_name = "PATH")]
     config: std::path::PathBuf,
-    /// Check host prerequisites and exit without starting the daemon.
+    /// Run the read-only readiness gate and exit; does not replace jailerd self-test.
     #[arg(long)]
     doctor: bool,
 }
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = config::load(&cli.config)?;
     if cli.doctor {
-        let report = preflight::collect_preflight(&cfg);
+        let report = preflight::collect_preflight(&cfg).await;
         print_preflight_report(&report);
         if report.has_failures() {
             anyhow::bail!(
@@ -168,6 +168,7 @@ fn print_preflight_report(report: &preflight::PreflightReport) {
     for check in &report.checks {
         let status = match check.status {
             preflight::PreflightStatus::Pass => "ok",
+            preflight::PreflightStatus::Warn => "warn",
             preflight::PreflightStatus::Fail => "fail",
         };
         println!("[{status}] {}: {}", check.name, check.detail);

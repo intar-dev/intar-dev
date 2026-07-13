@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import type {
   DesiredCachedImageV1,
   DesiredBuildV1,
-  DesiredVmV1,
-  HostDesiredStateV1,
+  DesiredVmV2,
+  HostDesiredStateV2,
 } from "@/generated/bridge";
 import {
   clearDesiredBuilds,
@@ -25,7 +25,7 @@ describe("desired state", () => {
       hostId: "host-alpha",
       nowUnixMs: 1_762_041_600_000,
     })).toEqual({
-      schema_version: 2,
+      schema_version: 3,
       host_id: "host-alpha",
       version: 0,
       generated_at_unix_ms: 1_762_041_600_000,
@@ -207,7 +207,8 @@ describe("desired state", () => {
       image_sha256:
         "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
       resources: {
-        cpu_count: 1,
+        cpu_millis: 1_000,
+        vcpu_count: 1,
         memory_mib: 512,
         disk_mib: 4096,
       },
@@ -265,11 +266,11 @@ describe("desired state", () => {
 function hostDesiredState(input: {
   version: number;
   cachedImages?: DesiredCachedImageV1[];
-  vms?: DesiredVmV1[];
+  vms?: DesiredVmV2[];
   builds?: DesiredBuildV1[];
-}): HostDesiredStateV1 {
+}): HostDesiredStateV2 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     host_id: "host-alpha",
     version: input.version,
     generated_at_unix_ms: 1_762_041_600_000,
@@ -309,7 +310,7 @@ function desiredVm(
   runId: string,
   vmName: string,
   sha256: string,
-): DesiredVmV1 {
+): DesiredVmV2 {
   return {
     run_id: runId,
     vm_name: vmName,
@@ -321,7 +322,8 @@ function desiredVm(
     },
     image_sha256: sha256,
     resources: {
-      cpu_count: 1,
+      cpu_millis: 1_000,
+      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 4096,
     },
@@ -364,7 +366,8 @@ function runStateWithProvisioning(input: {
         imageKey: input.imageKey,
         imageSha256: input.imageSha256,
         resources: {
-          vcpus: 1,
+          cpuMillis: 1_000,
+          vcpuCount: 1,
           memoryMib: 512,
           diskMib: 4096,
         },

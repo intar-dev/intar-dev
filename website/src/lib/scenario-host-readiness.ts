@@ -1,4 +1,4 @@
-import type { HostStateReportV1 } from "@/generated/bridge";
+import type { HostStateReportV2 } from "@/generated/bridge";
 import type { ImageKey } from "@/generated/catalog";
 
 export interface RequiredScenarioImage {
@@ -7,7 +7,7 @@ export interface RequiredScenarioImage {
 }
 
 export function hostHasImagesReady(
-  report: HostStateReportV1 | null | undefined,
+  report: HostStateReportV2 | null | undefined,
   required: RequiredScenarioImage[],
 ): boolean {
   if (required.length === 0) {

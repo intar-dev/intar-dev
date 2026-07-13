@@ -253,7 +253,10 @@ function builder(
     disabled: false,
     activeBuildCount,
     capacity: {
-      cpu_count: capacity.cpuCount ?? 4,
+      total_cpu_millis: (capacity.cpuCount ?? 4) * 1_000,
+      reserved_cpu_millis: 0,
+      schedulable_cpu_millis: (capacity.cpuCount ?? 4) * 1_000,
+      committed_cpu_millis: 0,
       memory_total_mib: 16_384,
       memory_available_mib: capacity.memoryAvailableMib ?? 8_192,
       disk_probe_path: "/var/cache/intar-builder",

@@ -89,7 +89,8 @@ scenario "pair-ping" {
   }
 
   vm "db" {
-    cpu      = 1
+    cpu      = 0.125
+    vcpus    = 1
     memory   = 512
     disk     = 3
     image    = "debian-13-generic"
@@ -133,7 +134,8 @@ scenario "pair-ping" {
   }
 
   vm "web" {
-    cpu      = 1
+    cpu      = 0.125
+    vcpus    = 1
     memory   = 512
     disk     = 3
     image    = "debian-13-generic"

@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { hostDesiredState } from "@/db/schema";
-import type { HostDesiredStateV1 } from "@/generated/bridge";
+import type { HostDesiredStateV2 } from "@/generated/bridge";
 import {
   createEmptyHostDesiredState,
   mutateDesiredState,
@@ -12,7 +12,7 @@ export async function loadOrCreateHostDesiredState(
   db: DrizzleD1Database,
   hostId: string,
   nowUnixMs: number,
-): Promise<HostDesiredStateV1> {
+): Promise<HostDesiredStateV2> {
   const rows = await db
     .select({ docJson: hostDesiredState.docJson })
     .from(hostDesiredState)
@@ -50,7 +50,7 @@ export async function mutateStoredHostDesiredState(
   hostId: string,
   nowUnixMs: number,
   mutator: DesiredStateMutator,
-): Promise<HostDesiredStateV1> {
+): Promise<HostDesiredStateV2> {
   // Optimistic concurrency: the doc is mutated by worker routes and the host
   // runtime DO alarm concurrently, and an unconditional write would silently
   // drop one side's version bump. The update only lands when the version we

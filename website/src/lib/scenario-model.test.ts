@@ -127,7 +127,8 @@ describe("scenario model", () => {
           "565d9a5e65009697de935eab180e6e7ef929a01b7e5963199fb168357021cb19",
         hostname: "web-server",
         resources: {
-          vcpus: 2,
+          cpuMillis: 2_000,
+          vcpuCount: 2,
           memoryMib: 2048,
           diskMib: 8192,
         },
@@ -305,7 +306,8 @@ function vm(overrides: Partial<ScenarioVmRecord> = {}): ScenarioVmRecord {
     initrdSha256:
       "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     bootCmdline: "root=/dev/vda rw console=ttyS0 quiet loglevel=4",
-    cpu: 2,
+    cpuMillis: 2_000,
+    vcpuCount: 2,
     memoryMib: 2048,
     diskMib: 8192,
     ...overrides,

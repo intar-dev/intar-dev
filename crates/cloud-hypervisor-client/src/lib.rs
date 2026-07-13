@@ -83,6 +83,11 @@ pub struct VmConfig {
     pub console: Option<ConsoleConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vsock: Option<VsockConfig>,
+    /// Install Cloud Hypervisor's VM-specific Landlock rules when the VM is
+    /// created. The launcher separately enables Landlock for the VMM's
+    /// infrastructure threads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landlock_enable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -352,5 +357,20 @@ mod tests {
             Some("/tmp/kino.vsock")
         );
         assert_eq!(vsock.get("id").and_then(|v| v.as_str()), Some("kino-vsock"));
+    }
+
+    #[test]
+    fn vm_config_serializes_landlock_enable() {
+        let vm = VmConfig {
+            payload: PayloadConfig::default(),
+            landlock_enable: Some(true),
+            ..VmConfig::default()
+        };
+
+        let value = serde_json::to_value(vm).expect("serialize vm config");
+        assert_eq!(
+            value.get("landlock_enable").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }

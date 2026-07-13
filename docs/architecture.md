@@ -24,6 +24,11 @@ The platform contracts live in Rust and are generated into TypeScript:
   contract fixtures into `website/src/generated/`.
 - Rust fixture tests and website schema tests validate the same committed fixtures.
 
+The jailer cutover is coordinated and intentionally incompatible. Catalog
+manifests are V3. The bridge envelope is V6 and carries V2 desired-state,
+resource/capacity, state-report, and VM-report documents. Old V2 catalog and V5
+bridge documents are rejected instead of translated.
+
 ## Control Plane
 
 The website Worker is also the control plane. Durable Objects keep host WebSocket
@@ -38,16 +43,20 @@ Host orchestration is desired-state based:
 - Desired phases are only `running` and `absent`.
 - Image build assignments are keyed by `build_id` and delivered in the same
   desired-state document under `builds`.
-- The bridge protocol is v5 and full-document based: `client_hello`,
+- The bridge protocol is v6 and full-document based: `client_hello`,
   `server_hello`, `desired_state`, `state_report`, `vm_report`, `build_report`,
   and `sync_request`. Every host declares `role = agent` or `role = builder`.
+  Agent capacity reports total, reserved, schedulable, and committed host
+  millicores plus jailer, hard-quota, Landlock, and cgroup-v2 capabilities.
 
 Run lifecycle state is derived in `website/src/lib/run-lifecycle.ts`. Reports only
 advance matching `(run_id, vm_name)` entries, which avoids cross-VM or cross-run
 state bleed.
 
-The D1 schema is intentionally reset-only. `website/drizzle/0000_baseline.sql`
-describes a fresh control plane; schema changes do not preserve an older database.
+`website/drizzle/0000_baseline.sql` describes a fresh control plane. The jailer
+cutover adds `0001_host_cpu_reservations.sql`; the per-host runtime Durable
+Object serializes pending and committed CPU reservations so concurrent starts
+cannot overcommit a host.
 
 ## Image Registry
 
@@ -55,7 +64,7 @@ Scenario pushes upload source bundles instead of building on GitHub Actions. The
 bundle endpoint stores a deterministic tar.gz in R2, records content hashes in D1,
 and assigns changed scenarios to connected builder hosts.
 
-Builder hosts publish raw zstd artifacts and `ScenarioManifestV2` manifest JSON.
+Builder hosts publish raw zstd artifacts and `ScenarioManifestV3` manifest JSON.
 The publish endpoint verifies manifests and image hashes, stores immutable images
 in R2, seeds the D1 scenario catalog, and updates each agent desired-state document
 with the referenced cached images.
@@ -86,16 +95,45 @@ the desired build.
 
 ## Host Agent
 
-`intar-agent` is a reconciler:
+`intar-agent` is an unprivileged reconciler:
 
 - It caches the latest desired-state document in local SQLite so it can converge
   after restart or while temporarily offline.
-- It compares desired VMs to local Cloud Hypervisor state and creates, destroys, or
-  archives VMs as needed.
+- It compares desired VMs with typed jailerd inspection results and requests
+  launch, stop, destroy, and run-network operations as needed.
 - It prewarms raw images and creates per-run root disks with reflink copy when the
   agent data filesystem supports it, falling back loudly to sparse copy.
 - It persists VM identity, network details, Kino probe state, SSH host keys, and
   archive jobs locally for crash recovery.
+
+The agent never spawns Cloud Hypervisor, invokes a privileged shell, or mutates
+TAPs, bridges, routes, nftables, namespaces, cgroups, or device policy. Its
+service has an empty capability bounding set and requires no `kvm` or `netdev`
+membership. It sends bounded typed requests to the root-owned
+`/run/intar-jailerd/control.sock` instead.
+
+## Scenario CPU resources
+
+Scenario HCL uses exact fixed-point CPU ceilings:
+
+```hcl
+cpu = 0.125
+# Optional; defaults to ceil(cpu), minimum 1.
+vcpus = 1
+```
+
+Positive integer or decimal literals with at most three fractional digits are
+accepted. `0.125` becomes 125 millicores and `2` remains 2000 millicores;
+zero, exponent notation, excess precision, and
+`cpu_millis > vcpu_count * 1000` are rejected. `cpu_millis` is the aggregate
+systemd/cgroup-v2 hard ceiling for the complete VMM process tree, while
+`vcpu_count` controls guest topology. It is also the unit used for local and D1
+admission reservations.
+
+`intar-jailerd` reserves 1000 host millicores by default and is the final local
+admission authority. For a fixed 100 ms period, 125 millicores is
+`cpu.max = 12500 100000` with `cpu.max.burst = 0`; eight such VMs consume one
+schedulable core exactly.
 
 Kino readiness is push-based. Each guest receives `KINO_HOST_READY_PORT` in
 `runtime.env`; Kino connects to the host over vsock, streams protobuf probe
@@ -125,16 +163,21 @@ Kino still owns in-guest probe execution and shell recording.
 
 VM networking is isolated per run:
 
-- The agent allocates a per-run bridge and a `/28` subnet from the configured
-  pool, defaulting to `10.77.0.0/16`.
+- The agent allocates addresses from the configured pool, defaulting to
+  `10.77.0.0/16`, and sends the complete topology in a typed request. Jailerd
+  independently restricts requests to canonical per-run `/28`s inside its
+  root-owned matching pool and refuses to replace unrelated host routes.
+- Jailerd creates one network namespace per run, its bridge, every VM TAP, and
+  the veth/transit connection to the host. The TAP is owned by the VM identity.
 - VMs in the same run can communicate through the run bridge.
 - Traffic between runs must route through the host and is dropped.
-- The rendered `table ip intar` and `table ip6 intar` nftables ruleset is applied
-  as a full text snapshot with `nft -f`.
+- Jailerd applies the required routes and nftables state; the agent has neither
+  `CAP_NET_ADMIN` nor `CAP_NET_RAW`.
 - Guest egress drops link-local metadata, RFC1918, and CGNAT destinations before
   internet egress is accepted.
 - SSH DNAT is constrained to the detected egress interface and, when available, the
-  host egress IPv4 address.
+  host egress IPv4 address. Public ports must be inside jailerd's root-owned
+  configured range and are reserved globally across active and recovered VMs.
 - Guest-to-host input is dropped; control traffic uses vsock.
 
 ## Host Rotation
@@ -153,6 +196,14 @@ Agent and builder host rotation is a drain-first operation:
 
 If those conditions cannot be proven, treat rotation as destructive maintenance
 and expect active runs on that host to fail.
+
+The V3/V6 jailer rollout is always destructive maintenance because existing
+unsandboxed VMs cannot be adopted. Drain every run and stop old agents first;
+install jailerd, jailer, the pinned Cloud Hypervisor v53.0 runtime, and systemd
+units while agents remain stopped; apply the D1 reservation migration and
+deploy the V6 Worker; republish every V3 manifest; then start only hosts that
+pass agent doctor and the root-only jailerd self-test. Validate a real
+`cpu = 0.125` run and the eight-VM saturation case before re-enabling starts.
 
 ## Terminal Access
 
@@ -176,8 +227,18 @@ Local verification should include:
 - `bun --cwd website test`
 - `bun --cwd website run build`
 
+Scenario-host release readiness additionally requires both distinct gates:
+
+- `intar-agent --config /etc/intar-agent/config.toml --doctor` is read-only.
+- `sudo /usr/lib/intar/intar-jailerd-self-test` boots the pinned VMM, measures
+  its hard quota, and removes disposable privileged state; it is the
+  operational proof. Use `--offline` after pre-seeding its pinned cache.
+
 Release verification also requires a real KVM host proof: publish a scenario,
 pre-cache its image, start a run, verify terminal access with the reported host key,
 verify metadata HTTP is unreachable, the host gateway rejects guest SSH, and
 same-run peers can reach each other over SSH; then tear the run down and confirm
 archive and replay artifacts land in R2.
+
+See [Scenario Host Jailer](scenario-host-jailer.md) for the root-owned config,
+pinned runtime/hash, readiness boundary, and ordered cutover.

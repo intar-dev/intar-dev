@@ -558,7 +558,7 @@ async fn protected_image_shas(db: &Db) -> HashSet<String> {
             return protected;
         }
     };
-    let desired = match serde_json::from_str::<intar_contracts::bridge::HostDesiredStateV1>(
+    let desired = match serde_json::from_str::<intar_contracts::bridge::HostDesiredStateV2>(
         &desired_row.doc_json,
     ) {
         Ok(desired) => desired,

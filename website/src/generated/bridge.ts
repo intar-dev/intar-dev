@@ -9,67 +9,67 @@ export type SyncRequestReason =
 
 export type HostRoleV1 = "agent" | "builder";
 
-export interface ClientHelloV5 {
+export interface ClientHelloV6 {
   protocol_version: number;
   host_id: string;
   agent_version: string;
   role: HostRoleV1;
   last_applied_desired_version?: number | null;
-  capabilities: HostCapabilitiesV1;
+  capabilities: HostCapabilitiesV2;
 }
 
-export interface ServerHelloV5 {
+export interface ServerHelloV6 {
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
-export interface DesiredStateV5 {
+export interface DesiredStateV6 {
   protocol_version: number;
   host_id: string;
-  desired_state: HostDesiredStateV1;
+  desired_state: HostDesiredStateV2;
 }
 
-export interface StateReportV5 {
+export interface StateReportV6 {
   protocol_version: number;
   host_id: string;
-  report: HostStateReportV1;
+  report: HostStateReportV2;
 }
 
-export interface VmReportV5 {
+export interface VmReportV6 {
   protocol_version: number;
   host_id: string;
-  report: VmReportV1;
+  report: VmReportV2;
 }
 
-export interface BuildReportV5 {
+export interface BuildReportV6 {
   protocol_version: number;
   host_id: string;
   report: BuildReportV1;
 }
 
-export interface SyncRequestV5 {
+export interface SyncRequestV6 {
   protocol_version: number;
   host_id: string;
   reason: SyncRequestReason;
 }
 
-export type BridgeMessageV5 =
-  | ({ type: "client_hello" } & ClientHelloV5)
-  | ({ type: "server_hello" } & ServerHelloV5)
-  | ({ type: "desired_state" } & DesiredStateV5)
-  | ({ type: "state_report" } & StateReportV5)
-  | ({ type: "vm_report" } & VmReportV5)
-  | ({ type: "build_report" } & BuildReportV5)
-  | ({ type: "sync_request" } & SyncRequestV5);
+export type BridgeMessageV6 =
+  | ({ type: "client_hello" } & ClientHelloV6)
+  | ({ type: "server_hello" } & ServerHelloV6)
+  | ({ type: "desired_state" } & DesiredStateV6)
+  | ({ type: "state_report" } & StateReportV6)
+  | ({ type: "vm_report" } & VmReportV6)
+  | ({ type: "build_report" } & BuildReportV6)
+  | ({ type: "sync_request" } & SyncRequestV6);
 
-export interface HostDesiredStateV1 {
+export interface HostDesiredStateV2 {
   schema_version: number;
   host_id: string;
   version: number;
   generated_at_unix_ms: number;
   cached_images: DesiredCachedImageV1[];
-  vms: DesiredVmV1[];
+  vms: DesiredVmV2[];
   builds: DesiredBuildV1[];
 }
 
@@ -90,37 +90,41 @@ export interface DesiredBuildV1 {
 
 export type DesiredVmPhase = "running" | "absent";
 
-export interface DesiredVmV1 {
+export interface DesiredVmV2 {
   run_id: string;
   vm_name: string;
   desired_phase: DesiredVmPhase;
   image_key: ImageKey;
   image_sha256: string;
-  resources: VmResourcesV1;
+  resources: VmResourcesV2;
   ssh_authorized_keys_openssh: string[];
   lease_expires_at_unix_ms: number;
 }
 
-export interface VmResourcesV1 {
-  cpu_count: number;
+export interface VmResourcesV2 {
+  cpu_millis: number;
+  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
 }
 
-export interface HostStateReportV1 {
+export interface HostStateReportV2 {
   schema_version: number;
   host_id: string;
   observed_at_unix_ms: number;
   applied_desired_version: number;
-  capacity: HostCapacityV1;
-  capabilities: HostCapabilitiesV1;
+  capacity: HostCapacityV2;
+  capabilities: HostCapabilitiesV2;
   cached_images: CachedImageStateV1[];
-  vms: VmActualStateV1[];
+  vms: VmActualStateV2[];
   builds: BuildReportV1[];
 }
 
-export interface HostCapacityV1 {
-  cpu_count: number;
+export interface HostCapacityV2 {
+  total_cpu_millis: number;
+  reserved_cpu_millis: number;
+  schedulable_cpu_millis: number;
+  committed_cpu_millis: number;
   memory_total_mib: Mib;
   memory_available_mib: Mib;
   disk_probe_path: string;
@@ -133,12 +137,39 @@ export interface HostCapacityV1 {
   primary_ipv6?: string | null;
 }
 
-export interface HostCapabilitiesV1 {
+export interface HostCapabilitiesV2 {
   arch: ImageArchitecture;
   supports_kvm: boolean;
   supports_vsock: boolean;
   supports_reflink: boolean;
   supports_nftables: boolean;
+  supports_jailer_v1: boolean;
+  supports_hard_cpu_quota: boolean;
+  supports_landlock: boolean;
+  supports_cgroup_v2: boolean;
+}
+
+export interface VmResourceStateV2 {
+  cpu_millis: number;
+  vcpu_count: number;
+  cpu_quota_us: number;
+  cpu_period_us: number;
+  cpu_usage_usec: number;
+  cpu_user_usec: number;
+  cpu_system_usec: number;
+  cpu_nr_periods: number;
+  cpu_nr_throttled: number;
+  cpu_throttled_usec: number;
+}
+
+export interface VmSandboxStateV1 {
+  healthy: boolean;
+  generation: string;
+  systemd_unit: string;
+  cgroup_path: string;
+  seccomp_enabled: boolean;
+  landlock_enabled: boolean;
+  no_new_privs: boolean;
 }
 
 export type ImageCachePhase =
@@ -170,7 +201,7 @@ export type VmPhase =
   | "failed"
   | "absent";
 
-export interface VmActualStateV1 {
+export interface VmActualStateV2 {
   run_id: string;
   vm_name: string;
   desired_version?: number | null;
@@ -178,6 +209,8 @@ export interface VmActualStateV1 {
   image_key?: ImageKey | null;
   image_sha256?: string | null;
   network?: VmNetworkStateV1 | null;
+  resource_state?: VmResourceStateV2 | null;
+  sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];
   archive?: VmArchiveStateV1 | null;
@@ -218,7 +251,7 @@ export interface VmArchiveStateV1 {
   error?: string | null;
 }
 
-export interface VmReportV1 {
+export interface VmReportV2 {
   schema_version: number;
   host_id: string;
   run_id: string;
@@ -227,6 +260,8 @@ export interface VmReportV1 {
   observed_at_unix_ms: number;
   phase: VmPhase;
   network?: VmNetworkStateV1 | null;
+  resource_state?: VmResourceStateV2 | null;
+  sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];
   archive?: VmArchiveStateV1 | null;

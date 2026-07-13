@@ -14,6 +14,7 @@ const EXAMPLE_TOML: &str = include_str!("../deploy/config.example.toml");
 pub struct AgentConfig {
     pub server: ServerConfig,
     pub cloud_hypervisor: CloudHypervisorConfig,
+    pub jailer: JailerClientConfig,
     pub bridge: BridgeConfig,
     pub ssh_access: SshAccessConfig,
     pub vm_defaults: VmDefaultsConfig,
@@ -38,15 +39,32 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CloudHypervisorConfig {
-    pub binary: String,
     pub spawn_timeout_seconds: u64,
 }
 
 impl Default for CloudHypervisorConfig {
     fn default() -> Self {
         Self {
-            binary: "cloud-hypervisor".to_string(),
             spawn_timeout_seconds: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct JailerClientConfig {
+    /// Root-owned SOCK_SEQPACKET endpoint exposed by intar-jailerd.
+    pub socket: PathBuf,
+    /// Bound all local privileged requests so bridge reconciliation cannot
+    /// hang indefinitely behind an unhealthy supervisor.
+    pub request_timeout_seconds: u64,
+}
+
+impl Default for JailerClientConfig {
+    fn default() -> Self {
+        Self {
+            socket: PathBuf::from("/run/intar-jailerd/control.sock"),
+            request_timeout_seconds: 10,
         }
     }
 }
@@ -224,15 +242,19 @@ pub fn load(path: &Path) -> Result<AgentConfig> {
         )
     })?;
 
-    cfg.cloud_hypervisor.binary = cfg.cloud_hypervisor.binary.trim().to_string();
-    if cfg.cloud_hypervisor.binary.is_empty() {
-        anyhow::bail!(
-            "config value cloud_hypervisor.binary must not be empty\n\nExample config:\n{EXAMPLE_TOML}"
-        );
-    }
     if cfg.cloud_hypervisor.spawn_timeout_seconds == 0 {
         anyhow::bail!(
             "config value cloud_hypervisor.spawn_timeout_seconds must be >= 1\n\nExample config:\n{EXAMPLE_TOML}"
+        );
+    }
+    if !cfg.jailer.socket.is_absolute() {
+        anyhow::bail!(
+            "config value jailer.socket must be an absolute path\n\nExample config:\n{EXAMPLE_TOML}"
+        );
+    }
+    if cfg.jailer.request_timeout_seconds == 0 {
+        anyhow::bail!(
+            "config value jailer.request_timeout_seconds must be >= 1\n\nExample config:\n{EXAMPLE_TOML}"
         );
     }
 
@@ -405,7 +427,6 @@ mod tests {
             &path,
             r#"
 [cloud_hypervisor]
-binary = "cloud-hypervisor"
 spawn_timeout_seconds = 10
 [image_registry]
 url = "https://example.com/images"
@@ -413,7 +434,11 @@ url = "https://example.com/images"
         )?;
 
         let cfg = load(&path)?;
-        assert_eq!(cfg.cloud_hypervisor.binary, "cloud-hypervisor");
+        assert_eq!(cfg.cloud_hypervisor.spawn_timeout_seconds, 10);
+        assert_eq!(
+            cfg.jailer.socket,
+            PathBuf::from("/run/intar-jailerd/control.sock")
+        );
         Ok(())
     }
 
@@ -442,6 +467,54 @@ url = "https://example.com/images"
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn load_rejects_relative_jailerd_socket() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[jailer]
+socket = "run/intar-jailerd/control.sock"
+[image_registry]
+url = "https://example.com/images"
+"#,
+        )?;
+
+        let error = load(&path).expect_err("relative jailerd socket must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("jailer.socket must be an absolute path"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_rejects_zero_jailerd_timeout() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[jailer]
+request_timeout_seconds = 0
+[image_registry]
+url = "https://example.com/images"
+"#,
+        )?;
+
+        let error = load(&path).expect_err("zero jailerd timeout must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("jailer.request_timeout_seconds must be >= 1"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 

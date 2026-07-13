@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "VmReportV1",
+  "title": "VmReportV2",
   "type": "object",
   "properties": {
     "archive": {
@@ -53,14 +53,34 @@
         "$ref": "#/$defs/VmProbeSnapshotV1"
       }
     },
+    "resource_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VmResourceStateV2"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "run_id": {
       "type": "string"
+    },
+    "sandbox": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VmSandboxStateV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 2,
+      "minimum": 2
     },
     "ssh_host_keys_openssh": {
       "type": "array",
@@ -215,6 +235,109 @@
         "unknown",
         "pass",
         "fail"
+      ]
+    },
+    "VmResourceStateV2": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "cpu_nr_periods": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_nr_throttled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_period_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_quota_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_system_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_throttled_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_usage_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_user_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vcpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "cpu_millis",
+        "vcpu_count",
+        "cpu_quota_us",
+        "cpu_period_us",
+        "cpu_usage_usec",
+        "cpu_user_usec",
+        "cpu_system_usec",
+        "cpu_nr_periods",
+        "cpu_nr_throttled",
+        "cpu_throttled_usec"
+      ]
+    },
+    "VmSandboxStateV1": {
+      "type": "object",
+      "properties": {
+        "cgroup_path": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "landlock_enabled": {
+          "type": "boolean"
+        },
+        "no_new_privs": {
+          "type": "boolean"
+        },
+        "seccomp_enabled": {
+          "type": "boolean"
+        },
+        "systemd_unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "healthy",
+        "generation",
+        "systemd_unit",
+        "cgroup_path",
+        "seccomp_enabled",
+        "landlock_enabled",
+        "no_new_privs"
       ]
     }
   }

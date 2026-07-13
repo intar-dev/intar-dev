@@ -16,6 +16,12 @@ Scenario control is desired-state based:
 The committed Rust contracts generate the TypeScript bridge types and fixtures in
 `src/generated/`; do not hand-edit those generated files.
 
+The jailer cutover is a coordinated break: scenario catalog manifests are V3,
+the bridge envelope is V6, and its desired-state/resource/capacity/report
+documents are V2. There is no V2-catalog or V5-bridge compatibility shim.
+Host CPU reservations use exact millicores and count pending plus committed
+rows against schedulable capacity.
+
 ## Useful commands
 
 Use the Node.js version pinned in `.node-version`; the Astro build relies on
@@ -38,9 +44,34 @@ using `wrangler.jsonc`. The bootstrap script deliberately uses the Wrangler
 version bundled with the Cloudflare Vite plugin so its persisted SQLite state
 stays compatible with the local workerd runtime.
 
-`drizzle/0000_baseline.sql` is reset-only. Schema changes intentionally do not
-support in-place upgrades. The committed all-zero D1 ID is a deployment guard;
-replace it only as part of the complete remote cutover below.
+`drizzle/*.sql` is an ordered migration stream. `bun run db:bootstrap:local`
+applies every migration to a fresh local database in filename order. Existing
+databases must apply only their first unapplied migration onward; for example,
+the Cloud Hypervisor jailer rollout uses:
+
+```bash
+bun run db:migrate:remote -- --from 0001_host_cpu_reservations.sql
+```
+
+Migration files are one-shot and deliberately fail when reapplied. Apply the
+remote migration before deploying code that uses its schema.
+
+`0001_host_cpu_reservations.sql` is also the V6 bridge cutover boundary. It
+refuses to run while any bridge client is connected, scenario placement is
+enabled on an agent, a scenario run or image build is active, desired VM state
+is anything other than an `absent` tombstone, or an actual report still
+contains a VM/build. On success it bumps and replaces every drained V5 desired
+document with an empty schema-3 document and removes old actual reports. Stop
+every V5 agent and builder before applying it so neither can write an old
+document back during the migration-to-deploy interval.
+
+For the jailer rollout, enter maintenance and drain all old scenario VMs before
+stopping the old agents. Install jailerd, jailer, the pinned Cloud Hypervisor
+v53.0 runtime, and systemd units while agents remain stopped; apply the
+reservation migration; deploy the V6 Worker; republish every scenario as V3;
+then start only hosts that pass both agent doctor and the root-only jailerd
+self-test. Validate `cpu = 0.125` and the eight-VM saturation case before
+re-enabling starts. Existing unsandboxed VMs cannot be adopted.
 
 Pull requests run the test/build and UI quality gates. A merge to `main` that
 changes the website automatically builds that exact commit and deploys it
@@ -72,7 +103,7 @@ either R2 binding still names the previous generation. Bootstrap the new remote
 database and approve the first administrator's normalized GitHub username:
 
 ```bash
-bunx wrangler d1 execute DB --remote --file drizzle/0000_baseline.sql --config wrangler.jsonc
+bun run db:migrate:remote
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc \
   --command "INSERT INTO access_allowlist (github_username, approved_by, approved_at) VALUES (lower('${GITHUB_USERNAME}'), NULL, cast(unixepoch('subsecond') * 1000 as integer)) ON CONFLICT(github_username) DO UPDATE SET approved_by = NULL, approved_at = excluded.approved_at;"
 

@@ -2,25 +2,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::fs::FileTypeExt as _;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt, future::join_all};
 use intar_contracts::bridge::{
-    BRIDGE_PROTOCOL_VERSION, BridgeMessageV5, CachedImageStateV1, ClientHelloV5, DesiredStateV5,
-    DesiredVmPhase, DesiredVmV1, HOST_DESIRED_STATE_SCHEMA_VERSION,
-    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV1, HostCapacityV1, HostDesiredStateV1,
-    HostRoleV1, HostStateReportV1, ImageCachePhase, StateReportV5, SyncRequestReason,
-    SyncRequestV5, VM_REPORT_SCHEMA_VERSION, VmActualStateV1, VmArchivePhase, VmArchiveStateV1,
-    VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV1, VmReportV5,
-    VmResourcesV1,
+    BRIDGE_PROTOCOL_VERSION, BridgeMessageV6, CachedImageStateV1, ClientHelloV6, DesiredStateV6,
+    DesiredVmPhase, DesiredVmV2, HOST_DESIRED_STATE_SCHEMA_VERSION,
+    HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
+    HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV6, SyncRequestReason,
+    SyncRequestV6, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
+    VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2, VmReportV6,
+    VmResourceStateV2, VmResourcesV2, VmSandboxStateV1,
 };
 use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
+use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmInspection};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
@@ -113,7 +115,7 @@ async fn connect_once(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    current_desired_state: &mut Option<HostDesiredStateV1>,
+    current_desired_state: &mut Option<HostDesiredStateV2>,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_agent_access(cfg, http).await?;
@@ -136,15 +138,16 @@ async fn connect_once(
     info!(host_id = %cfg.host_id, "bridge websocket connected");
 
     let (mut write, mut read) = ws_stream.split();
+    let hello_jailer = vm.jailer_capabilities().await.ok();
     send_bridge_message(
         &mut write,
-        &BridgeMessageV5::ClientHello(ClientHelloV5 {
+        &BridgeMessageV6::ClientHello(ClientHelloV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             role: HostRoleV1::Agent,
             last_applied_desired_version: current_desired_state.as_ref().map(|state| state.version),
-            capabilities: collect_host_capabilities(),
+            capabilities: collect_host_capabilities(hello_jailer.as_ref()),
         }),
     )
     .await?;
@@ -158,7 +161,7 @@ async fn connect_once(
             if let Some(message) = parse_bridge_message(message)? {
                 validate_bridge_message(&message, &cfg.host_id)?;
                 match message {
-                    BridgeMessageV5::ServerHello(server_hello) => break Ok(server_hello),
+                    BridgeMessageV6::ServerHello(server_hello) => break Ok(server_hello),
                     other => {
                         anyhow::bail!("expected server_hello, got {}", bridge_message_type(&other))
                     }
@@ -171,7 +174,7 @@ async fn connect_once(
     info!(
         host_id = %server_hello.host_id,
         desired_version = server_hello.desired_version,
-        "bridge v5 handshake complete"
+        "bridge v6 handshake complete"
     );
 
     send_sync_request(
@@ -256,11 +259,12 @@ async fn connect_once(
                             let probes = load_probe_snapshots_for_vm(db, &update.run_id, &update.vm_name).await;
                             let report = build_vm_report_from_status(
                                 &cfg.host_id,
+                                vm,
                                 vm.ssh_advertised_host().as_deref(),
                                 current_desired_state.as_ref(),
                                 status,
                                 probes,
-                            );
+                            ).await;
                             send_vm_report(&mut write, &cfg.host_id, report).await?;
                         }
                     }
@@ -279,15 +283,15 @@ async fn handle_server_message<W>(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    current_desired_state: &mut Option<HostDesiredStateV1>,
-    message: BridgeMessageV5,
+    current_desired_state: &mut Option<HostDesiredStateV2>,
+    message: BridgeMessageV6,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     match message {
-        BridgeMessageV5::DesiredState(message) => {
+        BridgeMessageV6::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
             cache_desired_state(db, &desired_state)
                 .await
@@ -307,7 +311,7 @@ where
             )
             .await?;
         }
-        BridgeMessageV5::SyncRequest(_) => {
+        BridgeMessageV6::SyncRequest(_) => {
             send_state_report(
                 write,
                 cfg,
@@ -318,20 +322,20 @@ where
             )
             .await?;
         }
-        BridgeMessageV5::ServerHello(_) => {
+        BridgeMessageV6::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
         }
-        BridgeMessageV5::ClientHello(_)
-        | BridgeMessageV5::StateReport(_)
-        | BridgeMessageV5::VmReport(_)
-        | BridgeMessageV5::BuildReport(_) => {
+        BridgeMessageV6::ClientHello(_)
+        | BridgeMessageV6::StateReport(_)
+        | BridgeMessageV6::VmReport(_)
+        | BridgeMessageV6::BuildReport(_) => {
             anyhow::bail!("server sent agent-originated bridge message");
         }
     }
     Ok(())
 }
 
-async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDesiredStateV1> {
+async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDesiredStateV2> {
     let row = match db.load_desired_state().await {
         Ok(Some(row)) => row,
         Ok(None) => return None,
@@ -349,7 +353,7 @@ async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDe
         return None;
     }
 
-    let desired_state = match serde_json::from_str::<HostDesiredStateV1>(&row.doc_json) {
+    let desired_state = match serde_json::from_str::<HostDesiredStateV2>(&row.doc_json) {
         Ok(value) => value,
         Err(error) => {
             warn!(error = %error, "cached desired state is invalid JSON");
@@ -373,13 +377,13 @@ async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDe
 async fn apply_cached_desired_state(
     cfg: &BridgeConfig,
     vm: &VmManager,
-    desired_state: HostDesiredStateV1,
+    desired_state: HostDesiredStateV2,
 ) -> Result<()> {
     let version = desired_state.version;
     let failure_reports = apply_desired_state(
         cfg,
         vm,
-        &DesiredStateV5 {
+        &DesiredStateV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             desired_state,
@@ -398,7 +402,7 @@ async fn apply_cached_desired_state(
     Ok(())
 }
 
-async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV1) -> Result<()> {
+async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV2) -> Result<()> {
     let version = i64::try_from(desired_state.version)
         .context("desired state version exceeds sqlite INTEGER range")?;
     let doc_json =
@@ -415,8 +419,8 @@ async fn cache_desired_state(db: &Db, desired_state: &HostDesiredStateV1) -> Res
 async fn apply_desired_state(
     cfg: &BridgeConfig,
     vm: &VmManager,
-    message: &DesiredStateV5,
-) -> Result<Vec<VmReportV1>> {
+    message: &DesiredStateV6,
+) -> Result<Vec<VmReportV2>> {
     validate_desired_state(&cfg.host_id, &message.desired_state)?;
     let desired = &message.desired_state;
     let now = now_ms();
@@ -481,8 +485,8 @@ async fn apply_desired_state(
 async fn reconcile_desired_vm(
     _cfg: &BridgeConfig,
     vm: &VmManager,
-    desired: &HostDesiredStateV1,
-    desired_vm: &DesiredVmV1,
+    desired: &HostDesiredStateV2,
+    desired_vm: &DesiredVmV2,
     now: i64,
 ) -> Result<()> {
     if let Some(existing) = vm.get_vm(&desired_vm.vm_name).await {
@@ -534,7 +538,7 @@ async fn reconcile_desired_vm(
     .map_err(|error| anyhow::anyhow!("{}", error.message))
 }
 
-fn desired_peer_vm_names(desired: &HostDesiredStateV1, desired_vm: &DesiredVmV1) -> Vec<String> {
+fn desired_peer_vm_names(desired: &HostDesiredStateV2, desired_vm: &DesiredVmV2) -> Vec<String> {
     desired
         .vms
         .iter()
@@ -558,7 +562,7 @@ async fn send_state_report<W>(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    desired: Option<&HostDesiredStateV1>,
+    desired: Option<&HostDesiredStateV2>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
@@ -567,7 +571,7 @@ where
     let report = build_host_state_report(&cfg.host_id, vm, db, disk_probe_path, desired).await;
     send_bridge_message(
         write,
-        &BridgeMessageV5::StateReport(StateReportV5 {
+        &BridgeMessageV6::StateReport(StateReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: cfg.host_id.clone(),
             report,
@@ -576,14 +580,14 @@ where
     .await
 }
 
-async fn send_vm_report<W>(write: &mut W, host_id: &str, report: VmReportV1) -> Result<()>
+async fn send_vm_report<W>(write: &mut W, host_id: &str, report: VmReportV2) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
     send_bridge_message(
         write,
-        &BridgeMessageV5::VmReport(VmReportV5 {
+        &BridgeMessageV6::VmReport(VmReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -599,7 +603,7 @@ where
 {
     send_bridge_message(
         write,
-        &BridgeMessageV5::SyncRequest(SyncRequestV5 {
+        &BridgeMessageV6::SyncRequest(SyncRequestV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             reason,
@@ -613,8 +617,8 @@ async fn build_host_state_report(
     vm: &VmManager,
     db: &Db,
     disk_probe_path: &Path,
-    desired: Option<&HostDesiredStateV1>,
-) -> HostStateReportV1 {
+    desired: Option<&HostDesiredStateV2>,
+) -> HostStateReportV2 {
     let now = now_ms();
     let profile = host_profile::collect(disk_probe_path);
     let probe_rows = match db.load_all_vm_probe_states().await {
@@ -626,14 +630,62 @@ async fn build_host_state_report(
     };
     let probes_by_vm = probe_snapshots_by_vm(probe_rows);
     let ssh_host = vm.ssh_advertised_host();
+    let statuses = vm.list_vms().await;
+    let profile_total_cpu_millis = u32::try_from(profile.cpu_cores)
+        .unwrap_or(u32::MAX / 1_000)
+        .saturating_mul(1_000);
+    let local_committed_cpu_millis = statuses
+        .iter()
+        .filter_map(|status| status.details.as_ref()?.cpu_millis)
+        .fold(0_u32, u32::saturating_add);
+    let jailer = vm.jailer_capabilities().await.ok();
+    let (total_cpu_millis, reserved_cpu_millis, schedulable_cpu_millis, committed_cpu_millis) =
+        jailer.as_ref().map_or_else(
+            || {
+                // Helper unavailability is fail-closed: advertise no
+                // schedulable CPU even when the host profile is otherwise
+                // healthy.
+                (
+                    profile_total_cpu_millis,
+                    profile_total_cpu_millis,
+                    0,
+                    local_committed_cpu_millis,
+                )
+            },
+            |capabilities| {
+                (
+                    saturating_u64_to_u32(capabilities.total_cpu_millis),
+                    saturating_u64_to_u32(capabilities.reserved_cpu_millis),
+                    saturating_u64_to_u32(capabilities.schedulable_cpu_millis),
+                    saturating_u64_to_u32(capabilities.committed_cpu_millis),
+                )
+            },
+        );
+    let inspections = join_all(statuses.iter().map(|status| async {
+        let generation = status
+            .details
+            .as_ref()
+            .and_then(|details| details.jail_generation.as_deref())?;
+        match vm.inspect_jailed_vm(generation).await {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for host report");
+                None
+            }
+        }
+    }))
+    .await;
 
-    HostStateReportV1 {
+    HostStateReportV2 {
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
         observed_at_unix_ms: now,
         applied_desired_version: desired.map(|state| state.version).unwrap_or(0),
-        capacity: HostCapacityV1 {
-            cpu_count: usize_to_u16(profile.cpu_cores),
+        capacity: HostCapacityV2 {
+            total_cpu_millis,
+            reserved_cpu_millis,
+            schedulable_cpu_millis,
+            committed_cpu_millis,
             memory_total_mib: mib_from_u64(profile.memory_total_mib.unwrap_or(0)),
             memory_available_mib: mib_from_u64(profile.memory_available_mib.unwrap_or(0)),
             disk_probe_path: profile.disk_probe_path,
@@ -645,21 +697,27 @@ async fn build_host_state_report(
             primary_ipv4: profile.primary_ipv4,
             primary_ipv6: profile.primary_ipv6,
         },
-        capabilities: collect_host_capabilities(),
+        capabilities: collect_host_capabilities(jailer.as_ref()),
         cached_images: desired
             .map(|state| cached_image_states(state, now))
             .unwrap_or_default(),
-        vms: vm
-            .list_vms()
-            .await
+        vms: statuses
             .into_iter()
-            .map(|status| {
+            .zip(inspections)
+            .map(|(status, inspection)| {
                 let run_id = local_run_id(&status).unwrap_or_default();
                 let probes = probes_by_vm
                     .get(&(run_id.clone(), status.name.clone()))
                     .cloned()
                     .unwrap_or_default();
-                actual_state_from_status(host_id, ssh_host.as_deref(), desired, status, probes)
+                actual_state_from_status(
+                    host_id,
+                    ssh_host.as_deref(),
+                    desired,
+                    status,
+                    probes,
+                    inspection.as_ref(),
+                )
             })
             .collect(),
         builds: Vec::new(),
@@ -669,28 +727,54 @@ async fn build_host_state_report(
 async fn build_vm_report_from_probe_update(
     host_id: &str,
     vm: &VmManager,
-    desired: Option<&HostDesiredStateV1>,
+    desired: Option<&HostDesiredStateV2>,
     update: &ProbeUpdateEnvelope,
-) -> Option<VmReportV1> {
+) -> Option<VmReportV2> {
     let status = vm.get_vm(&update.vm_name).await?;
-    Some(build_vm_report_from_status(
-        host_id,
-        vm.ssh_advertised_host().as_deref(),
-        desired,
-        status,
-        probe_snapshots_from_update(update),
-    ))
+    Some(
+        build_vm_report_from_status(
+            host_id,
+            vm,
+            vm.ssh_advertised_host().as_deref(),
+            desired,
+            status,
+            probe_snapshots_from_update(update),
+        )
+        .await,
+    )
 }
 
-fn build_vm_report_from_status(
+async fn build_vm_report_from_status(
     host_id: &str,
+    vm: &VmManager,
     ssh_host: Option<&str>,
-    desired: Option<&HostDesiredStateV1>,
+    desired: Option<&HostDesiredStateV2>,
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
-) -> VmReportV1 {
-    let actual = actual_state_from_status(host_id, ssh_host, desired, status, probes);
-    VmReportV1 {
+) -> VmReportV2 {
+    let inspection = match status
+        .details
+        .as_ref()
+        .and_then(|details| details.jail_generation.as_deref())
+    {
+        Some(generation) => match vm.inspect_jailed_vm(generation).await {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for VM report");
+                None
+            }
+        },
+        None => None,
+    };
+    let actual = actual_state_from_status(
+        host_id,
+        ssh_host,
+        desired,
+        status,
+        probes,
+        inspection.as_ref(),
+    );
+    VmReportV2 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
         run_id: actual.run_id,
@@ -699,6 +783,8 @@ fn build_vm_report_from_status(
         observed_at_unix_ms: actual.updated_at_unix_ms,
         phase: actual.phase,
         network: actual.network,
+        resource_state: actual.resource_state,
+        sandbox: actual.sandbox,
         ssh_host_keys_openssh: actual.ssh_host_keys_openssh,
         probes: actual.probes,
         archive: actual.archive,
@@ -709,10 +795,11 @@ fn build_vm_report_from_status(
 fn actual_state_from_status(
     _host_id: &str,
     ssh_host: Option<&str>,
-    desired: Option<&HostDesiredStateV1>,
+    desired: Option<&HostDesiredStateV2>,
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
-) -> VmActualStateV1 {
+    inspection: Option<&VmInspection>,
+) -> VmActualStateV2 {
     let run_id = local_run_id(&status).unwrap_or_default();
     let desired_vm = desired.and_then(|state| {
         state
@@ -721,7 +808,7 @@ fn actual_state_from_status(
             .find(|vm| vm.run_id == run_id && vm.vm_name == status.name)
     });
 
-    VmActualStateV1 {
+    VmActualStateV2 {
         run_id,
         vm_name: status.name.clone(),
         desired_version: desired_vm.and_then(|_| desired.map(|state| state.version)),
@@ -729,6 +816,8 @@ fn actual_state_from_status(
         image_key: desired_vm.map(|vm| vm.image_key.clone()),
         image_sha256: desired_vm.map(|vm| vm.image_sha256.clone()),
         network: network_state_from_status(&status, ssh_host),
+        resource_state: resource_state_from_status(&status, inspection),
+        sandbox: sandbox_state_from_status(&status, inspection),
         ssh_host_keys_openssh: status
             .details
             .as_ref()
@@ -743,12 +832,12 @@ fn actual_state_from_status(
 
 fn failed_vm_report(
     host_id: &str,
-    desired: &HostDesiredStateV1,
-    vm: &DesiredVmV1,
+    desired: &HostDesiredStateV2,
+    vm: &DesiredVmV2,
     observed_at_unix_ms: i64,
     error: String,
-) -> VmReportV1 {
-    VmReportV1 {
+) -> VmReportV2 {
+    VmReportV2 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
         host_id: host_id.to_string(),
         run_id: vm.run_id.clone(),
@@ -757,6 +846,8 @@ fn failed_vm_report(
         observed_at_unix_ms,
         phase: VmPhase::Failed,
         network: None,
+        resource_state: None,
+        sandbox: None,
         ssh_host_keys_openssh: Vec::new(),
         probes: Vec::new(),
         archive: None,
@@ -925,13 +1016,13 @@ fn probe_status(status: &str) -> VmProbeStatus {
     }
 }
 
-fn cached_image_states(desired: &HostDesiredStateV1, now: i64) -> Vec<CachedImageStateV1> {
+fn cached_image_states(desired: &HostDesiredStateV2, now: i64) -> Vec<CachedImageStateV1> {
     let cache_root = crate::image_cache::default_cache_root().ok();
     cached_image_states_with_cache_root(desired, now, cache_root.as_deref())
 }
 
 fn cached_image_states_with_cache_root(
-    desired: &HostDesiredStateV1,
+    desired: &HostDesiredStateV2,
     now: i64,
     cache_root: Option<&Path>,
 ) -> Vec<CachedImageStateV1> {
@@ -963,17 +1054,86 @@ fn cached_image_states_with_cache_root(
         .collect()
 }
 
-fn collect_host_capabilities() -> HostCapabilitiesV1 {
-    HostCapabilitiesV1 {
+fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabilitiesV2 {
+    let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
+        .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
+    let supports_jailer_v1 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v1);
+    HostCapabilitiesV2 {
         arch: host_architecture(),
-        supports_kvm: can_open_char_device(Path::new("/dev/kvm")),
-        supports_vsock: can_open_char_device(Path::new("/dev/vhost-vsock")),
+        // The service deliberately runs with PrivateDevices=true. A successful
+        // jailerd readiness attestation, not agent-visible device access, is
+        // the authority for KVM availability and complete helper accounting.
+        supports_kvm: supports_jailer_v1,
+        supports_vsock: true,
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
+        supports_jailer_v1,
+        supports_hard_cpu_quota: jailer
+            .is_some_and(|capabilities| capabilities.supports_hard_cpu_quota),
+        supports_landlock: jailer.is_some_and(|capabilities| capabilities.supports_landlock),
+        supports_cgroup_v2: jailer.map_or(supports_cgroup_v2, |capabilities| {
+            capabilities.supports_cgroup_v2
+        }),
     }
 }
 
-#[cfg(unix)]
+fn resource_state_from_status(
+    status: &VmStatusResponse,
+    inspection: Option<&VmInspection>,
+) -> Option<VmResourceStateV2> {
+    let details = status.details.as_ref()?;
+    let inspection = inspection?;
+    if details.jail_generation.as_deref() != Some(inspection.generation.as_str()) {
+        return None;
+    }
+    let cpu_stat = inspection.cpu_stat.as_ref();
+    Some(VmResourceStateV2 {
+        cpu_millis: inspection.cpu_quota.cpu_millis,
+        vcpu_count: inspection.vcpu_count,
+        cpu_quota_us: inspection.cpu_quota.quota_micros,
+        cpu_period_us: inspection.cpu_quota.period_micros,
+        cpu_usage_usec: cpu_stat.map_or(0, |stat| stat.usage_usec),
+        cpu_user_usec: cpu_stat.map_or(0, |stat| stat.user_usec),
+        cpu_system_usec: cpu_stat.map_or(0, |stat| stat.system_usec),
+        cpu_nr_periods: cpu_stat.map_or(0, |stat| stat.nr_periods),
+        cpu_nr_throttled: cpu_stat.map_or(0, |stat| stat.nr_throttled),
+        cpu_throttled_usec: cpu_stat.map_or(0, |stat| stat.throttled_usec),
+    })
+}
+
+fn sandbox_state_from_status(
+    status: &VmStatusResponse,
+    inspection: Option<&VmInspection>,
+) -> Option<VmSandboxStateV1> {
+    let details = status.details.as_ref()?;
+    let inspection_matches = inspection.is_some_and(|inspection| {
+        details.jail_generation.as_deref() == Some(inspection.generation.as_str())
+            && details.jail_unit_name.as_deref() == Some(inspection.unit_name.as_str())
+            && details.jail_cgroup_path.as_deref()
+                == inspection.cgroup_path.as_deref().and_then(Path::to_str)
+    });
+    Some(VmSandboxStateV1 {
+        healthy: inspection_matches
+            && inspection.is_some_and(|inspection| {
+                inspection.health == SandboxHealth::Healthy
+                    && inspection.seccomp_enabled
+                    && inspection.landlock_enabled
+                    && inspection.no_new_privs
+                    && inspection.capabilities_empty
+            }),
+        generation: details.jail_generation.clone()?,
+        systemd_unit: details.jail_unit_name.clone()?,
+        cgroup_path: details.jail_cgroup_path.clone()?,
+        seccomp_enabled: inspection_matches
+            && inspection.is_some_and(|inspection| inspection.seccomp_enabled),
+        landlock_enabled: inspection_matches
+            && inspection.is_some_and(|inspection| inspection.landlock_enabled),
+        no_new_privs: inspection_matches
+            && inspection.is_some_and(|inspection| inspection.no_new_privs),
+    })
+}
+
+#[cfg(all(test, unix))]
 fn can_open_char_device(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -988,7 +1148,7 @@ fn can_open_char_device(path: &Path) -> bool {
         .is_ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn can_open_char_device(_path: &Path) -> bool {
     false
 }
@@ -1087,7 +1247,7 @@ fn default_ws_url(base_url: &str, host_id: &str) -> String {
     format!("{ws_base}/api/agent/bridge/{host_id}")
 }
 
-async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV5) -> Result<()>
+async fn send_bridge_message<W>(write: &mut W, message: &BridgeMessageV6) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
@@ -1099,7 +1259,7 @@ where
         .context("failed to send bridge websocket message")
 }
 
-fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV5>> {
+fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV6>> {
     match message {
         Message::Text(raw) => parse_bridge_json(&raw).map(Some),
         Message::Binary(raw) => {
@@ -1113,18 +1273,18 @@ fn parse_bridge_message(message: Message) -> Result<Option<BridgeMessageV5>> {
     }
 }
 
-fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV5> {
+fn parse_bridge_json(raw: &str) -> Result<BridgeMessageV6> {
     let message =
-        serde_json::from_str::<BridgeMessageV5>(raw).context("invalid bridge v5 JSON message")?;
-    if !message_has_v5_protocol(&message) {
-        anyhow::bail!("invalid bridge protocol version; expected v5");
+        serde_json::from_str::<BridgeMessageV6>(raw).context("invalid bridge v6 JSON message")?;
+    if !message_has_v6_protocol(&message) {
+        anyhow::bail!("invalid bridge protocol version; expected v6");
     }
     Ok(message)
 }
 
-fn validate_bridge_message(message: &BridgeMessageV5, host_id: &str) -> Result<()> {
-    if !message_has_v5_protocol(message) {
-        anyhow::bail!("invalid bridge protocol version; expected v5");
+fn validate_bridge_message(message: &BridgeMessageV6, host_id: &str) -> Result<()> {
+    if !message_has_v6_protocol(message) {
+        anyhow::bail!("invalid bridge protocol version; expected v6");
     }
     let message_host_id = bridge_message_host_id(message);
     if message_host_id != host_id {
@@ -1133,7 +1293,7 @@ fn validate_bridge_message(message: &BridgeMessageV5, host_id: &str) -> Result<(
     Ok(())
 }
 
-fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV1) -> Result<()> {
+fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV2) -> Result<()> {
     if desired.schema_version != HOST_DESIRED_STATE_SCHEMA_VERSION {
         anyhow::bail!(
             "unsupported desired state schema version {}; expected {}",
@@ -1156,51 +1316,51 @@ fn validate_desired_state(host_id: &str, desired: &HostDesiredStateV1) -> Result
     Ok(())
 }
 
-fn message_has_v5_protocol(message: &BridgeMessageV5) -> bool {
+fn message_has_v6_protocol(message: &BridgeMessageV6) -> bool {
     match message {
-        BridgeMessageV5::ClientHello(message) => {
+        BridgeMessageV6::ClientHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::ServerHello(message) => {
+        BridgeMessageV6::ServerHello(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::DesiredState(message) => {
+        BridgeMessageV6::DesiredState(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::StateReport(message) => {
+        BridgeMessageV6::StateReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
-        BridgeMessageV5::BuildReport(message) => {
+        BridgeMessageV6::VmReport(message) => message.protocol_version == BRIDGE_PROTOCOL_VERSION,
+        BridgeMessageV6::BuildReport(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
-        BridgeMessageV5::SyncRequest(message) => {
+        BridgeMessageV6::SyncRequest(message) => {
             message.protocol_version == BRIDGE_PROTOCOL_VERSION
         }
     }
 }
 
-fn bridge_message_host_id(message: &BridgeMessageV5) -> &str {
+fn bridge_message_host_id(message: &BridgeMessageV6) -> &str {
     match message {
-        BridgeMessageV5::ClientHello(message) => &message.host_id,
-        BridgeMessageV5::ServerHello(message) => &message.host_id,
-        BridgeMessageV5::DesiredState(message) => &message.host_id,
-        BridgeMessageV5::StateReport(message) => &message.host_id,
-        BridgeMessageV5::VmReport(message) => &message.host_id,
-        BridgeMessageV5::BuildReport(message) => &message.host_id,
-        BridgeMessageV5::SyncRequest(message) => &message.host_id,
+        BridgeMessageV6::ClientHello(message) => &message.host_id,
+        BridgeMessageV6::ServerHello(message) => &message.host_id,
+        BridgeMessageV6::DesiredState(message) => &message.host_id,
+        BridgeMessageV6::StateReport(message) => &message.host_id,
+        BridgeMessageV6::VmReport(message) => &message.host_id,
+        BridgeMessageV6::BuildReport(message) => &message.host_id,
+        BridgeMessageV6::SyncRequest(message) => &message.host_id,
     }
 }
 
-fn bridge_message_type(message: &BridgeMessageV5) -> &'static str {
+fn bridge_message_type(message: &BridgeMessageV6) -> &'static str {
     match message {
-        BridgeMessageV5::ClientHello(_) => "client_hello",
-        BridgeMessageV5::ServerHello(_) => "server_hello",
-        BridgeMessageV5::DesiredState(_) => "desired_state",
-        BridgeMessageV5::StateReport(_) => "state_report",
-        BridgeMessageV5::VmReport(_) => "vm_report",
-        BridgeMessageV5::BuildReport(_) => "build_report",
-        BridgeMessageV5::SyncRequest(_) => "sync_request",
+        BridgeMessageV6::ClientHello(_) => "client_hello",
+        BridgeMessageV6::ServerHello(_) => "server_hello",
+        BridgeMessageV6::DesiredState(_) => "desired_state",
+        BridgeMessageV6::StateReport(_) => "state_report",
+        BridgeMessageV6::VmReport(_) => "vm_report",
+        BridgeMessageV6::BuildReport(_) => "build_report",
+        BridgeMessageV6::SyncRequest(_) => "sync_request",
     }
 }
 
@@ -1214,15 +1374,16 @@ fn local_run_id(status: &VmStatusResponse) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn resources_from_desired(resources: &VmResourcesV1) -> CreateVmResources {
+fn resources_from_desired(resources: &VmResourcesV2) -> CreateVmResources {
     CreateVmResources {
-        vcpus: u32::from(resources.cpu_count),
+        cpu_millis: resources.cpu_millis,
+        vcpus: u32::from(resources.vcpu_count),
         memory_mib: resources.memory_mib.0,
         disk_mib: Some(resources.disk_mib.0),
     }
 }
 
-fn desired_lease_duration_seconds(vm: &DesiredVmV1, now_ms: i64) -> Result<u64> {
+fn desired_lease_duration_seconds(vm: &DesiredVmV2, now_ms: i64) -> Result<u64> {
     let remaining_ms = vm.lease_expires_at_unix_ms.saturating_sub(now_ms);
     let seconds = u64::try_from((remaining_ms / 1_000).max(1)).unwrap_or(u64::MAX);
     Ok(seconds)
@@ -1244,7 +1405,7 @@ fn image_architecture_slug(arch: &ImageArchitecture) -> &'static str {
     }
 }
 
-fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV1) -> u32 {
+fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV2) -> u32 {
     let mut hash = desired_version;
     for byte in vm.run_id.bytes().chain(vm.vm_name.bytes()) {
         hash = hash.wrapping_mul(16_777_619) ^ u64::from(byte);
@@ -1252,12 +1413,12 @@ fn kino_vsock_cid(desired_version: u64, vm: &DesiredVmV1) -> u32 {
     10_000 + u32::try_from(hash % 50_000).unwrap_or(0)
 }
 
-fn usize_to_u16(value: usize) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
-}
-
 fn mib_from_u64(value: u64) -> Mib {
     Mib(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn saturating_u64_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn parse_rfc3339_ms(value: &str) -> Option<i64> {
@@ -1277,8 +1438,8 @@ mod tests {
 
     use super::*;
 
-    fn desired_vm() -> DesiredVmV1 {
-        DesiredVmV1 {
+    fn desired_vm() -> DesiredVmV2 {
+        DesiredVmV2 {
             run_id: "run-1".to_string(),
             vm_name: "web".to_string(),
             desired_phase: DesiredVmPhase::Running,
@@ -1288,8 +1449,9 @@ mod tests {
                 arch: ImageArchitecture::X86_64,
             },
             image_sha256: "a".repeat(64),
-            resources: VmResourcesV1 {
-                cpu_count: 1,
+            resources: VmResourcesV2 {
+                cpu_millis: 125,
+                vcpu_count: 1,
                 memory_mib: Mib(512),
                 disk_mib: Mib(4096),
             },
@@ -1315,8 +1477,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_v5_bridge_messages() {
-        let message = BridgeMessageV5::SyncRequest(SyncRequestV5 {
+    fn parses_only_v6_bridge_messages() {
+        let message = BridgeMessageV6::SyncRequest(SyncRequestV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: "host-1".to_string(),
             reason: SyncRequestReason::Connect,
@@ -1325,14 +1487,14 @@ mod tests {
 
         assert!(parse_bridge_json(&raw).is_ok());
 
-        let raw_v3 = raw.replace("\"protocol_version\":5", "\"protocol_version\":3");
-        let error = parse_bridge_json(&raw_v3).expect_err("v3 should fail");
-        assert!(error.to_string().contains("expected v5"));
+        let raw_v5 = raw.replace("\"protocol_version\":6", "\"protocol_version\":5");
+        let error = parse_bridge_json(&raw_v5).expect_err("v5 should fail");
+        assert!(error.to_string().contains("expected v6"));
     }
 
     #[test]
     fn agent_desired_state_rejects_build_assignments() {
-        let mut desired = HostDesiredStateV1 {
+        let mut desired = HostDesiredStateV2 {
             schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_string(),
             version: 1,
@@ -1377,7 +1539,7 @@ mod tests {
         std::fs::create_dir_all(&image_dir).expect("image cache dir");
         let raw_path = image_dir.join(format!("{image_sha256}.raw"));
         std::fs::write(&raw_path, b"raw").expect("raw cache file");
-        let desired = HostDesiredStateV1 {
+        let desired = HostDesiredStateV2 {
             schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
             host_id: "host-1".to_string(),
             version: 1,

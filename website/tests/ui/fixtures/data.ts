@@ -521,7 +521,10 @@ function makeHost() {
       observedAt: FIXED_NOW - 20_000,
       health: "healthy",
       capacity: {
-        cpu_count: 16,
+        total_cpu_millis: 16_000,
+        reserved_cpu_millis: 1_000,
+        schedulable_cpu_millis: 15_000,
+        committed_cpu_millis: 2_000,
         memory_total_mib: 32768,
         memory_available_mib: 24576,
         disk_probe_path: "/var/lib/intar",

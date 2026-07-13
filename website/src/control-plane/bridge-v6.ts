@@ -1,5 +1,5 @@
 import type {
-  BridgeMessageV5,
+  BridgeMessageV6,
   BuildPhase,
   DesiredVmPhase,
   HostRoleV1,
@@ -20,7 +20,7 @@ import {
 
 const textDecoder = new TextDecoder();
 
-const MESSAGE_TYPES = new Set<BridgeMessageV5["type"]>([
+const MESSAGE_TYPES = new Set<BridgeMessageV6["type"]>([
   "client_hello",
   "server_hello",
   "desired_state",
@@ -94,9 +94,9 @@ const SYNC_REQUEST_REASONS = new Set<SyncRequestReason>([
 
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/i;
 
-export function parseBridgeMessageV5(
+export function parseBridgeMessageV6(
   input: string | ArrayBuffer,
-): BridgeMessageV5 | null {
+): BridgeMessageV6 | null {
   const value = parseJson(input);
   if (!isRecord(value)) {
     return null;
@@ -107,7 +107,7 @@ export function parseBridgeMessageV5(
     return null;
   }
 
-  if (!hasV5Envelope(value)) {
+  if (!hasV6Envelope(value)) {
     return null;
   }
 
@@ -129,7 +129,7 @@ export function parseBridgeMessageV5(
   }
 }
 
-export function serializeBridgeMessageV5(message: BridgeMessageV5): string {
+export function serializeBridgeMessageV6(message: BridgeMessageV6): string {
   return JSON.stringify(message);
 }
 
@@ -142,7 +142,7 @@ function parseJson(input: string | ArrayBuffer): unknown {
   }
 }
 
-function hasV5Envelope(value: Record<string, unknown>): boolean {
+function hasV6Envelope(value: Record<string, unknown>): boolean {
   return (
     value.protocol_version === BRIDGE_PROTOCOL_VERSION &&
     typeof value.host_id === "string" &&
@@ -152,7 +152,7 @@ function hasV5Envelope(value: Record<string, unknown>): boolean {
 
 function isClientHello(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "client_hello" }> {
+): value is Extract<BridgeMessageV6, { type: "client_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -168,7 +168,7 @@ function isClientHello(
 
 function isServerHello(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "server_hello" }> {
+): value is Extract<BridgeMessageV6, { type: "server_hello" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -177,7 +177,7 @@ function isServerHello(
 
 function isDesiredState(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "desired_state" }> {
+): value is Extract<BridgeMessageV6, { type: "desired_state" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -203,7 +203,7 @@ function isDesiredState(
 
 function isStateReport(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "state_report" }> {
+): value is Extract<BridgeMessageV6, { type: "state_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -231,7 +231,7 @@ function isStateReport(
 
 function isVmReport(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "vm_report" }> {
+): value is Extract<BridgeMessageV6, { type: "vm_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -242,7 +242,7 @@ function isVmReport(
 
 function isBuildReport(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "build_report" }> {
+): value is Extract<BridgeMessageV6, { type: "build_report" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -256,7 +256,7 @@ function isBuildReport(
 
 function isSyncRequest(
   value: unknown,
-): value is Extract<BridgeMessageV5, { type: "sync_request" }> {
+): value is Extract<BridgeMessageV6, { type: "sync_request" }> {
   if (!isRecord(value)) {
     return false;
   }
@@ -264,8 +264,8 @@ function isSyncRequest(
   return reason !== null && SYNC_REQUEST_REASONS.has(reason as SyncRequestReason);
 }
 
-function isBridgeMessageType(value: string): value is BridgeMessageV5["type"] {
-  return MESSAGE_TYPES.has(value as BridgeMessageV5["type"]);
+function isBridgeMessageType(value: string): value is BridgeMessageV6["type"] {
+  return MESSAGE_TYPES.has(value as BridgeMessageV6["type"]);
 }
 
 function isOptionalNumber(value: unknown): boolean {
@@ -274,6 +274,10 @@ function isOptionalNumber(value: unknown): boolean {
 
 function isNonNegativeInteger(value: unknown): boolean {
   return Number.isInteger(value) && Number(value) >= 0;
+}
+
+function isPositiveInteger(value: unknown): boolean {
+  return Number.isInteger(value) && Number(value) > 0;
 }
 
 function isInteger(value: unknown): boolean {
@@ -333,7 +337,8 @@ function isOptionalImageKeyPayload(value: unknown): boolean {
 function isVmResourcesPayload(value: unknown): boolean {
   return (
     isRecord(value) &&
-    isNonNegativeInteger(value.cpu_count) &&
+    isPositiveInteger(value.cpu_millis) &&
+    isPositiveInteger(value.vcpu_count) &&
     isNonNegativeInteger(value.memory_mib) &&
     isNonNegativeInteger(value.disk_mib)
   );
@@ -385,7 +390,10 @@ function isDesiredVmPayload(value: unknown): boolean {
 function isHostCapacityPayload(value: unknown): boolean {
   return (
     isRecord(value) &&
-    isNonNegativeInteger(value.cpu_count) &&
+    isNonNegativeInteger(value.total_cpu_millis) &&
+    isNonNegativeInteger(value.reserved_cpu_millis) &&
+    isNonNegativeInteger(value.schedulable_cpu_millis) &&
+    isNonNegativeInteger(value.committed_cpu_millis) &&
     isNonNegativeInteger(value.memory_total_mib) &&
     isNonNegativeInteger(value.memory_available_mib) &&
     readString(value.disk_probe_path) !== null &&
@@ -418,7 +426,11 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     typeof value.supports_kvm === "boolean" &&
     typeof value.supports_vsock === "boolean" &&
     typeof value.supports_reflink === "boolean" &&
-    typeof value.supports_nftables === "boolean"
+    typeof value.supports_nftables === "boolean" &&
+    typeof value.supports_jailer_v1 === "boolean" &&
+    typeof value.supports_hard_cpu_quota === "boolean" &&
+    typeof value.supports_landlock === "boolean" &&
+    typeof value.supports_cgroup_v2 === "boolean"
   );
 }
 
@@ -451,6 +463,43 @@ function isVmNetworkStatePayload(value: unknown): boolean {
 
 function isOptionalVmNetworkStatePayload(value: unknown): boolean {
   return value === undefined || value === null || isVmNetworkStatePayload(value);
+}
+
+function isVmResourceStatePayload(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isPositiveInteger(value.cpu_millis) &&
+    isPositiveInteger(value.vcpu_count) &&
+    isPositiveInteger(value.cpu_quota_us) &&
+    isPositiveInteger(value.cpu_period_us) &&
+    isNonNegativeInteger(value.cpu_usage_usec) &&
+    isNonNegativeInteger(value.cpu_user_usec) &&
+    isNonNegativeInteger(value.cpu_system_usec) &&
+    isNonNegativeInteger(value.cpu_nr_periods) &&
+    isNonNegativeInteger(value.cpu_nr_throttled) &&
+    isNonNegativeInteger(value.cpu_throttled_usec)
+  );
+}
+
+function isOptionalVmResourceStatePayload(value: unknown): boolean {
+  return value === undefined || value === null || isVmResourceStatePayload(value);
+}
+
+function isVmSandboxStatePayload(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.healthy === "boolean" &&
+    readString(value.generation) !== null &&
+    readString(value.systemd_unit) !== null &&
+    readString(value.cgroup_path) !== null &&
+    typeof value.seccomp_enabled === "boolean" &&
+    typeof value.landlock_enabled === "boolean" &&
+    typeof value.no_new_privs === "boolean"
+  );
+}
+
+function isOptionalVmSandboxStatePayload(value: unknown): boolean {
+  return value === undefined || value === null || isVmSandboxStatePayload(value);
 }
 
 function isVmProbeSnapshotPayload(value: unknown): boolean {
@@ -501,6 +550,8 @@ function isVmActualStatePayload(value: unknown): boolean {
     isOptionalImageKeyPayload(value.image_key) &&
     isOptionalSha256Hex(value.image_sha256) &&
     isOptionalVmNetworkStatePayload(value.network) &&
+    isOptionalVmResourceStatePayload(value.resource_state) &&
+    isOptionalVmSandboxStatePayload(value.sandbox) &&
     isStringArray(value.ssh_host_keys_openssh) &&
     Array.isArray(value.probes) &&
     value.probes.every(isVmProbeSnapshotPayload) &&
@@ -525,6 +576,8 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
     phase !== null &&
     VM_PHASES.has(phase as VmPhase) &&
     isOptionalVmNetworkStatePayload(value.network) &&
+    isOptionalVmResourceStatePayload(value.resource_state) &&
+    isOptionalVmSandboxStatePayload(value.sandbox) &&
     isStringArray(value.ssh_host_keys_openssh) &&
     Array.isArray(value.probes) &&
     value.probes.every(isVmProbeSnapshotPayload) &&
@@ -536,7 +589,7 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
 function isBuildReportPayload(
   value: unknown,
   hostId: string,
-): value is Extract<BridgeMessageV5, { type: "build_report" }>["report"] {
+): value is Extract<BridgeMessageV6, { type: "build_report" }>["report"] {
   if (!isRecord(value)) {
     return false;
   }

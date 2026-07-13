@@ -1,0 +1,36 @@
+# Install as /etc/intar-jailerd/config.toml, owned by root and not writable by
+# group or other. Replace these numeric IDs with `id -u intar-agent` and
+# `id -g intar-agent` on the scenario host; SO_PEERCRED must match agent_uid.
+agent_uid = 991
+agent_gid = 991
+allow_uid_gid_collisions = false
+
+jail_root = "/var/lib/intar/jails"
+# Pinned static runtime. intar-agent has neither this path nor spawn authority.
+cloud_hypervisor_binary = "/usr/lib/intar/cloud-hypervisor-v53.0"
+cloud_hypervisor_sha256 = "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+jailer_binary = "/usr/lib/intar/intar-jailer"
+# Root-owned systemd SOCK_SEQPACKET endpoint used by the configured agent UID.
+socket_path = "/run/intar-jailerd/control.sock"
+netns_root = "/run/netns"
+
+# This root-owned pool is exclusively reserved for Intar. Jailerd accepts only
+# canonical per-run /28s inside it and will not replace pre-existing host routes.
+guest_network_pool = "10.77.0.0/16"
+# Reserve this non-privileged, non-ephemeral range exclusively for Intar SSH
+# DNAT. Jailerd enforces it and rejects duplicate ports across all active VMs.
+ssh_public_port_start = 22000
+ssh_public_port_end = 22999
+
+# Unschedulable host allowance. A one-CPU host therefore advertises zero by
+# default; lower this only as an explicit operator capacity decision.
+cpu_reserved_millis = 1000
+# Optional RLIMIT_FSIZE for the VMM process tree. Omit for no byte limit; when
+# set it must exceed zero and should cover the host's largest VM disk policy.
+# vmm_file_size_limit_bytes = 68719476736
+# Audit this entire range for local and directory identity collisions before
+# enabling the host. Failed cleanup quarantines identities instead of reusing.
+uid_gid_start = 200000
+uid_gid_end = 265535
+# Jailerd accepts typed artifact descriptors only below trusted source roots.
+allowed_source_roots = ["/var/cache/intar-agent"]

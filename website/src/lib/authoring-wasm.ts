@@ -18,7 +18,7 @@ export interface ScenarioValidationResult {
 
 // Mirrors the serde serialization of `intar_image_scenario::Scenario` —
 // notably `kino.probes` is a map keyed by probe name, and VM resources are
-// flat cpu/memory/disk fields.
+// flat cpu_millis/vcpu_count/memory/disk fields.
 export interface ScenarioPreviewProbe {
   name: string;
   description?: string | null;
@@ -39,7 +39,8 @@ export interface ScenarioPreview {
   hints: Array<{ id: string; title?: string | null }>;
   vms: Array<{
     name: string;
-    cpu: number;
+    cpu_millis: number;
+    vcpu_count: number;
     memory: number;
     disk: number;
     image: string;

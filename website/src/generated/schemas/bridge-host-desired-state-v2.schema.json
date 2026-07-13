@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "HostDesiredStateV1",
+  "title": "HostDesiredStateV2",
   "type": "object",
   "properties": {
     "builds": {
@@ -25,8 +25,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 3,
+      "minimum": 3
     },
     "version": {
       "type": "integer",
@@ -36,7 +36,7 @@
     "vms": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/DesiredVmV1"
+        "$ref": "#/$defs/DesiredVmV2"
       }
     }
   },
@@ -107,7 +107,7 @@
         "absent"
       ]
     },
-    "DesiredVmV1": {
+    "DesiredVmV2": {
       "type": "object",
       "properties": {
         "desired_phase": {
@@ -124,7 +124,7 @@
           "format": "int64"
         },
         "resources": {
-          "$ref": "#/$defs/VmResourcesV1"
+          "$ref": "#/$defs/VmResourcesV2"
         },
         "run_id": {
           "type": "string"
@@ -176,14 +176,13 @@
         "arch"
       ]
     },
-    "VmResourcesV1": {
+    "VmResourcesV2": {
       "type": "object",
       "properties": {
-        "cpu_count": {
+        "cpu_millis": {
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "format": "uint32",
+          "minimum": 1
         },
         "disk_mib": {
           "type": "integer",
@@ -194,10 +193,17 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "vcpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
         }
       },
       "required": [
-        "cpu_count",
+        "cpu_millis",
+        "vcpu_count",
         "memory_mib",
         "disk_mib"
       ]

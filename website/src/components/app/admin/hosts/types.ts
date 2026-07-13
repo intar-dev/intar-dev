@@ -3,7 +3,7 @@
 
 import type { AgentBridgeStatus } from "@/lib/agent-bridge";
 import type { HostHealth } from "@/lib/host-health";
-import type { HostCapacityV1 } from "@/generated/bridge";
+import type { HostCapacityV2 } from "@/generated/bridge";
 
 export interface AgentHostApi {
   id: string;
@@ -18,7 +18,7 @@ export interface AgentHostApi {
     appliedDesiredVersion: number;
     observedAt: number;
     health: HostHealth;
-    capacity: HostCapacityV1;
+    capacity: HostCapacityV2;
   } | null;
 }
 
@@ -155,7 +155,7 @@ export interface HostRecord {
   host: AgentHostApi;
   hostVms: VmStatus[];
   hostRuns: AgentVmRunRecord[];
-  capacity: HostCapacityV1 | null;
+  capacity: HostCapacityV2 | null;
 }
 
 export interface LiveScenarioRunRecord {

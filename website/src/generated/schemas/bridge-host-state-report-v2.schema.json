@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "HostStateReportV1",
+  "title": "HostStateReportV2",
   "type": "object",
   "properties": {
     "applied_desired_version": {
@@ -21,10 +21,10 @@
       }
     },
     "capabilities": {
-      "$ref": "#/$defs/HostCapabilitiesV1"
+      "$ref": "#/$defs/HostCapabilitiesV2"
     },
     "capacity": {
-      "$ref": "#/$defs/HostCapacityV1"
+      "$ref": "#/$defs/HostCapacityV2"
     },
     "host_id": {
       "type": "string"
@@ -36,13 +36,13 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 3,
+      "minimum": 3
     },
     "vms": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/VmActualStateV1"
+        "$ref": "#/$defs/VmActualStateV2"
       }
     }
   },
@@ -180,13 +180,25 @@
         "updated_at_unix_ms"
       ]
     },
-    "HostCapabilitiesV1": {
+    "HostCapabilitiesV2": {
       "type": "object",
       "properties": {
         "arch": {
           "$ref": "#/$defs/ImageArchitecture"
         },
+        "supports_cgroup_v2": {
+          "type": "boolean"
+        },
+        "supports_hard_cpu_quota": {
+          "type": "boolean"
+        },
+        "supports_jailer_v1": {
+          "type": "boolean"
+        },
         "supports_kvm": {
+          "type": "boolean"
+        },
+        "supports_landlock": {
           "type": "boolean"
         },
         "supports_nftables": {
@@ -204,16 +216,19 @@
         "supports_kvm",
         "supports_vsock",
         "supports_reflink",
-        "supports_nftables"
+        "supports_nftables",
+        "supports_jailer_v1",
+        "supports_hard_cpu_quota",
+        "supports_landlock",
+        "supports_cgroup_v2"
       ]
     },
-    "HostCapacityV1": {
+    "HostCapacityV2": {
       "type": "object",
       "properties": {
-        "cpu_count": {
+        "committed_cpu_millis": {
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
+          "format": "uint32",
           "minimum": 0
         },
         "disk_available_mib": {
@@ -272,10 +287,28 @@
             "string",
             "null"
           ]
+        },
+        "reserved_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "schedulable_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "required": [
-        "cpu_count",
+        "total_cpu_millis",
+        "reserved_cpu_millis",
+        "schedulable_cpu_millis",
+        "committed_cpu_millis",
         "memory_total_mib",
         "memory_available_mib",
         "disk_probe_path",
@@ -326,7 +359,7 @@
         "scenario"
       ]
     },
-    "VmActualStateV1": {
+    "VmActualStateV2": {
       "type": "object",
       "properties": {
         "archive": {
@@ -388,8 +421,28 @@
             "$ref": "#/$defs/VmProbeSnapshotV1"
           }
         },
+        "resource_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmResourceStateV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "run_id": {
           "type": "string"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmSandboxStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "ssh_host_keys_openssh": {
           "type": "array",
@@ -539,6 +592,109 @@
         "unknown",
         "pass",
         "fail"
+      ]
+    },
+    "VmResourceStateV2": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "cpu_nr_periods": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_nr_throttled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_period_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_quota_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_system_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_throttled_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_usage_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_user_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vcpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
+        }
+      },
+      "required": [
+        "cpu_millis",
+        "vcpu_count",
+        "cpu_quota_us",
+        "cpu_period_us",
+        "cpu_usage_usec",
+        "cpu_user_usec",
+        "cpu_system_usec",
+        "cpu_nr_periods",
+        "cpu_nr_throttled",
+        "cpu_throttled_usec"
+      ]
+    },
+    "VmSandboxStateV1": {
+      "type": "object",
+      "properties": {
+        "cgroup_path": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "landlock_enabled": {
+          "type": "boolean"
+        },
+        "no_new_privs": {
+          "type": "boolean"
+        },
+        "seccomp_enabled": {
+          "type": "boolean"
+        },
+        "systemd_unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "healthy",
+        "generation",
+        "systemd_unit",
+        "cgroup_path",
+        "seccomp_enabled",
+        "landlock_enabled",
+        "no_new_privs"
       ]
     }
   }

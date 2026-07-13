@@ -1,9 +1,11 @@
 [server]
 bind = "127.0.0.1:8080"
 
-[cloud_hypervisor]
-binary = "cloud-hypervisor"
-spawn_timeout_seconds = 10
+# intar-agent never spawns Cloud Hypervisor directly. Configure the pinned
+# runtime only in the root-owned /etc/intar-jailerd/config.toml.
+[jailer]
+socket = "/run/intar-jailerd/control.sock"
+request_timeout_seconds = 10
 
 [bridge]
 enabled = false
@@ -13,10 +15,13 @@ bootstrap_token = ""
 heartbeat_interval_seconds = 30
 
 [vm_defaults]
+# Naming and topology inputs for jailerd; the agent performs no privileged
+# networking operations.
 tap = "tap"
 work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
+# Fallback only. Scheduled scenarios use catalog V3 cpu_millis/vcpu_count.
 vcpus = 1
 memory_mib = 512
 

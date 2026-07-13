@@ -214,17 +214,117 @@ jobs:
             workdir="$(mktemp -d)"
             cp "${binary}" "${workdir}/${BINARY}"
             chmod +x "${workdir}/${BINARY}"
-            tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" "${BINARY}"
+            if [ "${PACKAGE}" = "intar-agent" ]; then
+              if [ "${arch}" != "amd64" ]; then
+                echo "Jailed scenario hosts currently support x86_64 only." >&2
+                exit 1
+              fi
+              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p intar-jailer --bin intar-jailer --target "${target}"
+              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release -p intar-jailerd --bin intar-jailerd --target "${target}"
+              cp "${target_dir}/${target}/release/intar-jailer" "${workdir}/intar-jailer"
+              cp "${target_dir}/${target}/release/intar-jailerd" "${workdir}/intar-jailerd"
+              chmod +x "${workdir}/intar-jailer" "${workdir}/intar-jailerd"
+              curl --fail --location --retry 3 \
+                --output "${workdir}/cloud-hypervisor-v53.0" \
+                "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0/cloud-hypervisor-static"
+              echo "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc  ${workdir}/cloud-hypervisor-v53.0" | sha256sum --check --strict
+              chmod 0555 "${workdir}/cloud-hypervisor-v53.0"
+              cp -R crates/intar-jailerd/deploy "${workdir}/deploy"
+              cp crates/intar-agent/deploy/intar-agent.service "${workdir}/deploy/intar-agent.service"
+              cp crates/intar-agent/deploy/config.example.toml "${workdir}/deploy/intar-agent.config.example.toml"
+
+              # Bundle the exact upstream license set corresponding to the
+              # pinned v53.0 source commit used for the static runtime.
+              ch_source="${workdir}/cloud-hypervisor-source.tar.gz"
+              curl --fail --location --retry 3 \
+                --output "${ch_source}" \
+                "https://github.com/cloud-hypervisor/cloud-hypervisor/archive/9ed824d6d08df3e96f7d5f50795d9449ac99f431.tar.gz"
+              echo "03c2c4d80bb68567835020b2be42dd23177f14d32660a1ce15dd175e2dfdcbbf  ${ch_source}" | sha256sum --check --strict
+              license_extract="$(mktemp -d)"
+              tar -tzf "${ch_source}" | while IFS= read -r entry; do
+                case "${entry}" in
+                  /*|../*|*/../*|*/..) echo "unsafe Cloud Hypervisor source path: ${entry}" >&2; exit 1 ;;
+                esac
+              done
+              tar -xzf "${ch_source}" -C "${license_extract}" --no-same-owner
+              cp -R \
+                "${license_extract}/cloud-hypervisor-9ed824d6d08df3e96f7d5f50795d9449ac99f431/LICENSES" \
+                "${workdir}/deploy/cloud-hypervisor-LICENSES"
+              rm -rf "${license_extract}" "${ch_source}"
+
+              metadata="$(mktemp)"
+              cargo metadata --locked --format-version 1 > "${metadata}"
+              python3 crates/intar-jailerd/deploy/generate-dependency-inventory.py \
+                "${metadata}" \
+                "${workdir}/deploy/intar-rust-dependencies.json"
+              rm -f "${metadata}"
+              chmod +x \
+                "${workdir}/deploy/install.sh" \
+                "${workdir}/deploy/intar-jailerd-self-test.sh" \
+                "${workdir}/deploy/package-smoke.sh" \
+                "${workdir}/deploy/prepare-v6-cutover.py" \
+                "${workdir}/deploy/uninstall.sh"
+              (
+                cd "${workdir}"
+                find . -type f ! -path './deploy/SHA256SUMS' -print0 \
+                  | LC_ALL=C sort -z \
+                  | xargs -0 sha256sum > deploy/SHA256SUMS
+              )
+            fi
+            tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" .
             rm -rf "${workdir}"
           }
           build_archive amd64 x86_64-unknown-linux-musl
-          if [ "${PACKAGE}" = "intar-builder" ]; then
-            echo "Skipping arm64 intar-builder artifact; the current builder preflight supports x86_64 KVM hosts only."
+          if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-agent" ]; then
+            echo "Skipping arm64 ${PACKAGE} artifact; the current KVM host baseline is x86_64 only."
           else
             build_archive arm64 aarch64-unknown-linux-musl
           fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
+
+      - name: Smoke-test jailed scenario-host package
+        if: inputs.project == 'intar-agent'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            acl \
+            binutils \
+            curl \
+            dosfstools \
+            e2fsprogs \
+            file \
+            iproute2 \
+            nftables \
+            procps \
+            shellcheck
+          if ! id intar-agent >/dev/null 2>&1; then
+            sudo useradd \
+              --system \
+              --no-create-home \
+              --home-dir /nonexistent \
+              --shell /usr/sbin/nologin \
+              intar-agent
+          fi
+          for script in \
+            crates/intar-jailerd/deploy/install.sh \
+            crates/intar-jailerd/deploy/intar-jailerd-self-test.sh \
+            crates/intar-jailerd/deploy/package-smoke.sh \
+            crates/intar-jailerd/deploy/uninstall.sh; do
+            sh -n "${script}"
+            shellcheck "${script}"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/intar-jailerd/deploy/prepare-v6-cutover.py")
+          compile(path.read_text(), str(path), "exec")
+          PY
+          sudo crates/intar-jailerd/deploy/package-smoke.sh \
+            "dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
 
       - name: Create tag and GitHub release
         env:

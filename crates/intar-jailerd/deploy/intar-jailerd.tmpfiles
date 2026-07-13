@@ -1,0 +1,4 @@
+d /var/lib/intar/jails 0700 root root -
+d /var/lib/intar/jails/cloud-hypervisor 0700 root root -
+d /var/lib/intar/jails/quarantine 0700 root root -
+d /run/intar-jailerd 0750 root intar-agent -
