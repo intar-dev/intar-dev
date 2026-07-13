@@ -45,6 +45,7 @@ import {
   formatScenarioDurationMs,
   getScenarioBootScreenCopy,
   getScenarioShutdownScreenCopy,
+  hasPendingInfrastructureTeardown,
   hasUsableTerminalTarget,
 } from "@/components/app/run/run-support";
 import { NativeSshDialog } from "@/components/remote-access/NativeSshDialogButton";
@@ -317,6 +318,9 @@ export function ScenarioRun() {
         currentProbe?.label ||
         attemptData?.phaseDetail ||
         "Waiting for run status";
+  const infrastructureTeardownPending = Boolean(
+    attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
+  );
   const probePassToasts = useProbePassEvents(
     attemptData?.vms,
     attemptData?.objectives,
@@ -324,7 +328,8 @@ export function ScenarioRun() {
   );
   const canDeleteRun =
     attemptData !== null &&
-    (attemptData.phase === "completed" || attemptData.phase === "failed");
+    (attemptData.phase === "completed" || attemptData.phase === "failed") &&
+    !infrastructureTeardownPending;
   const bootSteps = useMemo(
     () => buildScenarioBootSteps(attemptData),
     [attemptData],
@@ -401,7 +406,7 @@ export function ScenarioRun() {
 
   const showEndRunAction =
     showCancelAction &&
-    attemptData?.outcome === "in_progress" &&
+    (attemptData?.outcome === "in_progress" || infrastructureTeardownPending) &&
     !showShutdownLoadingScreen;
   const showSshMenuItem = Boolean(
     selectedVm &&
