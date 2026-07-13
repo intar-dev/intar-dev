@@ -446,6 +446,25 @@ impl Client {
         Ok(())
     }
 
+    /// PUT /api/v1/vm.add-disk
+    pub async fn vm_add_disk(&self, cfg: &DiskConfig) -> Result<(), Error> {
+        let url = Self::api_url("vm.add-disk");
+
+        let resp = self.http.put(url).json(cfg).send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let body = body.trim().to_string();
+            return Err(Error::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        Ok(())
+    }
+
     /// PUT /api/v1/vm.shutdown
     pub async fn vm_shutdown(&self) -> Result<(), Error> {
         let url = Self::api_url("vm.shutdown");
@@ -554,6 +573,80 @@ mod tests {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    fn spawn_add_disk_denial_server(
+        listener: UnixListener,
+        response_body: String,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut stream = accept_for(&listener, Duration::from_secs(2))
+                .expect("accept add-disk HTTP connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set add-disk HTTP read timeout");
+
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1_024];
+            let header_end = loop {
+                if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+                let length = stream.read(&mut buffer).expect("read add-disk headers");
+                assert_ne!(length, 0, "HTTP client closed before sending headers");
+                request.extend_from_slice(&buffer[..length]);
+            };
+            let headers = std::str::from_utf8(&request[..header_end])
+                .expect("add-disk HTTP headers are UTF-8");
+            assert!(headers.starts_with("PUT /api/v1/vm.add-disk HTTP/1.1\r\n"));
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("valid Content-Length"))
+                })
+                .expect("add-disk request has Content-Length");
+            while request.len() < header_end + content_length {
+                let length = stream.read(&mut buffer).expect("read add-disk body");
+                assert_ne!(length, 0, "HTTP client closed before sending body");
+                request.extend_from_slice(&buffer[..length]);
+            }
+            let body: DiskConfig =
+                serde_json::from_slice(&request[header_end..header_end + content_length])
+                    .expect("deserialize add-disk request body");
+            assert_eq!(body.path, "/run/landlock-api-canary");
+            assert!(body.readonly);
+            assert_eq!(body.id.as_deref(), Some("landlock-denied"));
+            assert!(matches!(body.image_type, Some(DiskImageType::Raw)));
+
+            // Cloud Hypervisor's micro-http drops pending responses on
+            // EPOLLRDHUP. The typed client must keep its write side open until
+            // it has received the complete response.
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("shorten add-disk HTTP read timeout");
+            let mut extra = [0_u8; 1];
+            match stream.read(&mut extra) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Ok(0) => panic!("HTTP client half-closed before receiving the response"),
+                Ok(_) => panic!("HTTP client sent bytes beyond its declared body"),
+                Err(error) => panic!("unexpected add-disk connection state: {error}"),
+            }
+
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write add-disk denial response");
+        })
+    }
+
     #[test]
     fn vm_config_serializes_vsock() {
         let vm = VmConfig {
@@ -595,6 +688,47 @@ mod tests {
             value.get("landlock_enable").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn typed_add_disk_preserves_v53_error_response_without_half_close() {
+        let temp = tempfile::tempdir().expect("create add-disk test directory");
+        let socket = temp.path().join("cloud-hypervisor.sock");
+        let listener = UnixListener::bind(&socket).expect("bind add-disk Unix socket");
+        let expected_chain = vec![
+            "Error from API",
+            "The disk could not be added to the VM",
+            "Error from device manager",
+            "Cannot open disk path",
+            "I/O error (path=/run/landlock-api-canary op=open)",
+            "Permission denied (os error 13)",
+        ];
+        let response_body = serde_json::to_string(&expected_chain).expect("serialize error chain");
+        let server = spawn_add_disk_denial_server(listener, response_body.clone());
+        let client = Client::new(socket.to_str().expect("socket path is UTF-8"))
+            .expect("create add-disk client");
+        let disk = DiskConfig {
+            path: "/run/landlock-api-canary".to_owned(),
+            readonly: true,
+            id: Some("landlock-denied".to_owned()),
+            image_type: Some(DiskImageType::Raw),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build add-disk test runtime");
+        let error = runtime
+            .block_on(client.vm_add_disk(&disk))
+            .expect_err("Landlock-negative add-disk must fail");
+        match error {
+            Error::HttpStatus { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, response_body);
+            }
+            error => panic!("unexpected add-disk error: {error}"),
+        }
+        server.join().expect("add-disk HTTP server");
     }
 
     #[cfg(target_os = "linux")]
