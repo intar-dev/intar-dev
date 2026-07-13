@@ -38,6 +38,13 @@ jobs:
     runs-on: ${{ inputs.project == 'intar-agent' && 'ubuntu-24.04' || 'namespace-profile-intar-dev' }}
 
     steps:
+      - name: Ensure main
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "This workflow must run from main, got ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+
       - name: Checkout on Namespace
         if: inputs.project != 'intar-agent'
         uses: namespacelabs/nscloud-checkout-action@v9
@@ -90,13 +97,6 @@ jobs:
               )
           print(f"Landlock ABI {abi}")
           PY
-
-      - name: Ensure main
-        run: |
-          if [ "${GITHUB_REF_NAME}" != "main" ]; then
-            echo "This workflow must run from main, got ${GITHUB_REF_NAME}." >&2
-            exit 1
-          fi
 
       - name: Resolve project
         id: project
@@ -213,37 +213,29 @@ jobs:
           manifest = pathlib.Path(os.environ["MANIFEST"])
           version = os.environ["VERSION"]
           text = manifest.read_text()
-          updated, count = re.subn(r'(?m)^version = "[^"]+"', f'version = "{version}"', text, count=1)
-          if count != 1:
+          match = re.search(r'(?m)^version = "([^"]+)"', text)
+          if match is None:
               raise SystemExit(f"failed to update package version in {manifest}")
+
+          def semver(value):
+              parsed = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", value)
+              if parsed is None:
+                  raise SystemExit(f"unsupported package version: {value}")
+              return tuple(map(int, parsed.groups()))
+
+          current = match.group(1)
+          if semver(current) > semver(version):
+              raise SystemExit(
+                  f"refusing to downgrade {manifest} from {current} to {version}; "
+                  "choose the matching release bump"
+              )
+          updated = text[:match.start()] + f'version = "{version}"' + text[match.end():]
           manifest.write_text(updated)
           PY
           cargo update -p "${PACKAGE}" --precise "${VERSION}"
 
       - name: Run checks
         run: just verify
-
-      - name: Commit release version
-        id: version_commit
-        env:
-          MANIFEST: ${{ steps.project.outputs.manifest }}
-          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
-          PROJECT: ${{ inputs.project }}
-        run: |
-          set -euo pipefail
-          # The tag step needs an identity even when the manifest was bumped
-          # ahead of the dispatch and there is nothing to commit.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet --exit-code -- "${MANIFEST}" Cargo.lock; then
-            release_sha="$(git rev-parse HEAD)"
-          else
-            git add "${MANIFEST}" Cargo.lock
-            git commit -m "chore(${PROJECT}): release ${VERSION_TAG}"
-            git push origin HEAD:main
-            release_sha="$(git rev-parse HEAD)"
-          fi
-          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Build release artifacts
         env:
@@ -443,6 +435,28 @@ jobs:
           docker exec "${smoke_container}" \
             /root/package-smoke.sh /tmp/intar-agent.tar.gz
 
+      - name: Commit release version
+        id: version_commit
+        env:
+          MANIFEST: ${{ steps.project.outputs.manifest }}
+          VERSION_TAG: ${{ steps.next.outputs.version_tag }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          set -euo pipefail
+          # Publish the version commit only after every build and privileged
+          # package smoke has passed. Keep it local until the tag and branch
+          # can be pushed atomically; a failed release must not mutate main.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet --exit-code -- "${MANIFEST}" Cargo.lock; then
+            release_sha="$(git rev-parse HEAD)"
+          else
+            git add "${MANIFEST}" Cargo.lock
+            git commit -m "chore(${PROJECT}): release ${VERSION_TAG}"
+            release_sha="$(git rev-parse HEAD)"
+          fi
+          echo "sha=${release_sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Create tag and GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -452,6 +466,12 @@ jobs:
           PROJECT: ${{ inputs.project }}
         run: |
           set -euo pipefail
+          git fetch origin main
+          remote_main="$(git rev-parse origin/main)"
+          if [ "${remote_main}" != "${GITHUB_SHA}" ]; then
+            echo "main advanced during release verification; rerun from ${remote_main}." >&2
+            exit 1
+          fi
           git tag -a "${TAG}" "${RELEASE_SHA}" -m "${PROJECT} ${VERSION_TAG}"
-          git push origin "${TAG}"
-          gh release create "${TAG}" dist/* --target "${RELEASE_SHA}" --title "${PROJECT} ${VERSION_TAG}" --notes "Release ${VERSION_TAG}."
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/${TAG}"
+          gh release create "${TAG}" dist/* --verify-tag --target "${RELEASE_SHA}" --title "${PROJECT} ${VERSION_TAG}" --notes "Release ${VERSION_TAG}."

@@ -245,11 +245,11 @@ mod linux {
             if let Some(unit_name) = self.unit_name.take() {
                 let _ = stop_and_reset_unit(&unit_name);
             }
-            if let Some(namespace_name) = self.namespace_name.take() {
-                let _ = run_command(&self.ip, ["netns", "delete", namespace_name.as_str()]);
-            }
             if let Some(host_veth_name) = self.host_veth_name.take() {
                 let _ = run_command(&self.ip, ["link", "delete", host_veth_name.as_str()]);
+            }
+            if let Some(namespace_name) = self.namespace_name.take() {
+                let _ = run_command(&self.ip, ["netns", "delete", namespace_name.as_str()]);
             }
             if let Some(directory) = self.directory.take() {
                 // Never traverse a leaked mount while unwinding.  The checked
@@ -2791,60 +2791,72 @@ mod linux {
             .to_str()
             .context("trusted ip binary path is not valid UTF-8")?;
         checked_command(ip, ["netns", "add", namespace])?;
-        if let Err(error) = checked_command(
-            ip,
-            [
-                "link", "add", host_veth, "type", "veth", "peer", "name", peer_veth,
-            ],
-        ) {
+        let mut pair_created = false;
+        let result = (|| -> Result<()> {
+            checked_command(
+                ip,
+                [
+                    "link", "add", host_veth, "type", "veth", "peer", "name", peer_veth,
+                ],
+            )?;
+            pair_created = true;
+            checked_command(ip, ["link", "set", peer_veth, "netns", namespace])?;
+            let host_cidr = format!("198.18.{octet}.1/30");
+            let peer_cidr = format!("198.18.{octet}.2/30");
+            checked_command(ip, ["address", "add", host_cidr.as_str(), "dev", host_veth])?;
+            checked_command(ip, ["link", "set", host_veth, "up"])?;
+            checked_command(
+                ip,
+                [
+                    "netns",
+                    "exec",
+                    namespace,
+                    ip_argument,
+                    "link",
+                    "set",
+                    "lo",
+                    "up",
+                ],
+            )?;
+            checked_command(
+                ip,
+                [
+                    "netns",
+                    "exec",
+                    namespace,
+                    ip_argument,
+                    "address",
+                    "add",
+                    peer_cidr.as_str(),
+                    "dev",
+                    peer_veth,
+                ],
+            )?;
+            checked_command(
+                ip,
+                [
+                    "netns",
+                    "exec",
+                    namespace,
+                    ip_argument,
+                    "link",
+                    "set",
+                    peer_veth,
+                    "up",
+                ],
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // Deleting the host end first deterministically removes the pair.
+            // Deleting the namespace first can asynchronously remove both
+            // veths and race a subsequent host-link deletion.
+            if pair_created {
+                let _ = run_command(ip, ["link", "delete", host_veth]);
+            }
             let _ = run_command(ip, ["netns", "delete", namespace]);
             return Err(error);
         }
-        checked_command(ip, ["link", "set", peer_veth, "netns", namespace])?;
-        let host_cidr = format!("198.18.{octet}.1/30");
-        let peer_cidr = format!("198.18.{octet}.2/30");
-        checked_command(ip, ["address", "add", host_cidr.as_str(), "dev", host_veth])?;
-        checked_command(ip, ["link", "set", host_veth, "up"])?;
-        checked_command(
-            ip,
-            [
-                "netns",
-                "exec",
-                namespace,
-                ip_argument,
-                "link",
-                "set",
-                "lo",
-                "up",
-            ],
-        )?;
-        checked_command(
-            ip,
-            [
-                "netns",
-                "exec",
-                namespace,
-                ip_argument,
-                "address",
-                "add",
-                peer_cidr.as_str(),
-                "dev",
-                peer_veth,
-            ],
-        )?;
-        checked_command(
-            ip,
-            [
-                "netns",
-                "exec",
-                namespace,
-                ip_argument,
-                "link",
-                "set",
-                peer_veth,
-                "up",
-            ],
-        )?;
         Ok(())
     }
 
@@ -2883,23 +2895,49 @@ mod linux {
     }
 
     fn delete_test_network(ip: &Path, namespace: &str, host_veth: &str) -> Result<()> {
-        let namespace_result = checked_command(ip, ["netns", "delete", namespace]);
-        let link_result = if Path::new("/sys/class/net").join(host_veth).exists() {
-            checked_command(ip, ["link", "delete", host_veth]).map(|_| ())
-        } else {
-            Ok(())
-        };
-        namespace_result.map(|_| ())?;
-        link_result?;
-        ensure!(
-            !Path::new("/run/netns").join(namespace).exists(),
-            "self-test network namespace leaked after deletion"
-        );
-        ensure!(
-            !Path::new("/sys/class/net").join(host_veth).exists(),
-            "self-test host veth leaked after deletion"
-        );
+        let host_veth_path = Path::new("/sys/class/net").join(host_veth);
+        if path_entry_exists(&host_veth_path)? {
+            let result = checked_command(ip, ["link", "delete", host_veth]).map(|_| ());
+            accept_delete_outcome(
+                result,
+                path_entry_exists(&host_veth_path)?,
+                "self-test host veth",
+            )?;
+        }
+        let namespace_path = Path::new("/run/netns").join(namespace);
+        if path_entry_exists(&namespace_path)? {
+            let result = checked_command(ip, ["netns", "delete", namespace]).map(|_| ());
+            accept_delete_outcome(
+                result,
+                path_entry_exists(&namespace_path)?,
+                "self-test network namespace",
+            )?;
+        }
         Ok(())
+    }
+
+    fn accept_delete_outcome<T>(
+        result: Result<T>,
+        resource_still_exists: bool,
+        resource: &str,
+    ) -> Result<()> {
+        if !resource_still_exists {
+            // A concurrent kernel teardown may report ENODEV after the final
+            // state has already been reached. The postcondition is authority.
+            return Ok(());
+        }
+        match result {
+            Ok(_) => bail!("{resource} leaked after deletion"),
+            Err(error) => Err(error).with_context(|| format!("{resource} deletion failed")),
+        }
+    }
+
+    fn path_entry_exists(path: &Path) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+        }
     }
 
     fn trusted_ip_binary() -> Result<PathBuf> {
@@ -3152,6 +3190,28 @@ mod linux {
             let metadata = std::fs::symlink_metadata(&path).expect("stat trusted ip binary");
             assert!(metadata.is_file());
             assert!(!metadata.file_type().is_symlink());
+        }
+
+        #[test]
+        fn delete_outcome_is_accepted_only_when_the_resource_is_absent() {
+            accept_delete_outcome(Err::<(), _>(anyhow::anyhow!("ENODEV")), false, "veth")
+                .expect("already-absent veth");
+            accept_delete_outcome(Ok(()), false, "veth").expect("deleted veth");
+            assert!(
+                accept_delete_outcome(Err::<(), _>(anyhow::anyhow!("EPERM")), true, "veth")
+                    .is_err()
+            );
+            assert!(accept_delete_outcome(Ok(()), true, "veth").is_err());
+        }
+
+        #[test]
+        fn path_entry_existence_is_fallible_and_does_not_follow_the_entry() {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let missing = temporary.path().join("missing");
+            assert!(!path_entry_exists(&missing).expect("inspect missing entry"));
+            std::os::unix::fs::symlink("missing", temporary.path().join("link"))
+                .expect("create dangling link");
+            assert!(path_entry_exists(&temporary.path().join("link")).expect("inspect link"));
         }
 
         #[test]
