@@ -262,7 +262,9 @@ function SidebarTrigger({
       data-slot="sidebar-trigger"
       variant="ghost"
       size="icon-sm"
-      className={cn(className)}
+      // Upstream shadcn proportions: 28px chrome control, 16px glyph. The
+      // coarse-pointer rule in global.css still guarantees 44px on touch.
+      className={cn("size-7", className)}
       onClick={(event) => {
         onClick?.(event)
         toggleSidebar()
