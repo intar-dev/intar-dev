@@ -2903,12 +2903,25 @@ mod linux {
     }
 
     fn trusted_ip_binary() -> Result<PathBuf> {
-        for path in ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"] {
+        for path in ["/usr/bin/ip", "/usr/sbin/ip", "/sbin/ip"] {
             let path = Path::new(path);
-            if path.is_file() {
-                validate_trusted_executable(path)?;
-                return Ok(path.to_path_buf());
+            let metadata = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("stat trusted ip candidate {}", path.display()));
+                }
+            };
+            // On merged-/usr distributions, /sbin/ip and /usr/sbin/ip are
+            // symlinks to /usr/bin/ip. Never follow those aliases across the
+            // privileged boundary; select only an actual regular file whose
+            // complete ancestor chain can be validated below.
+            if !metadata.is_file() {
+                continue;
             }
+            validate_trusted_executable_metadata(path, &metadata)?;
+            return Ok(path.to_path_buf());
         }
         bail!("could not find a trusted absolute ip binary")
     }
@@ -2955,11 +2968,6 @@ mod linux {
             "current executable path contains a non-normal component"
         );
         Ok(())
-    }
-
-    fn validate_trusted_executable(path: &Path) -> Result<()> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        validate_trusted_executable_metadata(path, &metadata)
     }
 
     fn trusted_executable_sha256(path: &Path) -> Result<String> {
@@ -3137,6 +3145,14 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn trusted_ip_binary_selects_a_regular_non_symlink() {
+            let path = trusted_ip_binary().expect("trusted ip binary");
+            let metadata = std::fs::symlink_metadata(&path).expect("stat trusted ip binary");
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+        }
 
         #[test]
         fn cpu_stat_parser_is_exact() {
