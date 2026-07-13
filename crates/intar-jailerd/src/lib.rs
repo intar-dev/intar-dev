@@ -1811,10 +1811,13 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
     fn launch_result(&mut self, record: VmRecord) -> Result<VmLaunchResult> {
         let inspection = self.backend.inspect_unit(&record.unit_name)?;
-        if !backend_identity_matches(&record, &inspection)
-            || (inspection.health == SandboxHealth::Healthy
-                && !live_api_ping(&record.paths.host_api_socket))
-        {
+        // This is a same-daemon retry of a launch whose `start_unit` handshake
+        // already verified the API socket before the record was persisted and
+        // inserted. Re-pinging here turns a transient API stall into destructive
+        // quarantine and makes the idempotency response race VMM API readiness.
+        // Recovery and InspectVm remain the liveness authorities and still
+        // require a successful API ping for a healthy process.
+        if !backend_identity_matches(&record, &inspection) {
             let _ = self.backend.stop_unit(&record.unit_name);
             self.preparer.quarantine(&self.config, &record.generation)?;
             bail!("idempotent launch found mismatched live VM identity")
@@ -3531,6 +3534,68 @@ mod tests {
             response,
             Response::Error(ProtocolError { ref code, .. }) if code == "conflict"
         ));
+    }
+
+    #[test]
+    fn idempotent_launch_still_rejects_a_changed_live_process_identity() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend::default(),
+            TrackingPreparer::default(),
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+        let request = launch(1, 125);
+        let launched = match core.handle(Request::LaunchVm(Box::new(request.clone()))) {
+            Response::LaunchVm(value) => value,
+            other => panic!("unexpected first launch response {other:?}"),
+        };
+        core.backend
+            .units
+            .get_mut(&launched.unit_name)
+            .expect("fake unit")
+            .pid_start_time_ticks = Some(8);
+
+        let response = core.handle(Request::LaunchVm(Box::new(request)));
+        assert!(matches!(
+            response,
+            Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
+        ));
+        assert!(core.backend.stopped_units.contains(&launched.unit_name));
+        assert!(core.preparer.quarantined.contains(&launched.generation));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inspect_healthy_vm_still_requires_a_live_api_ping() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend::default(),
+            FakePreparer,
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+        let launched = match core.handle(Request::LaunchVm(Box::new(launch(1, 125)))) {
+            Response::LaunchVm(value) => value,
+            other => panic!("unexpected launch response {other:?}"),
+        };
+
+        let response = core.handle(Request::InspectVm(VmIdentityRequest::by_generation(
+            launched.generation,
+        )));
+        assert!(matches!(
+            response,
+            Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
+        ));
+        assert!(core.backend.stopped_units.contains(&launched.unit_name));
     }
 
     #[test]
