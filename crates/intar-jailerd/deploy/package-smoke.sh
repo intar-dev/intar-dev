@@ -21,7 +21,7 @@ case "${archive}" in
 esac
 [ -f "${archive}" ] || die "archive does not exist: ${archive}"
 
-for command in awk file find getfacl ip nft python3 readelf readlink setfacl sha256sum stat sysctl systemctl tar; do
+for command in awk file find getfacl install ip nft python3 readelf readlink setfacl sha256sum sleep stat sysctl systemctl tar; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exist"
@@ -72,10 +72,16 @@ work_root=$(mktemp -d /var/lib/intar-package-smoke.XXXXXX)
 package_root=${work_root}/package
 installed=0
 cleanup_failed=0
+installer_probe_pid=
 
 cleanup() {
   status=$?
   trap - 0 HUP INT TERM
+  if [ -n "${installer_probe_pid}" ]; then
+    kill "${installer_probe_pid}" >/dev/null 2>&1 || true
+    wait "${installer_probe_pid}" 2>/dev/null || true
+    installer_probe_pid=
+  fi
   if [ "${installed}" -eq 1 ] && ! "${package_root}/deploy/uninstall.sh"; then
     echo "intar package smoke: uninstall refused or failed" >&2
     cleanup_failed=1
@@ -402,6 +408,33 @@ legacy_state=$(python3 "${cutover_helper}" \
   --agent-uid "${agent_uid}" \
   --agent-gid "${agent_gid}")
 [ "${legacy_state}" = legacy-drained ] || die "cutover helper did not recognize drained V5 state"
+
+# The full root installer—not only its extracted scan function—must refuse a
+# forbidden live executable before it can mutate the proven-drained V5 state.
+installer_probe=${work_root}/cloud-hypervisor-installer-audit
+install -o root -g root -m 0700 "$(command -v sleep)" "${installer_probe}"
+"${installer_probe}" 60 &
+installer_probe_pid=$!
+probe_ready=false
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if target=$(readlink "/proc/${installer_probe_pid}/exe" 2>/dev/null) && \
+     [ "${target}" = "${installer_probe}" ]; then
+    probe_ready=true
+    break
+  fi
+  sleep 0.05
+done
+[ "${probe_ready}" = true ] || die "installer process-audit fixture did not become observable"
+if installer_output=$("${package_root}/deploy/install.sh" 2>&1); then
+  die "installer accepted a live forbidden executable"
+fi
+printf '%s\n' "${installer_output}" | grep -Fqx \
+  "intar-jailerd install: legacy/foreign Cloud Hypervisor is still running: /proc/${installer_probe_pid}/exe" || \
+  die "installer rejected the process fixture for the wrong reason"
+kill "${installer_probe_pid}"
+wait "${installer_probe_pid}" 2>/dev/null || true
+installer_probe_pid=
+rm -f -- "${installer_probe}"
 
 # Persisted local VM state, a non-absent desired VM, a malformed absent
 # tombstone, and any desired build must each block the cutover without

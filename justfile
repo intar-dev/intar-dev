@@ -14,6 +14,7 @@ test:
     cargo test --workspace
 
 verify:
+    sh crates/intar-jailerd/tests/install-process-audit.sh crates/intar-jailerd/deploy/install.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace

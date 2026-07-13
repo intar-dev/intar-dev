@@ -339,6 +339,7 @@ jobs:
             crates/intar-jailerd/deploy/install.sh \
             crates/intar-jailerd/deploy/intar-jailerd-self-test.sh \
             crates/intar-jailerd/deploy/package-smoke.sh \
+            crates/intar-jailerd/tests/install-process-audit.sh \
             crates/intar-jailerd/deploy/uninstall.sh; do
             sh -n "${script}"
             shellcheck "${script}"

@@ -8,10 +8,13 @@ rust-version.workspace = true
 
 [dependencies]
 reqwest = { workspace = true, features = ["json"] }
+rustix.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

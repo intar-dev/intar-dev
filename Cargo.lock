@@ -668,8 +668,11 @@ name = "cloud-hypervisor-client"
 version = "0.1.0"
 dependencies = [
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

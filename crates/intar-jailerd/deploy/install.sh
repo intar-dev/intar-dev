@@ -7,6 +7,63 @@ die() {
   exit 1
 }
 
+# Keep pathname expansion disabled for the privileged installer, but enumerate
+# procfs explicitly so the live-process drain check cannot be neutralized by
+# `set -f`. Return 0 with "name:/proc/PID/exe" for a forbidden process, 1 when
+# the host is clean, and 2 when procfs cannot be enumerated completely.
+# INTAR_INSTALL_PROCESS_AUDIT_BEGIN
+find_forbidden_process_in() {
+  [ "$#" -eq 1 ] || return 2
+  # Snapshot only the numeric entries from one procfs directory read. A PID
+  # may disappear after this point; only that ENOENT race is ignored. Failure
+  # to enumerate /proc or inspect any still-present executable returns 2.
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+proc_root = sys.argv[1]
+if not os.path.isabs(proc_root):
+    raise SystemExit(2)
+
+try:
+    entries = os.listdir(proc_root)
+except OSError:
+    raise SystemExit(2)
+
+for pid in sorted(
+    (entry for entry in entries if entry.isascii() and entry.isdigit()),
+    key=int,
+):
+    executable = os.path.join(proc_root, pid, "exe")
+    try:
+        target = os.readlink(executable)
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    except OSError:
+        raise SystemExit(2)
+
+    name = os.path.basename(target.removesuffix(" (deleted)"))
+    if name in {
+        "cloud-hypervisor",
+        "intar-agent",
+        "intar-jailer",
+        "intar-jailerd",
+        "kino",
+    } or name.startswith("cloud-hypervisor-"):
+        print(f"{name}:{executable}")
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+# Production callers cannot override the procfs root through arguments or the
+# environment. Tests exercise the scanner above with isolated fixture roots.
+find_forbidden_process() {
+  find_forbidden_process_in /proc
+}
+# INTAR_INSTALL_PROCESS_AUDIT_END
+
 breaking_v6_cutover=false
 case "$#" in
   0) ;;
@@ -28,7 +85,7 @@ agent_database=/var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3
 cutover_helper=${archive_dir}/deploy/prepare-v6-cutover.py
 
 for command in \
-  awk find flock getent getfacl gpasswd grep install ip mktemp mv nft readlink \
+  awk find flock getent getfacl gpasswd grep install ip mktemp mv nft \
   python3 sed setfacl sha256sum stat sysctl systemctl systemd-tmpfiles tr; do
   command -v "${command}" >/dev/null 2>&1 || die "required host command is missing: ${command}"
 done
@@ -152,16 +209,19 @@ if [ -n "${agent_cgroup}" ] && [ -f "/sys/fs/cgroup${agent_cgroup}/cgroup.events
   populated=$(awk '$1 == "populated" { print $2 }' "/sys/fs/cgroup${agent_cgroup}/cgroup.events")
   [ "${populated}" = 0 ] || die "legacy intar-agent cgroup is still populated"
 fi
-for executable in /proc/[0-9]*/exe; do
-  if target=$(readlink "${executable}" 2>/dev/null); then
-    name=${target##*/}
-    name=${name% (deleted)}
-    case "${name}" in
-      cloud-hypervisor|cloud-hypervisor-*) die "legacy/foreign Cloud Hypervisor is still running: ${executable}" ;;
-      intar-agent|intar-jailer|intar-jailerd|kino) die "Intar workload/helper process is still running: ${executable}" ;;
-    esac
-  fi
-done
+if forbidden_process=$(find_forbidden_process); then
+  forbidden_name=${forbidden_process%%:*}
+  forbidden_executable=${forbidden_process#*:}
+  case "${forbidden_name}" in
+    cloud-hypervisor|cloud-hypervisor-*)
+      die "legacy/foreign Cloud Hypervisor is still running: ${forbidden_executable}"
+      ;;
+    *) die "Intar workload/helper process is still running: ${forbidden_executable}" ;;
+  esac
+else
+  forbidden_status=$?
+  [ "${forbidden_status}" -eq 1 ] || die "failed to enumerate live host processes"
+fi
 
 # The V5 database is deliberately incompatible with V6.  Inspect every
 # install, and require an explicit destructive flag before archiving and
