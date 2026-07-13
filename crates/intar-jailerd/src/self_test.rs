@@ -2547,13 +2547,13 @@ mod linux {
             path,
             "org.freedesktop.systemd1.Unit",
         )?;
-        let control_group: String = unit.get_property("ControlGroup")?;
         let service = zbus::blocking::Proxy::new(
             &connection,
             "org.freedesktop.systemd1",
             unit.path(),
             "org.freedesktop.systemd1.Service",
         )?;
+        let control_group: String = service.get_property("ControlGroup")?;
         let main_pid: u32 = service.get_property("MainPID")?;
         Ok(UnitState {
             main_pid,
