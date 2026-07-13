@@ -168,7 +168,6 @@ mod linux {
     use std::ffi::CString;
     use std::fs::{File, OpenOptions};
     use std::io::{ErrorKind, Read as _, Write as _};
-    use std::net::Shutdown;
     use std::os::unix::fs::{
         FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
     };
@@ -180,8 +179,8 @@ mod linux {
     use anyhow::{Context as _, Result, bail, ensure};
     use cloud_hypervisor_client::{
         Client as CloudHypervisorClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType,
-        MemoryConfig, NetConfig, PayloadConfig, SerialConfig, UnixSocketEndpoint, VmConfig,
-        VmState,
+        Error as CloudHypervisorError, MemoryConfig, NetConfig, PayloadConfig, SerialConfig,
+        VmConfig, VmState,
     };
     use intar_jailer_protocol::{
         ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
@@ -216,6 +215,7 @@ mod linux {
     const WORKER_SECONDS: u64 = 8;
     const SATURATION_VM_TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
     const SATURATION_GUEST_READY_TIMEOUT: Duration = Duration::from_secs(45);
+    const LANDLOCK_API_CALL_TIMEOUT: Duration = Duration::from_secs(5);
     const EXPECTED_API_ONLY_VMM_ARGV: [&str; 5] = [
         "/cloud-hypervisor",
         "--api-socket",
@@ -1647,9 +1647,17 @@ mod linux {
                 .with_context(|| format!("wait for package-smoke VM {index}"))?;
                 assert_smoke_inspection(&inspection)
                     .with_context(|| format!("validate package-smoke VM {index}"))?;
-                prove_cloud_hypervisor_landlock(&launch.paths.host_api_socket)
+                runtime
+                    .block_on(prove_cloud_hypervisor_landlock(&clients[index]))
                     .with_context(|| format!("prove package-smoke VM {index} Landlock"))?;
-                inspections.push(inspection);
+                let post_landlock_inspection = expect_inspection(
+                    core.handle(Request::InspectVm(selector.clone())),
+                    &format!("inspect package-smoke VM {index} after Landlock denial"),
+                )?;
+                assert_smoke_inspection(&post_landlock_inspection).with_context(|| {
+                    format!("validate package-smoke VM {index} after Landlock denial")
+                })?;
+                inspections.push(post_landlock_inspection);
             }
 
             assert_saturation_vm_isolation(&inspections, &tasks_before)?;
@@ -2642,65 +2650,123 @@ mod linux {
         Ok(())
     }
 
-    fn prove_cloud_hypervisor_landlock(socket_path: &Path) -> Result<()> {
-        let endpoint = UnixSocketEndpoint::new(socket_path.to_path_buf())?;
-        let mut stream = endpoint.connect()?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let body = serde_json::json!({
-            // The jailer's outer /run rule grants ReadFile, while this
-            // root-owned canary is absent from the typed VmConfig. A denied
-            // add-disk therefore proves Cloud Hypervisor v53's inner Landlock
-            // layer independently of the inherited outer jailer ruleset.
-            "path": "/run/landlock-api-canary",
-            "readonly": true,
-            "id": "landlock-denied",
-            "image_type": "Raw"
-        })
-        .to_string();
-        write!(
-            stream,
-            "PUT /api/v1/vm.add-disk HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        )?;
-        stream.shutdown(Shutdown::Write)?;
-        let mut response_bytes = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(length) => {
-                    response_bytes.extend_from_slice(&buffer[..length]);
-                    ensure!(
-                        response_bytes.len() <= 64 * 1024,
-                        "Landlock-negative API response exceeds 64 KiB"
-                    );
-                }
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
-                {
-                    break;
-                }
-                Err(error) => return Err(error).context("read Landlock-negative API response"),
-            }
-        }
-        let response = String::from_utf8(response_bytes)
-            .context("Landlock-negative API response is not UTF-8")?;
-        let status = response
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|value| value.parse::<u16>().ok())
-            .context("parse Landlock-negative API response")?;
-        let lower = response.to_ascii_lowercase();
+    async fn prove_cloud_hypervisor_landlock(client: &CloudHypervisorClient) -> Result<()> {
+        const CANARY_PATH: &str = "/run/landlock-api-canary";
+        const CANARY_ID: &str = "landlock-denied";
+
+        let before = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_info())
+            .await
+            .context("time out inspecting VM before Landlock-negative add-disk")?
+            .context("inspect VM before Landlock-negative add-disk")?;
         ensure!(
-            status >= 400
-                && (lower.contains("landlock")
-                    || lower.contains("permission denied")
-                    || lower.contains("operation not permitted")
-                    || lower.contains("os error 13")),
-            "Cloud Hypervisor did not prove its inner Landlock denial for the outer-allowlisted canary: {response:?}"
+            matches!(before.state, VmState::Running),
+            "VM is not running before Landlock-negative add-disk"
+        );
+        ensure!(
+            before.config.landlock_enable == Some(true),
+            "VM configuration does not enable Landlock"
+        );
+        let before_disks = serde_json::to_value(&before.config.disks)
+            .context("serialize pre-denial disk configuration")?;
+        ensure!(
+            before
+                .config
+                .disks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|disk| disk.id.as_deref() != Some(CANARY_ID) && disk.path != CANARY_PATH),
+            "Landlock canary is already present before the negative proof"
+        );
+
+        // The jailer's outer /run rule grants ReadFile, while this root-owned
+        // 0444 canary is absent from the typed VmConfig. The exact v53 EACCES
+        // chain therefore proves Cloud Hypervisor's narrower inner Landlock
+        // ruleset independently of both DAC and the outer jailer ruleset.
+        let canary = DiskConfig {
+            path: CANARY_PATH.to_owned(),
+            readonly: true,
+            id: Some(CANARY_ID.to_owned()),
+            image_type: Some(DiskImageType::Raw),
+        };
+        let denial = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_add_disk(&canary))
+            .await
+            .context("time out waiting for Landlock-negative add-disk response")?;
+        match denial {
+            Err(CloudHypervisorError::HttpStatus { status, body }) => {
+                validate_v53_landlock_denial(status, &body)?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .context("Landlock-negative add-disk failed without an HTTP denial");
+            }
+            Ok(()) => bail!("Cloud Hypervisor unexpectedly attached the Landlock canary"),
+        }
+
+        let ping = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.ping())
+            .await
+            .context("time out pinging VMM after Landlock-negative add-disk")?
+            .context("ping VMM after Landlock-negative add-disk")?;
+        let reported_version = ping
+            .build_version
+            .as_deref()
+            .or(ping.version.as_deref())
+            .unwrap_or_default();
+        ensure!(
+            reported_version.contains("53.0"),
+            "VMM reported unexpected version after Landlock denial: {reported_version:?}"
+        );
+        let after = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_info())
+            .await
+            .context("time out inspecting VM after Landlock-negative add-disk")?
+            .context("inspect VM after Landlock-negative add-disk")?;
+        ensure!(
+            matches!(after.state, VmState::Running),
+            "VM is not running after Landlock-negative add-disk"
+        );
+        ensure!(
+            after.config.landlock_enable == Some(true),
+            "VM configuration lost Landlock after the negative proof"
+        );
+        let after_disks = serde_json::to_value(&after.config.disks)
+            .context("serialize post-denial disk configuration")?;
+        ensure!(
+            after_disks == before_disks,
+            "Landlock-negative add-disk changed the VM disk configuration"
+        );
+        ensure!(
+            after
+                .config
+                .disks
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .all(|disk| disk.id.as_deref() != Some(CANARY_ID) && disk.path != CANARY_PATH),
+            "Landlock canary appeared in the post-denial VM configuration"
+        );
+        Ok(())
+    }
+
+    fn validate_v53_landlock_denial(status: u16, body: &str) -> Result<()> {
+        const V53_DENIAL_CHAIN: [&str; 6] = [
+            "Error from API",
+            "The disk could not be added to the VM",
+            "Error from device manager",
+            "Cannot open disk path",
+            "I/O error (path=/run/landlock-api-canary op=open)",
+            "Permission denied (os error 13)",
+        ];
+
+        ensure!(
+            status == 500,
+            "Landlock-negative add-disk returned HTTP {status}, expected 500"
+        );
+        let chain: Vec<String> = serde_json::from_str(body)
+            .context("parse Cloud Hypervisor v53 Landlock denial chain")?;
+        let expected = V53_DENIAL_CHAIN.map(str::to_owned).to_vec();
+        ensure!(
+            chain == expected,
+            "Cloud Hypervisor returned an unexpected Landlock denial chain: {chain:?}"
         );
         Ok(())
     }
@@ -3526,6 +3592,30 @@ mod linux {
             let metadata = std::fs::symlink_metadata(&path).expect("stat trusted ip binary");
             assert!(metadata.is_file());
             assert!(!metadata.file_type().is_symlink());
+        }
+
+        #[test]
+        fn landlock_denial_accepts_only_the_exact_pinned_v53_chain() {
+            let exact = serde_json::json!([
+                "Error from API",
+                "The disk could not be added to the VM",
+                "Error from device manager",
+                "Cannot open disk path",
+                "I/O error (path=/run/landlock-api-canary op=open)",
+                "Permission denied (os error 13)"
+            ])
+            .to_string();
+            validate_v53_landlock_denial(500, &exact).expect("exact v53 EACCES chain");
+
+            assert!(validate_v53_landlock_denial(400, &exact).is_err());
+            assert!(validate_v53_landlock_denial(500, "not-json").is_err());
+            let wrong_path = exact.replace("/run/landlock-api-canary", "/run/a-different-file");
+            assert!(validate_v53_landlock_denial(500, &wrong_path).is_err());
+            let wrong_errno = exact.replace(
+                "Permission denied (os error 13)",
+                "Operation not permitted (os error 1)",
+            );
+            assert!(validate_v53_landlock_denial(500, &wrong_errno).is_err());
         }
 
         #[test]
