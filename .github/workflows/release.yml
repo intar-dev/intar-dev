@@ -290,25 +290,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            acl \
-            binutils \
-            curl \
-            dosfstools \
-            e2fsprogs \
-            file \
-            iproute2 \
-            nftables \
-            procps \
-            shellcheck
-          if ! id intar-agent >/dev/null 2>&1; then
-            sudo useradd \
-              --system \
-              --no-create-home \
-              --home-dir /nonexistent \
-              --shell /usr/sbin/nologin \
-              intar-agent
-          fi
+          sudo apt-get install -y shellcheck
           for script in \
             crates/intar-jailerd/deploy/install.sh \
             crates/intar-jailerd/deploy/intar-jailerd-self-test.sh \
@@ -323,8 +305,91 @@ jobs:
           path = Path("crates/intar-jailerd/deploy/prepare-v6-cutover.py")
           compile(path.read_text(), str(path), "exec")
           PY
-          sudo crates/intar-jailerd/deploy/package-smoke.sh \
-            "dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
+
+          # Namespace runners are containers and do not use systemd as PID 1.
+          # Boot a disposable privileged systemd container so the package smoke
+          # exercises the real transient-unit, cgroup-v2, KVM, TUN, and cleanup
+          # paths without mutating the runner container itself.
+          smoke_image="intar-agent-package-smoke:${GITHUB_RUN_ID}"
+          smoke_container="intar-agent-package-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_smoke() {
+            status=$?
+            trap - EXIT
+            if [ "${status}" -ne 0 ] && \
+              docker inspect "${smoke_container}" >/dev/null 2>&1; then
+              docker logs "${smoke_container}" || true
+              docker exec "${smoke_container}" \
+                journalctl --boot --no-pager --lines 500 || true
+            fi
+            docker rm --force --volumes "${smoke_container}" >/dev/null 2>&1 || true
+            docker image rm --force "${smoke_image}" >/dev/null 2>&1 || true
+            exit "${status}"
+          }
+          trap cleanup_smoke EXIT
+
+          test -c /dev/kvm
+          test -c /dev/net/tun
+          docker build \
+            --file .github/docker/intar-agent-package-smoke.Dockerfile \
+            --tag "${smoke_image}" \
+            .github/docker
+          docker run \
+            --cgroupns=private \
+            --detach \
+            --device /dev/kvm \
+            --device /dev/net/tun \
+            --env container=docker \
+            --hostname intar-package-smoke \
+            --name "${smoke_container}" \
+            --privileged \
+            --security-opt seccomp=unconfined \
+            --stop-signal SIGRTMIN+3 \
+            --tmpfs /run:rw,nosuid,nodev,mode=755 \
+            --tmpfs /run/lock:rw,nosuid,nodev,noexec,mode=755 \
+            "${smoke_image}"
+
+          systemd_ready=false
+          for _ in $(seq 1 30); do
+            if docker exec "${smoke_container}" \
+              systemctl show --property=Version >/dev/null 2>&1 && \
+              docker exec "${smoke_container}" \
+                test -S /run/dbus/system_bus_socket; then
+              systemd_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "${systemd_ready}" != true ]; then
+            docker logs "${smoke_container}" || true
+            echo "Disposable package-smoke systemd did not become ready." >&2
+            exit 1
+          fi
+          test "$(docker exec "${smoke_container}" ps -p 1 -o comm= | tr -d ' ')" = systemd
+          docker exec "${smoke_container}" test -S /run/dbus/system_bus_socket
+          test "$(docker exec "${smoke_container}" stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          docker exec "${smoke_container}" grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          docker exec "${smoke_container}" test -w /sys/fs/cgroup/cgroup.subtree_control
+          docker exec "${smoke_container}" test -c /dev/kvm
+          docker exec "${smoke_container}" test -r /dev/kvm
+          docker exec "${smoke_container}" test -w /dev/kvm
+          docker exec "${smoke_container}" test -c /dev/net/tun
+          docker exec "${smoke_container}" test -r /dev/net/tun
+          docker exec "${smoke_container}" test -w /dev/net/tun
+
+          archive="dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
+          docker cp "${archive}" "${smoke_container}:/tmp/intar-agent.tar.gz"
+          docker cp \
+            crates/intar-jailerd/deploy/package-smoke.sh \
+            "${smoke_container}:/root/package-smoke.sh"
+          docker exec "${smoke_container}" chmod 0700 /root/package-smoke.sh
+          docker exec "${smoke_container}" useradd \
+            --system \
+            --no-create-home \
+            --home-dir /nonexistent \
+            --shell /usr/sbin/nologin \
+            intar-agent
+          docker exec "${smoke_container}" \
+            /root/package-smoke.sh /tmp/intar-agent.tar.gz
 
       - name: Create tag and GitHub release
         env:
