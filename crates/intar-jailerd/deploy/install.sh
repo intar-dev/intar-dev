@@ -86,7 +86,7 @@ cutover_helper=${archive_dir}/deploy/prepare-v6-cutover.py
 
 for command in \
   awk find flock getent getfacl gpasswd grep install ip mktemp mv nft \
-  python3 sed setfacl sha256sum stat sysctl systemctl systemd-tmpfiles tr; do
+  nsenter python3 sed setfacl sha256sum stat sysctl systemctl systemd-run systemd-tmpfiles tr; do
   command -v "${command}" >/dev/null 2>&1 || die "required host command is missing: ${command}"
 done
 systemctl show --property=Version >/dev/null 2>&1 || die "cannot communicate with systemd"

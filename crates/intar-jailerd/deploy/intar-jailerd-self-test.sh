@@ -31,7 +31,7 @@ esac
 [ "$(uname -s)" = Linux ] || die "requires Linux"
 [ "$(uname -m)" = x86_64 ] || die "requires x86_64"
 
-for command in awk curl flock install mkfs.ext4 mkfs.vfat mktemp sha256sum stat systemctl tar truncate; do
+for command in awk curl flock install mkfs.ext4 mkfs.vfat mktemp sha256sum stat systemctl systemd-run tar truncate; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 [ -x /usr/lib/intar/intar-jailerd ] || die "installed intar-jailerd is missing"
@@ -49,10 +49,15 @@ if systemctl is-active --quiet intar-jailerd.service; then
   daemon_was_active=true
 fi
 run_root=
+self_test_unit=
 
 cleanup() {
   status=$?
   trap - 0 HUP INT TERM
+  if [ -n "${self_test_unit}" ]; then
+    systemctl stop "${self_test_unit}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${self_test_unit}" >/dev/null 2>&1 || true
+  fi
   if [ -n "${run_root}" ]; then
     rm -rf -- "${run_root}"
   fi
@@ -199,7 +204,43 @@ runtime_sha256=$(sha256sum "${run_root}/runtime.raw" | awk '{print $1}')
 recording_sha256=$(sha256sum "${run_root}/recordings.vfat" | awk '{print $1}')
 [ "${kernel_sha256}" = "${KERNEL_SHA256}" ] || die "cached kernel digest changed"
 
-/usr/lib/intar/intar-jailerd self-test \
+self_test_unit="intar-jailerd-selftest-$$.service"
+systemd-run \
+  --quiet \
+  --wait \
+  --pipe \
+  --collect \
+  --unit="${self_test_unit}" \
+  --property=Type=exec \
+  --property=User=root \
+  --property=Group=root \
+  --property=NoNewPrivileges=false \
+  --property=UMask=0077 \
+  --property=PrivateTmp=true \
+  --property=ProtectHome=true \
+  --property=ProtectSystem=strict \
+  --property='ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd /run/netns' \
+  --property=ProtectClock=true \
+  --property=ProtectControlGroups=true \
+  --property=ProtectHostname=true \
+  --property=ProtectKernelLogs=true \
+  --property=ProtectKernelModules=true \
+  --property=ProtectKernelTunables=false \
+  --property=LockPersonality=true \
+  --property=MemoryDenyWriteExecute=true \
+  --property='RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6' \
+  --property=RestrictSUIDSGID=false \
+  --property=RestrictRealtime=true \
+  --property=LimitRTPRIO=0 \
+  --property=DevicePolicy=closed \
+  --property='DeviceAllow=/dev/kvm rw' \
+  --property='DeviceAllow=/dev/net/tun rw' \
+  --property='DeviceAllow=/dev/urandom r' \
+  --property='DeviceAllow=/dev/null rw' \
+  --property='CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_MKNOD CAP_NET_ADMIN CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SYS_PTRACE CAP_SYS_RESOURCE' \
+  --property=SystemCallArchitectures=native \
+  --property='SystemCallFilter=@system-service @mount @privileged' \
+  /usr/lib/intar/intar-jailerd self-test \
   --config /etc/intar-jailerd/config.toml \
   --kernel "${run_root}/kernel" \
   --kernel-sha256 "${kernel_sha256}" \
@@ -209,5 +250,6 @@ recording_sha256=$(sha256sum "${run_root}/recordings.vfat" | awk '{print $1}')
   --runtime-disk-sha256 "${runtime_sha256}" \
   --recording-disk "${run_root}/recordings.vfat" \
   --recording-disk-sha256 "${recording_sha256}"
+self_test_unit=
 
 echo "intar-jailerd self-test: eight-VM 125m saturation, ninth-admission rejection, and jailed Cloud Hypervisor lifecycle passed"

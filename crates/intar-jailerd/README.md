@@ -66,8 +66,11 @@ fresh fixture root solely to its isolated in-memory self-test configuration.
 Advanced/manual artifact flags remain available on `intar-jailerd self-test`,
 but bare mode without artifacts is non-attesting diagnostics.
 
-Agent doctor is read-only. The root-only self-test uses an isolated in-memory
-1000-millicore authority to create eight concurrent Cloud Hypervisor v53 VMs,
+Agent doctor is read-only. The root-only self-test runs under the same
+private-mount/filesystem sandbox as the installed service and uses an isolated
+in-memory 1000-millicore authority. It proves every named run namespace is the
+same nsfs inode in the daemon and PID-1 mount namespaces, then creates eight
+concurrent Cloud Hypervisor v53 VMs,
 each with its own unit, cgroup, jail, identity, and TAP in one shared run
 network namespace. It requires the ninth 125-millicore request to fail local
 admission, proves every API/Landlock lifecycle and KVM task tree, measures all

@@ -206,6 +206,10 @@ mod linux {
         SELF_TEST_SATURATION_VM_COUNT, SELF_TEST_VM_MEMORY_MIB, SelfTestArtifacts,
         SelfTestAttestationV1, VerifiedArtifact,
     };
+    use crate::network::{
+        add_host_visible_namespace, delete_host_visible_namespace, initial_mount_namespace_entry,
+        trusted_nsenter_binary, verify_host_visible_namespace,
+    };
     use crate::{
         FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
         host_cpu_capacity_millis,
@@ -241,6 +245,8 @@ mod linux {
 
     struct Cleanup {
         ip: PathBuf,
+        nsenter: PathBuf,
+        netns_root: PathBuf,
         unit_name: Option<String>,
         namespace_name: Option<String>,
         host_veth_name: Option<String>,
@@ -258,7 +264,12 @@ mod linux {
                 let _ = run_command(&self.ip, ["link", "delete", host_veth_name.as_str()]);
             }
             if let Some(namespace_name) = self.namespace_name.take() {
-                let _ = run_command(&self.ip, ["netns", "delete", namespace_name.as_str()]);
+                let _ = delete_host_visible_namespace(
+                    &self.nsenter,
+                    &self.ip,
+                    &self.netns_root,
+                    &namespace_name,
+                );
             }
             if let Some(directory) = self.directory.take() {
                 // Never traverse a leaked mount while unwinding.  The checked
@@ -328,6 +339,7 @@ mod linux {
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
 
         let ip = trusted_ip_binary()?;
+        let nsenter = trusted_nsenter_binary()?;
         let namespace_name = format!("ist{short}");
         let host_veth_name = format!("ish{short}");
         let peer_veth_name = format!("isn{short}");
@@ -336,6 +348,8 @@ mod linux {
         ensure!(peer_veth_name.len() <= 15);
         let mut cleanup = Cleanup {
             ip: ip.clone(),
+            nsenter: nsenter.clone(),
+            netns_root: config.netns_root.clone(),
             unit_name: None,
             namespace_name: None,
             host_veth_name: None,
@@ -344,17 +358,59 @@ mod linux {
             uid_gid_end: config.uid_gid_end,
         };
 
-        create_test_network(
+        add_host_visible_namespace(&nsenter, &ip, &config.netns_root, &namespace_name)?;
+        cleanup.namespace_name = Some(namespace_name.clone());
+        if let Err(error) = verify_host_visible_namespace(&config.netns_root, &namespace_name) {
+            let rollback =
+                delete_test_network(&nsenter, &ip, &config.netns_root, &namespace_name, None);
+            if rollback.is_ok() {
+                cleanup.namespace_name = None;
+            }
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(error).context(format!(
+                    "host-visible namespace verification rollback also failed: {rollback_error:#}"
+                )),
+            };
+        }
+        let network_setup = create_test_network(
             &ip,
+            &config.netns_root,
             &namespace_name,
             &host_veth_name,
             &peer_veth_name,
             short,
-        )?;
-        cleanup.namespace_name = Some(namespace_name.clone());
-        cleanup.host_veth_name = Some(host_veth_name.clone());
-        verify_network(&ip, &namespace_name, &host_veth_name, &peer_veth_name)?;
-
+            &mut cleanup,
+        )
+        .and_then(|()| {
+            verify_network(
+                &ip,
+                &config.netns_root,
+                &namespace_name,
+                &host_veth_name,
+                &peer_veth_name,
+            )
+        });
+        if let Err(error) = network_setup {
+            let owned_host_veth = cleanup.host_veth_name.clone();
+            let rollback = delete_test_network(
+                &nsenter,
+                &ip,
+                &config.netns_root,
+                &namespace_name,
+                owned_host_veth.as_deref(),
+            );
+            if rollback.is_ok() {
+                cleanup.namespace_name = None;
+                cleanup.host_veth_name = None;
+            }
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(error).context(format!(
+                    "preliminary network rollback also failed: {rollback_error:#}"
+                )),
+            };
+        }
         let allowed_dir = directory.join("allowed");
         create_root_directory(&allowed_dir)?;
         let denied_path = directory.join("denied-marker");
@@ -404,7 +460,13 @@ mod linux {
         stop_and_reset_unit(&unit_name)?;
         cleanup.unit_name = None;
         wait_for_cgroup_drain(&cgroup_directory, Duration::from_secs(10))?;
-        delete_test_network(&ip, &namespace_name, &host_veth_name)?;
+        delete_test_network(
+            &nsenter,
+            &ip,
+            &config.netns_root,
+            &namespace_name,
+            Some(&host_veth_name),
+        )?;
         cleanup.namespace_name = None;
         cleanup.host_veth_name = None;
 
@@ -3218,86 +3280,91 @@ mod linux {
 
     fn create_test_network(
         ip: &Path,
+        netns_root: &Path,
         namespace: &str,
         host_veth: &str,
         peer_veth: &str,
         seed: &str,
+        cleanup: &mut Cleanup,
     ) -> Result<()> {
         let octet = 1 + (u8::from_str_radix(&seed[..2], 16)? % 250);
         let ip_argument = ip
             .to_str()
             .context("trusted ip binary path is not valid UTF-8")?;
-        checked_command(ip, ["netns", "add", namespace])?;
-        let mut pair_created = false;
-        let result = (|| -> Result<()> {
-            checked_command(
-                ip,
-                [
-                    "link", "add", host_veth, "type", "veth", "peer", "name", peer_veth,
-                ],
-            )?;
-            pair_created = true;
-            checked_command(ip, ["link", "set", peer_veth, "netns", namespace])?;
-            let host_cidr = format!("198.18.{octet}.1/30");
-            let peer_cidr = format!("198.18.{octet}.2/30");
-            checked_command(ip, ["address", "add", host_cidr.as_str(), "dev", host_veth])?;
-            checked_command(ip, ["link", "set", host_veth, "up"])?;
-            checked_command(
-                ip,
-                [
-                    "netns",
-                    "exec",
-                    namespace,
-                    ip_argument,
-                    "link",
-                    "set",
-                    "lo",
-                    "up",
-                ],
-            )?;
-            checked_command(
-                ip,
-                [
-                    "netns",
-                    "exec",
-                    namespace,
-                    ip_argument,
-                    "address",
-                    "add",
-                    peer_cidr.as_str(),
-                    "dev",
-                    peer_veth,
-                ],
-            )?;
-            checked_command(
-                ip,
-                [
-                    "netns",
-                    "exec",
-                    namespace,
-                    ip_argument,
-                    "link",
-                    "set",
-                    peer_veth,
-                    "up",
-                ],
-            )?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            // Deleting the host end first deterministically removes the pair.
-            // Deleting the namespace first can asynchronously remove both
-            // veths and race a subsequent host-link deletion.
-            if pair_created {
-                let _ = run_command(ip, ["link", "delete", host_veth]);
-            }
-            let _ = run_command(ip, ["netns", "delete", namespace]);
-            return Err(error);
-        }
+        checked_ip_command(
+            ip,
+            netns_root,
+            [
+                "link", "add", host_veth, "type", "veth", "peer", "name", peer_veth,
+            ],
+        )?;
+        cleanup.host_veth_name = Some(host_veth.to_owned());
+        checked_ip_command(
+            ip,
+            netns_root,
+            ["link", "set", peer_veth, "netns", namespace],
+        )?;
+        let host_cidr = format!("198.18.{octet}.1/30");
+        let peer_cidr = format!("198.18.{octet}.2/30");
+        checked_ip_command(
+            ip,
+            netns_root,
+            ["address", "add", host_cidr.as_str(), "dev", host_veth],
+        )?;
+        checked_ip_command(ip, netns_root, ["link", "set", host_veth, "up"])?;
+        checked_ip_command(
+            ip,
+            netns_root,
+            [
+                "netns",
+                "exec",
+                namespace,
+                ip_argument,
+                "link",
+                "set",
+                "lo",
+                "up",
+            ],
+        )?;
+        checked_ip_command(
+            ip,
+            netns_root,
+            [
+                "netns",
+                "exec",
+                namespace,
+                ip_argument,
+                "address",
+                "add",
+                peer_cidr.as_str(),
+                "dev",
+                peer_veth,
+            ],
+        )?;
+        checked_ip_command(
+            ip,
+            netns_root,
+            [
+                "netns",
+                "exec",
+                namespace,
+                ip_argument,
+                "link",
+                "set",
+                peer_veth,
+                "up",
+            ],
+        )?;
         Ok(())
     }
 
-    fn verify_network(ip: &Path, namespace: &str, host_veth: &str, peer_veth: &str) -> Result<()> {
+    fn verify_network(
+        ip: &Path,
+        netns_root: &Path,
+        namespace: &str,
+        host_veth: &str,
+        peer_veth: &str,
+    ) -> Result<()> {
         let ip_argument = ip
             .to_str()
             .context("trusted ip binary path is not valid UTF-8")?;
@@ -3305,8 +3372,9 @@ mod linux {
             Path::new("/sys/class/net").join(host_veth).is_dir(),
             "self-test host veth is absent"
         );
-        let output = checked_command(
+        let output = checked_ip_command(
             ip,
+            netns_root,
             [
                 "netns",
                 "exec",
@@ -3323,30 +3391,40 @@ mod linux {
             "self-test namespace peer is absent"
         );
         let host_namespace = std::fs::metadata("/proc/self/ns/net")?;
-        let test_namespace = std::fs::metadata(Path::new("/run/netns").join(namespace))?;
+        let namespace_inode = verify_host_visible_namespace(netns_root, namespace)?;
         ensure!(
-            host_namespace.ino() != test_namespace.ino(),
+            host_namespace.ino() != namespace_inode,
             "self-test did not create a distinct network namespace"
         );
         Ok(())
     }
 
-    fn delete_test_network(ip: &Path, namespace: &str, host_veth: &str) -> Result<()> {
-        let host_veth_path = Path::new("/sys/class/net").join(host_veth);
-        if path_entry_exists(&host_veth_path)? {
-            let result = checked_command(ip, ["link", "delete", host_veth]).map(|_| ());
-            accept_delete_outcome(
-                result,
-                path_entry_exists(&host_veth_path)?,
-                "self-test host veth",
-            )?;
+    fn delete_test_network(
+        nsenter: &Path,
+        ip: &Path,
+        netns_root: &Path,
+        namespace: &str,
+        host_veth: Option<&str>,
+    ) -> Result<()> {
+        if let Some(host_veth) = host_veth {
+            let host_veth_path = Path::new("/sys/class/net").join(host_veth);
+            if path_entry_exists(&host_veth_path)? {
+                let result =
+                    checked_ip_command(ip, netns_root, ["link", "delete", host_veth]).map(|_| ());
+                accept_delete_outcome(
+                    result,
+                    path_entry_exists(&host_veth_path)?,
+                    "self-test host veth",
+                )?;
+            }
         }
-        let namespace_path = Path::new("/run/netns").join(namespace);
-        if path_entry_exists(&namespace_path)? {
-            let result = checked_command(ip, ["netns", "delete", namespace]).map(|_| ());
+        let namespace_path = netns_root.join(namespace);
+        let initial_namespace_path = initial_mount_namespace_entry(netns_root, namespace)?;
+        if path_entry_exists(&namespace_path)? || path_entry_exists(&initial_namespace_path)? {
+            let result = delete_host_visible_namespace(nsenter, ip, netns_root, namespace);
             accept_delete_outcome(
                 result,
-                path_entry_exists(&namespace_path)?,
+                path_entry_exists(&namespace_path)? || path_entry_exists(&initial_namespace_path)?,
                 "self-test network namespace",
             )?;
         }
@@ -3495,6 +3573,29 @@ mod linux {
             output.status.success(),
             "{} failed: {}",
             program.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(output)
+    }
+
+    fn checked_ip_command<'a>(
+        ip: &Path,
+        netns_root: &Path,
+        arguments: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Output> {
+        let output = Command::new(ip)
+            .args(arguments)
+            .env_clear()
+            .env("IP_NETNS_DIR", netns_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("execute {}", ip.display()))?;
+        ensure!(
+            output.status.success(),
+            "{} failed: {}",
+            ip.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
         Ok(output)

@@ -50,6 +50,7 @@ pub struct PreflightEnvironment {
     pub os: &'static str,
     pub arch: &'static str,
     pub path_entries: Vec<PathBuf>,
+    pub trusted_nsenter: Result<PathBuf, String>,
     pub kvm_path: PathBuf,
     pub tun_path: PathBuf,
     pub urandom_path: PathBuf,
@@ -80,6 +81,7 @@ impl PreflightEnvironment {
             os: env::consts::OS,
             arch: env::consts::ARCH,
             systemd_version: read_systemd_version(&path_entries),
+            trusted_nsenter: find_trusted_nsenter(),
             path_entries,
             kvm_path: PathBuf::from("/dev/kvm"),
             tun_path: PathBuf::from("/dev/net/tun"),
@@ -133,6 +135,7 @@ pub fn collect_preflight_with_environment(
     );
     push_socket_check(&mut checks, "jailerd socket", &cfg.jailer.socket);
     push_command_check(&mut checks, "nft binary", "nft", &env.path_entries);
+    push_trusted_helper_check(&mut checks, "nsenter binary", &env.trusted_nsenter);
     push_ipv4_forwarding_check(&mut checks, &env.ipv4_forwarding);
     push_dir_result_check(&mut checks, "image cache root", &env.cache_root);
     push_vm_work_dir_check(&mut checks, cfg, env);
@@ -677,6 +680,20 @@ fn push_command_check(
     }
 }
 
+fn push_trusted_helper_check(
+    checks: &mut Vec<PreflightCheck>,
+    name: &str,
+    helper: &Result<PathBuf, String>,
+) {
+    match helper {
+        Ok(path) => checks.push(pass(
+            name,
+            format!("trusted root-owned helper at {}", path.display()),
+        )),
+        Err(error) => checks.push(fail(name, error.clone())),
+    }
+}
+
 fn push_char_device_presence_check(checks: &mut Vec<PreflightCheck>, name: &str, path: &Path) {
     match path.metadata() {
         Ok(metadata) if is_char_device(&metadata) => checks.push(pass(
@@ -843,6 +860,53 @@ fn parse_systemd_major_version(value: &str) -> Option<u32> {
         .find(|part| !part.is_empty())?
         .parse()
         .ok()
+}
+
+fn find_trusted_nsenter() -> Result<PathBuf, String> {
+    let mut failures = Vec::new();
+    for path in [
+        Path::new("/usr/bin/nsenter"),
+        Path::new("/usr/sbin/nsenter"),
+    ] {
+        match validate_trusted_root_executable(path) {
+            Ok(()) => return Ok(path.to_path_buf()),
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(format!(
+        "no trusted nsenter helper matched jailerd's absolute candidates ({})",
+        failures.join("; ")
+    ))
+}
+
+#[cfg(unix)]
+fn validate_trusted_root_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("not a regular non-symlink file".to_string());
+    }
+    if metadata.uid() != 0 || metadata.nlink() != 1 || metadata.mode() & 0o022 != 0 {
+        return Err("not root-owned, single-link, and non-writable by group/other".to_string());
+    }
+    if !executable_permissions(&metadata) {
+        return Err("not executable".to_string());
+    }
+    let mut ancestor = path.parent();
+    while let Some(directory) = ancestor {
+        let metadata = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(format!("untrusted ancestor {}", directory.display()));
+        }
+        ancestor = directory.parent();
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_trusted_root_executable(_path: &Path) -> Result<(), String> {
+    Err("trusted Unix helper validation is unavailable".to_string())
 }
 
 fn resolve_command(command: &str, path_entries: &[PathBuf]) -> Option<PathBuf> {
@@ -1015,6 +1079,7 @@ mod tests {
         let systemd_runtime = temp.path().join("run/systemd/system");
         fs::create_dir_all(&systemd_runtime).unwrap();
         fake_tool(&bin, "nft");
+        fake_tool(&bin, "nsenter");
         let mut cfg = AgentConfig::default();
         cfg.bridge.enabled = true;
         cfg.bridge.base_url = "https://intar.dev".to_string();
@@ -1033,6 +1098,7 @@ mod tests {
         let env = PreflightEnvironment {
             os: "linux",
             arch: "x86_64",
+            trusted_nsenter: Ok(bin.join("nsenter")),
             path_entries: vec![bin],
             kvm_path: PathBuf::from("/dev/null"),
             tun_path: PathBuf::from("/dev/null"),
@@ -1075,6 +1141,7 @@ mod tests {
         let env = PreflightEnvironment {
             os: "linux",
             arch: "x86_64",
+            trusted_nsenter: Ok(temp.path().join("nsenter")),
             path_entries: Vec::new(),
             kvm_path: fake_kvm,
             tun_path: PathBuf::from("/dev/null"),
@@ -1113,6 +1180,7 @@ mod tests {
         let env = PreflightEnvironment {
             os: "macos",
             arch: "aarch64",
+            trusted_nsenter: Err("trusted nsenter unavailable".to_string()),
             path_entries: Vec::new(),
             kvm_path: temp.path().join("missing-kvm"),
             tun_path: temp.path().join("missing-tun"),
@@ -1173,6 +1241,7 @@ mod tests {
         let env = PreflightEnvironment {
             os: "linux",
             arch: "x86_64",
+            trusted_nsenter: Ok(temp.path().join("nsenter")),
             path_entries: Vec::new(),
             kvm_path: PathBuf::from("/dev/null"),
             tun_path: PathBuf::from("/dev/null"),
@@ -1271,6 +1340,7 @@ mod tests {
         PreflightEnvironment {
             os: "linux",
             arch: "x86_64",
+            trusted_nsenter: Ok(temp.path().join("nsenter")),
             path_entries: Vec::new(),
             kvm_path: PathBuf::from("/dev/null"),
             tun_path: PathBuf::from("/dev/null"),
