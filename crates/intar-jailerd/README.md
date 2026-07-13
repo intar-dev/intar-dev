@@ -27,6 +27,12 @@ semantics. The Linux backend creates the per-run network namespace and
 per-generation transient systemd service through typed operations; it never
 falls back to a raw root child process or invokes a shell.
 
+The daemon service keeps `CAP_SYS_PTRACE` only for strong cross-UID executable
+identity checks against `/proc/<pid>/exe`. The privileged self-test and daemon
+startup both reject a missing effective or bounding capability instead of
+silently treating `EACCES` as a process race. VM units do not inherit it and
+the VMM capability sets remain empty.
+
 The one-shot `intar-jailer` performs namespace, pivot-root, procfs, rlimit,
 credential, capability, `no_new_privs`, Landlock, and seccomp setup. Privileged
 KVM integration tests must be run on the pinned production host baseline. The

@@ -289,6 +289,8 @@ mod linux {
         artifacts: Option<(&SelfTestArtifacts, &Path)>,
     ) -> Result<SelfTestAttestationV1> {
         require_root()?;
+        crate::require_supervisor_process_inspection_capability()
+            .context("prove cross-UID VMM executable inspection capability")?;
         config
             .validate()
             .context("validate jailerd configuration")?;

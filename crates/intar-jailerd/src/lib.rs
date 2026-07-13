@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use anyhow::ensure;
 use anyhow::{Context as _, Result, bail};
 use intar_jailer_protocol::{
     CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, CpuQuota, DestroyRunNetworkRequest,
@@ -31,6 +33,11 @@ mod network;
 #[cfg(target_os = "linux")]
 use network::NetworkManager;
 pub mod self_test;
+
+#[cfg(any(target_os = "linux", test))]
+const CAP_SYS_PTRACE_BIT: u32 = 19;
+#[cfg(target_os = "linux")]
+const VMM_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A launch description which maps directly to a systemd transient service.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,6 +229,7 @@ impl SystemdHostBackend {
         config: &JailerdConfig,
         landlock_attested: bool,
     ) -> Result<Self> {
+        require_supervisor_process_inspection_capability()?;
         let _ = zbus::blocking::Connection::system().context("connect to system D-Bus")?;
         Ok(Self {
             network: NetworkManager::new(config)?,
@@ -375,25 +383,38 @@ impl HostBackend for SystemdHostBackend {
             )
             .with_context(|| format!("start transient unit {}", spec.unit_name))?;
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + VMM_START_TIMEOUT;
         let inspection = loop {
-            match self.inspect_existing(&spec.unit_name) {
-                Ok(inspection)
-                    if inspection.pid.is_some()
-                        && ping_cloud_hypervisor(&spec.api_socket_path).is_ok() =>
-                {
-                    break inspection;
+            let last_observation = match self.inspect_existing(&spec.unit_name) {
+                Ok(inspection) if inspection.pid.is_some() => {
+                    match ping_cloud_hypervisor(&spec.api_socket_path) {
+                        Ok(()) => break inspection,
+                        Err(error) => format!(
+                            "verified VMM process is present but its API ping failed: {error:#}"
+                        ),
+                    }
                 }
                 Ok(inspection) if inspection.health == SandboxHealth::Exited => {
                     bail!("Cloud Hypervisor exited during transient-unit activation")
                 }
-                Ok(_) | Err(_) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(25));
+                Ok(inspection) => format!(
+                    "unit health is {:?} and no verified VMM process is visible",
+                    inspection.health
+                ),
+                Err(error) if error_has_io_kind(&error, std::io::ErrorKind::PermissionDenied) => {
+                    return Err(error).context(
+                        "inspect the cross-UID Cloud Hypervisor process; intar-jailerd requires CAP_SYS_PTRACE",
+                    );
                 }
-                Ok(_) | Err(_) => {
-                    bail!("timed out waiting for verified Cloud Hypervisor API process")
-                }
+                Err(error) => format!("unit inspection failed: {error:#}"),
+            };
+            if Instant::now() >= deadline {
+                bail!(
+                    "timed out after {}s waiting for verified Cloud Hypervisor API process; {last_observation}",
+                    VMM_START_TIMEOUT.as_secs()
+                )
             }
+            std::thread::sleep(Duration::from_millis(25));
         };
         let cgroup_path = inspection.cgroup_path.clone();
         if let Some(cgroup_path) = &cgroup_path
@@ -675,6 +696,38 @@ fn process_root_inode(pid: u32) -> Option<u64> {
         .map(|metadata| metadata.ino())
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn capability_set_contains(status: &str, field: &str, capability_bit: u32) -> bool {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .map(str::trim)
+        .and_then(|value| u64::from_str_radix(value, 16).ok())
+        .is_some_and(|mask| mask & (1_u64 << capability_bit) != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn require_supervisor_process_inspection_capability() -> Result<()> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("read intar-jailerd process capabilities")?;
+    for field in ["CapEff:", "CapBnd:"] {
+        ensure!(
+            capability_set_contains(&status, field, CAP_SYS_PTRACE_BIT),
+            "intar-jailerd requires CAP_SYS_PTRACE in {field} to verify unique-UID VMM executables"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn error_has_io_kind(error: &anyhow::Error, kind: std::io::ErrorKind) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == kind)
+    })
+}
+
 #[cfg(target_os = "linux")]
 fn find_verified_vmm_pid(control_group: &str, expected: &Sha256Digest) -> Result<Option<u32>> {
     if control_group.is_empty() {
@@ -687,8 +740,13 @@ fn find_verified_vmm_pid(control_group: &str, expected: &Sha256Digest) -> Result
     for line in processes.lines() {
         let pid: u32 = line.parse().context("parse VM cgroup PID")?;
         let executable = PathBuf::from(format!("/proc/{pid}/exe"));
-        let Ok(file) = File::open(&executable) else {
-            continue;
+        let file = match File::open(&executable) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("open cgroup process executable for PID {pid}"));
+            }
         };
         if !reader_digest_matches(file, expected)? {
             continue;
@@ -4081,6 +4139,35 @@ mod tests {
         assert_eq!(properties["CPUQuotaPeriodUSec"], "100000");
         assert_eq!(properties["KillMode"], "control-group");
         assert_eq!(properties["RestrictRealtime"], "yes");
+    }
+
+    #[test]
+    fn process_capability_parser_requires_sys_ptrace_bit() {
+        let status = concat!(
+            "Name:\tintar-jailerd\n",
+            "CapEff:\t0000000000080000\n",
+            "CapBnd:\t000001ffffffffff\n",
+        );
+        assert!(capability_set_contains(
+            status,
+            "CapEff:",
+            CAP_SYS_PTRACE_BIT
+        ));
+        assert!(capability_set_contains(
+            status,
+            "CapBnd:",
+            CAP_SYS_PTRACE_BIT
+        ));
+        assert!(!capability_set_contains(
+            "CapEff:\t0000000000000000\n",
+            "CapEff:",
+            CAP_SYS_PTRACE_BIT
+        ));
+        assert!(!capability_set_contains(
+            "CapEff:\tnot-hex\n",
+            "CapEff:",
+            CAP_SYS_PTRACE_BIT
+        ));
     }
 
     #[test]
