@@ -51,21 +51,21 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-/// A Unix socket endpoint whose parent directory stays pinned by file
-/// descriptor on Linux.
+/// A Unix socket endpoint whose socket inode stays pinned by file descriptor
+/// on Linux.
 ///
 /// Linux limits the pathname supplied to `connect(2)` to `sockaddr_un.sun_path`
 /// even when the socket itself lives at a valid, longer host-visible path. We
-/// open the parent with `openat2(2)` and connect through the short,
-/// process-local `/proc/self/fd/<fd>/<name>` spelling instead. The original
-/// path remains available for persistence and diagnostics, and no symlink is
-/// followed while the parent directory is opened.
+/// open and validate the socket with `openat2(2)`, then connect through its
+/// short, process-local `/proc/self/fd/<fd>` spelling. The original path
+/// remains available for persistence and diagnostics, while the opened inode
+/// prevents a later pathname replacement from redirecting API traffic.
 #[derive(Clone, Debug)]
 pub struct UnixSocketEndpoint {
     logical_path: PathBuf,
     connection_path: PathBuf,
     #[cfg(target_os = "linux")]
-    _parent: Arc<std::os::fd::OwnedFd>,
+    _socket: Arc<std::os::fd::OwnedFd>,
 }
 
 impl UnixSocketEndpoint {
@@ -101,12 +101,74 @@ impl UnixSocketEndpoint {
                 path: logical_path.clone(),
                 source: io::Error::from(source),
             })?;
-            let connection_path =
-                PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join(file_name);
+            let parent_stat = rustix::fs::fstat(&parent).map_err(|source| Error::SocketPath {
+                path: logical_path.clone(),
+                source: io::Error::from(source),
+            })?;
+            if rustix::fs::FileType::from_raw_mode(parent_stat.st_mode)
+                != rustix::fs::FileType::Directory
+            {
+                return Err(Error::SocketPath {
+                    path: logical_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "socket parent is not a directory",
+                    ),
+                });
+            }
+            let socket = openat2(
+                &parent,
+                file_name,
+                OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+                ResolveFlags::BENEATH
+                    | ResolveFlags::NO_MAGICLINKS
+                    | ResolveFlags::NO_SYMLINKS
+                    | ResolveFlags::NO_XDEV,
+            )
+            .map_err(|source| Error::SocketPath {
+                path: logical_path.clone(),
+                source: io::Error::from(source),
+            })?;
+            let socket_stat = rustix::fs::fstat(&socket).map_err(|source| Error::SocketPath {
+                path: logical_path.clone(),
+                source: io::Error::from(source),
+            })?;
+            if rustix::fs::FileType::from_raw_mode(socket_stat.st_mode)
+                != rustix::fs::FileType::Socket
+            {
+                return Err(Error::SocketPath {
+                    path: logical_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "socket path is not a Unix socket",
+                    ),
+                });
+            }
+            if socket_stat.st_nlink != 1 {
+                return Err(Error::SocketPath {
+                    path: logical_path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "socket inode must have exactly one link",
+                    ),
+                });
+            }
+            if socket_stat.st_uid != parent_stat.st_uid || socket_stat.st_gid != parent_stat.st_gid
+            {
+                return Err(Error::SocketPath {
+                    path: logical_path,
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "socket owner does not match its parent directory",
+                    ),
+                });
+            }
+            let connection_path = PathBuf::from(format!("/proc/self/fd/{}", socket.as_raw_fd()));
             Ok(Self {
                 logical_path,
                 connection_path,
-                _parent: Arc::new(parent),
+                _socket: Arc::new(socket),
             })
         }
 
@@ -432,9 +494,65 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::io::{Read as _, Write as _};
     #[cfg(target_os = "linux")]
+    use std::os::unix::fs::MetadataExt as _;
+    #[cfg(target_os = "linux")]
     use std::os::unix::net::UnixListener;
     #[cfg(target_os = "linux")]
     use std::thread;
+    #[cfg(target_os = "linux")]
+    use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    fn accept_for(listener: &UnixListener, timeout: Duration) -> Option<UnixStream> {
+        listener
+            .set_nonblocking(true)
+            .expect("make test listener nonblocking");
+        let deadline = Instant::now() + timeout;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Some(stream),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept test unix socket: {error}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_ping_server(
+        listener: UnixListener,
+        version: &'static str,
+    ) -> thread::JoinHandle<bool> {
+        thread::spawn(move || {
+            let Some(mut stream) = accept_for(&listener, Duration::from_secs(2)) else {
+                return false;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set test HTTP read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1_024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let length = stream.read(&mut buffer).expect("read HTTP request");
+                assert_ne!(length, 0, "HTTP client closed before sending headers");
+                request.extend_from_slice(&buffer[..length]);
+            }
+            assert!(request.starts_with(b"GET /api/v1/vmm.ping HTTP/1.1\r\n"));
+            let body = format!(r#"{{"version":"{version}"}}"#);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write HTTP response");
+            true
+        })
+    }
 
     #[test]
     fn vm_config_serializes_vsock() {
@@ -493,6 +611,13 @@ mod tests {
         fs::create_dir_all(&long_parent).expect("create long socket parent");
         let long_socket = long_parent.join("cloud-hypervisor.sock");
         fs::hard_link(&short_socket, &long_socket).expect("hard-link unix socket");
+        fs::remove_file(&short_socket).expect("remove short socket link");
+        assert_eq!(
+            fs::symlink_metadata(&long_socket)
+                .expect("stat long socket")
+                .nlink(),
+            1
+        );
 
         assert!(UnixStream::connect(&long_socket).is_err());
         let endpoint = UnixSocketEndpoint::new(&long_socket).expect("anchor long socket path");
@@ -500,24 +625,10 @@ mod tests {
         let _client = endpoint
             .connect()
             .expect("connect through pinned parent fd");
-        let _server = listener.accept().expect("accept fd-relative connection");
+        let _server =
+            accept_for(&listener, Duration::from_secs(2)).expect("accept fd-relative connection");
 
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept HTTP connection");
-            let mut request = Vec::new();
-            let mut buffer = [0_u8; 1_024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let length = stream.read(&mut buffer).expect("read HTTP request");
-                assert_ne!(length, 0, "HTTP client closed before sending headers");
-                request.extend_from_slice(&buffer[..length]);
-            }
-            assert!(request.starts_with(b"GET /api/v1/vmm.ping HTTP/1.1\r\n"));
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                )
-                .expect("write HTTP response");
-        });
+        let server = spawn_ping_server(listener, "long-path");
         let logical_path = long_socket.to_str().expect("test path is UTF-8");
         let client = Client::new(logical_path).expect("create client for long socket path");
         assert_eq!(client.socket_path(), logical_path);
@@ -525,8 +636,9 @@ mod tests {
             .enable_all()
             .build()
             .expect("build test runtime");
-        runtime.block_on(client.ping()).expect("ping long socket");
-        server.join().expect("HTTP server thread");
+        let ping = runtime.block_on(client.ping()).expect("ping long socket");
+        assert_eq!(ping.version.as_deref(), Some("long-path"));
+        assert!(server.join().expect("HTTP server thread"));
     }
 
     #[cfg(target_os = "linux")]
@@ -543,5 +655,99 @@ mod tests {
         let error = UnixSocketEndpoint::new(link.join("cloud-hypervisor.sock"))
             .expect_err("symlinked socket parent must fail closed");
         assert!(matches!(error, Error::SocketPath { .. }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fd_anchored_endpoint_rejects_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create socket test directory");
+        let target = temp.path().join("target.sock");
+        let _listener = UnixListener::bind(&target).expect("bind target unix socket");
+        let link = temp.path().join("link.sock");
+        symlink(&target, &link).expect("create final socket symlink");
+
+        let error =
+            UnixSocketEndpoint::new(&link).expect_err("symlinked final socket must fail closed");
+        assert!(matches!(error, Error::SocketPath { .. }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fd_anchored_endpoint_rejects_non_socket_and_multi_link_socket() {
+        let temp = tempfile::tempdir().expect("create socket test directory");
+        let regular = temp.path().join("regular");
+        fs::write(&regular, b"not a socket").expect("write regular file");
+        assert!(UnixSocketEndpoint::new(&regular).is_err());
+
+        let socket = temp.path().join("socket");
+        let _listener = UnixListener::bind(&socket).expect("bind unix socket");
+        let second_link = temp.path().join("socket-link");
+        fs::hard_link(&socket, &second_link).expect("hard-link unix socket");
+        assert_eq!(
+            fs::symlink_metadata(&socket)
+                .expect("stat multi-link socket")
+                .nlink(),
+            2
+        );
+        assert!(UnixSocketEndpoint::new(&socket).is_err());
+        assert!(UnixSocketEndpoint::new(&second_link).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fd_anchored_clients_cannot_be_redirected_by_pathname_swap() {
+        let temp = tempfile::tempdir().expect("create socket test directory");
+        let logical_socket = temp.path().join("cloud-hypervisor.sock");
+        let original_listener =
+            UnixListener::bind(&logical_socket).expect("bind original unix socket");
+        let endpoint =
+            UnixSocketEndpoint::new(&logical_socket).expect("anchor original raw socket");
+        let logical_path = logical_socket.to_str().expect("test path is UTF-8");
+        let client = Client::new(logical_path).expect("anchor original reqwest socket");
+        assert_eq!(endpoint.logical_path(), logical_socket);
+        assert_eq!(client.socket_path(), logical_path);
+
+        let retired_socket = temp.path().join("retired.sock");
+        fs::rename(&logical_socket, &retired_socket).expect("rename original socket path");
+        let replacement_listener =
+            UnixListener::bind(&logical_socket).expect("bind replacement unix socket");
+
+        let raw_client = endpoint
+            .connect()
+            .expect("connect raw client to pinned original inode");
+        let raw_server = accept_for(&original_listener, Duration::from_secs(2))
+            .expect("original listener must receive raw connection");
+        assert!(
+            accept_for(&replacement_listener, Duration::from_millis(50)).is_none(),
+            "replacement listener received fd-anchored raw traffic"
+        );
+        drop(raw_client);
+        drop(raw_server);
+
+        let named_client =
+            UnixStream::connect(&logical_socket).expect("connect to replacement by path");
+        let named_server = accept_for(&replacement_listener, Duration::from_secs(2))
+            .expect("replacement listener must remain reachable by name");
+        drop(named_client);
+        drop(named_server);
+
+        let original_server = spawn_ping_server(original_listener, "original");
+        let replacement_server = spawn_ping_server(replacement_listener, "replacement");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let ping = runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(2), client.ping()).await })
+            .expect("fd-anchored reqwest ping timed out")
+            .expect("fd-anchored reqwest ping failed");
+        assert_eq!(ping.version.as_deref(), Some("original"));
+        assert!(original_server.join().expect("original HTTP server"));
+        assert!(
+            !replacement_server.join().expect("replacement HTTP server"),
+            "replacement listener received fd-anchored reqwest traffic"
+        );
     }
 }
