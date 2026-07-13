@@ -28,6 +28,25 @@ id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exis
 [ -d /run/systemd/system ] || die "systemd is not the active service manager"
 systemctl show --property=Version >/dev/null 2>&1 || die "cannot communicate with systemd"
 
+capability_bit_is_set() {
+  status_field=$1
+  capability_bit=$2
+  capability_mask=$(awk -v field="${status_field}:" '$1 == field { print $2; found = 1; exit } END { if (!found) exit 1 }' "/proc/$$/status") || \
+    die "could not read ${status_field} from /proc/$$/status"
+  python3 - "${capability_mask}" "${capability_bit}" <<'PY'
+import sys
+
+mask = int(sys.argv[1], 16)
+bit = int(sys.argv[2])
+raise SystemExit(0 if mask & (1 << bit) else 1)
+PY
+}
+
+capability_bit_is_set CapEff 19 || \
+  die "CAP_SYS_PTRACE (bit 19) is absent from the package-smoke effective capability set"
+capability_bit_is_set CapBnd 19 || \
+  die "CAP_SYS_PTRACE (bit 19) is absent from the package-smoke capability bounding set"
+
 # This destructive test is intentionally limited to a disposable release VM.
 for path in \
   /etc/intar-jailerd \
@@ -184,6 +203,12 @@ for relative in \
     die "archive is missing a regular ${relative}"
   fi
 done
+(capability_bounding_set=$(awk -F= '$1 == "CapabilityBoundingSet" { print $2 }' \
+    "${package_root}/deploy/intar-jailerd.service")
+  case " ${capability_bounding_set} " in
+    *" CAP_SYS_PTRACE "*) ;;
+    *) die "packaged intar-jailerd.service omits CAP_SYS_PTRACE from CapabilityBoundingSet" ;;
+  esac)
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
 for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do

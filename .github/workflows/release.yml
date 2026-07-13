@@ -380,6 +380,7 @@ jobs:
           docker run \
             --cgroupns=private \
             --detach \
+            --cap-add SYS_PTRACE \
             --device /dev/kvm \
             --device /dev/net/tun \
             --env container=docker \

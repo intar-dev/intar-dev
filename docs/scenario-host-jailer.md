@@ -62,6 +62,13 @@ fields and packets larger than 64 KiB, and accepts only versioned typed
 operations. Requests cannot inject commands, host paths, cgroup files, or
 systemd properties.
 
+The root supervisor retains `CAP_SYS_PTRACE` solely so it can open and hash
+`/proc/<pid>/exe` after the VMM becomes a nondumpable process under its unique
+UID. Startup fails closed when that capability is absent or cross-UID process
+inspection is denied. The capability is never passed to the transient VM
+unit: Cloud Hypervisor still has empty effective, permitted, inheritable,
+ambient, and bounding capability sets.
+
 Each launch receives a fresh systemd unit/cgroup, jail generation, UID/GID, and
 root filesystem. The one-shot jailer enters the prepared run network namespace,
 constructs the remaining namespaces and minimal root, drops every capability,
