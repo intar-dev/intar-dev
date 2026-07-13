@@ -46,6 +46,13 @@ pub struct UnitLaunchSpec {
     pub device_allow: Vec<&'static str>,
 }
 
+const JAIL_DEVICE_ALLOW: &[&str] = &[
+    "/dev/kvm rwm",
+    "/dev/net/tun rwm",
+    "/dev/urandom rm",
+    "/dev/null rwm",
+];
+
 impl UnitLaunchSpec {
     /// Properties required on the transient unit. Backends must apply all of
     /// them atomically or fail the launch.
@@ -1735,12 +1742,12 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             cpu_quota: quota,
             uid: identity,
             gid: identity,
-            device_allow: vec![
-                "/dev/kvm rw",
-                "/dev/net/tun rw",
-                "/dev/urandom r",
-                "/dev/null rw",
-            ],
+            // The jailer creates these four device nodes after pivot_root, so
+            // systemd's closed device policy must grant its distinct `m`
+            // permission as well as the VMM's runtime access. Cloud
+            // Hypervisor cannot create devices after the jailer clears every
+            // capability set.
+            device_allow: JAIL_DEVICE_ALLOW.to_vec(),
         };
         let mut record = VmRecord {
             generation: generation.clone(),
@@ -3176,6 +3183,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend {
         units: BTreeMap<String, BackendInspection>,
+        started_specs: Vec<UnitLaunchSpec>,
         stopped_units: Vec<String>,
         destroyed_vm_networks: Vec<(ValidatedId, ValidatedId)>,
         fail_vm_network: bool,
@@ -3187,6 +3195,7 @@ mod tests {
             true
         }
         fn start_unit(&mut self, spec: &UnitLaunchSpec) -> Result<StartedUnit> {
+            self.started_specs.push(spec.clone());
             self.units.insert(
                 spec.unit_name.clone(),
                 BackendInspection {
@@ -3415,6 +3424,35 @@ mod tests {
         let response = core.handle(Request::LaunchVm(Box::new(launch(8, 125))));
         assert!(matches!(response, Response::Error(_)));
         assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
+    }
+
+    #[test]
+    fn launch_grants_mknod_only_for_the_jail_devices() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend::default(),
+            FakePreparer,
+            125,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+        assert!(matches!(
+            core.handle(Request::LaunchVm(Box::new(launch(0, 125)))),
+            Response::LaunchVm(_)
+        ));
+        assert_eq!(core.backend.started_specs.len(), 1);
+        assert_eq!(
+            core.backend.started_specs[0].device_allow,
+            [
+                "/dev/kvm rwm",
+                "/dev/net/tun rwm",
+                "/dev/urandom rm",
+                "/dev/null rwm",
+            ]
+        );
     }
 
     #[test]
