@@ -216,6 +216,13 @@ mod linux {
     const WORKER_SECONDS: u64 = 8;
     const SATURATION_VM_TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
     const SATURATION_GUEST_READY_TIMEOUT: Duration = Duration::from_secs(45);
+    const EXPECTED_API_ONLY_VMM_ARGV: [&str; 5] = [
+        "/cloud-hypervisor",
+        "--api-socket",
+        "/run/cloud-hypervisor.sock",
+        "--seccomp",
+        "true",
+    ];
 
     #[derive(Debug, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
@@ -238,6 +245,8 @@ mod linux {
         namespace_name: Option<String>,
         host_veth_name: Option<String>,
         directory: Option<PathBuf>,
+        uid_gid_start: u32,
+        uid_gid_end: u32,
     }
 
     impl Drop for Cleanup {
@@ -255,7 +264,8 @@ mod linux {
                 // Never traverse a leaked mount while unwinding.  The checked
                 // cleanup leaves a suspicious directory in place for operator
                 // inspection if any mount is still attached.
-                let _ = remove_disposable_directory(&directory);
+                let _ =
+                    remove_disposable_directory(&directory, self.uid_gid_start, self.uid_gid_end);
             }
         }
     }
@@ -328,6 +338,8 @@ mod linux {
             namespace_name: None,
             host_veth_name: None,
             directory: Some(directory.clone()),
+            uid_gid_start: config.uid_gid_start,
+            uid_gid_end: config.uid_gid_end,
         };
 
         create_test_network(
@@ -400,7 +412,8 @@ mod linux {
             }
             None => Ok(()),
         };
-        let directory_cleanup = remove_disposable_directory(&directory);
+        let directory_cleanup =
+            remove_disposable_directory(&directory, config.uid_gid_start, config.uid_gid_end);
         if directory_cleanup.is_ok() {
             cleanup.directory = None;
         }
@@ -867,7 +880,53 @@ mod linux {
         Ok(File::from(fd))
     }
 
-    fn remove_disposable_directory(directory: &Path) -> Result<()> {
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CleanupIdentityReservationV1 {
+        version: u16,
+        generation: ValidatedId,
+        uid: u32,
+        gid: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CleanupOwner {
+        Root,
+        Vm,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CleanupDevice {
+        major: u32,
+        minor: u32,
+        mode: u32,
+    }
+
+    #[derive(Debug, Default)]
+    struct CleanupPolicy {
+        vm_owners: BTreeMap<String, (u32, u32)>,
+    }
+
+    impl CleanupPolicy {
+        fn expected_vm_owner(&self, relative: &[Vec<u8>]) -> Option<(u32, u32)> {
+            if relative.len() < 6
+                || relative[0] != b"cloud-hypervisor-lifecycle"
+                || relative[1] != b"jails"
+                || !matches!(relative[2].as_slice(), b"cloud-hypervisor" | b"quarantine")
+                || relative[4] != b"root"
+            {
+                return None;
+            }
+            let generation = std::str::from_utf8(&relative[3]).ok()?;
+            self.vm_owners.get(generation).copied()
+        }
+    }
+
+    fn remove_disposable_directory(
+        directory: &Path,
+        uid_gid_start: u32,
+        uid_gid_end: u32,
+    ) -> Result<()> {
         ensure!(
             directory.is_absolute(),
             "disposable self-test jail path must be absolute"
@@ -937,7 +996,8 @@ mod linux {
             let cleanup_stat = rustix::fs::fstat(&cleanup_fd)?;
             ensure_same_cleanup_object(&original_stat, &cleanup_stat)
                 .context("renamed disposable self-test jail changed identity")?;
-            remove_cleanup_directory_contents(&cleanup_fd)?;
+            let policy = load_cleanup_policy(&cleanup_fd, uid_gid_start, uid_gid_end)?;
+            remove_cleanup_directory_contents(&cleanup_fd, &policy, &[])?;
 
             // Re-resolve and compare immediately before unlinking the final
             // directory entry. This rejects path swaps even by another
@@ -1009,12 +1069,132 @@ mod linux {
         )?)
     }
 
+    fn open_optional_cleanup_directory(
+        parent: &impl std::os::fd::AsFd,
+        name: &str,
+    ) -> Result<Option<std::os::fd::OwnedFd>> {
+        match openat2(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        ) {
+            Ok(fd) => {
+                validate_cleanup_directory(&rustix::fs::fstat(&fd)?)?;
+                Ok(Some(fd))
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => Ok(None),
+            Err(error) => Err(error).context("open optional self-test cleanup directory"),
+        }
+    }
+
+    fn open_cleanup_regular_file(
+        parent: &impl std::os::fd::AsFd,
+        name: impl rustix::path::Arg,
+    ) -> Result<std::os::fd::OwnedFd> {
+        Ok(openat2(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        )?)
+    }
+
+    fn load_cleanup_policy(
+        cleanup_root: &impl std::os::fd::AsFd,
+        uid_gid_start: u32,
+        uid_gid_end: u32,
+    ) -> Result<CleanupPolicy> {
+        let Some(lifecycle) =
+            open_optional_cleanup_directory(cleanup_root, "cloud-hypervisor-lifecycle")?
+        else {
+            return Ok(CleanupPolicy::default());
+        };
+        let Some(jails) = open_optional_cleanup_directory(&lifecycle, "jails")? else {
+            return Ok(CleanupPolicy::default());
+        };
+        let Some(quarantine) = open_optional_cleanup_directory(&jails, "quarantine")? else {
+            return Ok(CleanupPolicy::default());
+        };
+        let Some(reservations) = open_optional_cleanup_directory(&quarantine, "reservations")?
+        else {
+            return Ok(CleanupPolicy::default());
+        };
+
+        let mut policy = CleanupPolicy::default();
+        let mut identities = BTreeSet::new();
+        let mut stream = rustix::fs::Dir::read_from(&reservations)?;
+        let mut names = Vec::new();
+        while let Some(entry) = stream.read() {
+            let entry = entry?;
+            if matches!(entry.file_name().to_bytes(), b"." | b"..") {
+                continue;
+            }
+            names.push(entry.file_name().to_owned());
+        }
+        drop(stream);
+
+        for name in names {
+            let fd = open_cleanup_regular_file(&reservations, name.as_c_str())?;
+            let stat = rustix::fs::fstat(&fd)?;
+            ensure!(
+                rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::RegularFile
+                    && stat.st_uid == 0
+                    && stat.st_gid == 0
+                    && stat.st_nlink == 1
+                    && stat.st_mode & 0o177 == 0,
+                "self-test identity reservation is not a root-owned private one-link regular file"
+            );
+            let mut bytes = Vec::new();
+            File::from(fd)
+                .take(MAX_ATTESTATION_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= MAX_ATTESTATION_BYTES as usize,
+                "self-test identity reservation exceeds 64 KiB"
+            );
+            let reservation: CleanupIdentityReservationV1 = serde_json::from_slice(&bytes)?;
+            let generation = reservation.generation.as_str();
+            ensure!(
+                reservation.version == 1
+                    && reservation.uid == reservation.gid
+                    && (uid_gid_start..=uid_gid_end).contains(&reservation.uid)
+                    && name.to_bytes() == format!("{generation}.json").as_bytes(),
+                "invalid self-test identity reservation"
+            );
+            ensure!(
+                identities.insert(reservation.uid),
+                "duplicate self-test VM identity reservation"
+            );
+            ensure!(
+                policy
+                    .vm_owners
+                    .insert(generation.to_owned(), (reservation.uid, reservation.gid))
+                    .is_none(),
+                "duplicate self-test generation reservation"
+            );
+        }
+        Ok(policy)
+    }
+
     fn validate_cleanup_directory(stat: &rustix::fs::Stat) -> Result<()> {
         ensure!(
             rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir(),
             "cleanup target is not a directory"
         );
-        ensure!(stat.st_uid == 0, "cleanup directory is not root-owned");
+        ensure!(
+            stat.st_uid == 0 && stat.st_gid == 0,
+            "cleanup directory is not root-owned"
+        );
         ensure!(
             stat.st_mode & 0o022 == 0,
             "cleanup directory is writable by group/other"
@@ -1023,18 +1203,151 @@ mod linux {
         Ok(())
     }
 
-    fn validate_cleanup_file(stat: &rustix::fs::Stat) -> Result<()> {
+    fn cleanup_jail_relative(relative: &[Vec<u8>]) -> Option<&[Vec<u8>]> {
+        if relative.len() < 5
+            || relative[0] != b"cloud-hypervisor-lifecycle"
+            || relative[1] != b"jails"
+            || !matches!(relative[2].as_slice(), b"cloud-hypervisor" | b"quarantine")
+            || relative[4] != b"root"
+        {
+            return None;
+        }
+        Some(&relative[5..])
+    }
+
+    fn cleanup_owner(
+        stat: &rustix::fs::Stat,
+        relative: &[Vec<u8>],
+        policy: &CleanupPolicy,
+    ) -> Result<CleanupOwner> {
+        if (stat.st_uid, stat.st_gid) == (0, 0) {
+            return Ok(CleanupOwner::Root);
+        }
         ensure!(
-            rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file(),
-            "cleanup target is neither a regular file nor directory"
+            policy.expected_vm_owner(relative) == Some((stat.st_uid, stat.st_gid)),
+            "cleanup entry has an unexpected owner"
         );
-        ensure!(stat.st_uid == 0, "cleanup file is not root-owned");
+        Ok(CleanupOwner::Vm)
+    }
+
+    fn validate_cleanup_tree_directory(
+        stat: &rustix::fs::Stat,
+        relative: &[Vec<u8>],
+        policy: &CleanupPolicy,
+    ) -> Result<CleanupOwner> {
         ensure!(
-            stat.st_mode & 0o022 == 0,
-            "cleanup file is writable by group/other"
+            rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir(),
+            "cleanup target is not a directory"
         );
-        ensure!(stat.st_nlink == 1, "cleanup file must have one link");
+        ensure!(stat.st_nlink >= 1, "cleanup directory has no links");
+        let owner = cleanup_owner(stat, relative, policy)?;
+        if owner == CleanupOwner::Root {
+            ensure!(
+                stat.st_mode & 0o022 == 0,
+                "root-owned cleanup directory is writable by group/other"
+            );
+        } else {
+            ensure!(
+                stat.st_mode & 0o002 == 0,
+                "VM-owned cleanup directory is other-writable"
+            );
+        }
+        Ok(owner)
+    }
+
+    fn expected_cleanup_device(relative: &[Vec<u8>]) -> Option<CleanupDevice> {
+        match cleanup_jail_relative(relative)? {
+            [dev, kvm] if dev == b"dev" && kvm == b"kvm" => Some(CleanupDevice {
+                major: 10,
+                minor: 232,
+                mode: 0o600,
+            }),
+            [dev, net, tun] if dev == b"dev" && net == b"net" && tun == b"tun" => {
+                Some(CleanupDevice {
+                    major: 10,
+                    minor: 200,
+                    mode: 0o600,
+                })
+            }
+            [dev, urandom] if dev == b"dev" && urandom == b"urandom" => Some(CleanupDevice {
+                major: 1,
+                minor: 9,
+                mode: 0o400,
+            }),
+            [dev, null] if dev == b"dev" && null == b"null" => Some(CleanupDevice {
+                major: 1,
+                minor: 3,
+                mode: 0o600,
+            }),
+            _ => None,
+        }
+    }
+
+    fn cleanup_socket_allowed(relative: &[Vec<u8>]) -> bool {
+        matches!(
+            cleanup_jail_relative(relative),
+            Some([run, socket])
+                if run == b"run"
+                    && matches!(socket.as_slice(), b"cloud-hypervisor.sock" | b"kino.vsock")
+        )
+    }
+
+    fn validate_cleanup_leaf(
+        stat: &rustix::fs::Stat,
+        relative: &[Vec<u8>],
+        policy: &CleanupPolicy,
+    ) -> Result<()> {
+        ensure!(stat.st_nlink == 1, "cleanup leaf must have one link");
+        let owner = cleanup_owner(stat, relative, policy)?;
+        let file_type = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+        match file_type {
+            rustix::fs::FileType::RegularFile => {
+                if owner == CleanupOwner::Root {
+                    ensure!(
+                        stat.st_mode & 0o022 == 0,
+                        "root-owned cleanup file is writable by group/other"
+                    );
+                } else {
+                    ensure!(
+                        stat.st_mode & 0o002 == 0,
+                        "VM-owned cleanup file is other-writable"
+                    );
+                }
+            }
+            rustix::fs::FileType::CharacterDevice => {
+                let expected = expected_cleanup_device(relative)
+                    .context("cleanup character device is not allowlisted")?;
+                ensure!(
+                    owner == CleanupOwner::Vm
+                        && rustix::fs::major(stat.st_rdev) == expected.major
+                        && rustix::fs::minor(stat.st_rdev) == expected.minor
+                        && stat.st_mode & 0o777 == expected.mode,
+                    "cleanup character device does not match its allowlist entry"
+                );
+            }
+            rustix::fs::FileType::Socket => {
+                ensure!(
+                    owner == CleanupOwner::Vm
+                        && cleanup_socket_allowed(relative)
+                        && stat.st_mode & 0o002 == 0,
+                    "cleanup socket is not allowlisted"
+                );
+            }
+            _ => bail!("cleanup leaf has a forbidden file type"),
+        }
         Ok(())
+    }
+
+    fn lock_cleanup_directory(directory: &impl std::os::fd::AsFd) -> Result<rustix::fs::Stat> {
+        rustix::fs::fchown(
+            directory,
+            Some(rustix::process::Uid::ROOT),
+            Some(rustix::process::Gid::ROOT),
+        )?;
+        rustix::fs::fchmod(directory, Mode::RUSR | Mode::WUSR | Mode::XUSR)?;
+        let stat = rustix::fs::fstat(directory)?;
+        validate_cleanup_directory(&stat)?;
+        Ok(stat)
     }
 
     fn ensure_same_cleanup_object(
@@ -1053,7 +1366,11 @@ mod linux {
         Ok(())
     }
 
-    fn remove_cleanup_directory_contents(directory: &impl std::os::fd::AsFd) -> Result<()> {
+    fn remove_cleanup_directory_contents(
+        directory: &impl std::os::fd::AsFd,
+        policy: &CleanupPolicy,
+        relative: &[Vec<u8>],
+    ) -> Result<()> {
         let mut stream = rustix::fs::Dir::read_from(directory)?;
         let mut names = Vec::new();
         while let Some(entry) = stream.read() {
@@ -1066,25 +1383,30 @@ mod linux {
         drop(stream);
 
         for name in names {
+            let mut entry_relative = relative.to_vec();
+            entry_relative.push(name.to_bytes().to_vec());
             let entry_fd = open_cleanup_entry(directory, name.as_c_str())
                 .context("open disposable self-test cleanup entry")?;
             let entry_stat = rustix::fs::fstat(&entry_fd)?;
             let file_type = rustix::fs::FileType::from_raw_mode(entry_stat.st_mode);
             if file_type.is_dir() {
-                validate_cleanup_directory(&entry_stat)?;
+                validate_cleanup_tree_directory(&entry_stat, &entry_relative, policy)?;
                 let child_fd = open_cleanup_directory(directory, name.as_c_str())?;
                 let child_stat = rustix::fs::fstat(&child_fd)?;
                 ensure_same_cleanup_object(&entry_stat, &child_stat)?;
-                remove_cleanup_directory_contents(&child_fd)?;
+                let locked_stat = lock_cleanup_directory(&child_fd)?;
+                remove_cleanup_directory_contents(&child_fd, policy, &entry_relative)?;
                 let final_fd = open_cleanup_directory(directory, name.as_c_str())?;
                 let final_stat = rustix::fs::fstat(&final_fd)?;
-                ensure_same_cleanup_object(&entry_stat, &final_stat)?;
+                ensure_same_cleanup_object(&locked_stat, &final_stat)?;
+                validate_cleanup_directory(&final_stat)?;
                 rustix::fs::unlinkat(directory, name.as_c_str(), rustix::fs::AtFlags::REMOVEDIR)?;
             } else {
-                validate_cleanup_file(&entry_stat)?;
+                validate_cleanup_leaf(&entry_stat, &entry_relative, policy)?;
                 let final_fd = open_cleanup_entry(directory, name.as_c_str())?;
                 let final_stat = rustix::fs::fstat(&final_fd)?;
                 ensure_same_cleanup_object(&entry_stat, &final_stat)?;
+                validate_cleanup_leaf(&final_stat, &entry_relative, policy)?;
                 rustix::fs::unlinkat(directory, name.as_c_str(), rustix::fs::AtFlags::empty())?;
             }
         }
@@ -1299,8 +1621,8 @@ mod linux {
                     !launch.paths.host_jail_root.join("dev/vhost-vsock").exists(),
                     "package smoke VM {index} unexpectedly exposed /dev/vhost-vsock"
                 );
-                let denied_host_path = launch.paths.host_jail_root.join("landlock-denied.raw");
-                write_new_root_file(&denied_host_path, b"landlock-vmm-negative\n", 0o444)?;
+                let landlock_canary = launch.paths.host_jail_root.join("run/landlock-api-canary");
+                write_new_root_file(&landlock_canary, b"landlock-vmm-negative\n", 0o444)?;
                 let client = CloudHypervisorClient::new(path_utf8(&launch.paths.host_api_socket)?)?;
                 let vm_config = smoke_vm_config(launch, request)?;
                 runtime
@@ -1759,6 +2081,7 @@ mod linux {
         ensure!(inspection.cpu_quota.cpu_millis == SELF_TEST_CPU_MILLIS);
         ensure!(inspection.vcpu_count == 1);
         let pid = inspection.pid.context("VMM inspection has no process ID")?;
+        assert_api_only_vmm_argv(pid)?;
         assert_process_identity(pid, inspection.uid, inspection.gid)?;
         assert_process_namespaces(pid, &inspection.netns_name)?;
         assert_process_root_and_mounts(pid, inspection)?;
@@ -1778,6 +2101,27 @@ mod linux {
         assert_cgroup_process_security(&cgroup, inspection.uid, inspection.gid)?;
         ensure_unit_tasks_accounted(&unit, &cgroup)?;
         ensure_process_descendants_accounted(&unit, &cgroup)?;
+        Ok(())
+    }
+
+    fn assert_api_only_vmm_argv(pid: u32) -> Result<()> {
+        let bytes = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+        validate_api_only_vmm_argv(&bytes)
+    }
+
+    fn validate_api_only_vmm_argv(bytes: &[u8]) -> Result<()> {
+        ensure!(
+            bytes.last() == Some(&0),
+            "Cloud Hypervisor argv is not NUL terminated"
+        );
+        let argv = bytes[..bytes.len() - 1]
+            .split(|byte| *byte == 0)
+            .map(std::str::from_utf8)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(
+            argv == EXPECTED_API_ONLY_VMM_ARGV,
+            "Cloud Hypervisor is not running with the exact API-only argv: {argv:?}"
+        );
         Ok(())
     }
 
@@ -2300,7 +2644,11 @@ mod linux {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let body = serde_json::json!({
-            "path": "/landlock-denied.raw",
+            // The jailer's outer /run rule grants ReadFile, while this
+            // root-owned canary is absent from the typed VmConfig. A denied
+            // add-disk therefore proves Cloud Hypervisor v53's inner Landlock
+            // layer independently of the inherited outer jailer ruleset.
+            "path": "/run/landlock-api-canary",
             "readonly": true,
             "id": "landlock-denied",
             "image_type": "Raw"
@@ -2348,7 +2696,7 @@ mod linux {
                     || lower.contains("permission denied")
                     || lower.contains("operation not permitted")
                     || lower.contains("os error 13")),
-            "Cloud Hypervisor did not prove Landlock denial for an unallowlisted readable file: {response:?}"
+            "Cloud Hypervisor did not prove its inner Landlock denial for the outer-allowlisted canary: {response:?}"
         );
         Ok(())
     }
@@ -3329,6 +3677,143 @@ mod linux {
             let first = rustix::fs::fstat(&first).expect("stat first file");
             let second = rustix::fs::fstat(&second).expect("stat second file");
             assert!(ensure_same_cleanup_object(&first, &second).is_err());
+        }
+
+        fn cleanup_test_path(suffix: &[&str]) -> Vec<Vec<u8>> {
+            [
+                "cloud-hypervisor-lifecycle",
+                "jails",
+                "quarantine",
+                "generation-one",
+                "root",
+            ]
+            .into_iter()
+            .chain(suffix.iter().copied())
+            .map(|component| component.as_bytes().to_vec())
+            .collect()
+        }
+
+        #[test]
+        fn cleanup_policy_binds_vm_owner_to_its_reserved_generation() {
+            let mut policy = CleanupPolicy::default();
+            policy
+                .vm_owners
+                .insert("generation-one".to_owned(), (200_000, 200_000));
+            assert_eq!(
+                policy.expected_vm_owner(&cleanup_test_path(&["logs", "serial.log"])),
+                Some((200_000, 200_000))
+            );
+            let mut wrong = cleanup_test_path(&["logs", "serial.log"]);
+            wrong[3] = b"generation-two".to_vec();
+            assert_eq!(policy.expected_vm_owner(&wrong), None);
+            assert_eq!(
+                policy.expected_vm_owner(&[
+                    b"cloud-hypervisor-lifecycle".to_vec(),
+                    b"jails".to_vec(),
+                    b"quarantine".to_vec(),
+                    b"generation-one".to_vec(),
+                    b"metadata-v1.json".to_vec(),
+                ]),
+                None
+            );
+        }
+
+        #[test]
+        fn cleanup_device_and_socket_allowlists_are_path_exact() {
+            assert_eq!(
+                expected_cleanup_device(&cleanup_test_path(&["dev", "kvm"])),
+                Some(CleanupDevice {
+                    major: 10,
+                    minor: 232,
+                    mode: 0o600,
+                })
+            );
+            assert_eq!(
+                expected_cleanup_device(&cleanup_test_path(&["dev", "net", "tun"])),
+                Some(CleanupDevice {
+                    major: 10,
+                    minor: 200,
+                    mode: 0o600,
+                })
+            );
+            assert_eq!(
+                expected_cleanup_device(&cleanup_test_path(&["dev", "urandom"])),
+                Some(CleanupDevice {
+                    major: 1,
+                    minor: 9,
+                    mode: 0o400,
+                })
+            );
+            assert_eq!(
+                expected_cleanup_device(&cleanup_test_path(&["dev", "null"])),
+                Some(CleanupDevice {
+                    major: 1,
+                    minor: 3,
+                    mode: 0o600,
+                })
+            );
+            assert!(expected_cleanup_device(&cleanup_test_path(&["dev", "vhost-vsock"])).is_none());
+            assert!(cleanup_socket_allowed(&cleanup_test_path(&[
+                "run",
+                "cloud-hypervisor.sock"
+            ])));
+            assert!(cleanup_socket_allowed(&cleanup_test_path(&[
+                "run",
+                "kino.vsock"
+            ])));
+            assert!(!cleanup_socket_allowed(&cleanup_test_path(&[
+                "run",
+                "unexpected.sock"
+            ])));
+        }
+
+        #[test]
+        fn cleanup_leaf_rejects_a_hardlinked_vm_file() {
+            if rustix::process::geteuid() == rustix::process::Uid::ROOT {
+                return;
+            }
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let file_path = temporary.path().join("root.raw");
+            std::fs::write(&file_path, b"fixture").expect("write cleanup fixture");
+            let file = File::open(&file_path).expect("open cleanup fixture");
+            let stat = rustix::fs::fstat(&file).expect("stat cleanup fixture");
+            let mut policy = CleanupPolicy::default();
+            policy
+                .vm_owners
+                .insert("generation-one".to_owned(), (stat.st_uid, stat.st_gid));
+            let relative = cleanup_test_path(&["disks", "root.raw"]);
+            validate_cleanup_leaf(&stat, &relative, &policy)
+                .expect("one-link VM file is cleanup-safe");
+
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o666))
+                .expect("make cleanup fixture other-writable");
+            let writable = rustix::fs::fstat(&file).expect("restat writable fixture");
+            assert!(validate_cleanup_leaf(&writable, &relative, &policy).is_err());
+            std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o600))
+                .expect("restore private cleanup fixture mode");
+
+            std::fs::hard_link(&file_path, temporary.path().join("outside-link"))
+                .expect("create cleanup hardlink attack");
+            let linked = rustix::fs::fstat(&file).expect("restat hardlinked fixture");
+            assert!(validate_cleanup_leaf(&linked, &relative, &policy).is_err());
+        }
+
+        #[test]
+        fn cloud_hypervisor_argv_contract_is_api_only() {
+            let exact = EXPECTED_API_ONLY_VMM_ARGV.join("\0") + "\0";
+            validate_api_only_vmm_argv(exact.as_bytes()).expect("exact API-only argv");
+            assert!(
+                validate_api_only_vmm_argv(
+                    b"/cloud-hypervisor\0--api-socket\0/run/cloud-hypervisor.sock\0--landlock\0--seccomp\0true\0"
+                )
+                .is_err()
+            );
+            assert!(
+                validate_api_only_vmm_argv(
+                    b"/cloud-hypervisor\0--api-socket\0/run/cloud-hypervisor.sock\0--seccomp\0true\0--kernel\0/boot/kernel\0"
+                )
+                .is_err()
+            );
         }
 
         #[test]

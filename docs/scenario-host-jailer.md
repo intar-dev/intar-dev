@@ -66,9 +66,21 @@ Each launch receives a fresh systemd unit/cgroup, jail generation, UID/GID, and
 root filesystem. The one-shot jailer enters the prepared run network namespace,
 constructs the remaining namespaces and minimal root, drops every capability,
 and execs the copied, hash-verified Cloud Hypervisor v53.0 runtime with seccomp
-and Landlock enabled. Only the explicitly verified minimal device set is
-exposed; a host is not eligible if the pinned runtime cannot pass that package
-smoke test.
+and Landlock enabled. The pinned v53.0 CLI cannot combine its `--landlock` flag
+with Intar's API-only startup: [v53 classifies that flag as VM
+configuration](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v53.0/cloud-hypervisor/src/main.rs#L327-L339),
+which requires a kernel or firmware payload, and [a CLI payload makes v53
+create and boot the VM
+itself](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/v53.0/cloud-hypervisor/src/main.rs#L757-L781).
+Intar therefore omits the incompatible CLI flag. After
+pivoting and dropping the VM identity and capabilities, `intar-jailer` installs
+a hard-required Landlock ABI-v3 filesystem ruleset immediately before `exec`,
+so every Cloud Hypervisor thread inherits the outer boundary. Intar still sends
+`landlock_enable: true` in each typed `VmConfig`, adding v53's VM-specific path
+rules on the VMM thread. Either layer failing is fatal; this is not a
+reduced-isolation fallback. Only the explicitly verified minimal device set is
+exposed, and a host is not eligible if the pinned runtime cannot pass that
+package smoke test.
 
 ## Readiness gates
 
