@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v1";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v2";
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashParams<'a> {

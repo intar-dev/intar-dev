@@ -12,8 +12,9 @@ use intar_contracts::{
     catalog::ScenarioManifestV2,
     guest::{
         ENV_DNS_SERVERS, ENV_GATEWAY, ENV_GUEST_IP_CIDR, ENV_KINO_HOST_READY_PORT,
-        ENV_KINO_VSOCK_CID, ENV_KINO_VSOCK_PORT, ENV_SSH_AUTHORIZED_KEYS_B64, ENV_VM_HOSTNAME,
-        GUEST_USERNAME, RECORDING_DISK_LABEL, RUNTIME_DISK_LABEL, RUNTIME_ENV_FILENAME, RuntimeEnv,
+        ENV_KINO_VSOCK_CID, ENV_KINO_VSOCK_PORT, ENV_PEER_HOSTS_B64, ENV_SSH_AUTHORIZED_KEYS_B64,
+        ENV_VM_HOSTNAME, GUEST_USERNAME, RECORDING_DISK_LABEL, RUNTIME_DISK_LABEL,
+        RUNTIME_ENV_FILENAME, RuntimeEnv,
     },
     stargate::{IssueTerminalSessionRequest, IssueTerminalSessionResponse},
 };
@@ -148,6 +149,7 @@ export const runtimeEnvKeys = {{
   guestIpCidr: "{}",
   gateway: "{}",
   dnsServers: "{}",
+  peerHostsB64: "{}",
 }} as const;
 "#,
         label_to_string(RUNTIME_DISK_LABEL),
@@ -167,6 +169,7 @@ export const runtimeEnvKeys = {{
         ENV_GUEST_IP_CIDR,
         ENV_GATEWAY,
         ENV_DNS_SERVERS,
+        ENV_PEER_HOSTS_B64,
     )
 }
 

@@ -111,7 +111,13 @@ generates host keys, starts `sshd`, and starts Kino. The runtime disk carries:
 - Kino vsock coordinates,
 - host readiness port,
 - hostname,
-- guest network address, gateway, and DNS.
+- guest network address, gateway, and DNS,
+- same-run peer VM names and addresses.
+
+The supervisor installs the peer entries into `/etc/hosts` (and maps the VM's
+own hostname to its run-network address), so every VM in a run resolves every
+other VM by its scenario VM name. Peer addresses are also exported to login
+shells as `INTAR_PEER_<VM>_IP`.
 
 Kino still owns in-guest probe execution and shell recording.
 

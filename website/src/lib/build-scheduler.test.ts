@@ -175,7 +175,7 @@ describe("build scheduler", () => {
       r2Key: "builds/bundles/abc123.tar.gz",
       kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v1",
+        buildFormatVersion: "intar-image-build-v2",
         scenarios: [
           {
             scenarioId: "broken-nginx",

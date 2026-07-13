@@ -142,5 +142,6 @@ mod tests {
         assert!(runtime_env.contains("INTAR_DNS_SERVERS='1.1.1.1 8.8.8.8'"));
         assert!(runtime_env.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
         assert!(runtime_env.contains("INTAR_PEER_REDIS_CACHE_IP='10.200.0.4'"));
+        assert!(runtime_env.contains("INTAR_PEER_HOSTS_B64='"));
     }
 }
