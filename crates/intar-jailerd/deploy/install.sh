@@ -337,8 +337,9 @@ for directory in \
   /var/cache/intar-agent/intar-agent/images \
   /var/cache/intar-agent/state \
   /var/cache/intar-agent/state/intar-agent; do
-  [ -d "${directory}" ] && [ ! -L "${directory}" ] || \
+  if [ ! -d "${directory}" ] || [ -L "${directory}" ]; then
     die "agent cache path is not a non-symlink directory: ${directory}"
+  fi
   [ "$(stat -c '%u:%g:%a' -- "${directory}")" = "${agent_uid}:${agent_gid}:700" ] || \
     die "agent cache directory has unsafe ownership or mode: ${directory}"
 done
