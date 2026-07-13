@@ -229,7 +229,10 @@ Local verification should include:
 
 Scenario-host release readiness additionally requires both distinct gates:
 
-- `intar-agent --config /etc/intar-agent/config.toml --doctor` is read-only.
+- `sudo -u intar-agent env XDG_CACHE_HOME=/var/cache/intar-agent
+  XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent
+  --doctor --config /etc/intar-agent/config.toml` is read-only and runs with
+  the same XDG paths and peer identity as the deployed service.
 - `sudo /usr/lib/intar/intar-jailerd-self-test` boots the pinned VMM, measures
   its hard quota, and removes disposable privileged state; it is the
   operational proof. Use `--offline` after pre-seeding its pinned cache.

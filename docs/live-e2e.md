@@ -12,8 +12,9 @@ guest terminal path, network isolation, teardown, and R2 run artifacts.
 - At least one Linux/KVM agent host is registered, connected, enabled for
   scenarios, and reporting jailer-v1, hard CPU quota, Landlock, unified
   cgroup-v2 CPU accounting, KVM, nftables, and reflink support.
-- `intar-agent --config /etc/intar-agent/config.toml --doctor` exits 0 on that
-  agent host.
+- `sudo -u intar-agent env XDG_CACHE_HOME=/var/cache/intar-agent
+  XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent
+  --doctor --config /etc/intar-agent/config.toml` exits 0 on that agent host.
 - `sudo /usr/lib/intar/intar-jailerd-self-test` exits 0 on that host. Doctor is
   read-only; only this artifact-backed root test boots the pinned VMM and
   proves disposable unit/cgroup/jail/network setup, quota, and cleanup.
@@ -272,8 +273,10 @@ old self-hosted image builder:
 
 - `intar-builder doctor --config /etc/intar-builder/config.toml` exits 0 on the
   Linux/KVM builder host; attach the printed checklist.
-- `intar-agent --config /etc/intar-agent/config.toml --doctor` exits 0 on the
-  Linux/KVM scenario host; attach the printed checklist.
+- `sudo -u intar-agent env XDG_CACHE_HOME=/var/cache/intar-agent
+  XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent
+  --doctor --config /etc/intar-agent/config.toml` exits 0 on the Linux/KVM
+  scenario host; attach the printed checklist.
 - `sudo /usr/lib/intar/intar-jailerd-self-test` exits 0 on that host; attach its
   jailed-v53 lifecycle, quota, and disposable-state cleanup proof.
 - `just build-images broken-nginx builder.sample.amd64.hcl true` on a Linux/KVM

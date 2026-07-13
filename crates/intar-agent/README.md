@@ -13,15 +13,20 @@ cargo run -p intar-agent -- --config path/to/config.toml
 
 Before enabling a deployed scenario host, run the preflight checker:
 
-```bash
-intar-agent --config /etc/intar-agent/config.toml --doctor
+```sh
+sudo -u intar-agent env \
+  XDG_CACHE_HOME=/var/cache/intar-agent \
+  XDG_STATE_HOME=/var/cache/intar-agent/state \
+  /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
 ```
 
 `--doctor` loads the normal config and exits without starting the HTTP service.
 It is a read-only readiness gate for the unprivileged side: Linux x86_64 and
 kernel baseline, required device presence, unified cgroup v2 with its CPU
 controller, the jailerd socket, nftables, trusted cache/work roots, bridge
-configuration, and the image registry.
+configuration, and the image registry. Run the installed command as the
+configured agent identity so its XDG paths and jailerd peer credentials match
+the service.
 
 Doctor does not create a disposable systemd unit, cgroup, jail, or network
 namespace. Before enabling a host, also run the distinct privileged proof:

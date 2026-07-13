@@ -29,7 +29,11 @@ ProtectKernelTunables=false
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
-RestrictSUIDSGID=true
+# systemd 255 implements RestrictSUIDSGID by making openat2 return ENOSYS.
+# Jailerd requires openat2 for every trusted-root lookup, so keep this disabled;
+# its typed protocol and exclusive, verified file creation never request SUID or
+# SGID bits.
+RestrictSUIDSGID=false
 RestrictRealtime=true
 LimitRTPRIO=0
 DevicePolicy=closed
