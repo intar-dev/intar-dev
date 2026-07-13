@@ -358,22 +358,20 @@ impl NetworkManager {
 
     fn destroy_run_physical(&self, result: &RunNetworkResult) -> Result<()> {
         let mut failures = Vec::new();
-        if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name]) {
-            if let Err(error) = self.ip(&["link", "delete", &result.host_veth_name])
-                && self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
-            {
-                failures.push(format!("delete host run veth: {error:#}"));
-            }
+        if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
+            && let Err(error) = self.ip(&["link", "delete", &result.host_veth_name])
+            && self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
+        {
+            failures.push(format!("delete host run veth: {error:#}"));
         }
         let namespace_path = self.netns_root.join(&result.namespace_name);
         let initial_namespace_path =
             initial_mount_namespace_entry(&self.netns_root, &result.namespace_name)?;
-        if namespace_path.exists() || initial_namespace_path.exists() {
-            if let Err(error) = self.delete_namespace(&result.namespace_name)
-                && (namespace_path.exists() || initial_namespace_path.exists())
-            {
-                failures.push(format!("delete run network namespace: {error:#}"));
-            }
+        if (namespace_path.exists() || initial_namespace_path.exists())
+            && let Err(error) = self.delete_namespace(&result.namespace_name)
+            && (namespace_path.exists() || initial_namespace_path.exists())
+        {
+            failures.push(format!("delete run network namespace: {error:#}"));
         }
         if !failures.is_empty() {
             bail!("{}", failures.join("; "))
