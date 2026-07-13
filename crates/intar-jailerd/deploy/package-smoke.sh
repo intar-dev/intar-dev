@@ -21,7 +21,7 @@ case "${archive}" in
 esac
 [ -f "${archive}" ] || die "archive does not exist: ${archive}"
 
-for command in awk file find getfacl install ip nft python3 readelf readlink setfacl sha256sum sleep stat sysctl systemctl tar; do
+for command in awk env file find getfacl install ip nft python3 readelf readlink runuser setfacl sha256sum sleep stat sysctl systemctl tar; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exist"
@@ -215,6 +215,10 @@ done
     *" CAP_SYS_PTRACE "*) ;;
     *) die "packaged intar-jailerd.service omits CAP_SYS_PTRACE from CapabilityBoundingSet" ;;
   esac)
+(restrict_suid_sgid=$(awk -F= '$1 == "RestrictSUIDSGID" { print $2 }' \
+    "${package_root}/deploy/intar-jailerd.service")
+  [ "${restrict_suid_sgid}" = false ] || \
+    die "packaged intar-jailerd.service blocks openat2 through RestrictSUIDSGID")
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
 for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do
@@ -288,6 +292,10 @@ legacy = text.replace(
     1,
 )
 legacy = legacy.replace('bootstrap_token = ""', 'bootstrap_token = "cutover-test-secret"', 1)
+bridge_marker = '[bridge]\nenabled = false'
+if legacy.count(bridge_marker) != 1:
+    raise SystemExit("agent fixture lacks one disabled bridge table")
+legacy = legacy.replace(bridge_marker, '[bridge]\nenabled = true', 1)
 config_path.write_text(legacy)
 os.chown(config_path, 0, agent_gid)
 os.chmod(config_path, 0o640)
@@ -533,6 +541,16 @@ fi
 installed=1
 "${package_root}/deploy/install.sh" --breaking-v6-cutover
 
+for directory in \
+  /var/cache/intar-agent \
+  /var/cache/intar-agent/intar-agent \
+  /var/cache/intar-agent/intar-agent/images \
+  /var/cache/intar-agent/state \
+  /var/cache/intar-agent/state/intar-agent; do
+  [ "$(stat -c '%u:%g:%a' "${directory}")" = "${agent_uid}:${agent_gid}:700" ] || \
+    die "installer did not prepare the agent cache directory: ${directory}"
+done
+
 cutover_archive=$(find /var/lib/intar/cutover-archives -mindepth 1 -maxdepth 1 -type d -print)
 [ -n "${cutover_archive}" ] || die "installer did not create the V5 cutover archive"
 [ "$(printf '%s\n' "${cutover_archive}" | wc -l)" -eq 1 ] || die "installer created multiple cutover archives"
@@ -587,6 +605,23 @@ current_state=$(python3 "${cutover_helper}" \
   --agent-gid "${agent_gid}")
 [ "${current_state}" = current ] || die "cutover helper did not recognize completed V6 state"
 
+# A pre-existing wrong-type cache entry must fail the production installer
+# even when systemd-tmpfiles merely warns and skips it. The symlink target must
+# remain untouched, and an ordinary retry must recover after the entry is
+# removed.
+symlink_target=${work_root}/tmpfiles-symlink-target
+install -d -o root -g root -m 0755 "${symlink_target}"
+rmdir /var/cache/intar-agent/intar-agent/images
+ln -s "${symlink_target}" /var/cache/intar-agent/intar-agent/images
+symlink_target_before=$(stat -c '%u:%g:%a' -- "${symlink_target}")
+if "${package_root}/deploy/install.sh"; then
+  die "installer accepted a symlink in the agent cache tree"
+fi
+[ "$(stat -c '%u:%g:%a' -- "${symlink_target}")" = "${symlink_target_before}" ] || \
+  die "installer followed an agent cache symlink"
+rm -f -- /var/cache/intar-agent/intar-agent/images
+"${package_root}/deploy/install.sh"
+
 # A one-vCPU CI runner needs an explicit zero host reserve for the disposable
 # 125-millicore proof. Production keeps the 1000m default.
 sed -i 's/^cpu_reserved_millis = .*/cpu_reserved_millis = 0/' /etc/intar-jailerd/config.toml
@@ -601,5 +636,12 @@ help_output=$("${self_test}" --help 2>&1 || true)
 echo "${help_output}" | grep -q -- '--offline' || die "self-test wrapper lacks offline mode"
 "${self_test}"
 
-/usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
+runuser --user intar-agent -- env \
+  XDG_CACHE_HOME=/var/cache/intar-agent \
+  XDG_STATE_HOME=/var/cache/intar-agent/state \
+  /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
+systemctl is-active --quiet intar-jailerd.socket || \
+  die "doctor left intar-jailerd.socket inactive"
+systemctl is-active --quiet intar-jailerd.service || \
+  die "doctor left intar-jailerd.service inactive"
 echo "intar package smoke: installed v53.0 jailed lifecycle, quota and doctor passed"

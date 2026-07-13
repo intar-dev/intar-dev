@@ -319,7 +319,6 @@ if [ ! -e "${agent_config}" ]; then
   chown root:"${agent_gid}" "${agent_config}"
 fi
 
-install -d -o "${agent_uid}" -g "${agent_gid}" -m 0700 /var/cache/intar-agent
 install -d -o root -g root -m 0755 /run/netns
 
 publish_file "${archive_dir}/deploy/intar-jailerd.service" /etc/systemd/system/intar-jailerd.service 0644
@@ -332,6 +331,17 @@ publish_file "${archive_dir}/deploy/intar-jailerd.sysctl.conf" /etc/sysctl.d/90-
 # Any binary/config change invalidates the boot-bound proof.
 rm -f -- /var/lib/intar/jails/self-test-attestation-v1.json
 systemd-tmpfiles --create /etc/tmpfiles.d/intar-jailerd.conf
+for directory in \
+  /var/cache/intar-agent \
+  /var/cache/intar-agent/intar-agent \
+  /var/cache/intar-agent/intar-agent/images \
+  /var/cache/intar-agent/state \
+  /var/cache/intar-agent/state/intar-agent; do
+  [ -d "${directory}" ] && [ ! -L "${directory}" ] || \
+    die "agent cache path is not a non-symlink directory: ${directory}"
+  [ "$(stat -c '%u:%g:%a' -- "${directory}")" = "${agent_uid}:${agent_gid}:700" ] || \
+    die "agent cache directory has unsafe ownership or mode: ${directory}"
+done
 sysctl -p /etc/sysctl.d/90-intar-jailerd.conf >/dev/null
 [ "$(sysctl -n net.ipv4.ip_forward)" = 1 ] || die "IPv4 forwarding remains disabled"
 systemctl daemon-reload
@@ -340,4 +350,5 @@ systemctl enable --now intar-jailerd.socket
 
 echo "Installed the jailed scenario-host package; intar-agent remains stopped."
 echo "Run: sudo /usr/lib/intar/intar-jailerd-self-test"
-echo "Then run doctor and explicitly enable/start intar-agent only when both pass."
+echo "Then run: sudo -u intar-agent env XDG_CACHE_HOME=/var/cache/intar-agent XDG_STATE_HOME=/var/cache/intar-agent/state /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml"
+echo "Explicitly enable/start intar-agent only when both checks pass."

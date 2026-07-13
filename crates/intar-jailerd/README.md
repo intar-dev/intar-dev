@@ -50,8 +50,14 @@ activation, and supplies their exact hashes to the binary:
 
 ```sh
 sudo /usr/lib/intar/intar-jailerd-self-test
-intar-agent --config /etc/intar-agent/config.toml --doctor
+sudo -u intar-agent env \
+  XDG_CACHE_HOME=/var/cache/intar-agent \
+  XDG_STATE_HOME=/var/cache/intar-agent/state \
+  /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
 ```
+
+Doctor must run as the configured agent identity so its cache paths and
+`SO_PEERCRED` identity match the service that will consume the result.
 
 For an offline host, pre-seed the two files listed in the wrapper/notices under
 `/var/lib/intar/self-test-assets/downloads/`, then pass `--offline`. The

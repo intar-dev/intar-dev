@@ -95,7 +95,10 @@ Run both checks before enabling scheduling:
 
 ```sh
 sudo /usr/lib/intar/intar-jailerd-self-test
-intar-agent --config /etc/intar-agent/config.toml --doctor
+sudo -u intar-agent env \
+  XDG_CACHE_HOME=/var/cache/intar-agent \
+  XDG_STATE_HOME=/var/cache/intar-agent/state \
+  /usr/local/bin/intar-agent --doctor --config /etc/intar-agent/config.toml
 ```
 
 Agent doctor is deliberately read-only. It validates the unprivileged host view
@@ -103,7 +106,8 @@ and jailerd handshake, including the Linux/x86_64 baseline, kernel, device
 presence, unified cgroup-v2 CPU controller, socket, nftables command, trusted
 working roots, bridge configuration, and registry configuration. It does not
 create a unit, cgroup, jail, or network namespace and therefore cannot prove
-privileged isolation or cleanup.
+privileged isolation or cleanup. Run it as the configured agent identity so
+the XDG paths and `SO_PEERCRED` identity match the deployed service.
 
 The installed root-only wrapper is the operational proof. It downloads
 hash-pinned boot fixtures directly from their publishers into a root-only
