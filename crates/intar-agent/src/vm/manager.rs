@@ -5697,6 +5697,7 @@ mod tests {
         })
         .expect("vm config should render");
 
+        assert_eq!(cfg.landlock_enable, Some(true));
         assert_eq!(cfg.payload.firmware, None);
         assert_eq!(cfg.payload.kernel.as_deref(), Some("/boot/kernel"));
         assert_eq!(cfg.payload.initramfs.as_deref(), Some("/boot/initrd"));

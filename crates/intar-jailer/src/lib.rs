@@ -20,6 +20,14 @@ use intar_jailer_protocol::JailSpecV1;
 #[cfg(target_os = "linux")]
 use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, open, openat2, unlinkat};
 
+#[cfg(any(target_os = "linux", test))]
+const CLOUD_HYPERVISOR_ARGS: [&str; 4] = [
+    "--api-socket",
+    "/run/cloud-hypervisor.sock",
+    "--seccomp",
+    "true",
+];
+
 #[derive(Debug, Parser)]
 #[command(name = "intar-jailer")]
 #[command(about = "Single-use Cloud Hypervisor isolation boundary")]
@@ -143,15 +151,22 @@ fn validate_spec_metadata(metadata: &Metadata) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::fs::OpenOptions;
+    use std::fs::{File, OpenOptions};
+    use std::io::ErrorKind;
+    use std::os::fd::OwnedFd;
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
     use std::os::unix::process::ExitStatusExt as _;
     use std::path::Path;
     use std::process::{Command, Stdio};
 
-    use anyhow::{Context as _, Result, bail};
+    use anyhow::{Context as _, Result, bail, ensure};
     use intar_jailer_protocol::JailSpecV1;
-    use rustix::fs::{Mode, OFlags, open};
+    use landlock::{
+        ABI, Access as _, AccessFs, BitFlags, CompatLevel, Compatible as _, LandlockStatus,
+        PathBeneath, Ruleset, RulesetAttr as _, RulesetCreatedAttr as _, RulesetStatus,
+        make_bitflags,
+    };
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
     use rustix::mount::{
         MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change, unmount,
     };
@@ -169,7 +184,18 @@ mod linux {
         thread::{Gid, Uid},
     };
 
-    use super::load_root_owned_spec;
+    use super::{CLOUD_HYPERVISOR_ARGS, load_root_owned_spec};
+
+    type LandlockRule = (OwnedFd, BitFlags<AccessFs>);
+
+    #[derive(Clone, Copy)]
+    enum RuleAnchorKind {
+        RootFile,
+        VmFile,
+        RootDirectory,
+        VmDirectory,
+        VmCharacterDevice { major: u32, minor: u32, mode: u32 },
+    }
 
     pub(super) fn run_stage1(spec_path: &Path) -> Result<()> {
         require_root()?;
@@ -214,25 +240,284 @@ mod linux {
     pub(super) fn run_stage2(uid: u32, gid: u32) -> Result<()> {
         require_root()?;
         mount_proc()?;
+        let landlock_rules = prepare_landlock_rules(uid, gid)?;
         drop_privileges(uid, gid)?;
 
+        // This copied helper is deliberately outside the allowlist. Proving it
+        // is readable after the UID/capability drop and then denied after
+        // restriction makes the outer Landlock layer an exec-time invariant.
+        File::open("/intar-jailer")
+            .context("prove jailer helper is readable before Landlock restriction")?;
+        apply_landlock(landlock_rules)?;
+        match File::open("/intar-jailer") {
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => {}
+            Ok(_) => bail!("Landlock did not deny the unallowlisted jailer helper"),
+            Err(error) => {
+                return Err(error)
+                    .context("probe unallowlisted jailer helper after Landlock restriction");
+            }
+        }
+
         let stderr = OpenOptions::new()
-            .create(true)
             .append(true)
             .open("/logs/cloud-hypervisor.stderr.log")
             .context("open Cloud Hypervisor stderr log")?;
+
+        // Cloud Hypervisor v53 assigns its CLI --landlock flag to the
+        // vm-config argument group, which requires --kernel or --firmware and
+        // would make the runtime create and boot a CLI-defined VM. Intar keeps
+        // the exact pinned binary API-only: this inherited ruleset covers every
+        // runtime thread, while each typed VmConfig also requests v53's
+        // narrower landlock_enable layer.
         let error = Command::new("/cloud-hypervisor")
-            .arg("--api-socket")
-            .arg("/run/cloud-hypervisor.sock")
-            .arg("--landlock")
-            .arg("--seccomp")
-            .arg("true")
+            .args(CLOUD_HYPERVISOR_ARGS)
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
             .exec();
         Err(error).context("exec jailed Cloud Hypervisor")
+    }
+
+    fn prepare_landlock_rules(uid: u32, gid: u32) -> Result<Vec<LandlockRule>> {
+        let root = open(
+            "/",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .context("open jailed root for Landlock rules")?;
+        let mut rules = Vec::new();
+
+        push_jail_rule(
+            &mut rules,
+            &root,
+            "cloud-hypervisor",
+            RuleAnchorKind::RootFile,
+            make_bitflags!(AccessFs::{Execute | ReadFile}),
+            uid,
+            gid,
+        )?;
+        push_jail_rule(
+            &mut rules,
+            &root,
+            "boot/kernel",
+            RuleAnchorKind::RootFile,
+            AccessFs::ReadFile.into(),
+            uid,
+            gid,
+        )?;
+        match open_jail_rule_anchor(&root, "boot/initrd") {
+            Ok(fd) => {
+                validate_rule_anchor(&fd, "boot/initrd", RuleAnchorKind::RootFile, uid, gid)?;
+                rules.push((fd, AccessFs::ReadFile.into()));
+            }
+            Err(error) if error == rustix::io::Errno::NOENT => {}
+            Err(error) => return Err(error).context("open optional Landlock anchor boot/initrd"),
+        }
+        for (path, kind, access) in [
+            (
+                "disks/root.raw",
+                RuleAnchorKind::VmFile,
+                make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate}),
+            ),
+            (
+                "disks/runtime.raw",
+                RuleAnchorKind::RootFile,
+                AccessFs::ReadFile.into(),
+            ),
+            (
+                "disks/recordings.vfat",
+                RuleAnchorKind::VmFile,
+                make_bitflags!(AccessFs::{ReadFile | WriteFile | Truncate}),
+            ),
+        ] {
+            push_jail_rule(&mut rules, &root, path, kind, access, uid, gid)?;
+        }
+        for path in [
+            "logs/serial.log",
+            "logs/console.log",
+            "logs/cloud-hypervisor.stderr.log",
+        ] {
+            push_jail_rule(
+                &mut rules,
+                &root,
+                path,
+                RuleAnchorKind::VmFile,
+                make_bitflags!(AccessFs::{WriteFile | Truncate}),
+                uid,
+                gid,
+            )?;
+        }
+        push_jail_rule(
+            &mut rules,
+            &root,
+            "run",
+            RuleAnchorKind::VmDirectory,
+            make_bitflags!(AccessFs::{
+                ReadFile | WriteFile | RemoveFile | MakeReg | MakeSock | Truncate
+            }),
+            uid,
+            gid,
+        )?;
+        for (path, kind, access) in [
+            (
+                "dev/kvm",
+                RuleAnchorKind::VmCharacterDevice {
+                    major: 10,
+                    minor: 232,
+                    mode: 0o600,
+                },
+                make_bitflags!(AccessFs::{ReadFile | WriteFile}),
+            ),
+            (
+                "dev/net/tun",
+                RuleAnchorKind::VmCharacterDevice {
+                    major: 10,
+                    minor: 200,
+                    mode: 0o600,
+                },
+                make_bitflags!(AccessFs::{ReadFile | WriteFile}),
+            ),
+            (
+                "dev/urandom",
+                RuleAnchorKind::VmCharacterDevice {
+                    major: 1,
+                    minor: 9,
+                    mode: 0o400,
+                },
+                AccessFs::ReadFile.into(),
+            ),
+            (
+                "dev/null",
+                RuleAnchorKind::VmCharacterDevice {
+                    major: 1,
+                    minor: 3,
+                    mode: 0o600,
+                },
+                make_bitflags!(AccessFs::{ReadFile | WriteFile}),
+            ),
+        ] {
+            push_jail_rule(&mut rules, &root, path, kind, access, uid, gid)?;
+        }
+
+        // procfs is the one intentional mount boundary inside the jail, so it
+        // is pinned independently after mount rather than reached through a
+        // lookup that weakens NO_XDEV for every other anchor.
+        let proc_fd = open(
+            "/proc",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .context("open fresh procfs Landlock anchor")?;
+        validate_rule_anchor(&proc_fd, "proc", RuleAnchorKind::RootDirectory, uid, gid)?;
+        rules.push((proc_fd, make_bitflags!(AccessFs::{ReadFile | ReadDir})));
+        Ok(rules)
+    }
+
+    fn open_jail_rule_anchor(
+        root: &impl std::os::fd::AsFd,
+        relative: &str,
+    ) -> rustix::io::Result<OwnedFd> {
+        openat2(
+            root,
+            relative,
+            OFlags::PATH | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+    }
+
+    fn push_jail_rule(
+        rules: &mut Vec<LandlockRule>,
+        root: &impl std::os::fd::AsFd,
+        relative: &str,
+        kind: RuleAnchorKind,
+        access: BitFlags<AccessFs>,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        let fd = open_jail_rule_anchor(root, relative)
+            .with_context(|| format!("open Landlock anchor {relative}"))?;
+        validate_rule_anchor(&fd, relative, kind, uid, gid)?;
+        rules.push((fd, access));
+        Ok(())
+    }
+
+    fn validate_rule_anchor(
+        fd: &impl std::os::fd::AsFd,
+        path: &str,
+        kind: RuleAnchorKind,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        let stat = rustix::fs::fstat(fd).with_context(|| format!("stat Landlock anchor {path}"))?;
+        let file_type = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+        let expected_owner = match kind {
+            RuleAnchorKind::RootFile | RuleAnchorKind::RootDirectory => (0, 0),
+            RuleAnchorKind::VmFile
+            | RuleAnchorKind::VmDirectory
+            | RuleAnchorKind::VmCharacterDevice { .. } => (uid, gid),
+        };
+        ensure!(
+            (stat.st_uid, stat.st_gid) == expected_owner,
+            "Landlock anchor {path} has unexpected owner {}:{}",
+            stat.st_uid,
+            stat.st_gid
+        );
+        match kind {
+            RuleAnchorKind::RootFile | RuleAnchorKind::VmFile => {
+                ensure!(
+                    file_type == rustix::fs::FileType::RegularFile && stat.st_nlink == 1,
+                    "Landlock anchor {path} is not a one-link regular file"
+                );
+            }
+            RuleAnchorKind::RootDirectory | RuleAnchorKind::VmDirectory => {
+                ensure!(
+                    file_type == rustix::fs::FileType::Directory && stat.st_nlink >= 1,
+                    "Landlock anchor {path} is not a linked directory"
+                );
+            }
+            RuleAnchorKind::VmCharacterDevice { major, minor, mode } => {
+                ensure!(
+                    file_type == rustix::fs::FileType::CharacterDevice
+                        && rustix::fs::major(stat.st_rdev) == major
+                        && rustix::fs::minor(stat.st_rdev) == minor
+                        && stat.st_mode & 0o777 == mode
+                        && stat.st_nlink == 1,
+                    "Landlock anchor {path} is not the expected character device"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_landlock(rules: Vec<LandlockRule>) -> Result<()> {
+        let requested_abi = ABI::V3;
+        let mut ruleset = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(requested_abi))?
+            .set_compatibility(CompatLevel::HardRequirement)
+            .create()?
+            .set_compatibility(CompatLevel::HardRequirement);
+        for (fd, access) in rules {
+            ruleset = ruleset.add_rule(PathBeneath::new(fd, access))?;
+        }
+        let status = ruleset.restrict_self()?;
+        ensure!(
+            status.ruleset == RulesetStatus::FullyEnforced,
+            "jailer Landlock ruleset was not fully enforced"
+        );
+        ensure!(
+            matches!(
+                status.landlock,
+                LandlockStatus::Available { effective_abi, .. } if effective_abi >= ABI::V3
+            ),
+            "jailer Landlock ABI 3 is not fully available"
+        );
+        Ok(())
     }
 
     fn ensure_process_environment_cleared(spec_path: &Path) -> Result<()> {
@@ -495,5 +780,21 @@ mod tests {
         std::fs::write(&path, b"{}").expect("write fixture");
         std::fs::hard_link(&path, alias).expect("hard link fixture");
         assert!(validate_spec_metadata(&std::fs::metadata(path).expect("metadata")).is_err());
+    }
+
+    #[test]
+    fn cloud_hypervisor_v53_startup_is_api_only() {
+        assert_eq!(
+            CLOUD_HYPERVISOR_ARGS,
+            [
+                "--api-socket",
+                "/run/cloud-hypervisor.sock",
+                "--seccomp",
+                "true"
+            ]
+        );
+        assert!(!CLOUD_HYPERVISOR_ARGS.contains(&"--landlock"));
+        assert!(!CLOUD_HYPERVISOR_ARGS.contains(&"--kernel"));
+        assert!(!CLOUD_HYPERVISOR_ARGS.contains(&"--firmware"));
     }
 }

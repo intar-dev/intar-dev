@@ -282,8 +282,10 @@ old self-hosted image builder:
 - The built root disk boots with direct `-kernel`/`-initrd` under QEMU/KVM.
 - Jailerd hash-verifies, copies, and launches the bundled Cloud Hypervisor v53.0
   runtime inside the VM unit and jail; `intar-agent` has no direct spawn path.
-- The jailed package smoke test boots with only the allowlisted devices and
-  proves seccomp and Landlock fail closed.
+- The jailed package smoke test verifies the API-only v53 argv, boots with only
+  the allowlisted devices, and independently proves both the inherited
+  jailer-installed Landlock boundary and the VM-specific
+  `VmConfig.landlock_enable` layer fail closed alongside seccomp.
 - A busy `cpu = 0.125`, `vcpus = 1` guest exposes
   `cpu.max = 12500 100000`, `cpu.max.burst = 0`, increments `nr_throttled`, and
   stays within the documented elapsed-time bound after warm-up.

@@ -385,14 +385,12 @@ impl HostBackend for SystemdHostBackend {
                     break inspection;
                 }
                 Ok(inspection) if inspection.health == SandboxHealth::Exited => {
-                    let _ = self.stop_unit(&spec.unit_name);
                     bail!("Cloud Hypervisor exited during transient-unit activation")
                 }
                 Ok(_) | Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(25));
                 }
                 Ok(_) | Err(_) => {
-                    let _ = self.stop_unit(&spec.unit_name);
                     bail!("timed out waiting for verified Cloud Hypervisor API process")
                 }
             }
@@ -401,7 +399,6 @@ impl HostBackend for SystemdHostBackend {
         if let Some(cgroup_path) = &cgroup_path
             && let Err(error) = assert_cpu_quota(cgroup_path, spec.cpu_quota)
         {
-            let _ = self.stop_unit(&spec.unit_name);
             return Err(error).context("verify transient unit CPU controller");
         }
         Ok(StartedUnit {
@@ -460,10 +457,34 @@ impl HostBackend for SystemdHostBackend {
         if !matches!(active_state.as_str(), "inactive" | "failed") {
             bail!("refusing to destroy populated transient unit {unit_name}")
         }
-        let _: () = manager
-            .call("ResetFailedUnit", &(unit_name,))
-            .with_context(|| format!("reset transient unit {unit_name}"))?;
-        Ok(true)
+        drop(unit);
+        let reset: zbus::Result<()> = manager.call("ResetFailedUnit", &(unit_name,));
+        match reset {
+            Ok(()) => {}
+            Err(zbus::Error::MethodError(name, _, _))
+                if name.as_str() == "org.freedesktop.systemd1.NoSuchUnit" =>
+            {
+                return Ok(true);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reset transient unit {unit_name}"));
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match Self::get_unit_path(&manager, unit_name)? {
+                None => return Ok(true),
+                Some(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Some(_) => {
+                    bail!(
+                        "timed out waiting for systemd to unload transient unit {unit_name} after reset"
+                    )
+                }
+            }
+        }
     }
 
     fn ensure_run_network(
@@ -1777,32 +1798,32 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let started = match self.backend.start_unit(&unit_spec) {
             Ok(started) => started,
             Err(error) => {
-                let _ = self.backend.stop_unit(&unit_name);
-                let _ = self
-                    .backend
-                    .destroy_vm_network(&request.run_id, &generation);
-                let _ = self.preparer.quarantine(&self.config, &generation);
-                return Err(error).context("start sandbox transient unit");
+                return self.fail_launch(
+                    &request.run_id,
+                    &generation,
+                    &unit_name,
+                    error.context("start sandbox transient unit"),
+                );
             }
         };
         if started.unit_name != unit_name {
-            let _ = self.backend.stop_unit(&unit_name);
-            let _ = self
-                .backend
-                .destroy_vm_network(&request.run_id, &generation);
-            let _ = self.preparer.quarantine(&self.config, &generation);
-            bail!("backend returned mismatched transient unit name")
+            return self.fail_launch(
+                &request.run_id,
+                &generation,
+                &unit_name,
+                anyhow::anyhow!("backend returned mismatched transient unit name"),
+            );
         }
         record.cgroup_path.clone_from(&started.cgroup_path);
         record.host_boot_id.clone_from(&started.host_boot_id);
         record.pid_start_time_ticks = started.pid_start_time_ticks;
         if let Err(error) = self.preparer.persist(&self.config, &record) {
-            let _ = self.backend.stop_unit(&unit_name);
-            let _ = self
-                .backend
-                .destroy_vm_network(&request.run_id, &generation);
-            let _ = self.preparer.quarantine(&self.config, &generation);
-            return Err(error).context("persist VM sandbox identity");
+            return self.fail_launch(
+                &request.run_id,
+                &generation,
+                &unit_name,
+                error.context("persist VM sandbox identity"),
+            );
         }
         self.records.insert(generation.clone(), record);
         Ok(VmLaunchResult {
@@ -1822,6 +1843,63 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         })
     }
 
+    fn fail_launch<T>(
+        &mut self,
+        run_id: &ValidatedId,
+        generation: &ValidatedId,
+        unit_name: &str,
+        failure: anyhow::Error,
+    ) -> Result<T> {
+        match self.rollback_failed_launch(run_id, generation, unit_name) {
+            Ok(()) => Err(failure),
+            Err(rollback_error) => Err(failure.context(format!(
+                "failed-launch rollback was incomplete: {rollback_error:#}"
+            ))),
+        }
+    }
+
+    fn rollback_failed_launch(
+        &mut self,
+        run_id: &ValidatedId,
+        generation: &ValidatedId,
+        unit_name: &str,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        let stop_proved_drain = match self.backend.stop_unit(unit_name) {
+            Ok(_) => true,
+            Err(error) => {
+                failures.push(format!("stop transient unit {unit_name}: {error:#}"));
+                false
+            }
+        };
+        let destroy_proved_drain = match self.backend.destroy_unit(unit_name) {
+            Ok(_) => true,
+            Err(error) => {
+                failures.push(format!("destroy transient unit {unit_name}: {error:#}"));
+                false
+            }
+        };
+        if stop_proved_drain || destroy_proved_drain {
+            if let Err(error) = self.backend.destroy_vm_network(run_id, generation) {
+                failures.push(format!(
+                    "destroy VM network for generation {generation}: {error:#}"
+                ));
+            }
+            if let Err(error) = self.preparer.quarantine(&self.config, generation) {
+                failures.push(format!("quarantine generation {generation}: {error:#}"));
+            }
+        } else {
+            failures.push(format!(
+                "preserved VM network and generation {generation} because cgroup drain was not proven"
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!(failures.join("; "))
+        }
+    }
+
     fn launch_result(&mut self, record: VmRecord) -> Result<VmLaunchResult> {
         let inspection = self.backend.inspect_unit(&record.unit_name)?;
         // This is a same-daemon retry of a launch whose `start_unit` handshake
@@ -1831,7 +1909,11 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         // Recovery and InspectVm remain the liveness authorities and still
         // require a successful API ping for a healthy process.
         if !backend_identity_matches(&record, &inspection) {
-            let _ = self.backend.stop_unit(&record.unit_name);
+            self.backend.stop_unit(&record.unit_name)?;
+            self.backend.destroy_unit(&record.unit_name)?;
+            let _ = self
+                .backend
+                .destroy_vm_network(&record.request.run_id, &record.generation);
             self.preparer.quarantine(&self.config, &record.generation)?;
             bail!("idempotent launch found mismatched live VM identity")
         }
@@ -1864,7 +1946,11 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             || (inspection.health == SandboxHealth::Healthy
                 && !live_api_ping(&record.paths.host_api_socket))
         {
-            let _ = self.backend.stop_unit(&record.unit_name);
+            self.backend.stop_unit(&record.unit_name)?;
+            self.backend.destroy_unit(&record.unit_name)?;
+            let _ = self
+                .backend
+                .destroy_vm_network(&record.request.run_id, &record.generation);
             self.preparer.quarantine(&self.config, &record.generation)?;
             bail!("live VM identity does not match persisted sandbox metadata")
         }
@@ -2049,6 +2135,9 @@ fn quarantine_recovered_record<B: HostBackend, P: JailPreparer>(
     backend
         .stop_unit(&unit_name)
         .with_context(|| format!("drain mismatched transient unit {unit_name}"))?;
+    backend
+        .destroy_unit(&unit_name)
+        .with_context(|| format!("remove mismatched transient unit {unit_name}"))?;
 
     // Retaining a network attachment is safer than aborting daemon startup
     // after the process tree has drained. The caller revokes readiness and the
@@ -3185,8 +3274,14 @@ mod tests {
         units: BTreeMap<String, BackendInspection>,
         started_specs: Vec<UnitLaunchSpec>,
         stopped_units: Vec<String>,
+        destroyed_units: Vec<String>,
+        unit_operations: Vec<String>,
         destroyed_vm_networks: Vec<(ValidatedId, ValidatedId)>,
         fail_vm_network: bool,
+        fail_start_after_create: bool,
+        fail_stop_unit: bool,
+        fail_destroy_unit: bool,
+        fail_destroy_vm_network: bool,
         returned_unit_name: Option<String>,
     }
 
@@ -3214,6 +3309,9 @@ mod tests {
                     capabilities_empty: true,
                 },
             );
+            if self.fail_start_after_create {
+                bail!("injected transient unit activation failure")
+            }
             Ok(StartedUnit {
                 unit_name: self
                     .returned_unit_name
@@ -3233,6 +3331,10 @@ mod tests {
         }
         fn stop_unit(&mut self, unit_name: &str) -> Result<bool> {
             self.stopped_units.push(unit_name.to_owned());
+            self.unit_operations.push(format!("stop:{unit_name}"));
+            if self.fail_stop_unit {
+                bail!("injected transient unit stop failure")
+            }
             let Some(unit) = self.units.get_mut(unit_name) else {
                 return Ok(false);
             };
@@ -3240,6 +3342,11 @@ mod tests {
             Ok(true)
         }
         fn destroy_unit(&mut self, unit_name: &str) -> Result<bool> {
+            self.destroyed_units.push(unit_name.to_owned());
+            self.unit_operations.push(format!("destroy:{unit_name}"));
+            if self.fail_destroy_unit {
+                bail!("injected transient unit destroy failure")
+            }
             if self.units.get(unit_name).is_some_and(|unit| {
                 !matches!(
                     unit.health,
@@ -3285,6 +3392,9 @@ mod tests {
         ) -> Result<bool> {
             self.destroyed_vm_networks
                 .push((run_id.clone(), generation.clone()));
+            if self.fail_destroy_vm_network {
+                bail!("injected VM network destroy failure")
+            }
             Ok(true)
         }
         fn destroy_run_network(&mut self, _request: &DestroyRunNetworkRequest) -> Result<bool> {
@@ -3326,6 +3436,9 @@ mod tests {
     #[derive(Default)]
     struct TrackingPreparer {
         quarantined: Vec<ValidatedId>,
+        persist_calls: usize,
+        fail_persist_call: Option<usize>,
+        fail_quarantine: bool,
     }
 
     impl JailPreparer for TrackingPreparer {
@@ -3355,6 +3468,17 @@ mod tests {
 
         fn quarantine(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
             self.quarantined.push(generation.clone());
+            if self.fail_quarantine {
+                bail!("injected jail quarantine failure")
+            }
+            Ok(())
+        }
+
+        fn persist(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
+            self.persist_calls += 1;
+            if self.fail_persist_call == Some(self.persist_calls) {
+                bail!("injected jail metadata persistence failure")
+            }
             Ok(())
         }
     }
@@ -3610,6 +3734,7 @@ mod tests {
             Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
         ));
         assert!(core.backend.stopped_units.contains(&launched.unit_name));
+        assert!(core.backend.destroyed_units.contains(&launched.unit_name));
         assert!(core.preparer.quarantined.contains(&launched.generation));
     }
 
@@ -3640,6 +3765,7 @@ mod tests {
             Response::Error(ProtocolError { ref code, .. }) if code == "host_operation_failed"
         ));
         assert!(core.backend.stopped_units.contains(&launched.unit_name));
+        assert!(core.backend.destroyed_units.contains(&launched.unit_name));
     }
 
     #[test]
@@ -3676,6 +3802,161 @@ mod tests {
     }
 
     #[test]
+    fn partial_start_failure_stops_then_destroys_the_transient_unit() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend {
+                fail_start_after_create: true,
+                ..FakeBackend::default()
+            },
+            TrackingPreparer::default(),
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+
+        let response = core.handle(Request::LaunchVm(Box::new(launch(1, 125))));
+        assert!(matches!(response, Response::Error(_)));
+        assert!(core.records.is_empty());
+        let generation = core
+            .preparer
+            .quarantined
+            .first()
+            .expect("failed generation quarantined");
+        let unit_name = format!("intar-vm-{generation}.service");
+        assert_eq!(
+            core.backend.unit_operations,
+            [format!("stop:{unit_name}"), format!("destroy:{unit_name}")]
+        );
+        assert!(!core.backend.units.contains_key(&unit_name));
+        assert_eq!(
+            core.backend.destroyed_vm_networks,
+            [(
+                ValidatedId::parse("run").expect("run ID"),
+                generation.clone()
+            )]
+        );
+    }
+
+    #[test]
+    fn post_start_persistence_failure_rolls_back_the_transient_unit() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend::default(),
+            TrackingPreparer {
+                fail_persist_call: Some(2),
+                ..TrackingPreparer::default()
+            },
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+
+        let response = core.handle(Request::LaunchVm(Box::new(launch(1, 125))));
+        assert!(matches!(response, Response::Error(_)));
+        assert!(core.records.is_empty());
+        let generation = core
+            .preparer
+            .quarantined
+            .first()
+            .expect("failed generation quarantined");
+        let unit_name = format!("intar-vm-{generation}.service");
+        assert_eq!(
+            core.backend.unit_operations,
+            [format!("stop:{unit_name}"), format!("destroy:{unit_name}")]
+        );
+        assert!(!core.backend.units.contains_key(&unit_name));
+        assert_eq!(core.preparer.persist_calls, 2);
+    }
+
+    #[test]
+    fn failed_launch_reports_every_rollback_failure() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend {
+                fail_start_after_create: true,
+                fail_stop_unit: true,
+                fail_destroy_unit: true,
+                fail_destroy_vm_network: true,
+                ..FakeBackend::default()
+            },
+            TrackingPreparer {
+                fail_quarantine: true,
+                ..TrackingPreparer::default()
+            },
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+
+        let Response::Error(error) = core.handle(Request::LaunchVm(Box::new(launch(1, 125))))
+        else {
+            panic!("failed launch unexpectedly succeeded")
+        };
+        for expected in [
+            "injected transient unit activation failure",
+            "injected transient unit stop failure",
+            "injected transient unit destroy failure",
+            "preserved VM network and generation",
+        ] {
+            assert!(
+                error.message.contains(expected),
+                "missing {expected:?} from {:?}",
+                error.message
+            );
+        }
+        assert_eq!(core.backend.stopped_units.len(), 1);
+        assert_eq!(core.backend.destroyed_units.len(), 1);
+        assert!(core.backend.destroyed_vm_networks.is_empty());
+        assert!(core.preparer.quarantined.is_empty());
+    }
+
+    #[test]
+    fn drained_failed_launch_reports_network_and_quarantine_failures() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend {
+                fail_start_after_create: true,
+                fail_destroy_vm_network: true,
+                ..FakeBackend::default()
+            },
+            TrackingPreparer {
+                fail_quarantine: true,
+                ..TrackingPreparer::default()
+            },
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+
+        let Response::Error(error) = core.handle(Request::LaunchVm(Box::new(launch(1, 125))))
+        else {
+            panic!("failed launch unexpectedly succeeded")
+        };
+        for expected in [
+            "injected transient unit activation failure",
+            "injected VM network destroy failure",
+            "injected jail quarantine failure",
+        ] {
+            assert!(error.message.contains(expected));
+        }
+        assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
+        assert_eq!(core.preparer.quarantined.len(), 1);
+    }
+
+    #[test]
     fn mismatched_started_unit_never_controls_the_returned_unit_name() {
         let mut config = test_config();
         config.cpu_reserved_millis = 0;
@@ -3706,6 +3987,11 @@ mod tests {
             core.backend.stopped_units,
             vec![format!("intar-vm-{generation}.service")]
         );
+        assert_eq!(
+            core.backend.destroyed_units,
+            vec![format!("intar-vm-{generation}.service")]
+        );
+        assert!(core.backend.units.is_empty());
         assert!(
             !core
                 .backend
@@ -3766,7 +4052,8 @@ mod tests {
         )
         .expect("quarantine tampered record without aborting recovery");
         assert!(core.records.is_empty());
-        assert_eq!(core.backend.stopped_units, vec![expected_unit]);
+        assert_eq!(core.backend.stopped_units, vec![expected_unit.clone()]);
+        assert_eq!(core.backend.destroyed_units, vec![expected_unit]);
         assert_eq!(core.preparer.quarantined, vec![record.generation.clone()]);
         assert_eq!(
             core.preparer.reserved,
