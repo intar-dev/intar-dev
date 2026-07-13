@@ -12,15 +12,21 @@ die() {
 # `set -f`. Return 0 with "name:/proc/PID/exe" for a forbidden process, 1 when
 # the host is clean, and 2 when procfs cannot be enumerated completely.
 # INTAR_INSTALL_PROCESS_AUDIT_BEGIN
-find_forbidden_process() {
+find_forbidden_process_in() {
+  [ "$#" -eq 1 ] || return 2
   # Snapshot only the numeric entries from one procfs directory read. A PID
   # may disappear after this point; only that ENOENT race is ignored. Failure
   # to enumerate /proc or inspect any still-present executable returns 2.
-  python3 - <<'PY'
+  python3 - "$1" <<'PY'
 import os
+import sys
+
+proc_root = sys.argv[1]
+if not os.path.isabs(proc_root):
+    raise SystemExit(2)
 
 try:
-    entries = os.listdir("/proc")
+    entries = os.listdir(proc_root)
 except OSError:
     raise SystemExit(2)
 
@@ -28,7 +34,7 @@ for pid in sorted(
     (entry for entry in entries if entry.isascii() and entry.isdigit()),
     key=int,
 ):
-    executable = f"/proc/{pid}/exe"
+    executable = os.path.join(proc_root, pid, "exe")
     try:
         target = os.readlink(executable)
     except (FileNotFoundError, ProcessLookupError):
@@ -49,6 +55,12 @@ for pid in sorted(
 
 raise SystemExit(1)
 PY
+}
+
+# Production callers cannot override the procfs root through arguments or the
+# environment. Tests exercise the scanner above with isolated fixture roots.
+find_forbidden_process() {
+  find_forbidden_process_in /proc
 }
 # INTAR_INSTALL_PROCESS_AUDIT_END
 
