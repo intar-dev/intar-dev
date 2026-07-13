@@ -44,8 +44,9 @@ for path in \
   /usr/share/doc/intar-jailerd \
   /var/cache/intar-agent \
   /var/lib/intar; do
-  [ ! -e "${path}" ] && [ ! -L "${path}" ] || \
+  if [ -e "${path}" ] || [ -L "${path}" ]; then
     die "refusing to overwrite existing state: ${path}"
+  fi
 done
 
 work_root=$(mktemp -d /var/lib/intar-package-smoke.XXXXXX)
@@ -179,8 +180,9 @@ for relative in \
   deploy/intar-jailerd.sysctl.conf \
   deploy/intar-jailerd.tmpfiles \
   deploy/intar-vms.slice; do
-  [ -f "${package_root}/${relative}" ] && [ ! -L "${package_root}/${relative}" ] || \
+  if [ ! -f "${package_root}/${relative}" ] || [ -L "${package_root}/${relative}" ]; then
     die "archive is missing a regular ${relative}"
+  fi
 done
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
@@ -476,12 +478,16 @@ installed=1
 cutover_archive=$(find /var/lib/intar/cutover-archives -mindepth 1 -maxdepth 1 -type d -print)
 [ -n "${cutover_archive}" ] || die "installer did not create the V5 cutover archive"
 [ "$(printf '%s\n' "${cutover_archive}" | wc -l)" -eq 1 ] || die "installer created multiple cutover archives"
-[ ! -e "${agent_database}" ] && [ ! -L "${agent_database}" ] || die "legacy SQLite database was not reset"
+if [ -e "${agent_database}" ] || [ -L "${agent_database}" ]; then
+  die "legacy SQLite database was not reset"
+fi
 for archived in \
   "${cutover_archive}/intar-agent.config.v5.toml" \
   "${cutover_archive}/intar-agent.v5.sqlite3" \
   "${cutover_archive}/manifest.json"; do
-  [ -f "${archived}" ] && [ ! -L "${archived}" ] || die "cutover archive is incomplete"
+  if [ ! -f "${archived}" ] || [ -L "${archived}" ]; then
+    die "cutover archive is incomplete"
+  fi
   [ "$(stat -c '%u:%g:%a:%h' "${archived}")" = 0:0:600:1 ] || \
     die "cutover archive file is not root-only"
 done
