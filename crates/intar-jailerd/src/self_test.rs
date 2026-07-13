@@ -1624,7 +1624,8 @@ mod linux {
                     "package smoke VM {index} unexpectedly exposed /dev/vhost-vsock"
                 );
                 let landlock_canary = launch.paths.host_jail_root.join("run/landlock-api-canary");
-                write_new_root_file(&landlock_canary, b"landlock-vmm-negative\n", 0o444)?;
+                write_new_root_file(&landlock_canary, b"landlock-vmm-negative\n", 0o444)
+                    .with_context(|| format!("create package-smoke VM {index} Landlock canary"))?;
                 let client = CloudHypervisorClient::new(path_utf8(&launch.paths.host_api_socket)?)?;
                 let vm_config = smoke_vm_config(launch, request)?;
                 runtime
@@ -2723,52 +2724,22 @@ mod linux {
                     ));
                 }
             }
-        }
 
-        for (index, selector) in selectors.iter().enumerate() {
-            let deadline = Instant::now() + SATURATION_VM_TRANSITION_TIMEOUT;
-            let mut drained = false;
-            loop {
-                match expect_inspection(
-                    core.handle(Request::InspectVm(selector.clone())),
-                    &format!("wait for stopped package-smoke VM {index}"),
-                ) {
-                    Ok(inspection)
-                        if matches!(
-                            inspection.health,
-                            SandboxHealth::Exited | SandboxHealth::Quarantined
-                        ) =>
-                    {
-                        drained = true;
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        failures.push(format!(
-                            "inspect VM {index} during cleanup failed: {error:#}"
-                        ));
-                        break;
-                    }
-                }
-                if Instant::now() >= deadline {
-                    failures.push(format!("package-smoke VM {index} unit did not drain"));
-                    break;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-
-            if drained {
-                match core.handle(Request::DestroyVm(selector.clone())) {
-                    Response::DestroyVm(_) => {}
-                    Response::Error(error) => failures.push(format!(
-                        "destroy package-smoke VM {index} failed: {}: {}",
-                        error.code, error.message
-                    )),
-                    response => {
-                        failures.push(format!(
-                            "unexpected destroy response for VM {index}: {response:?}"
-                        ));
-                    }
+            // StopVm synchronously proves that the complete unit cgroup has
+            // drained. systemd may garbage-collect the inactive transient unit
+            // immediately afterwards, so an intervening InspectVm is racy and
+            // cannot add a stronger proof. DestroyVm is the final authority: it
+            // accepts an already-absent unit but still refuses a populated one.
+            match core.handle(Request::DestroyVm(selector.clone())) {
+                Response::DestroyVm(_) => {}
+                Response::Error(error) => failures.push(format!(
+                    "destroy package-smoke VM {index} failed: {}: {}",
+                    error.code, error.message
+                )),
+                response => {
+                    failures.push(format!(
+                        "unexpected destroy response for VM {index}: {response:?}"
+                    ));
                 }
             }
         }
@@ -3471,12 +3442,26 @@ mod linux {
         options
             .write(true)
             .create_new(true)
-            .mode(mode)
+            // Keep the file private until all bytes are durable. The root
+            // self-test deliberately inherits umask 077, so the requested
+            // final mode must be applied through this already-open FD.
+            .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
         let mut file = options.open(path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        set_exact_file_mode(&file, mode)?;
+        file.sync_all()?;
         validate_root_file_metadata(&file.metadata()?, mode)
+    }
+
+    fn set_exact_file_mode(file: &File, mode: u32) -> Result<()> {
+        ensure!(
+            mode & !0o777 == 0,
+            "trusted file mode contains non-permission bits"
+        );
+        rustix::fs::fchmod(file, Mode::from_raw_mode(mode))
+            .context("set exact trusted file permissions")
     }
 
     fn read_worker_report(path: &Path) -> Result<WorkerReportV1> {
@@ -3879,6 +3864,27 @@ mod linux {
                 sha256: digest,
             };
             assert!(shared_artifact_parent(&[&kernel, &other]).is_err());
+        }
+
+        #[test]
+        fn trusted_file_mode_is_normalized_through_the_open_fd() {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let path = temporary.path().join("canary");
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .expect("create private canary");
+
+            set_exact_file_mode(&file, 0o444).expect("normalize canary permissions");
+
+            assert_eq!(file.metadata().expect("stat canary").mode() & 0o777, 0o444);
+            assert!(set_exact_file_mode(&file, 0o10_444).is_err());
+            assert_eq!(
+                file.metadata().expect("restat canary").mode() & 0o777,
+                0o444
+            );
         }
 
         #[test]

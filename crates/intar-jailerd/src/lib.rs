@@ -447,14 +447,39 @@ impl HostBackend for SystemdHostBackend {
             path,
             "org.freedesktop.systemd1.Service",
         )?;
-        let control_group: String = service.get_property("ControlGroup")?;
-        let _: zbus::zvariant::OwnedObjectPath = manager
-            .call("StopUnit", &(unit_name, "replace"))
-            .with_context(|| format!("stop transient unit {unit_name}"))?;
+        let control_group: zbus::Result<String> = service.get_property("ControlGroup");
+        let Some(control_group) = settle_unit_operation(
+            control_group,
+            UnitCallSite::ObjectProperty,
+            || Ok(Self::get_unit_path(&manager, unit_name)?.is_some()),
+            &format!("read transient unit cgroup {unit_name}"),
+        )?
+        else {
+            return Ok(false);
+        };
+        let stop: zbus::Result<zbus::zvariant::OwnedObjectPath> =
+            manager.call("StopUnit", &(unit_name, "replace"));
+        if settle_unit_operation(
+            stop,
+            UnitCallSite::Manager,
+            || Ok(Self::get_unit_path(&manager, unit_name)?.is_some()),
+            &format!("stop transient unit {unit_name}"),
+        )?
+        .is_none()
+        {
+            if !wait_cgroup_drained(&control_group, Duration::from_secs(5))? {
+                bail!("transient unit disappeared before its cgroup drained")
+            }
+            return Ok(false);
+        }
         if !wait_cgroup_drained(&control_group, Duration::from_secs(5))? {
-            let _: () = manager
-                .call("KillUnit", &(unit_name, "all", 9_i32))
-                .with_context(|| format!("kill transient unit cgroup {unit_name}"))?;
+            let kill: zbus::Result<()> = manager.call("KillUnit", &(unit_name, "all", 9_i32));
+            let _ = settle_unit_operation(
+                kill,
+                UnitCallSite::Manager,
+                || Ok(Self::get_unit_path(&manager, unit_name)?.is_some()),
+                &format!("kill transient unit cgroup {unit_name}"),
+            )?;
             if !wait_cgroup_drained(&control_group, Duration::from_secs(10))? {
                 bail!("transient unit cgroup did not drain after SIGKILL")
             }
@@ -474,22 +499,30 @@ impl HostBackend for SystemdHostBackend {
             path,
             "org.freedesktop.systemd1.Unit",
         )?;
-        let active_state: String = unit.get_property("ActiveState")?;
+        let active_state: zbus::Result<String> = unit.get_property("ActiveState");
+        let Some(active_state) = settle_unit_operation(
+            active_state,
+            UnitCallSite::ObjectProperty,
+            || Ok(Self::get_unit_path(&manager, unit_name)?.is_some()),
+            &format!("read transient unit state {unit_name}"),
+        )?
+        else {
+            return Ok(false);
+        };
         if !matches!(active_state.as_str(), "inactive" | "failed") {
             bail!("refusing to destroy populated transient unit {unit_name}")
         }
         drop(unit);
         let reset: zbus::Result<()> = manager.call("ResetFailedUnit", &(unit_name,));
-        match reset {
-            Ok(()) => {}
-            Err(zbus::Error::MethodError(name, _, _))
-                if name.as_str() == "org.freedesktop.systemd1.NoSuchUnit" =>
-            {
-                return Ok(true);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("reset transient unit {unit_name}"));
-            }
+        if settle_unit_operation(
+            reset,
+            UnitCallSite::Manager,
+            || Ok(Self::get_unit_path(&manager, unit_name)?.is_some()),
+            &format!("reset transient unit {unit_name}"),
+        )?
+        .is_none()
+        {
+            return Ok(true);
         }
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -547,6 +580,59 @@ impl HostBackend for SystemdHostBackend {
 
     fn destroy_run_network(&mut self, request: &DestroyRunNetworkRequest) -> Result<bool> {
         self.network.destroy_run(&request.run_id)
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnitCallSite {
+    Manager,
+    ObjectProperty,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_unit_disappeared_name(site: UnitCallSite, name: &str) -> bool {
+    match site {
+        UnitCallSite::Manager => name == "org.freedesktop.systemd1.NoSuchUnit",
+        UnitCallSite::ObjectProperty => matches!(
+            name,
+            "org.freedesktop.DBus.Error.UnknownObject" | "org.freedesktop.systemd1.NoSuchUnit"
+        ),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_unit_disappeared_error(site: UnitCallSite, error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, _, _) => is_unit_disappeared_name(site, name.as_str()),
+        zbus::Error::FDO(error) => matches!(
+            (site, error.as_ref()),
+            (
+                UnitCallSite::ObjectProperty,
+                zbus::fdo::Error::UnknownObject(_)
+            )
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn settle_unit_operation<T>(
+    operation: zbus::Result<T>,
+    site: UnitCallSite,
+    unit_still_exists: impl FnOnce() -> Result<bool>,
+    context: &str,
+) -> Result<Option<T>> {
+    match operation {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if is_unit_disappeared_error(site, &error) => {
+            if unit_still_exists().context("recheck transient unit after D-Bus failure")? {
+                Err(error).with_context(|| context.to_owned())
+            } else {
+                Ok(None)
+            }
+        }
+        Err(error) => Err(error).with_context(|| context.to_owned()),
     }
 }
 
@@ -3693,6 +3779,11 @@ mod tests {
             Response::StopVm(_)
         ));
         assert!(core.backend.units.remove(&launched.unit_name).is_some());
+        assert!(matches!(
+            core.handle(Request::StopVm(identity.clone())),
+            Response::StopVm(OperationResult { changed: false })
+        ));
+        assert_eq!(core.capabilities().committed_cpu_millis, 125);
 
         assert!(matches!(
             core.handle(Request::DestroyVm(identity)),
@@ -3700,6 +3791,7 @@ mod tests {
         ));
         assert_eq!(core.capabilities().committed_cpu_millis, 0);
         assert!(!core.records.contains_key(&launched.generation));
+        assert_eq!(core.backend.destroyed_vm_networks.len(), 1);
     }
 
     #[test]
@@ -4170,6 +4262,88 @@ mod tests {
             "CapEff:",
             CAP_SYS_PTRACE_BIT
         ));
+    }
+
+    #[test]
+    fn unit_operation_accepts_only_a_confirmed_mid_operation_disappearance() {
+        assert!(is_unit_disappeared_name(
+            UnitCallSite::Manager,
+            "org.freedesktop.systemd1.NoSuchUnit"
+        ));
+        assert!(is_unit_disappeared_name(
+            UnitCallSite::ObjectProperty,
+            "org.freedesktop.DBus.Error.UnknownObject"
+        ));
+        assert!(is_unit_disappeared_name(
+            UnitCallSite::ObjectProperty,
+            "org.freedesktop.systemd1.NoSuchUnit"
+        ));
+        for name in [
+            "org.freedesktop.DBus.Error.UnknownInterface",
+            "org.freedesktop.DBus.Error.UnknownProperty",
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.systemd1.LoadFailed",
+        ] {
+            assert!(!is_unit_disappeared_name(UnitCallSite::Manager, name));
+            assert!(!is_unit_disappeared_name(
+                UnitCallSite::ObjectProperty,
+                name
+            ));
+        }
+
+        assert_eq!(
+            settle_unit_operation(
+                Ok(7_u8),
+                UnitCallSite::Manager,
+                || panic!("successful call must not recheck"),
+                "stop"
+            )
+            .expect("successful operation"),
+            Some(7)
+        );
+        let disappeared = || {
+            zbus::Error::FDO(Box::new(zbus::fdo::Error::UnknownObject(
+                "injected disappearance".to_owned(),
+            )))
+        };
+        assert_eq!(
+            settle_unit_operation(
+                Err(disappeared()),
+                UnitCallSite::ObjectProperty,
+                || Ok(false),
+                "stop",
+            )
+            .expect("confirmed disappearance"),
+            None::<u8>
+        );
+
+        let existing = settle_unit_operation::<u8>(
+            Err(disappeared()),
+            UnitCallSite::ObjectProperty,
+            || Ok(true),
+            "stop transient unit",
+        )
+        .expect_err("a live unit must preserve the original error");
+        assert!(format!("{existing:#}").contains("injected disappearance"));
+
+        let unknown = settle_unit_operation::<u8>(
+            Err(disappeared()),
+            UnitCallSite::ObjectProperty,
+            || bail!("injected recheck failure"),
+            "stop transient unit",
+        )
+        .expect_err("an inconclusive recheck must fail closed");
+        assert!(format!("{unknown:#}").contains("injected recheck failure"));
+
+        let unrelated = settle_unit_operation::<u8>(
+            Err(zbus::Error::Failure("injected D-Bus error".to_owned())),
+            UnitCallSite::Manager,
+            || panic!("unrelated errors must not be reclassified"),
+            "stop transient unit",
+        )
+        .expect_err("an unrelated D-Bus failure must fail closed");
+        assert!(format!("{unrelated:#}").contains("injected D-Bus error"));
     }
 
     #[test]
