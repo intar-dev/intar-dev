@@ -345,23 +345,28 @@ export function WebSshTerminal({
   if (variant === "embedded") {
     return (
       <div className="flex h-full min-h-0 w-full max-w-full flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
-        <div className="flex shrink-0 flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2">
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{title}</p>
+            {/* Stays in the DOM as the transport live region; only shown
+                while the connection needs attention. */}
             <p
               role="status"
               aria-live="polite"
               aria-atomic="true"
-              className="text-xs text-muted-foreground"
+              className={
+                status === "connected"
+                  ? "sr-only"
+                  : "text-xs text-muted-foreground"
+              }
             >
               Terminal status: {status}
             </p>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <Button
               size="sm"
               variant="outline"
-              className="w-full sm:w-auto"
               onClick={() => {
                 void connect();
               }}
@@ -371,12 +376,7 @@ export function WebSshTerminal({
             </Button>
             {headerActions}
             {showCloseButton ? (
-              <Button
-                size="sm"
-                variant="outline"
-                className="w-full sm:w-auto"
-                onClick={closeTerminal}
-              >
+              <Button size="sm" variant="outline" onClick={closeTerminal}>
                 Close
               </Button>
             ) : null}

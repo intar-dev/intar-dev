@@ -9,7 +9,7 @@ import type {
   ScenarioStatusStep,
 } from "./run-types";
 
-export function formatScenarioElapsedTime(totalSeconds: number) {
+function formatScenarioElapsedTime(totalSeconds: number) {
   const hours = Math.floor(totalSeconds / 3_600);
   const minutes = Math.floor((totalSeconds % 3_600) / 60);
   const seconds = totalSeconds % 60;

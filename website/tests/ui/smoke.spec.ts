@@ -72,7 +72,11 @@ test("run workspace opens a deterministic terminal transport", async ({
     runState: "running",
   });
   await expect(page.locator(".xterm")).toBeVisible();
-  await expect(page.getByText(/Status:\s*connected/i)).toBeVisible();
+  // The transport live region is sr-only while healthy — assert content, not
+  // visibility.
+  await expect(
+    page.getByRole("status").filter({ hasText: /Terminal status:/i }),
+  ).toHaveText(/Terminal status:\s*connected/i);
 });
 
 test("team workspace keeps the active tab in the URL", async ({ page, ui }) => {

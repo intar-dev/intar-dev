@@ -23,8 +23,7 @@ import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
 import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
-import { OpsConsoleRail } from "@/components/app/run/OpsConsoleRail";
-import { RunSummaryCard } from "@/components/app/run/RunSummaryCard";
+import { ChecksSection, RunConsole } from "@/components/app/run/RunConsole";
 import { AssistDrawer } from "@/components/app/run/AssistDrawer";
 import {
   ProbePassToasts,
@@ -577,26 +576,28 @@ export function ScenarioRun() {
     if (!attemptData) return null;
 
     return (
-      <>
+      <RunConsole>
         {showResolutionCard ? (
-          <ResolutionCard
-            runId={runId}
-            scenarioName={attemptData.scenarioName}
-            createdAt={attemptData.createdAt}
-            solveDurationMs={attemptData.solveDurationMs}
-            hints={attemptData.hints}
-            objectives={attemptData.objectives}
-            assisted={attemptData.solution.assisted}
-            pending={destroyScenario.isPending}
-            onEndScenario={requestDestroyScenario}
-          />
-        ) : (
-          <>
-            <OpsConsoleRail
-              vmName={selectedVm?.scenarioVmName ?? null}
+          <div>
+            <ResolutionCard
+              runId={runId}
+              scenarioName={attemptData.scenarioName}
               createdAt={attemptData.createdAt}
               solveDurationMs={attemptData.solveDurationMs}
-              leaseDeadlineMs={leaseDeadlineMs}
+              hints={attemptData.hints}
+              objectives={attemptData.objectives}
+              assisted={attemptData.solution.assisted}
+              pending={destroyScenario.isPending}
+              onEndScenario={requestDestroyScenario}
+            />
+          </div>
+        ) : (
+          <>
+            {/* Keyed per machine so row open/close state never leaks across
+                VM switches. */}
+            <ChecksSection
+              key={selectedVm?.scenarioVmName ?? "checks"}
+              vmName={selectedVm?.scenarioVmName ?? null}
               probes={selectedProbes}
               objectives={attemptData.objectives}
             />
@@ -630,7 +631,7 @@ export function ScenarioRun() {
           provisioning={selectedVm?.provisioning ?? null}
           terminalTarget={selectedVm?.terminalTarget ?? null}
         />
-      </>
+      </RunConsole>
     );
   };
 
@@ -784,7 +785,15 @@ export function ScenarioRun() {
                   <ProbePassToasts toasts={probePassToasts} />
                 </div>
               ) : (
-                <div className="relative min-h-0 flex-1 overflow-y-auto">
+                <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  {/* The lease keeps ticking without a terminal — keep the
+                      countdown's only home visible in this state too. */}
+                  <div className="flex shrink-0 justify-end empty:hidden">
+                    <LeaseCountdown
+                      deadlineMs={leaseDeadlineMs}
+                      className="text-xs"
+                    />
+                  </div>
                   <ScenarioShellStatusCard
                     phase={selectedVm?.phase ?? attemptData.phase}
                     title={selectedVm?.phaseTitle ?? attemptData.phaseTitle}
@@ -810,34 +819,23 @@ export function ScenarioRun() {
               <aside
                 aria-label="Run console"
                 className={cn(
-                  "flex min-h-0 flex-col gap-3 overflow-y-auto pr-1",
+                  "min-h-0 overflow-y-auto pr-1",
                   maximized && "hidden",
                 )}
               >
-                <RunSummaryCard
-                  scenarioName={attemptData.scenarioName}
-                  vmCount={attemptData.vms.length}
-                  solveDurationMs={attemptData.solveDurationMs}
-                />
                 {renderRunRail()}
               </aside>
             ) : (
               <RunStatusDock
                 label="Run checks and assistance"
-                description="Review live checks, lease state, hints, solution, and machine details without leaving the shell."
+                description="Review live checks, hints, solution, and machine details without leaving the shell."
                 status={
-                  <>
-                    {selectedProbes.length
-                      ? `${passedCheckCount}/${selectedProbes.length} checks · ${currentCheckLabel}`
-                      : attemptData.phaseDetail}
-                    <LeaseCountdown
-                      deadlineMs={leaseDeadlineMs}
-                      className="ml-3 text-xs"
-                    />
-                  </>
+                  selectedProbes.length
+                    ? `${passedCheckCount}/${selectedProbes.length} checks · ${currentCheckLabel}`
+                    : attemptData.phaseDetail
                 }
               >
-                <div className="space-y-4">{renderRunRail()}</div>
+                {renderRunRail()}
               </RunStatusDock>
             )}
           </div>

@@ -185,7 +185,7 @@ export function summarizeProbeValue(
     case "service":
       return `${parsed.value.service}: ${parsed.value.actualState ?? "unknown"} (want ${parsed.value.desiredState})`;
     case "k8s_pod_state":
-      return `${parsed.value.matchedPods} pod(s) match ${parsed.value.selector}`;
+      return `${parsed.value.matchedPods} pod(s) match ${parsed.value.selector} (want ${parsed.value.desiredState})`;
     case "command_json_path":
       return parsed.value.matched
         ? `${parsed.value.jsonPath} matched`

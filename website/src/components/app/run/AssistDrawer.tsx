@@ -1,13 +1,8 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, Eye, LifeBuoy, LockKeyhole } from "lucide-react";
+import { Eye, LifeBuoy, LockKeyhole } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
+import { DisclosureRow } from "@/components/app/patterns/DisclosureRow";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +12,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
 import type {
   ScenarioObjective,
   ScenarioRunHint,
@@ -92,7 +86,6 @@ export function AssistDrawer(props: {
   solutionPending: boolean;
   solutionError: string | null;
 }) {
-  const [open, setOpen] = useState(false);
   const groups = useMemo(
     () => groupHints(props.hints, props.objectives),
     [props.hints, props.objectives],
@@ -100,60 +93,47 @@ export function AssistDrawer(props: {
   const revealedCount = props.hints.filter((hint) => hint.revealed).length;
 
   return (
-    <Card size="sm">
-      <CardHeader>
-        <button
-          type="button"
-          className="flex w-full items-center justify-between gap-2 text-left"
-          onClick={() => setOpen((current) => !current)}
-          aria-expanded={open}
-        >
-          <CardTitle className="flex items-center gap-2 font-heading text-base">
-            <LifeBuoy className="size-4 text-muted-foreground" />
-            Assist
-            {props.hints.length ? (
-              <span className="text-xs font-normal text-muted-foreground tabular-nums">
-                {revealedCount}/{props.hints.length}
-              </span>
-            ) : null}
-          </CardTitle>
-          <ChevronDown
-            className={cn(
-              "size-4 shrink-0 text-muted-foreground transition-transform",
-              open && "rotate-180",
-            )}
+    <section aria-label="Assist">
+      <DisclosureRow
+        leading={
+          <LifeBuoy
+            className="size-4 shrink-0 text-muted-foreground"
             aria-hidden="true"
           />
-        </button>
-      </CardHeader>
-      {open ? (
-        <CardContent className="space-y-6">
-          {props.hintError ? (
-            <p className="text-xs text-destructive">{props.hintError}</p>
-          ) : null}
-          {groups.map((group) => (
-            <HintLadder
-              key={group.key}
-              group={group}
-              onReveal={props.onRevealHint}
-              pendingHintKey={props.pendingHintKey}
-            />
-          ))}
-          {!props.hints.length ? (
-            <p className="text-sm text-muted-foreground">
-              This scenario ships no hints. The machine itself is the
-              documentation.
-            </p>
-          ) : null}
-          <SolutionFooter
-            solution={props.solution}
-            onReveal={props.onRevealSolution}
-            pending={props.solutionPending}
-            error={props.solutionError}
+        }
+        title="Assist"
+        meta={
+          props.hints.length
+            ? `${revealedCount}/${props.hints.length}`
+            : undefined
+        }
+        contentClassName="space-y-6"
+      >
+        {props.hintError ? (
+          <p className="text-xs text-destructive">{props.hintError}</p>
+        ) : null}
+        {groups.map((group) => (
+          <HintLadder
+            key={group.key}
+            group={group}
+            onReveal={props.onRevealHint}
+            pendingHintKey={props.pendingHintKey}
           />
-        </CardContent>
-      ) : null}
-    </Card>
+        ))}
+        {!props.hints.length ? (
+          <p className="text-sm text-muted-foreground">
+            This scenario ships no hints. The machine itself is the
+            documentation.
+          </p>
+        ) : null}
+        <SolutionFooter
+          solution={props.solution}
+          onReveal={props.onRevealSolution}
+          pending={props.solutionPending}
+          error={props.solutionError}
+        />
+      </DisclosureRow>
+    </section>
   );
 }
 
