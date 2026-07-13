@@ -149,7 +149,9 @@ for path in \
   /usr/lib/intar/intar-jailerd-self-test \
   /usr/lib/intar/cloud-hypervisor-v53.0 \
   /usr/local/bin/intar-agent; do
-  [ ! -e "${path}" ] && [ ! -L "${path}" ] || die "installed path remains: ${path}"
+  if [ -e "${path}" ] || [ -L "${path}" ]; then
+    die "installed path remains: ${path}"
+  fi
 done
 
 for wants in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
@@ -158,7 +160,9 @@ for wants in /etc/systemd/system/*.wants /etc/systemd/system/*.requires; do
     "${wants}/intar-agent.service" \
     "${wants}/intar-jailerd.socket" \
     "${wants}/intar-jailerd.service"; do
-    [ ! -e "${link}" ] && [ ! -L "${link}" ] || die "systemd enablement link remains: ${link}"
+    if [ -e "${link}" ] || [ -L "${link}" ]; then
+      die "systemd enablement link remains: ${link}"
+    fi
   done
 done
 
