@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "host_id": "host-alpha",
   "run_id": "run-20260702-a",
   "vm_name": "webserver",
@@ -12,6 +12,27 @@
     "guest_cidr": "10.77.0.2/28",
     "gateway": "10.77.0.1",
     "ssh_host_port": 22001
+  },
+  "resource_state": {
+    "cpu_millis": 125,
+    "vcpu_count": 1,
+    "cpu_quota_us": 12500,
+    "cpu_period_us": 100000,
+    "cpu_usage_usec": 3125000,
+    "cpu_user_usec": 2500000,
+    "cpu_system_usec": 625000,
+    "cpu_nr_periods": 300,
+    "cpu_nr_throttled": 299,
+    "cpu_throttled_usec": 21875000
+  },
+  "sandbox": {
+    "healthy": true,
+    "generation": "vm-01jz8w5pjcr7xz6j8p8q2c49ds",
+    "systemd_unit": "intar-vm-vm-01jz8w5pjcr7xz6j8p8q2c49ds.service",
+    "cgroup_path": "/intar-vms.slice/intar-vm-vm-01jz8w5pjcr7xz6j8p8q2c49ds.service",
+    "seccomp_enabled": true,
+    "landlock_enabled": true,
+    "no_new_privs": true
   },
   "ssh_host_keys_openssh": [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey webserver"

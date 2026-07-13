@@ -4,7 +4,7 @@ import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 import type {
   ImageFormat,
   ImageKey,
-  ScenarioManifestV2,
+  ScenarioManifestV3,
 } from "@/generated/catalog";
 
 export interface CatalogScenarioRows {
@@ -14,7 +14,7 @@ export interface CatalogScenarioRows {
 }
 
 export function catalogRowsFromScenarioManifest(
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
   options: { nowUnixMs: number; enabled?: boolean } = { nowUnixMs: Date.now() },
 ): CatalogScenarioRows {
   const enabled = options.enabled ?? true;
@@ -34,7 +34,8 @@ export function catalogRowsFromScenarioManifest(
       kernelSha256: vm.boot.kernel_sha256,
       initrdSha256: vm.boot.initrd_sha256,
       bootCmdline: vm.boot.cmdline,
-      cpu: vm.cpu_count,
+      cpuMillis: vm.cpu_millis,
+      vcpuCount: vm.vcpu_count,
       memoryMib: vm.memory_mib,
       diskMib: vm.disk_mib,
     } satisfies typeof vmScenarioVms.$inferInsert;
@@ -82,7 +83,7 @@ export function catalogRowsFromScenarioManifest(
 
 export async function seedScenarioManifest(
   db: DrizzleD1Database,
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
   options: { nowUnixMs?: number; enabled?: boolean } = {},
 ): Promise<CatalogScenarioRows> {
   const rowOptions: { nowUnixMs: number; enabled?: boolean } = {

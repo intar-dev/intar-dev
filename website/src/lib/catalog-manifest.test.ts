@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ScenarioManifestV2 } from "@/generated/catalog";
+import type { ScenarioManifestV3 } from "@/generated/catalog";
 import { catalogRowsFromScenarioManifest } from "@/lib/catalog-manifest";
 
 describe("catalog manifest", () => {
@@ -52,7 +52,8 @@ describe("catalog manifest", () => {
           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         bootCmdline:
           "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false",
-        cpu: 2,
+        cpuMillis: 125,
+        vcpuCount: 1,
         memoryMib: 2048,
         diskMib: 8192,
       },
@@ -92,11 +93,11 @@ describe("catalog manifest", () => {
   });
 });
 
-function readManifestFixture(): ScenarioManifestV2 {
+function readManifestFixture(): ScenarioManifestV3 {
   return JSON.parse(
     readFileSync(
-      new URL("../generated/fixtures/catalog/scenario-manifest-v2.json", import.meta.url),
+      new URL("../generated/fixtures/catalog/scenario-manifest-v3.json", import.meta.url),
       "utf8",
     ),
-  ) as ScenarioManifestV2;
+  ) as ScenarioManifestV3;
 }

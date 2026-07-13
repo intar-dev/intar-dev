@@ -28,7 +28,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import type { ScenarioHintManifestV2 } from "@/generated/catalog";
+import type { ScenarioHintManifestV3 } from "@/generated/catalog";
 import type {
   ScenarioProbeRecord,
   ScenarioVmRecord,
@@ -37,7 +37,7 @@ import type {
 interface ScenarioRecord extends AdminScenarioSummary {
   briefingMarkdown: string;
   solutionMarkdown: string;
-  hints: ScenarioHintManifestV2[];
+  hints: ScenarioHintManifestV3[];
   probes: ScenarioProbeRecord[];
   vms: ScenarioVmRecord[];
 }
@@ -444,7 +444,7 @@ function HintTile({
   hint,
   fallbackTitle,
 }: {
-  hint: ScenarioHintManifestV2;
+  hint: ScenarioHintManifestV3;
   fallbackTitle: string;
 }) {
   return (
@@ -466,7 +466,8 @@ function VmRecord({
         <p className="font-mono text-sm font-medium">{vm.name}</p>
         <Badge variant="outline">{vm.image}</Badge>
         <div className="flex flex-wrap gap-x-4 text-sm text-muted-foreground">
-          <span>{vm.cpu} vCPU</span>
+          <span>{formatCpu(vm.cpuMillis)} CPU</span>
+          <span>{vm.vcpuCount} vCPU</span>
           <span>{formatMemory(vm.memoryMib)}</span>
           <span>{formatDisk(vm.diskMib)}</span>
         </div>
@@ -487,6 +488,12 @@ function VmRecord({
       </div>
     </div>
   );
+}
+
+function formatCpu(cpuMillis: number): string {
+  return (cpuMillis / 1000).toLocaleString(undefined, {
+    maximumFractionDigits: 3,
+  });
 }
 
 function BootMeta({ label, value }: { label: string; value: string }) {

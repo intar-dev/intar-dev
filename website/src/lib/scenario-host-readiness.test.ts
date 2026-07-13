@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HostStateReportV1 } from "@/generated/bridge";
+import type { HostStateReportV2 } from "@/generated/bridge";
 import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
 import { hostHasImagesReady } from "@/lib/scenario-host-readiness";
 
@@ -37,9 +37,9 @@ describe("hostHasImagesReady", () => {
 });
 
 function report(
-  phase: HostStateReportV1["cached_images"][number]["phase"],
+  phase: HostStateReportV2["cached_images"][number]["phase"],
   imageSha256: string,
-  cachedImages: HostStateReportV1["cached_images"] = [
+  cachedImages: HostStateReportV2["cached_images"] = [
     {
       image_key: { scenario: "pair-ping", vm: "web", arch: "x86_64" },
       image_sha256: imageSha256,
@@ -49,14 +49,17 @@ function report(
       updated_at_unix_ms: 1_762_041_660_000,
     },
   ],
-): HostStateReportV1 {
+): HostStateReportV2 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 1,
     capacity: {
-      cpu_count: 8,
+      total_cpu_millis: 8_000,
+      reserved_cpu_millis: 1_000,
+      schedulable_cpu_millis: 7_000,
+      committed_cpu_millis: 0,
       memory_total_mib: 32_768,
       memory_available_mib: 24_576,
       disk_probe_path: "/var/lib/intar-agent",
@@ -69,6 +72,10 @@ function report(
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
+      supports_jailer_v1: true,
+      supports_hard_cpu_quota: true,
+      supports_landlock: true,
+      supports_cgroup_v2: true,
     },
     cached_images: cachedImages,
     vms: [],

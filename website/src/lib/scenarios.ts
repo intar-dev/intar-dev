@@ -11,7 +11,7 @@ import {
   normalizeScenarioVmDirectBootMetadata,
   parseScenarioDifficulty,
 } from "@/lib/scenario-model";
-import type { ScenarioHintManifestV2 } from "@/generated/catalog";
+import type { ScenarioHintManifestV3 } from "@/generated/catalog";
 import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 
 export interface ScenarioListRecord {
@@ -24,7 +24,7 @@ export interface ScenarioListRecord {
   tags: string[];
   briefingMarkdown: string;
   solutionMarkdown: string;
-  hints: ScenarioHintManifestV2[];
+  hints: ScenarioHintManifestV3[];
   probeCount: number;
   vmCount: number;
   enabled: boolean;
@@ -157,7 +157,8 @@ export async function loadScenario(
             ? vm.imageSha256.trim()
             : null,
         ...directBoot,
-        cpu: vm.cpu,
+        cpuMillis: vm.cpuMillis,
+        vcpuCount: vm.vcpuCount,
         memoryMib: vm.memoryMib,
         diskMib: vm.diskMib,
       };

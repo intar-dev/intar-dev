@@ -12,42 +12,43 @@ export interface ImageKey {
 
 export type Mib = number;
 
-export interface ScenarioHintManifestV2 {
+export interface ScenarioHintManifestV3 {
   id: string;
   title?: string | null;
   body_markdown: string;
 }
 
-export interface ScenarioProbeManifestV2 {
+export interface ScenarioProbeManifestV3 {
   id: string;
   phase: ProbePhase;
   kind: string;
   display_name: string;
   title?: string | null;
   body_markdown?: string | null;
-  hints: ScenarioHintManifestV2[];
+  hints: ScenarioHintManifestV3[];
 }
 
-export interface ScenarioVmBootManifestV2 {
+export interface ScenarioVmBootManifestV3 {
   kernel_sha256: string;
   initrd_sha256: string;
   cmdline: string;
 }
 
-export interface ScenarioVmManifestV2 {
+export interface ScenarioVmManifestV3 {
   name: string;
   image_key: ImageKey;
   image_sha256: string;
   image_format: ImageFormat;
   image_virtual_size_bytes: number;
-  boot: ScenarioVmBootManifestV2;
-  cpu_count: number;
+  boot: ScenarioVmBootManifestV3;
+  cpu_millis: number;
+  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
-  probes: ScenarioProbeManifestV2[];
+  probes: ScenarioProbeManifestV3[];
 }
 
-export interface ScenarioManifestV2 {
+export interface ScenarioManifestV3 {
   schema_version: number;
   scenario_id: string;
   name: string;
@@ -59,6 +60,6 @@ export interface ScenarioManifestV2 {
   tags: string[];
   briefing_markdown: string;
   solution_markdown: string;
-  hints: ScenarioHintManifestV2[];
-  vms: ScenarioVmManifestV2[];
+  hints: ScenarioHintManifestV3[];
+  vms: ScenarioVmManifestV3[];
 }

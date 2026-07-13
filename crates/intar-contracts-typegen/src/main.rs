@@ -5,11 +5,11 @@ use std::{fs, path::Path};
 use anyhow::{Context as _, Result};
 use intar_contracts::{
     bridge::{
-        BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV5, BuildReportV1,
+        BRIDGE_PROTOCOL_VERSION, BUILD_REPORT_SCHEMA_VERSION, BridgeMessageV6, BuildReportV1,
         DesiredBuildV1, HOST_DESIRED_STATE_SCHEMA_VERSION, HOST_STATE_REPORT_SCHEMA_VERSION,
-        HostDesiredStateV1, HostStateReportV1, VM_REPORT_SCHEMA_VERSION, VmReportV1,
+        HostDesiredStateV2, HostStateReportV2, VM_REPORT_SCHEMA_VERSION, VmReportV2,
     },
-    catalog::ScenarioManifestV2,
+    catalog::ScenarioManifestV3,
     guest::{
         ENV_DNS_SERVERS, ENV_GATEWAY, ENV_GUEST_IP_CIDR, ENV_KINO_HOST_READY_PORT,
         ENV_KINO_VSOCK_CID, ENV_KINO_VSOCK_PORT, ENV_PEER_HOSTS_B64, ENV_SSH_AUTHORIZED_KEYS_B64,
@@ -30,6 +30,21 @@ fn main() -> Result<()> {
     fs::create_dir_all(fixture_dir.join("catalog")).context("create catalog fixture directory")?;
     fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
 
+    for obsolete in [
+        "schemas/catalog-scenario-manifest-v2.schema.json",
+        "schemas/bridge-host-desired-state-v1.schema.json",
+        "schemas/bridge-host-state-report-v1.schema.json",
+        "schemas/bridge-vm-report-v1.schema.json",
+        "schemas/bridge-message-v5.schema.json",
+        "fixtures/catalog/scenario-manifest-v2.json",
+        "fixtures/bridge/host-desired-state-v1.json",
+        "fixtures/bridge/host-state-report-v1.json",
+        "fixtures/bridge/vm-report-v1.json",
+        "fixtures/bridge/sync-request-v5.json",
+    ] {
+        remove_file_if_exists(&out_dir.join(obsolete))?;
+    }
+
     write_schema(
         &schema_dir.join("runtime-env.schema.json"),
         &schema_for!(RuntimeEnv),
@@ -43,20 +58,20 @@ fn main() -> Result<()> {
         &schema_for!(IssueTerminalSessionResponse),
     )?;
     write_schema(
-        &schema_dir.join("catalog-scenario-manifest-v2.schema.json"),
-        &schema_for!(ScenarioManifestV2),
+        &schema_dir.join("catalog-scenario-manifest-v3.schema.json"),
+        &schema_for!(ScenarioManifestV3),
     )?;
     write_schema(
-        &schema_dir.join("bridge-host-desired-state-v1.schema.json"),
-        &schema_for!(HostDesiredStateV1),
+        &schema_dir.join("bridge-host-desired-state-v2.schema.json"),
+        &schema_for!(HostDesiredStateV2),
     )?;
     write_schema(
-        &schema_dir.join("bridge-host-state-report-v1.schema.json"),
-        &schema_for!(HostStateReportV1),
+        &schema_dir.join("bridge-host-state-report-v2.schema.json"),
+        &schema_for!(HostStateReportV2),
     )?;
     write_schema(
-        &schema_dir.join("bridge-vm-report-v1.schema.json"),
-        &schema_for!(VmReportV1),
+        &schema_dir.join("bridge-vm-report-v2.schema.json"),
+        &schema_for!(VmReportV2),
     )?;
     write_schema(
         &schema_dir.join("bridge-desired-build-v1.schema.json"),
@@ -67,8 +82,8 @@ fn main() -> Result<()> {
         &schema_for!(BuildReportV1),
     )?;
     write_schema(
-        &schema_dir.join("bridge-message-v5.schema.json"),
-        &schema_for!(BridgeMessageV5),
+        &schema_dir.join("bridge-message-v6.schema.json"),
+        &schema_for!(BridgeMessageV6),
     )?;
 
     fs::write(out_dir.join("constants.ts"), constants_ts()).context("write constants.ts")?;
@@ -85,20 +100,20 @@ fn main() -> Result<()> {
         &fixture_dir.join("stargate/issue-terminal-session-response.json"),
     )?;
     copy_fixture(
-        "crates/intar-contracts/fixtures/catalog/scenario-manifest-v2.json",
-        &fixture_dir.join("catalog/scenario-manifest-v2.json"),
+        "crates/intar-contracts/fixtures/catalog/scenario-manifest-v3.json",
+        &fixture_dir.join("catalog/scenario-manifest-v3.json"),
     )?;
     copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/host-desired-state-v1.json",
-        &fixture_dir.join("bridge/host-desired-state-v1.json"),
+        "crates/intar-contracts/fixtures/bridge/host-desired-state-v2.json",
+        &fixture_dir.join("bridge/host-desired-state-v2.json"),
     )?;
     copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/host-state-report-v1.json",
-        &fixture_dir.join("bridge/host-state-report-v1.json"),
+        "crates/intar-contracts/fixtures/bridge/host-state-report-v2.json",
+        &fixture_dir.join("bridge/host-state-report-v2.json"),
     )?;
     copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/vm-report-v1.json",
-        &fixture_dir.join("bridge/vm-report-v1.json"),
+        "crates/intar-contracts/fixtures/bridge/vm-report-v2.json",
+        &fixture_dir.join("bridge/vm-report-v2.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/bridge/desired-build-v1.json",
@@ -109,8 +124,8 @@ fn main() -> Result<()> {
         &fixture_dir.join("bridge/build-report-v1.json"),
     )?;
     copy_fixture(
-        "crates/intar-contracts/fixtures/bridge/sync-request-v5.json",
-        &fixture_dir.join("bridge/sync-request-v5.json"),
+        "crates/intar-contracts/fixtures/bridge/sync-request-v6.json",
+        &fixture_dir.join("bridge/sync-request-v6.json"),
     )?;
 
     Ok(())
@@ -125,6 +140,14 @@ fn copy_fixture(source: &str, dest: &Path) -> Result<()> {
     fs::copy(source, dest)
         .with_context(|| format!("copy fixture {source} to {}", dest.display()))?;
     Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove obsolete {}", path.display())),
+    }
 }
 
 fn constants_ts() -> String {
@@ -238,42 +261,43 @@ export interface ImageKey {
 
 export type Mib = number;
 
-export interface ScenarioHintManifestV2 {
+export interface ScenarioHintManifestV3 {
   id: string;
   title?: string | null;
   body_markdown: string;
 }
 
-export interface ScenarioProbeManifestV2 {
+export interface ScenarioProbeManifestV3 {
   id: string;
   phase: ProbePhase;
   kind: string;
   display_name: string;
   title?: string | null;
   body_markdown?: string | null;
-  hints: ScenarioHintManifestV2[];
+  hints: ScenarioHintManifestV3[];
 }
 
-export interface ScenarioVmBootManifestV2 {
+export interface ScenarioVmBootManifestV3 {
   kernel_sha256: string;
   initrd_sha256: string;
   cmdline: string;
 }
 
-export interface ScenarioVmManifestV2 {
+export interface ScenarioVmManifestV3 {
   name: string;
   image_key: ImageKey;
   image_sha256: string;
   image_format: ImageFormat;
   image_virtual_size_bytes: number;
-  boot: ScenarioVmBootManifestV2;
-  cpu_count: number;
+  boot: ScenarioVmBootManifestV3;
+  cpu_millis: number;
+  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
-  probes: ScenarioProbeManifestV2[];
+  probes: ScenarioProbeManifestV3[];
 }
 
-export interface ScenarioManifestV2 {
+export interface ScenarioManifestV3 {
   schema_version: number;
   scenario_id: string;
   name: string;
@@ -285,8 +309,8 @@ export interface ScenarioManifestV2 {
   tags: string[];
   briefing_markdown: string;
   solution_markdown: string;
-  hints: ScenarioHintManifestV2[];
-  vms: ScenarioVmManifestV2[];
+  hints: ScenarioHintManifestV3[];
+  vms: ScenarioVmManifestV3[];
 }
 "#
 }
@@ -303,67 +327,67 @@ export type SyncRequestReason =
 
 export type HostRoleV1 = "agent" | "builder";
 
-export interface ClientHelloV5 {
+export interface ClientHelloV6 {
   protocol_version: number;
   host_id: string;
   agent_version: string;
   role: HostRoleV1;
   last_applied_desired_version?: number | null;
-  capabilities: HostCapabilitiesV1;
+  capabilities: HostCapabilitiesV2;
 }
 
-export interface ServerHelloV5 {
+export interface ServerHelloV6 {
   protocol_version: number;
   host_id: string;
   desired_version: number;
 }
 
-export interface DesiredStateV5 {
+export interface DesiredStateV6 {
   protocol_version: number;
   host_id: string;
-  desired_state: HostDesiredStateV1;
+  desired_state: HostDesiredStateV2;
 }
 
-export interface StateReportV5 {
+export interface StateReportV6 {
   protocol_version: number;
   host_id: string;
-  report: HostStateReportV1;
+  report: HostStateReportV2;
 }
 
-export interface VmReportV5 {
+export interface VmReportV6 {
   protocol_version: number;
   host_id: string;
-  report: VmReportV1;
+  report: VmReportV2;
 }
 
-export interface BuildReportV5 {
+export interface BuildReportV6 {
   protocol_version: number;
   host_id: string;
   report: BuildReportV1;
 }
 
-export interface SyncRequestV5 {
+export interface SyncRequestV6 {
   protocol_version: number;
   host_id: string;
   reason: SyncRequestReason;
 }
 
-export type BridgeMessageV5 =
-  | ({ type: "client_hello" } & ClientHelloV5)
-  | ({ type: "server_hello" } & ServerHelloV5)
-  | ({ type: "desired_state" } & DesiredStateV5)
-  | ({ type: "state_report" } & StateReportV5)
-  | ({ type: "vm_report" } & VmReportV5)
-  | ({ type: "build_report" } & BuildReportV5)
-  | ({ type: "sync_request" } & SyncRequestV5);
+export type BridgeMessageV6 =
+  | ({ type: "client_hello" } & ClientHelloV6)
+  | ({ type: "server_hello" } & ServerHelloV6)
+  | ({ type: "desired_state" } & DesiredStateV6)
+  | ({ type: "state_report" } & StateReportV6)
+  | ({ type: "vm_report" } & VmReportV6)
+  | ({ type: "build_report" } & BuildReportV6)
+  | ({ type: "sync_request" } & SyncRequestV6);
 
-export interface HostDesiredStateV1 {
+export interface HostDesiredStateV2 {
   schema_version: number;
   host_id: string;
   version: number;
   generated_at_unix_ms: number;
   cached_images: DesiredCachedImageV1[];
-  vms: DesiredVmV1[];
+  vms: DesiredVmV2[];
   builds: DesiredBuildV1[];
 }
 
@@ -384,37 +408,41 @@ export interface DesiredBuildV1 {
 
 export type DesiredVmPhase = "running" | "absent";
 
-export interface DesiredVmV1 {
+export interface DesiredVmV2 {
   run_id: string;
   vm_name: string;
   desired_phase: DesiredVmPhase;
   image_key: ImageKey;
   image_sha256: string;
-  resources: VmResourcesV1;
+  resources: VmResourcesV2;
   ssh_authorized_keys_openssh: string[];
   lease_expires_at_unix_ms: number;
 }
 
-export interface VmResourcesV1 {
-  cpu_count: number;
+export interface VmResourcesV2 {
+  cpu_millis: number;
+  vcpu_count: number;
   memory_mib: Mib;
   disk_mib: Mib;
 }
 
-export interface HostStateReportV1 {
+export interface HostStateReportV2 {
   schema_version: number;
   host_id: string;
   observed_at_unix_ms: number;
   applied_desired_version: number;
-  capacity: HostCapacityV1;
-  capabilities: HostCapabilitiesV1;
+  capacity: HostCapacityV2;
+  capabilities: HostCapabilitiesV2;
   cached_images: CachedImageStateV1[];
-  vms: VmActualStateV1[];
+  vms: VmActualStateV2[];
   builds: BuildReportV1[];
 }
 
-export interface HostCapacityV1 {
-  cpu_count: number;
+export interface HostCapacityV2 {
+  total_cpu_millis: number;
+  reserved_cpu_millis: number;
+  schedulable_cpu_millis: number;
+  committed_cpu_millis: number;
   memory_total_mib: Mib;
   memory_available_mib: Mib;
   disk_probe_path: string;
@@ -427,12 +455,39 @@ export interface HostCapacityV1 {
   primary_ipv6?: string | null;
 }
 
-export interface HostCapabilitiesV1 {
+export interface HostCapabilitiesV2 {
   arch: ImageArchitecture;
   supports_kvm: boolean;
   supports_vsock: boolean;
   supports_reflink: boolean;
   supports_nftables: boolean;
+  supports_jailer_v1: boolean;
+  supports_hard_cpu_quota: boolean;
+  supports_landlock: boolean;
+  supports_cgroup_v2: boolean;
+}
+
+export interface VmResourceStateV2 {
+  cpu_millis: number;
+  vcpu_count: number;
+  cpu_quota_us: number;
+  cpu_period_us: number;
+  cpu_usage_usec: number;
+  cpu_user_usec: number;
+  cpu_system_usec: number;
+  cpu_nr_periods: number;
+  cpu_nr_throttled: number;
+  cpu_throttled_usec: number;
+}
+
+export interface VmSandboxStateV1 {
+  healthy: boolean;
+  generation: string;
+  systemd_unit: string;
+  cgroup_path: string;
+  seccomp_enabled: boolean;
+  landlock_enabled: boolean;
+  no_new_privs: boolean;
 }
 
 export type ImageCachePhase =
@@ -464,7 +519,7 @@ export type VmPhase =
   | "failed"
   | "absent";
 
-export interface VmActualStateV1 {
+export interface VmActualStateV2 {
   run_id: string;
   vm_name: string;
   desired_version?: number | null;
@@ -472,6 +527,8 @@ export interface VmActualStateV1 {
   image_key?: ImageKey | null;
   image_sha256?: string | null;
   network?: VmNetworkStateV1 | null;
+  resource_state?: VmResourceStateV2 | null;
+  sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];
   archive?: VmArchiveStateV1 | null;
@@ -512,7 +569,7 @@ export interface VmArchiveStateV1 {
   error?: string | null;
 }
 
-export interface VmReportV1 {
+export interface VmReportV2 {
   schema_version: number;
   host_id: string;
   run_id: string;
@@ -521,6 +578,8 @@ export interface VmReportV1 {
   observed_at_unix_ms: number;
   phase: VmPhase;
   network?: VmNetworkStateV1 | null;
+  resource_state?: VmResourceStateV2 | null;
+  sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
   probes: VmProbeSnapshotV1[];
   archive?: VmArchiveStateV1 | null;

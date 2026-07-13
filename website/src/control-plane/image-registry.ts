@@ -11,10 +11,10 @@ import {
 import type {
   ImageArchitecture,
   ImageKey,
-  ScenarioHintManifestV2,
-  ScenarioManifestV2,
-  ScenarioProbeManifestV2,
-  ScenarioVmManifestV2,
+  ScenarioHintManifestV3,
+  ScenarioManifestV3,
+  ScenarioProbeManifestV3,
+  ScenarioVmManifestV3,
 } from "@/generated/catalog";
 import type { AgentHostRole, ImageBuildBundleMeta } from "@/db/schema";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
@@ -31,7 +31,7 @@ const textDecoder = new TextDecoder();
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 const IMAGE_KEY_RE = /^[A-Za-z0-9._-]+$/;
 const BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const EXPECTED_BUILD_FORMAT_VERSION = "intar-image-build-v2";
+const EXPECTED_BUILD_FORMAT_VERSION = "intar-image-build-v3";
 const TAR_BLOCK_SIZE = 512;
 const MAX_BUNDLE_TAR_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGES_PER_KEY = 2;
@@ -669,7 +669,7 @@ type PreparedVmImage = {
 async function prepareBootArtifacts(
   env: Cloudflare.Env,
   form: FormData,
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
 ): Promise<
   | {
       ok: true;
@@ -753,7 +753,7 @@ async function prepareBootArtifacts(
 async function prepareVmImages(
   env: Cloudflare.Env,
   form: FormData,
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
 ): Promise<
   { ok: true; prepared: PreparedVmImage[] } | { ok: false; response: Response }
 > {
@@ -960,7 +960,7 @@ async function handleAgentBuildLogUpload(
 
 async function bumpHostCachedImages(
   db: DrizzleD1Database,
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
 ): Promise<void> {
   const nowUnixMs = Date.now();
   const images = manifest.vms.map((vm) => ({
@@ -995,7 +995,10 @@ export function isRuntimeImageCacheHost(host: {
   disabled: boolean;
   scenarioEnabled: boolean;
 }): boolean {
-  return host.role === "agent" && !host.disabled && host.scenarioEnabled;
+  // Maintenance disables placement, not cache convergence. Keeping this
+  // independent from scenarioEnabled lets a drained host prewarm the newly
+  // published generation before starts are re-enabled.
+  return host.role === "agent" && !host.disabled;
 }
 
 async function handleAgentImageIndex(
@@ -1289,7 +1292,7 @@ function isSafeBuildId(value: string): boolean {
 async function readManifest(
   value: FormDataEntryValue | null,
 ): Promise<
-  { ok: true; value: ScenarioManifestV2 } | { ok: false; response: Response }
+  { ok: true; value: ScenarioManifestV3 } | { ok: false; response: Response }
 > {
   if (!value) {
     return {
@@ -1314,7 +1317,7 @@ async function readManifest(
       response: jsonResponse({ error: "manifest is not a JSON object" }, 400),
     };
   }
-  return { ok: true, value: parsed as unknown as ScenarioManifestV2 };
+  return { ok: true, value: parsed as unknown as ScenarioManifestV3 };
 }
 
 async function readBundleMeta(value: FormDataEntryValue | null): Promise<
@@ -1714,9 +1717,9 @@ async function requireBuilderAgentRequest(
   return verified;
 }
 
-function validateManifest(manifest: ScenarioManifestV2): Response | null {
-  if (manifest.schema_version !== 2) {
-    return jsonResponse({ error: "manifest schema_version must be 2" }, 400);
+function validateManifest(manifest: ScenarioManifestV3): Response | null {
+  if (manifest.schema_version !== 3) {
+    return jsonResponse({ error: "manifest schema_version must be 3" }, 400);
   }
   const scenarioId = manifest.scenario_id?.trim();
   if (!scenarioId) {
@@ -1813,8 +1816,8 @@ function isDirectBootCmdline(value: string): boolean {
 }
 
 function normalizePublishManifest(
-  manifest: ScenarioManifestV2,
-): ScenarioManifestV2 {
+  manifest: ScenarioManifestV3,
+): ScenarioManifestV3 {
   const scenarioId = manifest.scenario_id.trim();
   return {
     ...manifest,
@@ -1845,7 +1848,7 @@ function normalizePublishManifest(
 }
 
 function hasValidScenarioMetadata(
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
   scenarioId: string,
 ): boolean {
   return (
@@ -1853,7 +1856,7 @@ function hasValidScenarioMetadata(
     Boolean(readString(manifest.title)) &&
     Boolean(readString(manifest.description)) &&
     isScenarioDifficulty(manifest.difficulty) &&
-    isPositiveInteger(manifest.estimated_minutes) &&
+    isPositiveU32(manifest.estimated_minutes) &&
     Array.isArray(manifest.tags) &&
     manifest.tags.every((tag) => Boolean(readString(tag))) &&
     Boolean(readString(manifest.briefing_markdown)) &&
@@ -1861,15 +1864,17 @@ function hasValidScenarioMetadata(
   );
 }
 
-function hasValidVmResources(vm: ScenarioVmManifestV2): boolean {
+function hasValidVmResources(vm: ScenarioVmManifestV3): boolean {
   return (
-    isPositiveInteger(vm.cpu_count) &&
-    isPositiveInteger(vm.memory_mib) &&
-    isPositiveInteger(vm.disk_mib)
+    isPositiveU32(vm.cpu_millis) &&
+    isPositiveU16(vm.vcpu_count) &&
+    vm.cpu_millis <= vm.vcpu_count * 1000 &&
+    isPositiveU32(vm.memory_mib) &&
+    isPositiveU32(vm.disk_mib)
   );
 }
 
-function validateVmProbes(probes: ScenarioProbeManifestV2[]): Response | null {
+function validateVmProbes(probes: ScenarioProbeManifestV3[]): Response | null {
   if (!Array.isArray(probes)) {
     return jsonResponse({ error: "manifest contains an invalid probe" }, 400);
   }
@@ -1899,7 +1904,7 @@ function validateVmProbes(probes: ScenarioProbeManifestV2[]): Response | null {
   return null;
 }
 
-function hasValidHintList(hints: ScenarioHintManifestV2[]): boolean {
+function hasValidHintList(hints: ScenarioHintManifestV3[]): boolean {
   if (!Array.isArray(hints)) {
     return false;
   }
@@ -1920,7 +1925,7 @@ function hasValidHintList(hints: ScenarioHintManifestV2[]): boolean {
   return true;
 }
 
-function imageFileForVm(form: FormData, vm: ScenarioVmManifestV2): File | null {
+function imageFileForVm(form: FormData, vm: ScenarioVmManifestV3): File | null {
   const field = form.get(`image:${vm.name}`);
   if (field instanceof File) return field;
 
@@ -1951,7 +1956,7 @@ function artifactFilenameMatches(filename: string, sha256: string): boolean {
   return filename === sha256 || filename === `${sha256}.artifact`;
 }
 
-function bootArtifactSha256s(manifest: ScenarioManifestV2): string[] {
+function bootArtifactSha256s(manifest: ScenarioManifestV3): string[] {
   const values = new Set<string>();
   for (const vm of manifest.vms) {
     const kernelSha256 = normalizeSha256(vm.boot.kernel_sha256);
@@ -1984,8 +1989,16 @@ function isProbePhase(value: unknown): boolean {
   return value === "boot" || value === "scenario";
 }
 
-function isPositiveInteger(value: unknown): boolean {
-  return typeof value === "number" && Number.isInteger(value) && value > 0;
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isPositiveU16(value: unknown): boolean {
+  return isPositiveInteger(value) && value <= 0xffff;
+}
+
+function isPositiveU32(value: unknown): boolean {
+  return isPositiveInteger(value) && value <= 0xffff_ffff;
 }
 
 function isOptionalString(value: unknown): boolean {

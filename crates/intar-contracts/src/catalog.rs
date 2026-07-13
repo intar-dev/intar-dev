@@ -37,7 +37,7 @@ pub enum ScenarioDifficulty {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioHintManifestV2 {
+pub struct ScenarioHintManifestV3 {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -46,7 +46,8 @@ pub struct ScenarioHintManifestV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioManifestV2 {
+pub struct ScenarioManifestV3 {
+    #[schemars(range(min = 3, max = 3))]
     pub schema_version: u16,
     pub scenario_id: String,
     pub name: String,
@@ -58,23 +59,26 @@ pub struct ScenarioManifestV2 {
     pub tags: Vec<String>,
     pub briefing_markdown: String,
     pub solution_markdown: String,
-    pub hints: Vec<ScenarioHintManifestV2>,
-    pub vms: Vec<ScenarioVmManifestV2>,
+    pub hints: Vec<ScenarioHintManifestV3>,
+    pub vms: Vec<ScenarioVmManifestV3>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioVmManifestV2 {
+pub struct ScenarioVmManifestV3 {
     pub name: String,
     pub image_key: ImageKey,
     pub image_sha256: String,
     pub image_format: ImageFormat,
     pub image_virtual_size_bytes: u64,
-    pub boot: ScenarioVmBootManifestV2,
-    pub cpu_count: u16,
+    pub boot: ScenarioVmBootManifestV3,
+    #[schemars(range(min = 1))]
+    pub cpu_millis: u32,
+    #[schemars(range(min = 1))]
+    pub vcpu_count: u16,
     pub memory_mib: Mib,
     pub disk_mib: Mib,
-    pub probes: Vec<ScenarioProbeManifestV2>,
+    pub probes: Vec<ScenarioProbeManifestV3>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -85,7 +89,7 @@ pub enum ImageFormat {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioVmBootManifestV2 {
+pub struct ScenarioVmBootManifestV3 {
     pub kernel_sha256: String,
     pub initrd_sha256: String,
     pub cmdline: String,
@@ -93,7 +97,7 @@ pub struct ScenarioVmBootManifestV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScenarioProbeManifestV2 {
+pub struct ScenarioProbeManifestV3 {
     pub id: String,
     pub phase: ProbePhase,
     pub kind: String,
@@ -102,5 +106,5 @@ pub struct ScenarioProbeManifestV2 {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_markdown: Option<String>,
-    pub hints: Vec<ScenarioHintManifestV2>,
+    pub hints: Vec<ScenarioHintManifestV3>,
 }

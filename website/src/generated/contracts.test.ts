@@ -22,29 +22,39 @@ describe("generated contract schemas", () => {
 
   it("validates the scenario manifest fixture", () => {
     expect(validateFixture(
-      "schemas/catalog-scenario-manifest-v2.schema.json",
-      "fixtures/catalog/scenario-manifest-v2.json",
+      "schemas/catalog-scenario-manifest-v3.schema.json",
+      "fixtures/catalog/scenario-manifest-v3.json",
     )).toBe(true);
+  });
+
+  it("rejects a v2 scenario manifest version", () => {
+    const fixture = readJson(
+      "fixtures/catalog/scenario-manifest-v3.json",
+    ) as Record<string, unknown>;
+    expect(validateValue(
+      "schemas/catalog-scenario-manifest-v3.schema.json",
+      { ...fixture, schema_version: 2 },
+    )).toBe(false);
   });
 
   it("validates the bridge desired state fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-host-desired-state-v1.schema.json",
-      "fixtures/bridge/host-desired-state-v1.json",
+      "schemas/bridge-host-desired-state-v2.schema.json",
+      "fixtures/bridge/host-desired-state-v2.json",
     )).toBe(true);
   });
 
   it("validates the bridge host state report fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-host-state-report-v1.schema.json",
-      "fixtures/bridge/host-state-report-v1.json",
+      "schemas/bridge-host-state-report-v2.schema.json",
+      "fixtures/bridge/host-state-report-v2.json",
     )).toBe(true);
   });
 
   it("validates the bridge vm report fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-vm-report-v1.schema.json",
-      "fixtures/bridge/vm-report-v1.json",
+      "schemas/bridge-vm-report-v2.schema.json",
+      "fixtures/bridge/vm-report-v2.json",
     )).toBe(true);
   });
 
@@ -64,17 +74,33 @@ describe("generated contract schemas", () => {
 
   it("validates the bridge message fixture", () => {
     expect(validateFixture(
-      "schemas/bridge-message-v5.schema.json",
-      "fixtures/bridge/sync-request-v5.json",
+      "schemas/bridge-message-v6.schema.json",
+      "fixtures/bridge/sync-request-v6.json",
     )).toBe(true);
+  });
+
+  it("rejects a v5 bridge protocol version", () => {
+    const fixture = readJson(
+      "fixtures/bridge/sync-request-v6.json",
+    ) as Record<string, unknown>;
+    expect(validateValue(
+      "schemas/bridge-message-v6.schema.json",
+      { ...fixture, protocol_version: 5 },
+    )).toBe(false);
   });
 });
 
 function validateFixture(schemaPath: string, fixturePath: string): boolean {
+  const value = readJson(fixturePath);
+  const valid = validateValue(schemaPath, value);
+  return valid;
+}
+
+function validateValue(schemaPath: string, value: unknown): boolean {
   const validate = ajv.compile(readJson(schemaPath) as AnySchema);
-  const valid = validate(readJson(fixturePath));
+  const valid = validate(value);
   if (!valid) {
-    throw new Error(JSON.stringify(validate.errors, null, 2));
+    return false;
   }
   return true;
 }

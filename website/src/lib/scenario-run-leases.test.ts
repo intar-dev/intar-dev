@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { HostDesiredStateV1 } from "@/generated/bridge";
+import type { HostDesiredStateV2 } from "@/generated/bridge";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 
 describe("selectOverdueRunLeases", () => {
@@ -7,7 +7,7 @@ describe("selectOverdueRunLeases", () => {
     expect(
       selectOverdueRunLeases(
         {
-          schema_version: 1,
+          schema_version: 3,
           host_id: "host-alpha",
           version: 1,
           generated_at_unix_ms: 1_000,
@@ -34,7 +34,7 @@ function desiredVm(
   vmName: string,
   leaseExpiresAt: number,
   desiredPhase: "running" | "absent",
-): HostDesiredStateV1["vms"][number] {
+): HostDesiredStateV2["vms"][number] {
   return {
     run_id: runId,
     vm_name: vmName,
@@ -42,7 +42,8 @@ function desiredVm(
     image_key: { scenario: "scenario", vm: vmName, arch: "x86_64" },
     image_sha256: "a".repeat(64),
     resources: {
-      cpu_count: 1,
+      cpu_millis: 1_000,
+      vcpu_count: 1,
       memory_mib: 512,
       disk_mib: 4,
     },

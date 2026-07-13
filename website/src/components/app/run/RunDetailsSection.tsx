@@ -53,7 +53,9 @@ export function RunDetailsSection({
               ) : null}
               {resources ? (
                 <DetailRow label="Resources">
-                  {resources.vcpus} vCPU ·{" "}
+                  {(resources.cpuMillis / 1000).toLocaleString(undefined, {
+                    maximumFractionDigits: 3,
+                  })} CPU · {resources.vcpuCount} vCPU ·{" "}
                   {formatBytes(resources.memoryMib * 1024 * 1024)} RAM ·{" "}
                   {formatBytes(resources.diskMib * 1024 * 1024)} disk
                 </DetailRow>

@@ -1,8 +1,8 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type {
-  ScenarioManifestV2,
-  ScenarioVmManifestV2,
+  ScenarioManifestV3,
+  ScenarioVmManifestV3,
 } from "../src/generated/catalog";
 import type {
   DashboardArchivedRun,
@@ -44,11 +44,11 @@ interface Options {
 
 interface LoadedManifest {
   path: string;
-  manifest: ScenarioManifestV2;
+  manifest: ScenarioManifestV3;
 }
 
 interface RequiredImage {
-  image_key: ScenarioVmManifestV2["image_key"];
+  image_key: ScenarioVmManifestV3["image_key"];
   image_sha256: string;
 }
 
@@ -71,7 +71,7 @@ interface HostSummary {
       arch: string;
     };
     cachedImages: Array<{
-      image_key: ScenarioVmManifestV2["image_key"];
+      image_key: ScenarioVmManifestV3["image_key"];
       image_sha256: string;
       phase: string;
       error?: string | null;
@@ -120,7 +120,7 @@ interface AdminBuildSummary {
 interface AdminScenarioResponse {
   scenario: {
     vms: Array<{
-      imageKey: ScenarioVmManifestV2["image_key"] | null;
+      imageKey: ScenarioVmManifestV3["image_key"] | null;
       imageSha256: string | null;
       imageFormat: string;
       imageVirtualSizeBytes: number;
@@ -324,7 +324,7 @@ async function runLiveE2e(options: Options): Promise<void> {
 async function publishManifest(
   options: Options,
   loadedManifests: LoadedManifest[],
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
 ): Promise<void> {
   if (!options.publishToken) {
     throw new Error(
@@ -1783,12 +1783,12 @@ async function loadManifests(paths: string[]): Promise<LoadedManifest[]> {
   return loaded;
 }
 
-function parseManifest(value: unknown, path: string): ScenarioManifestV2 {
+export function parseManifest(value: unknown, path: string): ScenarioManifestV3 {
   if (!isRecord(value)) {
     throw new Error(`manifest ${path} is not a JSON object`);
   }
-  if (value.schema_version !== 2) {
-    throw new Error(`manifest ${path} must use schema_version 2`);
+  if (value.schema_version !== 3) {
+    throw new Error(`manifest ${path} must use schema_version 3`);
   }
   if (typeof value.scenario_id !== "string" || !value.scenario_id) {
     throw new Error(`manifest ${path} is missing scenario_id`);
@@ -1799,7 +1799,7 @@ function parseManifest(value: unknown, path: string): ScenarioManifestV2 {
   value.vms.forEach((vm, index) =>
     assertManifestVmDirectBootMetadata(vm, path, index),
   );
-  return value as unknown as ScenarioManifestV2;
+  return value as unknown as ScenarioManifestV3;
 }
 
 function assertManifestVmDirectBootMetadata(
@@ -1856,12 +1856,12 @@ function assertManifestVmDirectBootMetadata(
   }
 }
 
-function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV2 {
+function combineManifests(loaded: LoadedManifest[]): ScenarioManifestV3 {
   const [first, ...rest] = loaded;
   if (!first) {
     throw new Error("cannot combine zero manifests");
   }
-  const combined: ScenarioManifestV2 = {
+  const combined: ScenarioManifestV3 = {
     ...first.manifest,
     vms: [...first.manifest.vms],
   };
@@ -1898,7 +1898,7 @@ function inferImagePaths(loaded: LoadedManifest[]): Map<string, string> {
 
 async function inferArtifactPaths(
   loaded: LoadedManifest[],
-  manifest: ScenarioManifestV2,
+  manifest: ScenarioManifestV3,
 ): Promise<Map<string, string>> {
   const required = new Set(bootArtifactSha256s(manifest));
   const inferred = new Map<string, string>();
@@ -2178,7 +2178,7 @@ function imageLabel(vm: RequiredImage): string {
   return `${vm.image_key.scenario}/${vm.image_key.vm}/${vm.image_key.arch}@${vm.image_sha256.slice(0, 12)}`;
 }
 
-function bootArtifactSha256s(manifest: ScenarioManifestV2): string[] {
+function bootArtifactSha256s(manifest: ScenarioManifestV3): string[] {
   const values = new Set<string>();
   for (const vm of manifest.vms) {
     values.add(vm.boot.kernel_sha256.toLowerCase());

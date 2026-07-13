@@ -3,7 +3,7 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use intar_contracts::catalog::ScenarioManifestV2;
+use intar_contracts::catalog::ScenarioManifestV3;
 use reqwest::blocking::multipart::Form;
 
 use crate::config::ImageUploadConfig;
@@ -73,7 +73,7 @@ impl ImageUploader {
 
     pub fn publish_manifest(
         &self,
-        manifest: &ScenarioManifestV2,
+        manifest: &ScenarioManifestV3,
         images: &[PublishImageFile],
     ) -> Result<PublishReceipt> {
         self.publish_manifest_with_artifacts(manifest, images, &[])
@@ -86,7 +86,7 @@ impl ImageUploader {
     /// payloads is rejected with 413.
     pub fn publish_manifest_with_artifacts(
         &self,
-        manifest: &ScenarioManifestV2,
+        manifest: &ScenarioManifestV3,
         images: &[PublishImageFile],
         artifacts: &[PublishArtifactFile],
     ) -> Result<PublishReceipt> {
@@ -231,7 +231,7 @@ struct UploadCompleteResponse {
 }
 
 fn image_upload_body(
-    manifest: &ScenarioManifestV2,
+    manifest: &ScenarioManifestV3,
     image: &PublishImageFile,
 ) -> Result<serde_json::Value> {
     let vm = manifest

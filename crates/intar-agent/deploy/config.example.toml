@@ -1,9 +1,11 @@
 [server]
 bind = "127.0.0.1:8080"
 
-[cloud_hypervisor]
-binary = "cloud-hypervisor"
-spawn_timeout_seconds = 10
+# intar-agent is unprivileged. Cloud Hypervisor v53.0 and its checksum are
+# configured only in the root-owned /etc/intar-jailerd/config.toml.
+[jailer]
+socket = "/run/intar-jailerd/control.sock"
+request_timeout_seconds = 10
 
 [bridge]
 enabled = false
@@ -20,16 +22,22 @@ public_port_end = 22999
 advertised_host = "host1.intar.app"
 
 [vm_defaults]
+# A naming hint sent to jailerd; the agent does not create TAP devices.
 tap = "tap"
 
-# Where the agent writes per-VM artifacts (root disks, runtime disks, logs, and recordings).
+# Trusted agent-side source/cache root. Jailerd copies verified inputs into its
+# root-owned jail and grants only narrow ACL access to API/vsock/log paths.
 work_dir = "/var/cache/intar-agent"
 
 [vm_defaults.resources]
+# Fallback topology for local requests. Scenario catalog V3 manifests carry
+# exact cpu_millis and vcpu_count resources for scheduled VMs.
 vcpus = 1
 memory_mib = 512
 
 [vm_defaults.network]
+# Address pool and DNS topology sent to jailerd. Privileged bridge/TAP/route/
+# nftables changes happen only inside jailerd.
 guest_cidr = "10.77.0.0/16"
 dns = ["1.1.1.1", "8.8.8.8"]
 

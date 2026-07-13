@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ScenarioManifestV2",
+  "title": "ScenarioManifestV3",
   "type": "object",
   "properties": {
     "briefing_markdown": {
@@ -23,7 +23,7 @@
     "hints": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/ScenarioHintManifestV2"
+        "$ref": "#/$defs/ScenarioHintManifestV3"
       }
     },
     "name": {
@@ -35,8 +35,8 @@
     "schema_version": {
       "type": "integer",
       "format": "uint16",
-      "maximum": 65535,
-      "minimum": 0
+      "maximum": 3,
+      "minimum": 3
     },
     "solution_markdown": {
       "type": "string"
@@ -53,7 +53,7 @@
     "vms": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/ScenarioVmManifestV2"
+        "$ref": "#/$defs/ScenarioVmManifestV3"
       }
     }
   },
@@ -120,7 +120,7 @@
         "hard"
       ]
     },
-    "ScenarioHintManifestV2": {
+    "ScenarioHintManifestV3": {
       "type": "object",
       "properties": {
         "body_markdown": {
@@ -141,7 +141,7 @@
         "body_markdown"
       ]
     },
-    "ScenarioProbeManifestV2": {
+    "ScenarioProbeManifestV3": {
       "type": "object",
       "properties": {
         "body_markdown": {
@@ -156,7 +156,7 @@
         "hints": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ScenarioHintManifestV2"
+            "$ref": "#/$defs/ScenarioHintManifestV3"
           }
         },
         "id": {
@@ -183,7 +183,7 @@
         "hints"
       ]
     },
-    "ScenarioVmBootManifestV2": {
+    "ScenarioVmBootManifestV3": {
       "type": "object",
       "properties": {
         "cmdline": {
@@ -202,17 +202,16 @@
         "cmdline"
       ]
     },
-    "ScenarioVmManifestV2": {
+    "ScenarioVmManifestV3": {
       "type": "object",
       "properties": {
         "boot": {
-          "$ref": "#/$defs/ScenarioVmBootManifestV2"
+          "$ref": "#/$defs/ScenarioVmBootManifestV3"
         },
-        "cpu_count": {
+        "cpu_millis": {
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "format": "uint32",
+          "minimum": 1
         },
         "disk_mib": {
           "type": "integer",
@@ -244,8 +243,14 @@
         "probes": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ScenarioProbeManifestV2"
+            "$ref": "#/$defs/ScenarioProbeManifestV3"
           }
+        },
+        "vcpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
         }
       },
       "required": [
@@ -255,7 +260,8 @@
         "image_format",
         "image_virtual_size_bytes",
         "boot",
-        "cpu_count",
+        "cpu_millis",
+        "vcpu_count",
         "memory_mib",
         "disk_mib",
         "probes"

@@ -14,3 +14,8 @@ bun --cwd website test
 ```
 
 `scenarios/` is intentionally reserved for the scenario content subtree.
+
+Scenario-host operators should follow the breaking
+[Cloud Hypervisor jailer rollout](docs/scenario-host-jailer.md), including the
+exact fractional-CPU contract and separate unprivileged doctor/root self-test
+readiness gates.

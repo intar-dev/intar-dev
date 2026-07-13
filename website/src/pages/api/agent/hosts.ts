@@ -8,7 +8,7 @@ import {
   hostActualState,
   scenarioRuns,
 } from "@/db/schema";
-import type { HostStateReportV1 } from "@/generated/bridge";
+import type { HostStateReportV2 } from "@/generated/bridge";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -37,9 +37,9 @@ interface HostActualStateSummary {
   appliedDesiredVersion: number;
   observedAt: number;
   health: HostHealth;
-  capacity: HostStateReportV1["capacity"];
-  capabilities: HostStateReportV1["capabilities"];
-  cachedImages: HostStateReportV1["cached_images"];
+  capacity: HostStateReportV2["capacity"];
+  capabilities: HostStateReportV2["capabilities"];
+  cachedImages: HostStateReportV2["cached_images"];
 }
 
 export const prerender = false;

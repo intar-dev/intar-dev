@@ -1,20 +1,20 @@
 import type {
   DesiredCachedImageV1,
   DesiredBuildV1,
-  DesiredVmV1,
-  HostDesiredStateV1,
+  DesiredVmV2,
+  HostDesiredStateV2,
 } from "@/generated/bridge";
 import { HOST_DESIRED_STATE_SCHEMA_VERSION } from "@/generated/constants";
 import type { ImageKey } from "@/generated/catalog";
 import type { RunVmStateDocument } from "@/lib/run-state";
 
-export type DesiredStateDraft = HostDesiredStateV1;
+export type DesiredStateDraft = HostDesiredStateV2;
 export type DesiredStateMutator = (draft: DesiredStateDraft) => void;
 
 export function createEmptyHostDesiredState(input: {
   hostId: string;
   nowUnixMs: number;
-}): HostDesiredStateV1 {
+}): HostDesiredStateV2 {
   return {
     schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
     host_id: input.hostId,
@@ -27,10 +27,10 @@ export function createEmptyHostDesiredState(input: {
 }
 
 export function mutateDesiredState(
-  current: HostDesiredStateV1,
+  current: HostDesiredStateV2,
   mutator: DesiredStateMutator,
   options: { nowUnixMs: number },
-): HostDesiredStateV1 {
+): HostDesiredStateV2 {
   const before = comparableDesiredStatePayload(current);
   const draft = cloneDesiredState(current);
   mutator(draft);
@@ -65,7 +65,7 @@ export function upsertDesiredCachedImage(
 
 export function upsertDesiredVm(
   draft: DesiredStateDraft,
-  vm: DesiredVmV1,
+  vm: DesiredVmV2,
 ): void {
   const next = cloneDesiredVm(vm);
   const index = draft.vms.findIndex(
@@ -152,7 +152,7 @@ export function desiredVmFromRunVm(input: {
   vm: RunVmStateDocument;
   nowUnixMs: number;
   sshAuthorizedKeysOpenssh: string[];
-}): DesiredVmV1 | null {
+}): DesiredVmV2 | null {
   const imageKey = input.vm.provisioning.imageKey;
   const imageSha256 = input.vm.provisioning.imageSha256?.trim() ?? "";
   const resources = input.vm.provisioning.resources;
@@ -177,7 +177,8 @@ export function desiredVmFromRunVm(input: {
     image_key: cloneImageKey(imageKey),
     image_sha256: imageSha256,
     resources: {
-      cpu_count: resources.vcpus,
+      cpu_millis: resources.cpuMillis,
+      vcpu_count: resources.vcpuCount,
       memory_mib: resources.memoryMib,
       disk_mib: resources.diskMib,
     },
@@ -187,8 +188,8 @@ export function desiredVmFromRunVm(input: {
 }
 
 function normalizeDesiredState(
-  document: HostDesiredStateV1,
-): HostDesiredStateV1 {
+  document: HostDesiredStateV2,
+): HostDesiredStateV2 {
   return {
     ...document,
     cached_images: uniqueLastBy(
@@ -214,7 +215,7 @@ function normalizeDesiredState(
   };
 }
 
-function comparableDesiredStatePayload(document: HostDesiredStateV1): string {
+function comparableDesiredStatePayload(document: HostDesiredStateV2): string {
   const normalized = normalizeDesiredState(document);
   return JSON.stringify({
     schema_version: normalized.schema_version,
@@ -225,7 +226,7 @@ function comparableDesiredStatePayload(document: HostDesiredStateV1): string {
   });
 }
 
-function cloneDesiredState(document: HostDesiredStateV1): HostDesiredStateV1 {
+function cloneDesiredState(document: HostDesiredStateV2): HostDesiredStateV2 {
   return {
     ...document,
     cached_images: document.cached_images.map(cloneDesiredCachedImage),
@@ -243,7 +244,7 @@ function cloneDesiredCachedImage(
   };
 }
 
-function cloneDesiredVm(vm: DesiredVmV1): DesiredVmV1 {
+function cloneDesiredVm(vm: DesiredVmV2): DesiredVmV2 {
   return {
     ...vm,
     image_key: cloneImageKey(vm.image_key),
@@ -278,7 +279,7 @@ function normalizeAuthorizedKeys(values: string[]): string[] {
   ];
 }
 
-function desiredVmIdentity(vm: DesiredVmV1): string {
+function desiredVmIdentity(vm: DesiredVmV2): string {
   return `${vm.run_id}\n${vm.vm_name}`;
 }
 

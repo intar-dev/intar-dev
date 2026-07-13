@@ -1,4 +1,4 @@
-import type { HostDesiredStateV1 } from "@/generated/bridge";
+import type { HostDesiredStateV2 } from "@/generated/bridge";
 
 export interface OverdueRunLease {
   runId: string;
@@ -6,7 +6,7 @@ export interface OverdueRunLease {
 }
 
 export function selectOverdueRunLeases(
-  desiredState: HostDesiredStateV1,
+  desiredState: HostDesiredStateV2,
   nowUnixMs: number,
 ): OverdueRunLease[] {
   const byRunId = new Map<string, Set<string>>();

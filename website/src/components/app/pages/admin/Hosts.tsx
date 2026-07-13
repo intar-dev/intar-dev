@@ -241,8 +241,10 @@ export function AdminHosts() {
                   />
                   <HostMetric
                     label="CPU / load"
-                    value={capacity?.cpu_count ? `${capacity.cpu_count} cores` : "Unknown"}
-                    detail={`${formatLoad(capacity?.load_avg_1m)} / ${formatLoad(capacity?.load_avg_5m)} / ${formatLoad(capacity?.load_avg_15m)}`}
+                    value={capacity ? `${capacity.committed_cpu_millis} / ${capacity.schedulable_cpu_millis}m` : "Unknown"}
+                    detail={capacity
+                      ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
+                      : "No CPU capacity reported"}
                   />
                   <HostMetric label="Memory" value={memorySummary} detail="Available / total" />
                   <HostMetric

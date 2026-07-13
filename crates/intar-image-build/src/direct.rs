@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use intar_contracts::catalog::ScenarioManifestV2;
+use intar_contracts::catalog::ScenarioManifestV3;
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
 
@@ -92,7 +92,7 @@ pub struct DirectBuildArtifact {
     pub image_sha256_hex: String,
     pub kernel_sha256_hex: String,
     pub initrd_sha256_hex: String,
-    pub manifest: ScenarioManifestV2,
+    pub manifest: ScenarioManifestV3,
 }
 
 /// Render direct-QEMU build inputs without executing QEMU.

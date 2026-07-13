@@ -15,10 +15,10 @@ import {
   vmScenarios,
 } from "@/db/schema";
 import type {
-  BridgeMessageV5,
-  HostStateReportV1,
+  BridgeMessageV6,
+  HostStateReportV2,
   VmPhase,
-  VmReportV1,
+  VmReportV2,
 } from "@/generated/bridge";
 import type { ImageKey } from "@/generated/catalog";
 import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
@@ -134,7 +134,8 @@ describe("HostRuntimeDO workers integration", () => {
         image_key: testImageKey,
         image_sha256: "2".repeat(64),
         resources: {
-          cpu_count: 1,
+          cpu_millis: 1_000,
+          vcpu_count: 1,
           memory_mib: 512,
           disk_mib: 4096,
         },
@@ -266,7 +267,7 @@ describe("HostRuntimeDO workers integration", () => {
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: hostId,
       reason: "reconnect",
     });
@@ -337,6 +338,115 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("returns scenario_host_cpu_exhausted for a pinned saturated host", async () => {
+    const hostId = "host-pinned-saturated";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { stub, ws } = await connectHost(hostId);
+    await seedEnabledScenario(drizzle(env.DB), now);
+    sendBridge(ws, stateReport(hostId, {
+      observedAt: now,
+      appliedDesiredVersion: 0,
+      schedulableCpuMillis: 125,
+      cachedImages: [{
+        image_key: testImageKey,
+        image_sha256: "2".repeat(64),
+        phase: "ready",
+        updated_at_unix_ms: now,
+      }],
+    }));
+    await waitForHostActualState(drizzle(env.DB), hostId, (row) => row.observedAt === now);
+    const fill = await stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/reserve",
+      {
+        method: "POST",
+        body: JSON.stringify({ hostId, runId: "capacity-fill", cpuMillis: 125 }),
+      },
+    );
+    expect(fill.status).toBe(201);
+
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+        hostId,
+      }),
+    ).rejects.toMatchObject({ code: "scenario_host_cpu_exhausted" });
+    ws.close();
+  });
+
+  it("retries the next ranked host when the first CPU reservation is exhausted", async () => {
+    const now = Date.now();
+    const firstHostId = "host-ranked-first";
+    const secondHostId = "host-ranked-second";
+    await seedHost(firstHostId);
+    await seedHost(secondHostId);
+    const first = await connectHost(firstHostId);
+    const second = await connectHost(secondHostId);
+    await seedEnabledScenario(drizzle(env.DB), now);
+
+    sendBridge(second.ws, stateReport(secondHostId, {
+      observedAt: now,
+      appliedDesiredVersion: 0,
+      schedulableCpuMillis: 1_000,
+      cachedImages: [{
+        image_key: testImageKey,
+        image_sha256: "2".repeat(64),
+        phase: "ready",
+        updated_at_unix_ms: now,
+      }],
+    }));
+    sendBridge(first.ws, stateReport(firstHostId, {
+      observedAt: now + 1,
+      appliedDesiredVersion: 0,
+      schedulableCpuMillis: 2_000,
+      cachedImages: [{
+        image_key: testImageKey,
+        image_sha256: "2".repeat(64),
+        phase: "ready",
+        updated_at_unix_ms: now,
+      }],
+    }));
+    await Promise.all([
+      waitForHostActualState(
+        drizzle(env.DB),
+        firstHostId,
+        (row) => row.observedAt === now + 1,
+      ),
+      waitForHostActualState(
+        drizzle(env.DB),
+        secondHostId,
+        (row) => row.observedAt === now,
+      ),
+    ]);
+
+    const fill = await first.stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/reserve",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostId: firstHostId,
+          runId: "first-host-fill",
+          cpuMillis: 2_000,
+        }),
+      },
+    );
+    expect(fill.status).toBe(201);
+
+    const started = await startScenarioRunForUser({
+      scenarioId: "broken-nginx",
+      userId: "user-1",
+    });
+    const [run] = await drizzle(env.DB)
+      .select({ hostId: scenarioRuns.hostId })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, started.runId));
+    expect(run?.hostId).toBe(secondHostId);
+
+    first.ws.close();
+    second.ws.close();
+  });
+
   it("re-pushes a lagging desired version from the alarm loop after the dispatch threshold", async () => {
     const hostId = "host-lag-repush";
     await seedHost(hostId);
@@ -353,7 +463,7 @@ describe("HostRuntimeDO workers integration", () => {
 
     sendBridge(ws, {
       type: "sync_request",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: hostId,
       reason: "operator_requested",
     });
@@ -397,14 +507,17 @@ const testImageKey = {
 async function seedHost(hostId: string): Promise<void> {
   const db = drizzle(env.DB);
   const now = Date.now();
-  await db.insert(user).values({
-    id: "user-1",
-    name: "Test User",
-    email: "test@example.com",
-    emailVerified: true,
-    createdAt: new Date(now),
-    updatedAt: new Date(now),
-  });
+  await db
+    .insert(user)
+    .values({
+      id: "user-1",
+      name: "Test User",
+      email: "test@example.com",
+      emailVerified: true,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    })
+    .onConflictDoNothing();
   await db.insert(agentHosts).values({
     id: hostId,
     userId: "user-1",
@@ -422,7 +535,7 @@ async function connectHost(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
 ): Promise<{
-  messages: BridgeMessageV5[];
+  messages: BridgeMessageV6[];
   stub: DurableObjectStub;
   ws: WebSocket;
 }> {
@@ -439,11 +552,11 @@ async function connectHost(
   if (!ws) {
     throw new Error("missing websocket");
   }
-  const messages: BridgeMessageV5[] = [];
+  const messages: BridgeMessageV6[] = [];
   ws.accept();
   ws.addEventListener("message", (event) => {
     if (typeof event.data === "string") {
-      messages.push(JSON.parse(event.data) as BridgeMessageV5);
+      messages.push(JSON.parse(event.data) as BridgeMessageV6);
     }
   });
   ws.send(JSON.stringify(clientHello(hostId, options)));
@@ -453,10 +566,10 @@ async function connectHost(
 function clientHello(
   hostId: string,
   options?: { lastAppliedDesiredVersion?: number | null },
-): BridgeMessageV5 {
-  const message: BridgeMessageV5 = {
+): Extract<BridgeMessageV6, { type: "client_hello" }> {
+  const message: Extract<BridgeMessageV6, { type: "client_hello" }> = {
     type: "client_hello",
-    protocol_version: 5,
+    protocol_version: 6,
     host_id: hostId,
     agent_version: "test-agent",
     role: "agent",
@@ -466,6 +579,10 @@ function clientHello(
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
+      supports_jailer_v1: true,
+      supports_hard_cpu_quota: true,
+      supports_landlock: true,
+      supports_cgroup_v2: true,
     },
   };
   if (options && "lastAppliedDesiredVersion" in options) {
@@ -474,15 +591,15 @@ function clientHello(
   return message;
 }
 
-function sendBridge(ws: WebSocket, message: BridgeMessageV5): void {
+function sendBridge(ws: WebSocket, message: BridgeMessageV6): void {
   ws.send(JSON.stringify(message));
 }
 
 async function waitForBridgeMessage(
-  messages: BridgeMessageV5[],
-  predicate: (message: BridgeMessageV5) => boolean,
+  messages: BridgeMessageV6[],
+  predicate: (message: BridgeMessageV6) => boolean,
   timeoutMs = 1_000,
-): Promise<BridgeMessageV5> {
+): Promise<BridgeMessageV6> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
     const match = messages.find(predicate);
@@ -497,8 +614,8 @@ async function waitForBridgeMessage(
 }
 
 async function waitForMessageCount(
-  messages: BridgeMessageV5[],
-  predicate: (message: BridgeMessageV5) => boolean,
+  messages: BridgeMessageV6[],
+  predicate: (message: BridgeMessageV6) => boolean,
   expected: number,
   timeoutMs = 1_000,
 ): Promise<number> {
@@ -613,7 +730,8 @@ async function seedRun(input: {
           imageKey: testImageKey,
           imageSha256: "2".repeat(64),
           resources: {
-            vcpus: 1,
+            cpuMillis: 1_000,
+            vcpuCount: 1,
             memoryMib: 512,
             diskMib: 4096,
           },
@@ -684,7 +802,8 @@ async function seedEnabledScenario(
     kernelSha256: "a".repeat(64),
     initrdSha256: "b".repeat(64),
     bootCmdline: "root=/dev/vda rw",
-    cpu: 1,
+    cpuMillis: 125,
+    vcpuCount: 1,
     memoryMib: 512,
     diskMib: 4096,
   });
@@ -695,13 +814,14 @@ function stateReport(
   input: {
     observedAt: number;
     appliedDesiredVersion: number;
-    cachedImages?: HostStateReportV1["cached_images"];
-    vms?: HostStateReportV1["vms"];
+    cachedImages?: HostStateReportV2["cached_images"];
+    vms?: HostStateReportV2["vms"];
+    schedulableCpuMillis?: number;
   },
-): BridgeMessageV5 {
+): BridgeMessageV6 {
   return {
     type: "state_report",
-    protocol_version: 5,
+    protocol_version: 6,
     host_id: hostId,
     report: {
       schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -709,7 +829,10 @@ function stateReport(
       observed_at_unix_ms: input.observedAt,
       applied_desired_version: input.appliedDesiredVersion,
       capacity: {
-        cpu_count: 4,
+        total_cpu_millis: (input.schedulableCpuMillis ?? 4_000) + 1_000,
+        reserved_cpu_millis: 1_000,
+        schedulable_cpu_millis: input.schedulableCpuMillis ?? 4_000,
+        committed_cpu_millis: 0,
         memory_total_mib: 8192,
         memory_available_mib: 4096,
         disk_probe_path: "/var/lib/intar-agent",
@@ -722,6 +845,10 @@ function stateReport(
         supports_vsock: true,
         supports_reflink: true,
         supports_nftables: true,
+        supports_jailer_v1: true,
+        supports_hard_cpu_quota: true,
+        supports_landlock: true,
+        supports_cgroup_v2: true,
       },
       cached_images: input.cachedImages ?? [],
       vms: input.vms ?? [],
@@ -738,13 +865,13 @@ function vmReport(
   observedAt: number,
   sshHostPort: number,
   guestIp: string,
-): BridgeMessageV5 {
+): BridgeMessageV6 {
   return {
     type: "vm_report",
-    protocol_version: 5,
+    protocol_version: 6,
     host_id: hostId,
     report: {
-      schema_version: 1,
+      schema_version: 2,
       host_id: hostId,
       run_id: runId,
       vm_name: vmName,
@@ -767,6 +894,6 @@ function vmReport(
         phase: "none",
         artifact_count: 0,
       },
-    } satisfies VmReportV1,
+    } satisfies VmReportV2,
   };
 }

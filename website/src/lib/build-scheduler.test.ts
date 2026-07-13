@@ -5,7 +5,7 @@ import {
   recordHostBuildReports,
   recordImageBuildReport,
 } from "@/lib/build-scheduler";
-import type { BuildReportV1, HostDesiredStateV1 } from "@/generated/bridge";
+import type { BuildReportV1, HostDesiredStateV2 } from "@/generated/bridge";
 
 const desiredStateStoreMock = vi.hoisted(() => ({
   mutateStoredHostDesiredState: vi.fn(),
@@ -175,7 +175,7 @@ describe("build scheduler", () => {
       r2Key: "builds/bundles/abc123.tar.gz",
       kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v2",
+        buildFormatVersion: "intar-image-build-v3",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -399,11 +399,11 @@ function buildSchedulerDb(input: {
   };
 }
 
-function desiredStateWithBuild(buildId: string): HostDesiredStateV1 {
+function desiredStateWithBuild(buildId: string): HostDesiredStateV2 {
   return desiredStateWithBuilds([buildId]);
 }
 
-function desiredStateWithBuilds(buildIds: string[]): HostDesiredStateV1 {
+function desiredStateWithBuilds(buildIds: string[]): HostDesiredStateV2 {
   const state = emptyDesiredState("builder-1");
   state.version = 7;
   state.generated_at_unix_ms = 1_762_041_600_000;
@@ -419,9 +419,9 @@ function desiredStateWithBuilds(buildIds: string[]): HostDesiredStateV1 {
   return state;
 }
 
-function emptyDesiredState(hostId: string): HostDesiredStateV1 {
+function emptyDesiredState(hostId: string): HostDesiredStateV2 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     host_id: hostId,
     version: 0,
     generated_at_unix_ms: 0,
@@ -506,7 +506,7 @@ function builderCandidateRow(
     connected: true,
     activeSessionId:
       options.activeSessionId === undefined
-        ? `v5:${hostId}`
+        ? `v6:${hostId}`
         : options.activeSessionId,
     lastClientHelloAt,
     stateReportedAt: options.stateReportedAt ?? lastClientHelloAt,
@@ -514,7 +514,10 @@ function builderCandidateRow(
     reportJson: {
       capabilities: { arch: options.arch ?? "x86_64" },
       capacity: {
-        cpu_count: capacity.cpuCount,
+        total_cpu_millis: capacity.cpuCount * 1_000,
+        reserved_cpu_millis: 0,
+        schedulable_cpu_millis: capacity.cpuCount * 1_000,
+        committed_cpu_millis: 0,
         memory_available_mib: capacity.memoryAvailableMib,
         disk_available_mib: capacity.diskAvailableMib,
       },

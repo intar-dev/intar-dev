@@ -1,59 +1,59 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type {
-  BridgeMessageV5,
+  BridgeMessageV6,
   BuildReportV1,
-  HostDesiredStateV1,
-  HostStateReportV1,
-  VmReportV1,
+  HostDesiredStateV2,
+  HostStateReportV2,
+  VmReportV2,
 } from "@/generated/bridge";
 import {
-  parseBridgeMessageV5,
-  serializeBridgeMessageV5,
-} from "@/control-plane/bridge-v5";
+  parseBridgeMessageV6,
+  serializeBridgeMessageV6,
+} from "@/control-plane/bridge-v6";
 
-describe("bridge v5 protocol", () => {
+describe("bridge v6 protocol", () => {
   it("parses the generated sync request fixture", () => {
-    const fixture = readFixture("sync-request-v5.json");
-    expect(parseBridgeMessageV5(JSON.stringify(fixture))).toEqual(fixture);
+    const fixture = readFixture("sync-request-v6.json");
+    expect(parseBridgeMessageV6(JSON.stringify(fixture))).toEqual(fixture);
   });
 
-  it("serializes bridge messages as snake_case v5 JSON", () => {
-    const fixture = readFixture<BridgeMessageV5>("sync-request-v5.json");
-    expect(JSON.parse(serializeBridgeMessageV5(fixture))).toEqual(fixture);
+  it("serializes bridge messages as snake_case v6 JSON", () => {
+    const fixture = readFixture<BridgeMessageV6>("sync-request-v6.json");
+    expect(JSON.parse(serializeBridgeMessageV6(fixture))).toEqual(fixture);
   });
 
   it("parses desired state, state report, vm report, and build report envelopes", () => {
-    const desiredState = readFixture<HostDesiredStateV1>(
-      "host-desired-state-v1.json",
+    const desiredState = readFixture<HostDesiredStateV2>(
+      "host-desired-state-v2.json",
     );
-    const hostReport = readFixture<HostStateReportV1>(
-      "host-state-report-v1.json",
+    const hostReport = readFixture<HostStateReportV2>(
+      "host-state-report-v2.json",
     );
-    const vmReport = readFixture<VmReportV1>("vm-report-v1.json");
+    const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
 
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "desired_state",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: desiredState.host_id,
       desired_state: desiredState,
     }))?.type).toBe("desired_state");
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "state_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: hostReport.host_id,
       report: hostReport,
     }))?.type).toBe("state_report");
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "vm_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: vmReport.host_id,
       report: vmReport,
     }))?.type).toBe("vm_report");
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "build_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: buildReport.host_id,
       report: buildReport,
     }))?.type).toBe("build_report");
@@ -62,7 +62,7 @@ describe("bridge v5 protocol", () => {
   it("parses client hello only with valid host capabilities", () => {
     const clientHello = {
       type: "client_hello",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: "host-alpha",
       agent_version: "0.1.0",
       role: "builder",
@@ -73,13 +73,17 @@ describe("bridge v5 protocol", () => {
         supports_vsock: true,
         supports_reflink: true,
         supports_nftables: true,
+        supports_jailer_v1: true,
+        supports_hard_cpu_quota: true,
+        supports_landlock: true,
+        supports_cgroup_v2: true,
       },
     };
 
-    expect(parseBridgeMessageV5(JSON.stringify(clientHello))?.type).toBe(
+    expect(parseBridgeMessageV6(JSON.stringify(clientHello))?.type).toBe(
       "client_hello",
     );
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       ...clientHello,
       capabilities: {
         ...clientHello.capabilities,
@@ -88,8 +92,8 @@ describe("bridge v5 protocol", () => {
     }))).toBeNull();
   });
 
-  it("rejects non-v5 protocol envelopes", () => {
-    expect(parseBridgeMessageV5(JSON.stringify({
+  it("rejects non-v6 protocol envelopes", () => {
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "sync_request",
       protocol_version: 4,
       host_id: "host-alpha",
@@ -97,23 +101,23 @@ describe("bridge v5 protocol", () => {
     }))).toBeNull();
   });
 
-  it("rejects desired states missing required v5 arrays", () => {
-    const desiredState = readFixture<HostDesiredStateV1>(
-      "host-desired-state-v1.json",
+  it("rejects desired states missing required v6 arrays", () => {
+    const desiredState = readFixture<HostDesiredStateV2>(
+      "host-desired-state-v2.json",
     );
     const { builds: _builds, ...missingBuilds } = desiredState;
 
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "desired_state",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: desiredState.host_id,
       desired_state: missingBuilds,
     }))).toBeNull();
   });
 
   it("rejects desired states with malformed hashes", () => {
-    const desiredState = readFixture<HostDesiredStateV1>(
-      "host-desired-state-v1.json",
+    const desiredState = readFixture<HostDesiredStateV2>(
+      "host-desired-state-v2.json",
     );
     const badCachedImage = cloneFixture(desiredState);
     badCachedImage.cached_images[0]!.image_sha256 = "not-a-sha256";
@@ -123,32 +127,65 @@ describe("bridge v5 protocol", () => {
     badBuild.builds[0]!.content_hash = "not-a-sha256";
 
     for (const candidate of [badCachedImage, badDesiredVm, badBuild]) {
-      expect(parseBridgeMessageV5(JSON.stringify({
+      expect(parseBridgeMessageV6(JSON.stringify({
         type: "desired_state",
-        protocol_version: 5,
+        protocol_version: 6,
         host_id: desiredState.host_id,
         desired_state: candidate,
       }))).toBeNull();
     }
   });
 
-  it("rejects report envelopes with a mismatched host id", () => {
-    const vmReport = readFixture<VmReportV1>("vm-report-v1.json");
-    expect(parseBridgeMessageV5(JSON.stringify({
+  it("rejects zero CPU entitlements and malformed sandbox accounting", () => {
+    const desiredState = readFixture<HostDesiredStateV2>(
+      "host-desired-state-v2.json",
+    );
+    const zeroCpu = cloneFixture(desiredState);
+    zeroCpu.vms[0]!.resources.cpu_millis = 0;
+    expect(parseBridgeMessageV6(JSON.stringify({
+      type: "desired_state",
+      protocol_version: 6,
+      host_id: desiredState.host_id,
+      desired_state: zeroCpu,
+    }))).toBeNull();
+
+    const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
+    const badQuota = cloneFixture(vmReport);
+    badQuota.resource_state!.cpu_quota_us = 0;
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "vm_report",
-      protocol_version: 5,
+      protocol_version: 6,
+      host_id: vmReport.host_id,
+      report: badQuota,
+    }))).toBeNull();
+
+    const badSandbox = cloneFixture(vmReport);
+    badSandbox.sandbox!.systemd_unit = "";
+    expect(parseBridgeMessageV6(JSON.stringify({
+      type: "vm_report",
+      protocol_version: 6,
+      host_id: vmReport.host_id,
+      report: badSandbox,
+    }))).toBeNull();
+  });
+
+  it("rejects report envelopes with a mismatched host id", () => {
+    const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
+    expect(parseBridgeMessageV6(JSON.stringify({
+      type: "vm_report",
+      protocol_version: 6,
       host_id: "host-bravo",
       report: vmReport,
     }))).toBeNull();
   });
 
   it("rejects vm reports missing required report arrays", () => {
-    const vmReport = readFixture<VmReportV1>("vm-report-v1.json");
+    const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
     const { probes: _probes, ...missingProbes } = vmReport;
 
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "vm_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: vmReport.host_id,
       report: missingProbes,
     }))).toBeNull();
@@ -156,9 +193,9 @@ describe("bridge v5 protocol", () => {
 
   it("rejects build reports with unsupported phases", () => {
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "build_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: buildReport.host_id,
       report: {
         ...buildReport,
@@ -169,9 +206,9 @@ describe("bridge v5 protocol", () => {
 
   it("rejects build reports with malformed content hashes", () => {
     const buildReport = readFixture<BuildReportV1>("build-report-v1.json");
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "build_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: buildReport.host_id,
       report: {
         ...buildReport,
@@ -181,26 +218,26 @@ describe("bridge v5 protocol", () => {
   });
 
   it("rejects state reports missing required report arrays", () => {
-    const hostReport = readFixture<HostStateReportV1>(
-      "host-state-report-v1.json",
+    const hostReport = readFixture<HostStateReportV2>(
+      "host-state-report-v2.json",
     );
     const { vms: _vms, ...missingVms } = hostReport;
 
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "state_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: hostReport.host_id,
       report: missingVms,
     }))).toBeNull();
   });
 
   it("rejects state reports with malformed embedded build reports", () => {
-    const hostReport = readFixture<HostStateReportV1>(
-      "host-state-report-v1.json",
+    const hostReport = readFixture<HostStateReportV2>(
+      "host-state-report-v2.json",
     );
-    expect(parseBridgeMessageV5(JSON.stringify({
+    expect(parseBridgeMessageV6(JSON.stringify({
       type: "state_report",
-      protocol_version: 5,
+      protocol_version: 6,
       host_id: hostReport.host_id,
       report: {
         ...hostReport,

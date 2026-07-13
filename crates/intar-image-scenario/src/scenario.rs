@@ -4,7 +4,7 @@
 use crate::{KinoDefaults, KinoDefinition, KinoProbeDefinition, ScenarioError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 const INTAR_MANAGED_KINO_PATHS: &[&str] = &[
@@ -87,7 +87,8 @@ pub enum ProbePhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmDefinition {
     pub name: String,
-    pub cpu: u32,
+    pub cpu_millis: u32,
+    pub vcpu_count: u16,
     pub memory: u32,
     pub disk: u32,
     pub image: String,
@@ -180,6 +181,7 @@ impl Scenario {
     }
 
     pub fn parse(content: &str) -> Result<Self, ScenarioError> {
+        let mut vm_cpu_literals: VecDeque<_> = extract_vm_cpu_literals(content)?.into();
         let body: hcl::Body =
             hcl::from_str(content).map_err(|error| ScenarioError::HclParse(error.to_string()))?;
 
@@ -254,7 +256,12 @@ impl Scenario {
                         kino = parse_kino(inner_block)?;
                     }
                     "vm" => {
-                        let vm = parse_vm(inner_block)?;
+                        let cpu_literal = vm_cpu_literals.pop_front().ok_or_else(|| {
+                            ScenarioError::InvalidScenario(
+                                "internal VM CPU literal/parser ordering mismatch".into(),
+                            )
+                        })?;
+                        let vm = parse_vm(inner_block, cpu_literal.as_deref())?;
                         if vms
                             .iter()
                             .any(|existing: &VmDefinition| existing.name == vm.name)
@@ -856,10 +863,11 @@ fn parse_probe_phase(name: &str, expr: &hcl::Expression) -> Result<ProbePhase, S
     }
 }
 
-fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
+fn parse_vm(block: &hcl::Block, cpu_literal: Option<&str>) -> Result<VmDefinition, ScenarioError> {
     let name = required_single_label(block, "vm", "missing vm name")?;
 
-    let mut cpu: u32 = 1;
+    let mut cpu_millis = 1_000;
+    let mut vcpu_count = None;
     let mut memory: u32 = 1024;
     let mut disk: u32 = 10;
     let mut image = String::new();
@@ -869,7 +877,17 @@ fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
 
     for attr in block.body.attributes() {
         match attr.key.as_str() {
-            "cpu" => cpu = extract_u32(&attr.expr)?,
+            "cpu" => {
+                let literal = cpu_literal.ok_or_else(|| {
+                    ScenarioError::InvalidScenario(format!(
+                        "vm '{name}' cpu literal was not preserved"
+                    ))
+                })?;
+                cpu_millis = parse_cpu_millis(literal).map_err(|message| {
+                    ScenarioError::InvalidScenario(format!("vm '{name}' cpu {message}"))
+                })?;
+            }
+            "vcpus" => vcpu_count = Some(extract_u16(&attr.expr)?),
             "memory" => memory = extract_u32(&attr.expr)?,
             "disk" => disk = extract_u32(&attr.expr)?,
             "image" => image = extract_string(&attr.expr)?,
@@ -910,15 +928,38 @@ fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
         )));
     }
 
-    if cpu == 0 {
+    if cpu_millis == 0 {
         return Err(ScenarioError::InvalidScenario(format!(
             "vm '{name}' cpu must be > 0"
         )));
     }
 
+    let vcpu_count = match vcpu_count {
+        Some(0) => {
+            return Err(ScenarioError::InvalidScenario(format!(
+                "vm '{name}' vcpus must be > 0"
+            )));
+        }
+        Some(value) => value,
+        None => u16::try_from(cpu_millis.div_ceil(1_000)).map_err(|_| {
+            ScenarioError::InvalidScenario(format!(
+                "vm '{name}' cpu requires more than {} vcpus",
+                u16::MAX
+            ))
+        })?,
+    };
+
+    let vcpu_capacity_millis = u32::from(vcpu_count) * 1_000;
+    if cpu_millis > vcpu_capacity_millis {
+        return Err(ScenarioError::InvalidScenario(format!(
+            "vm '{name}' cpu ({cpu_millis} millicores) exceeds vcpus capacity ({vcpu_capacity_millis} millicores)"
+        )));
+    }
+
     Ok(VmDefinition {
         name,
-        cpu,
+        cpu_millis,
+        vcpu_count,
         memory,
         disk,
         image,
@@ -926,6 +967,82 @@ fn parse_vm(block: &hcl::Block) -> Result<VmDefinition, ScenarioError> {
         steps,
         probes,
     })
+}
+
+fn extract_vm_cpu_literals(content: &str) -> Result<Vec<Option<String>>, ScenarioError> {
+    let body = hcl_edit::parser::parse_body(content)
+        .map_err(|error| ScenarioError::HclParse(error.to_string()))?;
+    let mut literals = Vec::new();
+
+    for scenario in body.get_blocks("scenario") {
+        for vm in scenario.body.get_blocks("vm") {
+            let literal = vm
+                .body
+                .get_attribute("cpu")
+                .map(|attribute| match &attribute.value {
+                    hcl_edit::expr::Expression::Number(number) => number
+                        .as_repr()
+                        .map(|representation| String::from(&**representation))
+                        .ok_or_else(|| {
+                            ScenarioError::InvalidScenario(
+                                "cpu number is missing its source representation".into(),
+                            )
+                        }),
+                    expression => Err(ScenarioError::InvalidScenario(format!(
+                        "expected cpu number, got {expression:?}"
+                    ))),
+                })
+                .transpose()?;
+            literals.push(literal);
+        }
+    }
+
+    Ok(literals)
+}
+
+fn parse_cpu_millis(literal: &str) -> Result<u32, String> {
+    if literal.contains('e') || literal.contains('E') {
+        return Err("must not use exponent notation".into());
+    }
+
+    let (whole, fraction) = match literal.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (literal, None),
+    };
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("must be a positive integer or decimal literal".into());
+    }
+    let fraction_millis = match fraction {
+        None => 0,
+        Some(fraction) if fraction.is_empty() || fraction.len() > 3 => {
+            return Err("must have at most three fractional digits".into());
+        }
+        Some(fraction) if !fraction.bytes().all(|byte| byte.is_ascii_digit()) => {
+            return Err("must be a positive integer or decimal literal".into());
+        }
+        Some(fraction) => {
+            let value = fraction
+                .parse::<u32>()
+                .map_err(|_| "has an invalid fractional component".to_string())?;
+            let digits = u32::try_from(fraction.len())
+                .map_err(|_| "has too many fractional digits".to_string())?;
+            let padding = 3_u32.saturating_sub(digits);
+            value * 10_u32.pow(padding)
+        }
+    };
+    let whole = whole
+        .parse::<u64>()
+        .map_err(|_| "is too large".to_string())?;
+    let millis = whole
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(u64::from(fraction_millis)))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "is too large".to_string())?;
+
+    if millis == 0 {
+        return Err("must be > 0".into());
+    }
+    Ok(millis)
 }
 
 fn parse_vm_step(block: &hcl::Block) -> Result<VmStep, ScenarioError> {
@@ -1472,6 +1589,60 @@ scenario "broken-nginx" {
         assert_eq!(probe.hints[0].id, "status");
         assert_eq!(scenario.total_probe_count(), 4);
         assert_eq!(scenario.images["debian-12-minimal"].base, "trixie");
+        assert_eq!(scenario.vms[0].cpu_millis, 1_000);
+        assert_eq!(scenario.vms[0].vcpu_count, 1);
+    }
+
+    #[test]
+    fn parses_fractional_cpu_as_exact_millicores() {
+        let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125");
+
+        let scenario = Scenario::parse(&hcl).unwrap();
+
+        assert_eq!(scenario.vms[0].cpu_millis, 125);
+        assert_eq!(scenario.vms[0].vcpu_count, 1);
+    }
+
+    #[test]
+    fn defaults_vcpus_to_the_cpu_ceiling_and_accepts_an_explicit_topology() {
+        let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 2.125");
+        let scenario = Scenario::parse(&hcl).unwrap();
+        assert_eq!(scenario.vms[0].cpu_millis, 2_125);
+        assert_eq!(scenario.vms[0].vcpu_count, 3);
+
+        let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 0.125\n    vcpus  = 4");
+        let scenario = Scenario::parse(&hcl).unwrap();
+        assert_eq!(scenario.vms[0].cpu_millis, 125);
+        assert_eq!(scenario.vms[0].vcpu_count, 4);
+    }
+
+    #[test]
+    fn rejects_inexact_or_non_positive_cpu_literals() {
+        for (literal, expected) in [
+            ("0", "must be > 0"),
+            ("-0.125", "positive integer or decimal literal"),
+            ("0.0001", "at most three fractional digits"),
+            ("1.0000", "at most three fractional digits"),
+            ("1e-1", "must not use exponent notation"),
+        ] {
+            let hcl = supported_hcl().replace("cpu    = 1", &format!("cpu    = {literal}"));
+            let error = Scenario::parse(&hcl).unwrap_err();
+            assert!(
+                matches!(error, ScenarioError::InvalidScenario(ref message) if message.contains(expected)),
+                "literal {literal} should fail with {expected}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_cpu_above_explicit_vcpu_capacity() {
+        let hcl = supported_hcl().replace("cpu    = 1", "cpu    = 1.001\n    vcpus  = 1");
+
+        let error = Scenario::parse(&hcl).unwrap_err();
+
+        assert!(
+            matches!(error, ScenarioError::InvalidScenario(message) if message.contains("exceeds vcpus capacity"))
+        );
     }
 
     #[test]

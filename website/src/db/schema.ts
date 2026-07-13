@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   sqliteTable,
@@ -8,13 +9,13 @@ import {
 } from "drizzle-orm/sqlite-core";
 import type {
   BuildPhase,
-  HostDesiredStateV1,
-  HostStateReportV1,
+  HostDesiredStateV2,
+  HostStateReportV2,
 } from "@/generated/bridge";
 import type {
   ImageArchitecture,
   ImageKey,
-  ScenarioHintManifestV2,
+  ScenarioHintManifestV3,
 } from "@/generated/catalog";
 
 const nowMsDefault = sql`(cast(unixepoch('subsecond') * 1000 as integer))`;
@@ -30,6 +31,7 @@ export interface ScenarioRunHintSnapshot {
 }
 
 export type AgentHostRole = "agent" | "builder";
+export type HostCpuReservationState = "pending" | "committed";
 export type ImageBuildStatus =
   | "queued"
   | "assigned"
@@ -293,7 +295,7 @@ export const hostDesiredState = sqliteTable(
       .primaryKey()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
-    docJson: jsonText<HostDesiredStateV1>("doc_json").notNull(),
+    docJson: jsonText<HostDesiredStateV2>("doc_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -308,7 +310,7 @@ export const hostActualState = sqliteTable(
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     appliedDesiredVersion: integer("applied_desired_version").notNull(),
     observedAt: integer("observed_at").notNull(),
-    reportJson: jsonText<HostStateReportV1>("report_json").notNull(),
+    reportJson: jsonText<HostStateReportV2>("report_json").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -317,6 +319,36 @@ export const hostActualState = sqliteTable(
       table.appliedDesiredVersion,
     ),
     index("host_actual_state_observed_idx").on(table.observedAt),
+  ],
+);
+
+export const hostCpuReservations = sqliteTable(
+  "host_cpu_reservations",
+  {
+    runId: text("run_id").primaryKey(),
+    hostId: text("host_id")
+      .notNull()
+      .references(() => agentHosts.id, { onDelete: "cascade" }),
+    cpuMillis: integer("cpu_millis").notNull(),
+    state: text("state").$type<HostCpuReservationState>().notNull(),
+    expiresAt: integer("expires_at"),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    check("host_cpu_reservations_cpu_positive", sql`${table.cpuMillis} > 0`),
+    check(
+      "host_cpu_reservations_state_valid",
+      sql`${table.state} in ('pending', 'committed')`,
+    ),
+    index("host_cpu_reservations_host_state_idx").on(
+      table.hostId,
+      table.state,
+    ),
+    index("host_cpu_reservations_pending_expiry_idx").on(
+      table.state,
+      table.expiresAt,
+    ),
   ],
 );
 
@@ -533,7 +565,7 @@ export const vmScenarios = sqliteTable(
     tagsJson: jsonText<string[]>("tags_json").notNull(),
     briefingMarkdown: text("briefing_markdown").notNull(),
     solutionMarkdown: text("solution_markdown").notNull(),
-    hintsJson: jsonText<ScenarioHintManifestV2[]>("hints_json").notNull(),
+    hintsJson: jsonText<ScenarioHintManifestV3[]>("hints_json").notNull(),
     enabled: integer("enabled", { mode: "boolean" }).default(false).notNull(),
     enabledAt: integer("enabled_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
@@ -561,7 +593,8 @@ export const vmScenarioVms = sqliteTable(
     kernelSha256: text("kernel_sha256").notNull(),
     initrdSha256: text("initrd_sha256").notNull(),
     bootCmdline: text("boot_cmdline").notNull(),
-    cpu: integer("cpu").notNull(),
+    cpuMillis: integer("cpu_millis").notNull(),
+    vcpuCount: integer("vcpu_count").notNull(),
     memoryMib: integer("memory_mib").notNull(),
     diskMib: integer("disk_mib").notNull(),
   },
@@ -593,7 +626,7 @@ export const vmScenarioProbes = sqliteTable(
     description: text("description").notNull(),
     title: text("title"),
     bodyMarkdown: text("body_markdown"),
-    hintsJson: jsonText<ScenarioHintManifestV2[]>("hints_json").notNull(),
+    hintsJson: jsonText<ScenarioHintManifestV3[]>("hints_json").notNull(),
     phase: text("phase").default("scenario").notNull(),
     // Probe kind from the manifest (file_exists, port_open, service, …) —
     // drives the per-kind "why is this failing" rendering on the run page.

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BridgeMessageV5",
+  "title": "BridgeMessageV6",
   "oneOf": [
     {
       "type": "object",
@@ -10,7 +10,7 @@
           "const": "client_hello"
         }
       },
-      "$ref": "#/$defs/ClientHelloV5",
+      "$ref": "#/$defs/ClientHelloV6",
       "required": [
         "type"
       ]
@@ -23,7 +23,7 @@
           "const": "server_hello"
         }
       },
-      "$ref": "#/$defs/ServerHelloV5",
+      "$ref": "#/$defs/ServerHelloV6",
       "required": [
         "type"
       ]
@@ -36,7 +36,7 @@
           "const": "desired_state"
         }
       },
-      "$ref": "#/$defs/DesiredStateV5",
+      "$ref": "#/$defs/DesiredStateV6",
       "required": [
         "type"
       ]
@@ -49,7 +49,7 @@
           "const": "state_report"
         }
       },
-      "$ref": "#/$defs/StateReportV5",
+      "$ref": "#/$defs/StateReportV6",
       "required": [
         "type"
       ]
@@ -62,7 +62,7 @@
           "const": "vm_report"
         }
       },
-      "$ref": "#/$defs/VmReportV5",
+      "$ref": "#/$defs/VmReportV6",
       "required": [
         "type"
       ]
@@ -75,7 +75,7 @@
           "const": "build_report"
         }
       },
-      "$ref": "#/$defs/BuildReportV5",
+      "$ref": "#/$defs/BuildReportV6",
       "required": [
         "type"
       ]
@@ -88,7 +88,7 @@
           "const": "sync_request"
         }
       },
-      "$ref": "#/$defs/SyncRequestV5",
+      "$ref": "#/$defs/SyncRequestV6",
       "required": [
         "type"
       ]
@@ -179,7 +179,7 @@
         "attempt"
       ]
     },
-    "BuildReportV5": {
+    "BuildReportV6": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -188,8 +188,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         },
         "report": {
           "$ref": "#/$defs/BuildReportV1"
@@ -239,14 +239,14 @@
         "updated_at_unix_ms"
       ]
     },
-    "ClientHelloV5": {
+    "ClientHelloV6": {
       "type": "object",
       "properties": {
         "agent_version": {
           "type": "string"
         },
         "capabilities": {
-          "$ref": "#/$defs/HostCapabilitiesV1"
+          "$ref": "#/$defs/HostCapabilitiesV2"
         },
         "host_id": {
           "type": "string"
@@ -262,8 +262,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         },
         "role": {
           "$ref": "#/$defs/HostRoleV1"
@@ -327,11 +327,11 @@
         "image_sha256"
       ]
     },
-    "DesiredStateV5": {
+    "DesiredStateV6": {
       "type": "object",
       "properties": {
         "desired_state": {
-          "$ref": "#/$defs/HostDesiredStateV1"
+          "$ref": "#/$defs/HostDesiredStateV2"
         },
         "host_id": {
           "type": "string"
@@ -339,8 +339,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         }
       },
       "required": [
@@ -356,7 +356,7 @@
         "absent"
       ]
     },
-    "DesiredVmV1": {
+    "DesiredVmV2": {
       "type": "object",
       "properties": {
         "desired_phase": {
@@ -373,7 +373,7 @@
           "format": "int64"
         },
         "resources": {
-          "$ref": "#/$defs/VmResourcesV1"
+          "$ref": "#/$defs/VmResourcesV2"
         },
         "run_id": {
           "type": "string"
@@ -399,13 +399,25 @@
         "lease_expires_at_unix_ms"
       ]
     },
-    "HostCapabilitiesV1": {
+    "HostCapabilitiesV2": {
       "type": "object",
       "properties": {
         "arch": {
           "$ref": "#/$defs/ImageArchitecture"
         },
+        "supports_cgroup_v2": {
+          "type": "boolean"
+        },
+        "supports_hard_cpu_quota": {
+          "type": "boolean"
+        },
+        "supports_jailer_v1": {
+          "type": "boolean"
+        },
         "supports_kvm": {
+          "type": "boolean"
+        },
+        "supports_landlock": {
           "type": "boolean"
         },
         "supports_nftables": {
@@ -423,16 +435,19 @@
         "supports_kvm",
         "supports_vsock",
         "supports_reflink",
-        "supports_nftables"
+        "supports_nftables",
+        "supports_jailer_v1",
+        "supports_hard_cpu_quota",
+        "supports_landlock",
+        "supports_cgroup_v2"
       ]
     },
-    "HostCapacityV1": {
+    "HostCapacityV2": {
       "type": "object",
       "properties": {
-        "cpu_count": {
+        "committed_cpu_millis": {
           "type": "integer",
-          "format": "uint16",
-          "maximum": 65535,
+          "format": "uint32",
           "minimum": 0
         },
         "disk_available_mib": {
@@ -491,10 +506,28 @@
             "string",
             "null"
           ]
+        },
+        "reserved_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "schedulable_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total_cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
         }
       },
       "required": [
-        "cpu_count",
+        "total_cpu_millis",
+        "reserved_cpu_millis",
+        "schedulable_cpu_millis",
+        "committed_cpu_millis",
         "memory_total_mib",
         "memory_available_mib",
         "disk_probe_path",
@@ -502,7 +535,7 @@
         "disk_available_mib"
       ]
     },
-    "HostDesiredStateV1": {
+    "HostDesiredStateV2": {
       "type": "object",
       "properties": {
         "builds": {
@@ -527,8 +560,8 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 3,
+          "minimum": 3
         },
         "version": {
           "type": "integer",
@@ -538,7 +571,7 @@
         "vms": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DesiredVmV1"
+            "$ref": "#/$defs/DesiredVmV2"
           }
         }
       },
@@ -559,7 +592,7 @@
         "builder"
       ]
     },
-    "HostStateReportV1": {
+    "HostStateReportV2": {
       "type": "object",
       "properties": {
         "applied_desired_version": {
@@ -580,10 +613,10 @@
           }
         },
         "capabilities": {
-          "$ref": "#/$defs/HostCapabilitiesV1"
+          "$ref": "#/$defs/HostCapabilitiesV2"
         },
         "capacity": {
-          "$ref": "#/$defs/HostCapacityV1"
+          "$ref": "#/$defs/HostCapacityV2"
         },
         "host_id": {
           "type": "string"
@@ -595,13 +628,13 @@
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 3,
+          "minimum": 3
         },
         "vms": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/VmActualStateV1"
+            "$ref": "#/$defs/VmActualStateV2"
           }
         }
       },
@@ -660,7 +693,7 @@
         "scenario"
       ]
     },
-    "ServerHelloV5": {
+    "ServerHelloV6": {
       "type": "object",
       "properties": {
         "desired_version": {
@@ -674,8 +707,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         }
       },
       "required": [
@@ -684,7 +717,7 @@
         "desired_version"
       ]
     },
-    "StateReportV5": {
+    "StateReportV6": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -693,11 +726,11 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         },
         "report": {
-          "$ref": "#/$defs/HostStateReportV1"
+          "$ref": "#/$defs/HostStateReportV2"
         }
       },
       "required": [
@@ -715,7 +748,7 @@
         "operator_requested"
       ]
     },
-    "SyncRequestV5": {
+    "SyncRequestV6": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -724,8 +757,8 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         },
         "reason": {
           "$ref": "#/$defs/SyncRequestReason"
@@ -737,7 +770,7 @@
         "reason"
       ]
     },
-    "VmActualStateV1": {
+    "VmActualStateV2": {
       "type": "object",
       "properties": {
         "archive": {
@@ -799,8 +832,28 @@
             "$ref": "#/$defs/VmProbeSnapshotV1"
           }
         },
+        "resource_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmResourceStateV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "run_id": {
           "type": "string"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmSandboxStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "ssh_host_keys_openssh": {
           "type": "array",
@@ -952,7 +1005,7 @@
         "fail"
       ]
     },
-    "VmReportV1": {
+    "VmReportV2": {
       "type": "object",
       "properties": {
         "archive": {
@@ -1005,14 +1058,34 @@
             "$ref": "#/$defs/VmProbeSnapshotV1"
           }
         },
+        "resource_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmResourceStateV2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "run_id": {
           "type": "string"
+        },
+        "sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VmSandboxStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "schema_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 2,
+          "minimum": 2
         },
         "ssh_host_keys_openssh": {
           "type": "array",
@@ -1035,7 +1108,7 @@
         "probes"
       ]
     },
-    "VmReportV5": {
+    "VmReportV6": {
       "type": "object",
       "properties": {
         "host_id": {
@@ -1044,11 +1117,11 @@
         "protocol_version": {
           "type": "integer",
           "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0
+          "maximum": 6,
+          "minimum": 6
         },
         "report": {
-          "$ref": "#/$defs/VmReportV1"
+          "$ref": "#/$defs/VmReportV2"
         }
       },
       "required": [
@@ -1057,14 +1130,81 @@
         "report"
       ]
     },
-    "VmResourcesV1": {
+    "VmResourceStateV2": {
       "type": "object",
       "properties": {
-        "cpu_count": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
+        },
+        "cpu_nr_periods": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_nr_throttled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_period_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_quota_us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
+        },
+        "cpu_system_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_throttled_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_usage_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cpu_user_usec": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "vcpu_count": {
           "type": "integer",
           "format": "uint16",
           "maximum": 65535,
-          "minimum": 0
+          "minimum": 1
+        }
+      },
+      "required": [
+        "cpu_millis",
+        "vcpu_count",
+        "cpu_quota_us",
+        "cpu_period_us",
+        "cpu_usage_usec",
+        "cpu_user_usec",
+        "cpu_system_usec",
+        "cpu_nr_periods",
+        "cpu_nr_throttled",
+        "cpu_throttled_usec"
+      ]
+    },
+    "VmResourcesV2": {
+      "type": "object",
+      "properties": {
+        "cpu_millis": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1
         },
         "disk_mib": {
           "type": "integer",
@@ -1075,12 +1215,54 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "vcpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1
         }
       },
       "required": [
-        "cpu_count",
+        "cpu_millis",
+        "vcpu_count",
         "memory_mib",
         "disk_mib"
+      ]
+    },
+    "VmSandboxStateV1": {
+      "type": "object",
+      "properties": {
+        "cgroup_path": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "landlock_enabled": {
+          "type": "boolean"
+        },
+        "no_new_privs": {
+          "type": "boolean"
+        },
+        "seccomp_enabled": {
+          "type": "boolean"
+        },
+        "systemd_unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "healthy",
+        "generation",
+        "systemd_unit",
+        "cgroup_path",
+        "seccomp_enabled",
+        "landlock_enabled",
+        "no_new_privs"
       ]
     }
   }

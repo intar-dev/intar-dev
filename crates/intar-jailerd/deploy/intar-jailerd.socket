@@ -1,0 +1,19 @@
+[Unit]
+Description=Intar jailer control socket
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenSequentialPacket=/run/intar-jailerd/control.sock
+Service=intar-jailerd.service
+SocketMode=0660
+SocketUser=root
+SocketGroup=intar-agent
+FileDescriptorName=control
+Backlog=64
+FlushPending=true
+RemoveOnStop=true
+TriggerLimitIntervalSec=30s
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=sockets.target

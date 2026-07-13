@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
+import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
   hostActualState,
@@ -22,6 +23,11 @@ import {
   mutateStoredHostDesiredState,
 } from "@/lib/desired-state-store";
 import { hostHealth } from "@/lib/host-health";
+import {
+  commitHostCpu,
+  reserveHostCpu,
+  rollbackHostCpu,
+} from "@/lib/host-cpu-reservation-client";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId } from "@/lib/id";
 import { revokeAllRoutes } from "@/lib/route-revocation";
@@ -183,7 +189,7 @@ interface ScenarioRunContentSnapshot {
 const HOST_HEARTBEAT_TTL_MS = 90_000;
 
 type HostSelectionResult =
-  | { ok: true; hostId: string }
+  | { ok: true; hostIds: string[] }
   | { ok: false; reason: "unavailable" | "image_not_ready" };
 
 type ScenarioRouteType =
@@ -820,36 +826,20 @@ async function startScenarioRunInternal(params: {
     throw activeRunConflictError(active.title);
   }
 
-  const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
-  let hostId: string;
-  if (params.hostId) {
-    await assertScenarioLaunchHostForUser(
-      params.hostId,
-      params.userId,
-      requiredImages,
-    );
-    hostId = params.hostId;
-  } else {
-    const selection = await selectScenarioHost(requiredImages);
-    if (!selection.ok) {
-      if (selection.reason === "image_not_ready") {
-        throw appError(
-          409,
-          "image_not_ready",
-          "scenario images are not ready on any available host",
-        );
-      }
-      throw appError(
-        409,
-        "scenario_host_unavailable",
-        "no scenario host available",
-      );
-    }
-    hostId = selection.hostId;
-  }
-
   const runId = createAppId();
   const createdAt = Date.now();
+  const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
+  const cpuMillis = scenario.launchSpecs.reduce(
+    (total, spec) => total + spec.resources.cpuMillis,
+    0,
+  );
+  if (!Number.isSafeInteger(cpuMillis) || cpuMillis <= 0) {
+    throw appError(
+      500,
+      "scenario_catalog_invalid",
+      "scenario CPU entitlement is invalid",
+    );
+  }
   const runVmStates = scenario.launchSpecs.map((spec, index) => {
     const vmId = createAppId();
     const runtimeVmName = deterministicRuntimeVmName(
@@ -927,6 +917,77 @@ async function startScenarioRunInternal(params: {
     ),
   });
 
+  let hostId: string;
+  if (params.hostId) {
+    await assertScenarioLaunchHostForUser(
+      params.hostId,
+      params.userId,
+      requiredImages,
+    );
+    const reservation = await reserveHostCpu({
+      hostId: params.hostId,
+      runId,
+      cpuMillis,
+    });
+    if (!reservation.ok) {
+      throw reservation.reason === "exhausted"
+        ? scenarioHostCpuExhaustedError()
+        : appError(
+            409,
+            "scenario_host_unavailable",
+            "host cannot provide strict CPU isolation",
+          );
+    }
+    hostId = params.hostId;
+  } else {
+    const selection = await selectScenarioHosts(requiredImages);
+    if (!selection.ok) {
+      if (selection.reason === "image_not_ready") {
+        throw appError(
+          409,
+          "image_not_ready",
+          "scenario images are not ready on any available host",
+        );
+      }
+      throw appError(
+        409,
+        "scenario_host_unavailable",
+        "no scenario host available",
+      );
+    }
+
+    let sawCpuExhaustion = false;
+    let selectedHostId: string | null = null;
+    for (const candidateHostId of selection.hostIds) {
+      const reservation = await reserveHostCpu({
+        hostId: candidateHostId,
+        runId,
+        cpuMillis,
+      });
+      if (reservation.ok) {
+        selectedHostId = candidateHostId;
+        break;
+      }
+      if (reservation.reason === "exhausted") {
+        sawCpuExhaustion = true;
+        continue;
+      }
+      if (reservation.reason === "conflict") {
+        throw new Error(`CPU reservation conflict for run ${runId}`);
+      }
+    }
+    if (!selectedHostId) {
+      throw sawCpuExhaustion
+        ? scenarioHostCpuExhaustedError()
+        : appError(
+            409,
+            "scenario_host_unavailable",
+            "no scenario host can provide strict CPU isolation",
+          );
+    }
+    hostId = selectedHostId;
+  }
+
   const db = drizzle(env.DB);
   try {
     await db.insert(scenarioRuns).values({
@@ -968,10 +1029,19 @@ async function startScenarioRunInternal(params: {
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
     });
+    await commitHostCpu({ hostId, runId });
   } catch (error) {
     await Promise.allSettled([
-      db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId)),
+      markRunVmsAbsentInDesiredState({
+        hostId,
+        runId,
+        vms: provisionedState.vms,
+        nowUnixMs: Date.now(),
+        db,
+      }),
     ]);
+    await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId));
+    await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
     // Two concurrent starts race past the pre-check; the unique index on
     // active_key rejects the loser.
     if (isActiveKeyUniqueViolation(error)) {
@@ -1313,6 +1383,14 @@ function activeRunConflictError(activeRunTitle?: string) {
   );
 }
 
+function scenarioHostCpuExhaustedError() {
+  return appError(
+    409,
+    "scenario_host_cpu_exhausted",
+    "scenario CPU capacity is exhausted",
+  );
+}
+
 function isActiveKeyUniqueViolation(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -1514,7 +1592,7 @@ export async function revokeScenarioNativeProfileRoutesForUser(
   await revokeAllRoutes(routeUsernames, deleteStargateRoute);
 }
 
-async function selectScenarioHost(
+async function selectScenarioHosts(
   requiredImages: RequiredScenarioImage[],
 ): Promise<HostSelectionResult> {
   const db = drizzle(env.DB);
@@ -1543,11 +1621,14 @@ async function selectScenarioHost(
 
   const candidates = rows
     .map((row) => {
-      // The bridge v5 state report is the live source of per-host VM load
+      // The bridge v6 state report is the live source of per-host VM load
       // and capacity; the legacy inventory upload no longer exists.
       const capacity = row.actualReport?.capacity ?? null;
       const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
-      const cpuCores = Math.max(1, capacity?.cpu_count ?? 0);
+      const cpuCores = Math.max(
+        1,
+        (capacity?.total_cpu_millis ?? 0) / 1000,
+      );
       const loadPerCpu =
         typeof capacity?.load_avg_1m === "number" && capacity.load_avg_1m >= 0
           ? capacity.load_avg_1m / cpuCores
@@ -1557,6 +1638,11 @@ async function selectScenarioHost(
         inventoryVmCount,
         loadPerCpu,
         memoryAvailableMib: capacity?.memory_available_mib ?? -1,
+        reportedFreeCpuMillis: Math.max(
+          0,
+          (capacity?.schedulable_cpu_millis ?? 0) -
+            (capacity?.committed_cpu_millis ?? 0),
+        ),
       };
     })
     .filter(
@@ -1571,7 +1657,9 @@ async function selectScenarioHost(
           },
           now,
           HOST_HEARTBEAT_TTL_MS,
-        ) && hostHealth(row.actualReportedAt ?? null, now) === "healthy",
+        ) &&
+        hostHealth(row.actualReportedAt ?? null, now) === "healthy" &&
+        strictCpuCapacity(row.actualReport) !== null,
     );
 
   if (!candidates.length) {
@@ -1613,6 +1701,9 @@ async function selectScenarioHost(
     if (leftRuns !== rightRuns) {
       return leftRuns - rightRuns;
     }
+    if (left.reportedFreeCpuMillis !== right.reportedFreeCpuMillis) {
+      return right.reportedFreeCpuMillis - left.reportedFreeCpuMillis;
+    }
     if (left.inventoryVmCount !== right.inventoryVmCount) {
       return left.inventoryVmCount - right.inventoryVmCount;
     }
@@ -1628,8 +1719,10 @@ async function selectScenarioHost(
     return left.id.localeCompare(right.id);
   });
 
-  const hostId = imageReadyCandidates[0]?.id;
-  return hostId ? { ok: true, hostId } : { ok: false, reason: "unavailable" };
+  const hostIds = imageReadyCandidates.map((candidate) => candidate.id);
+  return hostIds.length
+    ? { ok: true, hostIds }
+    : { ok: false, reason: "unavailable" };
 }
 
 function parseObjectives(raw: string): ScenarioObjective[] {

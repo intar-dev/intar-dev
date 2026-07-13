@@ -75,7 +75,8 @@ export interface RunVmProvisioningSpec {
   imageKey: ImageKey | null;
   imageSha256: string | null;
   resources: {
-    vcpus: number;
+    cpuMillis: number;
+    vcpuCount: number;
     memoryMib: number;
     diskMib: number;
   } | null;
