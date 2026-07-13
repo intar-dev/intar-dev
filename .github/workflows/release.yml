@@ -32,20 +32,71 @@ concurrency:
 jobs:
   release:
     name: Bump, tag, and build
-    runs-on: namespace-profile-intar-dev
+    # The jailed agent release needs a host kernel with Landlock enabled.
+    # Namespace's runner kernel currently has Landlock disabled at boot, while
+    # the other release targets do not execute the privileged jailer smoke.
+    runs-on: ${{ inputs.project == 'intar-agent' && 'ubuntu-24.04' || 'namespace-profile-intar-dev' }}
 
     steps:
+      - name: Checkout on Namespace
+        if: inputs.project != 'intar-agent'
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          fetch-depth: 0
+
+      - name: Checkout jailed agent release
+        if: inputs.project == 'intar-agent'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Preflight jailed release runner
+        if: inputs.project == 'intar-agent'
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(ps -p 1 -o comm= | tr -d ' ')" = systemd
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          grep -qw cpu /sys/fs/cgroup/cgroup.controllers
+          test -c /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-intar-kvm.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+          test -c /dev/net/tun
+          test -r /dev/net/tun
+          test -w /dev/net/tun
+          python3 - <<'PY'
+          import ctypes
+          import os
+
+          SYS_LANDLOCK_CREATE_RULESET = 444
+          LANDLOCK_CREATE_RULESET_VERSION = 1
+          libc = ctypes.CDLL(None, use_errno=True)
+          libc.syscall.restype = ctypes.c_long
+          abi = libc.syscall(
+              SYS_LANDLOCK_CREATE_RULESET,
+              ctypes.c_void_p(),
+              ctypes.c_size_t(),
+              LANDLOCK_CREATE_RULESET_VERSION,
+          )
+          if abi < 3:
+              error = ctypes.get_errno()
+              detail = os.strerror(error) if error else "unsupported ABI"
+              raise SystemExit(
+                  f"release runner requires Landlock ABI >= 3; got {abi}: {detail}"
+              )
+          print(f"Landlock ABI {abi}")
+          PY
+
       - name: Ensure main
         run: |
           if [ "${GITHUB_REF_NAME}" != "main" ]; then
             echo "This workflow must run from main, got ${GITHUB_REF_NAME}." >&2
             exit 1
           fi
-
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
-        with:
-          fetch-depth: 0
 
       - name: Resolve project
         id: project
@@ -132,6 +183,7 @@ jobs:
           rustup show active-toolchain
 
       - name: Set up Namespace caches
+        if: inputs.project != 'intar-agent'
         uses: namespacelabs/nscloud-cache-action@v1
         with:
           cache: rust
