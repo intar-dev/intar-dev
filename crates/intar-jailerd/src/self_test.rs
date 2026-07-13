@@ -180,7 +180,7 @@ mod linux {
     use cloud_hypervisor_client::{
         Client as CloudHypervisorClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType,
         Error as CloudHypervisorError, MemoryConfig, NetConfig, PayloadConfig, SerialConfig,
-        VmConfig, VmState,
+        VmConfig, VmInfo, VmState,
     };
     use intar_jailer_protocol::{
         ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
@@ -215,7 +215,7 @@ mod linux {
     const WORKER_SECONDS: u64 = 8;
     const SATURATION_VM_TRANSITION_TIMEOUT: Duration = Duration::from_secs(30);
     const SATURATION_GUEST_READY_TIMEOUT: Duration = Duration::from_secs(45);
-    const LANDLOCK_API_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+    const CLOUD_HYPERVISOR_API_CALL_TIMEOUT: Duration = Duration::from_secs(5);
     const EXPECTED_API_ONLY_VMM_ARGV: [&str; 5] = [
         "/cloud-hypervisor",
         "--api-socket",
@@ -2042,26 +2042,72 @@ mod linux {
     }
 
     async fn shutdown_smoke_vm(client: &CloudHypervisorClient) -> Result<()> {
-        client
-            .vm_shutdown()
+        tokio::time::timeout(SATURATION_VM_TRANSITION_TIMEOUT, client.vm_shutdown())
             .await
+            .context("time out requesting jailed API shutdown")?
             .context("request jailed API shutdown")?;
-        let deadline = tokio::time::Instant::now() + SATURATION_VM_TRANSITION_TIMEOUT;
-        loop {
-            match client.vm_info().await {
-                Ok(info) if matches!(info.state, VmState::Shutdown) => break,
-                Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Ok(info) => bail!("smoke VM did not shut down: {:?}", info.state),
-                Err(error) => return Err(error).context("observe jailed API shutdown"),
-            }
-        }
-        client
-            .vm_delete()
+
+        // In pinned v53, vm_shutdown() takes ownership of the running VM,
+        // shuts it down synchronously, and drops it while retaining vm_config.
+        // vm_info() therefore reports Created, not Shutdown, after the API
+        // response. This exact state proves that the VMM can boot the retained
+        // configuration again; vm_delete() below then removes that config.
+        let shutdown_info =
+            tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_info())
+                .await
+                .context("time out inspecting jailed API shutdown")?
+                .context("inspect jailed API shutdown")?;
+        validate_v53_post_shutdown_state(&shutdown_info)?;
+
+        tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_delete())
             .await
+            .context("time out deleting shutdown smoke VM")?
             .context("delete shutdown smoke VM")?;
+        let deleted_info =
+            tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_info())
+                .await
+                .context("time out confirming smoke VM deletion")?;
+        validate_v53_post_delete_info(deleted_info)
+    }
+
+    fn validate_v53_post_shutdown_state(info: &VmInfo) -> Result<()> {
+        ensure!(
+            matches!(info.state, VmState::Created),
+            "pinned v53 did not retain only a reusable VM configuration after shutdown: {:?}",
+            info.state
+        );
         Ok(())
+    }
+
+    fn validate_v53_post_delete_info(
+        result: std::result::Result<VmInfo, CloudHypervisorError>,
+    ) -> Result<()> {
+        match result {
+            Err(CloudHypervisorError::HttpStatus { status, body }) => {
+                ensure!(
+                    status == 404,
+                    "pinned v53 returned HTTP {status} instead of 404 after VM delete"
+                );
+                let chain: Vec<String> = serde_json::from_str(&body)
+                    .context("parse pinned v53 post-delete error chain")?;
+                ensure!(
+                    chain
+                        == [
+                            "Error from API",
+                            "The VM info is not available",
+                            "VM is not created",
+                        ],
+                    "pinned v53 returned an unexpected post-delete error chain: {chain:?}"
+                );
+                Ok(())
+            }
+            Err(error) => Err(anyhow::Error::new(error)
+                .context("vm.info did not return pinned v53's post-delete 404")),
+            Ok(info) => bail!(
+                "pinned v53 still reported a VM after delete: {:?}",
+                info.state
+            ),
+        }
     }
 
     fn expect_inspection(response: Response, operation: &str) -> Result<VmInspection> {
@@ -2654,7 +2700,7 @@ mod linux {
         const CANARY_PATH: &str = "/run/landlock-api-canary";
         const CANARY_ID: &str = "landlock-denied";
 
-        let before = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_info())
+        let before = tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_info())
             .await
             .context("time out inspecting VM before Landlock-negative add-disk")?
             .context("inspect VM before Landlock-negative add-disk")?;
@@ -2689,9 +2735,12 @@ mod linux {
             id: Some(CANARY_ID.to_owned()),
             image_type: Some(DiskImageType::Raw),
         };
-        let denial = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_add_disk(&canary))
-            .await
-            .context("time out waiting for Landlock-negative add-disk response")?;
+        let denial = tokio::time::timeout(
+            CLOUD_HYPERVISOR_API_CALL_TIMEOUT,
+            client.vm_add_disk(&canary),
+        )
+        .await
+        .context("time out waiting for Landlock-negative add-disk response")?;
         match denial {
             Err(CloudHypervisorError::HttpStatus { status, body }) => {
                 validate_v53_landlock_denial(status, &body)?;
@@ -2703,7 +2752,7 @@ mod linux {
             Ok(()) => bail!("Cloud Hypervisor unexpectedly attached the Landlock canary"),
         }
 
-        let ping = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.ping())
+        let ping = tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.ping())
             .await
             .context("time out pinging VMM after Landlock-negative add-disk")?
             .context("ping VMM after Landlock-negative add-disk")?;
@@ -2716,7 +2765,7 @@ mod linux {
             reported_version.contains("53.0"),
             "VMM reported unexpected version after Landlock denial: {reported_version:?}"
         );
-        let after = tokio::time::timeout(LANDLOCK_API_CALL_TIMEOUT, client.vm_info())
+        let after = tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.vm_info())
             .await
             .context("time out inspecting VM after Landlock-negative add-disk")?
             .context("inspect VM after Landlock-negative add-disk")?;
@@ -3616,6 +3665,57 @@ mod linux {
                 "Operation not permitted (os error 1)",
             );
             assert!(validate_v53_landlock_denial(500, &wrong_errno).is_err());
+        }
+
+        #[test]
+        fn lifecycle_accepts_only_pinned_v53_shutdown_and_delete_results() {
+            let created = VmInfo {
+                config: VmConfig::default(),
+                state: VmState::Created,
+                memory_actual_size: None,
+            };
+            validate_v53_post_shutdown_state(&created).expect("v53 retained configuration");
+            for state in [VmState::Running, VmState::Paused, VmState::Shutdown] {
+                let info = VmInfo {
+                    state,
+                    ..created.clone()
+                };
+                assert!(validate_v53_post_shutdown_state(&info).is_err());
+            }
+
+            let exact_body = serde_json::json!([
+                "Error from API",
+                "The VM info is not available",
+                "VM is not created"
+            ])
+            .to_string();
+            validate_v53_post_delete_info(Err(CloudHypervisorError::HttpStatus {
+                status: 404,
+                body: exact_body.clone(),
+            }))
+            .expect("v53 deleted configuration");
+            assert!(
+                validate_v53_post_delete_info(Err(CloudHypervisorError::HttpStatus {
+                    status: 500,
+                    body: exact_body,
+                }))
+                .is_err()
+            );
+            assert!(
+                validate_v53_post_delete_info(Err(CloudHypervisorError::HttpStatus {
+                    status: 404,
+                    body: "[]".to_owned(),
+                }))
+                .is_err()
+            );
+            assert!(
+                validate_v53_post_delete_info(Err(CloudHypervisorError::HttpStatus {
+                    status: 404,
+                    body: "not-json".to_owned(),
+                }))
+                .is_err()
+            );
+            assert!(validate_v53_post_delete_info(Ok(created)).is_err());
         }
 
         #[test]
