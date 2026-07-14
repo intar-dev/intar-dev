@@ -739,6 +739,7 @@ os.close(fd)
 socket_path = "/var/lib/intar/jails/cloud-hypervisor/agent-service-probe/root/run/kino.vsock_10000"
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(socket_path)
+listener.listen(1)
 parent_path, socket_name = os.path.split(socket_path)
 parent_how = (ctypes.c_ulonglong * 3)(
     os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
