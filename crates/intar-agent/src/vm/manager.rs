@@ -3835,6 +3835,7 @@ async fn run_probe_worker_task(
     run_id: String,
     _kino_vsock_path: PathBuf,
     _kino_vsock_port: u32,
+    _jail_uid: u32,
 ) {
     warn!(
         vm = vm_name,
@@ -3972,6 +3973,9 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("vm details missing kino_vsock_path"))?;
     let kino_vsock_port = details.kino_vsock_port.unwrap_or(KINO_VSOCK_PORT);
+    let jail_uid = details
+        .jail_uid
+        .ok_or_else(|| anyhow::anyhow!("vm details missing jail_uid"))?;
 
     stop_probe_worker(inner, vm_name).await;
 
@@ -3984,6 +3988,7 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
             run_id,
             kino_vsock_path,
             kino_vsock_port,
+            jail_uid,
         )
         .await;
     });
@@ -4123,6 +4128,7 @@ async fn run_probe_worker_task(
     run_id: String,
     kino_vsock_path: PathBuf,
     _kino_vsock_port: u32,
+    jail_uid: u32,
 ) {
     match inner.db.load_vm_probe_state(vm_name.clone()).await {
         Ok(Some(row)) if row.run_id == run_id => {
@@ -4150,8 +4156,20 @@ async fn run_probe_worker_task(
             return;
         }
     };
+    if let Err(error) = activate_kino_ready_socket(&ready_socket_path, jail_uid).await {
+        error!(
+            error = %error,
+            vm = vm_name,
+            vm_uid = jail_uid,
+            path = %ready_socket_path.display(),
+            "failed to activate Kino readiness socket ACL mask"
+        );
+        let _ = tokio::fs::remove_file(&ready_socket_path).await;
+        return;
+    }
     info!(
         vm = vm_name,
+        vm_uid = jail_uid,
         path = %ready_socket_path.display(),
         "listening for guest-initiated Kino readiness pushes"
     );
@@ -4229,6 +4247,95 @@ async fn run_probe_worker_task(
         task.abort();
     }
     let _ = tokio::fs::remove_file(&ready_socket_path).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn activate_kino_ready_socket(path: &Path, jail_uid: u32) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+
+    // The run directory's default ACL names the unique VM UID. UnixListener
+    // creation can collapse that ACL's mask under the service's 0077 umask, so
+    // reactivate only the group-class mask. No permission is granted to other.
+    let file_name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .context("Kino readiness socket path has no file name")?;
+    let parent_path = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("Kino readiness socket path has no parent")?;
+    let parent = openat2(
+        rustix::fs::CWD,
+        parent_path,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
+    )
+    .context("pin Kino readiness socket parent")?;
+    let parent_stat = rustix::fs::fstat(&parent)?;
+    anyhow::ensure!(
+        rustix::fs::FileType::from_raw_mode(parent_stat.st_mode) == rustix::fs::FileType::Directory
+            && parent_stat.st_uid == jail_uid
+            && parent_stat.st_gid == jail_uid,
+        "Kino readiness socket parent identity changed"
+    );
+    let socket = openat2(
+        &parent,
+        file_name,
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH
+            | ResolveFlags::NO_MAGICLINKS
+            | ResolveFlags::NO_SYMLINKS
+            | ResolveFlags::NO_XDEV,
+    )
+    .context("pin Kino readiness socket")?;
+    let before = rustix::fs::fstat(&socket)?;
+    anyhow::ensure!(
+        rustix::fs::FileType::from_raw_mode(before.st_mode) == rustix::fs::FileType::Socket
+            && before.st_uid != 0
+            && before.st_uid != jail_uid
+            && before.st_nlink == 1,
+        "Kino readiness socket identity is unsafe"
+    );
+    let pinned_path = PathBuf::from(format!("/proc/self/fd/{}", socket.as_raw_fd()));
+    tokio::fs::set_permissions(&pinned_path, std::fs::Permissions::from_mode(0o760))
+        .await
+        .with_context(|| format!("set permissions on {}", path.display()))?;
+    let after = rustix::fs::fstat(&socket)?;
+    anyhow::ensure!(
+        before.st_dev == after.st_dev
+            && before.st_ino == after.st_ino
+            && before.st_uid == after.st_uid
+            && before.st_gid == after.st_gid
+            && after.st_nlink == 1,
+        "pinned Kino readiness socket identity changed"
+    );
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("inspect {} after permission update", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_socket(),
+        "Kino readiness path is not a Unix socket"
+    );
+    anyhow::ensure!(
+        metadata.dev() == after.st_dev
+            && metadata.ino() == after.st_ino
+            && metadata.uid() == after.st_uid
+            && metadata.gid() == after.st_gid,
+        "Kino readiness socket path was replaced"
+    );
+    anyhow::ensure!(
+        metadata.nlink() == 1,
+        "Kino readiness socket must have exactly one link"
+    );
+    anyhow::ensure!(
+        metadata.mode() & 0o077 == 0o060,
+        "Kino readiness socket ACL mask or other-user permissions are unsafe"
+    );
+    Ok(())
 }
 
 async fn persist_probe_update(inner: &Inner, update: &ProbeUpdateEnvelope) {
@@ -4387,26 +4494,44 @@ fn classify_jailer_identity_response(
 
 async fn wait_for_ch_ready(socket_path: &Path, timeout_seconds: u64) -> Result<ChClient> {
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let mut last_error = "socket path has not appeared".to_owned();
 
     loop {
         if socket_path.exists() {
             let socket = socket_path.display().to_string();
-            if let Ok(client) = ChClient::new(socket)
-                && client.ping().await.is_ok()
-            {
-                return Ok(client);
+            match ChClient::new(socket) {
+                Ok(client) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match tokio::time::timeout(remaining, client.ping()).await {
+                        Ok(Ok(_)) => return Ok(client),
+                        Ok(Err(error)) => {
+                            last_error = format!("API ping failed: {error}");
+                        }
+                        Err(_) => {
+                            last_error =
+                                "API ping exceeded the remaining readiness deadline".to_owned();
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_error = format!("socket validation failed: {error}");
+                }
             }
         }
 
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "cloud-hypervisor socket did not become ready in {}s at {}",
+                "cloud-hypervisor socket did not become ready in {}s at {}; last error: {}",
                 timeout_seconds,
-                socket_path.display()
+                socket_path.display(),
+                last_error,
             );
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(
+            Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await;
     }
 }
 

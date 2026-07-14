@@ -24,6 +24,7 @@ intar-jailer-protocol = { path = "../intar-jailer-protocol" }
 intar-kino-proto = { path = "../intar-kino-proto" }
 prost.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-no-provider", "stream"] }
+rustix.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 rusqlite.workspace = true
 serde.workspace = true

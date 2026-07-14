@@ -1132,6 +1132,13 @@ pub trait JailPreparer: Send {
     ) -> Result<PreparedJail>;
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool>;
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()>;
+    fn grant_agent_runtime_access(
+        &mut self,
+        _config: &JailerdConfig,
+        _generation: &ValidatedId,
+        _uid: u32,
+        _gid: u32,
+    ) -> Result<()>;
     fn persist(&mut self, _config: &JailerdConfig, _record: &VmRecord) -> Result<()> {
         Ok(())
     }
@@ -1184,6 +1191,16 @@ impl JailPreparer for FileSystemJailPreparer {
 
     fn quarantine(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
         quarantine_generation(config, generation)
+    }
+
+    fn grant_agent_runtime_access(
+        &mut self,
+        config: &JailerdConfig,
+        generation: &ValidatedId,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        grant_agent_api_socket_access(config, generation, uid, gid)
     }
 
     fn persist(&mut self, config: &JailerdConfig, record: &VmRecord) -> Result<()> {
@@ -1904,7 +1921,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             unit_name: unit_name.clone(),
             description: format!("Intar jailed VM {} / {}", request.run_id, request.vm_id),
             jailer_binary: self.config.jailer_binary.clone(),
-            jail_spec_path: prepared.spec_path,
+            jail_spec_path: prepared.spec_path.clone(),
             api_socket_path: prepared.paths.host_api_socket.clone(),
             cpu_quota: quota,
             uid: identity,
@@ -1958,6 +1975,17 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 &generation,
                 &unit_name,
                 anyhow::anyhow!("backend returned mismatched transient unit name"),
+            );
+        }
+        if let Err(error) =
+            self.preparer
+                .grant_agent_runtime_access(&self.config, &generation, identity, identity)
+        {
+            return self.fail_launch(
+                &request.run_id,
+                &generation,
+                &unit_name,
+                error.context("grant agent access to Cloud Hypervisor API socket"),
             );
         }
         record.cgroup_path.clone_from(&started.cgroup_path);
@@ -2438,7 +2466,7 @@ fn prepare_jail_files(
             set_owner(&directory, uid, gid)?;
             set_mode(&directory, 0o700)?;
         }
-        apply_agent_acls(config, &generation_dir, &root)?;
+        apply_agent_acls(config, &generation_dir, &root, uid)?;
 
         if run_network.namespace_name.is_empty()
             || run_network.namespace_name.len() > 64
@@ -3352,12 +3380,23 @@ fn set_owner(path: &Path, uid: u32, gid: u32) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn apply_agent_acls(config: &JailerdConfig, generation_dir: &Path, root: &Path) -> Result<()> {
+fn trusted_setfacl_binary() -> Result<PathBuf> {
     let setfacl = ["/usr/bin/setfacl", "/usr/sbin/setfacl"]
         .into_iter()
         .map(PathBuf::from)
         .find(|path| path_is_root_trusted(path, false))
         .context("trusted setfacl binary is required")?;
+    Ok(setfacl)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_agent_acls(
+    config: &JailerdConfig,
+    generation_dir: &Path,
+    root: &Path,
+    vm_uid: u32,
+) -> Result<()> {
+    let setfacl = trusted_setfacl_binary()?;
     let agent = config.agent_uid.to_string();
     for directory in [
         config.jail_root.as_path(),
@@ -3367,10 +3406,20 @@ fn apply_agent_acls(config: &JailerdConfig, generation_dir: &Path, root: &Path) 
     ] {
         run_setfacl(&setfacl, directory, &format!("u:{agent}:--x,m::--x"))?;
     }
-    for directory in [root.join("run"), root.join("logs")] {
-        run_setfacl(&setfacl, &directory, &format!("u:{agent}:rwx,m::rwx"))?;
-        run_setfacl(&setfacl, &directory, &format!("d:u:{agent}:rwx,d:m::rwx"))?;
-    }
+    let run = root.join("run");
+    run_setfacl(&setfacl, &run, &format!("u:{agent}:rwx,m::rwx"))?;
+    // The agent creates Kino's host-side readiness listener in this directory,
+    // while Cloud Hypervisor connects to it as the unique VM identity. Keep
+    // both named users in the inherited ACL; the agent activates the mask on
+    // the socket after bind without granting access to other users.
+    run_setfacl(
+        &setfacl,
+        &run,
+        &format!("d:u:{agent}:rwx,d:u:{vm_uid}:rwx,d:m::rwx"),
+    )?;
+    let logs = root.join("logs");
+    run_setfacl(&setfacl, &logs, &format!("u:{agent}:rwx,m::rwx"))?;
+    run_setfacl(&setfacl, &logs, &format!("d:u:{agent}:rwx,d:m::rwx"))?;
     for file in [
         root.join("logs/serial.log"),
         root.join("logs/console.log"),
@@ -3378,6 +3427,102 @@ fn apply_agent_acls(config: &JailerdConfig, generation_dir: &Path, root: &Path) 
     ] {
         run_setfacl(&setfacl, &file, &format!("u:{agent}:rw-,m::rw-"))?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn grant_agent_api_socket_access(
+    config: &JailerdConfig,
+    generation: &ValidatedId,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    let jail_root = trusted_jail_root_fd(config)?;
+    let generation_parent = open_optional_root_directory_at(&jail_root, c"cloud-hypervisor")?
+        .context("jail generation parent is missing")?;
+    let generation_name =
+        CString::new(generation.as_str()).expect("validated generation contains no NUL");
+    let generation_fd = open_lifecycle_entry_at(
+        &generation_parent,
+        &generation_name,
+        OFlags::RDONLY | OFlags::DIRECTORY,
+    )
+    .context("open jail generation for runtime ACL")?;
+    validate_root_directory(&generation_fd, "jail generation")?;
+    let root_fd =
+        open_lifecycle_entry_at(&generation_fd, c"root", OFlags::RDONLY | OFlags::DIRECTORY)
+            .context("open jail root for runtime ACL")?;
+    validate_root_directory(&root_fd, "jail root")?;
+    let run_fd = open_lifecycle_entry_at(&root_fd, c"run", OFlags::RDONLY | OFlags::DIRECTORY)
+        .context("open jail runtime directory")?;
+    let run_stat = rustix::fs::fstat(&run_fd)?;
+    ensure!(
+        rustix::fs::FileType::from_raw_mode(run_stat.st_mode) == rustix::fs::FileType::Directory
+            && run_stat.st_uid == uid
+            && run_stat.st_gid == gid,
+        "jail runtime directory identity changed"
+    );
+
+    let socket_fd = open_lifecycle_entry_at(&run_fd, c"cloud-hypervisor.sock", OFlags::PATH)
+        .context("open Cloud Hypervisor API socket for runtime ACL")?;
+    let before = rustix::fs::fstat(&socket_fd)?;
+    validate_runtime_socket(&before, uid, gid)?;
+
+    // Keep the verified socket inode pinned while the trusted helper applies
+    // the ACL. Referring to this process's fd prevents a pathname swap from
+    // redirecting setfacl; the fd remains open until the helper has exited.
+    let pinned_path = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        socket_fd.as_raw_fd()
+    ));
+    run_setfacl(
+        &trusted_setfacl_binary()?,
+        &pinned_path,
+        &format!("u:{}:rw-,m::rw-", config.agent_uid),
+    )?;
+
+    let after = rustix::fs::fstat(&socket_fd)?;
+    validate_runtime_socket(&after, uid, gid)?;
+    ensure!(
+        same_lifecycle_object(&before, &after),
+        "pinned Cloud Hypervisor API socket identity changed"
+    );
+    // POSIX ACL masks are reflected in the group-class mode bits. This catches
+    // the exact failure where the named agent entry existed but was rendered
+    // ineffective by Cloud Hypervisor's 0700 socket creation mode.
+    ensure!(
+        after.st_mode & 0o060 == 0o060,
+        "Cloud Hypervisor API socket ACL mask does not grant read/write access"
+    );
+
+    let current_fd = open_lifecycle_entry_at(&run_fd, c"cloud-hypervisor.sock", OFlags::PATH)
+        .context("reopen Cloud Hypervisor API socket after runtime ACL")?;
+    let current = rustix::fs::fstat(&current_fd)?;
+    validate_runtime_socket(&current, uid, gid)?;
+    ensure!(
+        same_lifecycle_object(&after, &current),
+        "Cloud Hypervisor API socket was replaced while granting agent access"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_socket(stat: &rustix::fs::Stat, uid: u32, gid: u32) -> Result<()> {
+    ensure!(
+        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Socket,
+        "Cloud Hypervisor API path is not a Unix socket"
+    );
+    ensure!(
+        stat.st_uid == uid && stat.st_gid == gid,
+        "Cloud Hypervisor API socket identity changed"
+    );
+    ensure!(
+        stat.st_nlink == 1,
+        "Cloud Hypervisor API socket must have exactly one link"
+    );
     Ok(())
 }
 
@@ -3404,8 +3549,23 @@ fn run_setfacl(program: &Path, path: &Path, acl: &str) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_agent_acls(_config: &JailerdConfig, _generation_dir: &Path, _root: &Path) -> Result<()> {
+fn apply_agent_acls(
+    _config: &JailerdConfig,
+    _generation_dir: &Path,
+    _root: &Path,
+    _vm_uid: u32,
+) -> Result<()> {
     bail!("POSIX ACL staging is supported only on Linux")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn grant_agent_api_socket_access(
+    _config: &JailerdConfig,
+    _generation: &ValidatedId,
+    _uid: u32,
+    _gid: u32,
+) -> Result<()> {
+    bail!("runtime socket ACLs are supported only on Linux")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -3580,13 +3740,24 @@ mod tests {
         fn quarantine(&mut self, _config: &JailerdConfig, _generation: &ValidatedId) -> Result<()> {
             Ok(())
         }
+        fn grant_agent_runtime_access(
+            &mut self,
+            _config: &JailerdConfig,
+            _generation: &ValidatedId,
+            _uid: u32,
+            _gid: u32,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[derive(Default)]
     struct TrackingPreparer {
         quarantined: Vec<ValidatedId>,
         persist_calls: usize,
+        runtime_access_calls: usize,
         fail_persist_call: Option<usize>,
+        fail_runtime_access: bool,
         fail_quarantine: bool,
     }
 
@@ -3619,6 +3790,20 @@ mod tests {
             self.quarantined.push(generation.clone());
             if self.fail_quarantine {
                 bail!("injected jail quarantine failure")
+            }
+            Ok(())
+        }
+
+        fn grant_agent_runtime_access(
+            &mut self,
+            _config: &JailerdConfig,
+            _generation: &ValidatedId,
+            _uid: u32,
+            _gid: u32,
+        ) -> Result<()> {
+            self.runtime_access_calls += 1;
+            if self.fail_runtime_access {
+                bail!("injected runtime socket ACL failure")
             }
             Ok(())
         }
@@ -3658,6 +3843,16 @@ mod tests {
 
         fn quarantine(&mut self, _config: &JailerdConfig, generation: &ValidatedId) -> Result<()> {
             self.quarantined.push(generation.clone());
+            Ok(())
+        }
+
+        fn grant_agent_runtime_access(
+            &mut self,
+            _config: &JailerdConfig,
+            _generation: &ValidatedId,
+            _uid: u32,
+            _gid: u32,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -4028,6 +4223,49 @@ mod tests {
         );
         assert!(!core.backend.units.contains_key(&unit_name));
         assert_eq!(core.preparer.persist_calls, 2);
+        assert_eq!(core.preparer.runtime_access_calls, 1);
+    }
+
+    #[test]
+    fn runtime_socket_acl_failure_rolls_back_the_transient_unit() {
+        let mut config = test_config();
+        config.cpu_reserved_millis = 0;
+        let mut core = JailerdCore::new_with_readiness(
+            config,
+            FakeBackend::default(),
+            TrackingPreparer {
+                fail_runtime_access: true,
+                ..TrackingPreparer::default()
+            },
+            1_000,
+            ready_readiness(),
+        )
+        .expect("core");
+        ensure_test_network(&mut core);
+
+        let Response::Error(error) = core.handle(Request::LaunchVm(Box::new(launch(1, 125))))
+        else {
+            panic!("runtime socket ACL failure unexpectedly succeeded")
+        };
+        assert!(
+            error
+                .message
+                .contains("injected runtime socket ACL failure")
+        );
+        assert!(core.records.is_empty());
+        assert_eq!(core.preparer.runtime_access_calls, 1);
+        assert_eq!(core.preparer.persist_calls, 1);
+        let generation = core
+            .preparer
+            .quarantined
+            .first()
+            .expect("failed generation quarantined");
+        let unit_name = format!("intar-vm-{generation}.service");
+        assert_eq!(
+            core.backend.unit_operations,
+            [format!("stop:{unit_name}"), format!("destroy:{unit_name}")]
+        );
+        assert!(!core.backend.units.contains_key(&unit_name));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 Description=intar-agent
 After=network-online.target intar-jailerd.socket
 Wants=network-online.target intar-jailerd.socket
+RequiresMountsFor=/var/cache/intar-agent /var/lib/intar/jails
 
 [Service]
 Type=simple
@@ -40,7 +41,10 @@ RestrictSUIDSGID=false
 LimitRTPRIO=0
 SystemCallArchitectures=native
 ReadOnlyPaths=/run/intar-jailerd
-ReadWritePaths=/var/cache/intar-agent
+# The mount namespace must permit the agent to create Kino's per-VM readiness
+# listener under root/run. Per-generation POSIX ACLs remain the DAC boundary:
+# boot assets, disks, metadata, and every non-granted jail path stay denied.
+ReadWritePaths=/var/cache/intar-agent /var/lib/intar/jails
 
 [Install]
 WantedBy=multi-user.target

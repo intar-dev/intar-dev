@@ -21,7 +21,7 @@ case "${archive}" in
 esac
 [ -f "${archive}" ] || die "archive does not exist: ${archive}"
 
-for command in awk env file find getfacl install ip nft nsenter python3 readelf readlink runuser setfacl sha256sum sleep stat sysctl systemctl systemd-run tar; do
+for command in awk env file find getfacl install ip nft nsenter python3 readelf readlink runuser seq setfacl setpriv sha256sum sleep stat sysctl systemctl systemd-run tar; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exist"
@@ -239,6 +239,12 @@ for service in intar-agent.service intar-jailerd.service; do
   [ "${restrict_suid_sgid}" = false ] || \
     die "packaged ${service} blocks openat2 through RestrictSUIDSGID"
 done
+agent_read_write_paths=$(awk -F= '$1 == "ReadWritePaths" { print $2 }' \
+  "${package_root}/deploy/intar-agent.service")
+case " ${agent_read_write_paths} " in
+  *" /var/cache/intar-agent "*" /var/lib/intar/jails "*) ;;
+  *) die "packaged intar-agent.service cannot create jailed runtime listeners" ;;
+esac
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
 for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do
@@ -665,20 +671,47 @@ systemctl is-active --quiet intar-jailerd.socket || \
 systemctl is-active --quiet intar-jailerd.service || \
   die "doctor left intar-jailerd.service inactive"
 
-# Run openat2 under the installed agent unit itself, not merely as its Unix
-# user. systemd 255's RestrictSUIDSGID filter returns ENOSYS for openat2, which
-# the agent needs to pin and validate jailed Cloud Hypervisor API sockets.
+# Run openat2 and a jailed runtime-socket bind under the installed agent unit
+# itself, not merely as its Unix user. systemd 255's RestrictSUIDSGID filter
+# returns ENOSYS for openat2, while ProtectSystem=strict denies the Kino
+# readiness listener unless the jail tree is explicitly mount-writable. The
+# disposable DAC fixture grants access only to its root/run directory.
 # Replacing only the probe lifecycle and ExecStart directives preserves every
 # production sandbox directive and catches any future hardening change that
-# blocks the syscall again.
+# blocks either operation again.
 install -d -o root -g root -m 0755 "${agent_probe_dropin_dir}"
+agent_runtime_probe_root=/var/lib/intar/jails/cloud-hypervisor/agent-service-probe
+agent_runtime_probe_vm_uid=265535
+agent_runtime_probe_socket=${agent_runtime_probe_root}/root/run/kino.vsock_10000
+install -d -o root -g root -m 0700 \
+  "${agent_runtime_probe_root}" \
+  "${agent_runtime_probe_root}/root" \
+  "${agent_runtime_probe_root}/root/run"
+chown "${agent_runtime_probe_vm_uid}:${agent_runtime_probe_vm_uid}" \
+  "${agent_runtime_probe_root}/root/run"
+setfacl --modify "u:${agent_uid}:--x,u:${agent_runtime_probe_vm_uid}:--x,m::--x" -- \
+  /var/lib/intar/jails \
+  /var/lib/intar/jails/cloud-hypervisor \
+  "${agent_runtime_probe_root}" \
+  "${agent_runtime_probe_root}/root"
+setfacl --modify "u:${agent_uid}:rwx,m::rwx" -- \
+  "${agent_runtime_probe_root}/root/run"
+setfacl --modify \
+  "u:${agent_runtime_probe_vm_uid}:--x,d:u:${agent_uid}:rwx,d:u:${agent_runtime_probe_vm_uid}:rwx,d:m::rwx" \
+  -- "${agent_runtime_probe_root}/root/run"
 agent_openat2_probe=${agent_probe_dropin_dir}/agent-openat2-probe.py
 cat >"${agent_openat2_probe}" <<'PY'
 import ctypes
 import os
+import socket
+import stat
 
 SYS_OPENAT2_X86_64 = 437
 AT_FDCWD = -100
+RESOLVE_NO_XDEV = 0x01
+RESOLVE_NO_MAGICLINKS = 0x02
+RESOLVE_NO_SYMLINKS = 0x04
+RESOLVE_BENEATH = 0x08
 
 libc = ctypes.CDLL(None, use_errno=True)
 libc.syscall.restype = ctypes.c_long
@@ -698,7 +731,58 @@ if fd < 0:
     error_number = ctypes.get_errno()
     raise OSError(error_number, os.strerror(error_number))
 os.close(fd)
-print("intar package smoke: agent systemd sandbox permits openat2")
+
+socket_path = "/var/lib/intar/jails/cloud-hypervisor/agent-service-probe/root/run/kino.vsock_10000"
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(socket_path)
+parent_path, socket_name = os.path.split(socket_path)
+parent_how = (ctypes.c_ulonglong * 3)(
+    os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0,
+    RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
+)
+parent_fd = libc.syscall(
+    SYS_OPENAT2_X86_64,
+    AT_FDCWD,
+    ctypes.c_char_p(os.fsencode(parent_path)),
+    ctypes.byref(parent_how),
+    ctypes.sizeof(parent_how),
+)
+if parent_fd < 0:
+    error_number = ctypes.get_errno()
+    raise OSError(error_number, os.strerror(error_number))
+parent_metadata = os.fstat(parent_fd)
+if parent_metadata.st_uid != 265535 or parent_metadata.st_gid != 265535:
+    raise SystemExit("runtime listener parent does not belong to the VM identity")
+socket_how = (ctypes.c_ulonglong * 3)(
+    os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0,
+    RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV,
+)
+socket_fd = libc.syscall(
+    SYS_OPENAT2_X86_64,
+    parent_fd,
+    ctypes.c_char_p(os.fsencode(socket_name)),
+    ctypes.byref(socket_how),
+    ctypes.sizeof(socket_how),
+)
+if socket_fd < 0:
+    error_number = ctypes.get_errno()
+    raise OSError(error_number, os.strerror(error_number))
+os.chmod(f"/proc/self/fd/{socket_fd}", 0o760)
+metadata = os.lstat(socket_path)
+if not stat.S_ISSOCK(metadata.st_mode):
+    raise SystemExit("runtime listener is not a Unix socket")
+if stat.S_IMODE(metadata.st_mode) != 0o760:
+    raise SystemExit("runtime listener mode was not activated safely")
+listener.settimeout(10)
+connection, _ = listener.accept()
+connection.close()
+listener.close()
+os.unlink(socket_path)
+os.close(socket_fd)
+os.close(parent_fd)
+print("intar package smoke: agent systemd sandbox permits openat2 and jailed runtime bind")
 PY
 chown root:root "${agent_openat2_probe}"
 chmod 0555 "${agent_openat2_probe}"
@@ -712,13 +796,36 @@ ExecStart=/usr/bin/python3 ${agent_openat2_probe}
 EOF
 chmod 0644 "${agent_probe_dropin_dir}/openat2-probe.conf"
 systemctl daemon-reload
-systemctl start intar-agent.service || \
-  die "installed intar-agent.service sandbox blocks openat2"
+systemctl start --no-block intar-agent.service || \
+  die "installed intar-agent.service sandbox blocks agent runtime probe"
+probe_ready=0
+for _ in $(seq 1 100); do
+  if [ -S "${agent_runtime_probe_socket}" ]; then
+    probe_ready=1
+    break
+  fi
+  sleep 0.05
+done
+[ "${probe_ready}" -eq 1 ] || die "agent runtime probe socket did not become ready"
+setpriv \
+  --reuid="${agent_runtime_probe_vm_uid}" \
+  --regid="${agent_runtime_probe_vm_uid}" \
+  --clear-groups \
+  python3 -c 'import socket, sys; connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); connection.connect(sys.argv[1]); connection.close()' \
+  "${agent_runtime_probe_socket}" || \
+  die "unique VM identity could not connect to agent runtime probe"
+for _ in $(seq 1 100); do
+  if systemctl is-active --quiet intar-agent.service; then
+    break
+  fi
+  sleep 0.05
+done
 systemctl is-active --quiet intar-agent.service || \
-  die "agent openat2 probe unit did not remain active"
+  die "agent runtime probe unit did not remain active"
 systemctl stop intar-agent.service
 rm -rf -- "${agent_probe_dropin_dir}"
+rm -rf -- "${agent_runtime_probe_root}"
 systemctl daemon-reload
 systemctl reset-failed intar-agent.service >/dev/null 2>&1 || true
 
-echo "intar package smoke: installed v53.0 jailed lifecycle, quota, agent openat2 sandbox, and doctor passed"
+echo "intar package smoke: installed v53.0 jailed lifecycle, quota, agent runtime sandbox, and doctor passed"
