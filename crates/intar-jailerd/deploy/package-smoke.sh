@@ -21,7 +21,7 @@ case "${archive}" in
 esac
 [ -f "${archive}" ] || die "archive does not exist: ${archive}"
 
-for command in awk env file find getfacl install ip nft python3 readelf readlink runuser setfacl sha256sum sleep stat sysctl systemctl tar; do
+for command in awk env file find getfacl install ip nft nsenter python3 readelf readlink runuser setfacl sha256sum sleep stat sysctl systemctl systemd-run tar; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exist"
@@ -103,12 +103,21 @@ cleanup() {
     cleanup_failed=1
   fi
   if netns_state=$(ip netns list); then
-    if echo "${netns_state}" | grep -q '^intar-ns-'; then
-      echo "intar package smoke: run network namespace leaked" >&2
+    if echo "${netns_state}" | grep -Eq '^(intar-ns-|ist[[:xdigit:]]{10}([[:space:]]|$))'; then
+      echo "intar package smoke: run or self-test network namespace leaked" >&2
       cleanup_failed=1
     fi
   else
     echo "intar package smoke: could not audit network namespaces" >&2
+    cleanup_failed=1
+  fi
+  if link_state=$(ip -o link show); then
+    if echo "${link_state}" | grep -Eq ': (ivh[[:xdigit:]]{12}|ish[[:xdigit:]]{10})(@|:)'; then
+      echo "intar package smoke: run or self-test host veth leaked" >&2
+      cleanup_failed=1
+    fi
+  else
+    echo "intar package smoke: could not audit host links" >&2
     cleanup_failed=1
   fi
   if nft_state=$(nft list tables); then

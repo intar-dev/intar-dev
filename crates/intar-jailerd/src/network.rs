@@ -16,12 +16,16 @@ use anyhow::{Context as _, Result, bail};
 use intar_jailer_protocol::{
     EnsureRunNetworkRequest, JailerdConfig, RunNetworkResult, ValidatedId, VmLaunchRequest,
 };
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{Mode, OFlags, fstat, fstatfs, open};
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 use sha2::{Digest as _, Sha256};
 
 const IP_CANDIDATES: &[&str] = &["/usr/sbin/ip", "/usr/bin/ip"];
 const NFT_CANDIDATES: &[&str] = &["/usr/sbin/nft", "/usr/bin/nft"];
+const NSENTER_CANDIDATES: &[&str] = &["/usr/bin/nsenter", "/usr/sbin/nsenter"];
+const INITIAL_MOUNT_NAMESPACE: &str = "/proc/1/ns/mnt";
+const INITIAL_ROOT: &str = "/proc/1/root";
+const NSFS_MAGIC: rustix::fs::FsWord = 0x6e73_6673;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VmNetworkAttachment {
@@ -48,6 +52,7 @@ struct RunState {
 pub(crate) struct NetworkManager {
     ip: PathBuf,
     nft: PathBuf,
+    nsenter: PathBuf,
     netns_root: PathBuf,
     policy: JailerdConfig,
     runs: BTreeMap<ValidatedId, RunState>,
@@ -58,6 +63,7 @@ impl NetworkManager {
         let netns_root = config.netns_root.clone();
         let ip = trusted_tool(IP_CANDIDATES).context("find trusted iproute2 binary")?;
         let nft = trusted_tool(NFT_CANDIDATES).context("find trusted nft binary")?;
+        let nsenter = trusted_nsenter_binary()?;
         if !netns_root.is_absolute() || !trusted_directory(&netns_root) {
             bail!(
                 "network namespace root is not a trusted root-owned directory: {}",
@@ -72,6 +78,7 @@ impl NetworkManager {
         Ok(Self {
             ip,
             nft,
+            nsenter,
             netns_root,
             policy: config.clone(),
             runs: BTreeMap::new(),
@@ -85,10 +92,14 @@ impl NetworkManager {
         self.policy
             .validate_run_network_request(request)
             .context("validate root-owned run network policy")?;
-        if let Some(existing) = self.runs.get(&request.run_id) {
+        if let Some(existing) = self.runs.get(&request.run_id).cloned() {
             if existing.request != *request {
                 bail!("run network already exists with different topology")
             }
+            self.construct_run(&existing)
+                .context("reconcile existing run network")?;
+            self.render_all()
+                .context("reconcile existing run network policy")?;
             return Ok(existing.result.clone());
         }
 
@@ -116,13 +127,21 @@ impl NetworkManager {
             installed,
         };
         self.construct_run(&state)?;
-        result.namespace_inode = namespace_inode(&self.netns_root, &result.namespace_name)?;
+        result.namespace_inode =
+            verify_host_visible_namespace(&self.netns_root, &result.namespace_name)?;
         state.result = result.clone();
         self.runs.insert(request.run_id.clone(), state);
         if let Err(error) = self.render_all() {
-            let _ = self.destroy_run_physical(&result);
-            self.runs.remove(&request.run_id);
-            return Err(error).context("install run network policy");
+            let cleanup = self.destroy_run_physical(&result);
+            if cleanup.is_ok() {
+                self.runs.remove(&request.run_id);
+            }
+            return match cleanup {
+                Ok(()) => Err(error).context("install run network policy"),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "install run network policy; physical rollback also failed and remains tracked: {cleanup_error:#}"
+                )),
+            };
         }
         Ok(result)
     }
@@ -338,14 +357,24 @@ impl NetworkManager {
     }
 
     fn destroy_run_physical(&self, result: &RunNetworkResult) -> Result<()> {
-        if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name]) {
-            self.ip(&["link", "delete", &result.host_veth_name])
-                .context("delete host run veth")?;
+        let mut failures = Vec::new();
+        if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
+            && let Err(error) = self.ip(&["link", "delete", &result.host_veth_name])
+            && self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
+        {
+            failures.push(format!("delete host run veth: {error:#}"));
         }
         let namespace_path = self.netns_root.join(&result.namespace_name);
-        if namespace_path.exists() {
-            self.ip(&["netns", "delete", &result.namespace_name])
-                .context("delete run network namespace")?;
+        let initial_namespace_path =
+            initial_mount_namespace_entry(&self.netns_root, &result.namespace_name)?;
+        if (namespace_path.exists() || initial_namespace_path.exists())
+            && let Err(error) = self.delete_namespace(&result.namespace_name)
+            && (namespace_path.exists() || initial_namespace_path.exists())
+        {
+            failures.push(format!("delete run network namespace: {error:#}"));
+        }
+        if !failures.is_empty() {
+            bail!("{}", failures.join("; "))
         }
         Ok(())
     }
@@ -356,29 +385,43 @@ impl NetworkManager {
         let host_veth = &state.result.host_veth_name;
         let namespace_veth = &state.result.namespace_veth_name;
         let namespace_path = self.netns_root.join(namespace);
+        let initial_namespace_path = initial_mount_namespace_entry(&self.netns_root, namespace)?;
         let created_namespace = !namespace_path.exists();
         if created_namespace {
-            self.ip(&["netns", "add", namespace])?;
+            self.create_namespace(namespace)?;
         } else {
+            self.verify_namespace_visibility(namespace)?;
             self.ip(&["-n", namespace, "link", "show", "lo"])
                 .context("verify existing network namespace")?;
         }
 
+        let mut created_veth = false;
         let operation = (|| -> Result<()> {
-            if !self.ip_succeeds(&["link", "show", "dev", host_veth])
-                && !self.ip_succeeds(&["-n", namespace, "link", "show", "dev", namespace_veth])
-            {
-                self.ip(&[
-                    "link",
-                    "add",
-                    host_veth,
-                    "type",
-                    "veth",
-                    "peer",
-                    "name",
-                    namespace_veth,
-                ])?;
-                self.ip(&["link", "set", namespace_veth, "netns", namespace])?;
+            let host_veth_exists = self.ip_succeeds(&["link", "show", "dev", host_veth]);
+            let namespace_veth_exists =
+                self.ip_succeeds(&["-n", namespace, "link", "show", "dev", namespace_veth]);
+            if created_namespace && (host_veth_exists || namespace_veth_exists) {
+                bail!("refusing to adopt a pre-existing run veth for a fresh namespace")
+            }
+            match (host_veth_exists, namespace_veth_exists) {
+                (false, false) => {
+                    self.ip(&[
+                        "link",
+                        "add",
+                        host_veth,
+                        "type",
+                        "veth",
+                        "peer",
+                        "name",
+                        namespace_veth,
+                    ])?;
+                    created_veth = true;
+                    self.ip(&["link", "set", namespace_veth, "netns", namespace])?;
+                }
+                (true, true) => {}
+                (true, false) | (false, true) => {
+                    bail!("refusing to adopt a one-sided run veth topology")
+                }
             }
             if !self.ip_succeeds(&["-n", namespace, "link", "show", "dev", bridge]) {
                 self.ip(&["-n", namespace, "link", "add", bridge, "type", "bridge"])?;
@@ -453,10 +496,50 @@ impl NetworkManager {
             enable_namespace_forwarding(namespace_path.clone())?;
             Ok(())
         })();
-        if operation.is_err() && created_namespace {
-            self.ip_ignore(&["netns".to_owned(), "delete".to_owned(), namespace.clone()]);
+        if let Err(error) = operation {
+            let mut cleanup_failures = Vec::new();
+            if created_veth
+                && self.ip_succeeds(&["link", "show", "dev", host_veth])
+                && let Err(cleanup_error) = self.ip(&["link", "delete", host_veth])
+                && self.ip_succeeds(&["link", "show", "dev", host_veth])
+            {
+                cleanup_failures.push(format!("delete new host veth: {cleanup_error:#}"));
+            }
+            if created_namespace
+                && (namespace_path.exists() || initial_namespace_path.exists())
+                && let Err(cleanup_error) = self.delete_namespace(namespace)
+                && (namespace_path.exists() || initial_namespace_path.exists())
+            {
+                cleanup_failures.push(format!("delete new run namespace: {cleanup_error:#}"));
+            }
+            return if cleanup_failures.is_empty() {
+                Err(error)
+            } else {
+                Err(error).context(format!(
+                    "run network rollback also failed: {}",
+                    cleanup_failures.join("; ")
+                ))
+            };
         }
-        operation
+        Ok(())
+    }
+
+    /// `ip netns add` persists a namespace by bind-mounting nsfs beneath
+    /// `/run/netns`. The jailerd service intentionally has a private mount
+    /// namespace, while VM transient units inherit PID 1's mount namespace.
+    /// Create and remove only the named namespace handle through trusted
+    /// `nsenter`; all link, route and nftables work remains in this process.
+    fn create_namespace(&self, namespace: &str) -> Result<()> {
+        create_host_visible_namespace(&self.nsenter, &self.ip, &self.netns_root, namespace)?;
+        Ok(())
+    }
+
+    fn delete_namespace(&self, namespace: &str) -> Result<()> {
+        delete_host_visible_namespace(&self.nsenter, &self.ip, &self.netns_root, namespace)
+    }
+
+    fn verify_namespace_visibility(&self, namespace: &str) -> Result<u64> {
+        verify_host_visible_namespace(&self.netns_root, namespace)
     }
 
     fn create_tap(
@@ -693,6 +776,92 @@ impl NetworkManager {
     }
 }
 
+pub(crate) fn trusted_nsenter_binary() -> Result<PathBuf> {
+    trusted_tool(NSENTER_CANDIDATES).context("find trusted util-linux nsenter binary")
+}
+
+pub(crate) fn create_host_visible_namespace(
+    nsenter: &Path,
+    ip: &Path,
+    netns_root: &Path,
+    namespace: &str,
+) -> Result<u64> {
+    add_host_visible_namespace(nsenter, ip, netns_root, namespace)?;
+    match verify_host_visible_namespace(netns_root, namespace) {
+        Ok(inode) => Ok(inode),
+        Err(error) => {
+            let cleanup = delete_host_visible_namespace(nsenter, ip, netns_root, namespace);
+            match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "host-visible namespace verification cleanup also failed: {cleanup_error:#}"
+                )),
+            }
+        }
+    }
+}
+
+pub(crate) fn add_host_visible_namespace(
+    nsenter: &Path,
+    ip: &Path,
+    netns_root: &Path,
+    namespace: &str,
+) -> Result<()> {
+    host_mount_ip(nsenter, ip, netns_root, &["netns", "add", namespace])
+        .context("create host-visible run network namespace")
+}
+
+pub(crate) fn delete_host_visible_namespace(
+    nsenter: &Path,
+    ip: &Path,
+    netns_root: &Path,
+    namespace: &str,
+) -> Result<()> {
+    host_mount_ip(nsenter, ip, netns_root, &["netns", "delete", namespace])
+        .context("delete host-visible run network namespace")
+}
+
+pub(crate) fn verify_host_visible_namespace(root: &Path, namespace: &str) -> Result<u64> {
+    let daemon_inode =
+        namespace_inode(root, namespace).context("verify jailerd-view run network namespace")?;
+    let initial_path = initial_mount_namespace_entry(root, namespace)?;
+    let initial_inode =
+        namespace_inode_path(&initial_path).context("verify PID-1-view run network namespace")?;
+    if daemon_inode != initial_inode {
+        bail!("run network namespace handle differs across jailerd and PID 1 mount namespaces")
+    }
+    Ok(daemon_inode)
+}
+
+fn host_mount_ip(nsenter: &Path, ip: &Path, netns_root: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new(nsenter)
+        .arg(format!("--mount={INITIAL_MOUNT_NAMESPACE}"))
+        .arg("--")
+        .arg(ip)
+        .args(args)
+        .env_clear()
+        .env("IP_NETNS_DIR", netns_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "execute trusted host-mount namespace helper {}",
+                nsenter.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "trusted host-mount namespace helper {} failed with {}: {}",
+            nsenter.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    Ok(())
+}
+
 fn derived_topology(request: &EnsureRunNetworkRequest) -> Result<(RunNetworkResult, String)> {
     let digest = Sha256::digest(request.run_id.as_str().as_bytes());
     let mut suffix = String::with_capacity(12);
@@ -888,13 +1057,31 @@ fn trusted_tool(candidates: &[&str]) -> Option<PathBuf> {
 }
 
 fn namespace_inode(root: &Path, name: &str) -> Result<u64> {
-    let path = root.join(name);
-    let metadata = std::fs::symlink_metadata(&path)
-        .with_context(|| format!("stat run network namespace {}", path.display()))?;
-    if metadata.file_type().is_symlink() || metadata.uid() != 0 {
+    namespace_inode_path(&root.join(name))
+}
+
+fn namespace_inode_path(path: &Path) -> Result<u64> {
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .with_context(|| format!("open run network namespace {}", path.display()))?;
+    let metadata =
+        fstat(&fd).with_context(|| format!("stat run network namespace {}", path.display()))?;
+    let filesystem =
+        fstatfs(&fd).with_context(|| format!("statfs run network namespace {}", path.display()))?;
+    if metadata.st_uid != 0 || metadata.st_nlink != 1 || filesystem.f_type != NSFS_MAGIC {
         bail!("run network namespace handle is not a root-owned nsfs entry")
     }
-    Ok(metadata.ino())
+    Ok(metadata.st_ino)
+}
+
+pub(crate) fn initial_mount_namespace_entry(root: &Path, name: &str) -> Result<PathBuf> {
+    let relative = root
+        .strip_prefix("/")
+        .context("network namespace root is not absolute")?;
+    Ok(Path::new(INITIAL_ROOT).join(relative).join(name))
 }
 
 fn trusted_regular_file(path: &Path) -> bool {
@@ -1017,6 +1204,26 @@ fn route_is_owned(output: &str, cidr: &str, via: &str, device: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_mount_namespace_entry_stays_beneath_pid_one_root() {
+        assert_eq!(
+            initial_mount_namespace_entry(Path::new("/run/netns"), "intar-ns-test").unwrap(),
+            Path::new("/proc/1/root/run/netns/intar-ns-test")
+        );
+    }
+
+    #[test]
+    fn namespace_inode_rejects_an_ordinary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("not-a-namespace");
+        std::fs::write(&path, b"").unwrap();
+        let error = namespace_inode_path(&path).unwrap_err();
+        assert!(
+            error.to_string().contains("not a root-owned nsfs entry"),
+            "unexpected error: {error:#}"
+        );
+    }
 
     #[test]
     fn derived_interface_names_are_stable_distinct_and_fit_linux_limit() {

@@ -104,7 +104,8 @@ sudo -u intar-agent env \
 Agent doctor is deliberately read-only. It validates the unprivileged host view
 and jailerd handshake, including the Linux/x86_64 baseline, kernel, device
 presence, unified cgroup-v2 CPU controller, socket, nftables command, trusted
-working roots, bridge configuration, and registry configuration. It does not
+`nsenter` helper, working roots, bridge configuration, and registry
+configuration. It does not
 create a unit, cgroup, jail, or network namespace and therefore cannot prove
 privileged isolation or cleanup. Run it as the configured agent identity so
 the XDG paths and `SO_PEERCRED` identity match the deployed service.
@@ -112,7 +113,11 @@ the XDG paths and `SO_PEERCRED` identity match the deployed service.
 The installed root-only wrapper is the operational proof. It downloads
 hash-pinned boot fixtures directly from their publishers into a root-only
 cache (or uses a pre-seeded cache with `--offline`), freezes socket activation,
-and invokes the artifact-backed test. An isolated in-memory jailerd authority
+and invokes the artifact-backed test in a transient service with the same
+private-mount and filesystem hardening as `intar-jailerd.service`. The test
+requires each named run namespace to be an nsfs mount with the same inode in
+the daemon and PID-1 mount namespaces before a VM can launch. An isolated
+in-memory jailerd authority
 advertises exactly 1000 schedulable millicores without changing production
 configuration. It boots eight concurrent 125-millicore v53.0 VMs in separate
 units, cgroups, jails, identities, and TAPs under one run network namespace;

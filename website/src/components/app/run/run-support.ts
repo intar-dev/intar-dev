@@ -29,6 +29,12 @@ export function formatScenarioDurationMs(durationMs: number) {
   return formatScenarioElapsedTime(Math.max(0, Math.floor(durationMs / 1_000)));
 }
 
+export function hasPendingInfrastructureTeardown(
+  vms: ReadonlyArray<Pick<ScenarioRunVmRecord, "phase">>,
+) {
+  return vms.some((vm) => vm.phase !== "completed");
+}
+
 export function scenarioRunOutcomeMeta(outcome: ScenarioRunRecord["outcome"]) {
   switch (outcome) {
     case "succeeded":
@@ -337,4 +343,3 @@ export function hasUsableTerminalTarget(vm: ScenarioRunVmRecord) {
     vm.canOpenTerminal && vm.terminalTarget.host && vm.terminalTarget.port > 0,
   );
 }
-
