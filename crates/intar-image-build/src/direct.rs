@@ -1,5 +1,6 @@
 use std::fs;
-use std::io::Write as _;
+#[cfg(unix)]
+use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -8,7 +9,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Error, Result, anyhow, bail};
 use intar_contracts::catalog::ScenarioManifestV3;
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
@@ -26,10 +27,14 @@ use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 
 const SSH_USERNAME: &str = "ubuntu";
 const SSH_HOST: &str = "127.0.0.1";
+const DIRECT_PROVISION_COMMAND: &str = "sudo bash /tmp/intar-provision.sh";
 // A build guest can briefly expose port 22 before its ephemeral key and
 // network setup have settled. Avoid hammering OpenSSH's unauthenticated
 // connection limits while retaining responsive readiness detection.
 const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const QEMU_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(unix)]
+const QMP_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildRequest {
@@ -236,8 +241,7 @@ pub fn run_direct_build(request: &DirectBuildRequest) -> Result<DirectBuildOutpu
 
     let mut qemu = spawn_qemu(&rendered)?;
     if let Err(error) = provision_guest(&rendered, &mut qemu, &ssh_key.private_key) {
-        terminate_qemu(&mut qemu);
-        return Err(error);
+        return Err(qemu_failure_after_cleanup(&mut qemu, error));
     }
     wait_for_qemu_shutdown(&mut qemu, &rendered)?;
 
@@ -369,8 +373,10 @@ fn provision_guest(
             )
             .await
             .context("failed to upload provision script")?;
+            // Provisioning must report success independently. The host requests
+            // poweroff over QMP only after this command returns status zero.
             ssh.run_logged(
-                "sudo bash /tmp/intar-provision.sh && sudo shutdown -P now",
+                DIRECT_PROVISION_COMMAND,
                 true,
                 &rendered.paths.build_log_path,
             )
@@ -442,36 +448,49 @@ fn wait_for_ssh(
 }
 
 fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &RenderedDirectBuild) -> Result<()> {
-    if let Some(status) = qemu
-        .try_wait()
-        .with_context(|| format!("failed to poll QEMU pid {}", qemu.id()))?
-    {
-        return qemu_status_to_result(status, rendered);
+    if let Some(status) = poll_qemu_or_cleanup(qemu)? {
+        bail!(
+            "QEMU exited with status {status} before the host requested acknowledged QMP powerdown; serial log: {}; build log: {}",
+            rendered.paths.serial_log_path.display(),
+            rendered.paths.build_log_path.display()
+        );
     }
 
-    let qmp_error = request_qemu_powerdown(rendered).err();
+    if let Err(error) = request_qemu_powerdown(rendered) {
+        return Err(qemu_failure_after_cleanup(
+            qemu,
+            anyhow!(
+                "failed to request acknowledged QMP powerdown after provisioning; serial log: {}; build log: {}: {error:#}",
+                rendered.paths.serial_log_path.display(),
+                rendered.paths.build_log_path.display()
+            ),
+        ));
+    }
     let qemu_exit_timeout_seconds = rendered.config.qemu_exit_timeout_seconds.max(1);
     let deadline = Instant::now() + Duration::from_secs(qemu_exit_timeout_seconds);
     while Instant::now() < deadline {
-        if let Some(status) = qemu
-            .try_wait()
-            .with_context(|| format!("failed to poll QEMU pid {}", qemu.id()))?
-        {
+        if let Some(status) = poll_qemu_or_cleanup(qemu)? {
             return qemu_status_to_result(status, rendered);
         }
-        thread::sleep(SSH_POLL_INTERVAL);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(QEMU_EXIT_POLL_INTERVAL.min(remaining));
     }
 
-    terminate_qemu(qemu);
-    let qmp_note = qmp_error
-        .as_ref()
-        .map(|error| format!("; QMP powerdown failed: {error:#}"))
-        .unwrap_or_default();
-    bail!(
-        "timed out waiting {qemu_exit_timeout_seconds}s for QEMU to exit after provisioning; killed QEMU; serial log: {}; build log: {}{qmp_note}",
-        rendered.paths.serial_log_path.display(),
-        rendered.paths.build_log_path.display()
-    )
+    if let Some(status) = poll_qemu_or_cleanup(qemu)? {
+        return qemu_status_to_result(status, rendered);
+    }
+
+    Err(qemu_failure_after_cleanup(
+        qemu,
+        anyhow!(
+            "timed out waiting {qemu_exit_timeout_seconds}s for QEMU to exit after acknowledged QMP powerdown; serial log: {}; build log: {}",
+            rendered.paths.serial_log_path.display(),
+            rendered.paths.build_log_path.display(),
+        ),
+    ))
 }
 
 fn qemu_status_to_result(status: ExitStatus, rendered: &RenderedDirectBuild) -> Result<()> {
@@ -494,21 +513,112 @@ fn request_qemu_powerdown(rendered: &RenderedDirectBuild) -> Result<()> {
         )
     })?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(QMP_IO_TIMEOUT))
+        .context("failed to set QMP read timeout")?;
+    stream
+        .set_write_timeout(Some(QMP_IO_TIMEOUT))
         .context("failed to set QMP write timeout")?;
-    stream
-        .write_all(br#"{"execute":"qmp_capabilities"}"#)
-        .context("failed to send QMP capabilities command")?;
-    stream
-        .write_all(b"\n")
-        .context("failed to terminate QMP capabilities command")?;
-    stream
-        .write_all(br#"{"execute":"system_powerdown"}"#)
-        .context("failed to send QMP powerdown command")?;
-    stream
-        .write_all(b"\n")
-        .context("failed to terminate QMP powerdown command")?;
+    let deadline = Instant::now() + QMP_IO_TIMEOUT;
+    let reader_stream = stream
+        .try_clone()
+        .context("failed to clone QMP socket for response reads")?;
+    let mut reader = BufReader::new(reader_stream);
+
+    let greeting = read_qmp_message(&mut reader, "greeting", deadline)?;
+    if !greeting
+        .get("QMP")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        bail!("QMP socket returned an invalid greeting: {greeting}");
+    }
+    execute_qmp_command(&mut stream, &mut reader, "qmp_capabilities", deadline)?;
+    execute_qmp_command(&mut stream, &mut reader, "system_powerdown", deadline)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn execute_qmp_command(
+    stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    command: &str,
+    deadline: Instant,
+) -> Result<()> {
+    stream
+        .set_write_timeout(Some(qmp_remaining(deadline, command)?))
+        .with_context(|| format!("failed to set QMP {command} write timeout"))?;
+    serde_json::to_writer(&mut *stream, &serde_json::json!({ "execute": command }))
+        .with_context(|| format!("failed to encode QMP {command} command"))?;
+    stream
+        .write_all(b"\n")
+        .with_context(|| format!("failed to terminate QMP {command} command"))?;
+    stream
+        .flush()
+        .with_context(|| format!("failed to flush QMP {command} command"))?;
+
+    loop {
+        let response = read_qmp_message(reader, command, deadline)?;
+        if let Some(error) = response.get("error") {
+            bail!("QMP {command} command failed: {error}");
+        }
+        if response.get("return").is_some() {
+            return Ok(());
+        }
+        if response.get("event").is_some() {
+            continue;
+        }
+        bail!("QMP {command} returned an unexpected response: {response}");
+    }
+}
+
+#[cfg(unix)]
+fn read_qmp_message(
+    reader: &mut BufReader<UnixStream>,
+    phase: &str,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    const MAX_QMP_MESSAGE_BYTES: usize = 64 * 1024;
+    loop {
+        reader
+            .get_ref()
+            .set_read_timeout(Some(qmp_remaining(deadline, phase)?))
+            .with_context(|| format!("failed to set QMP {phase} read timeout"))?;
+        let mut line = String::new();
+        let bytes = match reader
+            .take((MAX_QMP_MESSAGE_BYTES + 1) as u64)
+            .read_line(&mut line)
+        {
+            Ok(bytes) => bytes,
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                bail!("QMP handshake timed out while waiting for {phase}");
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read QMP {phase} response"));
+            }
+        };
+        if bytes == 0 {
+            bail!("QMP socket closed before the {phase} response");
+        }
+        if line.len() > MAX_QMP_MESSAGE_BYTES {
+            bail!("QMP {phase} response exceeded {MAX_QMP_MESSAGE_BYTES} bytes");
+        }
+        if !line.ends_with('\n') {
+            bail!("QMP {phase} response was not newline-terminated");
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        return serde_json::from_str(line)
+            .with_context(|| format!("QMP {phase} response was not valid JSON"));
+    }
+}
+
+#[cfg(unix)]
+fn qmp_remaining(deadline: Instant, phase: &str) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .with_context(|| format!("QMP handshake timed out while waiting for {phase}"))
 }
 
 #[cfg(not(unix))]
@@ -516,12 +626,43 @@ fn request_qemu_powerdown(_rendered: &RenderedDirectBuild) -> Result<()> {
     bail!("QMP powerdown over Unix sockets is not available on this platform")
 }
 
-fn terminate_qemu(qemu: &mut Child) {
-    if matches!(qemu.try_wait(), Ok(Some(_))) {
-        return;
+fn poll_qemu_or_cleanup(qemu: &mut Child) -> Result<Option<ExitStatus>> {
+    match qemu.try_wait() {
+        Ok(status) => Ok(status),
+        Err(error) => Err(qemu_failure_after_cleanup(
+            qemu,
+            Error::new(error).context(format!("failed to poll QEMU pid {}", qemu.id())),
+        )),
     }
-    let _ = qemu.kill();
-    let _ = qemu.wait();
+}
+
+fn qemu_failure_after_cleanup(qemu: &mut Child, failure: Error) -> Error {
+    match terminate_qemu(qemu) {
+        Ok(status) => failure.context(format!(
+            "QEMU pid {} was terminated and reaped with status {status}",
+            qemu.id()
+        )),
+        Err(cleanup_error) => anyhow!(
+            "{failure:#}; additionally failed to terminate and reap QEMU pid {}: {cleanup_error:#}",
+            qemu.id()
+        ),
+    }
+}
+
+fn terminate_qemu(qemu: &mut Child) -> Result<ExitStatus> {
+    let pid = qemu.id();
+    if let Err(kill_error) = qemu.kill() {
+        return match qemu.try_wait() {
+            Ok(Some(status)) => Ok(status),
+            Ok(None) => Err(Error::new(kill_error)
+                .context(format!("failed to kill still-running QEMU pid {pid}"))),
+            Err(poll_error) => Err(anyhow!(
+                "failed to kill QEMU pid {pid}: {kill_error}; failed to determine whether it exited: {poll_error}"
+            )),
+        };
+    }
+    qemu.wait()
+        .with_context(|| format!("failed to reap QEMU pid {pid} after killing it"))
 }
 
 fn direct_artifact_from_raw(
@@ -594,23 +735,34 @@ fn normalize_target_arch_label(target_arch: &str) -> &str {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use tempfile::tempdir;
+    #[cfg(unix)]
+    use std::io::{BufRead as _, BufReader, Write as _};
+    #[cfg(unix)]
+    use std::os::unix::net::{UnixListener, UnixStream};
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::process::{Command, Stdio};
+    #[cfg(unix)]
+    use std::thread;
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
+
+    use tempfile::{TempDir, tempdir};
 
     use super::{
-        DirectBuildPrepareInput, DirectBuildRequest, SSH_POLL_INTERVAL,
-        prepare_direct_build_inputs, render_direct_build,
+        DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest,
+        QEMU_EXIT_POLL_INTERVAL, QMP_IO_TIMEOUT, RenderedDirectBuild, SSH_POLL_INTERVAL,
+        prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
     };
     use crate::config::QemuBuildConfig;
     use crate::kino::KinoArtifact;
 
-    #[test]
-    fn ssh_readiness_poll_does_not_hammer_guest_limits() {
-        assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
-    }
-
-    #[test]
-    fn direct_render_uses_raw_zstd_outputs_and_direct_boot_args() {
-        let directory = tempdir().unwrap();
+    fn render_test_direct_build(
+        directory: &TempDir,
+        mut config: QemuBuildConfig,
+    ) -> RenderedDirectBuild {
         let scenario = intar_image_scenario::Scenario::parse(
             r#"
 scenario "broken-nginx" {
@@ -656,23 +808,508 @@ base_image "trixie" {
 "#,
         )
         .unwrap();
-        let base_image = catalog.base_image_by_name("trixie").unwrap().clone();
-        let rendered = render_direct_build(&DirectBuildRequest {
+        config.output_root = directory.path().join("dist");
+        config.work_root = directory.path().join(".work");
+
+        render_direct_build(&DirectBuildRequest {
             scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
             scenario,
             vm_name: "web".to_string(),
-            config: QemuBuildConfig {
-                output_root: directory.path().join("dist"),
-                work_root: directory.path().join(".work"),
-                ..QemuBuildConfig::default()
-            },
-            base_image,
+            config,
+            base_image: catalog.base_image_by_name("trixie").unwrap().clone(),
             kino: KinoArtifact {
                 binary_path: "/tmp/kino".into(),
                 version: "0.1.24".to_string(),
             },
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn ssh_readiness_poll_does_not_hammer_guest_limits() {
+        assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn direct_provisioning_requires_success_before_host_poweroff() {
+        assert_eq!(
+            DIRECT_PROVISION_COMMAND,
+            "sudo bash /tmp/intar-provision.sh"
+        );
+        assert!(!DIRECT_PROVISION_COMMAND.contains("shutdown"));
+        assert!(!DIRECT_PROVISION_COMMAND.contains("&&"));
+    }
+
+    #[test]
+    fn qemu_exit_poll_is_independent_from_ssh_readiness_backoff() {
+        assert_eq!(QEMU_EXIT_POLL_INTERVAL, Duration::from_millis(100));
+        assert!(QEMU_EXIT_POLL_INTERVAL < SSH_POLL_INTERVAL);
+    }
+
+    #[cfg(unix)]
+    fn write_qmp_message(stream: &mut UnixStream, message: &serde_json::Value) {
+        serde_json::to_writer(&mut *stream, message).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    }
+
+    #[cfg(unix)]
+    fn read_qmp_command(reader: &mut BufReader<UnixStream>, expected: &str) -> String {
+        let mut command = String::new();
+        reader.read_line(&mut command).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&command).unwrap(),
+            serde_json::json!({ "execute": expected })
+        );
+        command
+    }
+
+    #[cfg(unix)]
+    fn write_qmp_greeting(stream: &mut UnixStream) {
+        write_qmp_message(
+            stream,
+            &serde_json::json!({
+                "QMP": {
+                    "version": {
+                        "qemu": { "major": 9, "minor": 0, "micro": 0 },
+                        "package": ""
+                    },
+                    "capabilities": []
+                }
+            }),
+        );
+    }
+
+    #[cfg(unix)]
+    fn serve_acknowledged_powerdown(
+        listener: UnixListener,
+        exit_marker: Option<PathBuf>,
+    ) -> Vec<String> {
+        let (mut stream, _) = listener.accept().unwrap();
+        let reader_stream = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(reader_stream);
+        write_qmp_greeting(&mut stream);
+
+        let commands = vec![read_qmp_command(&mut reader, "qmp_capabilities"), {
+            write_qmp_message(&mut stream, &serde_json::json!({ "return": {} }));
+            read_qmp_command(&mut reader, "system_powerdown")
+        }];
+        write_qmp_message(&mut stream, &serde_json::json!({ "return": {} }));
+        if let Some(exit_marker) = exit_marker {
+            std::fs::write(exit_marker, "powerdown").unwrap();
+        }
+        commands
+    }
+
+    #[cfg(unix)]
+    fn run_qmp_flood_case(payload: &'static [u8]) -> (String, Duration, usize) {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            read_qmp_command(&mut reader, "qmp_capabilities");
+            let mut writes = 0;
+            loop {
+                if stream
+                    .write_all(payload)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    break;
+                }
+                writes += 1;
+                thread::sleep(Duration::from_millis(10));
+            }
+            writes
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started_at = Instant::now();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let elapsed = started_at.elapsed();
+        let writes = qmp_server.join().unwrap();
+        assert!(qemu.try_wait().unwrap().is_some());
+        (format!("{error:#}"), elapsed, writes)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_qmp_powerdown_accepts_a_clean_bounded_qemu_exit() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(
+            &directory,
+            QemuBuildConfig {
+                qemu_exit_timeout_seconds: 1,
+                ..QemuBuildConfig::default()
+            },
+        );
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let exit_marker = directory.path().join("qemu-exit");
+        let server_marker = exit_marker.clone();
+        let qmp_server =
+            thread::spawn(move || serve_acknowledged_powerdown(listener, Some(server_marker)));
+        let mut qemu = Command::new("sh")
+            .args([
+                "-c",
+                "while [ ! -e \"$1\" ]; do sleep 0.01; done",
+                "qemu-test",
+            ])
+            .arg(&exit_marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap();
+
+        assert_eq!(
+            qmp_server.join().unwrap(),
+            vec![
+                "{\"execute\":\"qmp_capabilities\"}\n",
+                "{\"execute\":\"system_powerdown\"}\n",
+            ]
+        );
+        assert!(qemu.try_wait().unwrap().unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_qmp_is_unavailable() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started_at = Instant::now();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert!(started_at.elapsed() < Duration::from_secs(3));
+        assert!(error.contains("failed to request acknowledged QMP powerdown after provisioning"));
+        assert!(error.contains("failed to connect to QMP socket"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_rejects_clean_qemu_exit_before_acknowledgement() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let mut qemu = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(qemu.wait().unwrap().success());
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+
+        assert!(format!("{error:#}").contains(
+            "QEMU exited with status exit status: 0 before the host requested acknowledged QMP powerdown"
+        ));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_qmp_returns_an_error() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            let command = read_qmp_command(&mut reader, "qmp_capabilities");
+            write_qmp_message(
+                &mut stream,
+                &serde_json::json!({
+                    "error": { "class": "CommandNotFound", "desc": "disabled" }
+                }),
+            );
+            command
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(
+            qmp_server.join().unwrap(),
+            "{\"execute\":\"qmp_capabilities\"}\n"
+        );
+        assert!(error.contains("QMP qmp_capabilities command failed"));
+        assert!(error.contains("CommandNotFound"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_requires_a_system_powerdown_acknowledgement() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            let capabilities = read_qmp_command(&mut reader, "qmp_capabilities");
+            write_qmp_message(&mut stream, &serde_json::json!({ "return": {} }));
+            let powerdown = read_qmp_command(&mut reader, "system_powerdown");
+            write_qmp_message(
+                &mut stream,
+                &serde_json::json!({
+                    "error": { "class": "GenericError", "desc": "powerdown rejected" }
+                }),
+            );
+            vec![capabilities, powerdown]
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(qmp_server.join().unwrap().len(), 2);
+        assert!(error.contains("QMP system_powerdown command failed"));
+        assert!(error.contains("powerdown rejected"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_qmp_closes_without_acknowledging() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            read_qmp_command(&mut reader, "qmp_capabilities")
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(
+            qmp_server.join().unwrap(),
+            "{\"execute\":\"qmp_capabilities\"}\n"
+        );
+        assert!(error.contains("QMP socket closed before the qmp_capabilities response"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_qmp_reply_is_malformed() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            let command = read_qmp_command(&mut reader, "qmp_capabilities");
+            stream.write_all(b"{not-json}\n").unwrap();
+            stream.flush().unwrap();
+            command
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(
+            qmp_server.join().unwrap(),
+            "{\"execute\":\"qmp_capabilities\"}\n"
+        );
+        assert!(error.contains("QMP qmp_capabilities response was not valid JSON"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_qmp_never_acknowledges() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(reader_stream);
+            write_qmp_greeting(&mut stream);
+            let command = read_qmp_command(&mut reader, "qmp_capabilities");
+            thread::sleep(QMP_IO_TIMEOUT + Duration::from_millis(100));
+            command
+        });
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started_at = Instant::now();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(
+            qmp_server.join().unwrap(),
+            "{\"execute\":\"qmp_capabilities\"}\n"
+        );
+        assert!(started_at.elapsed() >= QMP_IO_TIMEOUT);
+        assert!(started_at.elapsed() < Duration::from_secs(4));
+        assert!(error.contains("QMP handshake timed out while waiting for qmp_capabilities"));
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_has_an_absolute_deadline_during_qmp_floods() {
+        for payload in [
+            b"{\"event\":\"DEVICE_DELETED\"}\n".as_slice(),
+            b"\n".as_slice(),
+        ] {
+            let (error, elapsed, writes) = run_qmp_flood_case(payload);
+
+            assert!(elapsed >= QMP_IO_TIMEOUT);
+            assert!(elapsed < Duration::from_secs(4));
+            assert!(writes > 10);
+            assert!(error.contains("QMP handshake timed out while waiting for qmp_capabilities"));
+            assert!(error.contains("was terminated and reaped"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_fails_closed_when_acknowledged_qemu_stays_alive() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(
+            &directory,
+            QemuBuildConfig {
+                qemu_exit_timeout_seconds: 1,
+                ..QemuBuildConfig::default()
+            },
+        );
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let qmp_server = thread::spawn(move || serve_acknowledged_powerdown(listener, None));
+        let mut qemu = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started_at = Instant::now();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+        let error = format!("{error:#}");
+
+        assert_eq!(qmp_server.join().unwrap().len(), 2);
+        assert!(started_at.elapsed() >= Duration::from_secs(1));
+        assert!(started_at.elapsed() < Duration::from_secs(3));
+        assert!(
+            error
+                .contains("timed out waiting 1s for QEMU to exit after acknowledged QMP powerdown")
+        );
+        assert!(error.contains("was terminated and reaped"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_poweroff_rejects_nonzero_qemu_exit_after_acknowledgement() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(
+            &directory,
+            QemuBuildConfig {
+                qemu_exit_timeout_seconds: 1,
+                ..QemuBuildConfig::default()
+            },
+        );
+        let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let exit_marker = directory.path().join("qemu-exit");
+        let server_marker = exit_marker.clone();
+        let qmp_server =
+            thread::spawn(move || serve_acknowledged_powerdown(listener, Some(server_marker)));
+        let mut qemu = Command::new("sh")
+            .args([
+                "-c",
+                "while [ ! -e \"$1\" ]; do sleep 0.01; done; exit 7",
+                "qemu-test",
+            ])
+            .arg(&exit_marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
+
+        assert_eq!(qmp_server.join().unwrap().len(), 2);
+        assert!(format!("{error:#}").contains("QEMU exited with status exit status: 7"));
+        assert!(qemu.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn direct_render_uses_raw_zstd_outputs_and_direct_boot_args() {
+        let directory = tempdir().unwrap();
+        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
 
         assert!(
             rendered
