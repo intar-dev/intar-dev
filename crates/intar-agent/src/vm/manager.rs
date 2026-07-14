@@ -379,6 +379,7 @@ const SCENARIO_READY_BASE_TIMEOUT_SECONDS: u64 = 45;
 const SCENARIO_READY_REFERENCE_CPU_MILLIS: u32 = 1_000;
 const SCENARIO_READY_MAX_TIMEOUT_SECONDS: u64 = 6 * 60;
 const SCENARIO_READY_POLL_INTERVAL_MILLIS: u64 = 500;
+const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
 #[cfg(target_os = "linux")]
 const MAX_KINO_READY_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const CLOUD_HYPERVISOR_STDERR_LOG_NAME: &str = "cloud-hypervisor.stderr.log";
@@ -2034,6 +2035,7 @@ async fn wait_for_scenario_runtime_ready(
                     match update {
                         Ok(update) if update.vm_name == vm_name && update.run_id == run_id => {
                             if update.collection_state == ProbeCollectionState::Ok {
+                                ensure_scenario_runtime_process_live(vm_name, details).await?;
                                 return Ok(update);
                             }
                             last_error = Some(anyhow::anyhow!(
@@ -2050,6 +2052,8 @@ async fn wait_for_scenario_runtime_ready(
                     }
                 }
                 _ = ch_interval.tick() => {
+                    ensure_scenario_runtime_process_live(vm_name, details).await?;
+
                     let socket_exists = kino_vsock_path.exists();
                     if socket_exists && !saw_kino_vsock_socket {
                         info!(
@@ -2060,20 +2064,32 @@ async fn wait_for_scenario_runtime_ready(
                         saw_kino_vsock_socket = true;
                     }
 
-                    match ch.vm_info().await {
-                        Ok(info) => {
+                    match timeout(
+                        Duration::from_secs(SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS),
+                        ch.vm_info(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(info)) => {
                             if matches!(info.state, cloud_hypervisor_client::VmState::Shutdown) {
                                 anyhow::bail!("scenario vm shut down before runtime became ready");
                             }
                         }
-                        Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. }) => {
+                        Ok(Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. })) => {
                             anyhow::bail!("scenario vm disappeared before runtime became ready");
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             debug!(
                                 vm = vm_name,
                                 error = %error,
                                 "cloud-hypervisor vm_info failed while waiting for scenario readiness"
+                            );
+                        }
+                        Err(_) => {
+                            debug!(
+                                vm = vm_name,
+                                timeout_seconds = SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS,
+                                "cloud-hypervisor vm_info timed out while waiting for scenario readiness"
                             );
                         }
                     }
@@ -2099,6 +2115,151 @@ async fn wait_for_scenario_runtime_ready(
             ))
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScenarioRuntimeProcessLiveness {
+    Alive,
+    Dead(String),
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScenarioRuntimeProcessObservation {
+    Present { state: char, start_time_ticks: u64 },
+    Missing,
+    Unavailable,
+}
+
+// `InspectVm` is an adoption authority, not a health-poll endpoint: jailerd
+// deliberately quarantines a healthy unit when its API ping cannot prove the
+// persisted identity. Poll the already-persisted process identity here so a
+// transient API stall stays retryable while an exited/reused VMM fails fast.
+// The caller's existing typed StopVm/DestroyVm path still owns all cleanup;
+// this check never signals a persisted numeric PID.
+async fn ensure_scenario_runtime_process_live(vm_name: &str, details: &VmDetails) -> Result<()> {
+    match observe_scenario_runtime_process_liveness(vm_name, details).await {
+        ScenarioRuntimeProcessLiveness::Alive | ScenarioRuntimeProcessLiveness::Inconclusive => {
+            Ok(())
+        }
+        ScenarioRuntimeProcessLiveness::Dead(reason) => {
+            anyhow::bail!("scenario VMM became unavailable before runtime readiness: {reason}")
+        }
+    }
+}
+
+async fn observe_scenario_runtime_process_liveness(
+    vm_name: &str,
+    details: &VmDetails,
+) -> ScenarioRuntimeProcessLiveness {
+    let Some(pid) = details.ch_pid else {
+        return ScenarioRuntimeProcessLiveness::Inconclusive;
+    };
+
+    let proc_stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
+    let observation = match tokio::fs::read_to_string(&proc_stat_path).await {
+        Ok(value) => match parse_linux_proc_stat(&value) {
+            Some((state, start_time_ticks)) => ScenarioRuntimeProcessObservation::Present {
+                state,
+                start_time_ticks,
+            },
+            None => {
+                debug!(
+                    vm = vm_name,
+                    pid,
+                    path = %proc_stat_path.display(),
+                    "could not parse scenario VMM process identity"
+                );
+                ScenarioRuntimeProcessObservation::Unavailable
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A cross-UID process can be hidden from /proc by hidepid=2 or
+            // ProtectProc=invisible. `kill(pid, 0)` does not send a signal;
+            // it only distinguishes an absent PID (ESRCH) from a process
+            // which exists but is either visible or permission-protected.
+            let existence = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .map(rustix::process::test_kill_process);
+            if let Some(Err(error)) = existence.as_ref()
+                && !matches!(*error, rustix::io::Errno::SRCH | rustix::io::Errno::PERM)
+            {
+                debug!(
+                    vm = vm_name,
+                    pid,
+                    error = %error,
+                    "could not disambiguate hidden scenario VMM process identity"
+                );
+            }
+            classify_missing_proc_entry(existence)
+        }
+        Err(error) => {
+            debug!(
+                vm = vm_name,
+                pid,
+                error = %error,
+                "could not read scenario VMM process identity"
+            );
+            ScenarioRuntimeProcessObservation::Unavailable
+        }
+    };
+
+    classify_scenario_runtime_process_liveness(pid, details.ch_start_time_ticks, observation)
+}
+
+fn classify_missing_proc_entry(
+    existence: Option<rustix::io::Result<()>>,
+) -> ScenarioRuntimeProcessObservation {
+    match existence {
+        Some(Err(rustix::io::Errno::SRCH)) => ScenarioRuntimeProcessObservation::Missing,
+        Some(Ok(())) | Some(Err(_)) | None => ScenarioRuntimeProcessObservation::Unavailable,
+    }
+}
+
+fn classify_scenario_runtime_process_liveness(
+    pid: u32,
+    expected_start_time_ticks: Option<u64>,
+    observation: ScenarioRuntimeProcessObservation,
+) -> ScenarioRuntimeProcessLiveness {
+    let ScenarioRuntimeProcessObservation::Present {
+        state,
+        start_time_ticks,
+    } = observation
+    else {
+        return match observation {
+            ScenarioRuntimeProcessObservation::Missing => {
+                ScenarioRuntimeProcessLiveness::Dead(format!("VMM pid {pid} exited"))
+            }
+            ScenarioRuntimeProcessObservation::Unavailable => {
+                ScenarioRuntimeProcessLiveness::Inconclusive
+            }
+            ScenarioRuntimeProcessObservation::Present { .. } => unreachable!(),
+        };
+    };
+
+    if matches!(state, 'Z' | 'X' | 'x') {
+        return ScenarioRuntimeProcessLiveness::Dead(format!(
+            "VMM pid {pid} is no longer executable (process state {state})"
+        ));
+    }
+    let Some(expected) = expected_start_time_ticks else {
+        return ScenarioRuntimeProcessLiveness::Inconclusive;
+    };
+    if expected != start_time_ticks {
+        return ScenarioRuntimeProcessLiveness::Dead(format!(
+            "VMM pid {pid} was reused (expected start time {expected}, observed {start_time_ticks})"
+        ));
+    }
+    ScenarioRuntimeProcessLiveness::Alive
+}
+
+fn parse_linux_proc_stat(value: &str) -> Option<(char, u64)> {
+    let (_, fields) = value.rsplit_once(") ")?;
+    let mut fields = fields.split_ascii_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start_time_ticks = fields.nth(18)?.parse().ok()?;
+    Some((state, start_time_ticks))
 }
 
 async fn stop_booting_vm(inner: &Arc<Inner>, vm_name: &str) {
@@ -6551,6 +6712,110 @@ mod tests {
         );
         assert!(scenario_runtime_ready_timeout(0).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn scenario_runtime_proc_stat_parser_handles_parentheses_in_process_name() {
+        let value = concat!(
+            "42 (cloud hyper)visor) S ",
+            "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 ",
+            "987654 20 21"
+        );
+
+        assert_eq!(parse_linux_proc_stat(value), Some(('S', 987_654)));
+        assert_eq!(parse_linux_proc_stat("not a proc stat record"), None);
+    }
+
+    #[test]
+    fn scenario_runtime_liveness_fails_only_on_definitive_process_loss() {
+        let alive = ScenarioRuntimeProcessObservation::Present {
+            state: 'S',
+            start_time_ticks: 123,
+        };
+        assert_eq!(
+            classify_scenario_runtime_process_liveness(42, Some(123), alive),
+            ScenarioRuntimeProcessLiveness::Alive
+        );
+
+        let disappeared = classify_scenario_runtime_process_liveness(
+            42,
+            Some(123),
+            ScenarioRuntimeProcessObservation::Missing,
+        );
+        assert!(matches!(
+            disappeared,
+            ScenarioRuntimeProcessLiveness::Dead(ref reason) if reason.contains("pid 42 exited")
+        ));
+
+        let zombie = classify_scenario_runtime_process_liveness(
+            42,
+            Some(123),
+            ScenarioRuntimeProcessObservation::Present {
+                state: 'Z',
+                start_time_ticks: 123,
+            },
+        );
+        assert!(matches!(
+            zombie,
+            ScenarioRuntimeProcessLiveness::Dead(ref reason) if reason.contains("process state Z")
+        ));
+
+        let reused = classify_scenario_runtime_process_liveness(
+            42,
+            Some(123),
+            ScenarioRuntimeProcessObservation::Present {
+                state: 'S',
+                start_time_ticks: 124,
+            },
+        );
+        assert!(matches!(
+            reused,
+            ScenarioRuntimeProcessLiveness::Dead(ref reason) if reason.contains("was reused")
+        ));
+
+        assert_eq!(
+            classify_scenario_runtime_process_liveness(
+                42,
+                None,
+                ScenarioRuntimeProcessObservation::Present {
+                    state: 'S',
+                    start_time_ticks: 123,
+                },
+            ),
+            ScenarioRuntimeProcessLiveness::Inconclusive
+        );
+    }
+
+    #[test]
+    fn scenario_runtime_liveness_keeps_transient_observation_errors_inconclusive() {
+        assert_eq!(
+            classify_scenario_runtime_process_liveness(
+                42,
+                Some(123),
+                ScenarioRuntimeProcessObservation::Unavailable,
+            ),
+            ScenarioRuntimeProcessLiveness::Inconclusive
+        );
+    }
+
+    #[test]
+    fn hidden_proc_entry_is_missing_only_when_pid_probe_reports_esrch() {
+        assert_eq!(
+            classify_missing_proc_entry(Some(Err(rustix::io::Errno::SRCH))),
+            ScenarioRuntimeProcessObservation::Missing
+        );
+        assert_eq!(
+            classify_missing_proc_entry(Some(Err(rustix::io::Errno::PERM))),
+            ScenarioRuntimeProcessObservation::Unavailable
+        );
+        assert_eq!(
+            classify_missing_proc_entry(Some(Ok(()))),
+            ScenarioRuntimeProcessObservation::Unavailable
+        );
+        assert_eq!(
+            classify_missing_proc_entry(None),
+            ScenarioRuntimeProcessObservation::Unavailable
+        );
     }
 
     #[test]
