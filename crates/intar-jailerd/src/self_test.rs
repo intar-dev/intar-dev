@@ -165,7 +165,7 @@ fn validate_sha256(value: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::ffi::CString;
+    use std::ffi::{CString, OsStr};
     use std::fs::{File, OpenOptions};
     use std::io::{ErrorKind, Read as _, Write as _};
     use std::os::unix::fs::{
@@ -207,8 +207,9 @@ mod linux {
         SelfTestAttestationV1, VerifiedArtifact,
     };
     use crate::network::{
-        add_host_visible_namespace, delete_host_visible_namespace, initial_mount_namespace_entry,
-        initial_mount_namespace_root, trusted_nsenter_binary, verify_host_visible_namespace,
+        add_host_visible_namespace, checked_host_mount_ip, delete_host_visible_namespace,
+        initial_mount_namespace_entry, trusted_nsenter_binary, validate_initial_network_namespace,
+        verify_host_visible_namespace,
     };
     use crate::{
         FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
@@ -261,7 +262,15 @@ mod linux {
                 let _ = stop_and_reset_unit(&unit_name);
             }
             if let Some(host_veth_name) = self.host_veth_name.take() {
-                let _ = run_command(&self.ip, ["link", "delete", host_veth_name.as_str()]);
+                let _ = checked_host_mount_ip(
+                    &self.nsenter,
+                    &self.ip,
+                    [
+                        OsStr::new("link"),
+                        OsStr::new("delete"),
+                        OsStr::new(&host_veth_name),
+                    ],
+                );
             }
             if let Some(namespace_name) = self.namespace_name.take() {
                 let _ = delete_host_visible_namespace(
@@ -309,6 +318,8 @@ mod linux {
             config.netns_root == Path::new("/run/netns"),
             "self-test requires netns_root=/run/netns"
         );
+        validate_initial_network_namespace()
+            .context("prove self-test uses PID 1's network namespace")?;
         ensure_trusted_directory(&config.jail_root)?;
         invalidate_previous_attestation(config)?;
 
@@ -340,6 +351,11 @@ mod linux {
 
         let ip = trusted_ip_binary()?;
         let nsenter = trusted_nsenter_binary()?;
+        let network_tools = IpNetnsTools {
+            nsenter: &nsenter,
+            ip: &ip,
+            netns_root: &config.netns_root,
+        };
         let namespace_name = format!("ist{short}");
         let host_veth_name = format!("ish{short}");
         let peer_veth_name = format!("isn{short}");
@@ -374,8 +390,7 @@ mod linux {
             };
         }
         let network_setup = create_test_network(
-            &ip,
-            &config.netns_root,
+            network_tools,
             &namespace_name,
             &host_veth_name,
             &peer_veth_name,
@@ -384,8 +399,7 @@ mod linux {
         )
         .and_then(|()| {
             verify_network(
-                &ip,
-                &config.netns_root,
+                network_tools,
                 &namespace_name,
                 &host_veth_name,
                 &peer_veth_name,
@@ -3281,9 +3295,15 @@ mod linux {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct IpNetnsTools<'a> {
+        nsenter: &'a Path,
+        ip: &'a Path,
+        netns_root: &'a Path,
+    }
+
     fn create_test_network(
-        ip: &Path,
-        netns_root: &Path,
+        tools: IpNetnsTools<'_>,
         namespace: &str,
         host_veth: &str,
         peer_veth: &str,
@@ -3291,33 +3311,27 @@ mod linux {
         cleanup: &mut Cleanup,
     ) -> Result<()> {
         let octet = 1 + (u8::from_str_radix(&seed[..2], 16)? % 250);
-        let ip_argument = ip
+        let ip_argument = tools
+            .ip
             .to_str()
             .context("trusted ip binary path is not valid UTF-8")?;
         checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             [
                 "link", "add", host_veth, "type", "veth", "peer", "name", peer_veth,
             ],
         )?;
         cleanup.host_veth_name = Some(host_veth.to_owned());
-        checked_ip_command(
-            ip,
-            netns_root,
-            ["link", "set", peer_veth, "netns", namespace],
-        )?;
+        checked_ip_command(tools, ["link", "set", peer_veth, "netns", namespace])?;
         let host_cidr = format!("198.18.{octet}.1/30");
         let peer_cidr = format!("198.18.{octet}.2/30");
         checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             ["address", "add", host_cidr.as_str(), "dev", host_veth],
         )?;
-        checked_ip_command(ip, netns_root, ["link", "set", host_veth, "up"])?;
+        checked_ip_command(tools, ["link", "set", host_veth, "up"])?;
         checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             [
                 "netns",
                 "exec",
@@ -3330,8 +3344,7 @@ mod linux {
             ],
         )?;
         checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             [
                 "netns",
                 "exec",
@@ -3345,8 +3358,7 @@ mod linux {
             ],
         )?;
         checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             [
                 "netns",
                 "exec",
@@ -3362,13 +3374,13 @@ mod linux {
     }
 
     fn verify_network(
-        ip: &Path,
-        netns_root: &Path,
+        tools: IpNetnsTools<'_>,
         namespace: &str,
         host_veth: &str,
         peer_veth: &str,
     ) -> Result<()> {
-        let ip_argument = ip
+        let ip_argument = tools
+            .ip
             .to_str()
             .context("trusted ip binary path is not valid UTF-8")?;
         ensure!(
@@ -3376,8 +3388,7 @@ mod linux {
             "self-test host veth is absent"
         );
         let output = checked_ip_command(
-            ip,
-            netns_root,
+            tools,
             [
                 "netns",
                 "exec",
@@ -3394,7 +3405,7 @@ mod linux {
             "self-test namespace peer is absent"
         );
         let host_namespace = std::fs::metadata("/proc/self/ns/net")?;
-        let namespace_inode = verify_host_visible_namespace(netns_root, namespace)?;
+        let namespace_inode = verify_host_visible_namespace(tools.netns_root, namespace)?;
         ensure!(
             host_namespace.ino() != namespace_inode,
             "self-test did not create a distinct network namespace"
@@ -3412,8 +3423,15 @@ mod linux {
         if let Some(host_veth) = host_veth {
             let host_veth_path = Path::new("/sys/class/net").join(host_veth);
             if path_entry_exists(&host_veth_path)? {
-                let result =
-                    checked_ip_command(ip, netns_root, ["link", "delete", host_veth]).map(|_| ());
+                let result = checked_ip_command(
+                    IpNetnsTools {
+                        nsenter,
+                        ip,
+                        netns_root,
+                    },
+                    ["link", "delete", host_veth],
+                )
+                .map(|_| ());
                 accept_delete_outcome(
                     result,
                     path_entry_exists(&host_veth_path)?,
@@ -3581,26 +3599,19 @@ mod linux {
     }
 
     fn checked_ip_command<'a>(
-        ip: &Path,
-        netns_root: &Path,
+        tools: IpNetnsTools<'_>,
         arguments: impl IntoIterator<Item = &'a str>,
     ) -> Result<Output> {
-        let output = Command::new(ip)
-            .args(arguments)
-            .env_clear()
-            .env("IP_NETNS_DIR", initial_mount_namespace_root(netns_root)?)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .with_context(|| format!("execute {}", ip.display()))?;
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
         ensure!(
-            output.status.success(),
-            "{} failed: {}",
-            ip.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            tools.netns_root == Path::new("/run/netns"),
+            "self-test requires netns_root=/run/netns"
         );
-        Ok(output)
+        checked_host_mount_ip(
+            tools.nsenter,
+            tools.ip,
+            arguments.iter().copied().map(OsStr::new),
+        )
     }
 
     fn run_command<'a>(

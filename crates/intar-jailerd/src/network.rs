@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::os::fd::AsFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context as _, Result, bail};
 use intar_jailer_protocol::{
@@ -74,6 +74,7 @@ impl NetworkManager {
         let ip = trusted_tool(IP_CANDIDATES).context("find trusted iproute2 binary")?;
         let nft = trusted_tool(NFT_CANDIDATES).context("find trusted nft binary")?;
         let nsenter = trusted_nsenter_binary()?;
+        validate_iproute2_netns_root(&netns_root)?;
         if !netns_root.is_absolute() || !trusted_directory(&netns_root) {
             bail!(
                 "network namespace root is not a trusted root-owned directory: {}",
@@ -82,6 +83,7 @@ impl NetworkManager {
         }
         let host_netns_root = initial_mount_namespace_root(&netns_root)?;
         validate_host_netns_root(&netns_root, &host_netns_root)?;
+        validate_initial_network_namespace()?;
         if !std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
             .is_ok_and(|value| value.trim() == "1")
         {
@@ -749,45 +751,37 @@ impl NetworkManager {
     }
 
     fn ip(&self, args: &[&str]) -> Result<()> {
-        run_checked(
-            &self.ip,
-            args.iter().map(OsStr::new),
-            None,
-            &self.host_netns_root,
-        )
+        checked_host_mount_ip(&self.nsenter, &self.ip, args.iter().map(OsStr::new)).map(|_| ())
     }
 
     fn ip_succeeds(&self, args: &[&str]) -> bool {
-        run_status(&self.ip, args.iter().map(OsStr::new), &self.host_netns_root)
+        host_mount_ip_status(&self.nsenter, &self.ip, args.iter().map(OsStr::new))
     }
 
     fn ip_output(&self, args: &[&str]) -> Result<String> {
-        run_output(&self.ip, args.iter().map(OsStr::new), &self.host_netns_root)
+        let output = checked_host_mount_ip(&self.nsenter, &self.ip, args.iter().map(OsStr::new))?;
+        String::from_utf8(output.stdout).context("trusted helper emitted non-UTF-8 output")
     }
 
     fn nft_succeeds(&self, args: &[&str]) -> bool {
-        run_status(
-            &self.nft,
-            args.iter().map(OsStr::new),
-            &self.host_netns_root,
-        )
+        run_status(&self.nft, args.iter().map(OsStr::new))
     }
 
     fn ip_ignore(&self, args: &[String]) {
-        let _ = run_status(
+        let _ = host_mount_ip_status(
+            &self.nsenter,
             &self.ip,
             args.iter().map(String::as_str).map(OsStr::new),
-            &self.host_netns_root,
         );
     }
 
     fn ip_strings(&self, args: &[String]) -> Result<()> {
-        run_checked(
+        checked_host_mount_ip(
+            &self.nsenter,
             &self.ip,
             args.iter().map(String::as_str).map(OsStr::new),
-            None,
-            &self.host_netns_root,
         )
+        .map(|_| ())
     }
 
     fn nft_script(&self, script: &str) -> Result<()> {
@@ -795,13 +789,11 @@ impl NetworkManager {
             &self.nft,
             [OsStr::new("--check"), OsStr::new("-f"), OsStr::new("-")],
             Some(script.as_bytes()),
-            &self.host_netns_root,
         )?;
         run_checked(
             &self.nft,
             [OsStr::new("-f"), OsStr::new("-")],
             Some(script.as_bytes()),
-            &self.host_netns_root,
         )
     }
 }
@@ -857,30 +849,74 @@ pub(crate) fn verify_host_visible_namespace(root: &Path, namespace: &str) -> Res
 }
 
 fn host_mount_ip(nsenter: &Path, ip: &Path, netns_root: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new(nsenter)
+    validate_iproute2_netns_root(netns_root)?;
+    checked_host_mount_ip(nsenter, ip, args.iter().map(OsStr::new)).map(|_| ())
+}
+
+/// Execute a fixed trusted helper in PID 1's mount namespace without changing
+/// the caller's network namespace.
+///
+/// iproute2 6.1 resolves named network namespaces through its compile-time
+/// `/run/netns` path and ignores `IP_NETNS_DIR`.  Jailerd intentionally has a
+/// private mount view, so named `ip` operations must use PID 1's mount view to
+/// reach the root-owned nsfs entries that jailerd already verified by inode.
+pub(crate) fn checked_host_mount_ip<'a>(
+    nsenter: &Path,
+    ip: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> Result<Output> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let output = host_mount_ip_command(nsenter, ip, &args)
+        .output()
+        .with_context(|| {
+            format!(
+                "execute trusted helper {} in PID 1 mount namespace with arguments {:?}",
+                ip.display(),
+                args
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "trusted helper {} failed in PID 1 mount namespace with {} and arguments {:?}: {}",
+            ip.display(),
+            output.status,
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+    Ok(output)
+}
+
+fn host_mount_ip_status<'a>(
+    nsenter: &Path,
+    ip: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> bool {
+    let args = args.into_iter().collect::<Vec<_>>();
+    host_mount_ip_command(nsenter, ip, &args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn host_mount_ip_command(nsenter: &Path, ip: &Path, args: &[&OsStr]) -> Command {
+    let mut command = Command::new(nsenter);
+    command
         .arg(format!("--mount={INITIAL_MOUNT_NAMESPACE}"))
         .arg("--")
         .arg(ip)
         .args(args)
         .env_clear()
-        .env("IP_NETNS_DIR", netns_root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| {
-            format!(
-                "execute trusted host-mount namespace helper {}",
-                nsenter.display()
-            )
-        })?;
-    if !output.status.success() {
-        bail!(
-            "trusted host-mount namespace helper {} failed with {}: {}",
-            nsenter.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn validate_iproute2_netns_root(root: &Path) -> Result<()> {
+    if root != Path::new("/run/netns") {
+        bail!("network namespace root must be /run/netns for iproute2 interoperability")
     }
     Ok(())
 }
@@ -973,13 +1009,11 @@ fn run_checked<'a>(
     program: &Path,
     args: impl IntoIterator<Item = &'a OsStr>,
     stdin: Option<&[u8]>,
-    netns_root: &Path,
 ) -> Result<()> {
     let mut child = Command::new(program);
     child
         .args(args)
         .env_clear()
-        .env("IP_NETNS_DIR", netns_root)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -1012,44 +1046,15 @@ fn run_checked<'a>(
     Ok(())
 }
 
-fn run_status<'a>(
-    program: &Path,
-    args: impl IntoIterator<Item = &'a OsStr>,
-    netns_root: &Path,
-) -> bool {
+fn run_status<'a>(program: &Path, args: impl IntoIterator<Item = &'a OsStr>) -> bool {
     Command::new(program)
         .args(args)
         .env_clear()
-        .env("IP_NETNS_DIR", netns_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn run_output<'a>(
-    program: &Path,
-    args: impl IntoIterator<Item = &'a OsStr>,
-    netns_root: &Path,
-) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .env_clear()
-        .env("IP_NETNS_DIR", netns_root)
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("execute trusted helper {}", program.display()))?;
-    if !output.status.success() {
-        bail!(
-            "trusted helper {} failed with {}: {}",
-            program.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-    }
-    String::from_utf8(output.stdout).context("trusted helper emitted non-UTF-8 output")
 }
 
 fn enable_namespace_forwarding(namespace: PathBuf) -> Result<()> {
@@ -1108,6 +1113,17 @@ fn validate_host_netns_root(local_root: &Path, host_root: &Path) -> Result<()> {
     let local = trusted_directory_identity(local_root, "configured network namespace root")?;
     let host = trusted_directory_identity(host_root, "PID-1-view network namespace root")?;
     validate_netns_root_identities(local, host)
+}
+
+pub(crate) fn validate_initial_network_namespace() -> Result<()> {
+    let current = std::fs::metadata("/proc/self/ns/net")
+        .context("stat jailerd network namespace identity")?;
+    let initial =
+        std::fs::metadata("/proc/1/ns/net").context("stat PID 1 network namespace identity")?;
+    if (current.dev(), current.ino()) != (initial.dev(), initial.ino()) {
+        bail!("jailerd must remain in PID 1's network namespace")
+    }
+    Ok(())
 }
 
 fn trusted_directory_identity(path: &Path, label: &str) -> Result<DirectoryIdentity> {
@@ -1300,6 +1316,42 @@ mod tests {
             error
                 .to_string()
                 .contains("network namespace root is not absolute"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn iproute2_operations_enter_only_pid_one_mount_namespace() {
+        let arguments = [
+            OsStr::new("-n"),
+            OsStr::new("intar-test"),
+            OsStr::new("link"),
+        ];
+        let command = host_mount_ip_command(
+            Path::new("/usr/bin/nsenter"),
+            Path::new("/usr/sbin/ip"),
+            &arguments,
+        );
+        assert_eq!(command.get_program(), OsStr::new("/usr/bin/nsenter"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                OsStr::new("--mount=/proc/1/ns/mnt"),
+                OsStr::new("--"),
+                OsStr::new("/usr/sbin/ip"),
+                OsStr::new("-n"),
+                OsStr::new("intar-test"),
+                OsStr::new("link"),
+            ]
+        );
+    }
+
+    #[test]
+    fn iproute2_requires_the_compile_time_namespace_root() {
+        validate_iproute2_netns_root(Path::new("/run/netns")).unwrap();
+        let error = validate_iproute2_netns_root(Path::new("/var/lib/intar/netns")).unwrap_err();
+        assert!(
+            error.to_string().contains("must be /run/netns"),
             "unexpected error: {error:#}"
         );
     }
