@@ -515,6 +515,7 @@ async fn reconcile_desired_vm(
         anyhow::bail!("desired vm has no ssh_authorized_keys_openssh entry");
     }
     let lease_duration_seconds = desired_lease_duration_seconds(desired_vm, now)?;
+    let peer_vm_aliases = desired_peer_vm_aliases(desired, desired_vm);
 
     vm.create_scenario_vm(CreateScenarioVmRequest {
         name: desired_vm.vm_name.clone(),
@@ -530,7 +531,8 @@ async fn reconcile_desired_vm(
                 vsock_cid: kino_vsock_cid(desired.version, desired_vm),
                 vsock_port: Some(DEFAULT_KINO_VSOCK_PORT),
             }),
-            peer_vm_names: desired_peer_vm_names(desired, desired_vm),
+            peer_vm_names: peer_vm_aliases.keys().cloned().collect(),
+            peer_vm_aliases,
         },
     })
     .await
@@ -538,13 +540,16 @@ async fn reconcile_desired_vm(
     .map_err(|error| anyhow::anyhow!("{}", error.message))
 }
 
-fn desired_peer_vm_names(desired: &HostDesiredStateV2, desired_vm: &DesiredVmV2) -> Vec<String> {
+fn desired_peer_vm_aliases(
+    desired: &HostDesiredStateV2,
+    desired_vm: &DesiredVmV2,
+) -> BTreeMap<String, String> {
     desired
         .vms
         .iter()
         .filter(|vm| vm.desired_phase == DesiredVmPhase::Running)
         .filter(|vm| vm.run_id == desired_vm.run_id && vm.vm_name != desired_vm.vm_name)
-        .map(|vm| vm.vm_name.clone())
+        .map(|vm| (vm.vm_name.clone(), vm.image_key.vm.clone()))
         .collect()
 }
 
@@ -1526,6 +1531,44 @@ mod tests {
         assert_eq!(
             image_cache_key(&desired_vm().image_key),
             "broken-nginx-web-x86_64"
+        );
+    }
+
+    #[test]
+    fn desired_peer_aliases_map_runtime_names_to_manifest_vm_names() {
+        let mut web = desired_vm();
+        web.run_id = "run-pair".to_string();
+        web.vm_name = "pair-ping-web-bv1xgh-1".to_string();
+        web.image_key.scenario = "pair-ping".to_string();
+        web.image_key.vm = "web".to_string();
+
+        let mut db = web.clone();
+        db.vm_name = "pair-ping-db-bv1xgh-2".to_string();
+        db.image_key.vm = "db".to_string();
+
+        let mut absent = web.clone();
+        absent.vm_name = "pair-ping-cache-bv1xgh-3".to_string();
+        absent.image_key.vm = "cache".to_string();
+        absent.desired_phase = DesiredVmPhase::Absent;
+
+        let mut other_run = web.clone();
+        other_run.run_id = "other-run".to_string();
+        other_run.vm_name = "pair-ping-other-abcdef-1".to_string();
+        other_run.image_key.vm = "other".to_string();
+
+        let desired = HostDesiredStateV2 {
+            schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
+            host_id: "host-1".to_string(),
+            version: 1,
+            generated_at_unix_ms: 123,
+            cached_images: Vec::new(),
+            vms: vec![web.clone(), db.clone(), absent, other_run],
+            builds: Vec::new(),
+        };
+
+        assert_eq!(
+            desired_peer_vm_aliases(&desired, &web),
+            BTreeMap::from([(db.vm_name, "db".to_string())])
         );
     }
 

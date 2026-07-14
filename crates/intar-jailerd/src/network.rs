@@ -41,7 +41,8 @@ pub(crate) struct VmNetworkAttachment {
     pub generation: ValidatedId,
     pub vm_id: ValidatedId,
     pub tap_name: String,
-    pub mac_address: String,
+    pub guest_mac_address: String,
+    pub tap_mac_address: String,
     pub guest_ip_cidr: String,
     pub ssh_public_port: Option<u16>,
     pub vsock_cid: u32,
@@ -133,6 +134,16 @@ impl NetworkManager {
                 bail!("run guest network overlaps an active run")
             }
         }
+        let bridge_mac = derived_bridge_mac(request);
+        if self.runs.values().any(|state| {
+            derived_bridge_mac(&state.request) == bridge_mac
+                || state.attachments.values().any(|attachment| {
+                    attachment.guest_mac_address == bridge_mac
+                        || attachment.tap_mac_address == bridge_mac
+                })
+        }) {
+            bail!("derived run bridge MAC collides with an active network identity")
+        }
         let installed = self.nft_succeeds(&["list", "table", "inet", &nft_table]);
         let mut state = RunState {
             request: request.clone(),
@@ -181,10 +192,16 @@ impl NetworkManager {
         if !ipv4_cidr_contains(&run.guest_cidr, &request.guest_ip_cidr)? {
             bail!("VM guest address is outside its run network")
         }
+        let tap_mac_address =
+            derived_tap_mac(&request.mac_address).context("derive host TAP MAC from guest MAC")?;
         if self.runs.values().any(|other| {
-            other.attachments.values().any(|attachment| {
+            mac_conflicts_with_bridge(
+                &derived_bridge_mac(&other.request),
+                &request.mac_address,
+                &tap_mac_address,
+            ) || other.attachments.values().any(|attachment| {
                 attachment.tap_name == request.tap_name
-                    || attachment.mac_address == request.mac_address
+                    || attachment_macs_conflict(attachment, &request.mac_address, &tap_mac_address)
                     || attachment.vsock_cid == request.vsock_cid
                     || (request.ssh_public_port.is_some()
                         && attachment.ssh_public_port == request.ssh_public_port)
@@ -203,7 +220,8 @@ impl NetworkManager {
             generation: generation.clone(),
             vm_id: request.vm_id.clone(),
             tap_name: request.tap_name.clone(),
-            mac_address: request.mac_address.clone(),
+            guest_mac_address: request.mac_address.clone(),
+            tap_mac_address,
             guest_ip_cidr: request.guest_ip_cidr.clone(),
             ssh_public_port: request.ssh_public_port,
             vsock_cid: request.vsock_cid,
@@ -259,11 +277,14 @@ impl NetworkManager {
         if !ipv4_cidr_contains(&run.guest_cidr, &request.guest_ip_cidr)? {
             bail!("recovered VM guest address is outside its run network")
         }
+        let tap_mac_address = derived_tap_mac(&request.mac_address)
+            .context("derive recovered host TAP MAC from guest MAC")?;
         let attachment = VmNetworkAttachment {
             generation: generation.clone(),
             vm_id: request.vm_id.clone(),
             tap_name: request.tap_name.clone(),
-            mac_address: request.mac_address.clone(),
+            guest_mac_address: request.mac_address.clone(),
+            tap_mac_address,
             guest_ip_cidr: request.guest_ip_cidr.clone(),
             ssh_public_port: request.ssh_public_port,
             vsock_cid: request.vsock_cid,
@@ -277,9 +298,17 @@ impl NetworkManager {
             bail!("recovered generation has different network topology")
         }
         if self.runs.values().any(|other| {
-            other.attachments.values().any(|existing| {
+            mac_conflicts_with_bridge(
+                &derived_bridge_mac(&other.request),
+                &attachment.guest_mac_address,
+                &attachment.tap_mac_address,
+            ) || other.attachments.values().any(|existing| {
                 existing.tap_name == attachment.tap_name
-                    || existing.mac_address == attachment.mac_address
+                    || attachment_macs_conflict(
+                        existing,
+                        &attachment.guest_mac_address,
+                        &attachment.tap_mac_address,
+                    )
                     || existing.vsock_cid == attachment.vsock_cid
                     || (attachment.ssh_public_port.is_some()
                         && existing.ssh_public_port == attachment.ssh_public_port)
@@ -444,6 +473,8 @@ impl NetworkManager {
             if !self.ip_succeeds(&["-n", namespace, "link", "show", "dev", bridge]) {
                 self.ip(&["-n", namespace, "link", "add", bridge, "type", "bridge"])?;
             }
+            self.pin_and_verify_link_mac(namespace, bridge, &derived_bridge_mac(&state.request))
+                .context("pin deterministic run bridge MAC")?;
 
             self.ip(&[
                 "addr",
@@ -593,37 +624,7 @@ impl NetworkManager {
             "group",
             &attachment.gid.to_string(),
         ])?;
-        let operation = (|| -> Result<()> {
-            self.ip(&[
-                "-n",
-                namespace,
-                "link",
-                "set",
-                "dev",
-                &attachment.tap_name,
-                "address",
-                &attachment.mac_address,
-            ])?;
-            self.ip(&[
-                "-n",
-                namespace,
-                "link",
-                "set",
-                "dev",
-                &attachment.tap_name,
-                "master",
-                &network.bridge_name,
-            ])?;
-            self.ip(&[
-                "-n",
-                namespace,
-                "link",
-                "set",
-                "dev",
-                &attachment.tap_name,
-                "up",
-            ])
-        })();
+        let operation = self.configure_tap(network, attachment);
         if operation.is_err() {
             self.ip_ignore(&[
                 "-n".to_owned(),
@@ -668,35 +669,29 @@ impl NetworkManager {
         if !has_owner || !has_group {
             bail!("recovered VM TAP owner differs from its durable identity")
         }
-        self.ip(&[
-            "-n",
-            namespace,
-            "link",
-            "set",
-            "dev",
-            &attachment.tap_name,
-            "address",
-            &attachment.mac_address,
-        ])?;
-        self.ip(&[
-            "-n",
-            namespace,
-            "link",
-            "set",
-            "dev",
-            &attachment.tap_name,
-            "master",
-            &network.bridge_name,
-        ])?;
-        self.ip(&[
-            "-n",
-            namespace,
-            "link",
-            "set",
-            "dev",
-            &attachment.tap_name,
-            "up",
-        ])
+        self.configure_tap(network, attachment)
+    }
+
+    fn configure_tap(
+        &self,
+        network: &RunNetworkResult,
+        attachment: &VmNetworkAttachment,
+    ) -> Result<()> {
+        for command in tap_link_commands(network, attachment) {
+            self.ip_strings(&command)?;
+        }
+        Ok(())
+    }
+
+    fn pin_and_verify_link_mac(
+        &self,
+        namespace: &str,
+        interface: &str,
+        expected_mac: &str,
+    ) -> Result<()> {
+        self.ip_strings(&link_address_command(namespace, interface, expected_mac))?;
+        let output = self.ip_output(&["-n", namespace, "-o", "link", "show", "dev", interface])?;
+        verify_link_mac(&output, expected_mac)
     }
 
     fn render_all(&mut self) -> Result<()> {
@@ -945,6 +940,122 @@ fn derived_topology(request: &EnsureRunNetworkRequest) -> Result<(RunNetworkResu
         },
         format!("intar_{suffix}"),
     ))
+}
+
+fn derived_tap_mac(guest_mac: &str) -> Result<String> {
+    let octets = parse_mac(guest_mac).context("parse guest MAC")?;
+    if octets[0] & 0x01 != 0 {
+        bail!("guest MAC must be unicast")
+    }
+    // Toggle a non-domain bit first, then force the host identity back into
+    // the locally administered unicast domain. This maps every protocol-valid
+    // guest MAC to a distinct host MAC and preserves recovery for legacy
+    // global and non-02 local guest addresses. New 02 guests map to 06.
+    let tap_prefix = ((octets[0] ^ 0x04) & 0xfe) | 0x02;
+    Ok(format_mac(tap_prefix, &octets[1..]))
+}
+
+fn derived_bridge_mac(request: &EnsureRunNetworkRequest) -> String {
+    let digest = Sha256::digest(request.run_id.as_str().as_bytes());
+    format_mac(0x0a, &digest[..5])
+}
+
+fn parse_mac(value: &str) -> Result<[u8; 6]> {
+    if value.len() != 17 || value != value.to_ascii_lowercase() {
+        bail!("MAC must be 6 lowercase hexadecimal octets")
+    }
+    let mut octets = [0_u8; 6];
+    let mut parts = value.split(':');
+    for octet in &mut octets {
+        let part = parts.next().context("MAC has fewer than 6 octets")?;
+        if part.len() != 2 {
+            bail!("MAC octets must contain exactly 2 hexadecimal digits")
+        }
+        *octet = u8::from_str_radix(part, 16).context("MAC contains a non-hexadecimal octet")?;
+    }
+    if parts.next().is_some() {
+        bail!("MAC has more than 6 octets")
+    }
+    Ok(octets)
+}
+
+fn format_mac(prefix: u8, tail: &[u8]) -> String {
+    debug_assert_eq!(tail.len(), 5);
+    format!(
+        "{prefix:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        tail[0], tail[1], tail[2], tail[3], tail[4]
+    )
+}
+
+fn link_address_command(namespace: &str, interface: &str, mac: &str) -> Vec<String> {
+    [
+        "-n", namespace, "link", "set", "dev", interface, "address", mac,
+    ]
+    .map(str::to_owned)
+    .into()
+}
+
+fn tap_link_commands(
+    network: &RunNetworkResult,
+    attachment: &VmNetworkAttachment,
+) -> [Vec<String>; 3] {
+    [
+        link_address_command(
+            &network.namespace_name,
+            &attachment.tap_name,
+            &attachment.tap_mac_address,
+        ),
+        [
+            "-n",
+            &network.namespace_name,
+            "link",
+            "set",
+            "dev",
+            &attachment.tap_name,
+            "master",
+            &network.bridge_name,
+        ]
+        .map(str::to_owned)
+        .into(),
+        [
+            "-n",
+            &network.namespace_name,
+            "link",
+            "set",
+            "dev",
+            &attachment.tap_name,
+            "up",
+        ]
+        .map(str::to_owned)
+        .into(),
+    ]
+}
+
+fn verify_link_mac(output: &str, expected_mac: &str) -> Result<()> {
+    let fields = output.split_whitespace().collect::<Vec<_>>();
+    let actual = fields
+        .windows(2)
+        .find_map(|pair| (pair[0] == "link/ether").then_some(pair[1]))
+        .context("link inspection did not report an Ethernet MAC")?;
+    if actual != expected_mac {
+        bail!("link MAC differs after reconciliation: expected {expected_mac}, found {actual}")
+    }
+    Ok(())
+}
+
+fn attachment_macs_conflict(
+    existing: &VmNetworkAttachment,
+    guest_mac: &str,
+    tap_mac: &str,
+) -> bool {
+    existing.guest_mac_address == guest_mac
+        || existing.guest_mac_address == tap_mac
+        || existing.tap_mac_address == guest_mac
+        || existing.tap_mac_address == tap_mac
+}
+
+fn mac_conflicts_with_bridge(bridge_mac: &str, guest_mac: &str, tap_mac: &str) -> bool {
+    bridge_mac == guest_mac || bridge_mac == tap_mac
 }
 
 fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
@@ -1434,6 +1545,176 @@ mod tests {
     }
 
     #[test]
+    fn guest_tap_and_bridge_macs_are_stable_local_unicast_and_disjoint() {
+        let request = EnsureRunNetworkRequest {
+            run_id: ValidatedId::parse("run-a").unwrap(),
+            guest_cidr: "10.77.0.0/24".to_owned(),
+            gateway: "10.77.0.1".to_owned(),
+        };
+        let guest = "02:11:22:33:44:55";
+        let tap = derived_tap_mac(guest).unwrap();
+        let bridge = derived_bridge_mac(&request);
+
+        assert_eq!(tap, "06:11:22:33:44:55");
+        assert_eq!(bridge, derived_bridge_mac(&request));
+        assert_ne!(guest, tap);
+        assert_ne!(guest, bridge);
+        assert_ne!(tap, bridge);
+        for mac in [guest, tap.as_str(), bridge.as_str()] {
+            let octets = parse_mac(mac).unwrap();
+            assert_eq!(octets[0] & 0x01, 0, "{mac} must be unicast");
+            assert_eq!(octets[0] & 0x02, 0x02, "{mac} must be local");
+        }
+    }
+
+    #[test]
+    fn tap_mac_derivation_preserves_legacy_unicast_recovery() {
+        assert_eq!(
+            derived_tap_mac("06:11:22:33:44:55").unwrap(),
+            "02:11:22:33:44:55"
+        );
+        assert_eq!(
+            derived_tap_mac("00:11:22:33:44:55").unwrap(),
+            "06:11:22:33:44:55"
+        );
+        assert_eq!(
+            derived_tap_mac("0a:11:22:33:44:55").unwrap(),
+            "0e:11:22:33:44:55"
+        );
+    }
+
+    #[test]
+    fn tap_mac_derivation_rejects_malformed_and_multicast_guest_macs() {
+        for invalid in [
+            "03:11:22:33:44:55",
+            "02:11:22:33:44",
+            "02:11:22:33:44:555",
+            "02:11:22:33:44:GG",
+            "02:11:22:33:44:AA",
+        ] {
+            assert!(
+                derived_tap_mac(invalid).is_err(),
+                "accepted invalid guest MAC {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_collision_checks_cover_guest_tap_cross_class_and_bridge_domains() {
+        let existing = VmNetworkAttachment {
+            generation: ValidatedId::parse("generation").unwrap(),
+            vm_id: ValidatedId::parse("vm").unwrap(),
+            tap_name: "tap0".to_owned(),
+            guest_mac_address: "02:11:22:33:44:55".to_owned(),
+            tap_mac_address: "06:11:22:33:44:55".to_owned(),
+            guest_ip_cidr: "10.77.0.2/24".to_owned(),
+            ssh_public_port: None,
+            vsock_cid: 3,
+            uid: 200_000,
+            gid: 200_000,
+        };
+        for (guest, tap) in [
+            ("02:11:22:33:44:55", "06:00:00:00:00:01"),
+            ("02:00:00:00:00:01", "02:11:22:33:44:55"),
+            ("06:11:22:33:44:55", "06:00:00:00:00:01"),
+            ("02:00:00:00:00:01", "06:11:22:33:44:55"),
+        ] {
+            assert!(attachment_macs_conflict(&existing, guest, tap));
+        }
+        assert!(!attachment_macs_conflict(
+            &existing,
+            "02:00:00:00:00:01",
+            "06:00:00:00:00:01"
+        ));
+        assert!(mac_conflicts_with_bridge(
+            "0a:11:22:33:44:55",
+            "0a:11:22:33:44:55",
+            "06:00:00:00:00:01"
+        ));
+        assert!(mac_conflicts_with_bridge(
+            "0a:11:22:33:44:55",
+            "02:00:00:00:00:01",
+            "0a:11:22:33:44:55"
+        ));
+    }
+
+    #[test]
+    fn create_and_recovery_tap_commands_use_only_the_derived_host_mac() {
+        let request = EnsureRunNetworkRequest {
+            run_id: ValidatedId::parse("run-a").unwrap(),
+            guest_cidr: "10.77.0.0/24".to_owned(),
+            gateway: "10.77.0.1".to_owned(),
+        };
+        let (network, _) = derived_topology(&request).unwrap();
+        let attachment = VmNetworkAttachment {
+            generation: ValidatedId::parse("generation").unwrap(),
+            vm_id: ValidatedId::parse("vm").unwrap(),
+            tap_name: "tap0".to_owned(),
+            guest_mac_address: "02:11:22:33:44:55".to_owned(),
+            tap_mac_address: derived_tap_mac("02:11:22:33:44:55").unwrap(),
+            guest_ip_cidr: "10.77.0.2/24".to_owned(),
+            ssh_public_port: None,
+            vsock_cid: 3,
+            uid: 200_000,
+            gid: 200_000,
+        };
+
+        // Fresh creation and durable recovery both execute this exact command
+        // sequence through `configure_tap`.
+        let commands = tap_link_commands(&network, &attachment);
+        assert_eq!(
+            commands[0],
+            vec![
+                "-n",
+                network.namespace_name.as_str(),
+                "link",
+                "set",
+                "dev",
+                "tap0",
+                "address",
+                "06:11:22:33:44:55",
+            ]
+        );
+        assert!(
+            commands
+                .iter()
+                .flatten()
+                .all(|argument| argument != &attachment.guest_mac_address),
+            "host link commands must never assign the guest MAC"
+        );
+    }
+
+    #[test]
+    fn bridge_mac_reconciliation_command_and_verification_are_exact() {
+        assert_eq!(
+            link_address_command("intar-ns-test", "ibrtest", "0a:11:22:33:44:55"),
+            vec![
+                "-n",
+                "intar-ns-test",
+                "link",
+                "set",
+                "dev",
+                "ibrtest",
+                "address",
+                "0a:11:22:33:44:55",
+            ]
+        );
+        verify_link_mac(
+            "7: ibrtest: <BROADCAST> mtu 1500 link/ether 0a:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff",
+            "0a:11:22:33:44:55",
+        )
+        .unwrap();
+        assert!(
+            verify_link_mac(
+                "7: ibrtest: <BROADCAST> mtu 1500 link/ether 0a:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
+                "0a:11:22:33:44:55",
+            )
+            .is_err()
+        );
+        assert!(verify_link_mac("7: ibrtest: <BROADCAST>", "0a:11:22:33:44:55").is_err());
+    }
+
+    #[test]
     fn containment_uses_prefix_not_string_matching() {
         assert!(ipv4_cidr_contains("10.7.0.0/24", "10.7.0.25/24").unwrap());
         assert!(!ipv4_cidr_contains("10.7.0.0/24", "10.7.1.25/24").unwrap());
@@ -1498,7 +1779,8 @@ mod tests {
                 generation: ValidatedId::parse("generation").unwrap(),
                 vm_id: ValidatedId::parse("vm").unwrap(),
                 tap_name: "tap0".to_owned(),
-                mac_address: "02:00:00:00:00:01".to_owned(),
+                guest_mac_address: "02:00:00:00:00:01".to_owned(),
+                tap_mac_address: "06:00:00:00:00:01".to_owned(),
                 guest_ip_cidr: "10.77.0.2/29".to_owned(),
                 ssh_public_port: Some(22_001),
                 vsock_cid: 3,
