@@ -740,6 +740,7 @@ pub struct JailSpecV1 {
     pub gid: u32,
     pub jail_root: PathBuf,
     pub netns_path: PathBuf,
+    pub netns_inode: u64,
     pub nofile_limit: u64,
     pub file_size_limit: Option<u64>,
 }
@@ -769,6 +770,9 @@ impl JailSpecV1 {
                     self.netns_path.clone()
                 },
             ));
+        }
+        if self.netns_inode == 0 {
+            return Err(ValidationError::InvalidNetworkNamespaceInode);
         }
         if self.nofile_limit < 64 {
             return Err(ValidationError::InvalidNofileLimit);
@@ -842,6 +846,8 @@ pub enum ValidationError {
     UnsupportedVersion(u16),
     #[error("VM identity cannot be root")]
     RootVmIdentity,
+    #[error("run network namespace inode must be nonzero")]
+    InvalidNetworkNamespaceInode,
     #[error("RLIMIT_NOFILE must be at least 64")]
     InvalidNofileLimit,
     #[error("configured RLIMIT_FSIZE must be positive")]
@@ -1318,6 +1324,7 @@ mod tests {
             gid: 200_000,
             jail_root: PathBuf::from("/var/lib/intar/jails/generation/root"),
             netns_path: PathBuf::from("/run/netns/../host"),
+            netns_inode: 17,
             nofile_limit: 2_048,
             file_size_limit: None,
         };
@@ -1338,10 +1345,30 @@ mod tests {
             gid: 200_000,
             jail_root: PathBuf::from("/var/lib/intar/jails/generation/root"),
             netns_path: PathBuf::from("/run/netns/intar-generation"),
+            netns_inode: 17,
             nofile_limit: 2_048,
             file_size_limit: Some(0),
         };
         assert_eq!(spec.validate(), Err(ValidationError::InvalidFileSizeLimit));
+    }
+
+    #[test]
+    fn jail_spec_rejects_zero_network_namespace_inode() {
+        let spec = JailSpecV1 {
+            version: PROTOCOL_VERSION,
+            generation: ValidatedId::parse("generation").expect("generation"),
+            uid: 200_000,
+            gid: 200_000,
+            jail_root: PathBuf::from("/var/lib/intar/jails/generation/root"),
+            netns_path: PathBuf::from("/run/netns/intar-generation"),
+            netns_inode: 0,
+            nofile_limit: 2_048,
+            file_size_limit: None,
+        };
+        assert_eq!(
+            spec.validate(),
+            Err(ValidationError::InvalidNetworkNamespaceInode)
+        );
     }
 
     fn source(path: &str, access: ArtifactAccess) -> ArtifactSource {

@@ -16,7 +16,9 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/intar/jails /var/cache/intar-agent /run/intar-jailerd /run/netns
+# Named netns handles are created in PID 1's mount namespace and accessed
+# read-only through /proc/1/root; the daemon never needs a writable local view.
+ReadWritePaths=/var/lib/intar/jails /var/cache/intar-agent /run/intar-jailerd
 ProtectClock=true
 ProtectControlGroups=true
 ProtectHostname=true

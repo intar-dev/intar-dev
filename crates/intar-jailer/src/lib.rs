@@ -166,7 +166,7 @@ mod linux {
         PathBeneath, Ruleset, RulesetAttr as _, RulesetCreatedAttr as _, RulesetStatus,
         make_bitflags,
     };
-    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+    use rustix::fs::{FsWord, Mode, OFlags, ResolveFlags, fstat, fstatfs, open, openat2};
     use rustix::mount::{
         MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change, unmount,
     };
@@ -186,6 +186,8 @@ mod linux {
 
     use super::{CLOUD_HYPERVISOR_ARGS, load_root_owned_spec};
 
+    const NSFS_MAGIC: FsWord = 0x6e73_6673;
+
     type LandlockRule = (OwnedFd, BitFlags<AccessFs>);
 
     #[derive(Clone, Copy)]
@@ -204,7 +206,7 @@ mod linux {
         sanitize_inherited_fds()?;
         umask(Mode::RWXG | Mode::RWXO);
         apply_rlimits(&spec)?;
-        join_network_namespace(&spec.netns_path)?;
+        join_network_namespace(&spec.netns_path, spec.netns_inode)?;
         verify_host_devices()?;
         enter_namespaces()?;
         enter_root(&spec.jail_root)?;
@@ -591,15 +593,44 @@ mod linux {
         Ok(())
     }
 
-    fn join_network_namespace(path: &Path) -> Result<()> {
+    fn join_network_namespace(path: &Path, expected_inode: u64) -> Result<()> {
         let fd = open(
             path,
             OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
         )
         .with_context(|| format!("open network namespace {}", path.display()))?;
+        let metadata =
+            fstat(&fd).with_context(|| format!("stat network namespace {}", path.display()))?;
+        let filesystem =
+            fstatfs(&fd).with_context(|| format!("statfs network namespace {}", path.display()))?;
+        validate_network_namespace_identity(
+            metadata.st_uid,
+            metadata.st_gid,
+            metadata.st_nlink,
+            metadata.st_ino,
+            filesystem.f_type,
+            expected_inode,
+        )?;
         move_into_link_name_space(fd.as_fd(), Some(LinkNameSpaceType::Network))
             .context("join run network namespace")
+    }
+
+    fn validate_network_namespace_identity(
+        uid: u32,
+        gid: u32,
+        link_count: u64,
+        inode: u64,
+        filesystem_type: FsWord,
+        expected_inode: u64,
+    ) -> Result<()> {
+        if uid != 0 || gid != 0 || link_count != 1 || filesystem_type != NSFS_MAGIC {
+            bail!("run network namespace handle is not a root-owned nsfs entry")
+        }
+        if inode != expected_inode {
+            bail!("run network namespace inode mismatch: expected {expected_inode}, found {inode}")
+        }
+        Ok(())
     }
 
     #[allow(
@@ -754,6 +785,43 @@ mod linux {
     }
 
     use std::os::unix::process::CommandExt as _;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn rejects_network_namespace_inode_mismatch() {
+            let error = validate_network_namespace_identity(0, 0, 1, 18, NSFS_MAGIC, 17)
+                .expect_err("mismatched namespace inode must fail");
+            assert!(error.to_string().contains("inode mismatch"));
+        }
+
+        #[test]
+        fn rejects_ordinary_file_as_network_namespace() {
+            let directory = tempfile::tempdir().expect("temp directory");
+            let path = directory.path().join("ordinary-file");
+            std::fs::write(&path, b"not a namespace").expect("write ordinary file");
+            let fd = open(
+                &path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .expect("open ordinary file");
+            let metadata = fstat(&fd).expect("stat ordinary file");
+            let filesystem = fstatfs(&fd).expect("statfs ordinary file");
+            let error = validate_network_namespace_identity(
+                metadata.st_uid,
+                metadata.st_gid,
+                metadata.st_nlink,
+                metadata.st_ino,
+                filesystem.f_type,
+                metadata.st_ino,
+            )
+            .expect_err("ordinary file must fail namespace validation");
+            assert!(error.to_string().contains("root-owned nsfs entry"));
+        }
+    }
 }
 
 #[cfg(test)]
