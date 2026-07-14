@@ -56,6 +56,7 @@ for path in \
   /etc/systemd/system/intar-jailerd.service \
   /etc/systemd/system/intar-jailerd.socket \
   /etc/systemd/system/intar-agent.service \
+  /run/systemd/system/intar-agent.service.d \
   /etc/systemd/system/intar-vms.slice \
   /etc/tmpfiles.d/intar-jailerd.conf \
   /etc/sysctl.d/90-intar-jailerd.conf \
@@ -70,6 +71,7 @@ done
 
 work_root=$(mktemp -d /var/lib/intar-package-smoke.XXXXXX)
 package_root=${work_root}/package
+agent_probe_dropin_dir=/run/systemd/system/intar-agent.service.d
 installed=0
 cleanup_failed=0
 installer_probe_pid=
@@ -145,6 +147,7 @@ cleanup() {
   done
 
   rm -rf -- \
+    "${agent_probe_dropin_dir}" \
     "${work_root}" \
     /etc/intar-agent \
     /etc/intar-jailerd \
@@ -154,11 +157,17 @@ cleanup() {
     /usr/share/doc/intar-jailerd \
     /usr/lib/intar
 
+  if ! systemctl daemon-reload; then
+    echo "intar package smoke: systemd daemon-reload failed during cleanup" >&2
+    cleanup_failed=1
+  fi
+
   for path in \
     /etc/systemd/system/intar-agent.service \
     /etc/systemd/system/intar-jailerd.service \
     /etc/systemd/system/intar-jailerd.socket \
     /etc/systemd/system/intar-vms.slice \
+    /run/systemd/system/intar-agent.service.d \
     /etc/tmpfiles.d/intar-jailerd.conf \
     /etc/sysctl.d/90-intar-jailerd.conf \
     /usr/local/bin/intar-agent; do
@@ -224,10 +233,12 @@ done
     *" CAP_SYS_PTRACE "*) ;;
     *) die "packaged intar-jailerd.service omits CAP_SYS_PTRACE from CapabilityBoundingSet" ;;
   esac)
-(restrict_suid_sgid=$(awk -F= '$1 == "RestrictSUIDSGID" { print $2 }' \
-    "${package_root}/deploy/intar-jailerd.service")
+for service in intar-agent.service intar-jailerd.service; do
+  restrict_suid_sgid=$(awk -F= '$1 == "RestrictSUIDSGID" { print $2 }' \
+    "${package_root}/deploy/${service}")
   [ "${restrict_suid_sgid}" = false ] || \
-    die "packaged intar-jailerd.service blocks openat2 through RestrictSUIDSGID")
+    die "packaged ${service} blocks openat2 through RestrictSUIDSGID"
+done
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
 
 for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do
@@ -653,4 +664,61 @@ systemctl is-active --quiet intar-jailerd.socket || \
   die "doctor left intar-jailerd.socket inactive"
 systemctl is-active --quiet intar-jailerd.service || \
   die "doctor left intar-jailerd.service inactive"
-echo "intar package smoke: installed v53.0 jailed lifecycle, quota and doctor passed"
+
+# Run openat2 under the installed agent unit itself, not merely as its Unix
+# user. systemd 255's RestrictSUIDSGID filter returns ENOSYS for openat2, which
+# the agent needs to pin and validate jailed Cloud Hypervisor API sockets.
+# Replacing only the probe lifecycle and ExecStart directives preserves every
+# production sandbox directive and catches any future hardening change that
+# blocks the syscall again.
+install -d -o root -g root -m 0755 "${agent_probe_dropin_dir}"
+agent_openat2_probe=${agent_probe_dropin_dir}/agent-openat2-probe.py
+cat >"${agent_openat2_probe}" <<'PY'
+import ctypes
+import os
+
+SYS_OPENAT2_X86_64 = 437
+AT_FDCWD = -100
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+how = (ctypes.c_ulonglong * 3)(
+    os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC,
+    0,
+    0,
+)
+fd = libc.syscall(
+    SYS_OPENAT2_X86_64,
+    AT_FDCWD,
+    ctypes.c_char_p(b"/var/cache/intar-agent"),
+    ctypes.byref(how),
+    ctypes.sizeof(how),
+)
+if fd < 0:
+    error_number = ctypes.get_errno()
+    raise OSError(error_number, os.strerror(error_number))
+os.close(fd)
+print("intar package smoke: agent systemd sandbox permits openat2")
+PY
+chown root:root "${agent_openat2_probe}"
+chmod 0555 "${agent_openat2_probe}"
+cat >"${agent_probe_dropin_dir}/openat2-probe.conf" <<EOF
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=no
+ExecStart=
+ExecStart=/usr/bin/python3 ${agent_openat2_probe}
+EOF
+chmod 0644 "${agent_probe_dropin_dir}/openat2-probe.conf"
+systemctl daemon-reload
+systemctl start intar-agent.service || \
+  die "installed intar-agent.service sandbox blocks openat2"
+systemctl is-active --quiet intar-agent.service || \
+  die "agent openat2 probe unit did not remain active"
+systemctl stop intar-agent.service
+rm -rf -- "${agent_probe_dropin_dir}"
+systemctl daemon-reload
+systemctl reset-failed intar-agent.service >/dev/null 2>&1 || true
+
+echo "intar package smoke: installed v53.0 jailed lifecycle, quota, agent openat2 sandbox, and doctor passed"

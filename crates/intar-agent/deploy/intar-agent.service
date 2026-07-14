@@ -32,7 +32,11 @@ MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
-RestrictSUIDSGID=true
+# systemd 255 implements RestrictSUIDSGID by making openat2 return ENOSYS.
+# The agent requires openat2 to pin and validate jailed VMM API sockets before
+# connecting. Its empty capability boundary and NoNewPrivileges still prevent
+# set-ID execution from raising privilege inside its writable cache root.
+RestrictSUIDSGID=false
 LimitRTPRIO=0
 SystemCallArchitectures=native
 ReadOnlyPaths=/run/intar-jailerd
