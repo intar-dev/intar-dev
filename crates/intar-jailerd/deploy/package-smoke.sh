@@ -242,7 +242,11 @@ done
 agent_read_write_paths=$(awk -F= '$1 == "ReadWritePaths" { print $2 }' \
   "${package_root}/deploy/intar-agent.service")
 case " ${agent_read_write_paths} " in
-  *" /var/cache/intar-agent "*" /var/lib/intar/jails "*) ;;
+  *" /var/cache/intar-agent "*) ;;
+  *) die "packaged intar-agent.service cannot write its cache" ;;
+esac
+case " ${agent_read_write_paths} " in
+  *" /var/lib/intar/jails "*) ;;
   *) die "packaged intar-agent.service cannot create jailed runtime listeners" ;;
 esac
 (cd "${package_root}" && sha256sum --check --strict deploy/SHA256SUMS)
