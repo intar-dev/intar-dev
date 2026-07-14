@@ -114,7 +114,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -174,8 +174,8 @@ describe("image registry routes", () => {
           meta: {
             rev: "abc123",
             kino_version: "0.4.0",
-            build_format_version: "intar-image-build-v4",
-            buildFormatVersion: "intar-image-build-v4",
+            build_format_version: "intar-image-build-v5",
+            buildFormatVersion: "intar-image-build-v5",
             scenarios: [
               {
                 scenarioId: "broken-nginx",
@@ -203,7 +203,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -249,7 +249,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -295,7 +295,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -345,7 +345,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -395,7 +395,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -445,7 +445,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -491,7 +491,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -536,7 +536,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -581,7 +581,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "..",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -621,7 +621,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v4",
+        build_format_version: "intar-image-build-v5",
         scenarios: [
           {
             scenario_id: "..",
@@ -700,7 +700,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v3",
+        build_format_version: "intar-image-build-v4",
         scenarios: [
           {
             scenario_id: "broken-nginx",

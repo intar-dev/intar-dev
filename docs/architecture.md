@@ -148,9 +148,13 @@ of a fixed retry count. That covers the quota-scaled 80-second equivalent of the
 old ten-second budget with 50% headroom. This caps the SSH phase at one third of
 the 360-second agent deadline; earlier and later first-boot work shares the same
 whole-runtime deadline. Readiness is only accepted after the queued nonblocking
-SSH restart job has drained.
-Image content hashes use build format `intar-image-build-v4`, ensuring images
-generated with the earlier retry-count supervisor are rebuilt rather than reused.
+SSH start job has drained. Image finalization disables both SSH service aliases,
+masks socket activation, and gates `ssh.service` on `/run/intar/ssh-ready` before
+removing baked host keys. On first boot the supervisor configures networking and
+access, generates and validates the keys, creates the root-only gate, and then
+explicitly starts `ssh.service`. Image content hashes use build format
+`intar-image-build-v5`, ensuring images with the earlier SSH startup order are
+rebuilt rather than reused.
 
 ## Guest Runtime
 

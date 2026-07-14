@@ -44,7 +44,7 @@ describe("admin build response serialization", () => {
       r2Key: "builds/bundles/abc123.tar.gz",
       kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v4",
+        buildFormatVersion: "intar-image-build-v5",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -114,7 +114,7 @@ const buildRow: AdminBuildDetailResponseRow = {
   bundleR2Key: "builds/bundles/abc123.tar.gz",
   bundleKinoVersion: "0.4.0",
   bundleMeta: {
-    buildFormatVersion: "intar-image-build-v4",
+    buildFormatVersion: "intar-image-build-v5",
     scenarios: [
       {
         scenarioId: "broken-nginx",

@@ -185,11 +185,63 @@ fn append_script_body(
 
     append_runtime_assets(script, kino_template, scenario_motd, vm)?;
 
+    writeln!(
+        script,
+        "install -d -o root -g root -m 0755 /etc/systemd/system/ssh.service.d"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "cat >/etc/systemd/system/ssh.service.d/10-intar-gate.conf <<'EOF_SSH_GATE'"
+    )
+    .context("format error")?;
+    writeln!(script, "[Unit]").context("format error")?;
+    writeln!(script, "ConditionPathExists=/run/intar/ssh-ready").context("format error")?;
+    writeln!(script, "StartLimitIntervalSec=120s").context("format error")?;
+    writeln!(script, "StartLimitBurst=3").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "[Service]").context("format error")?;
+    writeln!(script, "RestartSec=2s").context("format error")?;
+    writeln!(script, "EOF_SSH_GATE").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root /etc/systemd/system/ssh.service.d/10-intar-gate.conf"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "chmod 0644 /etc/systemd/system/ssh.service.d/10-intar-gate.conf"
+    )
+    .context("format error")?;
     writeln!(script, "systemctl daemon-reload").context("format error")?;
     writeln!(script, "systemctl enable intar-scenario.service").context("format error")?;
     writeln!(
         script,
-        "systemctl enable ssh.service >/dev/null 2>&1 || systemctl enable sshd.service >/dev/null 2>&1 || true"
+        "systemctl disable ssh.service sshd.service ssh.socket >/dev/null 2>&1 || true"
+    )
+    .context("format error")?;
+    writeln!(script, "systemctl mask ssh.socket >/dev/null").context("format error")?;
+    writeln!(
+        script,
+        "if [ \"$(systemctl is-enabled ssh.service 2>/dev/null || true)\" != disabled ]; then echo 'failed to disable automatic SSH service activation' >&2; exit 1; fi"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "sshd_enablement=\"$(systemctl is-enabled sshd.service 2>/dev/null || true)\""
+    )
+    .context("format error")?;
+    writeln!(script, "case \"$sshd_enablement\" in").context("format error")?;
+    writeln!(script, "  alias|disabled|not-found) ;;").context("format error")?;
+    writeln!(
+        script,
+        "  *) echo \"unsafe sshd.service enablement state: $sshd_enablement\" >&2; exit 1 ;;"
+    )
+    .context("format error")?;
+    writeln!(script, "esac").context("format error")?;
+    writeln!(
+        script,
+        "if [ \"$(systemctl is-enabled ssh.socket 2>/dev/null || true)\" != masked ]; then echo 'failed to mask SSH socket activation' >&2; exit 1; fi"
     )
     .context("format error")?;
     writeln!(
@@ -830,16 +882,28 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "  log_phase ssh_boot start").context("format error")?;
     writeln!(script, "  generate_ssh_host_keys").context("format error")?;
+    writeln!(script, "  install -d -o root -g root -m 0755 /run/sshd").context("format error")?;
+    writeln!(script, "  if ! /usr/sbin/sshd -t; then").context("format error")?;
     writeln!(
         script,
-        "  if ! systemctl restart --no-block ssh.service; then"
+        "    echo 'generated SSH host keys failed sshd configuration validation' >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "    print_sshd_diagnostics").context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(
+        script,
+        "  install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready"
     )
     .context("format error")?;
     writeln!(
         script,
-        "    echo 'failed to enqueue ssh.service restart' >&2"
+        "  if ! systemctl start --no-block ssh.service; then"
     )
     .context("format error")?;
+    writeln!(script, "    echo 'failed to enqueue ssh.service start' >&2")
+        .context("format error")?;
     writeln!(script, "    print_sshd_diagnostics").context("format error")?;
     writeln!(script, "    return 1").context("format error")?;
     writeln!(script, "  fi").context("format error")?;
@@ -1482,6 +1546,36 @@ scenario "ssh-readiness" {
         assert!(script.contains("ssh_ready_timeout_seconds=120"));
         assert!(script.contains("read -r uptime _ </proc/uptime"));
 
+        let disable_ssh = script
+            .find("systemctl disable ssh.service sshd.service ssh.socket")
+            .unwrap();
+        let install_ssh_gate = script
+            .find("/etc/systemd/system/ssh.service.d/10-intar-gate.conf")
+            .unwrap();
+        let daemon_reload = script.find("systemctl daemon-reload").unwrap();
+        let mask_ssh_socket = script.find("systemctl mask ssh.socket").unwrap();
+        let remove_host_keys = script
+            .rfind("rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub")
+            .unwrap();
+        assert!(disable_ssh < remove_host_keys);
+        assert!(install_ssh_gate < daemon_reload);
+        assert!(daemon_reload < disable_ssh);
+        assert!(disable_ssh < mask_ssh_socket);
+        assert!(mask_ssh_socket < remove_host_keys);
+        assert!(script.contains("systemctl is-enabled ssh.service"));
+        assert!(script.contains("sshd_enablement=\"$(systemctl is-enabled sshd.service"));
+        assert!(script.contains("alias|disabled|not-found)"));
+        assert!(script.contains("unsafe sshd.service enablement state"));
+        assert!(script.contains("systemctl is-enabled ssh.socket"));
+        assert!(!script.contains("systemctl enable ssh.service"));
+        assert!(!script.contains("systemctl enable sshd.service"));
+        assert!(!script.contains("systemctl mask --now"));
+        assert!(script.contains("[Unit]\nConditionPathExists=/run/intar/ssh-ready\nStartLimitIntervalSec=120s\nStartLimitBurst=3\n\n[Service]\nRestartSec=2s"));
+        assert!(
+            script.contains("chown root:root /etc/systemd/system/ssh.service.d/10-intar-gate.conf")
+        );
+        assert!(script.contains("chmod 0644 /etc/systemd/system/ssh.service.d/10-intar-gate.conf"));
+
         let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
         let (start_sshd, _) = start_sshd_and_rest
             .split_once("\n}\n\ngrow_root_filesystem")
@@ -1492,8 +1586,27 @@ scenario "ssh-readiness" {
             )
         );
         assert!(start_sshd.contains("while true; do"));
-        assert!(start_sshd.contains("systemctl restart --no-block ssh.service"));
-        assert!(!start_sshd.contains("restart ssh.service >/dev/null"));
+        assert!(start_sshd.contains("systemctl start --no-block ssh.service"));
+        assert!(!start_sshd.contains("systemctl restart"));
+        assert!(!start_sshd.contains("systemctl reset-failed"));
+        let generate_keys = start_sshd.find("generate_ssh_host_keys").unwrap();
+        let create_sshd_runtime = start_sshd
+            .find("install -d -o root -g root -m 0755 /run/sshd")
+            .unwrap();
+        let validate_sshd = start_sshd.find("/usr/sbin/sshd -t").unwrap();
+        let create_ready_gate = start_sshd
+            .find("install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready")
+            .unwrap();
+        let start_service = start_sshd
+            .find("systemctl start --no-block ssh.service")
+            .unwrap();
+        assert!(generate_keys < create_sshd_runtime);
+        assert!(create_sshd_runtime < validate_sshd);
+        assert!(validate_sshd < create_ready_gate);
+        assert!(create_ready_gate < start_service);
+        assert!(start_sshd.contains(
+            "install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready\n  if ! systemctl start --no-block ssh.service"
+        ));
         assert_eq!(start_sshd.matches("systemctl show ssh.service").count(), 1);
         assert!(
             start_sshd.contains("systemctl show ssh.service --property=ActiveState --property=Job")
@@ -1519,16 +1632,19 @@ scenario "ssh-readiness" {
         assert!(!start_sshd.contains("sshd.service"));
         assert!(start_sshd.contains("now_seconds=\"$(monotonic_seconds)\""));
         assert!(start_sshd.contains("-ge \"$deadline_seconds\""));
-        assert!(
-            start_sshd.find("deadline_seconds=").unwrap()
-                < start_sshd.find("generate_ssh_host_keys").unwrap()
-        );
+        assert!(start_sshd.find("deadline_seconds=").unwrap() < generate_keys);
         assert!(start_sshd.contains(
             "timed out after ${ssh_ready_timeout_seconds}s waiting for ssh service to become active"
         ));
         assert!(!start_sshd.contains("for _ in {1..100}"));
         assert!(script.contains("systemctl status --no-pager --full ssh.service >&2"));
         assert!(script.contains("journalctl --no-pager --full --unit ssh.service --lines 100 >&2"));
+
+        let configure_network = script.rfind("\nconfigure_guest_network\n").unwrap();
+        let configure_access = script.rfind("\nconfigure_ssh_access\n").unwrap();
+        let start_sshd_call = script.rfind("\nstart_sshd\n").unwrap();
+        assert!(configure_network < configure_access);
+        assert!(configure_access < start_sshd_call);
     }
 
     #[test]
