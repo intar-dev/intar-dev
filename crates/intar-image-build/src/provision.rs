@@ -15,6 +15,11 @@ const INTAR_SCENARIO_SUPERVISOR_PATH: &str = "/usr/local/bin/intar-scenario-supe
 const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
+// At 125 millicores the old nominal ten-second retry loop has an approximately
+// 80-second CPU-scaled budget. Allow 50% headroom, measured against monotonic
+// uptime. Capping this phase at 120 seconds leaves a nominal 240 seconds of the
+// agent's 360-second whole-runtime window for the other first-boot phases.
+const GUEST_SSH_READY_TIMEOUT_SECONDS: u64 = 2 * 60;
 
 pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) -> Result<String> {
     let mut script = String::new();
@@ -534,6 +539,11 @@ fn append_runtime_assets(
     writeln!(script, "kino_log_path=\"$runtime_state_path/kino.log\"").context("format error")?;
     writeln!(script, "recording_mount_path=\"{RECORDING_MOUNT_PATH}\"").context("format error")?;
     writeln!(script, "recording_user=\"{DEFAULT_USERNAME}\"").context("format error")?;
+    writeln!(
+        script,
+        "ssh_ready_timeout_seconds={GUEST_SSH_READY_TIMEOUT_SECONDS}"
+    )
+    .context("format error")?;
     writeln!(script, "KINO_PID=\"\"").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase() {{").context("format error")?;
@@ -542,6 +552,12 @@ fn append_runtime_assets(
         "  printf '[intar-runtime] ts=%s phase=%s status=%s\\n' \"$(date -Ins)\" \"$1\" \"$2\""
     )
     .context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "monotonic_seconds() {{").context("format error")?;
+    writeln!(script, "  local uptime").context("format error")?;
+    writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
+    writeln!(script, "  printf '%s\\n' \"${{uptime%%.*}}\"").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "wait_for_block_device() {{").context("format error")?;
@@ -792,33 +808,93 @@ fn append_runtime_assets(
     writeln!(script, "  log_phase ssh_host_keys end").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
+    writeln!(script, "print_sshd_diagnostics() {{").context("format error")?;
+    writeln!(
+        script,
+        "  systemctl status --no-pager --full ssh.service >&2 || true"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  journalctl --no-pager --full --unit ssh.service --lines 100 >&2 || true"
+    )
+    .context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
     writeln!(script, "start_sshd() {{").context("format error")?;
+    writeln!(script, "  local deadline_seconds now_seconds ssh_active_state ssh_job ssh_properties property value").context("format error")?;
+    writeln!(
+        script,
+        "  deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
+    )
+    .context("format error")?;
     writeln!(script, "  log_phase ssh_boot start").context("format error")?;
     writeln!(script, "  generate_ssh_host_keys").context("format error")?;
-    writeln!(script, "  systemctl restart ssh.service >/dev/null 2>&1 || systemctl restart sshd.service >/dev/null 2>&1 || true").context("format error")?;
-    writeln!(script, "  for _ in {{1..100}}; do").context("format error")?;
-    writeln!(script, "    if systemctl is-active --quiet ssh.service || systemctl is-active --quiet sshd.service; then").context("format error")?;
-    writeln!(script, "      log_phase ssh_boot end").context("format error")?;
-    writeln!(script, "      return 0").context("format error")?;
+    writeln!(
+        script,
+        "  if ! systemctl restart --no-block ssh.service; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    echo 'failed to enqueue ssh.service restart' >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "    print_sshd_diagnostics").context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(script, "  while true; do").context("format error")?;
+    writeln!(script, "    ssh_active_state=unknown").context("format error")?;
+    writeln!(script, "    ssh_job=unknown").context("format error")?;
+    writeln!(
+        script,
+        "    ssh_properties=\"$(systemctl show ssh.service --property=ActiveState --property=Job 2>/dev/null || true)\""
+    )
+    .context("format error")?;
+    writeln!(script, "    while IFS='=' read -r property value; do").context("format error")?;
+    writeln!(script, "      case \"$property\" in").context("format error")?;
+    writeln!(
+        script,
+        "        ActiveState) ssh_active_state=\"$value\" ;;"
+    )
+    .context("format error")?;
+    writeln!(script, "        Job) ssh_job=\"$value\" ;;").context("format error")?;
+    writeln!(script, "      esac").context("format error")?;
+    writeln!(script, "    done <<<\"$ssh_properties\"").context("format error")?;
+    writeln!(script, "    if [ -z \"$ssh_job\" ]; then").context("format error")?;
+    writeln!(script, "      case \"$ssh_active_state\" in").context("format error")?;
+    writeln!(script, "        active)").context("format error")?;
+    writeln!(script, "          log_phase ssh_boot end").context("format error")?;
+    writeln!(script, "          return 0").context("format error")?;
+    writeln!(script, "          ;;").context("format error")?;
+    writeln!(script, "        failed)").context("format error")?;
+    writeln!(
+        script,
+        "          echo 'ssh.service entered failed state during startup' >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "          print_sshd_diagnostics").context("format error")?;
+    writeln!(script, "          return 1").context("format error")?;
+    writeln!(script, "          ;;").context("format error")?;
+    writeln!(script, "      esac").context("format error")?;
     writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    sleep 0.1").context("format error")?;
+    writeln!(script, "    now_seconds=\"$(monotonic_seconds)\"").context("format error")?;
+    writeln!(
+        script,
+        "    if [ \"$now_seconds\" -ge \"$deadline_seconds\" ]; then"
+    )
+    .context("format error")?;
+    writeln!(script, "      break").context("format error")?;
+    writeln!(script, "    fi").context("format error")?;
+    writeln!(script, "    sleep 1").context("format error")?;
     writeln!(script, "  done").context("format error")?;
+    writeln!(script, "  print_sshd_diagnostics").context("format error")?;
     writeln!(
         script,
-        "  systemctl status ssh.service >/dev/null 2>&1 && systemctl status ssh.service || true"
+        "  echo \"timed out after ${{ssh_ready_timeout_seconds}}s waiting for ssh service to become active\" >&2"
     )
     .context("format error")?;
-    writeln!(
-        script,
-        "  systemctl status sshd.service >/dev/null 2>&1 && systemctl status sshd.service || true"
-    )
-    .context("format error")?;
-    writeln!(
-        script,
-        "  echo 'timed out waiting for ssh service to become active' >&2"
-    )
-    .context("format error")?;
-    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "  return 1").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "grow_root_filesystem").context("format error")?;
@@ -1361,6 +1437,99 @@ mod tests {
     use intar_image_scenario::Scenario;
 
     use super::render_scenario_provision_script;
+
+    fn render_minimal_provision_script() -> String {
+        let scenario = Scenario::parse(
+            r#"
+scenario "ssh-readiness" {
+  title = "SSH Readiness"
+  category = "linux"
+  tags = ["ssh"]
+  difficulty = "easy"
+  estimated_minutes = 5
+  description = "Verify SSH readiness"
+  briefing = "Wait for SSH."
+  solution { body = "SSH starts automatically." }
+
+  image "debian-13-minimal" {
+    base = "trixie"
+  }
+
+  kino {
+    probe "ssh-running" {
+      kind = "service"
+      service = "ssh"
+      state = "running"
+      description = "SSH should be running"
+    }
+  }
+
+  vm "server" {
+    image = "debian-13-minimal"
+    probes = ["ssh-running"]
+  }
+}
+"#,
+        )
+        .unwrap();
+        let vm = scenario.vm_by_name("server").unwrap();
+        render_scenario_provision_script(&scenario, vm).unwrap()
+    }
+
+    #[test]
+    fn scenario_supervisor_uses_a_monotonic_ssh_readiness_deadline() {
+        let script = render_minimal_provision_script();
+        assert!(script.contains("ssh_ready_timeout_seconds=120"));
+        assert!(script.contains("read -r uptime _ </proc/uptime"));
+
+        let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
+        let (start_sshd, _) = start_sshd_and_rest
+            .split_once("\n}\n\ngrow_root_filesystem")
+            .unwrap();
+        assert!(
+            start_sshd.contains(
+                "deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
+            )
+        );
+        assert!(start_sshd.contains("while true; do"));
+        assert!(start_sshd.contains("systemctl restart --no-block ssh.service"));
+        assert!(!start_sshd.contains("restart ssh.service >/dev/null"));
+        assert_eq!(start_sshd.matches("systemctl show ssh.service").count(), 1);
+        assert!(
+            start_sshd.contains("systemctl show ssh.service --property=ActiveState --property=Job")
+        );
+        assert!(start_sshd.contains("while IFS='=' read -r property value; do"));
+        assert!(start_sshd.contains("done <<<\"$ssh_properties\""));
+        assert!(start_sshd.contains("ssh_job=unknown"));
+        assert!(start_sshd.contains("if [ -z \"$ssh_job\" ]; then"));
+        let (_, drained_job_and_rest) = start_sshd
+            .split_once("if [ -z \"$ssh_job\" ]; then\n")
+            .unwrap();
+        let (drained_job, _) = drained_job_and_rest
+            .split_once("\n    fi\n    now_seconds=")
+            .unwrap();
+        assert!(drained_job.contains("case \"$ssh_active_state\" in"));
+        assert!(drained_job.contains("active)"));
+        assert!(drained_job.contains("failed)"));
+        assert!(!start_sshd.contains("systemctl is-active"));
+        assert!(start_sshd.contains("failed)"));
+        assert!(start_sshd.contains("print_sshd_diagnostics"));
+        assert!(start_sshd.contains("sleep 1"));
+        assert!(!start_sshd.contains("sleep 0.1"));
+        assert!(!start_sshd.contains("sshd.service"));
+        assert!(start_sshd.contains("now_seconds=\"$(monotonic_seconds)\""));
+        assert!(start_sshd.contains("-ge \"$deadline_seconds\""));
+        assert!(
+            start_sshd.find("deadline_seconds=").unwrap()
+                < start_sshd.find("generate_ssh_host_keys").unwrap()
+        );
+        assert!(start_sshd.contains(
+            "timed out after ${ssh_ready_timeout_seconds}s waiting for ssh service to become active"
+        ));
+        assert!(!start_sshd.contains("for _ in {1..100}"));
+        assert!(script.contains("systemctl status --no-pager --full ssh.service >&2"));
+        assert!(script.contains("journalctl --no-pager --full --unit ssh.service --lines 100 >&2"));
+    }
 
     #[test]
     fn provision_script_contains_runtime_assets() {
