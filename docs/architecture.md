@@ -153,8 +153,8 @@ masks socket activation, and gates `ssh.service` on `/run/intar/ssh-ready` befor
 removing baked host keys. On first boot the supervisor configures networking and
 access, generates and validates the keys, creates the root-only gate, and then
 explicitly starts `ssh.service`. Image content hashes use build format
-`intar-image-build-v5`, ensuring images with the earlier SSH startup order are
-rebuilt rather than reused.
+`intar-image-build-v6`, ensuring images with bounded first-boot network-device
+discovery and failure diagnostics are rebuilt rather than reused.
 
 ## Guest Runtime
 
