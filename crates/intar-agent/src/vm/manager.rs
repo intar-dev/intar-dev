@@ -72,6 +72,8 @@ pub struct CreateScenarioVmRuntime {
     pub kino: Option<CreateScenarioVmRuntimeKino>,
     #[serde(default)]
     pub peer_vm_names: Vec<String>,
+    #[serde(default)]
+    pub peer_vm_aliases: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -740,27 +742,18 @@ impl VmManager {
                 "runtime.ssh_authorized_keys_openssh must not be empty",
             ));
         }
-        let mut peer_vm_names = Vec::new();
-        for peer_name in req.runtime.peer_vm_names {
-            let peer_name = peer_name.trim().to_string();
-            if peer_name.is_empty() || peer_name == req.name {
-                continue;
-            }
-            if !is_safe_key(&peer_name) {
-                return Err(ApiError::bad_request(
-                    "runtime.peer_vm_names entries must match [A-Za-z0-9_-]+",
-                ));
-            }
-            if !peer_vm_names.contains(&peer_name) {
-                peer_vm_names.push(peer_name);
-            }
-        }
+        let (peer_vm_names, peer_vm_aliases) = normalize_peer_vm_topology(
+            &req.name,
+            req.runtime.peer_vm_names,
+            req.runtime.peer_vm_aliases,
+        )?;
 
         let runtime = CreateScenarioVmRuntime {
             ssh_authorized_keys_openssh,
             network: req.runtime.network,
             kino: req.runtime.kino,
             peer_vm_names,
+            peer_vm_aliases,
         };
 
         self.queue_vm_create(QueueVmCreateRequest {
@@ -881,8 +874,14 @@ impl VmManager {
                 )
             }
             None => {
-                allocate_run_network(&self.inner, &run_id, &name, &scenario_runtime.peer_vm_names)
-                    .await?
+                allocate_run_network(
+                    &self.inner,
+                    &run_id,
+                    &name,
+                    &scenario_runtime.peer_vm_names,
+                    &scenario_runtime.peer_vm_aliases,
+                )
+                .await?
             }
         };
         let normalized_guest_cidr = validate_network(&network).map_err(|e| {
@@ -4891,11 +4890,96 @@ async fn ssh_terminal_target_ready(vm: &VmStatusResponse) -> bool {
     .is_ok_and(|result| result.is_ok())
 }
 
+fn normalize_peer_vm_topology(
+    current_vm_name: &str,
+    raw_peer_vm_names: Vec<String>,
+    raw_peer_vm_aliases: BTreeMap<String, String>,
+) -> Result<(Vec<String>, BTreeMap<String, String>), ApiError> {
+    let mut peer_vm_names = Vec::new();
+    for peer_name in raw_peer_vm_names {
+        let peer_name = peer_name.trim().to_string();
+        if peer_name.is_empty() || peer_name == current_vm_name {
+            continue;
+        }
+        if !is_safe_key(&peer_name) {
+            return Err(ApiError::bad_request(
+                "runtime.peer_vm_names entries must match [A-Za-z0-9_-]+",
+            ));
+        }
+        if !peer_vm_names.contains(&peer_name) {
+            peer_vm_names.push(peer_name);
+        }
+    }
+
+    let known_peer_names = peer_vm_names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut peer_vm_aliases = BTreeMap::new();
+    for (runtime_name, logical_name) in raw_peer_vm_aliases {
+        let runtime_name = runtime_name.trim().to_string();
+        let logical_name = logical_name.trim().to_string();
+        if !is_safe_key(&runtime_name) {
+            return Err(ApiError::bad_request(
+                "runtime.peer_vm_aliases keys must match [A-Za-z0-9_-]+",
+            ));
+        }
+        if !known_peer_names.contains(&runtime_name) {
+            return Err(ApiError::bad_request(format!(
+                "runtime.peer_vm_aliases key {runtime_name:?} does not name a runtime peer"
+            )));
+        }
+        if !is_safe_key(&logical_name) {
+            return Err(ApiError::bad_request(
+                "runtime.peer_vm_aliases values must match [A-Za-z0-9_-]+",
+            ));
+        }
+        if peer_vm_aliases
+            .insert(runtime_name.clone(), logical_name)
+            .is_some()
+        {
+            return Err(ApiError::bad_request(format!(
+                "runtime.peer_vm_aliases contains duplicate normalized key {runtime_name:?}"
+            )));
+        }
+    }
+
+    let mut logical_peer_names = BTreeSet::new();
+    let mut logical_peer_env_names = BTreeSet::new();
+    for runtime_name in &peer_vm_names {
+        let logical_name = peer_vm_aliases.get(runtime_name).unwrap_or(runtime_name);
+        if !logical_peer_names.insert(logical_name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "runtime peer aliases produce duplicate logical peer name {logical_name:?}"
+            )));
+        }
+        let logical_env_name = peer_env_name_identity(logical_name);
+        if !logical_peer_env_names.insert(logical_env_name.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "runtime peer aliases produce duplicate environment peer name {logical_env_name:?}"
+            )));
+        }
+    }
+
+    Ok((peer_vm_names, peer_vm_aliases))
+}
+
+fn peer_env_name_identity(peer_name: &str) -> String {
+    peer_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 async fn allocate_run_network(
     inner: &Inner,
     run_id: &str,
     vm_name: &str,
     peer_vm_names: &[String],
+    peer_vm_aliases: &BTreeMap<String, String>,
 ) -> Result<(CreateVmNetwork, String, BTreeMap<String, String>), ApiError> {
     let pool_cidr = inner.defaults.network.guest_cidr.trim();
     let (pool_ip, pool_prefix) = parse_ipv4_cidr(pool_cidr, "vm_defaults.network.guest_cidr")
@@ -4985,7 +5069,7 @@ async fn allocate_run_network(
                 dns: inner.defaults.network.dns.clone(),
             },
             run_bridge,
-            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations),
+            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations, peer_vm_aliases)?,
         ));
     }
 
@@ -5019,7 +5103,7 @@ async fn allocate_run_network(
                 dns: inner.defaults.network.dns.clone(),
             },
             run_bridge,
-            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations),
+            peer_guest_ip_strings(peer_vm_names, vm_name, &allocations, peer_vm_aliases)?,
         ));
     }
 
@@ -5069,16 +5153,27 @@ fn peer_guest_ip_strings(
     peer_vm_names: &[String],
     current_vm_name: &str,
     allocations: &BTreeMap<String, Ipv4Addr>,
-) -> BTreeMap<String, String> {
-    peer_vm_names
+    peer_vm_aliases: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let mut peers = BTreeMap::new();
+    for runtime_name in peer_vm_names
         .iter()
         .filter(|name| name.as_str() != current_vm_name)
-        .filter_map(|name| {
-            allocations
-                .get(name)
-                .map(|ip| (name.clone(), ip.to_string()))
-        })
-        .collect()
+    {
+        let Some(ip) = allocations.get(runtime_name) else {
+            continue;
+        };
+        let logical_name = peer_vm_aliases
+            .get(runtime_name)
+            .unwrap_or(runtime_name)
+            .clone();
+        if peers.insert(logical_name.clone(), ip.to_string()).is_some() {
+            return Err(ApiError::bad_request(format!(
+                "runtime peer aliases produce duplicate logical peer name {logical_name:?}"
+            )));
+        }
+    }
+    Ok(peers)
 }
 
 fn run_bridge_name(run_id: &str) -> String {
@@ -5795,6 +5890,113 @@ mod tests {
     }
 
     #[test]
+    fn peer_vm_topology_keeps_runtime_names_and_validates_logical_aliases() {
+        let db_runtime_name = "pair-ping-db-abc123-2".to_string();
+        let (peer_vm_names, peer_vm_aliases) = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec![db_runtime_name.clone()],
+            BTreeMap::from([(db_runtime_name.clone(), "db".to_string())]),
+        )
+        .expect("peer topology");
+
+        assert_eq!(peer_vm_names, vec![db_runtime_name.clone()]);
+        assert_eq!(
+            peer_vm_aliases.get(&db_runtime_name).map(String::as_str),
+            Some("db")
+        );
+
+        for aliases in [
+            BTreeMap::from([("../runtime-db".to_string(), "db".to_string())]),
+            BTreeMap::from([(db_runtime_name.clone(), "../db".to_string())]),
+        ] {
+            let error = normalize_peer_vm_topology(
+                "pair-ping-web-abc123-1",
+                vec![db_runtime_name.clone()],
+                aliases,
+            )
+            .expect_err("unsafe alias topology must fail");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(error.message.contains("must match [A-Za-z0-9_-]+"));
+        }
+
+        let error = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec![db_runtime_name],
+            BTreeMap::from([("pair-ping-cache-abc123-3".to_string(), "cache".to_string())]),
+        )
+        .expect_err("unknown runtime peer alias must fail");
+        assert!(error.message.contains("does not name a runtime peer"));
+    }
+
+    #[test]
+    fn peer_vm_topology_rejects_duplicate_and_fallback_alias_collisions() {
+        let db_runtime_name = "pair-ping-db-abc123-2".to_string();
+        let cache_runtime_name = "pair-ping-cache-abc123-3".to_string();
+        let error = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec![db_runtime_name.clone(), cache_runtime_name.clone()],
+            BTreeMap::from([
+                (db_runtime_name, "backend".to_string()),
+                (cache_runtime_name, "backend".to_string()),
+            ]),
+        )
+        .expect_err("duplicate logical aliases must fail");
+        assert!(
+            error
+                .message
+                .contains("duplicate logical peer name \"backend\"")
+        );
+
+        let db_runtime_name = "pair-ping-db-abc123-2".to_string();
+        let error = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec!["db".to_string(), db_runtime_name.clone()],
+            BTreeMap::from([(db_runtime_name, "db".to_string())]),
+        )
+        .expect_err("alias colliding with a fallback runtime name must fail");
+        assert!(error.message.contains("duplicate logical peer name \"db\""));
+    }
+
+    #[test]
+    fn peer_vm_topology_rejects_duplicate_normalized_alias_keys() {
+        let runtime_name = "pair-ping-db-abc123-2".to_string();
+        let error = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec![runtime_name.clone()],
+            BTreeMap::from([
+                (runtime_name.clone(), "db".to_string()),
+                (format!(" {runtime_name} "), "database".to_string()),
+            ]),
+        )
+        .expect_err("duplicate normalized alias keys must fail");
+        assert!(error.message.contains("duplicate normalized key"));
+    }
+
+    #[test]
+    fn peer_vm_topology_rejects_lossy_environment_alias_collisions() {
+        let redis_dash_runtime_name = "pair-ping-redis-dash-abc123-2".to_string();
+        let redis_underscore_runtime_name = "pair-ping-redis-underscore-abc123-3".to_string();
+        let error = normalize_peer_vm_topology(
+            "pair-ping-web-abc123-1",
+            vec![
+                redis_dash_runtime_name.clone(),
+                redis_underscore_runtime_name.clone(),
+            ],
+            BTreeMap::from([
+                (redis_dash_runtime_name, "redis-cache".to_string()),
+                (redis_underscore_runtime_name, "redis_cache".to_string()),
+            ]),
+        )
+        .expect_err("aliases that render the same environment key must fail");
+
+        assert!(
+            error
+                .message
+                .contains("duplicate environment peer name \"REDIS_CACHE\"")
+        );
+    }
+
+    #[test]
     fn allocate_guest_ip_in_subnet_skips_gateway_and_used_ips() {
         let subnet = u32::from(Ipv4Addr::new(10, 77, 12, 0));
         let gateway = Ipv4Addr::new(10, 77, 12, 1);
@@ -5817,21 +6019,37 @@ mod tests {
         let gateway = Ipv4Addr::new(10, 77, 12, 1);
         let existing_db = Ipv4Addr::new(10, 77, 12, 3);
         let used = BTreeSet::from([u32::from(gateway), u32::from(existing_db)]);
-        let existing = BTreeMap::from([("db".to_string(), existing_db)]);
-        let names = run_allocation_vm_names("web", &["db".to_string(), "redis-cache".to_string()]);
+        let web_runtime_name = "pair-ping-web-abc123-1";
+        let db_runtime_name = "pair-ping-db-abc123-2".to_string();
+        let redis_runtime_name = "pair-ping-redis-cache-abc123-3".to_string();
+        let peer_vm_names = vec![db_runtime_name.clone(), redis_runtime_name.clone()];
+        let peer_vm_aliases = BTreeMap::from([
+            (db_runtime_name.clone(), "db".to_string()),
+            (redis_runtime_name.clone(), "redis-cache".to_string()),
+        ]);
+        let existing = BTreeMap::from([(db_runtime_name.clone(), existing_db)]);
+        let names = run_allocation_vm_names(web_runtime_name, &peer_vm_names);
 
         let allocations = allocate_run_guest_ips(subnet, 28, gateway, &used, &existing, &names)
             .expect("run addresses");
 
-        assert_eq!(allocations.get("db"), Some(&existing_db));
-        assert_ne!(allocations.get("web"), allocations.get("db"));
-        assert_ne!(allocations.get("redis-cache"), allocations.get("db"));
+        assert_eq!(allocations.get(&db_runtime_name), Some(&existing_db));
+        assert_ne!(
+            allocations.get(web_runtime_name),
+            allocations.get(&db_runtime_name)
+        );
+        assert_ne!(
+            allocations.get(&redis_runtime_name),
+            allocations.get(&db_runtime_name)
+        );
         assert_eq!(
             peer_guest_ip_strings(
-                &["db".to_string(), "redis-cache".to_string()],
-                "web",
+                &peer_vm_names,
+                web_runtime_name,
                 &allocations,
+                &peer_vm_aliases,
             )
+            .expect("logical peer map")
             .keys()
             .cloned()
             .collect::<Vec<_>>(),
@@ -6536,6 +6754,8 @@ mod tests {
         .expect("request should parse");
 
         assert_eq!(req.lease_duration_seconds, Some(300));
+        assert!(req.runtime.peer_vm_names.is_empty());
+        assert!(req.runtime.peer_vm_aliases.is_empty());
         assert_eq!(
             req.runtime.ssh_authorized_keys_openssh,
             vec!["ssh-ed25519 AAAATEST stargate-target".to_string()]
