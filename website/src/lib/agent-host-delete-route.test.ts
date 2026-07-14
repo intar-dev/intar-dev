@@ -9,23 +9,29 @@ const agentBridgeMock = vi.hoisted(() => ({
   parseInventory: vi.fn(),
   requireAdminUserContext: vi.fn(),
 }));
-const schedulerMock = vi.hoisted(() => ({
-  assignQueuedImageBuilds: vi.fn(),
-}));
 const hostRuntimeMock = vi.hoisted(() => ({
   retireHostRuntime: vi.fn(),
 }));
 const dbMock = vi.hoisted(() => {
   const state = {
     referencedRuns: [] as Array<{ runId: string }>,
+    activeBuilds: [] as Array<{ buildId: string }>,
     deletedHosts: [] as Array<{ id: string }>,
+    limitedSelectCall: 0,
   };
   const db = {
     select: vi.fn(() => {
       const query = {
         from: vi.fn(),
         where: vi.fn(),
-        limit: vi.fn(() => Promise.resolve(state.referencedRuns)),
+        limit: vi.fn(() => {
+          const rows =
+            state.limitedSelectCall === 0
+              ? state.referencedRuns
+              : state.activeBuilds;
+          state.limitedSelectCall += 1;
+          return Promise.resolve(rows);
+        }),
       };
       query.from.mockReturnValue(query);
       query.where.mockReturnValue(query);
@@ -39,18 +45,6 @@ const dbMock = vi.hoisted(() => {
       query.where.mockReturnValue(query);
       return query;
     }),
-    update: vi.fn(() => {
-      const query = {
-        set: vi.fn(),
-        where: vi.fn(),
-      };
-      query.set.mockReturnValue(query);
-      query.where.mockReturnValue(query);
-      return query;
-    }),
-    batch: vi.fn(() =>
-      Promise.resolve([undefined, undefined, state.deletedHosts]),
-    ),
   };
   return {
     db,
@@ -60,7 +54,6 @@ const dbMock = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
-vi.mock("@/lib/build-scheduler", () => schedulerMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
@@ -71,7 +64,9 @@ describe("agent host deletion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dbMock.state.referencedRuns = [];
+    dbMock.state.activeBuilds = [];
     dbMock.state.deletedHosts = [{ id: "host-1" }];
+    dbMock.state.limitedSelectCall = 0;
     agentBridgeMock.requireAdminUserContext.mockResolvedValue({
       ok: true,
       context: { userId: "user-1" },
@@ -99,14 +94,10 @@ describe("agent host deletion", () => {
       hostId: "host-1",
     });
     expect(dbMock.db.delete).not.toHaveBeenCalled();
-    expect(dbMock.db.batch).not.toHaveBeenCalled();
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
-    expect(schedulerMock.assignQueuedImageBuilds).not.toHaveBeenCalled();
   });
 
-  it("keeps builder cleanup and rescheduling for an unreferenced host", async () => {
-    const now = 1_762_041_660_000;
-    vi.spyOn(Date, "now").mockReturnValue(now);
+  it("deletes a drained builder without mutating image builds", async () => {
     agentBridgeMock.loadHostForUser.mockResolvedValue({
       id: "host-1",
       role: "builder",
@@ -119,18 +110,28 @@ describe("agent host deletion", () => {
       ok: true,
       hostId: "host-1",
     });
-    expect(dbMock.db.batch).toHaveBeenCalledTimes(1);
     expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
+    expect(dbMock.db.select).toHaveBeenCalledTimes(4);
     expect(hostRuntimeMock.retireHostRuntime).toHaveBeenCalledWith("host-1");
-    expect(schedulerMock.assignQueuedImageBuilds).toHaveBeenCalledWith(
-      dbMock.db,
-      now,
-    );
-    expect(
-      dbMock.db.batch.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      schedulerMock.assignQueuedImageBuilds.mock.invocationCallOrder[0] ?? 0,
-    );
+  });
+
+  it("requires a builder with active image builds to be drained first", async () => {
+    agentBridgeMock.loadHostForUser.mockResolvedValue({
+      id: "host-1",
+      role: "builder",
+    });
+    dbMock.state.activeBuilds = [{ buildId: "build-1" }];
+
+    const response = await deleteHostRequest();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "builder host has active image builds and must be drained first",
+      code: "host_has_active_builds",
+      hostId: "host-1",
+    });
+    expect(dbMock.db.delete).not.toHaveBeenCalled();
+    expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 
   it("fails closed when a run appears between the initial check and delete", async () => {
@@ -140,12 +141,35 @@ describe("agent host deletion", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
-      error: "host deletion conflicted with a new run or concurrent update",
+      error:
+        "host deletion conflicted with a new run, active build, or concurrent update",
       code: "host_delete_conflict",
       hostId: "host-1",
     });
     expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
-    expect(schedulerMock.assignQueuedImageBuilds).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a build is assigned after the builder precheck", async () => {
+    agentBridgeMock.loadHostForUser.mockResolvedValue({
+      id: "host-1",
+      role: "builder",
+    });
+    // The precheck sees no active build. An empty RETURNING result represents
+    // the atomic NOT EXISTS guard observing a raced assignment.
+    dbMock.state.deletedHosts = [];
+
+    const response = await deleteHostRequest();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "host deletion conflicted with a new run, active build, or concurrent update",
+      code: "host_delete_conflict",
+      hostId: "host-1",
+    });
+    expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
+    expect(dbMock.db.select).toHaveBeenCalledTimes(4);
+    expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 });
 

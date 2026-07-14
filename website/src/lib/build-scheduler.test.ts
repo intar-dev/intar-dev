@@ -13,14 +13,22 @@ const desiredStateStoreMock = vi.hoisted(() => ({
 const hostRuntimeWakeMock = vi.hoisted(() => ({
   tryWakeHostRuntime: vi.fn(),
 }));
+const imageBuildLockMock = vi.hoisted(() => ({
+  withImageBuildCoordinationLock: vi.fn(),
+}));
 
 vi.mock("@/lib/desired-state-store", () => desiredStateStoreMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
+vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
 
 describe("build scheduler", () => {
   beforeEach(() => {
     desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
     hostRuntimeWakeMock.tryWakeHostRuntime.mockReset();
+    imageBuildLockMock.withImageBuildCoordinationLock.mockReset();
+    imageBuildLockMock.withImageBuildCoordinationLock.mockImplementation(
+      async (_db, _input, callback) => callback({ assertHeld: vi.fn() }),
+    );
   });
 
   it("assigns queued builds to connected arch-matching builders and balances subsequent work", async () => {
@@ -83,6 +91,7 @@ describe("build scheduler", () => {
       ],
       activeBuildRows: [],
       claimedRows: [[{ id: "build-1" }], [{ id: "build-2" }], []],
+      activeAssignmentRows: [[{ id: "build-1" }], [{ id: "build-2" }]],
     });
 
     await expect(assignQueuedImageBuilds(db as never, now)).resolves.toEqual([
@@ -158,6 +167,43 @@ describe("build scheduler", () => {
     ]);
   });
 
+  it("compensates when supersession wins between an assignment claim and desired-state publication", async () => {
+    const now = 1_762_041_660_000;
+    const db = assignmentDb({
+      queuedRows: [queuedBuild("build-1", "broken-nginx")],
+      builderRows: [
+        builderCandidateRow("builder-1", {
+          cpuCount: 8,
+          memoryAvailableMib: 16_384,
+          diskAvailableMib: 100_000,
+        }),
+      ],
+      activeBuildRows: [],
+      claimedRows: [[{ id: "build-1" }]],
+      activeAssignmentRows: [[]],
+    });
+
+    await expect(assignQueuedImageBuilds(db as never, now)).resolves.toEqual(
+      [],
+    );
+    expect(
+      desiredStateStoreMock.mutateStoredHostDesiredState,
+    ).toHaveBeenCalledTimes(2);
+
+    const published = emptyDesiredState("builder-1");
+    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[0]?.[3]?.(
+      published,
+    );
+    expect(published.builds.map((build) => build.build_id)).toEqual([
+      "build-1",
+    ]);
+    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[1]?.[3]?.(
+      published,
+    );
+    expect(published.builds).toEqual([]);
+    expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledTimes(2);
+  });
+
   it("removes stale desired builds from the previous host when requeueing from a new bundle", async () => {
     const now = 1_762_041_660_000;
     const db = buildSchedulerDb({
@@ -188,29 +234,10 @@ describe("build scheduler", () => {
     });
 
     expect(queued).toEqual({ queued: 1 });
-    expect(db.updateSet).toHaveBeenCalledWith(
-      expect.objectContaining({
-        hostId: null,
-        status: "queued",
-        phase: "queued",
-        attempt: 0,
-        error: null,
-        logR2Key: null,
-        updatedAt: now,
-      }),
-    );
-    expect(
-      desiredStateStoreMock.mutateStoredHostDesiredState,
-    ).toHaveBeenCalledWith(db, "builder-1", now, expect.any(Function));
+    expect(db.batch).toHaveBeenCalledOnce();
     expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
       "builder-1",
     );
-
-    const mutator =
-      desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[0]?.[3];
-    const draft = desiredStateWithBuild("build-1");
-    mutator?.(draft);
-    expect(draft.builds).toEqual([]);
   });
 
   it("retires superseded active hashes and removes their desired builds before queuing the new hash", async () => {
@@ -244,45 +271,15 @@ describe("build scheduler", () => {
       }),
     ).resolves.toEqual({ queued: 1 });
 
-    expect(db.updateSet).toHaveBeenCalledOnce();
-    expect(db.updateSet).toHaveBeenCalledWith({
-      status: "stale",
-      error: "superseded by bundle bundle-new",
-      updatedAt: now,
-    });
-    expect(
-      desiredStateStoreMock.mutateStoredHostDesiredState,
-    ).toHaveBeenNthCalledWith(1, db, "builder-1", now, expect.any(Function));
-    expect(
-      desiredStateStoreMock.mutateStoredHostDesiredState,
-    ).toHaveBeenNthCalledWith(2, db, "builder-2", now, expect.any(Function));
-
-    const builderOneState = desiredStateWithBuilds([
-      "assigned-old",
-      "building-old",
-      "keep-1",
-    ]);
-    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[0]?.[3]?.(
-      builderOneState,
+    expect(db.batch).toHaveBeenCalledOnce();
+    expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenNthCalledWith(
+      1,
+      "builder-1",
     );
-    expect(builderOneState.builds.map((build) => build.build_id)).toEqual([
-      "keep-1",
-    ]);
-
-    const builderTwoState = desiredStateWithBuilds([
-      "other-host-old",
-      "keep-2",
-    ]);
-    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[1]?.[3]?.(
-      builderTwoState,
+    expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenNthCalledWith(
+      2,
+      "builder-2",
     );
-    expect(builderTwoState.builds.map((build) => build.build_id)).toEqual([
-      "keep-2",
-    ]);
-
-    expect(
-      hostRuntimeWakeMock.tryWakeHostRuntime.mock.invocationCallOrder[1],
-    ).toBeLessThan(db.imageInsertValues.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("ignores build reports whose scenario or content hash no longer matches the assigned row", async () => {
@@ -442,86 +439,74 @@ function buildSchedulerDb(input: {
     status: "failed" | "stale";
   }>;
 }) {
-  const insertOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
-  const insertValues = vi.fn(() => ({
-    onConflictDoUpdate: insertOnConflictDoUpdate,
-  }));
-  const insert = vi.fn(() => ({ values: insertValues }));
-
-  const selectLimit = vi.fn().mockResolvedValue(input.existingBuildRows);
-  const selectWhere = vi.fn(() => ({ limit: selectLimit }));
-  const selectFrom = vi.fn(() => ({ where: selectWhere }));
-  const select = vi.fn(() => ({ from: selectFrom }));
-
-  const updateWhere = vi.fn().mockResolvedValue(undefined);
-  const updateSet = vi.fn(() => ({ where: updateWhere }));
-  const update = vi.fn(() => ({ set: updateSet }));
-
-  return {
-    insert,
-    select,
-    update,
-    updateSet,
-  };
+  return queueSchedulerDb({
+    cleanedHosts: [
+      ...new Set(
+        input.existingBuildRows
+          .map((row) => row.hostId)
+          .filter((hostId): hostId is string => hostId !== null),
+      ),
+    ],
+    insertedRows: [{ id: input.existingBuildRows[0]?.id ?? "build-1" }],
+  });
 }
 
 function newHashBuildSchedulerDb(input: {
   retiredRows: Array<{ id: string; hostId: string | null }>;
   insertedRows: Array<{ id: string }>;
 }) {
+  return queueSchedulerDb({
+    cleanedHosts: [
+      ...new Set(
+        input.retiredRows
+          .map((row) => row.hostId)
+          .filter((hostId): hostId is string => hostId !== null),
+      ),
+    ],
+    insertedRows: input.insertedRows,
+  });
+}
+
+function queueSchedulerDb(input: {
+  cleanedHosts: string[];
+  insertedRows: Array<{ id: string }>;
+}) {
   const bundleOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
   const bundleInsertValues = vi.fn(() => ({
     onConflictDoUpdate: bundleOnConflictDoUpdate,
   }));
-  const imageInsertReturning = vi.fn().mockResolvedValue(input.insertedRows);
-  const imageOnConflictDoNothing = vi.fn(() => ({
+  const imageInsertReturning = vi.fn(() => ({ kind: "queue-image-build" }));
+  const imageOnConflictDoUpdate = vi.fn(() => ({
     returning: imageInsertReturning,
   }));
   const imageInsertValues = vi.fn(() => ({
-    onConflictDoNothing: imageOnConflictDoNothing,
+    onConflictDoUpdate: imageOnConflictDoUpdate,
   }));
   const insert = vi
     .fn()
     .mockReturnValueOnce({ values: bundleInsertValues })
     .mockReturnValueOnce({ values: imageInsertValues });
 
-  const selectLimit = vi.fn().mockResolvedValue([]);
-  const selectWhere = vi.fn(() => ({ limit: selectLimit }));
-  const selectFrom = vi.fn(() => ({ where: selectWhere }));
-  const select = vi.fn(() => ({ from: selectFrom }));
+  const cleanupReturning = vi.fn(() => ({ kind: "cleanup-desired" }));
+  const cleanupWhere = vi.fn(() => ({ returning: cleanupReturning }));
+  const retireWhere = vi.fn(() => ({ kind: "retire-builds" }));
+  const update = vi
+    .fn()
+    .mockReturnValueOnce({
+      set: vi.fn(() => ({ where: cleanupWhere })),
+    })
+    .mockReturnValueOnce({
+      set: vi.fn(() => ({ where: retireWhere })),
+    });
+  const batch = vi
+    .fn()
+    .mockResolvedValue([
+      input.cleanedHosts.map((hostId) => ({ hostId })),
+      {},
+      input.insertedRows,
+    ]);
 
-  const updateReturning = vi.fn().mockResolvedValue(input.retiredRows);
-  const updateWhere = vi.fn(() => ({ returning: updateReturning }));
-  const updateSet = vi.fn(() => ({ where: updateWhere }));
-  const update = vi.fn(() => ({ set: updateSet }));
-
-  return {
-    insert,
-    imageInsertValues,
-    select,
-    update,
-    updateSet,
-  };
-}
-
-function desiredStateWithBuild(buildId: string): HostDesiredStateV2 {
-  return desiredStateWithBuilds([buildId]);
-}
-
-function desiredStateWithBuilds(buildIds: string[]): HostDesiredStateV2 {
-  const state = emptyDesiredState("builder-1");
-  state.version = 7;
-  state.generated_at_unix_ms = 1_762_041_600_000;
-  state.builds = buildIds.map((buildId) => ({
-    build_id: buildId,
-    scenario_id: "broken-nginx",
-    arch: "x86_64",
-    rev: "abc123",
-    content_hash: "f".repeat(64),
-    bundle_ref: "builds/bundles/abc123.tar.gz",
-    kino_version: "0.4.0",
-  }));
-  return state;
+  return { insert, update, batch };
 }
 
 function emptyDesiredState(hostId: string): HostDesiredStateV2 {
@@ -541,21 +526,23 @@ function assignmentDb(input: {
   builderRows: ReturnType<typeof builderCandidateRow>[];
   activeBuildRows: Array<{ hostId: string | null }>;
   claimedRows: Array<Array<{ id: string }>>;
+  activeAssignmentRows: Array<Array<{ id: string }>>;
 }) {
   const selectResults = [
     input.queuedRows,
     input.builderRows,
     input.activeBuildRows,
+    ...input.activeAssignmentRows,
   ];
-  const nextSelectRows = vi.fn(() =>
-    Promise.resolve(selectResults.shift() ?? []),
-  );
   const select = vi.fn(() => {
+    const rows = Promise.resolve(selectResults.shift() ?? []);
     const chain = {
       from: vi.fn(() => chain),
       innerJoin: vi.fn(() => chain),
       leftJoin: vi.fn(() => chain),
-      where: nextSelectRows,
+      where: vi.fn(() => chain),
+      limit: vi.fn(() => rows),
+      then: rows.then.bind(rows),
     };
     return chain;
   });

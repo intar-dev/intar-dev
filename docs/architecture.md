@@ -67,7 +67,12 @@ and assigns changed scenarios to connected builder hosts.
 Builder hosts publish raw zstd artifacts and `ScenarioManifestV3` manifest JSON.
 The publish endpoint verifies manifests and image hashes, stores immutable images
 in R2, seeds the D1 scenario catalog, and updates each agent desired-state document
-with the referenced cached images.
+with the referenced cached images. Builder-JWT publishes also carry the exact
+build ID, bundle revision, content hash, and architecture. The Worker matches all
+of them to the authenticated host's active assignment while holding the same
+per-scenario/architecture D1 lease used by supersession, so an old build cannot
+seed the catalog after its replacement wins. The static registry token remains
+the explicit privileged path for release tooling and manual `run-once` publishes.
 
 Agents list and download images through the Worker registry endpoint. The agent
 cache validates compressed raw-zstd hashes fail-closed, decompresses sparse raw
@@ -79,8 +84,12 @@ files to `<sha256>.raw`, and reports cache readiness from the raw artifact.
 
 - It joins the same bridge as agents with `role = builder`.
 - It caches the latest desired-state document in local SQLite.
+- After a process restart, workers remain gated until the bridge supplies fresh
+  live desired state; cached jobs cannot begin during reconnect.
 - It consumes `DesiredBuildV1` assignments, fetches the source bundle, and
   recomputes content hashes before building.
+- It removes withdrawn local jobs, checks withdrawal between blocking build
+  stages and before publish, and treats a publish-fence rejection as terminal.
 - It reports each phase through `build_report`; terminal reports remove the build
   from desired state.
 - It uploads build logs to R2 for the admin builds page.

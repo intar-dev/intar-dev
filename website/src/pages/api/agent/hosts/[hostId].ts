@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { and, eq, notExists } from "drizzle-orm";
+import { and, eq, inArray, notExists } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
@@ -9,7 +9,6 @@ import {
   scenarioRuns,
 } from "@/db/schema";
 import type { HostStateReportV2 } from "@/generated/bridge";
-import { assignQueuedImageBuilds } from "@/lib/build-scheduler";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -90,7 +89,22 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     return hostHasRunHistoryResponse(host.id);
   }
 
-  const now = Date.now();
+  if (host.role === "builder") {
+    const activeBuilds = await db
+      .select({ buildId: imageBuilds.id })
+      .from(imageBuilds)
+      .where(
+        and(
+          eq(imageBuilds.hostId, host.id),
+          inArray(imageBuilds.status, ["assigned", "building"]),
+        ),
+      )
+      .limit(1);
+    if (activeBuilds.length > 0) {
+      return hostHasActiveBuildsResponse(host.id);
+    }
+  }
+
   const runGuard = () =>
     notExists(
       db
@@ -98,58 +112,34 @@ export const DELETE: APIRoute = async ({ request, params }) => {
         .from(scenarioRuns)
         .where(eq(scenarioRuns.hostId, host.id)),
     );
-  const deleteHost = db
+  const activeBuildGuard = () =>
+    notExists(
+      db
+        .select({ buildId: imageBuilds.id })
+        .from(imageBuilds)
+        .where(
+          and(
+            eq(imageBuilds.hostId, host.id),
+            inArray(imageBuilds.status, ["assigned", "building"]),
+          ),
+        ),
+    );
+  const deletedHosts = await db
     .delete(agentHosts)
     .where(
       and(
         eq(agentHosts.id, hostId),
         eq(agentHosts.userId, authz.context.userId),
         runGuard(),
+        host.role === "builder" ? activeBuildGuard() : undefined,
       ),
     )
     .returning({ id: agentHosts.id });
-  const deletedHosts =
-    host.role === "builder"
-      ? (
-          await db.batch([
-            db
-              .update(imageBuilds)
-              .set({
-                hostId: null,
-                status: "queued",
-                phase: "queued",
-                error: "builder host was deleted before starting build",
-                updatedAt: now,
-              })
-              .where(
-                and(
-                  eq(imageBuilds.hostId, host.id),
-                  eq(imageBuilds.status, "assigned"),
-                  runGuard(),
-                ),
-              ),
-            db
-              .update(imageBuilds)
-              .set({
-                status: "stale",
-                error: "builder host was deleted while build was running",
-                updatedAt: now,
-              })
-              .where(
-                and(
-                  eq(imageBuilds.hostId, host.id),
-                  eq(imageBuilds.status, "building"),
-                  runGuard(),
-                ),
-              ),
-            deleteHost,
-          ])
-        )[2]
-      : await deleteHost;
   if (deletedHosts.length === 0) {
     return jsonResponse(
       {
-        error: "host deletion conflicted with a new run or concurrent update",
+        error:
+          "host deletion conflicted with a new run, active build, or concurrent update",
         code: "host_delete_conflict",
         hostId: host.id,
       },
@@ -169,10 +159,6 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     );
   }
 
-  if (host.role === "builder") {
-    await assignQueuedImageBuilds(db, now);
-  }
-
   return jsonResponse({ ok: true, hostId });
 };
 
@@ -181,6 +167,17 @@ function hostHasRunHistoryResponse(hostId: string): Response {
     {
       error: "host has scenario run history and cannot be deleted",
       code: "host_has_run_history",
+      hostId,
+    },
+    { status: 409 },
+  );
+}
+
+function hostHasActiveBuildsResponse(hostId: string): Response {
+  return jsonResponse(
+    {
+      error: "builder host has active image builds and must be drained first",
+      code: "host_has_active_builds",
       hostId,
     },
     { status: 409 },

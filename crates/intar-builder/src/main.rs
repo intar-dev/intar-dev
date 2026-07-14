@@ -21,8 +21,11 @@ use intar_image_build::{
     DirectBuildOutput, DirectBuildRequest, combine_scenario_manifests, ensure_base_rootfs,
     run_direct_build,
 };
-use intar_image_upload::{ImageUploadConfig, ImageUploader, PublishArtifactFile, PublishImageFile};
-use tokio::sync::mpsc;
+use intar_image_upload::{
+    Error as ImageUploadError, ImageUploadConfig, ImageUploader, PublishArtifactFile,
+    PublishBuildIdentity, PublishImageFile,
+};
+use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
 
@@ -34,6 +37,7 @@ use crate::bundle::{
 
 const FIRST_RETRY_DELAY_MS: i64 = 60_000;
 const LATER_RETRY_DELAY_MS: i64 = 300_000;
+const RUN_ONCE_PUBLISH_TOKEN_ENV: &str = "INTAR_REGISTRY_PUBLISH_TOKEN";
 
 #[derive(Debug)]
 struct NonRetryableBuildError {
@@ -146,11 +150,19 @@ async fn run(args: RunCommand) -> Result<()> {
         );
     }
     let (report_tx, report_rx) = mpsc::channel(128);
+    let (desired_ready_tx, desired_ready_rx) = watch::channel(false);
     for worker_id in 0..cfg.jobs.max_concurrent_builds {
         let worker_cfg = cfg.clone();
         let worker_report_tx = report_tx.clone();
+        let worker_desired_ready = desired_ready_rx.clone();
         tokio::spawn(async move {
-            builder_worker_loop(worker_cfg, worker_report_tx, worker_id).await;
+            builder_worker_loop(
+                worker_cfg,
+                worker_report_tx,
+                worker_desired_ready,
+                worker_id,
+            )
+            .await;
         });
     }
     drop(report_tx);
@@ -163,13 +175,18 @@ async fn run(args: RunCommand) -> Result<()> {
         workers = cfg.jobs.max_concurrent_builds,
         "builder daemon starting"
     );
-    bridge::run(cfg, db, report_rx).await
+    bridge::run(cfg, db, report_rx, desired_ready_tx).await
 }
 
 async fn run_once(args: RunOnceCommand) -> Result<()> {
     let cfg = config::load(&args.config)?;
     validate_job_config(&cfg)?;
     ensure_preflight_ready(&cfg, &args.config)?;
+    // Validate and capture the operator credential before creating local job
+    // state or spending time in QEMU. A malformed explicit token must fail
+    // before the build starts, while an absent token keeps run-once local.
+    let run_once_publish_token = optional_run_once_publish_token()?;
+    validate_run_once_publish_target(&cfg, run_once_publish_token.as_deref())?;
     let build_config = cfg.qemu_build_config();
     let db = db::BuilderDb::open(&cfg.builder.state_db)?;
     let (bundle_archive, rev) = resolve_bundle_archive(&cfg, &args.bundle).await?;
@@ -254,13 +271,19 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
         return Err(error);
     }
 
-    if let Some(access_token) = optional_builder_access_token(&cfg).await? {
+    if let Some(access_token) = run_once_publish_token {
         db.upsert_build_job(&bundle_input.build, "publishing", 1, None, now_unix_ms())?;
         let publish_cfg = cfg.clone();
         let publish_token = access_token.clone();
         let publish_outputs = outputs.clone();
+        let publish_build = bundle_input.build.clone();
         let publish_result = tokio::task::spawn_blocking(move || {
-            publish_build_outputs(&publish_cfg, &publish_token, &publish_outputs)
+            publish_build_outputs(
+                &publish_cfg,
+                &publish_token,
+                &publish_outputs,
+                &publish_build,
+            )
         })
         .await
         .context("run-once publish worker panicked")?;
@@ -327,7 +350,8 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
     } else {
         warn!(
             build_id = %bundle_input.build.build_id,
-            "bridge credentials are not configured; skipping run-once publish and log upload"
+            env = RUN_ONCE_PUBLISH_TOKEN_ENV,
+            "registry publish token is not configured; keeping run-once output local"
         );
     }
 
@@ -335,11 +359,52 @@ async fn run_once(args: RunOnceCommand) -> Result<()> {
     Ok(())
 }
 
+fn optional_run_once_publish_token() -> Result<Option<String>> {
+    match std::env::var(RUN_ONCE_PUBLISH_TOKEN_ENV) {
+        Ok(value) => validate_run_once_publish_token(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{RUN_ONCE_PUBLISH_TOKEN_ENV} must be valid UTF-8")
+        }
+    }
+}
+
+fn validate_run_once_publish_token(value: Option<String>) -> Result<Option<String>> {
+    match value {
+        Some(value) if value.trim().is_empty() => {
+            bail!("{RUN_ONCE_PUBLISH_TOKEN_ENV} must not be empty")
+        }
+        value => Ok(value),
+    }
+}
+
+fn validate_run_once_publish_target(
+    cfg: &config::BuilderConfig,
+    access_token: Option<&str>,
+) -> Result<()> {
+    if let Some(access_token) = access_token {
+        image_uploader(cfg, access_token)?;
+    }
+    Ok(())
+}
+
 async fn builder_worker_loop(
     cfg: config::BuilderConfig,
     report_tx: mpsc::Sender<intar_contracts::bridge::BuildReportV1>,
+    mut desired_ready: watch::Receiver<bool>,
     worker_id: u16,
 ) {
+    while !*desired_ready.borrow() {
+        if desired_ready.changed().await.is_err() {
+            warn!(
+                worker_id,
+                "builder worker stopped before receiving fresh desired state"
+            );
+            return;
+        }
+    }
+    info!(worker_id, "builder worker received fresh desired state");
+
     let mut tick = interval(Duration::from_secs(5));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -483,6 +548,7 @@ async fn run_claimed_build_job(
         })
         .await
         .context("base rootfs worker panicked")??;
+        ensure_build_still_desired(cfg, &job.build_id)?;
 
         {
             let db = db::BuilderDb::open(&cfg.builder.state_db)?;
@@ -520,6 +586,7 @@ async fn run_claimed_build_job(
                 return Err(error);
             }
         };
+        ensure_build_still_desired(cfg, &job.build_id)?;
         info!(
             build_id = %job.build_id,
             scenario = %output.rendered.scenario_name,
@@ -543,13 +610,20 @@ async fn run_claimed_build_job(
         )?;
     }
     emit_build_report(cfg, report_tx, &job.build_id).await?;
+    ensure_build_still_desired(cfg, &job.build_id)?;
     let publish_token = bridge::bootstrap_builder_access_token(&cfg.bridge)
         .await
         .context("failed to authenticate before publishing image build")?;
     let publish_cfg = cfg.clone();
     let publish_outputs = outputs.clone();
+    let publish_build = desired_build.clone();
     let publish_result = tokio::task::spawn_blocking(move || {
-        publish_build_outputs(&publish_cfg, &publish_token, &publish_outputs)
+        publish_build_outputs(
+            &publish_cfg,
+            &publish_token,
+            &publish_outputs,
+            &publish_build,
+        )
     })
     .await
     .context("publish worker panicked")?;
@@ -637,6 +711,7 @@ fn publish_build_outputs(
     cfg: &config::BuilderConfig,
     access_token: &str,
     outputs: &[DirectBuildOutput],
+    build: &intar_contracts::bridge::DesiredBuildV1,
 ) -> Result<()> {
     let manifest =
         combine_scenario_manifests(outputs.iter().map(|output| &output.artifact.manifest))?;
@@ -658,15 +733,17 @@ fn publish_build_outputs(
         })
         .collect::<Result<Vec<_>>>()?;
     let artifacts = publish_artifacts_from_outputs(outputs)?;
-    let publish_url = format!(
-        "{}/registry/v1/publish",
-        cfg.bridge.base_url.trim_end_matches('/')
-    );
-    let uploader = ImageUploader::new(ImageUploadConfig::new(publish_url, access_token))
-        .map_err(anyhow::Error::from)?;
+    let uploader = image_uploader(cfg, access_token)?;
+    let identity = PublishBuildIdentity::new(
+        &build.build_id,
+        &build.rev,
+        &build.content_hash,
+        build.arch.clone(),
+    )
+    .map_err(anyhow::Error::from)?;
     let receipt = uploader
-        .publish_manifest_with_artifacts(&manifest, &images, &artifacts)
-        .map_err(anyhow::Error::from)?;
+        .publish_build_manifest_with_artifacts(&manifest, &images, &artifacts, &identity)
+        .map_err(classify_publish_error)?;
     info!(
         scenario = %receipt.scenario_id,
         images = receipt.images.len(),
@@ -674,6 +751,38 @@ fn publish_build_outputs(
         "builder daemon published image build"
     );
     Ok(())
+}
+
+fn image_uploader(cfg: &config::BuilderConfig, access_token: &str) -> Result<ImageUploader> {
+    let publish_url = format!(
+        "{}/registry/v1/publish",
+        cfg.bridge.base_url.trim_end_matches('/')
+    );
+    ImageUploader::new(ImageUploadConfig::new(publish_url, access_token))
+        .map_err(anyhow::Error::from)
+}
+
+fn classify_publish_error(error: ImageUploadError) -> anyhow::Error {
+    if matches!(
+        error,
+        ImageUploadError::HttpStatus {
+            status: reqwest::StatusCode::CONFLICT | reqwest::StatusCode::GONE,
+            ..
+        }
+    ) {
+        return non_retryable_build_error(anyhow::Error::from(error));
+    }
+    anyhow::Error::from(error)
+}
+
+fn ensure_build_still_desired(cfg: &config::BuilderConfig, build_id: &str) -> Result<()> {
+    let db = db::BuilderDb::open(&cfg.builder.state_db)?;
+    if db.load_build_job(build_id)?.is_some() {
+        return Ok(());
+    }
+    Err(non_retryable_build_error(anyhow::anyhow!(
+        "build '{build_id}' was removed from desired state"
+    )))
 }
 
 fn publish_artifacts_from_outputs(
@@ -1062,9 +1171,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        bridge, config, db, ensure_preflight_report_ready, local_bundle_rev, log_upload_warning,
-        non_retryable_build_error, preflight, should_retry_build_error, validate_job_config,
-        verify_bundle_or_drop_cached_archive,
+        bridge, classify_publish_error, config, db, ensure_preflight_report_ready,
+        local_bundle_rev, log_upload_warning, non_retryable_build_error, preflight,
+        should_retry_build_error, validate_job_config, validate_run_once_publish_target,
+        validate_run_once_publish_token, verify_bundle_or_drop_cached_archive,
     };
 
     #[test]
@@ -1150,6 +1260,45 @@ mod tests {
 
         assert!(!should_retry_build_error(&non_retryable, 1, 3));
         assert!(format!("{non_retryable:#}").contains("content hash mismatch"));
+    }
+
+    #[test]
+    fn superseded_publish_rejections_do_not_retry() {
+        let withdrawn = classify_publish_error(intar_image_upload::Error::HttpStatus {
+            status: reqwest::StatusCode::CONFLICT,
+            body: "build is not active for this builder".to_string(),
+        });
+        assert!(!should_retry_build_error(&withdrawn, 1, 3));
+
+        let transient = classify_publish_error(intar_image_upload::Error::HttpStatus {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: "try again".to_string(),
+        });
+        assert!(should_retry_build_error(&transient, 1, 3));
+    }
+
+    #[test]
+    fn run_once_publish_requires_explicit_operator_token() {
+        assert_eq!(validate_run_once_publish_token(None).unwrap(), None);
+        assert_eq!(
+            validate_run_once_publish_token(Some("publish-secret".to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("publish-secret")
+        );
+        assert!(validate_run_once_publish_token(Some("  ".to_string())).is_err());
+    }
+
+    #[test]
+    fn run_once_publish_target_is_validated_before_building() {
+        let mut cfg = config::BuilderConfig::default();
+        assert!(validate_run_once_publish_target(&cfg, None).is_ok());
+
+        let error = validate_run_once_publish_target(&cfg, Some("publish-secret")).unwrap_err();
+        assert!(format!("{error:#}").contains("relative URL"));
+
+        cfg.bridge.base_url = "https://intar.test".to_string();
+        validate_run_once_publish_target(&cfg, Some("publish-secret")).unwrap();
     }
 
     #[tokio::test]

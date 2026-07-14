@@ -16,10 +16,18 @@ import type {
   ScenarioProbeManifestV3,
   ScenarioVmManifestV3,
 } from "@/generated/catalog";
-import type { AgentHostRole, ImageBuildBundleMeta } from "@/db/schema";
+import type {
+  AgentHostRole,
+  ImageBuildBundleMeta,
+  ImageBuildStatus,
+} from "@/db/schema";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { upsertDesiredCachedImage } from "@/lib/desired-state";
+import {
+  withImageBuildCoordinationLock,
+  type ImageBuildCoordinationLease,
+} from "@/lib/image-build-lock";
 import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
@@ -190,8 +198,8 @@ async function handlePublish(
     return jsonResponse({ error: "method not allowed" }, 405);
   }
 
-  const authz = await requirePublishAuth(request, env);
-  if (authz) return authz;
+  const authorization = await authorizeManifestPublish(request, env);
+  if (!authorization.ok) return authorization.response;
 
   let form: FormData;
   try {
@@ -206,53 +214,128 @@ async function handlePublish(
   const validationError = validateManifest(manifest.value);
   if (validationError) return validationError;
 
-  const artifacts = await prepareBootArtifacts(env, form, manifest.value);
-  if (!artifacts.ok) return artifacts.response;
-
-  const images = await prepareVmImages(env, form, manifest.value);
-  if (!images.ok) return images.response;
   const normalizedManifest = normalizePublishManifest(manifest.value);
 
-  await storePreparedBootArtifacts(env, artifacts.prepared);
-
-  const uploaded = [];
-  for (const image of images.prepared) {
-    if (image.payload) {
-      await env.VM_IMAGE_REGISTRY_BUCKET.put(image.objectKey, image.payload, {
-        httpMetadata: { contentType: "application/octet-stream" },
-        customMetadata: {
-          image_key: image.imageKey,
-          image_sha256: image.imageSha256,
-          scenario_id: normalizedManifest.scenario_id,
-          vm_name: image.vmName,
-        },
-      });
+  let buildFence:
+    | (PublishBuildIdentity & { hostId: string; scenarioId: string })
+    | null = null;
+  if (authorization.kind === "builder") {
+    const identity = readPublishBuildIdentity(form);
+    if (!identity.ok) return identity.response;
+    if (
+      !normalizedManifest.vms.every(
+        (vm) => vm.image_key.arch === identity.value.architecture,
+      )
+    ) {
+      return inactivePublishBuildResponse();
     }
-    await env.VM_IMAGE_REGISTRY_BUCKET.put(
-      `${image.objectKey}.sha256`,
-      textEncoder.encode(`${image.imageSha256}  ${image.imageKey}.raw.zst\n`),
-      { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
-    );
 
-    uploaded.push({
-      image_key: image.imageKey,
-      image_sha256: image.imageSha256,
-      object_key: image.objectKey,
-      bytes: image.bytes,
-      reused: image.reused,
-    });
+    buildFence = {
+      ...identity.value,
+      hostId: authorization.hostId,
+      scenarioId: normalizedManifest.scenario_id,
+    };
   }
 
   const db = drizzle(env.DB);
-  await seedScenarioManifest(db, normalizedManifest, {
-    enabled: true,
-    nowUnixMs: Date.now(),
-  });
+  const persistPreparedPublish = async (
+    lease: ImageBuildCoordinationLease | null,
+  ): Promise<
+    | {
+        ok: true;
+        uploaded: PublishedVmImage[];
+        artifacts: PublishedBootArtifact[];
+        preparedImages: PreparedVmImage[];
+      }
+    | { ok: false; response: Response }
+  > => {
+    if (buildFence) {
+      const assignment = await loadPublishBuildAssignment(
+        db,
+        buildFence.buildId,
+      );
+      if (!isActivePublishBuildAssignment(assignment, buildFence)) {
+        return { ok: false, response: inactivePublishBuildResponse() };
+      }
+    }
+
+    const artifacts = await prepareBootArtifacts(env, form, manifest.value);
+    if (!artifacts.ok) return artifacts;
+
+    const images = await prepareVmImages(env, form, manifest.value);
+    if (!images.ok) return images;
+
+    await storePreparedBootArtifacts(env, artifacts.prepared);
+    const uploaded = await storePreparedVmImages(
+      env,
+      images.prepared,
+      normalizedManifest.scenario_id,
+    );
+
+    if (buildFence) {
+      const assignment = await loadPublishBuildAssignment(
+        db,
+        buildFence.buildId,
+      );
+      if (!isActivePublishBuildAssignment(assignment, buildFence)) {
+        return { ok: false, response: inactivePublishBuildResponse() };
+      }
+      await lease?.assertHeld();
+    }
+
+    await seedScenarioManifest(db, normalizedManifest, {
+      enabled: true,
+      nowUnixMs: Date.now(),
+    });
+    return {
+      ok: true,
+      uploaded,
+      artifacts: artifacts.uploaded,
+      preparedImages: images.prepared,
+    };
+  };
+
+  let published:
+    | {
+        ok: true;
+        uploaded: PublishedVmImage[];
+        artifacts: PublishedBootArtifact[];
+        preparedImages: PreparedVmImage[];
+      }
+    | { ok: false; response: Response };
+  if (buildFence) {
+    const fenceRejected = { response: null as Response | null };
+    try {
+      published = await withImageBuildCoordinationLock(
+        db,
+        {
+          scenarioId: buildFence.scenarioId,
+          arch: buildFence.architecture,
+        },
+        async (lease) => {
+          const result = await persistPreparedPublish(lease);
+          if (!result.ok && result.response.status === 409) {
+            fenceRejected.response = result.response;
+          }
+          return result;
+        },
+      );
+    } catch (error) {
+      // Once the assignment check has deliberately rejected the publish, a
+      // best-effort lease release failure must not turn that 409 into a 500.
+      if (fenceRejected.response) return fenceRejected.response;
+      throw error;
+    }
+  } else {
+    published = await persistPreparedPublish(null);
+  }
+  if (!published.ok) return published.response;
+
   await bumpHostCachedImages(db, normalizedManifest);
 
   let pruned: PrunedImages[] = [];
   try {
-    pruned = await pruneStaleVmImages(env, db, images.prepared);
+    pruned = await pruneStaleVmImages(env, db, published.preparedImages);
   } catch (error) {
     // Retention is best-effort; a prune failure must never fail the publish.
     console.error("vm image registry prune failed", error);
@@ -262,8 +345,8 @@ async function handlePublish(
     {
       ok: true,
       scenario_id: normalizedManifest.scenario_id,
-      images: uploaded,
-      artifacts: artifacts.uploaded,
+      images: published.uploaded,
+      artifacts: published.artifacts,
       pruned,
     },
     201,
@@ -344,7 +427,10 @@ async function pruneStaleVmImages(
           basename.slice(0, -IMAGE_COMPANION_SUFFIX.length),
         );
         if (!sha256) continue;
-        const entry = entries.get(sha256) ?? { uploaded: null, companion: false };
+        const entry = entries.get(sha256) ?? {
+          uploaded: null,
+          companion: false,
+        };
         entry.companion = true;
         entries.set(sha256, entry);
       } else if (basename.endsWith(IMAGE_OBJECT_SUFFIX)) {
@@ -352,7 +438,10 @@ async function pruneStaleVmImages(
           basename.slice(0, -IMAGE_OBJECT_SUFFIX.length),
         );
         if (!sha256) continue;
-        const entry = entries.get(sha256) ?? { uploaded: null, companion: false };
+        const entry = entries.get(sha256) ?? {
+          uploaded: null,
+          companion: false,
+        };
         entry.uploaded = object.uploaded;
         entries.set(sha256, entry);
       }
@@ -444,7 +533,9 @@ function uploadTargetFromBody(
       return {
         ok: false,
         response: jsonResponse(
-          { error: "image uploads require image_key, scenario_id, and vm_name" },
+          {
+            error: "image uploads require image_key, scenario_id, and vm_name",
+          },
           400,
         ),
       };
@@ -480,7 +571,7 @@ async function handleUploadCreate(
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
-  const authz = await requirePublishAuth(request, env);
+  const authz = await requireBlobUploadAuth(request, env);
   if (authz) return authz;
 
   let body: unknown;
@@ -538,7 +629,7 @@ async function handleUploadPart(
   if (request.method !== "PUT") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
-  const authz = await requirePublishAuth(request, env);
+  const authz = await requireBlobUploadAuth(request, env);
   if (authz) return authz;
 
   const objectKey = url.searchParams.get("object_key") ?? "";
@@ -575,10 +666,7 @@ async function handleUploadPart(
       etag: part.etag,
     });
   } catch (error) {
-    return jsonResponse(
-      { error: `part upload failed: ${String(error)}` },
-      400,
-    );
+    return jsonResponse({ error: `part upload failed: ${String(error)}` }, 400);
   }
 }
 
@@ -589,7 +677,7 @@ async function handleUploadComplete(
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405);
   }
-  const authz = await requirePublishAuth(request, env);
+  const authz = await requireBlobUploadAuth(request, env);
   if (authz) return authz;
 
   let body: unknown;
@@ -656,6 +744,13 @@ type PreparedBootArtifact = {
   payload: ArrayBuffer | null;
 };
 
+type PublishedBootArtifact = {
+  sha256: string;
+  object_key: string;
+  bytes: number;
+  reused: boolean;
+};
+
 type PreparedVmImage = {
   vmName: string;
   imageKey: string;
@@ -666,6 +761,14 @@ type PreparedVmImage = {
   payload: ArrayBuffer | null;
 };
 
+type PublishedVmImage = {
+  image_key: string;
+  image_sha256: string;
+  object_key: string;
+  bytes: number;
+  reused: boolean;
+};
+
 async function prepareBootArtifacts(
   env: Cloudflare.Env,
   form: FormData,
@@ -674,12 +777,7 @@ async function prepareBootArtifacts(
   | {
       ok: true;
       prepared: PreparedBootArtifact[];
-      uploaded: Array<{
-        sha256: string;
-        object_key: string;
-        bytes: number;
-        reused: boolean;
-      }>;
+      uploaded: PublishedBootArtifact[];
     }
   | { ok: false; response: Response }
 > {
@@ -846,6 +944,40 @@ async function storePreparedBootArtifacts(
       },
     );
   }
+}
+
+async function storePreparedVmImages(
+  env: Cloudflare.Env,
+  images: PreparedVmImage[],
+  scenarioId: string,
+): Promise<PublishedVmImage[]> {
+  const uploaded: PublishedVmImage[] = [];
+  for (const image of images) {
+    if (image.payload) {
+      await env.VM_IMAGE_REGISTRY_BUCKET.put(image.objectKey, image.payload, {
+        httpMetadata: { contentType: "application/octet-stream" },
+        customMetadata: {
+          image_key: image.imageKey,
+          image_sha256: image.imageSha256,
+          scenario_id: scenarioId,
+          vm_name: image.vmName,
+        },
+      });
+    }
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      `${image.objectKey}.sha256`,
+      textEncoder.encode(`${image.imageSha256}  ${image.imageKey}.raw.zst\n`),
+      { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
+    );
+    uploaded.push({
+      image_key: image.imageKey,
+      image_sha256: image.imageSha256,
+      object_key: image.objectKey,
+      bytes: image.bytes,
+      reused: image.reused,
+    });
+  }
+  return uploaded;
 }
 
 async function handleAgentBundleDownload(
@@ -1106,11 +1238,7 @@ async function bootArtifactsExist(
 
 function imageObjectMatchesSha<
   T extends { customMetadata?: Record<string, string> },
->(
-  object: T | null,
-  imageKey: string,
-  sha256: string,
-): object is T {
+>(object: T | null, imageKey: string, sha256: string): object is T {
   if (!object) {
     return false;
   }
@@ -1127,10 +1255,7 @@ function imageObjectMatchesSha<
 
 function bootArtifactObjectMatchesSha<
   T extends { customMetadata?: Record<string, string> },
->(
-  object: T | null,
-  sha256: string,
-): object is T {
+>(object: T | null, sha256: string): object is T {
   if (!object) {
     return false;
   }
@@ -1213,7 +1338,125 @@ async function handleAgentArtifactDownload(
   });
 }
 
-async function requirePublishAuth(
+type ManifestPublishAuthorization =
+  | { ok: true; kind: "trusted-token" }
+  | { ok: true; kind: "builder"; hostId: string }
+  | { ok: false; response: Response };
+
+type PublishBuildIdentity = {
+  buildId: string;
+  rev: string;
+  contentHash: string;
+  architecture: ImageArchitecture;
+};
+
+type PublishBuildAssignment = {
+  id: string;
+  hostId: string | null;
+  status: ImageBuildStatus;
+  scenarioId: string;
+  arch: ImageArchitecture;
+  rev: string;
+  contentHash: string;
+};
+
+async function authorizeManifestPublish(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<ManifestPublishAuthorization> {
+  // The repository publication token is an administrative path used by the
+  // release pipeline. Builder agents use their host identity and are fenced
+  // against the exact active build assignment below.
+  if (await hasRegistryPublishToken(request, env)) {
+    return { ok: true, kind: "trusted-token" };
+  }
+
+  const verified = await requireBuilderAgentRequest(request, env);
+  if (!verified.ok) return verified;
+  return {
+    ok: true,
+    kind: "builder",
+    hostId: verified.agent.hostId,
+  };
+}
+
+function readPublishBuildIdentity(
+  form: FormData,
+):
+  | { ok: true; value: PublishBuildIdentity }
+  | { ok: false; response: Response } {
+  const buildId = readString(form.get("build_id"));
+  const rev = readString(form.get("rev"));
+  const contentHash = normalizeSha256(
+    readString(form.get("content_hash")) ?? "",
+  );
+  const architecture = readString(form.get("architecture"));
+  if (
+    !buildId ||
+    !isSafeBuildId(buildId) ||
+    !rev ||
+    !isSafeBundleRev(rev) ||
+    !contentHash ||
+    !isImageArchitecture(architecture)
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        {
+          error:
+            "builder publish requires valid build_id, rev, content_hash, and architecture",
+        },
+        400,
+      ),
+    };
+  }
+  return {
+    ok: true,
+    value: { buildId, rev, contentHash, architecture },
+  };
+}
+
+async function loadPublishBuildAssignment(
+  db: DrizzleD1Database,
+  buildId: string,
+): Promise<PublishBuildAssignment | undefined> {
+  const rows = await db
+    .select({
+      id: imageBuilds.id,
+      hostId: imageBuilds.hostId,
+      status: imageBuilds.status,
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+      rev: imageBuilds.rev,
+      contentHash: imageBuilds.contentHash,
+    })
+    .from(imageBuilds)
+    .where(eq(imageBuilds.id, buildId))
+    .limit(1);
+  return rows[0];
+}
+
+function isActivePublishBuildAssignment(
+  assignment: PublishBuildAssignment | undefined,
+  expected: PublishBuildIdentity & { hostId: string; scenarioId: string },
+): boolean {
+  return Boolean(
+    assignment &&
+    assignment.id === expected.buildId &&
+    assignment.hostId === expected.hostId &&
+    (assignment.status === "assigned" || assignment.status === "building") &&
+    assignment.scenarioId === expected.scenarioId &&
+    assignment.arch === expected.architecture &&
+    assignment.rev === expected.rev &&
+    assignment.contentHash === expected.contentHash,
+  );
+}
+
+function inactivePublishBuildResponse(): Response {
+  return jsonResponse({ error: "build is not active for this builder" }, 409);
+}
+
+async function requireBlobUploadAuth(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response | null> {
@@ -1262,7 +1505,10 @@ async function hasRegistryPublishToken(
   return timingSafeHashEqual(expectedHash, bearerHash);
 }
 
-function timingSafeHashEqual(expected: ArrayBuffer, actual: ArrayBuffer): boolean {
+function timingSafeHashEqual(
+  expected: ArrayBuffer,
+  actual: ArrayBuffer,
+): boolean {
   const subtle = crypto.subtle as SubtleCrypto & {
     timingSafeEqual?: (
       left: ArrayBuffer | ArrayBufferView,

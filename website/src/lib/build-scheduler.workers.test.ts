@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
   hostDesiredState,
+  imageBuildCoordinationLocks,
   imageBuildBundles,
   imageBuilds,
   user,
@@ -14,10 +15,17 @@ import {
 import type { BuildReportV1, DesiredBuildV1 } from "@/generated/bridge";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
 import {
+  maintainHostBuildAssignments,
   queueImageBuildsFromBundle,
   recordImageBuildReport,
 } from "@/lib/build-scheduler";
+import {
+  withImageBuildCoordinationLock,
+  withImageBuildCoordinationLocks,
+} from "@/lib/image-build-lock";
 import { resetD1Database } from "@/test/d1-migrations";
+
+type SchedulerDb = Parameters<typeof queueImageBuildsFromBundle>[0];
 
 describe("build scheduler bundle supersession", () => {
   beforeEach(async () => {
@@ -157,7 +165,253 @@ describe("build scheduler bundle supersession", () => {
       .where(eq(imageBuilds.contentHash, "a".repeat(64)));
     expect(sameHashRow).toEqual({ rev: "bundle-new", status: "queued" });
   });
+
+  it("serializes concurrent bundle hashes so only the last lock holder stays active", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+
+    const results = await Promise.all([
+      queueBundle(db, "bundle-a", "a", now),
+      queueBundle(db, "bundle-b", "b", now + 1),
+    ]);
+    expect(results).toEqual([{ queued: 1 }, { queued: 1 }]);
+
+    const rows = await db
+      .select({
+        contentHash: imageBuilds.contentHash,
+        status: imageBuilds.status,
+      })
+      .from(imageBuilds)
+      .where(eq(imageBuilds.scenarioId, "broken-nginx"));
+    const active = rows.filter((row) =>
+      ["queued", "assigned", "building"].includes(row.status),
+    );
+    expect(active).toHaveLength(1);
+    expect(rows.find((row) => row !== active[0])?.status).toBe("stale");
+    await expect(db.select().from(imageBuildCoordinationLocks)).resolves.toEqual(
+      [],
+    );
+  });
+
+  it("retries desired cleanup left by an interrupted supersession", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await seedBuilder(db, now);
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-old",
+      r2Key: "builds/bundles/bundle-old.tar.gz",
+      kinoVersion: "0.4.0",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v7",
+        scenarios: [],
+      },
+      createdAt: now - 1_000,
+      updatedAt: now - 1_000,
+    });
+    await db.insert(imageBuilds).values([
+      oldBuild("current-queued", "a", "queued", null, now),
+      {
+        ...oldBuild("retired-stale", "b", "building", "builder-1", now),
+        status: "stale" as const,
+        error: "superseded by an interrupted request",
+      },
+    ]);
+    const desired = {
+      ...createEmptyHostDesiredState({ hostId: "builder-1", nowUnixMs: now }),
+      version: 7,
+      builds: [
+        desiredBuild("current-queued", "a"),
+        desiredBuild("retired-stale", "b"),
+        desiredBuild("keep", "9"),
+      ],
+    };
+    await db.insert(hostDesiredState).values({
+      hostId: "builder-1",
+      version: desired.version,
+      docJson: desired,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(queueBundle(db, "bundle-retry", "a", now + 1)).resolves.toEqual(
+      { queued: 0 },
+    );
+
+    const [stored] = await db
+      .select({ version: hostDesiredState.version, docJson: hostDesiredState.docJson })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, "builder-1"));
+    expect(stored?.version).toBe(8);
+    expect(stored?.docJson.version).toBe(8);
+    expect(stored?.docJson.builds.map((build) => build.build_id)).toEqual([
+      "keep",
+    ]);
+  });
+
+  it("holds reports outside a publish-fenced catalog interval", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await seedBuilder(db, now);
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-old",
+      r2Key: "builds/bundles/bundle-old.tar.gz",
+      kinoVersion: "0.4.0",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v7",
+        scenarios: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db
+      .insert(imageBuilds)
+      .values(oldBuild("assigned-old", "1", "assigned", "builder-1", now));
+
+    let reportSettled = false;
+    let reportPromise!: ReturnType<typeof recordImageBuildReport>;
+    await withImageBuildCoordinationLock(
+      db,
+      { scenarioId: "broken-nginx", arch: "x86_64" },
+      async () => {
+        reportPromise = recordImageBuildReport(
+          db,
+          "builder-1",
+          buildReport("assigned-old", "1"),
+          now + 1,
+        ).finally(() => {
+          reportSettled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(reportSettled).toBe(false);
+      },
+    );
+
+    await expect(reportPromise).resolves.toEqual({
+      updated: true,
+      terminal: true,
+    });
+  });
+
+  it("rechecks silence after waiting for a publish fence", async () => {
+    const db = drizzle(env.DB);
+    const now = 1_762_041_660_000;
+    await seedBuilder(db, now);
+    await db.insert(imageBuildBundles).values({
+      rev: "bundle-old",
+      r2Key: "builds/bundles/bundle-old.tar.gz",
+      kinoVersion: "0.4.0",
+      metaJson: {
+        buildFormatVersion: "intar-image-build-v7",
+        scenarios: [],
+      },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(imageBuilds).values({
+      ...oldBuild("building-old", "1", "building", "builder-1", now),
+      timingsJson: { lastReportAt: now - 31 * 60 * 1_000 },
+      updatedAt: now - 31 * 60 * 1_000,
+    });
+
+    let maintenanceSettled = false;
+    let maintenancePromise!: ReturnType<typeof maintainHostBuildAssignments>;
+    await withImageBuildCoordinationLock(
+      db,
+      { scenarioId: "broken-nginx", arch: "x86_64" },
+      async () => {
+        maintenancePromise = maintainHostBuildAssignments(
+          db,
+          "builder-1",
+          now,
+        ).finally(() => {
+          maintenanceSettled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        expect(maintenanceSettled).toBe(false);
+        await db
+          .update(imageBuilds)
+          .set({ timingsJson: { lastReportAt: now }, updatedAt: now })
+          .where(eq(imageBuilds.id, "building-old"));
+      },
+    );
+
+    await expect(maintenancePromise).resolves.toMatchObject({
+      staleBuildIds: [],
+    });
+    const [build] = await db
+      .select({ status: imageBuilds.status })
+      .from(imageBuilds)
+      .where(eq(imageBuilds.id, "building-old"));
+    expect(build?.status).toBe("building");
+  });
+
+  it("releases the coordination lease when the callback fails", async () => {
+    const db = drizzle(env.DB);
+    const key = { scenarioId: "broken-nginx", arch: "x86_64" as const };
+    await expect(
+      withImageBuildCoordinationLock(db, key, async () => {
+        throw new Error("injected callback failure");
+      }),
+    ).rejects.toThrow("injected callback failure");
+    await expect(
+      withImageBuildCoordinationLock(db, key, async () => "reacquired"),
+    ).resolves.toBe("reacquired");
+
+    let activeCallbacks = 0;
+    let maximumActiveCallbacks = 0;
+    const other = { scenarioId: "workshop-cluster", arch: "x86_64" as const };
+    await Promise.all([
+      withImageBuildCoordinationLocks(db, [key, other, key], async () => {
+        activeCallbacks += 1;
+        maximumActiveCallbacks = Math.max(
+          maximumActiveCallbacks,
+          activeCallbacks,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        activeCallbacks -= 1;
+        return "first";
+      }),
+      withImageBuildCoordinationLocks(db, [other, key], async () => {
+        activeCallbacks += 1;
+        maximumActiveCallbacks = Math.max(
+          maximumActiveCallbacks,
+          activeCallbacks,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        activeCallbacks -= 1;
+        return "second";
+      }),
+    ]);
+    expect(maximumActiveCallbacks).toBe(1);
+    await expect(db.select().from(imageBuildCoordinationLocks)).resolves.toEqual(
+      [],
+    );
+  });
 });
+
+async function queueBundle(
+  db: SchedulerDb,
+  rev: string,
+  hashChar: string,
+  nowUnixMs: number,
+) {
+  return queueImageBuildsFromBundle(db, {
+    rev,
+    r2Key: `builds/bundles/${rev}.tar.gz`,
+    kinoVersion: "0.4.0",
+    meta: {
+      buildFormatVersion: "intar-image-build-v7",
+      scenarios: [
+        {
+          scenarioId: "broken-nginx",
+          arch: "x86_64",
+          contentHash: hashChar.repeat(64),
+        },
+      ],
+    },
+    nowUnixMs,
+  });
+}
 
 function oldBuild(
   id: string,
