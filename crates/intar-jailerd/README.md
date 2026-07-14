@@ -68,8 +68,9 @@ but bare mode without artifacts is non-attesting diagnostics.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated
-in-memory 1000-millicore authority. It proves every named run namespace is the
-same nsfs inode in the daemon and PID-1 mount namespaces, then creates eight
+in-memory 1000-millicore authority. The daemon resolves each root-owned nsfs
+handle through PID 1's root, while transient VM units prove the same inode at
+the configured `/run/netns` path. The test then creates eight
 concurrent Cloud Hypervisor v53 VMs,
 each with its own unit, cgroup, jail, identity, and TAP in one shared run
 network namespace. It requires the ninth 125-millicore request to fail local

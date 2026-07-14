@@ -208,7 +208,7 @@ mod linux {
     };
     use crate::network::{
         add_host_visible_namespace, delete_host_visible_namespace, initial_mount_namespace_entry,
-        trusted_nsenter_binary, verify_host_visible_namespace,
+        initial_mount_namespace_root, trusted_nsenter_binary, verify_host_visible_namespace,
     };
     use crate::{
         FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
@@ -2585,7 +2585,10 @@ mod linux {
                 "jailed Cloud Hypervisor retained the host {namespace} namespace"
             );
         }
-        let named_netns = std::fs::metadata(Path::new("/run/netns").join(netns_name))?;
+        let named_netns = std::fs::metadata(initial_mount_namespace_entry(
+            Path::new("/run/netns"),
+            netns_name,
+        )?)?;
         let vmm_netns = std::fs::metadata(format!("/proc/{pid}/ns/net"))?;
         ensure!(
             named_netns.ino() == vmm_netns.ino(),
@@ -3418,13 +3421,12 @@ mod linux {
                 )?;
             }
         }
-        let namespace_path = netns_root.join(namespace);
         let initial_namespace_path = initial_mount_namespace_entry(netns_root, namespace)?;
-        if path_entry_exists(&namespace_path)? || path_entry_exists(&initial_namespace_path)? {
+        if path_entry_exists(&initial_namespace_path)? {
             let result = delete_host_visible_namespace(nsenter, ip, netns_root, namespace);
             accept_delete_outcome(
                 result,
-                path_entry_exists(&namespace_path)? || path_entry_exists(&initial_namespace_path)?,
+                path_entry_exists(&initial_namespace_path)?,
                 "self-test network namespace",
             )?;
         }
@@ -3586,7 +3588,7 @@ mod linux {
         let output = Command::new(ip)
             .args(arguments)
             .env_clear()
-            .env("IP_NETNS_DIR", netns_root)
+            .env("IP_NETNS_DIR", initial_mount_namespace_root(netns_root)?)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

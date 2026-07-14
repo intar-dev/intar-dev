@@ -219,7 +219,7 @@ systemd-run \
   --property=PrivateTmp=true \
   --property=ProtectHome=true \
   --property=ProtectSystem=strict \
-  --property='ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd /run/netns' \
+  --property='ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd' \
   --property=ProtectClock=true \
   --property=ProtectControlGroups=true \
   --property=ProtectHostname=true \

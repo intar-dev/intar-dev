@@ -27,6 +27,15 @@ const INITIAL_MOUNT_NAMESPACE: &str = "/proc/1/ns/mnt";
 const INITIAL_ROOT: &str = "/proc/1/root";
 const NSFS_MAGIC: rustix::fs::FsWord = 0x6e73_6673;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VmNetworkAttachment {
     pub generation: ValidatedId,
@@ -54,6 +63,7 @@ pub(crate) struct NetworkManager {
     nft: PathBuf,
     nsenter: PathBuf,
     netns_root: PathBuf,
+    host_netns_root: PathBuf,
     policy: JailerdConfig,
     runs: BTreeMap<ValidatedId, RunState>,
 }
@@ -70,6 +80,8 @@ impl NetworkManager {
                 netns_root.display()
             )
         }
+        let host_netns_root = initial_mount_namespace_root(&netns_root)?;
+        validate_host_netns_root(&netns_root, &host_netns_root)?;
         if !std::fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
             .is_ok_and(|value| value.trim() == "1")
         {
@@ -80,6 +92,7 @@ impl NetworkManager {
             nft,
             nsenter,
             netns_root,
+            host_netns_root,
             policy: config.clone(),
             runs: BTreeMap::new(),
         })
@@ -126,9 +139,7 @@ impl NetworkManager {
             attachments: BTreeMap::new(),
             installed,
         };
-        self.construct_run(&state)?;
-        result.namespace_inode =
-            verify_host_visible_namespace(&self.netns_root, &result.namespace_name)?;
+        result.namespace_inode = self.construct_run(&state)?;
         state.result = result.clone();
         self.runs.insert(request.run_id.clone(), state);
         if let Err(error) = self.render_all() {
@@ -358,18 +369,20 @@ impl NetworkManager {
 
     fn destroy_run_physical(&self, result: &RunNetworkResult) -> Result<()> {
         let mut failures = Vec::new();
+        let namespace_path = self.host_netns_root.join(&result.namespace_name);
+        if path_entry_exists(&namespace_path)? {
+            self.verify_namespace_identity(&result.namespace_name, result.namespace_inode)?;
+        }
         if self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
             && let Err(error) = self.ip(&["link", "delete", &result.host_veth_name])
             && self.ip_succeeds(&["link", "show", "dev", &result.host_veth_name])
         {
             failures.push(format!("delete host run veth: {error:#}"));
         }
-        let namespace_path = self.netns_root.join(&result.namespace_name);
-        let initial_namespace_path =
-            initial_mount_namespace_entry(&self.netns_root, &result.namespace_name)?;
-        if (namespace_path.exists() || initial_namespace_path.exists())
-            && let Err(error) = self.delete_namespace(&result.namespace_name)
-            && (namespace_path.exists() || initial_namespace_path.exists())
+        if path_entry_exists(&namespace_path)?
+            && let Err(error) =
+                self.delete_namespace(&result.namespace_name, result.namespace_inode)
+            && path_entry_exists(&namespace_path)?
         {
             failures.push(format!("delete run network namespace: {error:#}"));
         }
@@ -379,21 +392,24 @@ impl NetworkManager {
         Ok(())
     }
 
-    fn construct_run(&self, state: &RunState) -> Result<()> {
+    fn construct_run(&self, state: &RunState) -> Result<u64> {
         let namespace = &state.result.namespace_name;
         let bridge = &state.result.bridge_name;
         let host_veth = &state.result.host_veth_name;
         let namespace_veth = &state.result.namespace_veth_name;
-        let namespace_path = self.netns_root.join(namespace);
-        let initial_namespace_path = initial_mount_namespace_entry(&self.netns_root, namespace)?;
-        let created_namespace = !namespace_path.exists();
-        if created_namespace {
-            self.create_namespace(namespace)?;
+        let namespace_path = self.host_netns_root.join(namespace);
+        let created_namespace = !path_entry_exists(&namespace_path)?;
+        let namespace_inode = if created_namespace {
+            self.create_namespace(namespace)?
         } else {
-            self.verify_namespace_visibility(namespace)?;
+            let inode = self.verify_namespace_visibility(namespace)?;
+            if state.result.namespace_inode != 0 && state.result.namespace_inode != inode {
+                bail!("run network namespace identity changed before reconciliation")
+            }
             self.ip(&["-n", namespace, "link", "show", "lo"])
                 .context("verify existing network namespace")?;
-        }
+            inode
+        };
 
         let mut created_veth = false;
         let operation = (|| -> Result<()> {
@@ -506,9 +522,9 @@ impl NetworkManager {
                 cleanup_failures.push(format!("delete new host veth: {cleanup_error:#}"));
             }
             if created_namespace
-                && (namespace_path.exists() || initial_namespace_path.exists())
-                && let Err(cleanup_error) = self.delete_namespace(namespace)
-                && (namespace_path.exists() || initial_namespace_path.exists())
+                && path_entry_exists(&namespace_path)?
+                && let Err(cleanup_error) = self.delete_namespace(namespace, namespace_inode)
+                && path_entry_exists(&namespace_path)?
             {
                 cleanup_failures.push(format!("delete new run namespace: {cleanup_error:#}"));
             }
@@ -521,25 +537,35 @@ impl NetworkManager {
                 ))
             };
         }
-        Ok(())
+        Ok(namespace_inode)
     }
 
     /// `ip netns add` persists a namespace by bind-mounting nsfs beneath
     /// `/run/netns`. The jailerd service intentionally has a private mount
     /// namespace, while VM transient units inherit PID 1's mount namespace.
     /// Create and remove only the named namespace handle through trusted
-    /// `nsenter`; all link, route and nftables work remains in this process.
-    fn create_namespace(&self, namespace: &str) -> Result<()> {
-        create_host_visible_namespace(&self.nsenter, &self.ip, &self.netns_root, namespace)?;
-        Ok(())
+    /// `nsenter`. All later lookups use PID 1's root because a child mount made
+    /// there is intentionally not propagated into the service's private bind
+    /// view; link, route and nftables work remains in this process.
+    fn create_namespace(&self, namespace: &str) -> Result<u64> {
+        create_host_visible_namespace(&self.nsenter, &self.ip, &self.netns_root, namespace)
     }
 
-    fn delete_namespace(&self, namespace: &str) -> Result<()> {
+    fn delete_namespace(&self, namespace: &str, expected_inode: u64) -> Result<()> {
+        self.verify_namespace_identity(namespace, expected_inode)?;
         delete_host_visible_namespace(&self.nsenter, &self.ip, &self.netns_root, namespace)
     }
 
     fn verify_namespace_visibility(&self, namespace: &str) -> Result<u64> {
         verify_host_visible_namespace(&self.netns_root, namespace)
+    }
+
+    fn verify_namespace_identity(&self, namespace: &str, expected_inode: u64) -> Result<()> {
+        let inode = self.verify_namespace_visibility(namespace)?;
+        if inode != expected_inode {
+            bail!("run network namespace identity differs from the recorded inode")
+        }
+        Ok(())
     }
 
     fn create_tap(
@@ -727,27 +753,31 @@ impl NetworkManager {
             &self.ip,
             args.iter().map(OsStr::new),
             None,
-            &self.netns_root,
+            &self.host_netns_root,
         )
     }
 
     fn ip_succeeds(&self, args: &[&str]) -> bool {
-        run_status(&self.ip, args.iter().map(OsStr::new), &self.netns_root)
+        run_status(&self.ip, args.iter().map(OsStr::new), &self.host_netns_root)
     }
 
     fn ip_output(&self, args: &[&str]) -> Result<String> {
-        run_output(&self.ip, args.iter().map(OsStr::new), &self.netns_root)
+        run_output(&self.ip, args.iter().map(OsStr::new), &self.host_netns_root)
     }
 
     fn nft_succeeds(&self, args: &[&str]) -> bool {
-        run_status(&self.nft, args.iter().map(OsStr::new), &self.netns_root)
+        run_status(
+            &self.nft,
+            args.iter().map(OsStr::new),
+            &self.host_netns_root,
+        )
     }
 
     fn ip_ignore(&self, args: &[String]) {
         let _ = run_status(
             &self.ip,
             args.iter().map(String::as_str).map(OsStr::new),
-            &self.netns_root,
+            &self.host_netns_root,
         );
     }
 
@@ -756,7 +786,7 @@ impl NetworkManager {
             &self.ip,
             args.iter().map(String::as_str).map(OsStr::new),
             None,
-            &self.netns_root,
+            &self.host_netns_root,
         )
     }
 
@@ -765,13 +795,13 @@ impl NetworkManager {
             &self.nft,
             [OsStr::new("--check"), OsStr::new("-f"), OsStr::new("-")],
             Some(script.as_bytes()),
-            &self.netns_root,
+            &self.host_netns_root,
         )?;
         run_checked(
             &self.nft,
             [OsStr::new("-f"), OsStr::new("-")],
             Some(script.as_bytes()),
-            &self.netns_root,
+            &self.host_netns_root,
         )
     }
 }
@@ -822,15 +852,8 @@ pub(crate) fn delete_host_visible_namespace(
 }
 
 pub(crate) fn verify_host_visible_namespace(root: &Path, namespace: &str) -> Result<u64> {
-    let daemon_inode =
-        namespace_inode(root, namespace).context("verify jailerd-view run network namespace")?;
     let initial_path = initial_mount_namespace_entry(root, namespace)?;
-    let initial_inode =
-        namespace_inode_path(&initial_path).context("verify PID-1-view run network namespace")?;
-    if daemon_inode != initial_inode {
-        bail!("run network namespace handle differs across jailerd and PID 1 mount namespaces")
-    }
-    Ok(daemon_inode)
+    namespace_inode_path(&initial_path).context("verify PID-1-view run network namespace")
 }
 
 fn host_mount_ip(nsenter: &Path, ip: &Path, netns_root: &Path, args: &[&str]) -> Result<()> {
@@ -1056,10 +1079,6 @@ fn trusted_tool(candidates: &[&str]) -> Option<PathBuf> {
         .find(|path| trusted_regular_file(path))
 }
 
-fn namespace_inode(root: &Path, name: &str) -> Result<u64> {
-    namespace_inode_path(&root.join(name))
-}
-
 fn namespace_inode_path(path: &Path) -> Result<u64> {
     let fd = open(
         path,
@@ -1077,11 +1096,68 @@ fn namespace_inode_path(path: &Path) -> Result<u64> {
     Ok(metadata.st_ino)
 }
 
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect path entry {}", path.display())),
+    }
+}
+
+fn validate_host_netns_root(local_root: &Path, host_root: &Path) -> Result<()> {
+    let local = trusted_directory_identity(local_root, "configured network namespace root")?;
+    let host = trusted_directory_identity(host_root, "PID-1-view network namespace root")?;
+    validate_netns_root_identities(local, host)
+}
+
+fn trusted_directory_identity(path: &Path, label: &str) -> Result<DirectoryIdentity> {
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .with_context(|| format!("open {label} {}", path.display()))?;
+    let stat = fstat(&fd).with_context(|| format!("stat {label} {}", path.display()))?;
+    let identity = DirectoryIdentity {
+        device: stat.st_dev as u64,
+        inode: stat.st_ino,
+        uid: stat.st_uid,
+        gid: stat.st_gid,
+        mode: stat.st_mode,
+    };
+    validate_netns_root_identity(identity, label)?;
+    Ok(identity)
+}
+
+fn validate_netns_root_identity(identity: DirectoryIdentity, label: &str) -> Result<()> {
+    if rustix::fs::FileType::from_raw_mode(identity.mode) != rustix::fs::FileType::Directory
+        || identity.uid != 0
+        || identity.gid != 0
+        || identity.mode & 0o022 != 0
+    {
+        bail!("{label} must be a root-owned, non-writable directory")
+    }
+    Ok(())
+}
+
+fn validate_netns_root_identities(local: DirectoryIdentity, host: DirectoryIdentity) -> Result<()> {
+    validate_netns_root_identity(local, "configured network namespace root")?;
+    validate_netns_root_identity(host, "PID-1-view network namespace root")?;
+    if (local.device, local.inode) != (host.device, host.inode) {
+        bail!("network namespace root differs across jailerd and PID 1 mount namespaces")
+    }
+    Ok(())
+}
+
 pub(crate) fn initial_mount_namespace_entry(root: &Path, name: &str) -> Result<PathBuf> {
+    Ok(initial_mount_namespace_root(root)?.join(name))
+}
+
+pub(crate) fn initial_mount_namespace_root(root: &Path) -> Result<PathBuf> {
     let relative = root
         .strip_prefix("/")
         .context("network namespace root is not absolute")?;
-    Ok(Path::new(INITIAL_ROOT).join(relative).join(name))
+    Ok(Path::new(INITIAL_ROOT).join(relative))
 }
 
 fn trusted_regular_file(path: &Path) -> bool {
@@ -1208,8 +1284,57 @@ mod tests {
     #[test]
     fn initial_mount_namespace_entry_stays_beneath_pid_one_root() {
         assert_eq!(
+            initial_mount_namespace_root(Path::new("/run/netns")).unwrap(),
+            Path::new("/proc/1/root/run/netns")
+        );
+        assert_eq!(
             initial_mount_namespace_entry(Path::new("/run/netns"), "intar-ns-test").unwrap(),
             Path::new("/proc/1/root/run/netns/intar-ns-test")
+        );
+    }
+
+    #[test]
+    fn initial_mount_namespace_root_rejects_relative_paths() {
+        let error = initial_mount_namespace_root(Path::new("run/netns")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("network namespace root is not absolute"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn netns_root_identity_requires_matching_safe_root_directories() {
+        let trusted = DirectoryIdentity {
+            device: 7,
+            inode: 11,
+            uid: 0,
+            gid: 0,
+            mode: 0o040755,
+        };
+        validate_netns_root_identities(trusted, trusted).unwrap();
+
+        let replaced = DirectoryIdentity {
+            inode: 12,
+            ..trusted
+        };
+        let error = validate_netns_root_identities(trusted, replaced).unwrap_err();
+        assert!(
+            error.to_string().contains("root differs across"),
+            "unexpected error: {error:#}"
+        );
+
+        let writable = DirectoryIdentity {
+            mode: 0o040777,
+            ..trusted
+        };
+        let error = validate_netns_root_identities(trusted, writable).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("root-owned, non-writable directory"),
+            "unexpected error: {error:#}"
         );
     }
 
@@ -1221,6 +1346,21 @@ mod tests {
         let error = namespace_inode_path(&path).unwrap_err();
         assert!(
             error.to_string().contains("not a root-owned nsfs entry"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn path_entry_probe_distinguishes_missing_dangling_and_inspection_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        assert!(!path_entry_exists(&missing).unwrap());
+        std::os::unix::fs::symlink("missing-target", directory.path().join("link")).unwrap();
+        assert!(path_entry_exists(&directory.path().join("link")).unwrap());
+        std::fs::write(directory.path().join("file"), b"").unwrap();
+        let error = path_entry_exists(&directory.path().join("file/child")).unwrap_err();
+        assert!(
+            error.to_string().contains("inspect path entry"),
             "unexpected error: {error:#}"
         );
     }

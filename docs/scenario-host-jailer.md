@@ -115,8 +115,9 @@ hash-pinned boot fixtures directly from their publishers into a root-only
 cache (or uses a pre-seeded cache with `--offline`), freezes socket activation,
 and invokes the artifact-backed test in a transient service with the same
 private-mount and filesystem hardening as `intar-jailerd.service`. The test
-requires each named run namespace to be an nsfs mount with the same inode in
-the daemon and PID-1 mount namespaces before a VM can launch. An isolated
+requires the daemon to resolve each root-owned nsfs handle through PID 1's
+root, while transient VM units prove the same inode at the configured
+`/run/netns` path before launch. An isolated
 in-memory jailerd authority
 advertises exactly 1000 schedulable millicores without changing production
 configuration. It boots eight concurrent 125-millicore v53.0 VMs in separate

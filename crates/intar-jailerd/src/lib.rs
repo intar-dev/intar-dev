@@ -1125,7 +1125,7 @@ pub trait JailPreparer: Send {
         &mut self,
         config: &JailerdConfig,
         request: &VmLaunchRequest,
-        netns_name: &str,
+        run_network: &RunNetworkResult,
         generation: &ValidatedId,
         uid: u32,
         gid: u32,
@@ -1170,12 +1170,12 @@ impl JailPreparer for FileSystemJailPreparer {
         &mut self,
         config: &JailerdConfig,
         request: &VmLaunchRequest,
-        netns_name: &str,
+        run_network: &RunNetworkResult,
         generation: &ValidatedId,
         uid: u32,
         gid: u32,
     ) -> Result<PreparedJail> {
-        prepare_jail_files(config, request, netns_name, generation, uid, gid)
+        prepare_jail_files(config, request, run_network, generation, uid, gid)
     }
 
     fn destroy(&mut self, config: &JailerdConfig, generation: &ValidatedId) -> Result<bool> {
@@ -1876,7 +1876,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         let prepared = match self.preparer.prepare(
             &self.config,
             &request,
-            &run_network.result.namespace_name,
+            &run_network.result,
             &generation,
             identity,
             identity,
@@ -2377,7 +2377,7 @@ fn current_host_boot_id() -> Option<String> {
 fn prepare_jail_files(
     config: &JailerdConfig,
     request: &VmLaunchRequest,
-    netns_name: &str,
+    run_network: &RunNetworkResult,
     generation: &ValidatedId,
     uid: u32,
     gid: u32,
@@ -2440,15 +2440,16 @@ fn prepare_jail_files(
         }
         apply_agent_acls(config, &generation_dir, &root)?;
 
-        if netns_name.is_empty()
-            || netns_name.len() > 64
-            || !netns_name
+        if run_network.namespace_name.is_empty()
+            || run_network.namespace_name.len() > 64
+            || !run_network
+                .namespace_name
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             bail!("invalid derived network namespace name")
         }
-        let netns_path = config.netns_root.join(netns_name);
+        let netns_path = config.netns_root.join(&run_network.namespace_name);
         let spec = JailSpecV1 {
             version: PROTOCOL_VERSION,
             generation: generation.clone(),
@@ -2456,9 +2457,11 @@ fn prepare_jail_files(
             gid,
             jail_root: root.clone(),
             netns_path,
+            netns_inode: run_network.namespace_inode,
             nofile_limit: 2_048,
             file_size_limit: config.vmm_file_size_limit_bytes,
         };
+        spec.validate().context("validate root-owned jail spec")?;
         let spec_path = generation_dir.join("jail-spec-v1.json");
         let mut spec_file = OpenOptions::new()
             .write(true)
@@ -3556,7 +3559,7 @@ mod tests {
             &mut self,
             config: &JailerdConfig,
             request: &VmLaunchRequest,
-            _netns_name: &str,
+            _run_network: &RunNetworkResult,
             generation: &ValidatedId,
             uid: u32,
             gid: u32,
@@ -3592,7 +3595,7 @@ mod tests {
             &mut self,
             config: &JailerdConfig,
             request: &VmLaunchRequest,
-            _netns_name: &str,
+            _run_network: &RunNetworkResult,
             generation: &ValidatedId,
             uid: u32,
             gid: u32,
@@ -3641,7 +3644,7 @@ mod tests {
             &mut self,
             _config: &JailerdConfig,
             _request: &VmLaunchRequest,
-            _netns_name: &str,
+            _run_network: &RunNetworkResult,
             _generation: &ValidatedId,
             _uid: u32,
             _gid: u32,
