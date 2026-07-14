@@ -205,6 +205,8 @@ recording_sha256=$(sha256sum "${run_root}/recordings.vfat" | awk '{print $1}')
 [ "${kernel_sha256}" = "${KERNEL_SHA256}" ] || die "cached kernel digest changed"
 
 self_test_unit="intar-jailerd-selftest-$$.service"
+# StopVm atomically exports each drained recording disk back into this exact
+# root-owned disposable artifact directory before DestroyVm removes its jail.
 systemd-run \
   --quiet \
   --wait \
@@ -219,7 +221,7 @@ systemd-run \
   --property=PrivateTmp=true \
   --property=ProtectHome=true \
   --property=ProtectSystem=strict \
-  --property='ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd' \
+  --property="ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd ${run_root}" \
   --property=ProtectClock=true \
   --property=ProtectControlGroups=true \
   --property=ProtectHostname=true \
