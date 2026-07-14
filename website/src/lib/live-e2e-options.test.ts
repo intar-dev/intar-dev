@@ -31,6 +31,13 @@ describe("live E2E options", () => {
     expect(options.waitReadyMs).toBe(12_345);
   });
 
+  it("defaults readiness beyond the quota-scaled agent deadline", () => {
+    const options = parseOptions([], requiredEnv);
+
+    expect(options.waitReadyMs).toBe(480_000);
+    expect(options.waitReadyMs).toBeGreaterThan(360_000);
+  });
+
   it("rejects inline values for boolean flags", () => {
     expect(() =>
       parseOptions(["--skip-publish=false"], requiredEnv),

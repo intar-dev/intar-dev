@@ -235,7 +235,8 @@ The harness fails unless all of these are true:
   throttling counters, and healthy sandbox state; the complete process tree is
   in the VM unit/cgroup.
 - The two-VM `pair-ping` run starts and reaches terminal-ready inside the
-  warm-start budget.
+  readiness timeout; the warm-start performance budget remains a separate
+  reflink-host gate.
 - Run payloads redact unrevealed hint bodies and solution markdown.
 - Skip-ahead hint reveal attempts are rejected without mutating reveal state.
 - The next hint reveal returns only that hint body and keeps later hints gated.
@@ -258,6 +259,12 @@ therefore requires a multi-session harness with two authenticated users and
 concurrent runs deliberately placed on the same agent host. That proof is outside
 this single-session harness; do not claim it from sequential or different-host
 runs.
+
+The agent scales its Kino boot-readiness deadline by the VM's aggregate CPU
+quota: the legacy 45-second budget at 1000 millicores becomes 360 seconds at
+125 millicores. The harness defaults `--wait-ready-ms` to `480000`, leaving time
+for desired-state delivery and report propagation beyond that bounded agent
+deadline.
 
 The default warm-start budget is `10000` milliseconds. Override only when
 diagnosing:
