@@ -104,8 +104,14 @@ pub struct Db {
 }
 
 enum Op {
-    UpsertVm(Box<VmRow>),
-    DeleteVm(String),
+    UpsertVm {
+        row: Box<VmRow>,
+        resp: oneshot::Sender<Result<()>>,
+    },
+    DeleteVm {
+        name: String,
+        resp: oneshot::Sender<Result<()>>,
+    },
     LoadVmProbeState {
         vm_name: String,
         resp: oneshot::Sender<Result<Option<VmProbeStateRow>>>,
@@ -227,19 +233,31 @@ impl Db {
     }
 
     pub async fn upsert_vm(&self, row: VmRow) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(Op::UpsertVm(Box::new(row)))
+            .send(Op::UpsertVm {
+                row: Box::new(row),
+                resp: resp_tx,
+            })
             .await
             .context("db channel closed")?;
-        Ok(())
+        resp_rx
+            .await
+            .context("db thread dropped vm upsert response")?
     }
 
     pub async fn delete_vm(&self, name: String) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(Op::DeleteVm(name))
+            .send(Op::DeleteVm {
+                name,
+                resp: resp_tx,
+            })
             .await
             .context("db channel closed")?;
-        Ok(())
+        resp_rx
+            .await
+            .context("db thread dropped vm delete response")?
     }
 
     pub async fn load_vm_probe_state(&self, vm_name: String) -> Result<Option<VmProbeStateRow>> {
@@ -469,15 +487,19 @@ fn db_thread_main(
 
     while let Some(op) = rx.blocking_recv() {
         match op {
-            Op::UpsertVm(row) => {
-                if let Err(error) = upsert_vm(&conn, &row) {
+            Op::UpsertVm { row, resp } => {
+                let result = upsert_vm(&conn, &row);
+                if let Err(error) = &result {
                     error!(error = %error, vm = row.name, "sqlite upsert vm failed");
                 }
+                let _ = resp.send(result);
             }
-            Op::DeleteVm(name) => {
-                if let Err(error) = delete_vm(&conn, &name) {
+            Op::DeleteVm { name, resp } => {
+                let result = delete_vm(&conn, &name);
+                if let Err(error) = &result {
                     error!(error = %error, vm = name, "sqlite delete vm failed");
                 }
+                let _ = resp.send(result);
             }
             Op::LoadVmProbeState { vm_name, resp } => {
                 let _ = resp.send(load_vm_probe_state(&conn, &vm_name));
@@ -1390,16 +1412,12 @@ mod tests {
         path
     }
 
-    #[test]
-    fn upsert_vm_persists_row_with_ssh_public_port() {
-        let path = test_db_path();
-        let conn = open_prepared_connection(&path).expect("open db");
-        let image_sha = "1".repeat(64);
-        let row = VmRow {
+    fn test_vm_row() -> VmRow {
+        VmRow {
             name: "vm-1".to_string(),
             state: "running".to_string(),
             image_key: Some("ubuntu".to_string()),
-            image_sha256: Some(image_sha.clone()),
+            image_sha256: Some("1".repeat(64)),
             created_at_s: 100,
             updated_at_s: 200,
             running_at_s: Some(150),
@@ -1436,7 +1454,26 @@ mod tests {
             cpu_millis: Some(125),
             vcpu_count: Some(1),
             ch_executable_sha256: Some("b".repeat(64)),
-        };
+        }
+    }
+
+    async fn open_test_db_thread(path: PathBuf) -> Db {
+        let (tx, rx) = mpsc::channel::<Op>(16);
+        let (init_tx, init_rx) = oneshot::channel::<Result<Vec<VmRow>>>();
+        std::thread::spawn(move || db_thread_main(path, rx, init_tx));
+        init_rx
+            .await
+            .expect("test db init response")
+            .expect("test db init");
+        Db { tx }
+    }
+
+    #[test]
+    fn upsert_vm_persists_row_with_ssh_public_port() {
+        let path = test_db_path();
+        let conn = open_prepared_connection(&path).expect("open db");
+        let image_sha = "1".repeat(64);
+        let row = test_vm_row();
 
         upsert_vm(&conn, &row).expect("upsert vm");
 
@@ -1458,6 +1495,70 @@ mod tests {
         assert_eq!(
             load_local_vm_image_shas(&conn).expect("load vm image shas"),
             vec![image_sha]
+        );
+    }
+
+    #[tokio::test]
+    async fn async_vm_writes_return_only_after_sqlite_applies_them() {
+        let path = test_db_path();
+        let db = open_test_db_thread(path.clone()).await;
+        let row = test_vm_row();
+
+        db.upsert_vm(row.clone()).await.expect("async upsert");
+        assert_eq!(
+            load_all_vms(&open_prepared_connection(&path).expect("read db"))
+                .expect("load inserted row")
+                .len(),
+            1
+        );
+
+        db.delete_vm(row.name).await.expect("async delete");
+        assert!(
+            load_all_vms(&open_prepared_connection(&path).expect("read db"))
+                .expect("load after delete")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn async_vm_writes_propagate_sqlite_execution_errors() {
+        let path = test_db_path();
+        let conn = open_prepared_connection(&path).expect("open db");
+        let existing = test_vm_row();
+        upsert_vm(&conn, &existing).expect("seed VM row");
+        conn.execute_batch(
+            r#"
+CREATE TRIGGER fail_vm_insert
+BEFORE INSERT ON vms
+BEGIN
+  SELECT RAISE(ABORT, 'forced vm insert failure');
+END;
+CREATE TRIGGER fail_vm_delete
+BEFORE DELETE ON vms
+BEGIN
+  SELECT RAISE(ABORT, 'forced vm delete failure');
+END;
+"#,
+        )
+        .expect("install failure triggers");
+        drop(conn);
+
+        let db = open_test_db_thread(path).await;
+        let mut new_row = test_vm_row();
+        new_row.name = "vm-2".to_string();
+        assert!(
+            db.upsert_vm(new_row)
+                .await
+                .expect_err("upsert SQL error must propagate")
+                .to_string()
+                .contains("upsert vms row")
+        );
+        assert!(
+            db.delete_vm(existing.name)
+                .await
+                .expect_err("delete SQL error must propagate")
+                .to_string()
+                .contains("delete vms row")
         );
     }
 

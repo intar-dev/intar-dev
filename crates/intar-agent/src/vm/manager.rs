@@ -545,6 +545,7 @@ struct Inner {
     create_sem: Arc<Semaphore>,
     delete_requests: Mutex<BTreeSet<String>>,
     cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    run_cleanup_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     archive_jobs_lock: Mutex<()>,
 }
 
@@ -587,6 +588,7 @@ impl VmManager {
             create_sem: Arc::new(Semaphore::new(8)),
             delete_requests: Mutex::new(BTreeSet::new()),
             cleanup_locks: Mutex::new(BTreeMap::new()),
+            run_cleanup_locks: Mutex::new(BTreeMap::new()),
             archive_jobs_lock: Mutex::new(()),
         };
         Ok(Self {
@@ -912,52 +914,10 @@ impl VmManager {
         let created_at = format_rfc3339_s(created_at_s);
         let updated_at_s = created_at_s;
 
-        let work_dir = resolve_work_dir(&self.inner.defaults)
-            .map_err(|e| ApiError::internal(format!("failed to resolve vm work dir: {e}")))?;
-        let vm_dir = work_dir.join("vms").join(&name);
-        let spool_dir = vm_spool_dir(&work_dir, &run_id, &name);
-        let recording_disk_path = spool_dir.join("recordings.vfat");
-
-        match tokio::fs::metadata(&vm_dir).await {
-            Ok(_) => {
-                return Err(ApiError::conflict(format!(
-                    "vm dir exists at {}",
-                    vm_dir.display()
-                )));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(ApiError::internal(format!(
-                    "failed to stat vm dir {}: {e}",
-                    vm_dir.display()
-                )));
-            }
-        }
-        tokio::fs::create_dir_all(&vm_dir)
-            .await
-            .with_context(|| format!("failed to create vm dir at {}", vm_dir.display()))
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        tokio::fs::create_dir_all(spool_dir.join("artifacts"))
-            .await
-            .with_context(|| format!("failed to create run spool at {}", spool_dir.display()))
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-
-        let root_disk_path = vm_dir.join("root.raw");
-        let config_disk_path = vm_dir.join(RUNTIME_DISK_FILENAME);
-        let ch_socket_path = vm_dir.join("cloud-hypervisor.sock");
-        let kino_vsock_path = vm_dir.join("kino.vsock");
-        let recording_disk_path_for_create = recording_disk_path.clone();
-        tokio::task::spawn_blocking(move || create_recording_disk(&recording_disk_path_for_create))
-            .await
-            .context("recording disk task panicked")
-            .map_err(|e| ApiError::internal(e.to_string()))?
-            .with_context(|| {
-                format!(
-                    "failed to create recording disk at {}",
-                    recording_disk_path.display()
-                )
-            })
-            .map_err(|e| ApiError::internal(e.to_string()))?;
+        // Reserve every in-memory-only resource before creating staging
+        // files. The CID guard stays held until the queued row is durable (or
+        // its provisional state is rolled back), so a concurrent request
+        // cannot reuse the same CID while persistence is in flight.
         let cid_guard = self.inner.kino_vsock_cid_lock.lock().await;
         let kino_vsock_cid = match scenario_runtime.kino.as_ref().map(|kino| kino.vsock_cid) {
             Some(vsock_cid) => {
@@ -983,6 +943,34 @@ impl VmManager {
         } else {
             None
         };
+
+        let work_dir = resolve_work_dir(&self.inner.defaults)
+            .map_err(|e| ApiError::internal(format!("failed to resolve vm work dir: {e}")))?;
+        let vm_dir = work_dir.join("vms").join(&name);
+        let spool_dir = vm_spool_dir(&work_dir, &run_id, &name);
+        let recording_disk_path = spool_dir.join("recordings.vfat");
+
+        for (kind, path) in [("vm dir", &vm_dir), ("vm spool", &spool_dir)] {
+            match tokio::fs::metadata(path).await {
+                Ok(_) => {
+                    return Err(ApiError::conflict(format!(
+                        "{kind} exists at {}",
+                        path.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(ApiError::internal(format!(
+                        "failed to stat {kind} {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        let root_disk_path = vm_dir.join("root.raw");
+        let config_disk_path = vm_dir.join(RUNTIME_DISK_FILENAME);
+        let ch_socket_path = vm_dir.join("cloud-hypervisor.sock");
+        let kino_vsock_path = vm_dir.join("kino.vsock");
 
         let details = VmDetails {
             image_key: Some(image_key.clone()),
@@ -1034,14 +1022,74 @@ impl VmManager {
             running_at_s: None,
         };
 
-        {
+        let reserved = {
             let mut states = self.inner.states.write().await;
-            states.insert(name.clone(), status.clone());
+            reserve_vm_state(&mut states, status.clone())
+        };
+        if !reserved {
+            return Err(ApiError::conflict(format!("vm \"{name}\" already exists")));
+        }
+
+        if let Err(error) = self.inner.db.upsert_vm(status.to_db_row()).await {
+            error!(error = %error, vm = name, "failed to persist vm status (queued); rolling back create");
+            if remove_matching_tracked_vm_state(&self.inner, &status).await {
+                clear_delete_request(&self.inner, &status.name).await;
+            }
+            let delete_error = self.inner.db.delete_vm(status.name.clone()).await.err();
+            drop(cid_guard);
+            return Err(ApiError::internal(match delete_error {
+                Some(delete_error) => format!(
+                    "failed to persist queued VM before launch: {error:#}; ambiguous-row delete also failed: {delete_error:#}"
+                ),
+                None => format!("failed to persist queued VM before launch: {error:#}"),
+            }));
         }
         drop(cid_guard);
 
-        if let Err(e) = self.inner.db.upsert_vm(status.to_db_row()).await {
-            error!(error = %e, "failed to persist vm status (queued)");
+        let staging_result = async {
+            tokio::fs::create_dir_all(&vm_dir)
+                .await
+                .with_context(|| format!("failed to create vm dir at {}", vm_dir.display()))?;
+            tokio::fs::create_dir_all(spool_dir.join("artifacts"))
+                .await
+                .with_context(|| {
+                    format!("failed to create run spool at {}", spool_dir.display())
+                })?;
+
+            let recording_disk_path_for_create = recording_disk_path.clone();
+            tokio::task::spawn_blocking(move || {
+                create_recording_disk(&recording_disk_path_for_create)
+            })
+            .await
+            .context("recording disk task panicked")?
+            .with_context(|| {
+                format!(
+                    "failed to create recording disk at {}",
+                    recording_disk_path.display()
+                )
+            })?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = staging_result {
+            let rollback_error =
+                rollback_persisted_queued_vm(&self.inner, &status, &vm_dir, &spool_dir)
+                    .await
+                    .err();
+            let rollback_failed = rollback_error.is_some();
+            let message = match rollback_error {
+                Some(rollback_error) => format!(
+                    "failed to stage queued VM: {error:#}; rollback also failed: {rollback_error:#}"
+                ),
+                None => format!("failed to stage queued VM: {error:#}"),
+            };
+            if rollback_failed {
+                mark_vm_failed(&self.inner, &status.name, message.clone()).await;
+                if take_delete_request(&self.inner, &status.name).await {
+                    spawn_vm_cleanup_task(Arc::clone(&self.inner), status.name.clone(), false);
+                }
+            }
+            return Err(ApiError::internal(message));
         }
         if let Err(error) = ensure_vm_network_reconciled(&self.inner).await {
             warn!(
@@ -1117,8 +1165,10 @@ impl VmManager {
             if let Err(e) = create_result {
                 let err = error_chain_to_string(&e);
                 stop_booting_vm(&inner, &name_for_task).await;
+                let _run_cleanup_guard =
+                    acquire_run_cleanup_lock(&inner.run_cleanup_locks, &run_id).await;
                 if let Err(cleanup_error) =
-                    cleanup_failed_jailed_launch(&inner, &run_id, &name_for_task).await
+                    cleanup_jailed_vm_by_logical_id(&inner, &run_id, &name_for_task).await
                 {
                     error!(
                         error = %cleanup_error,
@@ -1805,8 +1855,17 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
 
     set_state(inner, req.name, VmLifecycleState::CreatingVm).await;
 
+    // Launches and cleanup for the same run share one ordering domain. This
+    // prevents a new EnsureRunNetwork from interleaving between the last
+    // cleanup's sibling check and its DestroyRunNetwork request. Re-check a
+    // queued delete after this potentially blocking acquire so cancellation
+    // does not unnecessarily commit a jailed generation.
+    let run_launch_guard = acquire_run_cleanup_lock(&inner.run_cleanup_locks, req.run_id).await;
+    ensure_create_not_deleted(inner, req.name).await?;
     let (launch, run_network) = launch_jailed_cloud_hypervisor(inner, &req, &cached_image).await?;
     persist_jail_launch(inner, req.name, &launch, &run_network).await?;
+    drop(run_launch_guard);
+
     remove_agent_launch_sources(&req)
         .await
         .context("remove unprivileged launch staging files")?;
@@ -2043,37 +2102,31 @@ async fn stop_booting_vm(inner: &Arc<Inner>, vm_name: &str) {
     }
 }
 
-async fn cleanup_failed_jailed_launch(inner: &Inner, run_id: &str, vm_name: &str) -> Result<()> {
+async fn cleanup_jailed_vm_by_logical_id(inner: &Inner, run_id: &str, vm_name: &str) -> Result<()> {
     let selector = VmIdentityRequest::by_logical_id(
-        ValidatedId::parse(run_id.to_owned()).context("validate failed launch run ID")?,
-        ValidatedId::parse(vm_name.to_owned()).context("validate failed launch VM ID")?,
+        ValidatedId::parse(run_id.to_owned()).context("validate logical cleanup run ID")?,
+        ValidatedId::parse(vm_name.to_owned()).context("validate logical cleanup VM ID")?,
     );
-    let stop_error = match request_jailerd(inner, JailerRequest::StopVm(selector.clone())).await {
-        Ok(JailerResponse::StopVm(_)) => None,
-        Ok(JailerResponse::Error(error)) if error.code == "not_found" => return Ok(()),
-        Ok(JailerResponse::Error(error)) => Some(format!(
-            "jailerd {} while stopping failed launch: {}",
-            error.code, error.message
-        )),
-        Ok(response) => Some(format!(
-            "jailerd returned unexpected failed-launch stop response: {response:?}"
-        )),
-        Err(error) => Some(format!("failed-launch stop request failed: {error:#}")),
-    };
+    cleanup_jailed_vm_by_selector(inner, selector).await
+}
 
-    let destroy = request_jailerd(inner, JailerRequest::DestroyVm(selector)).await;
-    let destroy_error = match destroy {
-        Ok(JailerResponse::DestroyVm(_)) => None,
-        Ok(JailerResponse::Error(error)) if error.code == "not_found" => None,
-        Ok(JailerResponse::Error(error)) => Some(format!(
-            "jailerd {} while destroying failed launch: {}",
-            error.code, error.message
-        )),
-        Ok(response) => Some(format!(
-            "jailerd returned unexpected failed-launch destroy response: {response:?}"
-        )),
-        Err(error) => Some(format!("failed-launch destroy request failed: {error:#}")),
-    };
+async fn cleanup_jailed_vm_by_selector(inner: &Inner, selector: VmIdentityRequest) -> Result<()> {
+    let stop_error =
+        jailer_vm_selector_request(inner, selector.clone(), JailerIdentityOperation::Stop)
+            .await
+            .err()
+            .map(|error| format!("logical VM stop request failed: {error:#}"));
+
+    // Always follow StopVm with DestroyVm, including after a not-found stop.
+    // Both operations resolve the same typed (run_id, vm_id) selector, and a
+    // not-found response is an idempotent success. Avoid InspectVm here:
+    // inspection is an adoption/liveness operation whose API-ping checks may
+    // quarantine a partially launched VM before cleanup can drain it.
+    let destroy_error =
+        jailer_vm_selector_request(inner, selector, JailerIdentityOperation::Destroy)
+            .await
+            .err()
+            .map(|error| format!("logical VM destroy request failed: {error:#}"));
 
     match (stop_error, destroy_error) {
         (None, None) => Ok(()),
@@ -2137,10 +2190,26 @@ async fn cleanup_tracked_vm_with_mode(
 
     if cleanup_mode == CleanupMode::LocalOnly {
         teardown_vm_runtime(inner, &vm).await;
-        release_jailed_runtime(inner, &vm)
+        // Serialize the privileged release and durable local removal for every
+        // VM in a run. Without this guard, two concurrent cleanups can both
+        // observe the other tracked VM and both skip the shared run-network
+        // destroy. Holding it until the SQLite row is removed makes the next
+        // cleanup observe the completed predecessor, while a queued sibling
+        // that is not being deleted still keeps the network alive.
+        let _run_cleanup_guard = acquire_vm_run_cleanup_lock(inner, &vm).await;
+        if let Err(e) = release_jailed_runtime(inner, &vm)
             .await
-            .context("release jailed VM runtime during local cleanup")?;
-        local_cleanup_tracked_vm(inner, &vm, true).await;
+            .context("release jailed VM runtime during local cleanup")
+        {
+            let message = error_chain_to_string(&e);
+            mark_vm_delete_failed(inner, &vm.name, message).await;
+            return Err(e);
+        }
+        if let Err(e) = local_cleanup_tracked_vm(inner, &vm, true).await {
+            let message = error_chain_to_string(&e);
+            mark_vm_delete_failed(inner, &vm.name, message).await;
+            return Err(e);
+        }
         return Ok(CleanupOutcome::Deleted);
     }
 
@@ -2153,6 +2222,17 @@ async fn cleanup_tracked_vm_with_mode(
         }
     };
 
+    // Artifact capture and VMM shutdown can proceed concurrently, but the
+    // generation/network release decision and local state removal must be one
+    // ordered per-run operation. Failed release/archive work leaves the VM row
+    // tracked, so a later retry still protects or removes the shared network.
+    let _run_cleanup_guard = acquire_vm_run_cleanup_lock(inner, &vm).await;
+    if let Err(e) = release_jailed_runtime(inner, &vm).await {
+        let message = error_chain_to_string(&e);
+        mark_vm_delete_failed(inner, &vm.name, message).await;
+        return Err(e);
+    }
+
     if inner.bridge.enabled {
         set_state(inner, &vm.name, VmLifecycleState::ArchivingArtifacts).await;
         if let Err(e) = queue_archive_job(inner, &prepared).await {
@@ -2160,11 +2240,19 @@ async fn cleanup_tracked_vm_with_mode(
             mark_vm_delete_failed(inner, &vm.name, message).await;
             return Err(e);
         }
-        local_cleanup_tracked_vm(inner, &vm, false).await;
+        if let Err(e) = local_cleanup_tracked_vm(inner, &vm, false).await {
+            let message = error_chain_to_string(&e);
+            mark_vm_delete_failed(inner, &vm.name, message).await;
+            return Err(e);
+        }
         return Ok(CleanupOutcome::Deleted);
     }
 
-    local_cleanup_tracked_vm(inner, &vm, true).await;
+    if let Err(e) = local_cleanup_tracked_vm(inner, &vm, true).await {
+        let message = error_chain_to_string(&e);
+        mark_vm_delete_failed(inner, &vm.name, message).await;
+        return Err(e);
+    }
     Ok(CleanupOutcome::Deleted)
 }
 
@@ -2749,11 +2837,6 @@ async fn prepare_vm_for_delete(inner: &Inner, vm: &VmStatusResponse) -> Result<P
         extract_recordings_to_spool(Path::new(recording_disk_path), &artifacts_dir).await?;
     }
 
-    // Root-owned jail contents, TAPs, unit/cgroup state, and credentials are
-    // destroyed only by jailerd after the VM has drained and its artifacts
-    // have been copied. The agent never recursively deletes a jail path.
-    release_jailed_runtime(inner, vm).await?;
-
     Ok(PreparedVmDeletion {
         run_id,
         vm_name: vm.name.clone(),
@@ -2784,6 +2867,17 @@ async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse) -> Result<
         jailer_identity_request(inner, generation, JailerIdentityOperation::Destroy)
             .await
             .with_context(|| format!("destroy jail generation {generation}"))?;
+    } else if let Some(selector) = generationless_v6_launch_cleanup_selector(vm)? {
+        // A process crash can leave SQLite in any prelaunch state after
+        // jailerd has committed LaunchVm but before persist_jail_launch records
+        // the fresh generation (an earlier state transition may itself have
+        // failed to persist). Resolve only that narrow V6 window by the
+        // protocol's typed logical identity and drain it before considering
+        // the shared run network. Historical generation-less rows do not
+        // carry the V6 resource markers and deliberately stay local-only.
+        cleanup_jailed_vm_by_selector(inner, selector)
+            .await
+            .context("destroy generation-less jailed launch")?;
     }
 
     let Some(run_id) = details.run_id.as_deref() else {
@@ -2791,14 +2885,7 @@ async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse) -> Result<
     };
     let has_other_vm = {
         let states = inner.states.read().await;
-        states.iter().any(|(name, status)| {
-            name != &vm.name
-                && status
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.run_id.as_deref())
-                    == Some(run_id)
-        })
+        has_other_tracked_vm_for_run(&states, &vm.name, run_id)
     };
     if has_other_vm {
         return Ok(());
@@ -2820,6 +2907,47 @@ async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse) -> Result<
             "jailerd returned unexpected response to destroy_run_network: {response:?}"
         ),
     }
+}
+
+fn generationless_v6_launch_cleanup_selector(
+    vm: &VmStatusResponse,
+) -> Result<Option<VmIdentityRequest>> {
+    let Some(details) = vm.details.as_ref() else {
+        return Ok(None);
+    };
+    if details.jail_generation.is_some()
+        || details.cpu_millis.is_none()
+        || details.vcpu_count.is_none()
+    {
+        return Ok(None);
+    }
+
+    let run_id = details
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .context("generation-less V6 launch is missing its run ID")?;
+    Ok(Some(VmIdentityRequest::by_logical_id(
+        ValidatedId::parse(run_id.to_string())
+            .context("validate generation-less V6 launch run ID")?,
+        ValidatedId::parse(vm.name.clone()).context("validate generation-less V6 launch VM ID")?,
+    )))
+}
+
+fn has_other_tracked_vm_for_run(
+    states: &BTreeMap<String, VmStatusResponse>,
+    vm_name: &str,
+    run_id: &str,
+) -> bool {
+    states.iter().any(|(name, status)| {
+        name != vm_name
+            && status
+                .details
+                .as_ref()
+                .and_then(|details| details.run_id.as_deref())
+                == Some(run_id)
+    })
 }
 
 async fn upload_vm_run_artifacts(
@@ -3171,9 +3299,95 @@ fn hex_upper(nibble: u8) -> char {
     }
 }
 
-async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_spool_dir: bool) {
+async fn remove_vm_staging_paths(vm_name: &str, vm_dir: &Path, spool_dir: &Path) -> Result<()> {
+    let mut failures = Vec::new();
+    for (kind, path) in [("vm dir", vm_dir), ("vm spool", spool_dir)] {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => {
+                info!(vm = vm_name, path = %path.display(), "removed staged {kind}");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                failures.push(format!(
+                    "failed to remove {kind} {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(failures.join("; "))
+    }
+}
+
+async fn rollback_persisted_queued_vm(
+    inner: &Inner,
+    vm: &VmStatusResponse,
+    vm_dir: &Path,
+    spool_dir: &Path,
+) -> Result<()> {
+    remove_vm_staging_paths(&vm.name, vm_dir, spool_dir).await?;
+    inner
+        .db
+        .delete_vm(vm.name.clone())
+        .await
+        .context("delete queued VM row during staging rollback")?;
+    if !remove_matching_tracked_vm_state(inner, vm).await {
+        anyhow::bail!("queued VM state changed during staging rollback")
+    }
+    clear_delete_request(inner, &vm.name).await;
+    Ok(())
+}
+
+async fn remove_matching_tracked_vm_state(inner: &Inner, expected: &VmStatusResponse) -> bool {
+    let mut states = inner.states.write().await;
+    remove_matching_vm_state(&mut states, expected)
+}
+
+fn remove_matching_vm_state(
+    states: &mut BTreeMap<String, VmStatusResponse>,
+    expected: &VmStatusResponse,
+) -> bool {
+    let expected_run_id = expected
+        .details
+        .as_ref()
+        .and_then(|details| details.run_id.as_deref());
+    let matches = states.get(&expected.name).is_some_and(|current| {
+        current.created_at_s == expected.created_at_s
+            && current
+                .details
+                .as_ref()
+                .and_then(|details| details.run_id.as_deref())
+                == expected_run_id
+    });
+    if matches {
+        states.remove(&expected.name);
+    }
+    matches
+}
+
+fn reserve_vm_state(
+    states: &mut BTreeMap<String, VmStatusResponse>,
+    status: VmStatusResponse,
+) -> bool {
+    if states.contains_key(&status.name) {
+        return false;
+    }
+    states.insert(status.name.clone(), status);
+    true
+}
+
+async fn local_cleanup_tracked_vm(
+    inner: &Inner,
+    vm: &VmStatusResponse,
+    remove_spool_dir: bool,
+) -> Result<()> {
     clear_delete_request(inner, &vm.name).await;
     stop_terminal_worker(inner, &vm.name).await;
+
+    let mut filesystem_failures = Vec::new();
 
     if let Some(vm_dir) = agent_owned_vm_dir_for_status(vm) {
         match tokio::fs::remove_dir_all(&vm_dir).await {
@@ -3182,7 +3396,8 @@ async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_s
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                error!(error = %e, vm = vm.name, path = %vm_dir.display(), "failed to delete vm dir");
+                filesystem_failures
+                    .push(format!("failed to delete vm dir {}: {e}", vm_dir.display()));
             }
         }
     }
@@ -3193,40 +3408,45 @@ async fn local_cleanup_tracked_vm(inner: &Inner, vm: &VmStatusResponse, remove_s
             && let Err(e) = tokio::fs::remove_file(recording_disk_path).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            error!(
-                error = %e,
-                vm = vm.name,
-                path = recording_disk_path,
-                "failed to delete recording disk"
-            );
+            filesystem_failures.push(format!(
+                "failed to delete recording disk {recording_disk_path}: {e}"
+            ));
         }
         if remove_spool_dir
             && let Some(spool_dir) = details.spool_dir.as_deref()
             && let Err(e) = tokio::fs::remove_dir_all(spool_dir).await
             && e.kind() != std::io::ErrorKind::NotFound
         {
-            error!(
-                error = %e,
-                vm = vm.name,
-                path = spool_dir,
-                "failed to delete run spool dir"
-            );
+            filesystem_failures.push(format!("failed to delete run spool dir {spool_dir}: {e}"));
         }
     }
 
-    {
-        let mut states = inner.states.write().await;
-        states.remove(&vm.name);
+    if !filesystem_failures.is_empty() {
+        anyhow::bail!(filesystem_failures.join("; "))
+    }
+
+    // Keep the in-memory row (and therefore sibling/network protection) until
+    // SQLite has durably removed this VM. Db::delete_vm acknowledges the
+    // actual SQL statement rather than merely queueing it to the DB thread.
+    inner
+        .db
+        .delete_vm(vm.name.clone())
+        .await
+        .with_context(|| format!("delete VM {} from sqlite", vm.name))?;
+
+    if !remove_matching_tracked_vm_state(inner, vm).await {
+        warn!(
+            vm = vm.name,
+            "VM state changed after durable sqlite removal"
+        );
     }
     {
         let mut fingerprints = inner.terminal_state_fingerprints.lock().await;
         fingerprints.remove(&vm.name);
     }
 
-    if let Err(e) = inner.db.delete_vm(vm.name.clone()).await {
-        error!(error = %e, vm = vm.name, "failed to delete vm row from sqlite");
-    }
     info!(vm = vm.name, "cleaned up tracked vm");
+    Ok(())
 }
 
 fn is_create_in_progress_state(state: VmLifecycleState) -> bool {
@@ -3256,11 +3476,38 @@ async fn clear_delete_request(inner: &Inner, name: &str) {
 }
 
 async fn acquire_vm_cleanup_lock(inner: &Inner, name: &str) -> OwnedMutexGuard<()> {
+    acquire_cleanup_lock(&inner.cleanup_locks, name).await
+}
+
+async fn acquire_vm_run_cleanup_lock(
+    inner: &Inner,
+    vm: &VmStatusResponse,
+) -> Option<OwnedMutexGuard<()>> {
+    let run_id = vm
+        .details
+        .as_ref()
+        .and_then(|details| details.run_id.as_deref())
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())?;
+    Some(acquire_run_cleanup_lock(&inner.run_cleanup_locks, run_id).await)
+}
+
+async fn acquire_run_cleanup_lock(
+    run_cleanup_locks: &Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    run_id: &str,
+) -> OwnedMutexGuard<()> {
+    acquire_cleanup_lock(run_cleanup_locks, run_id).await
+}
+
+async fn acquire_cleanup_lock(
+    locks: &Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    key: &str,
+) -> OwnedMutexGuard<()> {
     let lock = {
-        let mut locks = inner.cleanup_locks.lock().await;
+        let mut locks = locks.lock().await;
         Arc::clone(
             locks
-                .entry(name.to_string())
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     };
@@ -4092,13 +4339,29 @@ async fn jailer_identity_request(
     let identity = VmIdentityRequest::by_generation(
         ValidatedId::parse(generation.to_string()).context("validate persisted jail generation")?,
     );
+    jailer_vm_selector_request(inner, identity, operation).await
+}
+
+async fn jailer_vm_selector_request(
+    inner: &Inner,
+    identity: VmIdentityRequest,
+    operation: JailerIdentityOperation,
+) -> Result<Option<VmInspection>> {
+    identity.validate().context("validate jailer VM selector")?;
     let request = match operation {
         JailerIdentityOperation::Inspect => JailerRequest::InspectVm(identity),
         JailerIdentityOperation::Stop => JailerRequest::StopVm(identity),
         JailerIdentityOperation::Destroy => JailerRequest::DestroyVm(identity),
     };
 
-    match (operation, request_jailerd(inner, request).await?) {
+    classify_jailer_identity_response(operation, request_jailerd(inner, request).await?)
+}
+
+fn classify_jailer_identity_response(
+    operation: JailerIdentityOperation,
+    response: JailerResponse,
+) -> Result<Option<VmInspection>> {
+    match (operation, response) {
         (JailerIdentityOperation::Inspect, JailerResponse::InspectVm(inspection)) => {
             Ok(Some(inspection))
         }
@@ -5257,6 +5520,7 @@ mod tests {
     use crate::kino_probe::{ProbeSummary, ProbeView};
     use cloud_hypervisor_client::Error as ChError;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn ch_is_not_created_error(err: &ChError) -> bool {
         matches!(err, ChError::HttpStatus { status: 404, .. })
@@ -5494,6 +5758,240 @@ mod tests {
             matching_vm_names_for_run_id(&states, "run-1"),
             vec!["vm-a".to_string(), "vm-b".to_string()]
         );
+    }
+
+    #[test]
+    fn generationless_v6_cleanup_uses_only_typed_logical_identity() {
+        let mut vm = test_vm_status("vm-prelaunch", Some("run-1"));
+
+        for state in [
+            VmLifecycleState::Queued,
+            VmLifecycleState::CachingImage,
+            VmLifecycleState::PreparingDisks,
+            VmLifecycleState::CreatingVm,
+            VmLifecycleState::BootingVm,
+            VmLifecycleState::Running,
+            VmLifecycleState::DeletingVm,
+            VmLifecycleState::ArchivingArtifacts,
+            VmLifecycleState::Failed,
+            VmLifecycleState::DeleteFailed,
+        ] {
+            vm.state = state;
+            let selector = generationless_v6_launch_cleanup_selector(&vm)
+                .expect("valid selector")
+                .expect("V6 generation-less row is eligible in every retry state");
+            assert_eq!(selector.generation, None);
+            assert_eq!(
+                selector.run_id.as_ref().map(ValidatedId::as_str),
+                Some("run-1")
+            );
+            assert_eq!(
+                selector.vm_id.as_ref().map(ValidatedId::as_str),
+                Some("vm-prelaunch")
+            );
+        }
+
+        vm.details.as_mut().expect("details").jail_generation = Some("generation-1".to_string());
+        assert!(
+            generationless_v6_launch_cleanup_selector(&vm)
+                .expect("generation selector check")
+                .is_none(),
+            "persisted generations must use generation identity"
+        );
+
+        let mut historical = test_vm_status("vm-historical", Some("run-1"));
+        let details = historical.details.as_mut().expect("details");
+        details.cpu_millis = None;
+        details.vcpu_count = None;
+        assert!(
+            generationless_v6_launch_cleanup_selector(&historical)
+                .expect("historical selector check")
+                .is_none(),
+            "pre-V6 generation-less rows must remain local-only"
+        );
+    }
+
+    #[test]
+    fn generationless_v6_cleanup_rejects_missing_or_invalid_logical_ids() {
+        let mut missing_run = test_vm_status("vm-prelaunch", None);
+        missing_run.state = VmLifecycleState::CreatingVm;
+        assert!(generationless_v6_launch_cleanup_selector(&missing_run).is_err());
+
+        let invalid_vm = test_vm_status("vm/invalid", Some("run-1"));
+        assert!(generationless_v6_launch_cleanup_selector(&invalid_vm).is_err());
+    }
+
+    #[test]
+    fn logical_cleanup_treats_not_found_stop_and_destroy_as_idempotent_success() {
+        for operation in [
+            JailerIdentityOperation::Stop,
+            JailerIdentityOperation::Destroy,
+        ] {
+            let response = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+                "not_found",
+                "logical VM is already absent",
+            ));
+            assert!(
+                classify_jailer_identity_response(operation, response)
+                    .expect("not-found cleanup is successful")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn logical_cleanup_failure_is_not_misclassified_as_absence() {
+        let response = JailerResponse::Error(intar_jailer_protocol::ProtocolError::new(
+            "resource_busy",
+            "unit still populated",
+        ));
+        assert!(
+            classify_jailer_identity_response(JailerIdentityOperation::Destroy, response).is_err()
+        );
+    }
+
+    #[test]
+    fn provisional_state_reservation_is_atomic_and_rollback_preserves_siblings() {
+        let first = test_vm_status("vm-1", Some("run-1"));
+        let duplicate = first.clone();
+        let sibling = test_vm_status("vm-2", Some("run-1"));
+        let replacement = {
+            let mut replacement = first.clone();
+            replacement.created_at_s = replacement.created_at_s.saturating_add(1);
+            replacement
+        };
+        let mut states = BTreeMap::new();
+
+        assert!(reserve_vm_state(&mut states, first.clone()));
+        assert!(!reserve_vm_state(&mut states, duplicate));
+        assert!(reserve_vm_state(&mut states, sibling.clone()));
+        assert!(remove_matching_vm_state(&mut states, &first));
+        assert!(states.contains_key(&sibling.name));
+
+        assert!(reserve_vm_state(&mut states, replacement));
+        assert!(!remove_matching_vm_state(&mut states, &first));
+        assert!(states.contains_key(&first.name));
+    }
+
+    #[tokio::test]
+    async fn staging_rollback_removes_only_the_reserved_vm_paths() {
+        let temp = tempdir().expect("temp dir");
+        let vm_dir = temp.path().join("vms").join("vm-1");
+        let spool_dir = temp.path().join("run-spool").join("run-1").join("vm-1");
+        let sibling_dir = temp.path().join("vms").join("vm-2");
+        tokio::fs::create_dir_all(&vm_dir).await.expect("vm dir");
+        tokio::fs::create_dir_all(spool_dir.join("artifacts"))
+            .await
+            .expect("spool dir");
+        tokio::fs::create_dir_all(&sibling_dir)
+            .await
+            .expect("sibling dir");
+
+        remove_vm_staging_paths("vm-1", &vm_dir, &spool_dir)
+            .await
+            .expect("rollback paths");
+
+        assert!(!vm_dir.exists());
+        assert!(!spool_dir.exists());
+        assert!(sibling_dir.exists());
+    }
+
+    #[test]
+    fn generationless_cleanup_keeps_run_network_until_sibling_row_is_removed() {
+        let orphan = test_vm_status("vm-orphan", Some("run-1"));
+        let sibling = test_vm_status("vm-sibling", Some("run-1"));
+        let mut states = BTreeMap::from([
+            (orphan.name.clone(), orphan.clone()),
+            (sibling.name.clone(), sibling.clone()),
+        ]);
+
+        assert!(
+            generationless_v6_launch_cleanup_selector(&orphan)
+                .expect("selector")
+                .is_some()
+        );
+        assert!(has_other_tracked_vm_for_run(&states, &orphan.name, "run-1"));
+
+        states.remove(&sibling.name);
+        assert!(!has_other_tracked_vm_for_run(
+            &states,
+            &orphan.name,
+            "run-1"
+        ));
+    }
+
+    #[test]
+    fn pending_same_run_sibling_keeps_shared_network_tracked() {
+        let deleting = test_vm_status("vm-deleting", Some("run-1"));
+        let mut pending = test_vm_status("vm-pending", Some("run-1"));
+        pending.state = VmLifecycleState::CachingImage;
+        assert_eq!(
+            pending
+                .details
+                .as_ref()
+                .and_then(|details| details.jail_generation.as_deref()),
+            None,
+            "fixture must represent a sibling not yet committed to jailerd"
+        );
+        let states = BTreeMap::from([
+            (deleting.name.clone(), deleting),
+            (pending.name.clone(), pending),
+        ]);
+
+        assert!(has_other_tracked_vm_for_run(
+            &states,
+            "vm-deleting",
+            "run-1"
+        ));
+    }
+
+    #[test]
+    fn ordered_same_run_cleanup_recognizes_the_last_vm_after_predecessor_removal() {
+        let first = test_vm_status("vm-first", Some("run-1"));
+        let last = test_vm_status("vm-last", Some("run-1"));
+        let mut states = BTreeMap::from([(first.name.clone(), first), (last.name.clone(), last)]);
+
+        assert!(has_other_tracked_vm_for_run(&states, "vm-first", "run-1"));
+        states.remove("vm-first");
+        assert!(!has_other_tracked_vm_for_run(&states, "vm-last", "run-1"));
+    }
+
+    #[tokio::test]
+    async fn run_lock_serializes_cleanup_and_launch_without_blocking_other_runs() {
+        let locks = Arc::new(Mutex::new(BTreeMap::new()));
+        let cleanup_guard = acquire_run_cleanup_lock(&locks, "run-1").await;
+
+        let (attempting_tx, attempting_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let same_run_locks = Arc::clone(&locks);
+        let launch_task = tokio::spawn(async move {
+            let _ = attempting_tx.send(());
+            let _launch_guard = acquire_run_cleanup_lock(&same_run_locks, "run-1").await;
+            let _ = acquired_tx.send(());
+        });
+        attempting_rx.await.expect("same-run launch started");
+
+        assert!(
+            timeout(Duration::from_millis(25), &mut acquired_rx)
+                .await
+                .is_err(),
+            "same-run launch acquired its lock before cleanup completed"
+        );
+
+        let other_run_guard = timeout(
+            Duration::from_secs(1),
+            acquire_run_cleanup_lock(&locks, "run-2"),
+        )
+        .await
+        .expect("another run's launch must not wait behind run-1 cleanup");
+        drop(other_run_guard);
+
+        drop(cleanup_guard);
+        timeout(Duration::from_secs(1), &mut acquired_rx)
+            .await
+            .expect("same-run launch should continue after cleanup")
+            .expect("same-run launch should report lock acquisition");
+        launch_task.await.expect("same-run launch completed");
     }
 
     #[test]
