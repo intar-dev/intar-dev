@@ -192,7 +192,7 @@ mod linux {
     use cloud_hypervisor_client::{
         Client as CloudHypervisorClient, ConsoleConfig, CpusConfig, DiskConfig, DiskImageType,
         Error as CloudHypervisorError, MemoryConfig, NetConfig, PayloadConfig, SerialConfig,
-        VmConfig, VmInfo, VmState,
+        VmConfig, VmInfo, VmState, VsockConfig,
     };
     use intar_jailer_protocol::{
         ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
@@ -1788,6 +1788,8 @@ mod linux {
                 runtime
                     .block_on(start_smoke_vm(&client, &vm_config))
                     .with_context(|| format!("start package-smoke VM {index}"))?;
+                assert_smoke_vsock_socket(&smoke_config, launch)
+                    .with_context(|| format!("validate package-smoke VM {index} vsock"))?;
                 clients.push(client);
             }
 
@@ -2065,8 +2067,6 @@ mod linux {
             ),
             guest_ip_cidr: format!("10.77.255.{}/28", index.saturating_add(242)),
             ssh_public_port: None,
-            // Deliberately unused in VmConfig below. The protocol still
-            // requires a valid typed CID for parity with production launches.
             vsock_cid: 4_294_000_001_u32.saturating_add(u32::from(index)),
             artifacts: protocol_artifacts(config, artifacts)?,
         })
@@ -2217,11 +2217,92 @@ mod linux {
                 iommu: false,
                 socket: None,
             }),
-            // This is the explicit package proof that v53 can boot without
-            // exposing /dev/vhost-vsock.
-            vsock: None,
+            // Exercise the same v53 Unix-backend path used by production.
+            // This proves that the jailed VMM can create /run/kino.vsock
+            // without exposing /dev/vhost-vsock.
+            vsock: Some(VsockConfig {
+                cid: u64::from(request.vsock_cid),
+                socket: path_utf8(&launch.paths.jailed_vsock_socket)?,
+                iommu: false,
+                pci_segment: None,
+                id: Some("selftest-kino-vsock".to_owned()),
+            }),
             landlock_enable: Some(true),
         })
+    }
+
+    fn assert_smoke_vsock_socket(config: &JailerdConfig, launch: &VmLaunchResult) -> Result<()> {
+        let jail_root = open(
+            &config.jail_root,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .context("pin trusted jail root for vsock validation")?;
+        let generation_root = PathBuf::from("cloud-hypervisor")
+            .join(launch.generation.as_str())
+            .join("root");
+        let root = openat2(
+            &jail_root,
+            &generation_root,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("pin package-smoke jail root for vsock validation")?;
+        let root_stat = rustix::fs::fstat(&root)?;
+        ensure!(
+            launch
+                .jail_root_inode
+                .is_some_and(|inode| inode == root_stat.st_ino),
+            "package-smoke jail root inode changed"
+        );
+        let run = openat2(
+            &root,
+            "run",
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("pin package-smoke runtime directory")?;
+        let run_stat = rustix::fs::fstat(&run)?;
+        ensure!(
+            rustix::fs::FileType::from_raw_mode(run_stat.st_mode)
+                == rustix::fs::FileType::Directory
+                && run_stat.st_uid == launch.uid
+                && run_stat.st_gid == launch.gid
+                && run_stat.st_nlink >= 1
+                && run_stat.st_mode & 0o700 == 0o700
+                && run_stat.st_mode & 0o007 == 0,
+            "package-smoke runtime directory has unsafe metadata"
+        );
+        let socket = openat2(
+            &run,
+            "kino.vsock",
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH
+                | ResolveFlags::NO_MAGICLINKS
+                | ResolveFlags::NO_SYMLINKS
+                | ResolveFlags::NO_XDEV,
+        )
+        .context("pin package-smoke Cloud Hypervisor vsock")?;
+        let socket_stat = rustix::fs::fstat(&socket)?;
+        ensure!(
+            rustix::fs::FileType::from_raw_mode(socket_stat.st_mode)
+                == rustix::fs::FileType::Socket
+                && socket_stat.st_uid == launch.uid
+                && socket_stat.st_gid == launch.gid
+                && socket_stat.st_nlink == 1
+                && socket_stat.st_mode & 0o007 == 0,
+            "package-smoke Cloud Hypervisor vsock has unsafe metadata"
+        );
+        Ok(())
     }
 
     async fn start_smoke_vm(client: &CloudHypervisorClient, config: &VmConfig) -> Result<()> {

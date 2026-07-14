@@ -350,13 +350,18 @@ mod linux {
                 gid,
             )?;
         }
+        // Cloud Hypervisor v53 builds a second, VM-specific Landlock domain
+        // during vm.create. Its landlock 0.4.5 helper must open /run to anchor
+        // the typed vsock rule and silently skips the rule if that open is
+        // denied. ReadDir is therefore required by the nested setup itself;
+        // without it, vm.boot later fails binding /run/kino.vsock with EACCES.
         push_jail_rule(
             &mut rules,
             &root,
             "run",
             RuleAnchorKind::VmDirectory,
             make_bitflags!(AccessFs::{
-                ReadFile | WriteFile | RemoveFile | MakeReg | MakeSock | Truncate
+                ReadFile | ReadDir | WriteFile | RemoveFile | MakeReg | MakeSock | Truncate
             }),
             uid,
             gid,
