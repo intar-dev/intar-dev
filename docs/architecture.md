@@ -142,7 +142,15 @@ host keys and includes them in VM reports. The launch deadline treats 45 seconds
 as a one-core CPU-time budget and scales wall time as
 `ceil(45 * 1000 / cpu_millis)`, bounded to 45–360 seconds. A 125-millicore VM
 therefore gets up to 360 seconds to complete its first boot without relaxing its
-hard CPU ceiling.
+hard CPU ceiling. The generated guest supervisor gives `sshd` 120 seconds from
+the start of its activation, measured against Linux's monotonic uptime instead
+of a fixed retry count. That covers the quota-scaled 80-second equivalent of the
+old ten-second budget with 50% headroom. This caps the SSH phase at one third of
+the 360-second agent deadline; earlier and later first-boot work shares the same
+whole-runtime deadline. Readiness is only accepted after the queued nonblocking
+SSH restart job has drained.
+Image content hashes use build format `intar-image-build-v4`, ensuring images
+generated with the earlier retry-count supervisor are rebuilt rather than reused.
 
 ## Guest Runtime
 

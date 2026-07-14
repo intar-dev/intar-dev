@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v3";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v4";
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashParams<'a> {
@@ -116,7 +116,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        ScenarioContentHashParams, normalize_relative_path, scenario_content_hash_from_entries,
+        BUILD_FORMAT_VERSION, ScenarioContentHashParams, normalize_relative_path,
+        scenario_content_hash_from_entries,
     };
 
     fn params() -> ScenarioContentHashParams<'static> {
@@ -147,6 +148,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn v4_build_format_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v4");
+        let hash = scenario_content_hash_from_entries(
+            &params(),
+            &[
+                ("b.txt".to_string(), b"bee".to_vec()),
+                ("a.txt".to_string(), b"aye".to_vec()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            hash,
+            "141227467402c303e6001226bdd348eb734c30d8dc4c94290d25c1d47266c510"
+        );
     }
 
     #[test]
