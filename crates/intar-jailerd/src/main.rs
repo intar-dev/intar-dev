@@ -98,6 +98,15 @@ enum Command {
         #[arg(long)]
         denied_path: PathBuf,
     },
+    #[command(hide = true)]
+    SelfTestAgentApiWorker {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        expected_uid: u32,
+        #[arg(long)]
+        expected_gid: u32,
+    },
 }
 
 fn main() {
@@ -152,6 +161,11 @@ fn run() -> Result<()> {
             allowed_dir,
             denied_path,
         } => self_test::worker(&report, &allowed_dir, &denied_path),
+        Command::SelfTestAgentApiWorker {
+            socket,
+            expected_uid,
+            expected_gid,
+        } => self_test::agent_api_worker(&socket, expected_uid, expected_gid),
     }
 }
 

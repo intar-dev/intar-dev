@@ -27,6 +27,7 @@ cloud-hypervisor-client = { path = "../cloud-hypervisor-client" }
 kvm-ioctls = "=0.25.0"
 landlock = "=0.4.5"
 libc = "=0.2.186"
+nix = { workspace = true, features = ["user"] }
 tokio.workspace = true
 
 # `main.rs` denies unsafe code globally and contains one narrowly allowed,

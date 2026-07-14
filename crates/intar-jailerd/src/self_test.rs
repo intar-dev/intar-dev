@@ -151,6 +151,18 @@ pub fn worker(_report: &Path, _allowed_dir: &Path, _denied_path: &Path) -> Resul
     bail!("the jailerd self-test worker is supported only on Linux")
 }
 
+/// Hidden worker used by the root self-test to prove the typed VMM API is
+/// reachable after dropping to the exact configured agent identity.
+#[cfg(target_os = "linux")]
+pub fn agent_api_worker(socket: &Path, expected_uid: u32, expected_gid: u32) -> Result<()> {
+    linux::agent_api_worker(socket, expected_uid, expected_gid)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn agent_api_worker(_socket: &Path, _expected_uid: u32, _expected_gid: u32) -> Result<()> {
+    bail!("the jailerd agent API worker is supported only on Linux")
+}
+
 fn validate_sha256(value: &str) -> Result<()> {
     if value.len() != 64
         || !value
@@ -707,6 +719,59 @@ mod linux {
         drop(vcpu);
         drop(vm);
         drop(kvm);
+        Ok(())
+    }
+
+    pub(super) fn agent_api_worker(
+        socket: &Path,
+        expected_uid: u32,
+        expected_gid: u32,
+    ) -> Result<()> {
+        ensure!(
+            expected_uid != 0 && expected_gid != 0,
+            "agent API worker refuses root identity"
+        );
+        ensure!(
+            socket.is_absolute() && socket.file_name() == Some(OsStr::new("cloud-hypervisor.sock")),
+            "agent API worker requires an absolute Cloud Hypervisor socket path"
+        );
+        ensure!(
+            rustix::process::geteuid().is_root(),
+            "agent API worker must start as root so it can clear every supplementary group"
+        );
+        // Drop all three credential IDs in the worker itself. `CommandExt::uid`
+        // and `gid` do not clear inherited supplementary groups, so relying on
+        // them would make this weaker than the production agent identity.
+        let uid = nix::unistd::Uid::from_raw(expected_uid);
+        let gid = nix::unistd::Gid::from_raw(expected_gid);
+        nix::unistd::setgroups(&[]).context("clear agent API worker supplementary groups")?;
+        nix::unistd::setresgid(gid, gid, gid).context("drop agent API worker GID")?;
+        nix::unistd::setresuid(uid, uid, uid).context("drop agent API worker UID")?;
+        let uid = rustix::process::getuid().as_raw();
+        let euid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        let egid = rustix::process::getegid().as_raw();
+        ensure!(
+            uid == expected_uid && euid == expected_uid,
+            "agent API worker UID does not match the configured agent"
+        );
+        ensure!(
+            gid == expected_gid && egid == expected_gid,
+            "agent API worker GID does not match the configured agent"
+        );
+        ensure!(
+            rustix::process::getgroups()?.is_empty(),
+            "agent API worker retained supplementary groups"
+        );
+        let client = CloudHypervisorClient::new(path_utf8(socket)?)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime
+            .block_on(async {
+                tokio::time::timeout(CLOUD_HYPERVISOR_API_CALL_TIMEOUT, client.ping()).await
+            })
+            .context("agent API worker ping timed out")??;
         Ok(())
     }
 
@@ -1569,6 +1634,7 @@ mod linux {
         artifact_root: &Path,
         directory: &Path,
     ) -> Result<()> {
+        let agent_probe_executable = trusted_current_exe()?.path;
         let lifecycle_root = directory.join("cloud-hypervisor-lifecycle");
         create_root_directory(&lifecycle_root)?;
         let mut smoke_config = config.clone();
@@ -1702,6 +1768,15 @@ mod linux {
                 let landlock_canary = launch.paths.host_jail_root.join("run/landlock-api-canary");
                 write_new_root_file(&landlock_canary, b"landlock-vmm-negative\n", 0o444)
                     .with_context(|| format!("create package-smoke VM {index} Landlock canary"))?;
+                prove_agent_api_access(
+                    &agent_probe_executable,
+                    &launch.paths.host_api_socket,
+                    smoke_config.agent_uid,
+                    smoke_config.agent_gid,
+                )
+                .with_context(|| {
+                    format!("prove package-smoke VM {index} API access as the agent identity")
+                })?;
                 let client = CloudHypervisorClient::new(path_utf8(&launch.paths.host_api_socket)?)?;
                 let vm_config = smoke_vm_config(launch, request)?;
                 runtime
@@ -1754,6 +1829,36 @@ mod linux {
                 Err(operation).context(format!("package-smoke cleanup also failed: {cleanup:#}"))
             }
         }
+    }
+
+    fn prove_agent_api_access(
+        executable: &Path,
+        socket: &Path,
+        agent_uid: u32,
+        agent_gid: u32,
+    ) -> Result<()> {
+        let output = Command::new(executable)
+            .args([
+                OsStr::new("self-test-agent-api-worker"),
+                OsStr::new("--socket"),
+                socket.as_os_str(),
+                OsStr::new("--expected-uid"),
+                OsStr::new(&agent_uid.to_string()),
+                OsStr::new("--expected-gid"),
+                OsStr::new(&agent_gid.to_string()),
+            ])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .context("execute agent-identity Cloud Hypervisor API worker")?;
+        ensure!(
+            output.status.success(),
+            "agent-identity Cloud Hypervisor API worker failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
     }
 
     fn ensure_saturation_resources(
