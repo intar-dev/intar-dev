@@ -26,7 +26,10 @@ use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 
 const SSH_USERNAME: &str = "ubuntu";
 const SSH_HOST: &str = "127.0.0.1";
-const SSH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+// A build guest can briefly expose port 22 before its ephemeral key and
+// network setup have settled. Avoid hammering OpenSSH's unauthenticated
+// connection limits while retaining responsive readiness detection.
+const SSH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct DirectBuildRequest {
@@ -594,11 +597,16 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        DirectBuildPrepareInput, DirectBuildRequest, prepare_direct_build_inputs,
-        render_direct_build,
+        DirectBuildPrepareInput, DirectBuildRequest, SSH_POLL_INTERVAL,
+        prepare_direct_build_inputs, render_direct_build,
     };
     use crate::config::QemuBuildConfig;
     use crate::kino::KinoArtifact;
+
+    #[test]
+    fn ssh_readiness_poll_does_not_hammer_guest_limits() {
+        assert_eq!(SSH_POLL_INTERVAL, std::time::Duration::from_secs(2));
+    }
 
     #[test]
     fn direct_render_uses_raw_zstd_outputs_and_direct_boot_args() {

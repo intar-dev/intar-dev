@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
@@ -111,6 +111,14 @@ export async function queueImageBuildsFromBundle(
       continue;
     }
 
+    await retireSupersededImageBuilds(db, {
+      scenarioId: scenario.scenarioId,
+      arch: scenario.arch,
+      contentHash: scenario.contentHash,
+      supersedingRev: input.rev,
+      nowUnixMs: input.nowUnixMs,
+    });
+
     const inserted = await db
       .insert(imageBuilds)
       .values({
@@ -142,6 +150,45 @@ export async function queueImageBuildsFromBundle(
   }
 
   return { queued };
+}
+
+async function retireSupersededImageBuilds(
+  db: DrizzleD1Database,
+  input: {
+    scenarioId: string;
+    arch: ImageBuildBundleMeta["scenarios"][number]["arch"];
+    contentHash: string;
+    supersedingRev: string;
+    nowUnixMs: number;
+  },
+): Promise<void> {
+  const retired = await db
+    .update(imageBuilds)
+    .set({
+      status: "stale",
+      error: `superseded by bundle ${input.supersedingRev}`,
+      updatedAt: input.nowUnixMs,
+    })
+    .where(
+      and(
+        eq(imageBuilds.scenarioId, input.scenarioId),
+        eq(imageBuilds.arch, input.arch),
+        ne(imageBuilds.contentHash, input.contentHash),
+        inArray(imageBuilds.status, ["queued", "assigned", "building"]),
+      ),
+    )
+    .returning({ id: imageBuilds.id, hostId: imageBuilds.hostId });
+
+  const buildIdsByHost = new Map<string, string[]>();
+  for (const build of retired) {
+    if (!build.hostId) continue;
+    const buildIds = buildIdsByHost.get(build.hostId) ?? [];
+    buildIds.push(build.id);
+    buildIdsByHost.set(build.hostId, buildIds);
+  }
+  for (const [hostId, buildIds] of buildIdsByHost) {
+    await removeDesiredBuildsFromHost(db, hostId, buildIds, input.nowUnixMs);
+  }
 }
 
 export async function assignQueuedImageBuilds(
@@ -467,13 +514,13 @@ async function loadBuilderCandidates(
     role: host.role,
     arch: host.reportJson?.capabilities.arch ?? null,
     connected: Boolean(
-        host.connected &&
-        host.activeSessionId &&
-        host.reportJson &&
-        typeof host.stateReportedAt === "number" &&
-        typeof host.lastClientHelloAt === "number" &&
-        host.stateReportedAt >= host.lastClientHelloAt &&
-        hostHealth(host.stateReportedAt, nowUnixMs) === "healthy",
+      host.connected &&
+      host.activeSessionId &&
+      host.reportJson &&
+      typeof host.stateReportedAt === "number" &&
+      typeof host.lastClientHelloAt === "number" &&
+      host.stateReportedAt >= host.lastClientHelloAt &&
+      hostHealth(host.stateReportedAt, nowUnixMs) === "healthy",
     ),
     disabled: Boolean(host.disabled),
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,

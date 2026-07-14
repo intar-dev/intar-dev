@@ -175,7 +175,7 @@ describe("build scheduler", () => {
       r2Key: "builds/bundles/abc123.tar.gz",
       kinoVersion: "0.4.0",
       meta: {
-        buildFormatVersion: "intar-image-build-v6",
+        buildFormatVersion: "intar-image-build-v7",
         scenarios: [
           {
             scenarioId: "broken-nginx",
@@ -211,6 +211,78 @@ describe("build scheduler", () => {
     const draft = desiredStateWithBuild("build-1");
     mutator?.(draft);
     expect(draft.builds).toEqual([]);
+  });
+
+  it("retires superseded active hashes and removes their desired builds before queuing the new hash", async () => {
+    const now = 1_762_041_660_000;
+    const db = newHashBuildSchedulerDb({
+      retiredRows: [
+        { id: "queued-old", hostId: null },
+        { id: "assigned-old", hostId: "builder-1" },
+        { id: "building-old", hostId: "builder-1" },
+        { id: "other-host-old", hostId: "builder-2" },
+      ],
+      insertedRows: [{ id: "build-new" }],
+    });
+
+    await expect(
+      queueImageBuildsFromBundle(db as never, {
+        rev: "bundle-new",
+        r2Key: "builds/bundles/bundle-new.tar.gz",
+        kinoVersion: "0.4.0",
+        meta: {
+          buildFormatVersion: "intar-image-build-v7",
+          scenarios: [
+            {
+              scenarioId: "broken-nginx",
+              arch: "x86_64",
+              contentHash: "a".repeat(64),
+            },
+          ],
+        },
+        nowUnixMs: now,
+      }),
+    ).resolves.toEqual({ queued: 1 });
+
+    expect(db.updateSet).toHaveBeenCalledOnce();
+    expect(db.updateSet).toHaveBeenCalledWith({
+      status: "stale",
+      error: "superseded by bundle bundle-new",
+      updatedAt: now,
+    });
+    expect(
+      desiredStateStoreMock.mutateStoredHostDesiredState,
+    ).toHaveBeenNthCalledWith(1, db, "builder-1", now, expect.any(Function));
+    expect(
+      desiredStateStoreMock.mutateStoredHostDesiredState,
+    ).toHaveBeenNthCalledWith(2, db, "builder-2", now, expect.any(Function));
+
+    const builderOneState = desiredStateWithBuilds([
+      "assigned-old",
+      "building-old",
+      "keep-1",
+    ]);
+    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[0]?.[3]?.(
+      builderOneState,
+    );
+    expect(builderOneState.builds.map((build) => build.build_id)).toEqual([
+      "keep-1",
+    ]);
+
+    const builderTwoState = desiredStateWithBuilds([
+      "other-host-old",
+      "keep-2",
+    ]);
+    desiredStateStoreMock.mutateStoredHostDesiredState.mock.calls[1]?.[3]?.(
+      builderTwoState,
+    );
+    expect(builderTwoState.builds.map((build) => build.build_id)).toEqual([
+      "keep-2",
+    ]);
+
+    expect(
+      hostRuntimeWakeMock.tryWakeHostRuntime.mock.invocationCallOrder[1],
+    ).toBeLessThan(db.imageInsertValues.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("ignores build reports whose scenario or content hash no longer matches the assigned row", async () => {
@@ -333,12 +405,7 @@ describe("build scheduler", () => {
   });
 
   it("ignores late build reports for non-active build rows", async () => {
-    for (const status of [
-      "queued",
-      "succeeded",
-      "failed",
-      "stale",
-    ] as const) {
+    for (const status of ["queued", "succeeded", "failed", "stale"] as const) {
       const db = buildReportDb({
         existingRows: [
           {
@@ -366,7 +433,6 @@ describe("build scheduler", () => {
       expect(db.updateSet).not.toHaveBeenCalled();
     }
   });
-
 });
 
 function buildSchedulerDb(input: {
@@ -393,6 +459,45 @@ function buildSchedulerDb(input: {
 
   return {
     insert,
+    select,
+    update,
+    updateSet,
+  };
+}
+
+function newHashBuildSchedulerDb(input: {
+  retiredRows: Array<{ id: string; hostId: string | null }>;
+  insertedRows: Array<{ id: string }>;
+}) {
+  const bundleOnConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+  const bundleInsertValues = vi.fn(() => ({
+    onConflictDoUpdate: bundleOnConflictDoUpdate,
+  }));
+  const imageInsertReturning = vi.fn().mockResolvedValue(input.insertedRows);
+  const imageOnConflictDoNothing = vi.fn(() => ({
+    returning: imageInsertReturning,
+  }));
+  const imageInsertValues = vi.fn(() => ({
+    onConflictDoNothing: imageOnConflictDoNothing,
+  }));
+  const insert = vi
+    .fn()
+    .mockReturnValueOnce({ values: bundleInsertValues })
+    .mockReturnValueOnce({ values: imageInsertValues });
+
+  const selectLimit = vi.fn().mockResolvedValue([]);
+  const selectWhere = vi.fn(() => ({ limit: selectLimit }));
+  const selectFrom = vi.fn(() => ({ where: selectWhere }));
+  const select = vi.fn(() => ({ from: selectFrom }));
+
+  const updateReturning = vi.fn().mockResolvedValue(input.retiredRows);
+  const updateWhere = vi.fn(() => ({ returning: updateReturning }));
+  const updateSet = vi.fn(() => ({ where: updateWhere }));
+  const update = vi.fn(() => ({ set: updateSet }));
+
+  return {
+    insert,
+    imageInsertValues,
     select,
     update,
     updateSet,
@@ -528,7 +633,13 @@ function builderCandidateRow(
 function buildReportDb(input: {
   existingRows: Array<{
     hostId: string | null;
-    status: "queued" | "assigned" | "building" | "succeeded" | "failed" | "stale";
+    status:
+      | "queued"
+      | "assigned"
+      | "building"
+      | "succeeded"
+      | "failed"
+      | "stale";
     scenarioId: string;
     contentHash: string;
     timingsJson: Record<string, unknown>;
