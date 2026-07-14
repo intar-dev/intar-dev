@@ -368,7 +368,14 @@ const DELETE_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const PROBE_POLL_INTERVAL_SECONDS: u64 = 2;
 const TERMINAL_PENDING_POLL_INTERVAL_MILLIS: u64 = 500;
 const TERMINAL_READY_POLL_INTERVAL_SECONDS: u64 = 5;
-const SCENARIO_READY_TIMEOUT_SECONDS: u64 = 45;
+// Treat the historical 45-second deadline as a one-core CPU-time budget. A
+// hard fractional quota deliberately stretches guest boot wall time, so using
+// the same wall-clock deadline for every quota makes otherwise healthy 125m
+// guests fail during their first boot. Keep a finite ceiling so a malformed or
+// impractically small quota cannot hold one readiness attempt indefinitely.
+const SCENARIO_READY_BASE_TIMEOUT_SECONDS: u64 = 45;
+const SCENARIO_READY_REFERENCE_CPU_MILLIS: u32 = 1_000;
+const SCENARIO_READY_MAX_TIMEOUT_SECONDS: u64 = 6 * 60;
 const SCENARIO_READY_POLL_INTERVAL_MILLIS: u64 = 500;
 #[cfg(target_os = "linux")]
 const MAX_KINO_READY_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -2008,7 +2015,10 @@ async fn wait_for_scenario_runtime_ready(
         .as_ref()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("vm details missing kino_vsock_path"))?;
-    let deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_TIMEOUT_SECONDS);
+    let cpu_millis = details
+        .cpu_millis
+        .ok_or_else(|| anyhow::anyhow!("vm details missing cpu_millis"))?;
+    let ready_timeout = scenario_runtime_ready_timeout(cpu_millis)?;
     let mut saw_kino_vsock_socket = false;
     let mut updates = inner.probe_updates_tx.subscribe();
     let mut ch_interval =
@@ -2016,74 +2026,78 @@ async fn wait_for_scenario_runtime_ready(
     ch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_error = None;
 
-    loop {
-        ensure_create_not_deleted(inner, vm_name).await?;
+    let wait_result = timeout(ready_timeout, async {
+        loop {
+            ensure_create_not_deleted(inner, vm_name).await?;
 
-        tokio::select! {
-            update = updates.recv() => {
-                match update {
-                    Ok(update) if update.vm_name == vm_name && update.run_id == run_id => {
-                        if update.collection_state == ProbeCollectionState::Ok {
-                            return Ok(update);
+            tokio::select! {
+                update = updates.recv() => {
+                    match update {
+                        Ok(update) if update.vm_name == vm_name && update.run_id == run_id => {
+                            if update.collection_state == ProbeCollectionState::Ok {
+                                return Ok(update);
+                            }
+                            last_error = Some(anyhow::anyhow!(
+                                update.collection_error.unwrap_or_else(|| "Kino readiness push reported an error".to_string())
+                            ));
                         }
-                        last_error = Some(anyhow::anyhow!(
-                            update.collection_error.unwrap_or_else(|| "Kino readiness push reported an error".to_string())
-                        ));
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        debug!(vm = vm_name, skipped, "lagged while waiting for Kino readiness push");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        anyhow::bail!("Kino readiness update channel closed");
-                    }
-                }
-            }
-            _ = ch_interval.tick() => {
-                let socket_exists = kino_vsock_path.exists();
-                if socket_exists && !saw_kino_vsock_socket {
-                    info!(
-                        vm = vm_name,
-                        path = %kino_vsock_path.display(),
-                        "cloud-hypervisor created Kino vsock socket"
-                    );
-                    saw_kino_vsock_socket = true;
-                }
-
-                match ch.vm_info().await {
-                    Ok(info) => {
-                        if matches!(info.state, cloud_hypervisor_client::VmState::Shutdown) {
-                            stop_booting_vm(inner, vm_name).await;
-                            anyhow::bail!("scenario vm shut down before runtime became ready");
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            debug!(vm = vm_name, skipped, "lagged while waiting for Kino readiness push");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            anyhow::bail!("Kino readiness update channel closed");
                         }
                     }
-                    Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. }) => {
-                        stop_booting_vm(inner, vm_name).await;
-                        anyhow::bail!("scenario vm disappeared before runtime became ready");
-                    }
-                    Err(error) => {
-                        debug!(
+                }
+                _ = ch_interval.tick() => {
+                    let socket_exists = kino_vsock_path.exists();
+                    if socket_exists && !saw_kino_vsock_socket {
+                        info!(
                             vm = vm_name,
-                            error = %error,
-                            "cloud-hypervisor vm_info failed while waiting for scenario readiness"
+                            path = %kino_vsock_path.display(),
+                            "cloud-hypervisor created Kino vsock socket"
                         );
+                        saw_kino_vsock_socket = true;
+                    }
+
+                    match ch.vm_info().await {
+                        Ok(info) => {
+                            if matches!(info.state, cloud_hypervisor_client::VmState::Shutdown) {
+                                anyhow::bail!("scenario vm shut down before runtime became ready");
+                            }
+                        }
+                        Err(cloud_hypervisor_client::Error::HttpStatus { status: 404, .. }) => {
+                            anyhow::bail!("scenario vm disappeared before runtime became ready");
+                        }
+                        Err(error) => {
+                            debug!(
+                                vm = vm_name,
+                                error = %error,
+                                "cloud-hypervisor vm_info failed while waiting for scenario readiness"
+                            );
+                        }
                     }
                 }
-
-                if Instant::now() >= deadline {
-                    stop_booting_vm(inner, vm_name).await;
-                    let error = last_error.unwrap_or_else(|| {
-                        anyhow::anyhow!(
-                            "timed out waiting for Kino readiness push on {}",
-                            kino_ready_socket_path(&kino_vsock_path).display()
-                        )
-                    });
-                    return Err(error).context(scenario_runtime_timeout_context(
-                        &kino_vsock_path,
-                        saw_kino_vsock_socket,
-                    ));
-                }
             }
+        }
+    })
+    .await;
+
+    match wait_result {
+        Ok(result) => result,
+        Err(_) => {
+            let error = last_error.unwrap_or_else(|| {
+                anyhow::anyhow!(
+                    "timed out waiting for Kino readiness push on {}",
+                    kino_ready_socket_path(&kino_vsock_path).display()
+                )
+            });
+            Err(error).context(scenario_runtime_timeout_context(
+                &kino_vsock_path,
+                saw_kino_vsock_socket,
+                ready_timeout,
+            ))
         }
     }
 }
@@ -3533,15 +3547,32 @@ async fn stop_cloud_hypervisor(inner: &Inner, details: &VmDetails, vm_name: &str
     {
         match ChClient::new(ch_socket_path.to_string()) {
             Ok(client) => {
-                if let Err(e) = client.vm_shutdown().await {
-                    warn!(
-                        error = %e,
-                        vm = vm_name,
-                        socket = ch_socket_path,
-                        "failed to request cloud-hypervisor shutdown"
-                    );
-                } else {
-                    tokio::time::sleep(Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS)).await;
+                match timeout(
+                    Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS),
+                    client.vm_shutdown(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        tokio::time::sleep(Duration::from_secs(DELETE_SHUTDOWN_GRACE_SECONDS))
+                            .await;
+                    }
+                    Ok(Err(e)) => {
+                        warn!(
+                            error = %e,
+                            vm = vm_name,
+                            socket = ch_socket_path,
+                            "failed to request cloud-hypervisor shutdown"
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            vm = vm_name,
+                            socket = ch_socket_path,
+                            timeout_seconds = DELETE_SHUTDOWN_GRACE_SECONDS,
+                            "timed out requesting cloud-hypervisor shutdown"
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -5565,9 +5596,26 @@ fn error_chain_to_string(err: &anyhow::Error) -> String {
     out
 }
 
-fn scenario_runtime_timeout_context(kino_vsock_path: &Path, saw_kino_vsock_socket: bool) -> String {
+fn scenario_runtime_ready_timeout(cpu_millis: u32) -> Result<Duration> {
+    anyhow::ensure!(cpu_millis > 0, "vm details cpu_millis must be positive");
+    let cpu_millis = u64::from(cpu_millis);
+    let quota_scaled_seconds = SCENARIO_READY_BASE_TIMEOUT_SECONDS
+        .saturating_mul(u64::from(SCENARIO_READY_REFERENCE_CPU_MILLIS))
+        .div_ceil(cpu_millis);
+    Ok(Duration::from_secs(quota_scaled_seconds.clamp(
+        SCENARIO_READY_BASE_TIMEOUT_SECONDS,
+        SCENARIO_READY_MAX_TIMEOUT_SECONDS,
+    )))
+}
+
+fn scenario_runtime_timeout_context(
+    kino_vsock_path: &Path,
+    saw_kino_vsock_socket: bool,
+    timeout: Duration,
+) -> String {
     let mut message = format!(
-        "timed out after {SCENARIO_READY_TIMEOUT_SECONDS}s waiting for scenario runtime readiness"
+        "timed out after {}s waiting for scenario runtime readiness",
+        timeout.as_secs()
     );
     if saw_kino_vsock_socket {
         message.push_str(" after Cloud Hypervisor created the Kino vsock socket at ");
@@ -6249,12 +6297,53 @@ mod tests {
     }
 
     #[test]
+    fn scenario_runtime_ready_timeout_scales_with_fractional_quota() -> Result<()> {
+        assert_eq!(
+            scenario_runtime_ready_timeout(2_000)?,
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(1_000)?,
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(999)?,
+            Duration::from_secs(46)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(500)?,
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(125)?,
+            Duration::from_secs(360)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(124)?,
+            Duration::from_secs(360)
+        );
+        assert_eq!(
+            scenario_runtime_ready_timeout(126)?,
+            Duration::from_secs(358)
+        );
+        assert_eq!(scenario_runtime_ready_timeout(1)?, Duration::from_secs(360));
+        assert_eq!(
+            scenario_runtime_ready_timeout(u32::MAX)?,
+            Duration::from_secs(45)
+        );
+        assert!(scenario_runtime_ready_timeout(0).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn scenario_runtime_timeout_context_reports_missing_vsock_socket() {
         let message = scenario_runtime_timeout_context(
             Path::new("/var/cache/intar-agent/vms/demo/kino.vsock"),
             false,
+            Duration::from_secs(360),
         );
 
+        assert!(message.contains("timed out after 360s"));
         assert!(message.contains("never created the Kino vsock socket"));
         assert!(message.contains("cloud-hypervisor.stderr.log"));
     }
@@ -6264,8 +6353,10 @@ mod tests {
         let message = scenario_runtime_timeout_context(
             Path::new("/var/cache/intar-agent/vms/demo/kino.vsock"),
             true,
+            Duration::from_secs(360),
         );
 
+        assert!(message.contains("timed out after 360s"));
         assert!(message.contains("created the Kino vsock socket"));
         assert!(!message.contains("cloud-hypervisor.stderr.log"));
     }

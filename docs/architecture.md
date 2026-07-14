@@ -138,7 +138,11 @@ schedulable core exactly.
 Kino readiness is push-based. Each guest receives `KINO_HOST_READY_PORT` in
 `runtime.env`; Kino connects to the host over vsock, streams protobuf probe
 snapshots, and includes generated SSH host public keys. The agent persists those
-host keys and includes them in VM reports.
+host keys and includes them in VM reports. The launch deadline treats 45 seconds
+as a one-core CPU-time budget and scales wall time as
+`ceil(45 * 1000 / cpu_millis)`, bounded to 45–360 seconds. A 125-millicore VM
+therefore gets up to 360 seconds to complete its first boot without relaxing its
+hard CPU ceiling.
 
 ## Guest Runtime
 

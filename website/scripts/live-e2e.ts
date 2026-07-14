@@ -2038,7 +2038,7 @@ export function parseOptions(
     allowNoArtifacts: flags.has("allow-no-artifacts"),
     waitCacheMs: parseMs(last(values, "wait-cache-ms"), 180_000),
     waitBuildMs: parseMs(last(values, "wait-build-ms"), 900_000),
-    waitReadyMs: parseMs(last(values, "wait-ready-ms"), 180_000),
+    waitReadyMs: parseMs(last(values, "wait-ready-ms"), 480_000),
     waitCompleteMs: parseMs(last(values, "wait-complete-ms"), 240_000),
     pollMs: parseMs(last(values, "poll-ms"), 2_000),
     warmStartBudgetMs: parseMs(last(values, "warm-start-ms"), 10_000),
@@ -2159,6 +2159,7 @@ Useful options:
   --skip-teardown                Leave the run active for manual inspection.
   --allow-no-artifacts           Do not fail if teardown produces no artifacts.
   --wait-build-ms MS             Builder queue timeout. Defaults to 900000.
+  --wait-ready-ms MS             Run readiness timeout. Defaults to 480000.
   --warm-start-ms MS             Click-to-terminal budget. Defaults to 10000.
 `);
 }

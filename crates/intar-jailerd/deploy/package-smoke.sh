@@ -75,6 +75,20 @@ agent_probe_dropin_dir=/run/systemd/system/intar-agent.service.d
 installed=0
 cleanup_failed=0
 installer_probe_pid=
+vm_slice_cgroup=
+cgroup_probe_unit=
+
+valid_vm_slice_cgroup() {
+  candidate=$1
+  case "${candidate}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "${candidate}" in
+    *[!A-Za-z0-9_./:@-]*|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  [ "${candidate##*/}" = intar-vms.slice ]
+}
 
 cleanup() {
   status=$?
@@ -84,9 +98,31 @@ cleanup() {
     wait "${installer_probe_pid}" 2>/dev/null || true
     installer_probe_pid=
   fi
-  if [ "${installed}" -eq 1 ] && ! "${package_root}/deploy/uninstall.sh"; then
-    echo "intar package smoke: uninstall refused or failed" >&2
-    cleanup_failed=1
+  if [ -n "${cgroup_probe_unit}" ]; then
+    systemctl stop "${cgroup_probe_unit}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${cgroup_probe_unit}" >/dev/null 2>&1 || true
+    cgroup_probe_unit=
+  fi
+  if [ "${installed}" -eq 1 ]; then
+    if candidate_cgroup=$(systemctl show --property=ControlGroup --value intar-vms.slice); then
+      if valid_vm_slice_cgroup "${candidate_cgroup}"; then
+        vm_slice_cgroup=${candidate_cgroup}
+      elif [ -z "${candidate_cgroup}" ] && \
+           candidate_state=$(systemctl show --property=ActiveState --value intar-vms.slice) && \
+           { [ "${candidate_state}" = inactive ] || [ "${candidate_state}" = failed ]; }; then
+        vm_slice_cgroup=
+      else
+        echo "intar package smoke: could not capture a safe VM slice cgroup path" >&2
+        cleanup_failed=1
+      fi
+    else
+      echo "intar package smoke: could not capture a safe VM slice cgroup path" >&2
+      cleanup_failed=1
+    fi
+    if ! "${package_root}/deploy/uninstall.sh"; then
+      echo "intar package smoke: uninstall refused or failed" >&2
+      cleanup_failed=1
+    fi
   fi
 
   if live_units=$(systemctl list-units --all --type=service --no-legend --plain 'intar-vm-*.service'); then
@@ -99,10 +135,29 @@ cleanup() {
     echo "intar package smoke: could not audit VM units" >&2
     cleanup_failed=1
   fi
-  if [ -f /sys/fs/cgroup/intar-vms.slice/cgroup.events ] && \
-     [ "$(awk '$1 == "populated" { print $2 }' /sys/fs/cgroup/intar-vms.slice/cgroup.events)" != 0 ]; then
-    echo "intar package smoke: VM cgroup descendants leaked" >&2
-    cleanup_failed=1
+  if [ -n "${vm_slice_cgroup}" ]; then
+    vm_slice_events=/sys/fs/cgroup${vm_slice_cgroup}/cgroup.events
+    if [ -f "${vm_slice_events}" ]; then
+      if vm_slice_populated=$(awk '
+        $1 == "populated" {
+          if (seen || NF != 2 || $2 !~ /^(0|1)$/) exit 2
+          seen = 1
+          value = $2
+        }
+        END {
+          if (!seen) exit 3
+          print value
+        }
+      ' "${vm_slice_events}"); then
+        if [ "${vm_slice_populated}" != 0 ]; then
+          echo "intar package smoke: VM cgroup descendants leaked" >&2
+          cleanup_failed=1
+        fi
+      else
+        echo "intar package smoke: VM slice cgroup.events is malformed or unreadable" >&2
+        cleanup_failed=1
+      fi
+    fi
   fi
   if netns_state=$(ip netns list); then
     if echo "${netns_state}" | grep -Eq '^(intar-ns-|ist[[:xdigit:]]{10}([[:space:]]|$))'; then
@@ -570,6 +625,43 @@ fi
 
 installed=1
 "${package_root}/deploy/install.sh" --breaking-v6-cutover
+
+# Prove both destructive entry points follow systemd's actual hyphenated slice
+# hierarchy instead of silently checking /sys/fs/cgroup/intar-vms.slice.  The
+# disposable process is intentionally not an Intar executable and its unit does
+# not match intar-vm-*.service, so only the whole-slice populated check can
+# reject the operation.
+cgroup_probe_unit=intar-cgroup-audit-probe.service
+systemd-run \
+  --unit="${cgroup_probe_unit}" \
+  --slice=intar-vms.slice \
+  --property=Type=simple \
+  --no-block \
+  "$(command -v sleep)" 60 >/dev/null
+cgroup_probe_active=false
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if systemctl is-active --quiet "${cgroup_probe_unit}"; then
+    cgroup_probe_active=true
+    break
+  fi
+  sleep 0.05
+done
+[ "${cgroup_probe_active}" = true ] || die "VM slice cgroup audit probe did not start"
+if cgroup_install_output=$("${package_root}/deploy/install.sh" 2>&1); then
+  die "installer accepted a populated VM slice"
+fi
+printf '%s\n' "${cgroup_install_output}" | grep -Fqx \
+  "intar-jailerd install: intar-vms.slice still has descendants" || \
+  die "installer rejected the populated VM slice for the wrong reason"
+if cgroup_uninstall_output=$("${package_root}/deploy/uninstall.sh" 2>&1); then
+  die "uninstaller accepted a populated VM slice"
+fi
+printf '%s\n' "${cgroup_uninstall_output}" | grep -Fqx \
+  "intar-jailerd uninstall: intar-vms.slice still has descendants" || \
+  die "uninstaller rejected the populated VM slice for the wrong reason"
+systemctl stop "${cgroup_probe_unit}"
+systemctl reset-failed "${cgroup_probe_unit}" >/dev/null 2>&1 || true
+cgroup_probe_unit=
 
 for directory in \
   /var/cache/intar-agent \
