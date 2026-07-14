@@ -288,6 +288,20 @@ export const imageBuilds = sqliteTable(
   ],
 );
 
+export const imageBuildCoordinationLocks = sqliteTable(
+  "image_build_coordination_locks",
+  {
+    key: text("key").primaryKey(),
+    ownerToken: text("owner_token").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    index("image_build_coordination_locks_expiry_idx").on(table.expiresAt),
+  ],
+);
+
 export const hostDesiredState = sqliteTable(
   "host_desired_state",
   {

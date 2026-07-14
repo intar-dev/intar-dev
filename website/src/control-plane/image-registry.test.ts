@@ -20,6 +20,10 @@ const schedulerMock = vi.hoisted(() => ({
   assignQueuedImageBuilds: vi.fn(),
   queueImageBuildsFromBundle: vi.fn(),
 }));
+const imageBuildLockMock = vi.hoisted(() => ({
+  withImageBuildCoordinationLock: vi.fn(),
+  assertHeld: vi.fn(),
+}));
 const catalogManifestMock = vi.hoisted(() => ({
   seedScenarioManifest: vi.fn(),
 }));
@@ -33,6 +37,7 @@ const hostRuntimeWakeMock = vi.hoisted(() => ({
 vi.mock("@/control-plane/auth", () => authMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 vi.mock("@/lib/build-scheduler", () => schedulerMock);
+vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
 vi.mock("@/lib/catalog-manifest", () => catalogManifestMock);
 vi.mock("@/lib/desired-state-store", () => desiredStateStoreMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
@@ -44,6 +49,18 @@ describe("image registry routes", () => {
     dbMock.drizzle.mockClear();
     schedulerMock.assignQueuedImageBuilds.mockReset();
     schedulerMock.queueImageBuildsFromBundle.mockReset();
+    imageBuildLockMock.assertHeld.mockReset();
+    imageBuildLockMock.assertHeld.mockResolvedValue(undefined);
+    imageBuildLockMock.withImageBuildCoordinationLock.mockReset();
+    imageBuildLockMock.withImageBuildCoordinationLock.mockImplementation(
+      async (
+        _db: unknown,
+        _identity: unknown,
+        operation: (lease: {
+          assertHeld: () => Promise<void>;
+        }) => Promise<unknown>,
+      ) => operation({ assertHeld: imageBuildLockMock.assertHeld }),
+    );
     catalogManifestMock.seedScenarioManifest.mockReset();
     desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
     hostRuntimeWakeMock.tryWakeHostRuntime.mockReset();
@@ -114,7 +131,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -174,8 +191,8 @@ describe("image registry routes", () => {
           meta: {
             rev: "abc123",
             kino_version: "0.4.0",
-            build_format_version: "intar-image-build-v6",
-            buildFormatVersion: "intar-image-build-v6",
+            build_format_version: "intar-image-build-v7",
+            buildFormatVersion: "intar-image-build-v7",
             scenarios: [
               {
                 scenarioId: "broken-nginx",
@@ -203,7 +220,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -249,7 +266,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -295,7 +312,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -345,7 +362,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -395,7 +412,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -445,7 +462,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -491,7 +508,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -536,7 +553,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -581,7 +598,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "..",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -621,7 +638,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v6",
+        build_format_version: "intar-image-build-v7",
         scenarios: [
           {
             scenario_id: "..",
@@ -700,7 +717,7 @@ describe("image registry routes", () => {
       JSON.stringify({
         rev: "abc123",
         kino_version: "0.4.0",
-        build_format_version: "intar-image-build-v5",
+        build_format_version: "intar-image-build-v6",
         scenarios: [
           {
             scenario_id: "broken-nginx",
@@ -799,6 +816,239 @@ describe("image registry routes", () => {
     await expect(response?.json()).resolves.toEqual({
       error: "builder role required",
     });
+  });
+
+  it("requires typed build identity fields for builder publishes", async () => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true,
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+    });
+    const form = new FormData();
+    form.set(
+      "manifest",
+      JSON.stringify(
+        publishManifest({
+          imageSha256: "a".repeat(64),
+          artifactSha256: "b".repeat(64),
+        }),
+      ),
+    );
+
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/publish", {
+        method: "POST",
+        headers: { authorization: "Bearer builder-jwt" },
+        body: form,
+      }),
+      {} as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toEqual({
+      error:
+        "builder publish requires valid build_id, rev, content_hash, and architecture",
+    });
+    expect(dbMock.drizzle).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["unknown build id", null],
+    ["different builder", { hostId: "builder-2" }],
+    ["stale build", { status: "stale" }],
+    ["different content hash", { contentHash: "e".repeat(64) }],
+    ["different scenario", { scenarioId: "pair-ping" }],
+    ["different architecture", { arch: "aarch64" }],
+    ["different bundle revision", { rev: "def456" }],
+  ] as const)(
+    "rejects a builder publish for an %s",
+    async (_label, assignmentOverride) => {
+      authMock.requireVerifiedAgentRequest.mockResolvedValue({
+        ok: true,
+        agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+      });
+      const form = builderPublishForm(
+        publishManifest({
+          imageSha256: "a".repeat(64),
+          artifactSha256: "b".repeat(64),
+        }),
+      );
+      const assignmentRows = assignmentOverride
+        ? [publishBuildAssignment(assignmentOverride)]
+        : [];
+      const db = publishFenceDb({ assignmentRows: [assignmentRows] });
+      dbMock.drizzle.mockReturnValueOnce(db);
+      const bucketHead = vi.fn();
+
+      const response = await handleImageRegistryRequest(
+        new Request("https://intar.test/registry/v1/publish", {
+          method: "POST",
+          headers: { authorization: "Bearer builder-jwt" },
+          body: form,
+        }),
+        {
+          DB: "db-binding",
+          VM_IMAGE_REGISTRY_BUCKET: { head: bucketHead },
+        } as unknown as Cloudflare.Env,
+      );
+
+      expect(response?.status).toBe(409);
+      await expect(response?.json()).resolves.toEqual({
+        error: "build is not active for this builder",
+      });
+      expect(bucketHead).not.toHaveBeenCalled();
+      expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
+    },
+  );
+
+  it("publishes an exactly assigned builder result while holding the build lock", async () => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true,
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+    });
+    const imageSha256 = "e".repeat(64);
+    const artifactSha256 = "f".repeat(64);
+    const form = builderPublishForm(
+      publishManifest({ imageSha256, artifactSha256 }),
+    );
+    const assignment = publishBuildAssignment();
+    const db = publishFenceDb({
+      assignmentRows: [[assignment], [assignment]],
+    });
+    dbMock.drizzle.mockReturnValueOnce(db);
+    const imageObjectKey = `images/broken-nginx-web-x86_64/${imageSha256}.raw.zst`;
+    const bucketHead = vi.fn().mockImplementation((key: string) =>
+      Promise.resolve(
+        key === imageObjectKey
+          ? {
+              size: 777,
+              customMetadata: {
+                image_key: "broken-nginx-web-x86_64",
+                image_sha256: imageSha256,
+              },
+            }
+          : {
+              size: 555,
+              customMetadata: { artifact_sha256: artifactSha256 },
+            },
+      ),
+    );
+    const bucketPut = vi.fn().mockResolvedValue(undefined);
+    const bucketList = vi.fn().mockResolvedValue({
+      objects: [],
+      truncated: false,
+    });
+
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/publish", {
+        method: "POST",
+        headers: { authorization: "Bearer builder-jwt" },
+        body: form,
+      }),
+      {
+        DB: "db-binding",
+        VM_IMAGE_REGISTRY_BUCKET: {
+          head: bucketHead,
+          put: bucketPut,
+          list: bucketList,
+        },
+      } as unknown as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(201);
+    await expect(response?.json()).resolves.toMatchObject({
+      ok: true,
+      scenario_id: "broken-nginx",
+      images: [
+        {
+          image_key: "broken-nginx-web-x86_64",
+          image_sha256: imageSha256,
+          object_key: imageObjectKey,
+          bytes: 777,
+          reused: true,
+        },
+      ],
+    });
+    expect(
+      imageBuildLockMock.withImageBuildCoordinationLock,
+    ).toHaveBeenCalledWith(
+      db,
+      { scenarioId: "broken-nginx", arch: "x86_64" },
+      expect.any(Function),
+    );
+    expect(imageBuildLockMock.assertHeld).toHaveBeenCalledOnce();
+    expect(catalogManifestMock.seedScenarioManifest).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the stale-build 409 when lease release also fails", async () => {
+    authMock.requireVerifiedAgentRequest.mockResolvedValue({
+      ok: true,
+      agent: { hostId: "builder-1", userId: "user-1", role: "builder" },
+    });
+    const imageSha256 = "e".repeat(64);
+    const artifactSha256 = "f".repeat(64);
+    const form = builderPublishForm(
+      publishManifest({ imageSha256, artifactSha256 }),
+    );
+    const db = publishFenceDb({
+      assignmentRows: [
+        [publishBuildAssignment()],
+        [publishBuildAssignment({ status: "stale" })],
+      ],
+    });
+    dbMock.drizzle.mockReturnValueOnce(db);
+    imageBuildLockMock.withImageBuildCoordinationLock.mockImplementationOnce(
+      async (
+        _db: unknown,
+        _identity: unknown,
+        operation: (lease: {
+          assertHeld: () => Promise<void>;
+        }) => Promise<unknown>,
+      ) => {
+        await operation({ assertHeld: imageBuildLockMock.assertHeld });
+        throw new Error("lease release failed");
+      },
+    );
+    const imageObjectKey = `images/broken-nginx-web-x86_64/${imageSha256}.raw.zst`;
+    const bucketHead = vi.fn().mockImplementation((key: string) =>
+      Promise.resolve(
+        key === imageObjectKey
+          ? {
+              size: 777,
+              customMetadata: {
+                image_key: "broken-nginx-web-x86_64",
+                image_sha256: imageSha256,
+              },
+            }
+          : {
+              size: 555,
+              customMetadata: { artifact_sha256: artifactSha256 },
+            },
+      ),
+    );
+    const bucketPut = vi.fn().mockResolvedValue(undefined);
+
+    const response = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/publish", {
+        method: "POST",
+        headers: { authorization: "Bearer builder-jwt" },
+        body: form,
+      }),
+      {
+        DB: "db-binding",
+        VM_IMAGE_REGISTRY_BUCKET: {
+          head: bucketHead,
+          put: bucketPut,
+        },
+      } as unknown as Cloudflare.Env,
+    );
+
+    expect(response?.status).toBe(409);
+    await expect(response?.json()).resolves.toEqual({
+      error: "build is not active for this builder",
+    });
+    expect(bucketPut).toHaveBeenCalledOnce();
+    expect(imageBuildLockMock.assertHeld).not.toHaveBeenCalled();
+    expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
   });
 
   it("rejects publish manifests whose image keys do not match the vm identity", async () => {
@@ -1157,10 +1407,7 @@ describe("image registry routes", () => {
 
   it.each([
     ["zero CPU", { cpu_millis: 0 }],
-    [
-      "u32-overflow CPU",
-      { cpu_millis: 0x1_0000_0000, vcpu_count: 0xffff },
-    ],
+    ["u32-overflow CPU", { cpu_millis: 0x1_0000_0000, vcpu_count: 0xffff }],
     ["u16-overflow vCPU count", { vcpu_count: 0x1_0000 }],
     ["u32-overflow memory", { memory_mib: 0x1_0000_0000 }],
     ["u32-overflow disk", { disk_mib: 0x1_0000_0000 }],
@@ -1168,41 +1415,44 @@ describe("image registry routes", () => {
       "unsafe integer CPU",
       { cpu_millis: Number.MAX_SAFE_INTEGER + 1, vcpu_count: 0xffff },
     ],
-  ])("rejects publish manifests with invalid vm resources: %s", async (_, invalid) => {
-    const manifest = publishManifest({
-      imageSha256: "a".repeat(64),
-      artifactSha256: "b".repeat(64),
-    });
-    const vm = manifest.vms[0];
-    if (!vm) {
-      throw new Error("expected publish manifest vm");
-    }
-    manifest.vms = [
-      {
-        ...vm,
-        ...invalid,
-      },
-    ];
-    const form = new FormData();
-    form.set("manifest", JSON.stringify(manifest));
+  ])(
+    "rejects publish manifests with invalid vm resources: %s",
+    async (_, invalid) => {
+      const manifest = publishManifest({
+        imageSha256: "a".repeat(64),
+        artifactSha256: "b".repeat(64),
+      });
+      const vm = manifest.vms[0];
+      if (!vm) {
+        throw new Error("expected publish manifest vm");
+      }
+      manifest.vms = [
+        {
+          ...vm,
+          ...invalid,
+        },
+      ];
+      const form = new FormData();
+      form.set("manifest", JSON.stringify(manifest));
 
-    const response = await handleImageRegistryRequest(
-      new Request("https://intar.test/registry/v1/publish", {
-        method: "POST",
-        headers: { authorization: "Bearer publish-secret" },
-        body: form,
-      }),
-      {
-        REGISTRY_PUBLISH_TOKEN: "publish-secret",
-      } as Cloudflare.Env,
-    );
+      const response = await handleImageRegistryRequest(
+        new Request("https://intar.test/registry/v1/publish", {
+          method: "POST",
+          headers: { authorization: "Bearer publish-secret" },
+          body: form,
+        }),
+        {
+          REGISTRY_PUBLISH_TOKEN: "publish-secret",
+        } as Cloudflare.Env,
+      );
 
-    expect(response?.status).toBe(400);
-    await expect(response?.json()).resolves.toEqual({
-      error: "manifest contains invalid vm resources",
-    });
-    expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
-  });
+      expect(response?.status).toBe(400);
+      await expect(response?.json()).resolves.toEqual({
+        error: "manifest contains invalid vm resources",
+      });
+      expect(catalogManifestMock.seedScenarioManifest).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects publish manifests with invalid raw-zstd boot metadata", async () => {
     const manifest = publishManifest({
@@ -2430,8 +2680,7 @@ describe("image registry routes", () => {
     );
     const bucketHead = vi.fn(async (key: string) => {
       if (
-        key ===
-        `images/broken-nginx-web-x86_64/${validImageSha256}.raw.zst`
+        key === `images/broken-nginx-web-x86_64/${validImageSha256}.raw.zst`
       ) {
         return {
           size: 123_456,
@@ -2922,6 +3171,73 @@ function buildLogDb(input: {
   };
 }
 
+type PublishBuildAssignmentFixture = {
+  id: string;
+  hostId: string | null;
+  status: "queued" | "assigned" | "building" | "succeeded" | "failed" | "stale";
+  scenarioId: string;
+  arch: "x86_64" | "aarch64";
+  rev: string;
+  contentHash: string;
+};
+
+function publishBuildAssignment(
+  overrides: Partial<PublishBuildAssignmentFixture> = {},
+): PublishBuildAssignmentFixture {
+  return {
+    id: "build-1",
+    hostId: "builder-1",
+    status: "building",
+    scenarioId: "broken-nginx",
+    arch: "x86_64",
+    rev: "abc123",
+    contentHash: "d".repeat(64),
+    ...overrides,
+  };
+}
+
+function builderPublishForm(manifest: ScenarioManifestV3): FormData {
+  const form = new FormData();
+  form.set("manifest", JSON.stringify(manifest));
+  form.set("build_id", "build-1");
+  form.set("rev", "abc123");
+  form.set("content_hash", "d".repeat(64));
+  form.set("architecture", "x86_64");
+  return form;
+}
+
+function publishFenceDb(input: {
+  assignmentRows: PublishBuildAssignmentFixture[][];
+  hostRows?: HostSelectRow[];
+  imageRefRows?: Array<{ imageKey: unknown; imageSha256: string | null }>;
+}) {
+  let selectCall = 0;
+  const select = vi.fn(() => {
+    const call = selectCall;
+    selectCall += 1;
+    if (call < input.assignmentRows.length) {
+      const rows = input.assignmentRows[call] ?? [];
+      const limit = vi.fn().mockResolvedValue(rows);
+      const where = vi.fn(() => ({ limit }));
+      const from = vi.fn(() => ({ where }));
+      return { from };
+    }
+
+    const rows =
+      call === input.assignmentRows.length
+        ? (input.hostRows ?? [])
+        : (input.imageRefRows ?? []);
+    const where = vi.fn().mockResolvedValue(rows);
+    const from = vi.fn(() => ({ where }));
+    return { from };
+  });
+
+  return {
+    kind: "test-db",
+    select,
+  };
+}
+
 function hostSelectDb(rows: HostSelectRow[]) {
   const selectWhere = vi.fn().mockResolvedValue(rows);
   const selectFrom = vi.fn(() => ({ where: selectWhere }));
@@ -3025,14 +3341,12 @@ function sourceBundleFixtureWithMetadataEntry(
 
 function bundleFixtureFiles(scenarioIds: string[]): Array<[string, string]> {
   return [
-    ["base-images.hcl", "base_image \"trixie\" {}\n"],
-    ["build-tools.hcl", "kino { version = \"0.4.0\" }\n"],
-    ...scenarioIds.map(
-      (scenarioId): [string, string] => [
-        `scenarios/${scenarioId}/scenario.hcl`,
-        `scenario "${scenarioId}" {}\n`,
-      ],
-    ),
+    ["base-images.hcl", 'base_image "trixie" {}\n'],
+    ["build-tools.hcl", 'kino { version = "0.4.0" }\n'],
+    ...scenarioIds.map((scenarioId): [string, string] => [
+      `scenarios/${scenarioId}/scenario.hcl`,
+      `scenario "${scenarioId}" {}\n`,
+    ]),
   ];
 }
 

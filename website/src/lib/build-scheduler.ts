@@ -1,8 +1,9 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
   hostActualState,
+  hostDesiredState,
   imageBuildBundles,
   imageBuilds,
   type ImageBuildBundleMeta,
@@ -17,7 +18,6 @@ import {
   isSilentBuildingBuild,
   isTerminalBuildPhase,
   shouldAcceptBuildReport,
-  shouldSkipExistingBuildForBundle,
   type BuilderCandidate,
 } from "@/lib/build-scheduler-core";
 import { removeDesiredBuild, upsertDesiredBuild } from "@/lib/desired-state";
@@ -25,6 +25,10 @@ import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { hostHealth } from "@/lib/host-health";
 import { createAppId } from "@/lib/id";
+import {
+  withImageBuildCoordinationLock,
+  withImageBuildCoordinationLocks,
+} from "@/lib/image-build-lock";
 
 export async function queueImageBuildsFromBundle(
   db: DrizzleD1Database,
@@ -58,67 +62,106 @@ export async function queueImageBuildsFromBundle(
 
   let queued = 0;
   for (const scenario of input.meta.scenarios) {
-    const timings: ImageBuildTimings = {
-      queuedAt: input.nowUnixMs,
-      startedAt: null,
-      finishedAt: null,
-      lastReportAt: null,
-    };
-    const existingRows = await db
-      .select({
-        id: imageBuilds.id,
-        hostId: imageBuilds.hostId,
-        status: imageBuilds.status,
-      })
-      .from(imageBuilds)
-      .where(
-        and(
-          eq(imageBuilds.scenarioId, scenario.scenarioId),
-          eq(imageBuilds.arch, scenario.arch),
-          eq(imageBuilds.contentHash, scenario.contentHash),
-        ),
-      )
-      .limit(1);
-    const existing = existingRows[0];
-    if (existing) {
-      if (shouldSkipExistingBuildForBundle(existing.status)) {
-        continue;
-      }
-      await db
-        .update(imageBuilds)
-        .set({
+    const result = await withImageBuildCoordinationLock(
+      db,
+      { scenarioId: scenario.scenarioId, arch: scenario.arch },
+      () =>
+        queueImageBuildScenario(db, {
+          scenarioId: scenario.scenarioId,
+          arch: scenario.arch,
+          contentHash: scenario.contentHash,
           rev: input.rev,
           kinoVersion: input.kinoVersion,
-          hostId: null,
-          status: "queued",
-          phase: "queued",
-          attempt: 0,
-          error: null,
-          logR2Key: null,
-          timingsJson: timings,
-          updatedAt: input.nowUnixMs,
-        })
-        .where(eq(imageBuilds.id, existing.id));
-      if (existing.hostId) {
-        await removeDesiredBuildsFromHost(
-          db,
-          existing.hostId,
-          [existing.id],
-          input.nowUnixMs,
-        );
-      }
-      queued += 1;
-      continue;
+          nowUnixMs: input.nowUnixMs,
+        }),
+    );
+    queued += result.queued;
+    for (const hostId of result.cleanedHostIds) {
+      await tryWakeHostRuntime(hostId);
     }
+  }
 
-    const inserted = await db
+  return { queued };
+}
+
+async function queueImageBuildScenario(
+  db: DrizzleD1Database,
+  input: {
+    scenarioId: string;
+    arch: ImageBuildBundleMeta["scenarios"][number]["arch"];
+    contentHash: string;
+    rev: string;
+    kinoVersion: string;
+    nowUnixMs: number;
+  },
+): Promise<{ queued: number; cleanedHostIds: string[] }> {
+  const timings: ImageBuildTimings = {
+    queuedAt: input.nowUnixMs,
+    startedAt: null,
+    finishedAt: null,
+    lastReportAt: null,
+  };
+  const cleanupBuildIds = supersessionCleanupBuildIds(input);
+  const cleanedBuilds = sql`coalesce(
+    (
+      select json_group_array(json(desired_build.value))
+      from json_each(${hostDesiredState.docJson}, '$.builds') as desired_build
+      where cast(json_extract(desired_build.value, '$.build_id') as text)
+        not in (${cleanupBuildIds})
+    ),
+    '[]'
+  )`;
+
+  // D1 batches are transactions. Keeping desired-state cleanup, retirement,
+  // and insertion/revival in one batch gives each scenario/architecture pair
+  // a single total order even when two bundle uploads race in different Worker
+  // isolates. The later transaction retires the earlier hash before activating
+  // its own, so at most one content hash can remain active.
+  const [cleanedHosts, , queuedRows] = await db.batch([
+    db
+      .update(hostDesiredState)
+      .set({
+        version: sql`${hostDesiredState.version} + 1`,
+        docJson: sql`json_set(
+          ${hostDesiredState.docJson},
+          '$.version', ${hostDesiredState.version} + 1,
+          '$.generated_at_unix_ms', ${input.nowUnixMs},
+          '$.builds', json(${cleanedBuilds})
+        )`,
+        updatedAt: input.nowUnixMs,
+      })
+      .where(
+        sql`exists (
+          select 1
+          from json_each(${hostDesiredState.docJson}, '$.builds') as desired_build
+          where cast(json_extract(desired_build.value, '$.build_id') as text)
+            in (${cleanupBuildIds})
+        )`,
+      )
+      .returning({ hostId: hostDesiredState.hostId }),
+    db
+      .update(imageBuilds)
+      .set({
+        status: "stale",
+        error: `superseded by bundle ${input.rev}`,
+        updatedAt: input.nowUnixMs,
+      })
+      .where(
+        and(
+          eq(imageBuilds.scenarioId, input.scenarioId),
+          eq(imageBuilds.arch, input.arch),
+          ne(imageBuilds.contentHash, input.contentHash),
+          inArray(imageBuilds.status, ["queued", "assigned", "building"]),
+        ),
+      ),
+    db
       .insert(imageBuilds)
       .values({
         id: createAppId(),
-        scenarioId: scenario.scenarioId,
-        arch: scenario.arch,
+        scenarioId: input.scenarioId,
+        arch: input.arch,
         rev: input.rev,
-        contentHash: scenario.contentHash,
+        contentHash: input.contentHash,
         kinoVersion: input.kinoVersion,
         hostId: null,
         status: "queued",
@@ -130,18 +173,65 @@ export async function queueImageBuildsFromBundle(
         createdAt: input.nowUnixMs,
         updatedAt: input.nowUnixMs,
       })
-      .onConflictDoNothing({
+      .onConflictDoUpdate({
         target: [
           imageBuilds.scenarioId,
           imageBuilds.arch,
           imageBuilds.contentHash,
         ],
+        set: {
+          rev: input.rev,
+          kinoVersion: input.kinoVersion,
+          hostId: null,
+          status: "queued",
+          phase: "queued",
+          attempt: 0,
+          error: null,
+          logR2Key: null,
+          timingsJson: timings,
+          updatedAt: input.nowUnixMs,
+        },
+        setWhere: inArray(imageBuilds.status, ["failed", "stale"]),
       })
-      .returning({ id: imageBuilds.id });
-    queued += inserted.length;
-  }
+      .returning({ id: imageBuilds.id }),
+  ]);
 
-  return { queued };
+  return {
+    queued: queuedRows.length,
+    cleanedHostIds: cleanedHosts.map(({ hostId }) => hostId),
+  };
+}
+
+function supersessionCleanupBuildIds(input: {
+  scenarioId: string;
+  arch: ImageBuildBundleMeta["scenarios"][number]["arch"];
+  contentHash: string;
+}) {
+  return dbBuildIds(
+    and(
+      eq(imageBuilds.scenarioId, input.scenarioId),
+      eq(imageBuilds.arch, input.arch),
+      or(
+        and(
+          ne(imageBuilds.contentHash, input.contentHash),
+          inArray(imageBuilds.status, [
+            "queued",
+            "assigned",
+            "building",
+            "stale",
+          ]),
+        ),
+        and(
+          eq(imageBuilds.contentHash, input.contentHash),
+          inArray(imageBuilds.status, ["queued", "failed", "stale"]),
+        ),
+      ),
+    ),
+  );
+}
+
+function dbBuildIds(where: ReturnType<typeof and>) {
+  return sql`select ${imageBuilds.id} from ${imageBuilds} where ${where}`;
 }
 
 export async function assignQueuedImageBuilds(
@@ -211,6 +301,31 @@ export async function assignQueuedImageBuilds(
     );
     await tryWakeHostRuntime(builder.hostId);
 
+    // Supersession can win after the claim but before the desired-state write.
+    // Recheck after publishing desired state; if the row is no longer assigned
+    // to this host, compensate immediately. If supersession happens after this
+    // read, its lock-held transaction removes the desired entry instead.
+    const activeAssignment = await db
+      .select({ id: imageBuilds.id })
+      .from(imageBuilds)
+      .where(
+        and(
+          eq(imageBuilds.id, build.id),
+          eq(imageBuilds.hostId, builder.hostId),
+          inArray(imageBuilds.status, ["assigned", "building"]),
+        ),
+      )
+      .limit(1);
+    if (!activeAssignment.length) {
+      await removeDesiredBuildsFromHost(
+        db,
+        builder.hostId,
+        [build.id],
+        nowUnixMs,
+      );
+      continue;
+    }
+
     activeCounts.set(
       builder.hostId,
       (activeCounts.get(builder.hostId) ?? 0) + 1,
@@ -248,7 +363,21 @@ export async function recordImageBuildReport(
   report: BuildReportV1,
   nowUnixMs: number,
 ): Promise<{ updated: boolean; terminal: boolean }> {
-  const rows = await db
+  const identities = await db
+    .select({
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+    })
+    .from(imageBuilds)
+    .where(eq(imageBuilds.id, report.build_id))
+    .limit(1);
+  const identity = identities[0];
+  if (!identity) {
+    return { updated: false, terminal: false };
+  }
+
+  return withImageBuildCoordinationLock(db, identity, async (lease) => {
+    const rows = await db
     .select({
       hostId: imageBuilds.hostId,
       status: imageBuilds.status,
@@ -259,44 +388,52 @@ export async function recordImageBuildReport(
     .from(imageBuilds)
     .where(eq(imageBuilds.id, report.build_id))
     .limit(1);
-  const existing = rows[0];
-  if (
-    !existing ||
-    !shouldAcceptBuildReport({
-      assignedHostId: existing.hostId,
-      assignedStatus: existing.status,
-      reportingHostId: hostId,
-      reportHostId: report.host_id,
-      assignedScenarioId: existing.scenarioId,
-      reportScenarioId: report.scenario_id,
-      assignedContentHash: existing.contentHash,
-      reportContentHash: report.content_hash,
-    })
-  ) {
-    return { updated: false, terminal: false };
-  }
+    const existing = rows[0];
+    if (
+      !existing ||
+      !shouldAcceptBuildReport({
+        assignedHostId: existing.hostId,
+        assignedStatus: existing.status,
+        reportingHostId: hostId,
+        reportHostId: report.host_id,
+        assignedScenarioId: existing.scenarioId,
+        reportScenarioId: report.scenario_id,
+        assignedContentHash: existing.contentHash,
+        reportContentHash: report.content_hash,
+      })
+    ) {
+      return { updated: false, terminal: false };
+    }
 
-  const timings = mergeBuildTimings(existing.timingsJson, report);
-  const updated = await db
-    .update(imageBuilds)
-    .set({
-      hostId,
-      phase: report.phase,
-      status: buildStatusFromPhase(report.phase),
-      attempt: report.attempt,
-      error: report.error ?? null,
-      timingsJson: timings,
-      updatedAt: nowUnixMs,
-    })
-    .where(
-      and(eq(imageBuilds.id, report.build_id), eq(imageBuilds.hostId, hostId)),
-    )
-    .returning({ id: imageBuilds.id });
+    const timings = mergeBuildTimings(existing.timingsJson, report);
+    await lease.assertHeld();
+    const updated = await db
+      .update(imageBuilds)
+      .set({
+        hostId,
+        phase: report.phase,
+        status: buildStatusFromPhase(report.phase),
+        attempt: report.attempt,
+        error: report.error ?? null,
+        timingsJson: timings,
+        updatedAt: nowUnixMs,
+      })
+      .where(
+        and(
+          eq(imageBuilds.id, report.build_id),
+          eq(imageBuilds.hostId, hostId),
+          eq(imageBuilds.scenarioId, existing.scenarioId),
+          eq(imageBuilds.contentHash, existing.contentHash),
+          inArray(imageBuilds.status, ["assigned", "building"]),
+        ),
+      )
+      .returning({ id: imageBuilds.id });
 
-  return {
-    updated: updated.length > 0,
-    terminal: updated.length > 0 && isTerminalBuildPhase(report.phase),
-  };
+    return {
+      updated: updated.length > 0,
+      terminal: updated.length > 0 && isTerminalBuildPhase(report.phase),
+    };
+  });
 }
 
 export async function recordHostBuildReports(
@@ -349,28 +486,85 @@ async function requeueAssignedBuildsForDisconnectedHost(
     return [];
   }
 
-  const rows = await db
-    .select({ id: imageBuilds.id })
+  const candidates = await db
+    .select({
+      id: imageBuilds.id,
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
+    })
     .from(imageBuilds)
     .where(
       and(eq(imageBuilds.hostId, hostId), eq(imageBuilds.status, "assigned")),
     );
-  const buildIds = rows.map((row) => row.id);
-  if (!buildIds.length) {
+  if (!candidates.length) {
     return [];
   }
 
-  await db
-    .update(imageBuilds)
-    .set({
-      hostId: null,
-      status: "queued",
-      phase: "queued",
-      error: "builder disconnected before starting build",
-      updatedAt: nowUnixMs,
-    })
-    .where(inArray(imageBuilds.id, buildIds));
-  await removeDesiredBuildsFromHost(db, hostId, buildIds, nowUnixMs);
+  const buildIds = await withImageBuildCoordinationLocks(
+    db,
+    candidates,
+    async (lease) => {
+      const lockedHosts = await db
+        .select({
+          connected: agentHosts.connected,
+          disconnectedAt: agentHosts.disconnectedAt,
+        })
+        .from(agentHosts)
+        .where(eq(agentHosts.id, hostId))
+        .limit(1);
+      const lockedHost = lockedHosts[0];
+      if (!lockedHost || !isDisconnectedPastDeadline(lockedHost, nowUnixMs)) {
+        return [];
+      }
+
+      const lockedRows = await db
+        .select({ id: imageBuilds.id })
+        .from(imageBuilds)
+        .where(
+          and(
+            eq(imageBuilds.hostId, hostId),
+            eq(imageBuilds.status, "assigned"),
+            inArray(
+              imageBuilds.id,
+              candidates.map((candidate) => candidate.id),
+            ),
+          ),
+        );
+      if (!lockedRows.length) return [];
+
+      await lease.assertHeld();
+      const updated = await db
+        .update(imageBuilds)
+        .set({
+          hostId: null,
+          status: "queued",
+          phase: "queued",
+          error: "builder disconnected before starting build",
+          updatedAt: nowUnixMs,
+        })
+        .where(
+          and(
+            eq(imageBuilds.hostId, hostId),
+            eq(imageBuilds.status, "assigned"),
+            inArray(
+              imageBuilds.id,
+              lockedRows.map((row) => row.id),
+            ),
+          ),
+        )
+        .returning({ id: imageBuilds.id });
+      const updatedIds = updated.map((row) => row.id);
+      await removeDesiredBuildsFromHost(
+        db,
+        hostId,
+        updatedIds,
+        nowUnixMs,
+        { wake: false },
+      );
+      return updatedIds;
+    },
+  );
+  if (buildIds.length) await tryWakeHostRuntime(hostId);
   return buildIds;
 }
 
@@ -382,6 +576,8 @@ async function markSilentBuildingBuildsStale(
   const rows = await db
     .select({
       id: imageBuilds.id,
+      scenarioId: imageBuilds.scenarioId,
+      arch: imageBuilds.arch,
       status: imageBuilds.status,
       updatedAt: imageBuilds.updatedAt,
       timingsJson: imageBuilds.timingsJson,
@@ -390,22 +586,68 @@ async function markSilentBuildingBuildsStale(
     .where(
       and(eq(imageBuilds.hostId, hostId), eq(imageBuilds.status, "building")),
     );
-  const staleIds = rows
-    .filter((row) => isSilentBuildingBuild(row, nowUnixMs))
-    .map((row) => row.id);
-  if (!staleIds.length) {
+  const candidates = rows.filter((row) =>
+    isSilentBuildingBuild(row, nowUnixMs),
+  );
+  if (!candidates.length) {
     return [];
   }
 
-  await db
-    .update(imageBuilds)
-    .set({
-      status: "stale",
-      error: "builder stopped reporting build progress",
-      updatedAt: nowUnixMs,
-    })
-    .where(inArray(imageBuilds.id, staleIds));
-  await removeDesiredBuildsFromHost(db, hostId, staleIds, nowUnixMs);
+  const staleIds = await withImageBuildCoordinationLocks(
+    db,
+    candidates,
+    async (lease) => {
+      const lockedRows = await db
+        .select({
+          id: imageBuilds.id,
+          status: imageBuilds.status,
+          updatedAt: imageBuilds.updatedAt,
+          timingsJson: imageBuilds.timingsJson,
+        })
+        .from(imageBuilds)
+        .where(
+          and(
+            eq(imageBuilds.hostId, hostId),
+            eq(imageBuilds.status, "building"),
+            inArray(
+              imageBuilds.id,
+              candidates.map((candidate) => candidate.id),
+            ),
+          ),
+        );
+      const lockedStaleIds = lockedRows
+        .filter((row) => isSilentBuildingBuild(row, nowUnixMs))
+        .map((row) => row.id);
+      if (!lockedStaleIds.length) return [];
+
+      await lease.assertHeld();
+      const updated = await db
+        .update(imageBuilds)
+        .set({
+          status: "stale",
+          error: "builder stopped reporting build progress",
+          updatedAt: nowUnixMs,
+        })
+        .where(
+          and(
+            eq(imageBuilds.hostId, hostId),
+            eq(imageBuilds.status, "building"),
+            inArray(imageBuilds.id, lockedStaleIds),
+          ),
+        )
+        .returning({ id: imageBuilds.id });
+      const updatedIds = updated.map((row) => row.id);
+      await removeDesiredBuildsFromHost(
+        db,
+        hostId,
+        updatedIds,
+        nowUnixMs,
+        { wake: false },
+      );
+      return updatedIds;
+    },
+  );
+  if (staleIds.length) await tryWakeHostRuntime(hostId);
   return staleIds;
 }
 
@@ -414,6 +656,7 @@ async function removeDesiredBuildsFromHost(
   hostId: string,
   buildIds: string[],
   nowUnixMs: number,
+  options?: { wake?: boolean },
 ): Promise<void> {
   if (!buildIds.length) {
     return;
@@ -423,7 +666,7 @@ async function removeDesiredBuildsFromHost(
       removeDesiredBuild(draft, { buildId });
     }
   });
-  await tryWakeHostRuntime(hostId);
+  if (options?.wake !== false) await tryWakeHostRuntime(hostId);
 }
 
 async function loadBuilderCandidates(
@@ -467,13 +710,13 @@ async function loadBuilderCandidates(
     role: host.role,
     arch: host.reportJson?.capabilities.arch ?? null,
     connected: Boolean(
-        host.connected &&
-        host.activeSessionId &&
-        host.reportJson &&
-        typeof host.stateReportedAt === "number" &&
-        typeof host.lastClientHelloAt === "number" &&
-        host.stateReportedAt >= host.lastClientHelloAt &&
-        hostHealth(host.stateReportedAt, nowUnixMs) === "healthy",
+      host.connected &&
+      host.activeSessionId &&
+      host.reportJson &&
+      typeof host.stateReportedAt === "number" &&
+      typeof host.lastClientHelloAt === "number" &&
+      host.stateReportedAt >= host.lastClientHelloAt &&
+      hostHealth(host.stateReportedAt, nowUnixMs) === "healthy",
     ),
     disabled: Boolean(host.disabled),
     activeBuildCount: activeBuildCount.get(host.hostId) ?? 0,

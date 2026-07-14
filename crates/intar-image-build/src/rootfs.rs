@@ -436,7 +436,7 @@ fn render_customize_hook(build_service: &str, build_start_script: &str) -> Strin
         r#"#!/bin/sh
 set -eu
 root="$1"
-mkdir -p "$root/etc/modules-load.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system" "$root/usr/local/sbin"
+mkdir -p "$root/etc/modules-load.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system/ssh.service.d" "$root/usr/local/sbin"
 cat > "$root/etc/modules-load.d/90-intar-runtime.conf" <<'EOF'
 {runtime_module_lines}
 EOF
@@ -450,9 +450,34 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 HostKey /etc/ssh/ssh_host_ed25519_key
 EOF
+cat > "$root/etc/systemd/system/ssh.service.d/10-intar-gate.conf" <<'EOF'
+[Unit]
+ConditionPathExists=/run/intar/ssh-ready
+EOF
 chroot "$root" useradd -m -s /bin/bash -G sudo ubuntu
 echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > "$root/etc/sudoers.d/90-intar-build"
 chmod 0440 "$root/etc/sudoers.d/90-intar-build"
+# The build bootstrap owns port 22 until the scenario image is finalized.
+# Do not let the distribution ssh unit race it before the ephemeral key and
+# static QEMU network have been installed. The condition also blocks activation
+# through systemd-ssh-generator's transient sshd-unix-local.socket.
+systemctl --root="$root" disable ssh.service >/dev/null
+ssh_socket_state="$(systemctl --root="$root" is-enabled ssh.socket 2>/dev/null || true)"
+case "$ssh_socket_state" in
+  enabled|enabled-runtime) systemctl --root="$root" disable ssh.socket >/dev/null ;;
+  alias|disabled|masked|not-found|static|"") ;;
+  *) echo "unsafe build ssh.socket enablement state: $ssh_socket_state" >&2; exit 1 ;;
+esac
+ssh_service_state="$(systemctl --root="$root" is-enabled ssh.service 2>/dev/null || true)"
+case "$ssh_service_state" in
+  disabled|not-found|static) ;;
+  *) echo "failed to disable build ssh.service: $ssh_service_state" >&2; exit 1 ;;
+esac
+sshd_service_state="$(systemctl --root="$root" is-enabled sshd.service 2>/dev/null || true)"
+case "$sshd_service_state" in
+  alias|disabled|not-found|static) ;;
+  *) echo "unsafe build sshd.service enablement state: $sshd_service_state" >&2; exit 1 ;;
+esac
 cat > "$root/etc/systemd/system/intar-build.service" <<'EOF'
 {build_service}
 EOF
@@ -469,13 +494,18 @@ ln -sf /etc/systemd/system/intar-build.service "$root/etc/systemd/system/multi-u
 fn render_intar_build_service() -> String {
     r#"[Unit]
 Description=Intar image build bootstrap
-After=local-fs.target
+After=local-fs.target systemd-udev-trigger.service
+Before=multi-user.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/sbin/intar-build-start
 Restart=on-failure
 RestartSec=1s
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
@@ -486,6 +516,16 @@ WantedBy=multi-user.target
 fn render_intar_build_start_script() -> String {
     r#"#!/bin/sh
 set -eu
+
+log_failure() {
+  status="$?"
+  echo "intar-build bootstrap failed with status $status" >&2
+  ip -brief link >&2 2>/dev/null || true
+  ip -brief address >&2 2>/dev/null || true
+  ip route show >&2 2>/dev/null || true
+  exit "$status"
+}
+trap log_failure EXIT
 
 seed_device=""
 for _ in $(seq 1 200); do
@@ -501,27 +541,43 @@ if [ -z "$seed_device" ]; then
 fi
 
 mkdir -p /run/intar-build
-mount -t vfat -o ro "$seed_device" /run/intar-build
+if mountpoint -q /run/intar-build; then
+  mounted_source="$(findmnt -n -o SOURCE --target /run/intar-build 2>/dev/null || true)"
+  if [ -z "$mounted_source" ] || [ "$(readlink -f "$mounted_source")" != "$(readlink -f "$seed_device")" ]; then
+    echo "unexpected filesystem already mounted at /run/intar-build" >&2
+    exit 1
+  fi
+else
+  mount -t vfat -o ro "$seed_device" /run/intar-build
+fi
 . /run/intar-build/build.env
 
-iface="${INTAR_BUILD_IFACE:-}"
-if [ -z "$iface" ]; then
-  for candidate in /sys/class/net/*; do
-    [ -e "$candidate" ] || continue
-    name="${candidate##*/}"
-    [ "$name" = "lo" ] && continue
-    iface="$name"
-    break
+configure_network() {
+  deadline=$(( $(cut -d. -f1 /proc/uptime) + 30 ))
+  last_error="no non-loopback network interface found"
+  while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+    if [ -n "${INTAR_BUILD_IFACE:-}" ]; then
+      candidates="/sys/class/net/$INTAR_BUILD_IFACE"
+    else
+      candidates="/sys/class/net/*"
+    fi
+    for candidate in $candidates; do
+      [ -e "$candidate" ] || continue
+      iface="${candidate##*/}"
+      [ "$iface" = "lo" ] && continue
+      if error="$(ip link set "$iface" up 2>&1)" &&
+         error="$(ip addr replace "${INTAR_BUILD_IP:-10.0.2.15/24}" dev "$iface" 2>&1)" &&
+         error="$(ip route replace default via "${INTAR_BUILD_GATEWAY:-10.0.2.2}" dev "$iface" 2>&1)"; then
+        echo "configured build network on $iface" >&2
+        return 0
+      fi
+      last_error="interface $iface: $error"
+    done
+    sleep 1
   done
-fi
-if [ -z "$iface" ]; then
-  echo "no non-loopback network interface found" >&2
-  exit 1
-fi
-
-ip link set "$iface" up
-ip addr add "${INTAR_BUILD_IP:-10.0.2.15/24}" dev "$iface" 2>/dev/null || true
-ip route replace default via "${INTAR_BUILD_GATEWAY:-10.0.2.2}" dev "$iface"
+  echo "timed out configuring build network: $last_error" >&2
+  return 1
+}
 
 # The mmdebstrap rootfs ships without resolv.conf; without a nameserver every
 # apt/curl step in the build provisioning fails on DNS resolution.
@@ -536,8 +592,17 @@ install -m 0600 -o ubuntu -g ubuntu /run/intar-build/authorized_keys /home/ubunt
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
   ssh-keygen -q -N '' -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
 fi
+install -d -o root -g root -m 0755 /run/sshd
+/usr/sbin/sshd -t
+configure_network
 
-exec /usr/sbin/sshd -D -e
+# This sshd is reachable only through QEMU's loopback host forward. The
+# builder's readiness probes must not poison OpenSSH's production-oriented
+# per-source penalty state while the guest is still starting.
+exec /usr/sbin/sshd -D -e \
+  -o PerSourcePenalties=no \
+  -o MaxStartups=100:30:200 \
+  -o LoginGraceTime=30
 "#
     .to_string()
 }
@@ -633,8 +698,41 @@ base_image "trixie" {
             plan.customize_hook
                 .contains("HostKey /etc/ssh/ssh_host_ed25519_key")
         );
-        assert!(plan.build_service.contains("After=local-fs.target"));
+        assert!(
+            plan.build_service
+                .contains("After=local-fs.target systemd-udev-trigger.service")
+        );
+        assert!(plan.build_service.contains("Before=multi-user.target"));
+        assert!(plan.build_service.contains("RuntimeDirectory=sshd"));
+        assert!(plan.build_service.contains("RuntimeDirectoryMode=0755"));
+        assert!(plan.build_service.contains("StandardError=journal+console"));
+        assert!(
+            plan.customize_hook
+                .contains("ConditionPathExists=/run/intar/ssh-ready")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("systemctl --root=\"$root\" disable ssh.service")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("failed to disable build ssh.service")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("unsafe build sshd.service enablement state")
+        );
+        assert!(!plan.customize_hook.contains("mask ssh.service"));
+        assert!(!plan.customize_hook.contains("mask sshd.service"));
         assert!(plan.build_start_script.contains("blkid -L INTARBUILD"));
+        assert!(
+            plan.build_start_script
+                .contains("mountpoint -q /run/intar-build")
+        );
+        assert!(
+            plan.build_start_script
+                .contains("findmnt -n -o SOURCE --target /run/intar-build")
+        );
         assert!(
             plan.build_start_script
                 .contains("INTAR_BUILD_IP:-10.0.2.15/24")
@@ -646,11 +744,66 @@ base_image "trixie" {
         );
         assert!(
             plan.build_start_script
-                .contains("ip link set \"$iface\" up")
+                .contains("ip link set \"$iface\" up 2>&1")
+        );
+        assert!(plan.build_start_script.contains("ip addr replace"));
+        assert!(
+            plan.build_start_script
+                .contains("timed out configuring build network")
+        );
+        assert!(
+            plan.build_start_script
+                .contains("install -d -o root -g root -m 0755 /run/sshd")
+        );
+        assert!(plan.build_start_script.contains("/usr/sbin/sshd -t"));
+        assert!(plan.build_start_script.contains("-o PerSourcePenalties=no"));
+        assert!(
+            plan.build_start_script
+                .contains("-o MaxStartups=100:30:200")
         );
         assert!(
             plan.build_start_script
                 .contains("ssh-keygen -q -N '' -t ed25519")
+        );
+        let install_key = plan
+            .build_start_script
+            .find("/run/intar-build/authorized_keys")
+            .unwrap();
+        let configure_network = plan
+            .build_start_script
+            .rfind("\nconfigure_network\n")
+            .unwrap();
+        let start_sshd = plan
+            .build_start_script
+            .find("exec /usr/sbin/sshd -D -e")
+            .unwrap();
+        assert!(install_key < configure_network);
+        assert!(configure_network < start_sshd);
+
+        let directory = tempfile::tempdir().unwrap();
+        let script_path = directory.path().join("intar-build-start");
+        std::fs::write(&script_path, &plan.build_start_script).unwrap();
+        let syntax = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&script_path)
+            .output()
+            .unwrap();
+        assert!(
+            syntax.status.success(),
+            "{}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+        let customize_path = directory.path().join("customize-hook");
+        std::fs::write(&customize_path, &plan.customize_hook).unwrap();
+        let customize_syntax = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&customize_path)
+            .output()
+            .unwrap();
+        assert!(
+            customize_syntax.status.success(),
+            "{}",
+            String::from_utf8_lossy(&customize_syntax.stderr)
         );
         for unit in MASKED_UNITS {
             assert!(plan.customize_hook.contains(&format!("mask {unit}")));

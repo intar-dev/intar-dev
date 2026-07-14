@@ -19,7 +19,7 @@ use intar_contracts::bridge::{
 use intar_contracts::catalog::{ImageArchitecture, Mib};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -60,6 +60,7 @@ pub async fn run(
     cfg: BuilderConfig,
     db: BuilderDb,
     mut build_reports: mpsc::Receiver<BuildReportV1>,
+    desired_ready: watch::Sender<bool>,
 ) -> Result<()> {
     let http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
@@ -82,6 +83,7 @@ pub async fn run(
             &db,
             &mut build_reports,
             &mut current_desired_state,
+            &desired_ready,
             reconnect,
         )
         .await
@@ -106,6 +108,7 @@ async fn connect_once(
     db: &BuilderDb,
     build_reports: &mut mpsc::Receiver<BuildReportV1>,
     current_desired_state: &mut Option<HostDesiredStateV2>,
+    desired_ready: &watch::Sender<bool>,
     reconnect: bool,
 ) -> Result<()> {
     let bootstrap = bootstrap_builder_access(&cfg.bridge, http).await?;
@@ -137,7 +140,15 @@ async fn connect_once(
             arch: capabilities.arch,
             supports_kvm: capabilities.supports_kvm,
             supports_vsock: capabilities.supports_vsock,
-            last_applied_desired_version: current_desired_state.as_ref().map(|state| state.version),
+            // A process restart must receive and apply authoritative desired
+            // state before any reset local job may run. Advertising no applied
+            // version until this process applies a live update forces that
+            // refresh even when a cached document has the current version or
+            // the first connection attempt fails.
+            last_applied_desired_version: advertised_desired_version(
+                current_desired_state.as_ref(),
+                *desired_ready.borrow(),
+            ),
         }),
     )
     .await?;
@@ -199,6 +210,7 @@ async fn connect_once(
                         cfg,
                         db,
                         current_desired_state,
+                        desired_ready,
                         message,
                     ).await?;
                 }
@@ -225,6 +237,7 @@ async fn handle_server_message<W>(
     cfg: &BuilderConfig,
     db: &BuilderDb,
     current_desired_state: &mut Option<HostDesiredStateV2>,
+    desired_ready: &watch::Sender<bool>,
     message: BridgeMessageV6,
 ) -> Result<()>
 where
@@ -237,6 +250,7 @@ where
             apply_desired_state(&cfg.bridge, db, &message)
                 .context("failed to apply builder desired state")?;
             *current_desired_state = Some(desired_state);
+            desired_ready.send_replace(true);
             send_state_report(write, cfg, db, current_desired_state.as_ref()).await?;
         }
         BridgeMessageV6::SyncRequest(_) => {
@@ -253,6 +267,15 @@ where
         }
     }
     Ok(())
+}
+
+fn advertised_desired_version(
+    current: Option<&HostDesiredStateV2>,
+    has_fresh_desired_state: bool,
+) -> Option<u64> {
+    has_fresh_desired_state
+        .then(|| current.map(|state| state.version))
+        .flatten()
 }
 
 fn load_cached_desired_state(cfg: &BridgeConfig, db: &BuilderDb) -> Option<HostDesiredStateV2> {
@@ -795,8 +818,8 @@ mod tests {
     use crate::db::BuilderDb;
 
     use super::{
-        BuilderClientHelloInput, build_host_state_report, builder_client_hello,
-        can_open_char_device, parse_meminfo_kib, validate_desired_state,
+        BuilderClientHelloInput, advertised_desired_version, build_host_state_report,
+        builder_client_hello, can_open_char_device, parse_meminfo_kib, validate_desired_state,
     };
 
     #[test]
@@ -834,6 +857,23 @@ mod tests {
         assert_eq!(hello.last_applied_desired_version, Some(7));
         assert!(hello.capabilities.supports_kvm);
         assert!(!hello.capabilities.supports_vsock);
+    }
+
+    #[test]
+    fn process_start_forces_fresh_desired_state_before_workers_run() {
+        let desired = intar_contracts::bridge::HostDesiredStateV2 {
+            schema_version: intar_contracts::bridge::HOST_DESIRED_STATE_SCHEMA_VERSION,
+            host_id: "builder-1".to_string(),
+            version: 7,
+            generated_at_unix_ms: 1000,
+            cached_images: Vec::new(),
+            vms: Vec::new(),
+            builds: Vec::new(),
+        };
+
+        assert_eq!(advertised_desired_version(Some(&desired), false), None);
+        assert_eq!(advertised_desired_version(Some(&desired), true), Some(7));
+        assert_eq!(advertised_desired_version(None, true), None);
     }
 
     #[test]

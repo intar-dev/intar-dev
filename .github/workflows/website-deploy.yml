@@ -51,6 +51,15 @@ jobs:
       - name: Build deployment artifact
         run: bun run build:deploy
 
+      - name: Apply image-build coordination migration
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: >-
+          bunx wrangler d1 execute DB --remote
+          --file drizzle/0002_image_build_coordination_locks.sql
+          --config wrangler.jsonc
+
       - name: Deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

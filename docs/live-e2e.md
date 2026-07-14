@@ -135,6 +135,7 @@ the Linux/KVM builder host, keep the `qemu`, `builder`, and `jobs` sections from
 `crates/intar-builder/deploy/config.example.toml`, and run:
 
 ```sh
+export INTAR_REGISTRY_PUBLISH_TOKEN="local-registry-publish-token"
 intar-builder doctor --config /etc/intar-builder/config.toml
 just bundle-images pair-ping builder.sample.amd64.hcl local-e2e true
 intar-builder run-once \
@@ -143,9 +144,11 @@ intar-builder run-once \
   --bundle dist/bundles/local-e2e.tar.gz
 ```
 
-`run-once` publishes the image through `/registry/v1/publish` using the builder
-host JWT. After that, run the live harness against the same local Worker with
-`--skip-publish`.
+`run-once` is a privileged manual path and publishes through
+`/registry/v1/publish` only when `INTAR_REGISTRY_PUBLISH_TOKEN` is set. Daemon
+builds instead use the builder host JWT plus the exact active build assignment;
+stale or superseded jobs cannot publish. After that, run the live harness
+against the same local Worker with `--skip-publish`.
 
 On a non-KVM workstation, use `just render-images` for argument/script inspection
 only. A TCG build is useful for diagnosing orchestration but does not satisfy the

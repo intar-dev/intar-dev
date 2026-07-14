@@ -3,7 +3,7 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use intar_contracts::catalog::ScenarioManifestV3;
+use intar_contracts::catalog::{ImageArchitecture, ScenarioManifestV3};
 use reqwest::blocking::multipart::Form;
 
 use crate::config::ImageUploadConfig;
@@ -21,6 +21,18 @@ pub struct PublishArtifactFile {
     pub sha256: String,
     pub source_path: PathBuf,
     pub filename: String,
+}
+
+/// Identity of the control-plane build assignment authorizing a builder
+/// publish. Operator-token publishes deliberately omit this context; builder
+/// agent JWTs are accepted by the registry only when these fields still match
+/// an active assignment for the authenticated host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishBuildIdentity {
+    pub build_id: String,
+    pub rev: String,
+    pub content_hash: String,
+    pub architecture: ImageArchitecture,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
@@ -90,6 +102,27 @@ impl ImageUploader {
         images: &[PublishImageFile],
         artifacts: &[PublishArtifactFile],
     ) -> Result<PublishReceipt> {
+        self.publish_manifest_with_optional_identity(manifest, images, artifacts, None)
+    }
+
+    pub fn publish_build_manifest_with_artifacts(
+        &self,
+        manifest: &ScenarioManifestV3,
+        images: &[PublishImageFile],
+        artifacts: &[PublishArtifactFile],
+        identity: &PublishBuildIdentity,
+    ) -> Result<PublishReceipt> {
+        validate_build_identity(identity)?;
+        self.publish_manifest_with_optional_identity(manifest, images, artifacts, Some(identity))
+    }
+
+    fn publish_manifest_with_optional_identity(
+        &self,
+        manifest: &ScenarioManifestV3,
+        images: &[PublishImageFile],
+        artifacts: &[PublishArtifactFile],
+        identity: Option<&PublishBuildIdentity>,
+    ) -> Result<PublishReceipt> {
         if images.is_empty() {
             return Err(Error::InvalidConfig("publish requires at least one image"));
         }
@@ -107,7 +140,17 @@ impl ImageUploader {
             self.upload_blob(&create_body, &artifact.source_path)?;
         }
 
-        let form = Form::new().text("manifest", serde_json::to_string(manifest)?);
+        let mut form = Form::new().text("manifest", serde_json::to_string(manifest)?);
+        if let Some(identity) = identity {
+            form = form
+                .text("build_id", identity.build_id.clone())
+                .text("rev", identity.rev.clone())
+                .text("content_hash", identity.content_hash.clone())
+                .text(
+                    "architecture",
+                    architecture_name(&identity.architecture).to_owned(),
+                );
+        }
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -202,6 +245,51 @@ impl ImageUploader {
             return Err(Error::HttpStatus { status, body: text });
         }
         Ok(serde_json::from_str(&text)?)
+    }
+}
+
+impl PublishBuildIdentity {
+    pub fn new(
+        build_id: impl Into<String>,
+        rev: impl Into<String>,
+        content_hash: impl Into<String>,
+        architecture: ImageArchitecture,
+    ) -> Result<Self> {
+        let identity = Self {
+            build_id: build_id.into(),
+            rev: rev.into(),
+            content_hash: content_hash.into(),
+            architecture,
+        };
+        validate_build_identity(&identity)?;
+        Ok(identity)
+    }
+}
+
+fn validate_build_identity(identity: &PublishBuildIdentity) -> Result<()> {
+    if !is_safe_identity_slug(&identity.build_id) {
+        return Err(Error::InvalidKey(identity.build_id.clone()));
+    }
+    if !is_safe_identity_slug(&identity.rev) {
+        return Err(Error::InvalidKey(identity.rev.clone()));
+    }
+    normalize_sha256(&identity.content_hash)?;
+    Ok(())
+}
+
+fn is_safe_identity_slug(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+const fn architecture_name(architecture: &ImageArchitecture) -> &'static str {
+    match architecture {
+        ImageArchitecture::X86_64 => "x86_64",
+        ImageArchitecture::Aarch64 => "aarch64",
     }
 }
 
@@ -331,7 +419,12 @@ fn normalize_filename(value: &str) -> Result<String> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{PublishArtifactFile, PublishImageFile, normalize_filename, normalize_sha256};
+    use intar_contracts::catalog::ImageArchitecture;
+
+    use super::{
+        PublishArtifactFile, PublishBuildIdentity, PublishImageFile, architecture_name,
+        normalize_filename, normalize_sha256,
+    };
 
     #[test]
     fn accepts_raw_zstd_publish_file() {
@@ -363,6 +456,42 @@ mod tests {
     fn normalizes_sha256() {
         assert_eq!(normalize_sha256(&"A".repeat(64)).unwrap(), "a".repeat(64));
         assert!(normalize_sha256("not-a-sha").is_err());
+    }
+
+    #[test]
+    fn validates_builder_publish_identity() {
+        let identity = PublishBuildIdentity::new(
+            "build-1",
+            "rev-1",
+            "A".repeat(64),
+            ImageArchitecture::X86_64,
+        )
+        .unwrap();
+        assert_eq!(identity.build_id, "build-1");
+        assert_eq!(architecture_name(&identity.architecture), "x86_64");
+
+        assert!(
+            PublishBuildIdentity::new(
+                "../escape",
+                "rev-1",
+                "a".repeat(64),
+                ImageArchitecture::X86_64,
+            )
+            .is_err()
+        );
+        assert!(
+            PublishBuildIdentity::new(
+                "build-1",
+                "../escape",
+                "a".repeat(64),
+                ImageArchitecture::X86_64,
+            )
+            .is_err()
+        );
+        assert!(
+            PublishBuildIdentity::new("build-1", "rev-1", "not-a-sha", ImageArchitecture::X86_64,)
+                .is_err()
+        );
     }
 
     #[test]

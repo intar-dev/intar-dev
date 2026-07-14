@@ -20,9 +20,7 @@ pub fn reconcile_desired_builds(
         .collect::<HashSet<_>>();
 
     for job in db.list_build_jobs()? {
-        if should_delete_local_job_missing_from_desired(&job.phase)
-            && !desired_build_ids.contains(job.build_id.as_str())
-        {
+        if !desired_build_ids.contains(job.build_id.as_str()) {
             db.delete_build_job(&job.build_id)?;
         }
     }
@@ -41,10 +39,6 @@ pub fn reconcile_desired_builds(
         inserted += 1;
     }
     Ok(inserted)
-}
-
-fn should_delete_local_job_missing_from_desired(phase: &str) -> bool {
-    matches!(phase, "queued" | "succeeded" | "failed")
 }
 
 #[cfg(test)]
@@ -150,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_queued_builds_missing_from_desired_state() {
+    fn removes_queued_and_active_builds_missing_from_desired_state() {
         let db = BuilderDb::open_in_memory().unwrap();
         let keep = desired_build("keep");
         let remove = desired_build("remove");
@@ -166,10 +160,7 @@ mod tests {
         assert_eq!(inserted, 0);
         assert!(db.load_build_job("keep").unwrap().is_some());
         assert!(db.load_build_job("remove").unwrap().is_none());
-        assert_eq!(
-            db.load_build_job("active").unwrap().unwrap().phase,
-            "building"
-        );
+        assert!(db.load_build_job("active").unwrap().is_none());
     }
 
     #[test]
