@@ -7,6 +7,11 @@ use intar_image_scenario::{
 };
 use std::fmt::Write as _;
 
+use crate::rootfs::{
+    INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE, INTAR_ACPI_POWEROFF_PATH,
+    INTAR_ACPI_POWEROFF_SCRIPT,
+};
+
 const DEFAULT_USERNAME: &str = "ubuntu";
 const RECORDING_MOUNT_PATH: &str = "/var/lib/kino-recordings";
 const RECORDING_CONFIG_PATH: &str = "/etc/kino/ssh-recording.hcl";
@@ -391,6 +396,72 @@ fn append_apt_cleanup_config(script: &mut String) -> Result<()> {
 
 fn append_final_cleanup(script: &mut String) -> Result<()> {
     writeln!(script).context("format error")?;
+    writeln!(script, "log_phase acpi_poweroff_handler start").context("format error")?;
+    writeln!(
+        script,
+        "install -d -o root -g root -m 0755 /etc/acpi/events"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "cat >{} <<'EOF_INTAR_ACPI_EVENT'",
+        shell_quote(INTAR_ACPI_EVENT_PATH)
+    )
+    .context("format error")?;
+    script.push_str(INTAR_ACPI_EVENT_RULE);
+    writeln!(script, "EOF_INTAR_ACPI_EVENT").context("format error")?;
+    writeln!(
+        script,
+        "cat >{} <<'EOF_INTAR_ACPI_POWEROFF'",
+        shell_quote(INTAR_ACPI_POWEROFF_PATH)
+    )
+    .context("format error")?;
+    script.push_str(INTAR_ACPI_POWEROFF_SCRIPT);
+    writeln!(script, "EOF_INTAR_ACPI_POWEROFF").context("format error")?;
+    writeln!(
+        script,
+        "chown root:root {} {}",
+        shell_quote(INTAR_ACPI_EVENT_PATH),
+        shell_quote(INTAR_ACPI_POWEROFF_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "chmod 0644 {}", shell_quote(INTAR_ACPI_EVENT_PATH))
+        .context("format error")?;
+    writeln!(
+        script,
+        "chmod 0755 {}",
+        shell_quote(INTAR_ACPI_POWEROFF_PATH)
+    )
+    .context("format error")?;
+    writeln!(script, "systemctl enable acpid.service >/dev/null").context("format error")?;
+    writeln!(script, "if ! systemctl restart acpid.service; then").context("format error")?;
+    writeln!(
+        script,
+        "  systemctl status --no-pager --full acpid.service >&2 || true"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  echo 'failed to restart ACPI poweroff handler' >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "fi").context("format error")?;
+    writeln!(
+        script,
+        "if ! systemctl is-active --quiet acpid.service; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  systemctl status --no-pager --full acpid.service >&2 || true"
+    )
+    .context("format error")?;
+    writeln!(script, "  echo 'ACPI poweroff handler is not active' >&2").context("format error")?;
+    writeln!(script, "  exit 1").context("format error")?;
+    writeln!(script, "fi").context("format error")?;
+    writeln!(script, "log_phase acpi_poweroff_handler end").context("format error")?;
+    writeln!(script).context("format error")?;
     writeln!(script, "log_phase cleanup start").context("format error")?;
     writeln!(script, "apt-get clean || true").context("format error")?;
     writeln!(
@@ -405,10 +476,10 @@ fn append_final_cleanup(script: &mut String) -> Result<()> {
         "find /var/log -type f -exec truncate -s 0 {{}} + || true"
     )
     .context("format error")?;
-    writeln!(script, "sync").context("format error")?;
     writeln!(script, "truncate -s 0 /etc/machine-id").context("format error")?;
     writeln!(script, "rm -f /var/lib/dbus/machine-id").context("format error")?;
     writeln!(script, "log_phase cleanup end").context("format error")?;
+    writeln!(script, "sync").context("format error")?;
     Ok(())
 }
 
@@ -1706,6 +1777,72 @@ scenario "ssh-readiness" {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn provision_reasserts_acpi_poweroff_handler_before_machine_id_cleanup() {
+        let script = render_minimal_provision_script();
+
+        let image_finalize_end = script.find("log_phase image_finalize end").unwrap();
+        let handler_start = script
+            .find("log_phase acpi_poweroff_handler start")
+            .unwrap();
+        let event_rule = script
+            .find("cat >'/etc/acpi/events/90-intar-power-button' <<'EOF_INTAR_ACPI_EVENT'")
+            .unwrap();
+        let poweroff_script = script
+            .find("cat >'/usr/local/sbin/intar-acpi-poweroff' <<'EOF_INTAR_ACPI_POWEROFF'")
+            .unwrap();
+        let enable_service = script
+            .find("systemctl enable acpid.service >/dev/null")
+            .unwrap();
+        let restart_service = script
+            .find("if ! systemctl restart acpid.service; then")
+            .unwrap();
+        let verify_service = script
+            .find("if ! systemctl is-active --quiet acpid.service; then")
+            .unwrap();
+        let handler_end = script.find("log_phase acpi_poweroff_handler end").unwrap();
+        let machine_id = script.find("truncate -s 0 /etc/machine-id").unwrap();
+        let cleanup_end = script.find("log_phase cleanup end").unwrap();
+        let final_sync = script.rfind("\nsync\n").unwrap();
+
+        assert!(image_finalize_end < handler_start);
+        assert!(handler_start < event_rule);
+        assert!(event_rule < poweroff_script);
+        assert!(poweroff_script < enable_service);
+        assert!(enable_service < restart_service);
+        assert!(restart_service < verify_service);
+        assert!(verify_service < handler_end);
+        assert!(handler_end < machine_id);
+        assert!(machine_id < cleanup_end);
+        assert!(cleanup_end < final_sync);
+        assert!(script.contains(
+            "event=button[ /]power\naction=/usr/local/sbin/intar-acpi-poweroff\nEOF_INTAR_ACPI_EVENT"
+        ));
+
+        let (_, poweroff_and_rest) = script.split_once("<<'EOF_INTAR_ACPI_POWEROFF'\n").unwrap();
+        let (poweroff, _) = poweroff_and_rest
+            .split_once("EOF_INTAR_ACPI_POWEROFF\n")
+            .unwrap();
+        assert_eq!(poweroff, "#!/bin/bash\nset -eu\nkill -s RTMIN+4 1\n");
+        assert!(!poweroff.contains("systemctl"));
+        assert!(!poweroff.contains("shutdown"));
+        assert!(!poweroff.contains("poweroff"));
+        assert!(!poweroff.contains("machine-id"));
+        assert!(!poweroff.contains("dbus"));
+        assert!(script.contains(
+            "chown root:root '/etc/acpi/events/90-intar-power-button' '/usr/local/sbin/intar-acpi-poweroff'"
+        ));
+        assert!(script.contains("chmod 0644 '/etc/acpi/events/90-intar-power-button'"));
+        assert!(script.contains("chmod 0755 '/usr/local/sbin/intar-acpi-poweroff'"));
+
+        let syntax = run_bash(&script, true);
+        assert!(
+            syntax.status.success(),
+            "bash -n rejected the rendered provision script: {}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
     }
 
     #[test]

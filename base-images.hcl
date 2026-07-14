@@ -4,6 +4,7 @@ base_image "trixie" {
   arch           = "amd64"
   kernel_package = "linux-image-cloud-amd64"
   packages = [
+    "acpid",
     "openssh-server",
     "ca-certificates",
     "curl",

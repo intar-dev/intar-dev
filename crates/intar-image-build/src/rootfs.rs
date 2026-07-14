@@ -21,6 +21,15 @@ const INITRAMFS_MODULES: &[&str] = &[
 
 const RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "nf_tables", "vxlan"];
 
+// QMP system_powerdown injects this ACPI event, but the minimal image has no
+// D-Bus-backed logind consumer. Bash resolves the libc-relative RTMIN+4 name;
+// Dash and procps kill do not. Systemd PID 1 maps that signal to poweroff.target.
+pub(crate) const INTAR_ACPI_EVENT_PATH: &str = "/etc/acpi/events/90-intar-power-button";
+pub(crate) const INTAR_ACPI_POWEROFF_PATH: &str = "/usr/local/sbin/intar-acpi-poweroff";
+pub(crate) const INTAR_ACPI_EVENT_RULE: &str =
+    "event=button[ /]power\naction=/usr/local/sbin/intar-acpi-poweroff\n";
+pub(crate) const INTAR_ACPI_POWEROFF_SCRIPT: &str = "#!/bin/bash\nset -eu\nkill -s RTMIN+4 1\n";
+
 const MASKED_UNITS: &[&str] = &[
     "apt-daily.service",
     "apt-daily.timer",
@@ -426,6 +435,10 @@ EOF
 
 fn render_customize_hook(build_service: &str, build_start_script: &str) -> String {
     let runtime_module_lines = RUNTIME_MODULES.join("\n");
+    let intar_acpi_event_path = INTAR_ACPI_EVENT_PATH;
+    let intar_acpi_poweroff_path = INTAR_ACPI_POWEROFF_PATH;
+    let intar_acpi_event_rule = INTAR_ACPI_EVENT_RULE;
+    let intar_acpi_poweroff_script = INTAR_ACPI_POWEROFF_SCRIPT;
     let masked_units = MASKED_UNITS
         .iter()
         .map(|unit| format!("systemctl --root=\"$root\" mask {unit} >/dev/null 2>&1 || true"))
@@ -436,7 +449,15 @@ fn render_customize_hook(build_service: &str, build_start_script: &str) -> Strin
         r#"#!/bin/sh
 set -eu
 root="$1"
-mkdir -p "$root/etc/modules-load.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system/ssh.service.d" "$root/usr/local/sbin"
+mkdir -p "$root/etc/acpi/events" "$root/etc/modules-load.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system/ssh.service.d" "$root/usr/local/sbin"
+cat > "$root{intar_acpi_event_path}" <<'EOF_INTAR_ACPI_EVENT'
+{intar_acpi_event_rule}EOF_INTAR_ACPI_EVENT
+cat > "$root{intar_acpi_poweroff_path}" <<'EOF_INTAR_ACPI_POWEROFF'
+{intar_acpi_poweroff_script}EOF_INTAR_ACPI_POWEROFF
+chown root:root "$root{intar_acpi_event_path}" "$root{intar_acpi_poweroff_path}"
+chmod 0644 "$root{intar_acpi_event_path}"
+chmod 0755 "$root{intar_acpi_poweroff_path}"
+systemctl --root="$root" enable acpid.service >/dev/null
 cat > "$root/etc/modules-load.d/90-intar-runtime.conf" <<'EOF'
 {runtime_module_lines}
 EOF
@@ -628,7 +649,7 @@ base_image "trixie" {
   mirror         = "https://deb.debian.org/debian"
   arch           = "amd64"
   kernel_package = "linux-image-cloud-amd64"
-  packages       = ["openssh-server", "ca-certificates", "curl", "python3", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo", "zstd"]
+  packages       = ["acpid", "openssh-server", "ca-certificates", "curl", "python3", "iproute2", "e2fsprogs", "kmod", "systemd-sysv", "udev", "sudo", "zstd"]
 }
 "#,
         )
@@ -656,7 +677,7 @@ base_image "trixie" {
                 .contains(&"--architectures=amd64".to_string())
         );
         assert!(plan.mmdebstrap_args.iter().any(|arg| {
-            arg == "--include=linux-image-cloud-amd64,openssh-server,ca-certificates,curl,python3,iproute2,e2fsprogs,kmod,systemd-sysv,udev,sudo,zstd"
+            arg == "--include=linux-image-cloud-amd64,acpid,openssh-server,ca-certificates,curl,python3,iproute2,e2fsprogs,kmod,systemd-sysv,udev,sudo,zstd"
         }));
         assert!(
             plan.mmdebstrap_args
@@ -682,6 +703,35 @@ base_image "trixie" {
         assert!(plan.essential_hook.contains("COMPRESS=zstd"));
         assert!(plan.essential_hook.contains("force-confold"));
         assert!(plan.essential_hook.contains("vmw_vsock_virtio_transport"));
+        assert!(plan.customize_hook.contains(
+            "cat > \"$root/etc/acpi/events/90-intar-power-button\" <<'EOF_INTAR_ACPI_EVENT'"
+        ));
+        assert!(
+            plan.customize_hook
+                .contains("event=button[ /]power\naction=/usr/local/sbin/intar-acpi-poweroff")
+        );
+        assert!(plan.customize_hook.contains(
+            "cat > \"$root/usr/local/sbin/intar-acpi-poweroff\" <<'EOF_INTAR_ACPI_POWEROFF'"
+        ));
+        assert!(
+            plan.customize_hook
+                .contains("#!/bin/bash\nset -eu\nkill -s RTMIN+4 1")
+        );
+        assert!(plan.customize_hook.contains(
+            "chown root:root \"$root/etc/acpi/events/90-intar-power-button\" \"$root/usr/local/sbin/intar-acpi-poweroff\""
+        ));
+        assert!(
+            plan.customize_hook
+                .contains("chmod 0644 \"$root/etc/acpi/events/90-intar-power-button\"")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("chmod 0755 \"$root/usr/local/sbin/intar-acpi-poweroff\"")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("systemctl --root=\"$root\" enable acpid.service >/dev/null")
+        );
         assert!(
             plan.customize_hook
                 .contains("/etc/modules-load.d/90-intar-runtime.conf")
