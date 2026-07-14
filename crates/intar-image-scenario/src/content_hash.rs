@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::ScenarioError;
 
-pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v5";
+pub const BUILD_FORMAT_VERSION: &str = "intar-image-build-v6";
 
 #[derive(Debug, Clone)]
 pub struct ScenarioContentHashParams<'a> {
@@ -151,8 +151,8 @@ mod tests {
     }
 
     #[test]
-    fn v5_build_format_matches_the_golden_hash() {
-        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v5");
+    fn v6_build_format_matches_the_golden_hash() {
+        assert_eq!(BUILD_FORMAT_VERSION, "intar-image-build-v6");
         let hash = scenario_content_hash_from_entries(
             &params(),
             &[
@@ -163,7 +163,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             hash,
-            "95ad38a6f6243d6a66178263067a6ee36aefe099414241f38750eb21d23f9e7e"
+            "73684cfd8197942f811966a1e5469c08dac81feb18469268b8b05e73765b3b2b"
         );
     }
 

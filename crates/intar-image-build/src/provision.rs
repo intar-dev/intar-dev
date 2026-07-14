@@ -15,6 +15,11 @@ const INTAR_SCENARIO_SUPERVISOR_PATH: &str = "/usr/local/bin/intar-scenario-supe
 const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
+// The virtio-net device and its final udev name are not guaranteed to exist
+// when the scenario supervisor first runs. Bound discovery and configuration
+// by monotonic wall time so fractional CPU quotas cannot turn a transient boot
+// race into either an immediate poweroff or an unbounded startup.
+const GUEST_NETWORK_READY_TIMEOUT_SECONDS: u64 = 30;
 // At 125 millicores the old nominal ten-second retry loop has an approximately
 // 80-second CPU-scaled budget. Allow 50% headroom, measured against monotonic
 // uptime. Capping this phase at 120 seconds leaves a nominal 240 seconds of the
@@ -576,7 +581,7 @@ fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
-    writeln!(script, "set -euo pipefail").context("format error")?;
+    writeln!(script, "set -Eeuo pipefail").context("format error")?;
     writeln!(script, "root_device=\"/dev/vda\"").context("format error")?;
     writeln!(script, "runtime_device=\"/dev/vdb\"").context("format error")?;
     writeln!(script, "recording_device=\"/dev/vdc\"").context("format error")?;
@@ -596,6 +601,11 @@ fn append_runtime_assets(
         "ssh_ready_timeout_seconds={GUEST_SSH_READY_TIMEOUT_SECONDS}"
     )
     .context("format error")?;
+    writeln!(
+        script,
+        "network_ready_timeout_seconds={GUEST_NETWORK_READY_TIMEOUT_SECONDS}"
+    )
+    .context("format error")?;
     writeln!(script, "KINO_PID=\"\"").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase() {{").context("format error")?;
@@ -605,6 +615,24 @@ fn append_runtime_assets(
     )
     .context("format error")?;
     writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "report_runtime_error() {{").context("format error")?;
+    writeln!(script, "  local status=\"$1\"").context("format error")?;
+    writeln!(script, "  local line=\"$2\"").context("format error")?;
+    writeln!(script, "  local command=\"$3\"").context("format error")?;
+    writeln!(script, "  trap - ERR").context("format error")?;
+    writeln!(
+        script,
+        "  printf '[intar-runtime] ts=%s error=command_failed status=%s line=%s command=%q\\n' \"$(date -Ins)\" \"$status\" \"$line\" \"$command\" >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "  return \"$status\"").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(
+        script,
+        "trap 'report_runtime_error \"$?\" \"$LINENO\" \"$BASH_COMMAND\"' ERR"
+    )
+    .context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "monotonic_seconds() {{").context("format error")?;
     writeln!(script, "  local uptime").context("format error")?;
@@ -656,6 +684,115 @@ fn append_runtime_assets(
     writeln!(script, "    printf '%s\\n' \"$iface\"").context("format error")?;
     writeln!(script, "    return 0").context("format error")?;
     writeln!(script, "  done").context("format error")?;
+    writeln!(script, "  return 1").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "network_config_error=\"\"").context("format error")?;
+    writeln!(script, "try_configure_guest_interface() {{").context("format error")?;
+    writeln!(script, "  local guest_iface=\"$1\"").context("format error")?;
+    writeln!(script, "  local command_error=\"\"").context("format error")?;
+    writeln!(
+        script,
+        "  if ! command_error=\"$(ip link set dev \"$guest_iface\" up 2>&1)\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    network_config_error=\"ip link set dev $guest_iface up failed: $command_error\""
+    )
+    .context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(
+        script,
+        "  if ! command_error=\"$(ip addr flush dev \"$guest_iface\" scope global 2>&1)\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    network_config_error=\"ip addr flush dev $guest_iface scope global failed: $command_error\""
+    )
+    .context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(
+        script,
+        "  if ! command_error=\"$(ip addr replace \"$INTAR_GUEST_IP_CIDR\" dev \"$guest_iface\" 2>&1)\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    network_config_error=\"ip addr replace $INTAR_GUEST_IP_CIDR dev $guest_iface failed: $command_error\""
+    )
+    .context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(
+        script,
+        "  if ! command_error=\"$(ip route replace default via \"$INTAR_GATEWAY\" dev \"$guest_iface\" 2>&1)\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "    network_config_error=\"ip route replace default via $INTAR_GATEWAY dev $guest_iface failed: $command_error\""
+    )
+    .context("format error")?;
+    writeln!(script, "    return 1").context("format error")?;
+    writeln!(script, "  fi").context("format error")?;
+    writeln!(script, "  return 0").context("format error")?;
+    writeln!(script, "}}").context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "wait_for_guest_network() {{").context("format error")?;
+    writeln!(script, "  local deadline_seconds guest_iface now_seconds").context("format error")?;
+    writeln!(
+        script,
+        "  deadline_seconds=$(( $(monotonic_seconds) + network_ready_timeout_seconds ))"
+    )
+    .context("format error")?;
+    writeln!(script, "  while true; do").context("format error")?;
+    writeln!(script, "    guest_iface=\"\"").context("format error")?;
+    writeln!(
+        script,
+        "    if guest_iface=\"$(find_guest_interface)\"; then"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "      if try_configure_guest_interface \"$guest_iface\"; then"
+    )
+    .context("format error")?;
+    writeln!(script, "        return 0").context("format error")?;
+    writeln!(script, "      fi").context("format error")?;
+    writeln!(script, "    else").context("format error")?;
+    writeln!(
+        script,
+        "      network_config_error='no non-loopback interface is present'"
+    )
+    .context("format error")?;
+    writeln!(script, "    fi").context("format error")?;
+    writeln!(script, "    now_seconds=\"$(monotonic_seconds)\"").context("format error")?;
+    writeln!(
+        script,
+        "    if [ \"$now_seconds\" -ge \"$deadline_seconds\" ]; then"
+    )
+    .context("format error")?;
+    writeln!(script, "      break").context("format error")?;
+    writeln!(script, "    fi").context("format error")?;
+    writeln!(script, "    sleep 0.1").context("format error")?;
+    writeln!(script, "  done").context("format error")?;
+    writeln!(
+        script,
+        "  echo \"timed out after ${{network_ready_timeout_seconds}}s waiting to configure a non-loopback guest interface\" >&2"
+    )
+    .context("format error")?;
+    writeln!(
+        script,
+        "  echo \"last network configuration error: $network_config_error\" >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "  ip -details link show >&2 || true").context("format error")?;
+    writeln!(script, "  ip -details address show >&2 || true").context("format error")?;
+    writeln!(script, "  ip route show table all >&2 || true").context("format error")?;
     writeln!(script, "  return 1").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
@@ -748,28 +885,7 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "  chmod 0644 /etc/hosts").context("format error")?;
     writeln!(script, "  hostname \"$INTAR_VM_HOSTNAME\"").context("format error")?;
-    writeln!(script, "  guest_iface=\"$(find_guest_interface)\"").context("format error")?;
-    writeln!(
-        script,
-        "  [ -n \"$guest_iface\" ] || {{ echo 'failed to determine guest interface' >&2; exit 1; }}"
-    )
-    .context("format error")?;
-    writeln!(script, "  ip link set dev \"$guest_iface\" up").context("format error")?;
-    writeln!(
-        script,
-        "  ip addr flush dev \"$guest_iface\" scope global || true"
-    )
-    .context("format error")?;
-    writeln!(
-        script,
-        "  ip addr add \"$INTAR_GUEST_IP_CIDR\" dev \"$guest_iface\""
-    )
-    .context("format error")?;
-    writeln!(
-        script,
-        "  ip route replace default via \"$INTAR_GATEWAY\" dev \"$guest_iface\""
-    )
-    .context("format error")?;
+    writeln!(script, "  wait_for_guest_network").context("format error")?;
     writeln!(script, "  rm -f /etc/resolv.conf").context("format error")?;
     writeln!(script, "  dns_servers=($INTAR_DNS_SERVERS)").context("format error")?;
     writeln!(script, "  [ \"${{#dns_servers[@]}}\" -gt 0 ] || {{ echo 'INTAR_DNS_SERVERS produced no nameservers' >&2; exit 1; }}").context("format error")?;
@@ -1086,8 +1202,10 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "[Unit]").context("format error")?;
     writeln!(script, "Description=Intar scenario supervisor").context("format error")?;
-    writeln!(script, "After=local-fs.target").context("format error")?;
+    writeln!(script, "After=local-fs.target systemd-udev-trigger.service")
+        .context("format error")?;
     writeln!(script, "Before=multi-user.target").context("format error")?;
+    writeln!(script, "FailureAction=poweroff-force").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "[Service]").context("format error")?;
     writeln!(script, "Type=simple").context("format error")?;
@@ -1096,7 +1214,6 @@ fn append_runtime_assets(
     writeln!(script, "TimeoutStartSec=30").context("format error")?;
     writeln!(script, "StandardOutput=journal+console").context("format error")?;
     writeln!(script, "StandardError=journal+console").context("format error")?;
-    writeln!(script, "FailureAction=poweroff-force").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "[Install]").context("format error")?;
     writeln!(script, "WantedBy=multi-user.target").context("format error")?;
@@ -1498,9 +1615,14 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::io::Write as _;
+    use std::process::{Command, Output, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use intar_image_scenario::Scenario;
 
-    use super::render_scenario_provision_script;
+    use super::{render_scenario_provision_script, shell_quote};
 
     fn render_minimal_provision_script() -> String {
         let scenario = Scenario::parse(
@@ -1538,6 +1660,52 @@ scenario "ssh-readiness" {
         .unwrap();
         let vm = scenario.vm_by_name("server").unwrap();
         render_scenario_provision_script(&scenario, vm).unwrap()
+    }
+
+    fn render_minimal_supervisor() -> String {
+        let provision = render_minimal_provision_script();
+        let (_, runtime_and_rest) = provision.split_once("<<'EOF_RUNTIME'\n").unwrap();
+        let (runtime, _) = runtime_and_rest.split_once("\nEOF_RUNTIME\n").unwrap();
+        format!("{runtime}\n")
+    }
+
+    fn render_minimal_supervisor_prefix() -> String {
+        let runtime = render_minimal_supervisor();
+        let (prefix, _) = runtime.split_once("\ngrow_root_filesystem\n").unwrap();
+        format!("{prefix}\n")
+    }
+
+    fn run_bash(script: &str, syntax_only: bool) -> Output {
+        let mut command = Command::new("bash");
+        if syntax_only {
+            command.arg("-n");
+        }
+        let mut child = command
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(script.as_bytes()).unwrap();
+        drop(stdin);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return child.wait_with_output().unwrap();
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "bash harness exceeded five seconds: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -1645,6 +1813,227 @@ scenario "ssh-readiness" {
         let start_sshd_call = script.rfind("\nstart_sshd\n").unwrap();
         assert!(configure_network < configure_access);
         assert!(configure_access < start_sshd_call);
+    }
+
+    #[test]
+    fn scenario_supervisor_waits_for_guest_network_and_reports_command_failures() {
+        let script = render_minimal_provision_script();
+
+        assert!(script.contains("network_ready_timeout_seconds=30"));
+        assert!(script.contains("set -Eeuo pipefail"));
+        assert!(
+            script.contains("trap 'report_runtime_error \"$?\" \"$LINENO\" \"$BASH_COMMAND\"' ERR")
+        );
+        assert!(script.contains("error=command_failed status=%s line=%s command=%q\\n"));
+        assert!(script.contains("After=local-fs.target systemd-udev-trigger.service"));
+
+        let (_, runtime_unit_and_rest) = script
+            .split_once("cat >/etc/systemd/system/intar-scenario.service <<'EOF_RUNTIME_UNIT'\n")
+            .unwrap();
+        let (runtime_unit, _) = runtime_unit_and_rest
+            .split_once("\nEOF_RUNTIME_UNIT")
+            .unwrap();
+        let (unit_section, service_section) = runtime_unit.split_once("\n[Service]\n").unwrap();
+        assert!(unit_section.contains("FailureAction=poweroff-force"));
+        assert!(!service_section.contains("FailureAction=poweroff-force"));
+
+        let (_, configure_attempt_and_rest) = script
+            .split_once("try_configure_guest_interface() {\n")
+            .unwrap();
+        let (configure_attempt, _) = configure_attempt_and_rest
+            .split_once("\n}\n\nwait_for_guest_network")
+            .unwrap();
+        assert!(configure_attempt.contains("ip link set dev \"$guest_iface\" up"));
+        assert!(configure_attempt.contains("ip addr flush dev \"$guest_iface\" scope global"));
+        assert!(
+            configure_attempt
+                .contains("ip addr replace \"$INTAR_GUEST_IP_CIDR\" dev \"$guest_iface\"")
+        );
+        assert!(
+            configure_attempt
+                .contains("ip route replace default via \"$INTAR_GATEWAY\" dev \"$guest_iface\"")
+        );
+        assert!(!configure_attempt.contains("ip addr add"));
+        assert_eq!(configure_attempt.matches("return 1").count(), 4);
+
+        let (_, network_wait_and_rest) = script.split_once("wait_for_guest_network() {\n").unwrap();
+        let (network_wait, _) = network_wait_and_rest
+            .split_once("\n}\n\nwait_for_vsock_ready")
+            .unwrap();
+        assert!(network_wait.contains(
+            "deadline_seconds=$(( $(monotonic_seconds) + network_ready_timeout_seconds ))"
+        ));
+        assert!(network_wait.contains("while true; do"));
+        assert!(network_wait.contains("if guest_iface=\"$(find_guest_interface)\"; then"));
+        assert!(network_wait.contains("if try_configure_guest_interface \"$guest_iface\"; then"));
+        assert!(network_wait.contains("now_seconds=\"$(monotonic_seconds)\""));
+        assert!(network_wait.contains("-ge \"$deadline_seconds\""));
+        assert!(network_wait.contains("sleep 0.1"));
+        assert!(network_wait.contains(
+            "timed out after ${network_ready_timeout_seconds}s waiting to configure a non-loopback guest interface"
+        ));
+        assert!(network_wait.contains("last network configuration error: $network_config_error"));
+        assert!(network_wait.contains("ip -details link show >&2 || true"));
+        assert!(network_wait.contains("ip -details address show >&2 || true"));
+        assert!(network_wait.contains("ip route show table all >&2 || true"));
+
+        let (_, configure_network_and_rest) =
+            script.split_once("configure_guest_network() {\n").unwrap();
+        let (configure_network, _) = configure_network_and_rest
+            .split_once("\n}\n\nconfigure_ssh_access")
+            .unwrap();
+        let hostname = configure_network
+            .find("hostname \"$INTAR_VM_HOSTNAME\"")
+            .unwrap();
+        let wait_for_network = configure_network.find("wait_for_guest_network").unwrap();
+        let replace_resolver = configure_network.find("rm -f /etc/resolv.conf").unwrap();
+        assert!(hostname < wait_for_network);
+        assert!(wait_for_network < replace_resolver);
+        assert!(!configure_network.contains("guest_iface=\"$(find_guest_interface)\""));
+    }
+
+    #[test]
+    fn rendered_scenario_supervisor_is_valid_bash() {
+        let output = run_bash(&render_minimal_supervisor(), true);
+        assert!(
+            output.status.success(),
+            "bash -n rejected the rendered supervisor: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn scenario_supervisor_retries_interface_discovery_and_rename_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let iface_attempts = temp.path().join("iface-attempts");
+        let link_attempts = temp.path().join("link-attempts");
+        let monotonic_calls = temp.path().join("monotonic-calls");
+        let ip_calls = temp.path().join("ip-calls");
+        std::fs::write(&iface_attempts, "0\n").unwrap();
+        std::fs::write(&link_attempts, "0\n").unwrap();
+        std::fs::write(&monotonic_calls, "0\n").unwrap();
+
+        let harness = r#"
+trap - EXIT INT TERM
+iface_attempts=__IFACE_ATTEMPTS__
+link_attempts=__LINK_ATTEMPTS__
+monotonic_calls=__MONOTONIC_CALLS__
+ip_calls=__IP_CALLS__
+INTAR_GUEST_IP_CIDR='10.77.0.2/28'
+INTAR_GATEWAY='10.77.0.1'
+find_guest_interface() {
+  local attempt
+  attempt="$(cat "$iface_attempts")"
+  attempt=$((attempt + 1))
+  printf '%s\n' "$attempt" >"$iface_attempts"
+  if [ "$attempt" -eq 2 ]; then
+    printf '%s\n' eth0
+    return 0
+  fi
+  if [ "$attempt" -ge 3 ]; then
+    printf '%s\n' ens3
+    return 0
+  fi
+  return 1
+}
+ip() {
+  local attempt
+  printf '%s\n' "$*" >>"$ip_calls"
+  if [ "$1" = link ]; then
+    attempt="$(cat "$link_attempts")"
+    attempt=$((attempt + 1))
+    printf '%s\n' "$attempt" >"$link_attempts"
+    if [ "$attempt" -eq 1 ]; then
+      echo 'device renamed during configuration' >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+monotonic_seconds() {
+  local value
+  value="$(cat "$monotonic_calls")"
+  value=$((value + 1))
+  printf '%s\n' "$value" >"$monotonic_calls"
+  printf '%s\n' "$value"
+}
+sleep() { :; }
+wait_for_guest_network
+test "$(cat "$iface_attempts")" -eq 3
+test "$(cat "$link_attempts")" -eq 2
+grep -F 'addr replace 10.77.0.2/28 dev ens3' "$ip_calls" >/dev/null
+grep -F 'route replace default via 10.77.0.1 dev ens3' "$ip_calls" >/dev/null
+"#
+        .replace(
+            "__IFACE_ATTEMPTS__",
+            &shell_quote(&iface_attempts.display().to_string()),
+        )
+        .replace(
+            "__LINK_ATTEMPTS__",
+            &shell_quote(&link_attempts.display().to_string()),
+        )
+        .replace(
+            "__MONOTONIC_CALLS__",
+            &shell_quote(&monotonic_calls.display().to_string()),
+        )
+        .replace(
+            "__IP_CALLS__",
+            &shell_quote(&ip_calls.display().to_string()),
+        );
+        let output = run_bash(&(render_minimal_supervisor_prefix() + &harness), false);
+        assert!(
+            output.status.success(),
+            "network retry harness failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn scenario_supervisor_network_timeout_reports_last_error_and_err_trap() {
+        let temp = tempfile::tempdir().unwrap();
+        let monotonic_calls = temp.path().join("monotonic-calls");
+        std::fs::write(&monotonic_calls, "0\n").unwrap();
+
+        let harness = r#"
+trap - EXIT INT TERM
+monotonic_calls=__MONOTONIC_CALLS__
+INTAR_GUEST_IP_CIDR='10.77.0.2/28'
+INTAR_GATEWAY='10.77.0.1'
+network_ready_timeout_seconds=1
+find_guest_interface() { printf '%s\n' eth0; }
+ip() {
+  if [ "$1" = link ]; then
+    echo 'device renamed during configuration' >&2
+    return 1
+  fi
+  return 0
+}
+monotonic_seconds() {
+  local value
+  value="$(cat "$monotonic_calls")"
+  value=$((value + 1))
+  printf '%s\n' "$value" >"$monotonic_calls"
+  printf '%s\n' "$value"
+}
+sleep() { :; }
+wait_for_guest_network
+"#
+        .replace(
+            "__MONOTONIC_CALLS__",
+            &shell_quote(&monotonic_calls.display().to_string()),
+        );
+        let output = run_bash(&(render_minimal_supervisor_prefix() + &harness), false);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("timed out after 1s waiting to configure"));
+        assert!(stderr.contains(
+            "last network configuration error: ip link set dev eth0 up failed: device renamed during configuration"
+        ));
+        assert!(stderr.contains("error=command_failed"));
+        assert!(
+            stderr.contains("command=return\\ 1")
+                || stderr.contains("command=wait_for_guest_network")
+        );
     }
 
     #[test]
@@ -1774,8 +2163,7 @@ scenario "broken-nginx" {
                 );
                 assert!(!script.contains("ssh-keygen -A"));
                 assert!(!script.contains("modprobe vsock"));
-                assert!(script.contains("After=local-fs.target"));
-                assert!(!script.contains("After=local-fs.target systemd-udev-trigger.service"));
+                assert!(script.contains("After=local-fs.target systemd-udev-trigger.service"));
                 assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
                 assert!(script.contains("wait -n \"$KINO_PID\" || true"));
                 assert!(script.contains("start_sshd"));
