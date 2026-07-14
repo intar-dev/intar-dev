@@ -1640,6 +1640,12 @@ mod linux {
         let mut smoke_config = config.clone();
         smoke_config.jail_root = lifecycle_root.join("jails");
         create_root_directory(&smoke_config.jail_root)?;
+        grant_agent_self_test_traversal(
+            config,
+            directory,
+            &lifecycle_root,
+            &smoke_config.jail_root,
+        )?;
         // This isolated Core instance has no other reservations.  The operator
         // reserve is validated by the normal daemon; retaining it here would
         // make the proof impossible on an otherwise empty one-core CI host.
@@ -1829,6 +1835,38 @@ mod linux {
                 Err(operation).context(format!("package-smoke cleanup also failed: {cleanup:#}"))
             }
         }
+    }
+
+    fn grant_agent_self_test_traversal(
+        config: &JailerdConfig,
+        directory: &Path,
+        lifecycle_root: &Path,
+        smoke_jail_root: &Path,
+    ) -> Result<()> {
+        let self_test_root = directory
+            .parent()
+            .context("disposable self-test jail has no parent")?;
+        let setfacl = crate::trusted_setfacl_binary()?;
+        let acl = format!("u:{}:--x,m::--x", config.agent_uid);
+        // The API worker deliberately runs as the exact unprivileged agent
+        // identity. Grant only directory traversal across the disposable
+        // ancestors; it still cannot list, create, read, or write here. The
+        // ordinary jail preparation grants the narrower run/socket access.
+        for path in [
+            config.jail_root.as_path(),
+            self_test_root,
+            directory,
+            lifecycle_root,
+            smoke_jail_root,
+        ] {
+            crate::run_setfacl(&setfacl, path, &acl).with_context(|| {
+                format!(
+                    "grant agent traversal of self-test ancestor {}",
+                    path.display()
+                )
+            })?;
+        }
+        Ok(())
     }
 
     fn prove_agent_api_access(
