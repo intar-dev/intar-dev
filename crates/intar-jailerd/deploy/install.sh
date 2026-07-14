@@ -141,6 +141,53 @@ unit_loaded() {
   [ "${load_state}" != not-found ]
 }
 
+assert_unit_cgroup_drained() {
+  audit_unit=$1
+  audit_leaf=$2
+  audit_label=$3
+  unit_loaded "${audit_unit}" || return 0
+  audit_cgroup=$(systemctl show --property=ControlGroup --value "${audit_unit}") || \
+    die "failed to query ${audit_label} path"
+  if [ -z "${audit_cgroup}" ]; then
+    audit_state=$(active_state "${audit_unit}") || die "failed to query ${audit_label} state"
+    case "${audit_state}" in
+      inactive|failed) return 0 ;;
+      *) die "${audit_label} has no systemd ControlGroup" ;;
+    esac
+  fi
+  case "${audit_cgroup}" in
+    /*) ;;
+    *) die "${audit_label} has a non-absolute systemd ControlGroup" ;;
+  esac
+  case "${audit_cgroup}" in
+    *[!A-Za-z0-9_./:@-]*|*//*|*/./*|*/../*|*/.|*/..)
+      die "${audit_label} has an unsafe systemd ControlGroup"
+      ;;
+  esac
+  [ "${audit_cgroup##*/}" = "${audit_leaf}" ] || \
+    die "${audit_label} has an unexpected systemd ControlGroup leaf"
+  audit_events=/sys/fs/cgroup${audit_cgroup}/cgroup.events
+  if [ ! -f "${audit_events}" ]; then
+    audit_state=$(active_state "${audit_unit}") || die "failed to query ${audit_label} state"
+    case "${audit_state}" in
+      inactive|failed) return 0 ;;
+      *) die "${audit_label} cgroup.events is missing" ;;
+    esac
+  fi
+  audit_populated=$(awk '
+    $1 == "populated" {
+      if (seen || NF != 2 || $2 !~ /^(0|1)$/) exit 2
+      seen = 1
+      value = $2
+    }
+    END {
+      if (!seen) exit 3
+      print value
+    }
+  ' "${audit_events}") || die "${audit_label} cgroup.events is malformed"
+  [ "${audit_populated}" = 0 ] || die "${audit_label} still has descendants"
+}
+
 agent_state=$(active_state intar-agent.service) || die "failed to query intar-agent.service"
 case "${agent_state}" in
   inactive|failed) ;;
@@ -199,16 +246,8 @@ active_vms=$(systemctl list-units --all --type=service --no-legend --plain 'inta
   echo "${active_vms}" >&2
   die "Intar VM units still exist"
 }
-if [ -f /sys/fs/cgroup/intar-vms.slice/cgroup.events ]; then
-  populated=$(awk '$1 == "populated" { print $2 }' /sys/fs/cgroup/intar-vms.slice/cgroup.events)
-  [ "${populated}" = 0 ] || die "intar-vms.slice still has descendants"
-fi
-agent_cgroup=$(systemctl show --property=ControlGroup --value intar-agent.service) || \
-  die "failed to query the legacy agent cgroup"
-if [ -n "${agent_cgroup}" ] && [ -f "/sys/fs/cgroup${agent_cgroup}/cgroup.events" ]; then
-  populated=$(awk '$1 == "populated" { print $2 }' "/sys/fs/cgroup${agent_cgroup}/cgroup.events")
-  [ "${populated}" = 0 ] || die "legacy intar-agent cgroup is still populated"
-fi
+assert_unit_cgroup_drained intar-vms.slice intar-vms.slice intar-vms.slice
+assert_unit_cgroup_drained intar-agent.service intar-agent.service "legacy intar-agent cgroup"
 if forbidden_process=$(find_forbidden_process); then
   forbidden_name=${forbidden_process%%:*}
   forbidden_executable=${forbidden_process#*:}

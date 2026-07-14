@@ -78,7 +78,7 @@
         "healthy": true,
         "generation": "vm-01jz8w5pjcr7xz6j8p8q2c49ds",
         "systemd_unit": "intar-vm-vm-01jz8w5pjcr7xz6j8p8q2c49ds.service",
-        "cgroup_path": "/intar-vms.slice/intar-vm-vm-01jz8w5pjcr7xz6j8p8q2c49ds.service",
+        "cgroup_path": "/intar.slice/intar-vms.slice/intar-vm-vm-01jz8w5pjcr7xz6j8p8q2c49ds.service",
         "seccomp_enabled": true,
         "landlock_enabled": true,
         "no_new_privs": true

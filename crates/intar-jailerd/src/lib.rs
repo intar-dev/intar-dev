@@ -3604,7 +3604,9 @@ mod tests {
                 spec.unit_name.clone(),
                 BackendInspection {
                     pid: Some(42),
-                    cgroup_path: Some(format!("/intar-vms.slice/{}", spec.unit_name).into()),
+                    cgroup_path: Some(
+                        format!("/intar.slice/intar-vms.slice/{}", spec.unit_name).into(),
+                    ),
                     host_boot_id: Some("test-boot".to_owned()),
                     pid_start_time_ticks: Some(7),
                     netns_inode: Some(17),
@@ -3627,7 +3629,9 @@ mod tests {
                     .clone()
                     .unwrap_or_else(|| spec.unit_name.clone()),
                 pid: Some(42),
-                cgroup_path: Some(format!("/intar-vms.slice/{}", spec.unit_name).into()),
+                cgroup_path: Some(
+                    format!("/intar.slice/intar-vms.slice/{}", spec.unit_name).into(),
+                ),
                 host_boot_id: Some("test-boot".to_owned()),
                 pid_start_time_ticks: Some(7),
             })
@@ -4793,7 +4797,9 @@ mod tests {
             quota,
             vcpu_count: request.vcpu_count,
             paths: jail_paths(&root, request.artifacts.initrd.is_some()),
-            cgroup_path: Some(format!("/intar-vms.slice/intar-vm-{generation}.service").into()),
+            cgroup_path: Some(
+                format!("/intar.slice/intar-vms.slice/intar-vm-{generation}.service").into(),
+            ),
             netns_name: "intar-ns-test".to_owned(),
             host_boot_id: current_host_boot_id(),
             pid_start_time_ticks: None,

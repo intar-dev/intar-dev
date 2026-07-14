@@ -1438,7 +1438,9 @@ mod tests {
             host_boot_id: Some("boot-id".to_string()),
             jail_generation: Some("generation-1".to_string()),
             jail_unit_name: Some("intar-vm-generation-1.service".to_string()),
-            jail_cgroup_path: Some("/intar-vms.slice/intar-vm-generation-1.service".to_string()),
+            jail_cgroup_path: Some(
+                "/intar.slice/intar-vms.slice/intar-vm-generation-1.service".to_string(),
+            ),
             jail_root_path: Some("/var/lib/intar/jails/generation-1/root".to_string()),
             jail_root_inode: Some(42),
             jail_uid: Some(200_000),
