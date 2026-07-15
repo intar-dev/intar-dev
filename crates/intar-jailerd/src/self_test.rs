@@ -91,36 +91,17 @@ impl SelfTestArtifacts {
     }
 }
 
-/// Run the destructive host diagnostics without publishing a readiness
-/// attestation.
-///
-/// This proves the disposable unit, quota, namespace, Landlock, and basic KVM
-/// plumbing.  Only [`run_with_artifacts`] boots the pinned VMM and can publish
-/// the durable proof consumed by production readiness.
-#[cfg(target_os = "linux")]
-pub fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
-    linux::run(config)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn run(_config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
-    bail!("the jailerd self-test is supported only on Linux")
-}
-
 /// Run the host proof plus the real Cloud Hypervisor package smoke.
 ///
-/// This is the only self-test entry point that may publish the boot-bound
-/// readiness attestation. It requires bootable, hash-pinned artifacts and
-/// proves eight concurrent jailed 125m Cloud Hypervisor lifecycles, exact
-/// one-core admission saturation, ninth-launch rejection, and KVM accounting.
-pub fn run_with_artifacts(
-    config: &JailerdConfig,
-    artifacts: &SelfTestArtifacts,
-) -> Result<SelfTestAttestationV2> {
+/// The self-test always requires bootable, hash-pinned artifacts and publishes
+/// its boot-bound readiness attestation only after proving eight concurrent
+/// jailed 125m Cloud Hypervisor lifecycles, exact one-core admission saturation,
+/// ninth-launch rejection, and KVM accounting.
+pub fn run(config: &JailerdConfig, artifacts: &SelfTestArtifacts) -> Result<SelfTestAttestationV2> {
     artifacts.validate()?;
     #[cfg(target_os = "linux")]
     {
-        linux::run_with_artifacts(config, artifacts)
+        linux::run(config, artifacts)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -304,23 +285,20 @@ mod linux {
         }
     }
 
-    pub(super) fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
-        run_inner(config, None)
-    }
-
-    pub(super) fn run_with_artifacts(
+    pub(super) fn run(
         config: &JailerdConfig,
         artifacts: &SelfTestArtifacts,
     ) -> Result<SelfTestAttestationV2> {
         // Artifact hashing is performed even before the disposable host proof
         // so a release job cannot accidentally attest a different smoke image.
         let artifact_root = verify_artifacts(artifacts)?;
-        run_inner(config, Some((artifacts, &artifact_root)))
+        run_inner(config, artifacts, &artifact_root)
     }
 
     fn run_inner(
         config: &JailerdConfig,
-        artifacts: Option<(&SelfTestArtifacts, &Path)>,
+        artifacts: &SelfTestArtifacts,
+        artifact_root: &Path,
     ) -> Result<SelfTestAttestationV2> {
         require_root()?;
         crate::require_supervisor_process_inspection_capability()
@@ -507,12 +485,8 @@ mod linux {
         cleanup.namespace_name = None;
         cleanup.host_veth_name = None;
 
-        let lifecycle_result = match artifacts {
-            Some((artifacts, artifact_root)) => {
-                run_cloud_hypervisor_smoke(config, artifacts, artifact_root, &directory)
-            }
-            None => Ok(()),
-        };
+        let lifecycle_result =
+            run_cloud_hypervisor_smoke(config, artifacts, artifact_root, &directory);
         let directory_cleanup =
             remove_disposable_directory(&directory, config.uid_gid_start, config.uid_gid_end);
         if directory_cleanup.is_ok() {
@@ -531,7 +505,6 @@ mod linux {
             }
         }
 
-        let lifecycle_verified = artifacts.is_some();
         let attestation = SelfTestAttestationV2 {
             version: ATTESTATION_VERSION,
             config_runtime_fingerprint_sha256,
@@ -547,17 +520,15 @@ mod linux {
             boot_quota_transition_verified: true,
             network_verified: true,
             landlock_negative_access: true,
-            kvm_accounting_proven: lifecycle_verified,
-            cloud_hypervisor_lifecycle_verified: lifecycle_verified,
+            kvm_accounting_proven: true,
+            cloud_hypervisor_lifecycle_verified: true,
             passed_at_unix_s: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .context("system clock predates Unix epoch")?
                 .as_secs(),
         };
-        if lifecycle_verified {
-            validate_attestation(&attestation)?;
-            write_attestation(config, &attestation)?;
-        }
+        validate_attestation(&attestation)?;
+        write_attestation(config, &attestation)?;
         Ok(attestation)
     }
 

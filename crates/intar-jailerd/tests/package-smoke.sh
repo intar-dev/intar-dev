@@ -353,7 +353,6 @@ for relative in \
   deploy/install.sh \
   deploy/intar-jailerd-self-test.sh \
   deploy/uninstall.sh \
-  deploy/prepare-v6-cutover.py \
   deploy/intar-agent.service \
   deploy/intar-agent.config.example.toml \
   deploy/intar-jailerd.service \
@@ -392,8 +391,6 @@ esac
 for binary in intar-agent intar-jailer intar-jailerd cloud-hypervisor-v53.0; do
   [ -x "${package_root}/${binary}" ] || die "archive binary is not executable: ${binary}"
 done
-[ -x "${package_root}/deploy/prepare-v6-cutover.py" ] || \
-  die "archive V6 cutover helper is not executable"
 cloud_hypervisor=${package_root}/cloud-hypervisor-v53.0
 echo "${CLOUD_HYPERVISOR_SHA256}  ${cloud_hypervisor}" | sha256sum --check --strict
 file_output=$(file --brief "${cloud_hypervisor}")
@@ -413,180 +410,11 @@ case "${version_output}" in
   *) die "unexpected Cloud Hypervisor version: ${version_output}" ;;
 esac
 
-cutover_helper=${package_root}/deploy/prepare-v6-cutover.py
 agent_uid=$(id -u intar-agent)
 agent_gid=$(id -g intar-agent)
-agent_config=/etc/intar-agent/config.toml
-agent_database=/var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3
-
-# Exercise the exact destructive upgrade path used by the first V6 rollout.
-# The fake credential is never printed; semantic comparison after install
-# proves that every value except cloud_hypervisor.binary survived unchanged.
-fresh_state=$(python3 "${cutover_helper}" \
-  --mode inspect \
-  --config "${agent_config}" \
-  --database "${agent_database}" \
-  --agent-uid "${agent_uid}" \
-  --agent-gid "${agent_gid}")
-[ "${fresh_state}" = fresh ] || die "cutover helper did not recognize fresh state"
-
-install -d -o root -g root -m 0755 /etc/intar-agent
-install -d -o "${agent_uid}" -g "${agent_gid}" -m 0700 \
-  /var/cache/intar-agent \
-  /var/cache/intar-agent/state \
-  /var/cache/intar-agent/state/intar-agent
-python3 - \
-  "${package_root}/deploy/intar-agent.config.example.toml" \
-  "${agent_config}" \
-  "${agent_database}" \
-  "${agent_uid}" \
-  "${agent_gid}" <<'PY'
-import json
-import os
-import sqlite3
-import sys
-from pathlib import Path
-
-source, config_path, database_path = map(Path, sys.argv[1:4])
-agent_uid = int(sys.argv[4])
-agent_gid = int(sys.argv[5])
-text = source.read_text()
-marker = "[jailer]\n"
-if text.count(marker) != 1:
-    raise SystemExit("agent fixture lacks one jailer table")
-legacy = text.replace(
-    marker,
-    '[cloud_hypervisor]\nbinary = "/usr/local/bin/cloud-hypervisor-legacy"\nspawn_timeout_seconds = 10\n\n[jailer]\n',
-    1,
-)
-legacy = legacy.replace('bootstrap_token = ""', 'bootstrap_token = "cutover-test-secret"', 1)
-bridge_marker = '[bridge]\nenabled = false'
-if legacy.count(bridge_marker) != 1:
-    raise SystemExit("agent fixture lacks one disabled bridge table")
-legacy = legacy.replace(bridge_marker, '[bridge]\nenabled = true', 1)
-config_path.write_text(legacy)
-os.chown(config_path, 0, agent_gid)
-os.chmod(config_path, 0o640)
-
-connection = sqlite3.connect(database_path)
-connection.executescript(
-    """
-CREATE TABLE vms (
-  name TEXT PRIMARY KEY,
-  state TEXT NOT NULL,
-  image_key TEXT,
-  image_sha256 TEXT,
-  created_at_s INTEGER NOT NULL,
-  updated_at_s INTEGER NOT NULL,
-  running_at_s INTEGER,
-  error TEXT,
-  root_disk_path TEXT,
-  seed_disk_path TEXT,
-  mac TEXT,
-  lease_duration_seconds INTEGER,
-  guest_ip TEXT,
-  guest_ip_cidr TEXT,
-  gateway TEXT,
-  bridge_name TEXT,
-  ssh_public_port INTEGER,
-  tap_name TEXT,
-  ch_socket_path TEXT,
-  ch_pid INTEGER,
-  kino_vsock_cid INTEGER,
-  kino_vsock_port INTEGER,
-  kino_vsock_path TEXT,
-  ssh_host_keys_openssh_json TEXT,
-  run_id TEXT,
-  recording_disk_path TEXT,
-  spool_dir TEXT
-);
-CREATE TABLE vm_probe_state (
-  vm_name TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  fingerprint TEXT NOT NULL,
-  collection_state TEXT NOT NULL,
-  collection_error TEXT,
-  summary_json TEXT NOT NULL,
-  snapshot_json TEXT NOT NULL,
-  generated_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL
-);
-CREATE TABLE archive_jobs (
-  run_id TEXT NOT NULL,
-  vm_name TEXT NOT NULL,
-  vm_created_at_ms INTEGER NOT NULL,
-  delete_requested_at_ms INTEGER NOT NULL,
-  deleted_at_ms INTEGER NOT NULL,
-  artifacts_dir TEXT NOT NULL,
-  next_attempt_at_ms INTEGER NOT NULL,
-  retry_count INTEGER NOT NULL,
-  last_error TEXT,
-  created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL,
-  PRIMARY KEY (run_id, vm_name)
-);
-CREATE TABLE desired_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  host_id TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  doc_json TEXT NOT NULL,
-  updated_at_ms INTEGER NOT NULL
-);
-CREATE TABLE image_cache_access (
-  image_sha256 TEXT PRIMARY KEY,
-  image_key TEXT NOT NULL,
-  kernel_sha256 TEXT NOT NULL,
-  initrd_sha256 TEXT NOT NULL,
-  raw_bytes INTEGER NOT NULL,
-  last_accessed_at_ms INTEGER NOT NULL
-);
-"""
-)
-desired = {
-    "schema_version": 2,
-    "host_id": "cutover-smoke",
-    "version": 1,
-    "generated_at_unix_ms": 1,
-    "cached_images": [],
-    "vms": [
-        {
-            "run_id": f"absent-run-{index}",
-            "vm_name": f"absent-vm-{index}",
-            "desired_phase": "absent",
-            "image_key": {
-                "scenario": "cutover-smoke",
-                "vm": f"absent-vm-{index}",
-                "arch": "x86_64",
-            },
-            "image_sha256": "a" * 64,
-            "resources": {"cpu_count": 1, "memory_mib": 512, "disk_mib": 4096},
-            "ssh_authorized_keys_openssh": [],
-            "lease_expires_at_unix_ms": 1,
-        }
-        for index in range(2)
-    ],
-    "builds": [],
-}
-connection.execute(
-    "INSERT INTO desired_state (id, host_id, version, doc_json, updated_at_ms) VALUES (1, ?, 1, ?, 1)",
-    ("cutover-smoke", json.dumps(desired)),
-)
-connection.commit()
-connection.close()
-os.chown(database_path, agent_uid, agent_gid)
-os.chmod(database_path, 0o600)
-PY
-
-legacy_state=$(python3 "${cutover_helper}" \
-  --mode inspect \
-  --config "${agent_config}" \
-  --database "${agent_database}" \
-  --agent-uid "${agent_uid}" \
-  --agent-gid "${agent_gid}")
-[ "${legacy_state}" = legacy-drained ] || die "cutover helper did not recognize drained V5 state"
 
 # The full root installer—not only its extracted scan function—must refuse a
-# forbidden live executable before it can mutate the proven-drained V5 state.
+# forbidden live executable before it can mutate the host.
 installer_probe=${work_root}/cloud-hypervisor-installer-audit
 install -o root -g root -m 0700 "$(command -v sleep)" "${installer_probe}"
 "${installer_probe}" 60 &
@@ -605,109 +433,15 @@ if installer_output=$("${package_root}/deploy/install.sh" 2>&1); then
   die "installer accepted a live forbidden executable"
 fi
 printf '%s\n' "${installer_output}" | grep -Fqx \
-  "intar-jailerd install: legacy/foreign Cloud Hypervisor is still running: /proc/${installer_probe_pid}/exe" || \
+  "intar-jailerd install: Cloud Hypervisor is still running: /proc/${installer_probe_pid}/exe" || \
   die "installer rejected the process fixture for the wrong reason"
 kill "${installer_probe_pid}"
 wait "${installer_probe_pid}" 2>/dev/null || true
 installer_probe_pid=
 rm -f -- "${installer_probe}"
 
-# Persisted local VM state, a non-absent desired VM, a malformed absent
-# tombstone, and any desired build must each block the cutover without
-# modifying inputs or creating an archive. Valid absent tombstones remain
-# eligible because they are drained deletion facts, not workload authority.
-unsafe_root=${work_root}/unsafe-cutover
-install -d -o root -g root -m 0700 "${unsafe_root}"
-for unsafe_case in local-vm running-tombstone malformed-tombstone build-workload; do
-  install -d -o root -g root -m 0700 \
-    "${unsafe_root}/${unsafe_case}" \
-    "${unsafe_root}/${unsafe_case}/config" \
-    "${unsafe_root}/${unsafe_case}/archives" \
-    "${unsafe_root}/${unsafe_case}/archives/attempt"
-  install -d -o "${agent_uid}" -g "${agent_gid}" -m 0700 \
-    "${unsafe_root}/${unsafe_case}/state"
-  install -o root -g "${agent_gid}" -m 0640 \
-    "${agent_config}" "${unsafe_root}/${unsafe_case}/config/config.toml"
-done
-python3 - "${agent_database}" "${unsafe_root}" "${agent_uid}" "${agent_gid}" <<'PY'
-import json
-import os
-import sqlite3
-import sys
-from pathlib import Path
-
-source_path = Path(sys.argv[1])
-unsafe_root = Path(sys.argv[2])
-agent_uid = int(sys.argv[3])
-agent_gid = int(sys.argv[4])
-for case_name in ("local-vm", "running-tombstone", "malformed-tombstone", "build-workload"):
-    source = sqlite3.connect(f"file:{source_path.as_posix()}?mode=ro", uri=True)
-    destination_path = unsafe_root / case_name / "state" / "intar-agent.sqlite3"
-    destination = sqlite3.connect(destination_path)
-    source.backup(destination)
-    source.close()
-    if case_name == "local-vm":
-        destination.execute(
-            "INSERT INTO vms (name, state, created_at_s, updated_at_s) VALUES ('unsafe-vm', 'running', 1, 1)"
-        )
-    else:
-        row = destination.execute("SELECT id, doc_json FROM desired_state").fetchone()
-        if row is None:
-            raise SystemExit("unsafe cutover fixture lacks desired state")
-        document = json.loads(row[1])
-        if case_name == "running-tombstone":
-            document["vms"][0]["desired_phase"] = "running"
-        elif case_name == "malformed-tombstone":
-            del document["vms"][0]["run_id"]
-        else:
-            document["builds"].append({"build_id": "unsafe-build"})
-        destination.execute(
-            "UPDATE desired_state SET doc_json = ? WHERE id = ?",
-            (json.dumps(document), row[0]),
-        )
-    destination.commit()
-    destination.close()
-    os.chown(destination_path, agent_uid, agent_gid)
-    os.chmod(destination_path, 0o600)
-PY
-for unsafe_case in local-vm running-tombstone malformed-tombstone build-workload; do
-  unsafe_config=${unsafe_root}/${unsafe_case}/config/config.toml
-  unsafe_database=${unsafe_root}/${unsafe_case}/state/intar-agent.sqlite3
-  unsafe_archive=${unsafe_root}/${unsafe_case}/archives/attempt
-  unsafe_config_before=$(sha256sum "${unsafe_config}" | awk '{print $1}')
-  unsafe_database_before=$(sha256sum "${unsafe_database}" | awk '{print $1}')
-  if python3 "${cutover_helper}" \
-    --mode apply \
-    --config "${unsafe_config}" \
-    --database "${unsafe_database}" \
-    --agent-uid "${agent_uid}" \
-    --agent-gid "${agent_gid}" \
-    --archive-dir "${unsafe_archive}"; then
-    die "cutover helper accepted unsafe ${unsafe_case} state"
-  fi
-  [ "$(sha256sum "${unsafe_config}" | awk '{print $1}')" = "${unsafe_config_before}" ] || \
-    die "refused ${unsafe_case} cutover changed the config"
-  [ "$(sha256sum "${unsafe_database}" | awk '{print $1}')" = "${unsafe_database_before}" ] || \
-    die "refused ${unsafe_case} cutover changed the database"
-  [ -z "$(find "${unsafe_archive}" -mindepth 1 -print -quit)" ] || \
-    die "refused ${unsafe_case} cutover wrote an archive"
-done
-rm -rf -- "${unsafe_root}"
-
-legacy_config_before=$(sha256sum "${agent_config}" | awk '{print $1}')
-legacy_database_before=$(sha256sum "${agent_database}" | awk '{print $1}')
-if "${package_root}/deploy/install.sh"; then
-  die "installer accepted V5 state without --breaking-v6-cutover"
-fi
-[ "$(sha256sum "${agent_config}" | awk '{print $1}')" = "${legacy_config_before}" ] || \
-  die "unflagged installer changed the legacy config"
-[ "$(sha256sum "${agent_database}" | awk '{print $1}')" = "${legacy_database_before}" ] || \
-  die "unflagged installer changed the legacy database"
-[ ! -e /var/lib/intar/cutover-archives ] || \
-  die "unflagged installer created a cutover archive"
-
 installed=1
-"${package_root}/deploy/install.sh" --breaking-v6-cutover
+"${package_root}/deploy/install.sh"
 
 # Prove both destructive entry points follow systemd's actual hyphenated slice
 # hierarchy instead of silently checking /sys/fs/cgroup/intar-vms.slice.  The
@@ -755,60 +489,6 @@ for directory in \
   [ "$(stat -c '%u:%g:%a' "${directory}")" = "${agent_uid}:${agent_gid}:700" ] || \
     die "installer did not prepare the agent cache directory: ${directory}"
 done
-
-cutover_archive=$(find /var/lib/intar/cutover-archives -mindepth 1 -maxdepth 1 -type d -print)
-[ -n "${cutover_archive}" ] || die "installer did not create the V5 cutover archive"
-[ "$(printf '%s\n' "${cutover_archive}" | wc -l)" -eq 1 ] || die "installer created multiple cutover archives"
-if [ -e "${agent_database}" ] || [ -L "${agent_database}" ]; then
-  die "legacy SQLite database was not reset"
-fi
-for archived in \
-  "${cutover_archive}/intar-agent.config.v5.toml" \
-  "${cutover_archive}/intar-agent.v5.sqlite3" \
-  "${cutover_archive}/manifest.json"; do
-  if [ ! -f "${archived}" ] || [ -L "${archived}" ]; then
-    die "cutover archive is incomplete"
-  fi
-  [ "$(stat -c '%u:%g:%a:%h' "${archived}")" = 0:0:600:1 ] || \
-    die "cutover archive file is not root-only"
-done
-python3 - "${cutover_archive}" "${agent_config}" <<'PY'
-import json
-import sqlite3
-import sys
-import tomllib
-from pathlib import Path
-
-archive = Path(sys.argv[1])
-current_path = Path(sys.argv[2])
-legacy = tomllib.loads((archive / "intar-agent.config.v5.toml").read_text())
-current = tomllib.loads(current_path.read_text())
-binary = legacy.get("cloud_hypervisor", {}).pop("binary", None)
-if binary != "/usr/local/bin/cloud-hypervisor-legacy":
-    raise SystemExit("archive did not preserve the legacy runtime path")
-if legacy != current:
-    raise SystemExit("cutover changed config values other than cloud_hypervisor.binary")
-if current.get("bridge", {}).get("bootstrap_token") != "cutover-test-secret":
-    raise SystemExit("cutover did not preserve the test credential")
-manifest = json.loads((archive / "manifest.json").read_text())
-if manifest.get("removed_config_key") != "cloud_hypervisor.binary":
-    raise SystemExit("cutover manifest is missing the removed key")
-verified_counts = manifest.get("verified_safe_state", {})
-if verified_counts.get("desired_vm_tombstones") != 2:
-    raise SystemExit("cutover manifest did not record the safe absent tombstones")
-with sqlite3.connect(archive / "intar-agent.v5.sqlite3") as database:
-    if database.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
-        raise SystemExit("cutover database archive failed quick_check")
-    if database.execute("SELECT COUNT(*) FROM vms").fetchone()[0] != 0:
-        raise SystemExit("cutover database archive contains VM state")
-PY
-current_state=$(python3 "${cutover_helper}" \
-  --mode inspect \
-  --config "${agent_config}" \
-  --database "${agent_database}" \
-  --agent-uid "${agent_uid}" \
-  --agent-gid "${agent_gid}")
-[ "${current_state}" = current ] || die "cutover helper did not recognize completed V6 state"
 
 # A pre-existing wrong-type cache entry must fail the production installer
 # even when systemd-tmpfiles merely warns and skips it. The symlink target must

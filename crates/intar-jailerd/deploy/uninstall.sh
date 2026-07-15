@@ -169,7 +169,6 @@ rm -f -- \
   /usr/share/doc/intar-jailerd/cloud-hypervisor-LICENSES/Apache-2.0.txt \
   /usr/share/doc/intar-jailerd/cloud-hypervisor-LICENSES/BSD-3-Clause.txt \
   /usr/share/doc/intar-jailerd/cloud-hypervisor-LICENSES/CC-BY-4.0.txt \
-  /var/lib/intar/jails/self-test-attestation-v1.json \
   /var/lib/intar/jails/self-test-attestation-v2.json
 rmdir /usr/share/doc/intar-jailerd/cloud-hypervisor-LICENSES 2>/dev/null || true
 rmdir /usr/share/doc/intar-jailerd 2>/dev/null || true

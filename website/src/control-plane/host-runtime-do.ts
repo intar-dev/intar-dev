@@ -7,12 +7,6 @@ import {
 } from "@/control-plane/bridge-v6";
 import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import {
-  acquireHostBenchmarkLeaseAndReserveCpuInD1,
-  clearDrainedHostBenchmarkLeaseInD1,
-  MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS,
-  releaseHostBenchmarkLeaseInD1,
-} from "@/control-plane/host-benchmark-leases";
-import {
   commitHostCpuReservation,
   nextPendingHostCpuReservationExpiry,
   reconcileHostCpuReservations,
@@ -47,7 +41,6 @@ import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
-import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
 import type {
   BridgeMessageV6,
   HostDesiredStateV2,
@@ -65,17 +58,6 @@ interface SocketAttachment {
   bridgeProtocol: "v6" | null;
   lastDesiredVersionSent: number | null;
   lastDesiredDispatchAtMs: number | null;
-}
-
-interface BridgeReceiptTiming {
-  receivedAtUnixMs: number;
-  receivedAtPerformanceMs: number;
-}
-
-interface DesiredDispatchTiming {
-  runId: string;
-  desiredVersion: number;
-  dispatchedAtUnixMs: number;
 }
 
 interface RunProjectionRow {
@@ -141,13 +123,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
-    // Both values are captured on the Worker before attachment parsing. The
-    // epoch timestamp correlates logs, while the same-isolate Performance API
-    // delta measures receipt through D1 projection without comparing clocks.
-    const receiptTiming: BridgeReceiptTiming = {
-      receivedAtUnixMs: Date.now(),
-      receivedAtPerformanceMs: performance.now(),
-    };
     const attachment = this.readSocketAttachment(ws);
     if (!attachment) {
       try {
@@ -164,7 +139,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         ws,
         attachment,
         bridgeMessage,
-        receiptTiming,
       );
       return;
     }
@@ -307,9 +281,8 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         409,
       );
     }
-    const benchmarkAcquire = pathname.endsWith("/benchmark-acquire");
     const commit = pathname.endsWith("/commit");
-    if (!benchmarkAcquire && !commit) {
+    if (!commit) {
       try {
         await this.loadRequiredHost(input.hostId);
       } catch {
@@ -321,56 +294,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     return this.withCpuReservationLock(async () => {
       const db = drizzle(this.env.DB);
       const now = Date.now();
-      if (benchmarkAcquire) {
-        if (
-          input.steadyCpuMillisByVm === null ||
-          input.guestVcpuCountByVm === null ||
-          input.userId === null ||
-          input.requiredImages === null ||
-          input.credentialNotBeforeUnixMs === null ||
-          input.credentialExpiresAtUnixMs === null
-        ) {
-          return jsonResponse(
-            {
-              error:
-                "steadyCpuMillisByVm, guestVcpuCountByVm, userId, requiredImages, and the credential window are required",
-            },
-            400,
-          );
-        }
-        const result = await acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
-          hostId: input.hostId,
-          runId: input.runId,
-          userId: input.userId,
-          steadyCpuMillisByVm: input.steadyCpuMillisByVm,
-          guestVcpuCountByVm: input.guestVcpuCountByVm,
-          requiredImages: input.requiredImages,
-          credentialNotBeforeUnixMs: input.credentialNotBeforeUnixMs,
-          credentialExpiresAtUnixMs: input.credentialExpiresAtUnixMs,
-          nowUnixMs: now,
-        });
-        if (
-          result.ok &&
-          result.state === "pending" &&
-          result.expiresAt !== null
-        ) {
-          await this.scheduleAlarmNoLaterThan(result.expiresAt);
-        }
-        return jsonResponse(result, result.ok ? 201 : 409);
-      }
-      if (pathname.endsWith("/benchmark-release")) {
-        if (input.userId === null) {
-          return jsonResponse({ error: "userId is required" }, 400);
-        }
-        await reconcileHostCpuReservations(db, input.hostId, now);
-        const result = await releaseHostBenchmarkLeaseInD1(db, {
-          hostId: input.hostId,
-          runId: input.runId,
-          userId: input.userId,
-          nowUnixMs: now,
-        });
-        return jsonResponse(result, result.ok ? 200 : 409);
-      }
       if (pathname.endsWith("/reserve")) {
         if (input.steadyCpuMillisByVm === null) {
           return jsonResponse(
@@ -442,7 +365,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       }
       if (pathname.endsWith("/rollback")) {
         const rolledBack = await rollbackPendingHostCpuReservation(db, input);
-        await clearDrainedHostBenchmarkLeaseInD1(db, input.hostId, now);
         return jsonResponse({ ok: true, rolledBack });
       }
       return jsonResponse({ error: "not found" }, 404);
@@ -469,7 +391,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws: WebSocket,
     attachment: SocketAttachment,
     message: BridgeMessageV6,
-    receiptTiming: BridgeReceiptTiming,
   ): Promise<void> {
     if (message.type === "client_hello") {
       await this.handleBridgeClientHello(ws, attachment, message);
@@ -517,7 +438,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       await this.applyBridgeVmReport(
         message.host_id,
         message.report,
-        receiptTiming,
         attachment.sessionId,
       );
       // VM-report projection owns this latency path. Desired-state commits
@@ -644,68 +564,13 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       host_id: hostId,
       desired_state: state,
     });
-    const runningRunIds = new Set(
-      state.vms
-        .filter((vm) => vm.desired_phase === "running")
-        .map((vm) => vm.run_id),
-    );
-    const desiredRunIds = new Set(state.vms.map((vm) => vm.run_id));
-    // Capture a conservative dispatch intent before touching durable storage.
-    // A newly observed run/version must be durable before the desired state can
-    // reach the agent. If persistence fails, the socket send is never attempted.
-    // Forced same-version re-pushes retain the first timestamp.
     const dispatchedAtUnixMs = Date.now();
-    await Promise.all(
-      [...runningRunIds].map(async (runId) => {
-        const key = desiredDispatchStorageKey(runId);
-        const existing = await this.ctx.storage.get<DesiredDispatchTiming>(key);
-        if (existing) return;
-        await this.ctx.storage.put(key, {
-          runId,
-          desiredVersion: state.version,
-          dispatchedAtUnixMs,
-        } satisfies DesiredDispatchTiming);
-      }),
-    );
-
     ws.send(serialized);
     ws.serializeAttachment({
       ...attachment,
       lastDesiredVersionSent: state.version,
       lastDesiredDispatchAtMs: dispatchedAtUnixMs,
     });
-
-    // Dispatch timing is evidence, not a delivery cache. Retain it across
-    // readiness and same-version re-pushes, and remove it only after explicit
-    // desired-state cleanup has removed the run altogether.
-    // Keep cleanup inside the desired-dispatch lock. A background cleanup for
-    // version N must never race version N+1 and delete N+1's newly persisted
-    // run evidence using the older desired-run set.
-    await this.cleanupRetiredDesiredDispatchTimings(desiredRunIds).catch(
-      (error) => {
-        console.error(
-          JSON.stringify({
-            message: "desired dispatch timing cleanup failed",
-            hostId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-      },
-    );
-  }
-
-  private async cleanupRetiredDesiredDispatchTimings(
-    desiredRunIds: ReadonlySet<string>,
-  ): Promise<void> {
-    const entries = await this.ctx.storage.list<DesiredDispatchTiming>({
-      prefix: DESIRED_DISPATCH_STORAGE_PREFIX,
-    });
-    const retiredKeys = [...entries.entries()]
-      .filter(([, timing]) => !desiredRunIds.has(timing.runId))
-      .map(([key]) => key);
-    if (retiredKeys.length > 0) {
-      await this.ctx.storage.delete(retiredKeys);
-    }
   }
 
   private async applyBridgeStateReport(
@@ -817,31 +682,15 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
     await this.withCpuReservationLock(async () => {
       await reconcileHostCpuReservations(db, hostId, now);
-      await clearDrainedHostBenchmarkLeaseInD1(db, hostId, now);
     });
   }
 
   private async applyBridgeVmReport(
     hostId: string,
     report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"],
-    receiptTiming: BridgeReceiptTiming,
     expectedSessionId: string,
   ): Promise<void> {
-    const desiredVersion = report.desired_version;
-    const dispatchTiming =
-      report.terminal.state === "ready" &&
-      Number.isSafeInteger(desiredVersion) &&
-      desiredVersion !== null &&
-      desiredVersion !== undefined &&
-      desiredVersion >= 0
-        ? await this.ctx.storage.get<DesiredDispatchTiming>(
-            desiredDispatchStorageKey(report.run_id),
-          )
-        : undefined;
     let projectionOutcome: RunProjectionOutcome | null = null;
-    let timingOutcome: RunProjectionOutcome | null = null;
-    let projectionAckAtUnixMs: number | null = null;
-    let receiptToProjectionAckMs: number | null = null;
     await this.withRunProjectionLock(report.run_id, async () => {
       const run = await this.loadRun(report.run_id);
       if (!run || run.hostId !== hostId) {
@@ -861,65 +710,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           expectedHostSession: { hostId, activeSessionId: expectedSessionId },
         },
       );
-      if (projectionOutcome === "stale_session" || !dispatchTiming) {
-        return;
-      }
-
-      projectionAckAtUnixMs = Date.now();
-      receiptToProjectionAckMs =
-        performance.now() - receiptTiming.receivedAtPerformanceMs;
-      if (
-        !Number.isFinite(receiptToProjectionAckMs) ||
-        receiptToProjectionAckMs < 0
-      ) {
-        return;
-      }
-      timingOutcome = await this.persistRunState(
-        report.run_id,
-        (latest) =>
-          attachTerminalProjectionAckTiming({
-            current: latest,
-            report,
-            dispatchTiming,
-            receivedAtUnixMs: receiptTiming.receivedAtUnixMs,
-            projectionAckAtUnixMs: projectionAckAtUnixMs!,
-            receiptToProjectionAckMs: receiptToProjectionAckMs!,
-          }),
-        {
-          keepDeleteRequestedAt: true,
-          expectedHostSession: { hostId, activeSessionId: expectedSessionId },
-        },
-      );
     });
 
-    if (
-      projectionOutcome === "stale_session" ||
-      timingOutcome === "stale_session"
-    ) {
+    if (projectionOutcome === "stale_session") {
       return;
-    }
-
-    if (projectionOutcome === "updated" || timingOutcome === "updated") {
-      const timingPersistedAtUnixMs = Date.now();
-      console.info(
-        JSON.stringify({
-          message: "bridge vm report projected",
-          hostId,
-          runId: report.run_id,
-          vmName: report.vm_name,
-          generation: report.runtime_constraints?.generation ?? null,
-          desiredVersion: report.desired_version ?? null,
-          observedAtUnixMs: report.observed_at_unix_ms,
-          workerReceivedAtUnixMs: receiptTiming.receivedAtUnixMs,
-          workerProjectionAckAtUnixMs: projectionAckAtUnixMs,
-          receiptToProjectionAckMs,
-          timingPersistedAtUnixMs,
-          fullReceiptToTimingPersistenceMs:
-            performance.now() - receiptTiming.receivedAtPerformanceMs,
-          projectionOutcome,
-          timingOutcome,
-        }),
-      );
     }
 
     // Terminal readiness is durable before liveness maintenance. A slow host
@@ -991,7 +785,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     if (options?.reconcileCpuReservations !== false) {
       await this.withCpuReservationLock(async () => {
         await reconcileHostCpuReservations(db, hostId, now);
-        await clearDrainedHostBenchmarkLeaseInD1(db, hostId, now);
       });
     }
 
@@ -1680,200 +1473,39 @@ function parseRunState(raw: string): RunStateDocument {
   }
 }
 
-function desiredDispatchStorageKey(runId: string): string {
-  return `${DESIRED_DISPATCH_STORAGE_PREFIX}${encodeURIComponent(runId)}`;
-}
-
-const DESIRED_DISPATCH_STORAGE_PREFIX = "desired-dispatch:";
-
-function attachTerminalProjectionAckTiming(input: {
-  current: RunStateDocument;
-  report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"];
-  dispatchTiming: DesiredDispatchTiming;
-  receivedAtUnixMs: number;
-  projectionAckAtUnixMs: number;
-  receiptToProjectionAckMs: number;
-}): RunStateDocument {
-  const vmIndex = input.current.vms.findIndex(
-    (vm) => vm.runtimeVmName === input.report.vm_name,
-  );
-  const currentVm = input.current.vms[vmIndex];
-  if (!currentVm || vmIndex < 0) return input.current;
-
-  const reportedGeneration =
-    input.report.runtime_constraints?.generation.trim() || null;
-  const projectedGeneration =
-    currentVm.runtimeConstraints?.generation?.trim() || null;
-  const desiredVersion = input.report.desired_version;
-  const hasPersistedTerminalTiming =
-    currentVm.workerTerminalReportReceivedAt !== undefined ||
-    currentVm.workerTerminalProjectionAckAt !== undefined ||
-    currentVm.workerTerminalReceiptToProjectionAckMs !== undefined ||
-    currentVm.workerTerminalProjectionGeneration !== undefined ||
-    currentVm.workerTerminalDesiredVersion !== undefined;
-  if (
-    hasPersistedTerminalTiming ||
-    input.report.terminal.state !== "ready" ||
-    currentVm.terminalPhase !== "ready" ||
-    currentVm.runtimeObservedAt !== input.report.observed_at_unix_ms ||
-    currentVm.terminalObservedAt !==
-      input.report.terminal.observed_at_unix_ms ||
-    !reportedGeneration ||
-    reportedGeneration !== projectedGeneration ||
-    !Number.isSafeInteger(desiredVersion) ||
-    desiredVersion === null ||
-    desiredVersion === undefined ||
-    desiredVersion < 0 ||
-    input.dispatchTiming.runId !== input.report.run_id ||
-    input.dispatchTiming.desiredVersion !== desiredVersion ||
-    !Number.isSafeInteger(input.dispatchTiming.dispatchedAtUnixMs) ||
-    input.dispatchTiming.dispatchedAtUnixMs < 0 ||
-    input.dispatchTiming.dispatchedAtUnixMs > input.receivedAtUnixMs ||
-    input.receivedAtUnixMs > input.projectionAckAtUnixMs ||
-    !Number.isFinite(input.receiptToProjectionAckMs) ||
-    input.receiptToProjectionAckMs < 0
-  ) {
-    return input.current;
-  }
-
-  const vms = [...input.current.vms];
-  vms[vmIndex] = {
-    ...currentVm,
-    workerDesiredDispatchAt: input.dispatchTiming.dispatchedAtUnixMs,
-    workerDesiredDispatchVersion: input.dispatchTiming.desiredVersion,
-    workerTerminalReportReceivedAt: input.receivedAtUnixMs,
-    workerTerminalProjectionAckAt: input.projectionAckAtUnixMs,
-    workerTerminalReceiptToProjectionAckMs: input.receiptToProjectionAckMs,
-    workerTerminalProjectionGeneration: projectedGeneration,
-    workerTerminalDesiredVersion: desiredVersion,
-  };
-  return { ...input.current, vms };
-}
-
 async function parseCpuReservationRequest(request: Request): Promise<{
   hostId: string;
   runId: string;
-  userId: string | null;
   steadyCpuMillisByVm: number[] | null;
-  guestVcpuCountByVm: number[] | null;
-  requiredImages: RequiredScenarioImage[] | null;
-  credentialNotBeforeUnixMs: number | null;
-  credentialExpiresAtUnixMs: number | null;
 } | null> {
   try {
     const value = (await request.json()) as Record<string, unknown>;
     const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
     const runId = typeof value.runId === "string" ? value.runId.trim() : "";
-    const userId = typeof value.userId === "string" ? value.userId.trim() : "";
     const steadyCpuMillisByVm = value.steadyCpuMillisByVm;
-    const guestVcpuCountByVm = value.guestVcpuCountByVm;
-    const requiredImages = parseRequiredScenarioImages(value.requiredImages);
-    const credentialNotBeforeUnixMs = value.credentialNotBeforeUnixMs;
-    const credentialExpiresAtUnixMs = value.credentialExpiresAtUnixMs;
     if (
       !hostId ||
       hostId.length > 128 ||
       !runId ||
       runId.length > 128 ||
-      (value.userId !== undefined && (!userId || userId.length > 128)) ||
       (steadyCpuMillisByVm !== undefined &&
         (!Array.isArray(steadyCpuMillisByVm) ||
           steadyCpuMillisByVm.length === 0 ||
           steadyCpuMillisByVm.length > 256 ||
-          !steadyCpuMillisByVm.every(isReservationCpuMillis))) ||
-      (guestVcpuCountByVm !== undefined &&
-        (!Array.isArray(guestVcpuCountByVm) ||
-          guestVcpuCountByVm.length === 0 ||
-          guestVcpuCountByVm.length > 256 ||
-          !guestVcpuCountByVm.every(isReservationVcpuCount))) ||
-      (Array.isArray(steadyCpuMillisByVm) &&
-        Array.isArray(guestVcpuCountByVm) &&
-        steadyCpuMillisByVm.length !== guestVcpuCountByVm.length) ||
-      (value.requiredImages !== undefined && requiredImages === null) ||
-      (credentialNotBeforeUnixMs !== undefined &&
-        !isReservationUnixMs(credentialNotBeforeUnixMs)) ||
-      (credentialExpiresAtUnixMs !== undefined &&
-        !isReservationUnixMs(credentialExpiresAtUnixMs)) ||
-      (isReservationUnixMs(credentialNotBeforeUnixMs) &&
-        isReservationUnixMs(credentialExpiresAtUnixMs) &&
-        (credentialExpiresAtUnixMs <= credentialNotBeforeUnixMs ||
-          credentialExpiresAtUnixMs - credentialNotBeforeUnixMs >
-            MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS))
+          !steadyCpuMillisByVm.every(isReservationCpuMillis)))
     ) {
       return null;
     }
     return {
       hostId,
       runId,
-      userId: userId || null,
       steadyCpuMillisByVm: Array.isArray(steadyCpuMillisByVm)
         ? (steadyCpuMillisByVm as number[])
-        : null,
-      guestVcpuCountByVm: Array.isArray(guestVcpuCountByVm)
-        ? (guestVcpuCountByVm as number[])
-        : null,
-      requiredImages,
-      credentialNotBeforeUnixMs: isReservationUnixMs(credentialNotBeforeUnixMs)
-        ? credentialNotBeforeUnixMs
-        : null,
-      credentialExpiresAtUnixMs: isReservationUnixMs(credentialExpiresAtUnixMs)
-        ? credentialExpiresAtUnixMs
         : null,
     };
   } catch {
     return null;
   }
-}
-
-function parseRequiredScenarioImages(
-  value: unknown,
-): RequiredScenarioImage[] | null {
-  if (value === undefined) {
-    return null;
-  }
-  if (!Array.isArray(value) || value.length === 0 || value.length > 256) {
-    return null;
-  }
-
-  const identities = new Set<string>();
-  const requiredImages: RequiredScenarioImage[] = [];
-  for (const candidate of value) {
-    if (!candidate || typeof candidate !== "object") {
-      return null;
-    }
-    const image = candidate as Record<string, unknown>;
-    const imageKeyValue = image.imageKey;
-    if (!imageKeyValue || typeof imageKeyValue !== "object") {
-      return null;
-    }
-    const imageKey = imageKeyValue as Record<string, unknown>;
-    const scenario =
-      typeof imageKey.scenario === "string" ? imageKey.scenario.trim() : "";
-    const vm = typeof imageKey.vm === "string" ? imageKey.vm.trim() : "";
-    const arch = imageKey.arch;
-    const imageSha256 =
-      typeof image.imageSha256 === "string"
-        ? image.imageSha256.toLowerCase()
-        : "";
-    const identity = `${scenario}:${vm}:${String(arch)}`;
-    if (
-      !scenario ||
-      scenario.length > 128 ||
-      !vm ||
-      vm.length > 128 ||
-      (arch !== "x86_64" && arch !== "aarch64") ||
-      !/^[a-f0-9]{64}$/.test(imageSha256) ||
-      identities.has(identity)
-    ) {
-      return null;
-    }
-    identities.add(identity);
-    requiredImages.push({
-      imageKey: { scenario, vm, arch },
-      imageSha256,
-    });
-  }
-  return requiredImages;
 }
 
 function isReservationCpuMillis(value: unknown): value is number {
@@ -1883,17 +1515,4 @@ function isReservationCpuMillis(value: unknown): value is number {
     value > 0 &&
     value <= 4_294_967_295
   );
-}
-
-function isReservationVcpuCount(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value > 0 &&
-    value <= 256
-  );
-}
-
-function isReservationUnixMs(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }

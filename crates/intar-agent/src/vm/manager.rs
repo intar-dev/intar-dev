@@ -17,18 +17,14 @@ use cloud_hypervisor_client::{
 };
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
-use intar_contracts::bridge::{
-    VmBootCpuSamplePointV1, VmBootCpuSampleV1, VmBootEvidenceV1, VmBootPhaseDurationsV1,
-    VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
-};
+use intar_contracts::bridge::{VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1};
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, DestroyRunNetworkRequest,
     EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap,
     JailerCapabilities, LaunchVmV2Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareImageV2Request,
     PreparedImageV2Result, Request as JailerRequest, Response as JailerResponse, RunNetworkResult,
-    SampleVmCpuRequest, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase,
-    VmCpuRuntimeState, VmCpuSample, VmIdentityRequest, VmInspection, VmLaunchRequest,
-    VmLaunchResult,
+    SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase, VmCpuRuntimeState,
+    VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
 use russh::{
@@ -176,11 +172,6 @@ pub struct VmDetails {
     pub ssh_host_keys_openssh: Vec<String>,
     #[serde(skip_serializing)]
     pub cpu_runtime: Option<VmCpuRuntimeState>,
-    /// In-memory boot evidence for the live generation. It is deliberately
-    /// absent after recovery: recovery attests the current sandbox and quota,
-    /// but cannot recreate measurements it did not observe.
-    #[serde(skip_serializing)]
-    pub boot_evidence: Option<VmBootEvidenceV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1099,7 +1090,6 @@ impl VmManager {
             kino_vsock_path: Some(kino_vsock_path.display().to_string()),
             ssh_host_keys_openssh: Vec::new(),
             cpu_runtime: None,
-            boot_evidence: None,
         };
 
         let status = VmStatusResponse {
@@ -1868,241 +1858,6 @@ async fn finalize_jailed_vm_boot(
     Ok(result)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VmCpuSamplePoint {
-    VmBootAccepted,
-    KinoReady,
-    PreSeal,
-    PostSeal,
-    TerminalPublished,
-}
-
-impl VmCpuSamplePoint {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::VmBootAccepted => "vm_boot_accepted",
-            Self::KinoReady => "kino_ready",
-            Self::PreSeal => "pre_seal",
-            Self::PostSeal => "post_seal",
-            Self::TerminalPublished => "terminal_published",
-        }
-    }
-
-    const fn contract(self) -> VmBootCpuSamplePointV1 {
-        match self {
-            Self::VmBootAccepted => VmBootCpuSamplePointV1::VmBootAccepted,
-            Self::KinoReady => VmBootCpuSamplePointV1::KinoReady,
-            Self::PreSeal => VmBootCpuSamplePointV1::PreSeal,
-            Self::PostSeal => VmBootCpuSamplePointV1::PostSeal,
-            Self::TerminalPublished => VmBootCpuSamplePointV1::TerminalPublished,
-        }
-    }
-}
-
-const fn vm_cpu_phase_label(phase: VmCpuPhase) -> &'static str {
-    match phase {
-        VmCpuPhase::BootBurst => "boot_burst",
-        VmCpuPhase::Steady => "steady",
-    }
-}
-
-fn validate_vm_cpu_sample(expected_generation: &ValidatedId, sample: &VmCpuSample) -> Result<()> {
-    anyhow::ensure!(
-        sample.generation == *expected_generation,
-        "jailerd sampled a different VM generation"
-    );
-    let attestation = sample
-        .cpu_runtime
-        .attestation
-        .as_ref()
-        .context("jailerd CPU sample omitted live quota attestation")?;
-    anyhow::ensure!(
-        attestation.quota == sample.cpu_runtime.effective_quota
-            && attestation.cpu_max == sample.cpu_runtime.effective_quota.cpu_max()
-            && attestation.cpu_max_burst == 0
-            && attestation.verified_at_unix_ms == sample.sampled_at_unix_ms,
-        "jailerd CPU sample quota attestation did not match the live runtime state"
-    );
-    Ok(())
-}
-
-fn validate_vm_cpu_sample_point(point: VmCpuSamplePoint, sample: &VmCpuSample) -> Result<()> {
-    let expected_phase = match point {
-        VmCpuSamplePoint::VmBootAccepted
-        | VmCpuSamplePoint::KinoReady
-        | VmCpuSamplePoint::PreSeal => VmCpuPhase::BootBurst,
-        VmCpuSamplePoint::PostSeal | VmCpuSamplePoint::TerminalPublished => VmCpuPhase::Steady,
-    };
-    anyhow::ensure!(
-        sample.cpu_runtime.phase == expected_phase,
-        "CPU sample point {} observed {} instead of {}",
-        point.as_str(),
-        vm_cpu_phase_label(sample.cpu_runtime.phase),
-        vm_cpu_phase_label(expected_phase),
-    );
-    Ok(())
-}
-
-fn accept_vm_cpu_sample(
-    name: &str,
-    generation: &ValidatedId,
-    point: VmCpuSamplePoint,
-    sample: &VmCpuSample,
-) -> Option<VmBootCpuSampleV1> {
-    if let Err(error) = validate_vm_cpu_sample(generation, sample)
-        .and_then(|()| validate_vm_cpu_sample_point(point, sample))
-    {
-        warn!(
-            vm = name,
-            generation = %generation,
-            sample_point = point.as_str(),
-            error = %format!("{error:#}"),
-            "rejected invalid VM CPU sample"
-        );
-        return None;
-    }
-    let runtime = &sample.cpu_runtime;
-    let attestation = runtime
-        .attestation
-        .as_ref()
-        .expect("validated CPU sample includes an attestation");
-    info!(
-        event = "vm_cpu_sample",
-        vm = name,
-        generation = %sample.generation,
-        sample_point = point.as_str(),
-        sampled_at_unix_ms = sample.sampled_at_unix_ms,
-        cpu_phase = vm_cpu_phase_label(runtime.phase),
-        steady_cpu_millis = runtime.steady_quota.cpu_millis,
-        effective_cpu_millis = runtime.effective_quota.cpu_millis,
-        boot_deadline_unix_ms = ?runtime.boot_deadline_unix_ms,
-        cpu_max = %attestation.cpu_max,
-        cpu_max_burst = attestation.cpu_max_burst,
-        quota_verified_at_unix_ms = attestation.verified_at_unix_ms,
-        usage_usec = sample.cpu_stat.usage_usec,
-        user_usec = sample.cpu_stat.user_usec,
-        system_usec = sample.cpu_stat.system_usec,
-        nr_periods = sample.cpu_stat.nr_periods,
-        nr_throttled = sample.cpu_stat.nr_throttled,
-        throttled_usec = sample.cpu_stat.throttled_usec,
-        "captured VM CPU runtime sample"
-    );
-    let sampled_at_unix_ms = match i64::try_from(sample.sampled_at_unix_ms) {
-        Ok(value) => value,
-        Err(_) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                "discarding VM CPU sample with out-of-range timestamp"
-            );
-            return None;
-        }
-    };
-    let quota_verified_at_unix_ms = match i64::try_from(attestation.verified_at_unix_ms) {
-        Ok(value) => value,
-        Err(_) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                "discarding VM CPU sample with out-of-range quota timestamp"
-            );
-            return None;
-        }
-    };
-    Some(VmBootCpuSampleV1 {
-        point: point.contract(),
-        sampled_at_unix_ms,
-        phase: match runtime.phase {
-            VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
-            VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
-        },
-        steady_cpu_millis: runtime.steady_quota.cpu_millis,
-        effective_cpu_millis: runtime.effective_quota.cpu_millis,
-        boot_deadline_unix_ms: runtime
-            .boot_deadline_unix_ms
-            .and_then(|value| i64::try_from(value).ok()),
-        cpu_max: attestation.cpu_max.clone(),
-        cpu_max_burst: attestation.cpu_max_burst,
-        quota_verified_at_unix_ms,
-        usage_usec: sample.cpu_stat.usage_usec,
-        user_usec: sample.cpu_stat.user_usec,
-        system_usec: sample.cpu_stat.system_usec,
-        nr_periods: sample.cpu_stat.nr_periods,
-        nr_throttled: sample.cpu_stat.nr_throttled,
-        throttled_usec: sample.cpu_stat.throttled_usec,
-    })
-}
-
-async fn capture_vm_cpu_sample(
-    inner: &Inner,
-    name: &str,
-    generation: &ValidatedId,
-    point: VmCpuSamplePoint,
-) -> Option<VmBootCpuSampleV1> {
-    // Telemetry must never extend the privileged boot lease. A healthy local
-    // SOCK_SEQPACKET/cgroup read completes in a few milliseconds; abandon the
-    // sample if the daemon is busy and let quota finalization proceed.
-    let response = match timeout(
-        Duration::from_millis(50),
-        request_jailerd(
-            inner,
-            JailerRequest::SampleVmCpu(SampleVmCpuRequest {
-                generation: generation.clone(),
-            }),
-        ),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(_) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                "skipping VM CPU sample because the 50ms telemetry budget expired"
-            );
-            return None;
-        }
-    };
-    let sample = match response {
-        Ok(JailerResponse::SampleVmCpu(sample)) => sample,
-        Ok(JailerResponse::Error(error)) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                error_code = %error.code,
-                error_message = %error.message,
-                "failed to capture VM CPU sample"
-            );
-            return None;
-        }
-        Ok(response) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                response = ?response,
-                "jailerd returned an unexpected VM CPU sample response"
-            );
-            return None;
-        }
-        Err(error) => {
-            warn!(
-                vm = name,
-                generation = %generation,
-                sample_point = point.as_str(),
-                error = %format!("{error:#}"),
-                "failed to request VM CPU sample"
-            );
-            return None;
-        }
-    };
-    accept_vm_cpu_sample(name, generation, point, &sample)
-}
-
 async fn commit_ready_vm_and_probe(
     inner: &Inner,
     name: &str,
@@ -2196,14 +1951,7 @@ async fn terminal_state_for_attested_ready(
     inner: &Inner,
     name: &str,
     generation: &ValidatedId,
-    boot_evidence: Option<VmBootEvidenceV1>,
 ) -> Result<VmTerminalState> {
-    if let Some(evidence) = &boot_evidence {
-        anyhow::ensure!(
-            evidence.generation == generation.as_str(),
-            "VM boot evidence generation does not match the live generation"
-        );
-    }
     let mut states = inner.states.write().await;
     let vm = states
         .get_mut(name)
@@ -2217,7 +1965,6 @@ async fn terminal_state_for_attested_ready(
             details.jail_generation.as_deref() == Some(generation.as_str()),
             "VM generation changed before terminal-ready publication"
         );
-        details.boot_evidence = boot_evidence;
         details.ssh_public_port.is_some()
     };
     anyhow::ensure!(
@@ -2416,8 +2163,6 @@ async fn remove_agent_launch_sources(req: &RunCreateInput<'_>) -> Result<()> {
 
 async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let create_started_at = Instant::now();
-    let create_started_at_unix_ms = now_unix_ms();
-    let mut cpu_samples = Vec::with_capacity(5);
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
 
     // New-run network construction and descriptor validation are independent.
@@ -2431,9 +2176,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let network_run_id = req.run_id.to_string();
     let network_config = req.network.clone();
     let network_task = tokio::spawn(async move {
-        let result =
-            ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await;
-        (result, Instant::now())
+        ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await
     });
     let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
     let ready_image = image_cache::require_ready_image_launch(
@@ -2509,7 +2252,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let peer_guest_ips = req.peer_guest_ips.clone();
     let hostname = req.hostname.to_string();
     let runtime_disk_task = tokio::task::spawn_blocking(move || {
-        let result = runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
+        runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
             path: &config_disk_path,
             ssh_authorized_keys_openssh: &ssh_authorized_keys_openssh,
             kino_vsock_cid,
@@ -2519,13 +2262,11 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             network: &network,
             root_resize_required,
             peer_guest_ips: &peer_guest_ips,
-        });
-        (result, Instant::now())
+        })
     });
     let (runtime_disk_result, network_result) = tokio::join!(runtime_disk_task, network_task);
-    let (runtime_disk_result, runtime_disk_ready_at) =
-        runtime_disk_result.context("scenario runtime disk task panicked")?;
-    let (run_network, network_ready_at) = network_result.context("run network task panicked")?;
+    let runtime_disk_result = runtime_disk_result.context("scenario runtime disk task panicked")?;
+    let run_network = network_result.context("run network task panicked")?;
     let run_network = run_network.context("failed to ensure jailed run network")?;
     runtime_disk_result.context("failed to write scenario runtime disk")?;
     ensure_create_not_deleted(inner, req.name).await?;
@@ -2576,7 +2317,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         kino_vsock_cid: req.kino_vsock_cid,
     })?;
 
-    // LaunchVm returns only after jailerd has pinned and pinged the API socket.
+    // LaunchVmV2 returns only after jailerd has pinned and pinged the API socket.
     // Repeating the readiness loop here adds another VMM API request and up to
     // one polling interval to every boot. Recovery still uses the bounded
     // readiness helper because it does not inherit that launch attestation.
@@ -2613,33 +2354,13 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         .context("cloud-hypervisor vm.boot failed")?;
     ensure_create_not_deleted(inner, req.name).await?;
     let boot_accepted_at = Instant::now();
-    if let Some(sample) = capture_vm_cpu_sample(
-        inner,
-        req.name,
-        &launch.generation,
-        VmCpuSamplePoint::VmBootAccepted,
-    )
-    .await
-    {
-        cpu_samples.push(sample);
-    }
 
     let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
         .await
         .context("scenario runtime did not become ready")?;
     ensure_create_not_deleted(inner, req.name).await?;
     let guest_ready_at = Instant::now();
-    if let Some(sample) = capture_vm_cpu_sample(
-        inner,
-        req.name,
-        &launch.generation,
-        VmCpuSamplePoint::KinoReady,
-    )
-    .await
-    {
-        cpu_samples.push(sample);
-    }
-    let finalized = seal_ready_vm_cpu(
+    seal_ready_vm_cpu(
         inner,
         req.name,
         &launch.generation,
@@ -2647,26 +2368,6 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     )
     .await?;
     let quota_sealed_at = Instant::now();
-    if let Some(sample) = finalized.pre_seal_cpu_sample.as_ref().and_then(|sample| {
-        accept_vm_cpu_sample(
-            req.name,
-            &launch.generation,
-            VmCpuSamplePoint::PreSeal,
-            sample,
-        )
-    }) {
-        cpu_samples.push(sample);
-    }
-    if let Some(sample) = finalized.post_seal_cpu_sample.as_ref().and_then(|sample| {
-        accept_vm_cpu_sample(
-            req.name,
-            &launch.generation,
-            VmCpuSamplePoint::PostSeal,
-            sample,
-        )
-    }) {
-        cpu_samples.push(sample);
-    }
     if req.ssh_public_port.is_some() {
         wait_for_guest_ssh_before_running(inner, req.name, &launch.generation).await?;
     }
@@ -2675,49 +2376,15 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
 
     // The VM can become externally ready only after jailerd has live-read the
     // steady cgroup quota, activated DNAT, and the agent has authenticated the
-    // guest host key. Capture the final quota boundary, atomically commit
-    // Running + Kino state, then emit exactly one composite ready event.
-    if let Some(sample) = capture_vm_cpu_sample(
-        inner,
-        req.name,
-        &launch.generation,
-        VmCpuSamplePoint::TerminalPublished,
-    )
-    .await
-    {
-        cpu_samples.push(sample);
-    }
+    // guest host key. Atomically commit Running + Kino state, then emit exactly
+    // one composite ready event.
     commit_ready_vm_and_probe(inner, req.name, &launch.generation, &ready)
         .await
         .context("durably commit sealed VM readiness")?;
     let terminal_ready_at = Instant::now();
-    let ready_at_unix_ms = now_unix_ms();
-    let phases = VmBootTimeline {
-        create_started_at,
-        image_ready_at,
-        runtime_disk_ready_at,
-        network_ready_at,
-        disks_ready_at,
-        jail_ready_at,
-        vmm_ready_at,
-        boot_accepted_at,
-        guest_ready_at,
-        quota_sealed_at,
-        ssh_verified_at,
-        terminal_ready_at,
-    }
-    .phase_durations();
-    let boot_evidence = VmBootEvidenceV1 {
-        generation: launch.generation.as_str().to_string(),
-        started_at_unix_ms: create_started_at_unix_ms,
-        ready_at_unix_ms,
-        phases,
-        cpu_samples,
-    };
-    let terminal =
-        terminal_state_for_attested_ready(inner, req.name, &launch.generation, Some(boot_evidence))
-            .await
-            .context("build generation-fenced terminal-ready projection")?;
+    let terminal = terminal_state_for_attested_ready(inner, req.name, &launch.generation)
+        .await
+        .context("build generation-fenced terminal-ready projection")?;
     emit_terminal_state_update(inner, terminal, false).await;
     start_terminal_worker(inner, req.name)
         .await
@@ -2741,57 +2408,6 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     );
 
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-struct VmBootTimeline {
-    create_started_at: Instant,
-    image_ready_at: Instant,
-    runtime_disk_ready_at: Instant,
-    network_ready_at: Instant,
-    disks_ready_at: Instant,
-    jail_ready_at: Instant,
-    vmm_ready_at: Instant,
-    boot_accepted_at: Instant,
-    guest_ready_at: Instant,
-    quota_sealed_at: Instant,
-    ssh_verified_at: Instant,
-    terminal_ready_at: Instant,
-}
-
-impl VmBootTimeline {
-    fn phase_durations(self) -> VmBootPhaseDurationsV1 {
-        let network_ms = duration_ms(
-            self.network_ready_at
-                .saturating_duration_since(self.create_started_at),
-        );
-        VmBootPhaseDurationsV1 {
-            image_disk_ms: duration_ms(self.image_ready_at - self.create_started_at)
-                .saturating_add(duration_ms(
-                    self.runtime_disk_ready_at - self.image_ready_at,
-                )),
-            network_jailer_vmm_ms: network_ms
-                .saturating_add(duration_ms(self.jail_ready_at - self.disks_ready_at))
-                .saturating_add(duration_ms(self.vmm_ready_at - self.jail_ready_at))
-                .saturating_add(duration_ms(self.boot_accepted_at - self.vmm_ready_at)),
-            guest_to_kino_ms: duration_ms(self.guest_ready_at - self.boot_accepted_at),
-            seal_ssh_publish_ms: duration_ms(self.terminal_ready_at - self.guest_ready_at),
-            total_ms: duration_ms(self.terminal_ready_at - self.create_started_at),
-            image_cache_ms: duration_ms(self.image_ready_at - self.create_started_at),
-            runtime_disk_ms: duration_ms(self.runtime_disk_ready_at - self.image_ready_at),
-            network_ms,
-            jailer_stage_ms: duration_ms(self.jail_ready_at - self.disks_ready_at),
-            vmm_start_ms: duration_ms(self.vmm_ready_at - self.jail_ready_at),
-            vm_api_ms: duration_ms(self.boot_accepted_at - self.vmm_ready_at),
-            quota_seal_ms: duration_ms(self.quota_sealed_at - self.guest_ready_at),
-            ssh_verify_ms: duration_ms(self.ssh_verified_at - self.quota_sealed_at),
-            terminal_publish_ms: duration_ms(self.terminal_ready_at - self.ssh_verified_at),
-        }
-    }
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn boot_capacity_retry_delay(attempt: u32) -> Duration {
@@ -3351,9 +2967,9 @@ async fn detect_tracked_vm_runtime(
     };
 
     let Some(generation) = details.jail_generation.as_deref() else {
-        // VMs created before the V6 jailer boundary are deliberately not
-        // adoptable. The coordinated rollout drains them before upgrading;
-        // incomplete pre-launch rows are safe to clean as dead state.
+        // A durable VM without a jail generation cannot be reattached. This
+        // includes incomplete pre-launch rows, which are safe to clean as dead
+        // state.
         return Ok(TrackedVmRuntimeStatus::Dead);
     };
 
@@ -3571,7 +3187,7 @@ async fn resume_tracked_vm_on_startup(
                 .await
                 .context("durably commit recovered VM readiness")?;
             let terminal =
-                terminal_state_for_attested_ready(&inner_for_task, &vm_name, &generation, None)
+                terminal_state_for_attested_ready(&inner_for_task, &vm_name, &generation)
                     .await
                     .context("build recovered terminal-ready projection")?;
             emit_terminal_state_update(&inner_for_task, terminal, false).await;
@@ -3901,7 +3517,7 @@ async fn release_jailed_runtime(inner: &Inner, vm: &VmStatusResponse) -> Result<
             .with_context(|| format!("destroy jail generation {generation}"))?;
     } else if let Some(selector) = generationless_v6_launch_cleanup_selector(vm)? {
         // A process crash can leave SQLite in any prelaunch state after
-        // jailerd has committed LaunchVm but before persist_jail_launch records
+        // jailerd has committed LaunchVmV2 but before persist_jail_launch records
         // the fresh generation (an earlier state transition may itself have
         // failed to persist). Resolve only that narrow V6 window by the
         // protocol's typed logical identity and drain it before considering
@@ -6855,7 +6471,6 @@ fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
                 row.ssh_host_keys_openssh_json.as_deref(),
             ),
             cpu_runtime: None,
-            boot_evidence: None,
         }),
         _ => None,
     };
@@ -7182,7 +6797,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::kino_probe::{ProbeSummary, ProbeView};
     use cloud_hypervisor_client::Error as ChError;
-    use intar_jailer_protocol::{CpuQuota, CpuQuotaAttestation, CpuStat};
+    use intar_jailer_protocol::{CpuQuota, CpuQuotaAttestation};
     use russh::client::Handler as _;
     use serde_json::json;
     use tempfile::tempdir;
@@ -7343,135 +6958,6 @@ mod tests {
         assert_eq!(sent[0], sent[1]);
     }
 
-    #[test]
-    fn cpu_sample_validation_is_generation_fenced_and_attestation_bound() {
-        let generation = ValidatedId::parse("generation-1").expect("generation");
-        let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
-        let effective_quota = CpuQuota::from_millis(2_000).expect("boot quota");
-        let mut sample = VmCpuSample {
-            generation: generation.clone(),
-            sampled_at_unix_ms: 123,
-            cpu_runtime: VmCpuRuntimeState {
-                phase: VmCpuPhase::BootBurst,
-                steady_quota,
-                effective_quota,
-                boot_deadline_unix_ms: Some(45_123),
-                attestation: Some(CpuQuotaAttestation {
-                    quota: effective_quota,
-                    cpu_max: effective_quota.cpu_max(),
-                    cpu_max_burst: 0,
-                    verified_at_unix_ms: 123,
-                }),
-            },
-            cpu_stat: CpuStat {
-                usage_usec: 10,
-                user_usec: 7,
-                system_usec: 3,
-                nr_periods: 2,
-                nr_throttled: 1,
-                throttled_usec: 4,
-            },
-        };
-
-        validate_vm_cpu_sample(&generation, &sample).expect("valid CPU sample");
-        validate_vm_cpu_sample_point(VmCpuSamplePoint::VmBootAccepted, &sample)
-            .expect("boot acceptance is sampled under the boot quota");
-        validate_vm_cpu_sample_point(VmCpuSamplePoint::KinoReady, &sample)
-            .expect("Kino readiness is sampled under the boot quota");
-        validate_vm_cpu_sample_point(VmCpuSamplePoint::PreSeal, &sample)
-            .expect("pre-seal is sampled under the boot quota");
-        let evidence =
-            accept_vm_cpu_sample("vm-1", &generation, VmCpuSamplePoint::PreSeal, &sample)
-                .expect("valid protocol sample becomes bridge evidence");
-        assert_eq!(evidence.point, VmBootCpuSamplePointV1::PreSeal);
-        assert_eq!(evidence.phase, VmRuntimeConstraintPhaseV1::BootBurst);
-        assert_eq!(evidence.steady_cpu_millis, 1_000);
-        assert_eq!(evidence.effective_cpu_millis, 2_000);
-        assert_eq!(evidence.cpu_max, "200000 100000");
-        assert_eq!(evidence.cpu_max_burst, 0);
-        assert_eq!(evidence.usage_usec, 10);
-        assert!(validate_vm_cpu_sample_point(VmCpuSamplePoint::PostSeal, &sample).is_err());
-        sample.cpu_runtime.phase = VmCpuPhase::Steady;
-        validate_vm_cpu_sample_point(VmCpuSamplePoint::PostSeal, &sample)
-            .expect("post-seal evidence is steady");
-        validate_vm_cpu_sample_point(VmCpuSamplePoint::TerminalPublished, &sample)
-            .expect("terminal publication evidence is steady");
-        sample.cpu_runtime.phase = VmCpuPhase::BootBurst;
-        assert_eq!(vm_cpu_phase_label(sample.cpu_runtime.phase), "boot_burst");
-        assert_eq!(
-            VmCpuSamplePoint::VmBootAccepted.as_str(),
-            "vm_boot_accepted"
-        );
-        assert_eq!(VmCpuSamplePoint::KinoReady.as_str(), "kino_ready");
-        assert_eq!(VmCpuSamplePoint::PreSeal.as_str(), "pre_seal");
-        assert_eq!(VmCpuSamplePoint::PostSeal.as_str(), "post_seal");
-        assert_eq!(
-            VmCpuSamplePoint::TerminalPublished.as_str(),
-            "terminal_published"
-        );
-        assert_eq!(
-            VmCpuSamplePoint::VmBootAccepted.contract(),
-            VmBootCpuSamplePointV1::VmBootAccepted
-        );
-        assert_eq!(
-            VmCpuSamplePoint::KinoReady.contract(),
-            VmBootCpuSamplePointV1::KinoReady
-        );
-        assert_eq!(
-            VmCpuSamplePoint::PreSeal.contract(),
-            VmBootCpuSamplePointV1::PreSeal
-        );
-        assert_eq!(
-            VmCpuSamplePoint::PostSeal.contract(),
-            VmBootCpuSamplePointV1::PostSeal
-        );
-        assert_eq!(
-            VmCpuSamplePoint::TerminalPublished.contract(),
-            VmBootCpuSamplePointV1::TerminalPublished
-        );
-
-        let stale_generation = ValidatedId::parse("generation-2").expect("different generation");
-        assert!(validate_vm_cpu_sample(&stale_generation, &sample).is_err());
-
-        sample
-            .cpu_runtime
-            .attestation
-            .as_mut()
-            .expect("attestation")
-            .cpu_max_burst = 1;
-        assert!(validate_vm_cpu_sample(&generation, &sample).is_err());
-    }
-
-    #[test]
-    fn boot_phase_evidence_preserves_overlapped_network_and_disk_work() {
-        let base = Instant::now();
-        let at = |milliseconds| base + Duration::from_millis(milliseconds);
-        let phases = VmBootTimeline {
-            create_started_at: base,
-            image_ready_at: at(250),
-            runtime_disk_ready_at: at(380),
-            network_ready_at: at(430),
-            disks_ready_at: at(430),
-            jail_ready_at: at(1_030),
-            vmm_ready_at: at(1_230),
-            boot_accepted_at: at(1_350),
-            guest_ready_at: at(6_150),
-            quota_sealed_at: at(6_230),
-            ssh_verified_at: at(6_580),
-            terminal_ready_at: at(6_670),
-        }
-        .phase_durations();
-
-        assert_eq!(phases.image_cache_ms, 250);
-        assert_eq!(phases.runtime_disk_ms, 130);
-        assert_eq!(phases.network_ms, 430);
-        assert_eq!(phases.image_disk_ms, 380);
-        assert_eq!(phases.network_jailer_vmm_ms, 1_350);
-        assert_eq!(phases.guest_to_kino_ms, 4_800);
-        assert_eq!(phases.seal_ssh_publish_ms, 520);
-        assert_eq!(phases.total_ms, 6_670);
-    }
-
     fn ch_is_not_started_error(err: &ChError) -> bool {
         matches!(err, ChError::HttpStatus { status: 405, .. })
     }
@@ -7590,7 +7076,6 @@ mod tests {
                 kino_vsock_path: None,
                 ssh_host_keys_openssh: Vec::new(),
                 cpu_runtime: None,
-                boot_evidence: None,
             }),
             error: None,
             lease_duration_seconds: None,

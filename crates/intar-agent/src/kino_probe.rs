@@ -60,7 +60,7 @@ pub struct ProbeUpdateEnvelope {
     pub vm_name: String,
     pub run_id: String,
     /// Jailer generation that owned the readiness socket which produced this
-    /// update. Generation fencing is mandatory in the v2-only cutover.
+    /// update. Generation fencing is mandatory in the v2 protocol.
     pub jail_generation: String,
     pub generated_at_ms: i64,
     pub collection_state: ProbeCollectionState,

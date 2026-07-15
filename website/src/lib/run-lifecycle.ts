@@ -80,7 +80,6 @@ export function applyVmReportToRunState(input: {
           network: input.report.network ?? null,
           terminal: input.report.terminal ?? null,
           runtime_constraints: input.report.runtime_constraints ?? null,
-          boot_evidence: input.report.boot_evidence ?? null,
           resource_state: input.report.resource_state ?? null,
           ssh_host_keys_openssh: input.report.ssh_host_keys_openssh,
           probes: input.report.probes,
@@ -156,7 +155,6 @@ function applyReportedVmState(input: {
     | "network"
     | "terminal"
     | "runtime_constraints"
-    | "boot_evidence"
     | "resource_state"
     | "ssh_host_keys_openssh"
     | "probes"
@@ -214,11 +212,6 @@ function applyReportedVmState(input: {
     withProbes.runtimeConstraints,
     input.report.runtime_constraints,
   );
-  const bootEvidence =
-    input.report.boot_evidence?.generation.trim() &&
-    input.report.boot_evidence.generation === runtimeConstraints?.generation
-      ? input.report.boot_evidence
-      : (withProbes.bootEvidence ?? null);
   const resourceState =
     input.report.resource_state &&
     input.report.runtime_constraints?.generation ===
@@ -239,7 +232,6 @@ function applyReportedVmState(input: {
     terminalObservedAt: terminal.observedAt,
     terminalTarget: terminal.target,
     runtimeConstraints,
-    bootEvidence,
     resourceState,
   };
   const derived = deriveVmPhase({
@@ -401,18 +393,10 @@ function resetVmForRuntimeGeneration(
       checkedAt: null,
     },
     runtimeConstraints: null,
-    bootEvidence: null,
     resourceState: null,
     bootProbes: resetProbes(current.bootProbes),
     scenarioProbes: resetProbes(current.scenarioProbes),
   };
-  delete reset.workerTerminalReportReceivedAt;
-  delete reset.workerTerminalProjectionAckAt;
-  delete reset.workerTerminalReceiptToProjectionAckMs;
-  delete reset.workerTerminalProjectionGeneration;
-  delete reset.workerTerminalDesiredVersion;
-  delete reset.workerDesiredDispatchAt;
-  delete reset.workerDesiredDispatchVersion;
   return reset;
 }
 

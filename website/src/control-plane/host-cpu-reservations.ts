@@ -1,7 +1,6 @@
 import { and, eq, exists, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
-  hostBenchmarkLeases,
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
@@ -46,7 +45,6 @@ export type ReserveHostCpuResult =
       reason:
         | "host_not_ready"
         | "boot_capacity_pending"
-        | "host_benchmark_leased"
         | "conflict";
       capacity: HostCpuReservationCapacity | null;
     };
@@ -95,18 +93,6 @@ export async function reserveHostCpuInD1(
     !Number.isSafeInteger(bootCpuMillis)
   ) {
     throw new Error("invalid boot CPU reservation contract");
-  }
-  const [benchmarkLease] = await db
-    .select({ runId: hostBenchmarkLeases.runId })
-    .from(hostBenchmarkLeases)
-    .where(eq(hostBenchmarkLeases.hostId, input.hostId))
-    .limit(1);
-  if (benchmarkLease) {
-    return {
-      ok: false,
-      reason: "host_benchmark_leased",
-      capacity: null,
-    };
   }
   await reconcileHostCpuReservations(db, input.hostId, input.nowUnixMs);
 
@@ -945,7 +931,6 @@ export function strictCpuCapacity(
     capabilities.supports_vsock !== true ||
     capabilities.supports_reflink !== true ||
     capabilities.supports_nftables !== true ||
-    capabilities.supports_jailer_v1 !== false ||
     capabilities.supports_jailer_v2 !== true ||
     capabilities.supports_boot_cpu_lease !== true ||
     capabilities.supports_template_backed_launch !== true ||

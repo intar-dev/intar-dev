@@ -1,6 +1,6 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
-import type { VmBootEvidenceV1, VmResourceStateV2 } from "@/generated/bridge";
+import type { VmResourceStateV2 } from "@/generated/bridge";
 
 export type RunPhase =
   | "queued"
@@ -127,9 +127,6 @@ export interface RunVmStateDocument {
   /// Explicit live cgroup boundary reported by the agent. Optional for stored
   /// run documents written before boot quota sealing was introduced.
   runtimeConstraints?: RuntimeConstraintsEvidence | null;
-  /// Generation-fenced host phase durations and four cgroup samples. The
-  /// terminal-ready report may precede this non-critical follow-up.
-  bootEvidence?: VmBootEvidenceV1 | null;
   /// Latest periodic cgroup counters when the host inventory includes them.
   /// Their absence must not trigger an InspectVm call during launch.
   resourceState?: VmResourceStateV2 | null;
@@ -141,17 +138,6 @@ export interface RunVmStateDocument {
   launchSummary: ScenarioLaunchSummary;
   runtimeState: string | null;
   runtimeObservedAt: number | null;
-  /// Worker timestamp captured immediately before the first successful bridge
-  /// dispatch of this desired-state version. Optional for older stored runs.
-  workerDesiredDispatchAt?: number | null;
-  workerDesiredDispatchVersion?: number | null;
-  /// Worker receipt and post-D1-CAS acknowledgement evidence for the accepted
-  /// terminal-ready report. The duration uses one Worker monotonic clock.
-  workerTerminalReportReceivedAt?: number | null;
-  workerTerminalProjectionAckAt?: number | null;
-  workerTerminalReceiptToProjectionAckMs?: number | null;
-  workerTerminalProjectionGeneration?: string | null;
-  workerTerminalDesiredVersion?: number | null;
   vmCreatedAt: number | null;
   provisioning: RunVmProvisioningSpec;
 }
@@ -329,35 +315,57 @@ export function canAdvanceVmPhase(current: VmPhase, next: VmPhase): boolean {
 }
 
 export function decorateVmState(vm: RunVmStateDocument): RunVmStateDocument {
+  const sanitizedVm = { ...vm } as RunVmStateDocument & {
+    bootEvidence?: unknown;
+    workerDesiredDispatchAt?: unknown;
+    workerDesiredDispatchVersion?: unknown;
+    workerTerminalReportReceivedAt?: unknown;
+    workerTerminalProjectionAckAt?: unknown;
+    workerTerminalReceiptToProjectionAckMs?: unknown;
+    workerTerminalProjectionGeneration?: unknown;
+    workerTerminalDesiredVersion?: unknown;
+  };
+  delete sanitizedVm.bootEvidence;
+  delete sanitizedVm.workerDesiredDispatchAt;
+  delete sanitizedVm.workerDesiredDispatchVersion;
+  delete sanitizedVm.workerTerminalReportReceivedAt;
+  delete sanitizedVm.workerTerminalProjectionAckAt;
+  delete sanitizedVm.workerTerminalReceiptToProjectionAckMs;
+  delete sanitizedVm.workerTerminalProjectionGeneration;
+  delete sanitizedVm.workerTerminalDesiredVersion;
+
   // A routable endpoint is evidence, not merely configuration. Older stored
   // run documents could carry a reserved SSH address while readiness was
   // still pending; scrub that legacy shape whenever state is projected so a
   // non-ready terminal can never be opened accidentally.
   const terminalTarget =
-    vm.terminalPhase === "ready"
-      ? vm.terminalTarget
+    sanitizedVm.terminalPhase === "ready"
+      ? sanitizedVm.terminalTarget
       : {
           host: null,
           port: 22,
-          username: vm.terminalTarget.username,
+          username: sanitizedVm.terminalTarget.username,
           hostKeyOpenssh: null,
           checkedAt: null,
         };
-  const descriptor = describeVmPhase(vm.phase, { ...vm, terminalTarget });
+  const descriptor = describeVmPhase(sanitizedVm.phase, {
+    ...sanitizedVm,
+    terminalTarget,
+  });
   return {
-    ...vm,
+    ...sanitizedVm,
     phaseTitle: descriptor.title,
     phaseDetail: descriptor.detail,
     progressPercent: descriptor.progressPercent,
-    terminalPhase: vm.terminalPhase,
-    runtimeObservedAt: vm.runtimeObservedAt ?? null,
-    runtimeConstraints: vm.runtimeConstraints ?? null,
-    bootEvidence: vm.bootEvidence ?? null,
-    resourceState: vm.resourceState ?? null,
+    terminalPhase: sanitizedVm.terminalPhase,
+    runtimeObservedAt: sanitizedVm.runtimeObservedAt ?? null,
+    runtimeConstraints: sanitizedVm.runtimeConstraints ?? null,
+    resourceState: sanitizedVm.resourceState ?? null,
     terminalTarget,
     canOpenTerminal:
-      vm.terminalPhase === "ready" && hasTerminalEndpoint(terminalTarget),
-    sessionTimeline: vm.sessionTimeline ?? null,
+      sanitizedVm.terminalPhase === "ready" &&
+      hasTerminalEndpoint(terminalTarget),
+    sessionTimeline: sanitizedVm.sessionTimeline ?? null,
   };
 }
 

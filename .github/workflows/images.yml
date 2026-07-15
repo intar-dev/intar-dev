@@ -19,7 +19,7 @@ on:
       - "build-tools.hcl"
       - "builder.*.hcl"
       - "scenarios/**"
-      - "website/drizzle/**"
+      - "website/migrations/**"
       - "website/src/control-plane/auth.ts"
       - "website/src/control-plane/bridge-v6.ts"
       - "website/src/control-plane/host-runtime-do.ts"
@@ -36,12 +36,6 @@ on:
       - Website production
     types:
       - completed
-  workflow_dispatch:
-    inputs:
-      reset_generation_ready:
-        description: Confirm the reset Worker generation is live and ready for image bundle upload
-        required: true
-        type: boolean
 
 permissions:
   contents: read
@@ -104,9 +98,7 @@ jobs:
         run: just render-images "" builder.sample.amd64.hcl
 
       - name: Verify bundle upload token
-        if: >-
-          github.event_name == 'workflow_run' ||
-          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
+        if: github.event_name == 'workflow_run'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
@@ -116,9 +108,7 @@ jobs:
           fi
 
       - name: Upload scenario source bundle
-        if: >-
-          github.event_name == 'workflow_run' ||
-          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
+        if: github.event_name == 'workflow_run'
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |

@@ -440,9 +440,6 @@
         "supports_hard_cpu_quota": {
           "type": "boolean"
         },
-        "supports_jailer_v1": {
-          "type": "boolean"
-        },
         "supports_jailer_v2": {
           "type": "boolean"
         },
@@ -471,7 +468,6 @@
         "supports_vsock",
         "supports_reflink",
         "supports_nftables",
-        "supports_jailer_v1",
         "supports_jailer_v2",
         "supports_boot_cpu_lease",
         "supports_template_backed_launch",
@@ -822,17 +818,6 @@
             }
           ]
         },
-        "boot_evidence": {
-          "description": "Generation-fenced, best-effort host measurements captured during the\nv2 boot path. These observations are benchmark evidence only: missing\ntelemetry must never hold the CPU lease open or suppress readiness.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/VmBootEvidenceV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "desired_version": {
           "type": [
             "integer",
@@ -977,234 +962,6 @@
         "artifact_count"
       ]
     },
-    "VmBootCpuSamplePointV1": {
-      "type": "string",
-      "enum": [
-        "vm_boot_accepted",
-        "kino_ready",
-        "pre_seal",
-        "post_seal",
-        "terminal_published"
-      ]
-    },
-    "VmBootCpuSampleV1": {
-      "type": "object",
-      "properties": {
-        "boot_deadline_unix_ms": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "int64"
-        },
-        "cpu_max": {
-          "type": "string"
-        },
-        "cpu_max_burst": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "effective_cpu_millis": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1
-        },
-        "nr_periods": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "nr_throttled": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "phase": {
-          "$ref": "#/$defs/VmRuntimeConstraintPhaseV1"
-        },
-        "point": {
-          "$ref": "#/$defs/VmBootCpuSamplePointV1"
-        },
-        "quota_verified_at_unix_ms": {
-          "type": "integer",
-          "format": "int64"
-        },
-        "sampled_at_unix_ms": {
-          "type": "integer",
-          "format": "int64"
-        },
-        "steady_cpu_millis": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1
-        },
-        "system_usec": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "throttled_usec": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "usage_usec": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "user_usec": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "point",
-        "sampled_at_unix_ms",
-        "phase",
-        "steady_cpu_millis",
-        "effective_cpu_millis",
-        "cpu_max",
-        "cpu_max_burst",
-        "quota_verified_at_unix_ms",
-        "usage_usec",
-        "user_usec",
-        "system_usec",
-        "nr_periods",
-        "nr_throttled",
-        "throttled_usec"
-      ]
-    },
-    "VmBootEvidenceV1": {
-      "type": "object",
-      "properties": {
-        "cpu_samples": {
-          "description": "Best-effort samples. A point can be absent when the 50 ms telemetry\nbudget expires; readiness and quota sealing never wait for a retry.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/VmBootCpuSampleV1"
-          }
-        },
-        "generation": {
-          "description": "Jailer-owned generation shared by every CPU sample in this object.",
-          "type": "string"
-        },
-        "phases": {
-          "$ref": "#/$defs/VmBootPhaseDurationsV1"
-        },
-        "ready_at_unix_ms": {
-          "type": "integer",
-          "format": "int64"
-        },
-        "started_at_unix_ms": {
-          "type": "integer",
-          "format": "int64"
-        }
-      },
-      "required": [
-        "generation",
-        "started_at_unix_ms",
-        "ready_at_unix_ms",
-        "phases",
-        "cpu_samples"
-      ]
-    },
-    "VmBootPhaseDurationsV1": {
-      "type": "object",
-      "properties": {
-        "guest_to_kino_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "image_cache_ms": {
-          "description": "Component durations retained so a regression can be attributed without\nintroducing another launch-time inspection.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "image_disk_ms": {
-          "description": "Image preparation plus runtime-disk staging work. Runtime-disk and\nnetwork construction overlap, so this excludes `network_ms`.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "jailer_stage_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "network_jailer_vmm_ms": {
-          "description": "Network construction plus the jailer/VMM path through `vm.boot`\nacceptance. This may overlap the runtime-disk portion above.",
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "network_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "quota_seal_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "runtime_disk_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "seal_ssh_publish_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "ssh_verify_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "terminal_publish_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "total_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "vm_api_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "vmm_start_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "image_disk_ms",
-        "network_jailer_vmm_ms",
-        "guest_to_kino_ms",
-        "seal_ssh_publish_ms",
-        "total_ms",
-        "image_cache_ms",
-        "runtime_disk_ms",
-        "network_ms",
-        "jailer_stage_ms",
-        "vmm_start_ms",
-        "vm_api_ms",
-        "quota_seal_ms",
-        "ssh_verify_ms",
-        "terminal_publish_ms"
-      ]
-    },
     "VmNetworkStateV1": {
       "type": "object",
       "properties": {
@@ -1306,16 +1063,6 @@
           "anyOf": [
             {
               "$ref": "#/$defs/VmArchiveStateV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "boot_evidence": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/VmBootEvidenceV1"
             },
             {
               "type": "null"

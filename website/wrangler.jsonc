@@ -35,6 +35,7 @@
       "binding": "DB",
       "database_id": "6e715506-88ce-4565-85bc-66a9cf2a3c5e",
       "database_name": "intar-dev-app-20260709",
+      "migrations_dir": "migrations",
     },
   ],
   "r2_buckets": [

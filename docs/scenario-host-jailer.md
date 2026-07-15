@@ -164,83 +164,27 @@ Landlock/seccomp and KVM task accounting for every VM; samples all eight busy
 guests for 30 seconds; and exhaustively removes the VMs and network before
 restoring the socket. A runtime hash mismatch, missing isolation feature,
 incomplete accounting, admission mismatch, or cleanup failure is a hard
-failure. Bare `intar-jailerd self-test` is diagnostic only and deliberately
-cannot publish the readiness attestation.
+failure. Only the complete artifact-backed run writes the readiness
+attestation.
 
-## Breaking rollout
+## Install and upgrade
 
-### Initial V3/V6 jailer cutover (`0001`)
-
-This cutover cannot adopt existing unsandboxed VMs:
-
-1. Enter maintenance and disable scenario scheduling.
-2. Drain every run, confirm desired state is absent, and confirm old units and
-   processes have stopped before stopping the old agents.
-3. On a host with V5 agent state, install the package with
-   `sudo deploy/install.sh --breaking-v6-cutover`. The installer holds the
-   maintenance lock, rejects live units/cgroups/processes, persisted VM rows,
-   probes, archive jobs, desired builds, and any malformed or non-absent
-   desired VM. Well-formed `desired_phase = "absent"` tombstones are safe
-   drained deletion facts and may be archived. The installer then creates a
-   root-only consistent config/SQLite archive under
-   `/var/lib/intar/cutover-archives/`. It removes only the obsolete
-   `cloud_hypervisor.binary` config key and resets the incompatible drained V5
-   database. Without the explicit flag, legacy state is reported but never
-   modified. Fresh and already-V6 hosts use `sudo deploy/install.sh`.
-4. The same package publishes `intar-jailerd`, `intar-jailer`, the pinned v53.0
-   runtime, checksums, notices, and systemd socket/service/slice definitions
-   while the agent remains stopped.
-5. Apply `0001_host_cpu_reservations.sql`, deploy the V6 Worker, and republish
-   every scenario as a V3 catalog manifest.
-6. Start only agents whose doctor and privileged self-test both pass.
-7. Prove a real `cpu = 0.125` run and eight concurrent 125-millicore VMs per
-   schedulable CPU before re-enabling starts.
+1. Disable scenario scheduling for the host and drain every run. Confirm desired
+   state contains no non-absent VM, actual state contains no VM, and artifact
+   archival and teardown have completed.
+2. Stop `intar-agent`. Keep the host disabled while the package is changing.
+3. Run `sudo deploy/install.sh`. The installer holds the maintenance lock,
+   rejects live VM units, populated Intar cgroups, and lingering VMM/helper
+   processes, publishes the pinned runtime and systemd definitions, and leaves
+   the agent stopped.
+4. Run the root-only self-test and the agent doctor. Require the exact
+   2000m/45000ms boot lease, generation-fenced quota sealing, template-backed
+   launch, every source-to-jail reflink path, and each required image in
+   `Ready` state.
+5. Start the agent, confirm its desired and actual revisions converge, then
+   re-enable scheduling.
 
 Keep the host unschedulable on any hash, seccomp, Landlock, cgroup, accounting,
-or helper failure. There is no reduced-isolation fallback.
-
-### Boot-quota v2-only cutover (`0003`)
-
-Boot acceleration is a second, coordinated breaking cutover. The historical
-`0001_host_cpu_reservations.sql` migration above established bridge V6 and the
-first reservation ledger; it does not install the boot/steady quota-phase
-schema. Apply `0003_boot_cpu_reservation_phases.sql` exactly once for this
-cutover. It refuses any nonempty reservation ledger or scenario run with a
-non-null `active_key`, then replaces the drained ledger rather than inferring a
-quota phase for old rows.
-
-Use this order:
-
-1. Enter maintenance and disable scenario placement in the control plane.
-   Disable scenario scheduling on every agent host and image-build assignment
-   on every builder host. Stop the old `intar-agent` and `intar-builder`
-   services before migrating D1 or deploying the Worker; a disconnected
-   service alone is not the durable maintenance switch.
-2. Drain all runs and builds. Require zero `host_cpu_reservations`, no
-   `scenario_runs.active_key`, no non-absent desired VM, no live VM unit or VMM
-   process, and no assigned/building image job. Preserve agent state until
-   artifact archival and teardown are complete.
-3. Apply `website/drizzle/0003_boot_cpu_reservation_phases.sql`, then deploy the
-   matching Worker from the same reviewed revision. Keep the old agents and
-   builders stopped: after the ledger replacement, neither an old Worker nor an
-   old host process belongs in the live protocol.
-4. Publish and install the matching `intar-agent` package, which also installs
-   `intar-jailerd` and `intar-jailer`, while the agent remains stopped. An
-   already-V6 host uses `sudo deploy/install.sh` without
-   `--breaking-v6-cutover`; that flag is only for the historical V5-to-V6
-   transition. Install the matching builder binary while `intar-builder`
-   remains stopped.
-5. Run the root-only jailerd self-test and agent doctor. Start only agents that
-   attest the exact 2000m/45000ms boot lease, generation-fenced quota sealing,
-   template-backed launch, every source-to-jail reflink path, and the target
-   image as `Ready`. Run builder doctor before restarting a builder.
-6. Keep general scheduling disabled while proving a real lifecycle and the
-   isolated five-warmup/thirty-sample `broken-nginx` benchmark. Re-enable hosts
-   one at a time only after the security, cleanup, and latency gates pass.
-
-Failure handling is fail-closed: leave both host roles unschedulable, stop the
-affected services, preserve v2 state and conservative capacity accounting, and
-keep ingress closed while preparing a coordinated forward fix. Do not reverse
-`0003`, roll the Worker back across its schema boundary, install an older host
-package, or re-enable an earlier protocol, steady-only launch, copy-based
-staging, or direct process spawning.
+template, or helper failure. Preserve current state and capacity accounting
+while preparing a forward fix; never enable a reduced-isolation, steady-only,
+copy-based, or direct-spawn launch path.

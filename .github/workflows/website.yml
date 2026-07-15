@@ -1,8 +1,5 @@
 name: Website
-run-name: >-
-  ${{ github.event_name == 'pull_request'
-      && format('Website validate PR #{0}', github.event.pull_request.number)
-      || format('Website validate {0}', github.ref_name) }}
+run-name: "Website validate PR #${{ github.event.pull_request.number }}"
 
 on:
   pull_request:
@@ -10,16 +7,12 @@ on:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
       - "website/**"
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: >-
-    ${{ github.event_name == 'pull_request'
-        && format('website-pr-{0}', github.event.pull_request.number)
-        || format('website-{0}', github.ref_name) }}
+  group: website-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 defaults:

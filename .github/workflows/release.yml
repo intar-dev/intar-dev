@@ -298,15 +298,13 @@ jobs:
 
               metadata="$(mktemp)"
               cargo metadata --locked --format-version 1 > "${metadata}"
-              python3 crates/intar-jailerd/deploy/generate-dependency-inventory.py \
+              python3 crates/intar-jailerd/scripts/generate-dependency-inventory.py \
                 "${metadata}" \
                 "${workdir}/deploy/intar-rust-dependencies.json"
               rm -f "${metadata}"
               chmod +x \
                 "${workdir}/deploy/install.sh" \
                 "${workdir}/deploy/intar-jailerd-self-test.sh" \
-                "${workdir}/deploy/package-smoke.sh" \
-                "${workdir}/deploy/prepare-v6-cutover.py" \
                 "${workdir}/deploy/uninstall.sh"
               (
                 cd "${workdir}"
@@ -338,18 +336,12 @@ jobs:
           for script in \
             crates/intar-jailerd/deploy/install.sh \
             crates/intar-jailerd/deploy/intar-jailerd-self-test.sh \
-            crates/intar-jailerd/deploy/package-smoke.sh \
+            crates/intar-jailerd/tests/package-smoke.sh \
             crates/intar-jailerd/tests/install-process-audit.sh \
             crates/intar-jailerd/deploy/uninstall.sh; do
             sh -n "${script}"
             shellcheck "${script}"
           done
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("crates/intar-jailerd/deploy/prepare-v6-cutover.py")
-          compile(path.read_text(), str(path), "exec")
-          PY
 
           # Namespace runners are containers and do not use systemd as PID 1.
           # Boot a disposable privileged systemd container so the package smoke
@@ -425,7 +417,7 @@ jobs:
           archive="dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
           docker cp "${archive}" "${smoke_container}:/tmp/intar-agent.tar.gz"
           docker cp \
-            crates/intar-jailerd/deploy/package-smoke.sh \
+            crates/intar-jailerd/tests/package-smoke.sh \
             "${smoke_container}:/root/package-smoke.sh"
           docker exec "${smoke_container}" chmod 0700 /root/package-smoke.sh
           docker exec "${smoke_container}" useradd \

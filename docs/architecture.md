@@ -24,10 +24,10 @@ The platform contracts live in Rust and are generated into TypeScript:
   contract fixtures into `website/src/generated/`.
 - Rust fixture tests and website schema tests validate the same committed fixtures.
 
-The jailer cutover is coordinated and intentionally incompatible. Catalog
-manifests are V3. The bridge envelope is V6 and carries V2 desired-state,
-resource/capacity, state-report, and VM-report documents. Old V2 catalog and V5
-bridge documents are rejected instead of translated.
+The platform contract is intentionally version-strict. Catalog manifests are
+V3. The bridge envelope is V6 and carries V2 desired-state, resource/capacity,
+state-report, and VM-report documents. Unsupported versions are rejected rather
+than translated.
 
 ## Control Plane
 
@@ -53,14 +53,10 @@ Run lifecycle state is derived in `website/src/lib/run-lifecycle.ts`. Reports on
 advance matching `(run_id, vm_name)` entries, which avoids cross-VM or cross-run
 state bleed.
 
-`website/drizzle/0000_baseline.sql` describes a fresh control plane. The jailer
-cutover adds `0001_host_cpu_reservations.sql`; the per-host runtime Durable
-Object serializes pending and committed CPU reservations so concurrent starts
-cannot overcommit a host. The later v2-only boot-quota cutover adds
-`0003_boot_cpu_reservation_phases.sql`. It requires an empty reservation ledger
-and no active scenario run before replacing the ledger with explicit boot and
-steady quota phases; it is not part of the historical `0001` migration and has
-no downgrade path.
+`website/migrations/0000_current_schema.sql` describes a fresh control plane
+and the numbered migrations describe its current evolution. The per-host runtime
+Durable Object serializes pending and committed CPU reservations with explicit
+boot and steady quota phases so concurrent starts cannot overcommit a host.
 
 ## Image Registry
 
@@ -239,26 +235,6 @@ Agent and builder host rotation is a drain-first operation:
 If those conditions cannot be proven, treat rotation as destructive maintenance
 and expect active runs on that host to fail.
 
-The V3/V6 jailer rollout is always destructive maintenance because existing
-unsandboxed VMs cannot be adopted. Drain every run and stop old agents first;
-install jailerd, jailer, the pinned Cloud Hypervisor v53.0 runtime, and systemd
-units while agents remain stopped; apply the historical
-`0001_host_cpu_reservations.sql` migration and deploy the V6 Worker; republish
-every V3 manifest; then start only hosts that pass agent doctor and the
-root-only jailerd self-test. Validate a real `cpu = 0.125` run and the eight-VM
-saturation case before re-enabling starts.
-
-The later boot-quota rollout is a separate breaking boundary. Disable both
-scenario placement and builder assignment, drain runs and builds, and stop all
-old `intar-agent` and `intar-builder` services before applying
-`0003_boot_cpu_reservation_phases.sql` or deploying its Worker. Deploy the
-coordinated Worker, agent/jailerd package, and builder revision without mixing
-old and new protocol participants. Keep scheduling off until the agent reports
-the exact boot lease, quota-seal attestation, fast template store, required
-reflink routes, and ready images, and until the privileged and latency gates
-pass. A failure is forward-fix-only; do not reverse the D1 migration or roll any
-component back across this schema/protocol boundary.
-
 ## Terminal Access
 
 The Worker creates an Ed25519 keypair for each `(run, vm)` launch. The public key is
@@ -298,4 +274,4 @@ same-run peers can reach each other over SSH; then tear the run down and confirm
 archive and replay artifacts land in R2.
 
 See [Scenario Host Jailer](scenario-host-jailer.md) for the root-owned config,
-pinned runtime/hash, readiness boundary, and ordered cutover.
+pinned runtime/hash, readiness boundary, and current host operations.

@@ -5,7 +5,6 @@ import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
   hostActualState,
-  hostBenchmarkLeases,
   hostDesiredState,
   imageBuilds,
   scenarioRuns,
@@ -46,12 +45,6 @@ interface HostDesiredStateSummary {
   builds: DesiredBuildV1[];
 }
 
-interface HostBenchmarkLeaseSummary {
-  runId: string;
-  acquiredAt: number;
-  updatedAt: number;
-}
-
 export const GET: APIRoute = async ({ request, params }) => {
   const authz = await requireAdminUserContext(request);
   if (!authz.ok) {
@@ -68,10 +61,9 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "host not found" }, { status: 404 });
   }
 
-  const [actualState, desiredState, benchmarkLease] = await Promise.all([
+  const [actualState, desiredState] = await Promise.all([
     loadHostActualStateSummary(host.id),
     loadHostDesiredStateSummary(host.id),
-    loadHostBenchmarkLeaseSummary(host.id),
   ]);
   return jsonResponse({
     host: {
@@ -85,7 +77,6 @@ export const GET: APIRoute = async ({ request, params }) => {
       inventory: parseInventory(host.inventory_json),
       actualState,
       desiredState,
-      benchmarkLease,
       status: buildStoredBridgeStatus(host),
     },
   });
@@ -260,20 +251,4 @@ async function loadHostDesiredStateSummary(
     vms: row.docJson.vms,
     builds: row.docJson.builds,
   };
-}
-
-async function loadHostBenchmarkLeaseSummary(
-  hostId: string,
-): Promise<HostBenchmarkLeaseSummary | null> {
-  const db = drizzle(env.DB);
-  const rows = await db
-    .select({
-      runId: hostBenchmarkLeases.runId,
-      acquiredAt: hostBenchmarkLeases.acquiredAt,
-      updatedAt: hostBenchmarkLeases.updatedAt,
-    })
-    .from(hostBenchmarkLeases)
-    .where(eq(hostBenchmarkLeases.hostId, hostId))
-    .limit(1);
-  return rows[0] ?? null;
 }

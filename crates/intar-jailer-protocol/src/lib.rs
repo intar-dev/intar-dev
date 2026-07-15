@@ -498,17 +498,6 @@ pub struct FinalizeVmBootRequest {
     pub generation: ValidatedId,
 }
 
-/// A generation-fenced request for a low-overhead live CPU accounting sample.
-///
-/// Jailerd reads only the persisted cgroup identity and the CPU controller
-/// files. Unlike `InspectVm`, this operation does not walk the process tree or
-/// repeat executable and sandbox-security verification.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SampleVmCpuRequest {
-    pub generation: ValidatedId,
-}
-
 impl VmIdentityRequest {
     pub fn by_generation(generation: ValidatedId) -> Self {
         Self {
@@ -552,10 +541,8 @@ pub enum Request {
     PrepareImageV2(Box<PrepareImageV2Request>),
     EnsureRunNetwork(EnsureRunNetworkRequest),
     RepairRunNetwork(EnsureRunNetworkRequest),
-    LaunchVm(Box<VmLaunchRequest>),
     LaunchVmV2(Box<LaunchVmV2Request>),
     FinalizeVmBoot(FinalizeVmBootRequest),
-    SampleVmCpu(SampleVmCpuRequest),
     InspectVm(VmIdentityRequest),
     StopVm(VmIdentityRequest),
     DestroyVm(VmIdentityRequest),
@@ -598,7 +585,6 @@ pub struct JailerCapabilities {
     pub reserved_cpu_millis: u64,
     pub schedulable_cpu_millis: u64,
     pub committed_cpu_millis: u64,
-    pub supports_jailer_v1: bool,
     /// Breaking v2 launch and readiness contract. These attestations are
     /// required on the v2 wire; an old daemon cannot decode as performance
     /// ready by omission.
@@ -727,17 +713,6 @@ pub struct CpuStat {
     pub throttled_usec: u64,
 }
 
-/// A phase-consistent snapshot of the persisted CPU runtime contract and the
-/// live cgroup CPU accounting counters for one exact VM generation.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct VmCpuSample {
-    pub generation: ValidatedId,
-    pub sampled_at_unix_ms: u64,
-    pub cpu_runtime: VmCpuRuntimeState,
-    pub cpu_stat: CpuStat,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmInspection {
@@ -772,16 +747,6 @@ pub struct FinalizeVmBootResult {
     pub changed: bool,
     pub ssh_forward_active: bool,
     pub cpu_runtime: VmCpuRuntimeState,
-    /// Exact live boot-quota sample taken while jailerd held the lifecycle
-    /// lock and immediately before mutating `cpu.max`. This is the pre-seal
-    /// boundary and is intentionally distinct from the caller's earlier Kino
-    /// readiness sample. Absent for an idempotent finalization or when the
-    /// watchdog already sealed the lease.
-    pub pre_seal_cpu_sample: Option<VmCpuSample>,
-    /// Exact live steady-quota sample taken immediately after the quota
-    /// mutation and readback. CPU accounting telemetry is best effort and can
-    /// be absent without reopening ingress or extending the boot lease.
-    pub post_seal_cpu_sample: Option<VmCpuSample>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -815,10 +780,8 @@ pub enum Response {
     PrepareImageV2(PreparedImageV2Result),
     EnsureRunNetwork(RunNetworkResult),
     RepairRunNetwork(RunNetworkResult),
-    LaunchVm(VmLaunchResult),
     LaunchVmV2(VmLaunchResult),
     FinalizeVmBoot(FinalizeVmBootResult),
-    SampleVmCpu(VmCpuSample),
     InspectVm(VmInspection),
     StopVm(OperationResult),
     DestroyVm(OperationResult),
@@ -1459,30 +1422,17 @@ mod tests {
         assert!(RequestEnvelope::decode(with_quota).is_err());
 
         let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
-        let boot_quota = CpuQuota::from_millis(2_000).expect("boot quota");
-        let sample = |phase, effective_quota, sampled_at_unix_ms| VmCpuSample {
-            generation: generation.clone(),
-            sampled_at_unix_ms,
-            cpu_runtime: VmCpuRuntimeState {
-                phase,
-                steady_quota,
-                effective_quota,
-                boot_deadline_unix_ms: (phase == VmCpuPhase::BootBurst).then_some(45_123),
-                attestation: Some(CpuQuotaAttestation {
-                    quota: effective_quota,
-                    cpu_max: effective_quota.cpu_max(),
-                    cpu_max_burst: 0,
-                    verified_at_unix_ms: sampled_at_unix_ms,
-                }),
-            },
-            cpu_stat: CpuStat {
-                usage_usec: 10,
-                user_usec: 7,
-                system_usec: 3,
-                nr_periods: 2,
-                nr_throttled: 1,
-                throttled_usec: 4,
-            },
+        let cpu_runtime = VmCpuRuntimeState {
+            phase: VmCpuPhase::Steady,
+            steady_quota,
+            effective_quota: steady_quota,
+            boot_deadline_unix_ms: None,
+            attestation: Some(CpuQuotaAttestation {
+                quota: steady_quota,
+                cpu_max: steady_quota.cpu_max(),
+                cpu_max_burst: 0,
+                verified_at_unix_ms: 124,
+            }),
         };
         let response = ResponseEnvelope::new(
             7,
@@ -1490,67 +1440,13 @@ mod tests {
                 generation: generation.clone(),
                 changed: true,
                 ssh_forward_active: true,
-                cpu_runtime: sample(VmCpuPhase::Steady, steady_quota, 124).cpu_runtime,
-                pre_seal_cpu_sample: Some(sample(VmCpuPhase::BootBurst, boot_quota, 123)),
-                post_seal_cpu_sample: Some(sample(VmCpuPhase::Steady, steady_quota, 124)),
+                cpu_runtime,
             }),
         );
         assert_eq!(
             ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
             response
         );
-    }
-
-    #[test]
-    fn cpu_sampling_is_generation_fenced_and_round_trips_runtime_evidence() {
-        let generation = ValidatedId::parse("generation-1").expect("generation");
-        let request = RequestEnvelope::new(
-            8,
-            Request::SampleVmCpu(SampleVmCpuRequest {
-                generation: generation.clone(),
-            }),
-        );
-        assert_eq!(
-            RequestEnvelope::decode(&request.encode().expect("encode")).expect("decode"),
-            request
-        );
-
-        let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
-        let effective_quota = CpuQuota::from_millis(2_000).expect("boot quota");
-        let response = ResponseEnvelope::new(
-            8,
-            Response::SampleVmCpu(VmCpuSample {
-                generation,
-                sampled_at_unix_ms: 123,
-                cpu_runtime: VmCpuRuntimeState {
-                    phase: VmCpuPhase::BootBurst,
-                    steady_quota,
-                    effective_quota,
-                    boot_deadline_unix_ms: Some(45_123),
-                    attestation: Some(CpuQuotaAttestation {
-                        quota: effective_quota,
-                        cpu_max: effective_quota.cpu_max(),
-                        cpu_max_burst: 0,
-                        verified_at_unix_ms: 123,
-                    }),
-                },
-                cpu_stat: CpuStat {
-                    usage_usec: 10,
-                    user_usec: 7,
-                    system_usec: 3,
-                    nr_periods: 2,
-                    nr_throttled: 1,
-                    throttled_usec: 4,
-                },
-            }),
-        );
-        assert_eq!(
-            ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
-            response
-        );
-
-        let with_selector = br#"{"version":1,"request_id":8,"request":{"operation":"sample_vm_cpu","parameters":{"generation":"generation-1","run_id":"run-1"}}}"#;
-        assert!(RequestEnvelope::decode(with_selector).is_err());
     }
 
     #[test]
@@ -1695,7 +1591,6 @@ mod tests {
             reserved_cpu_millis: 1_000,
             schedulable_cpu_millis: 7_000,
             committed_cpu_millis: 2_000,
-            supports_jailer_v1: false,
             supports_jailer_v2: true,
             supports_template_backed_launch: true,
             fast_template_store: true,

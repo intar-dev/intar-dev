@@ -36,30 +36,12 @@ export const POST: APIRoute = async ({ request, params }) => {
     );
   }
   const body = parsedBody as ScenarioSshBody;
-  if (
-    authz.context.authentication?.method === "boot_benchmark" &&
-    Object.keys(body).some((key) => key !== "vmId" && key !== "mode")
-  ) {
-    return jsonResponse(
-      { error: "boot benchmark SSH body contains unexpected fields" },
-      { status: 403 },
-    );
-  }
 
   const vmId = typeof body.vmId === "string" ? body.vmId.trim() : "";
   const mode =
     body.mode === "native" || body.mode === "browser" ? body.mode : "browser";
   if (!vmId) {
     return jsonResponse({ error: "vmId is required" }, { status: 400 });
-  }
-  if (
-    authz.context.authentication?.method === "boot_benchmark" &&
-    body.mode !== "browser"
-  ) {
-    return jsonResponse(
-      { error: "boot benchmark credential requires browser SSH mode" },
-      { status: 403 },
-    );
   }
 
   try {

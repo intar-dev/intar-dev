@@ -69,7 +69,6 @@ export interface HostSummary {
       supports_vsock: boolean;
       supports_reflink: boolean;
       supports_nftables: boolean;
-      supports_jailer_v1: boolean;
       supports_jailer_v2: boolean;
       supports_boot_cpu_lease: boolean;
       supports_template_backed_launch: boolean;
@@ -732,8 +731,6 @@ export function hostReadinessProblems(
     problems.push("host does not report nftables support");
   if (!capabilities.supports_reflink)
     problems.push("host does not report mandatory reflink support");
-  if (capabilities.supports_jailer_v1)
-    problems.push("host still advertises the rejected jailer-v1 launch path");
   if (!capabilities.supports_jailer_v2)
     problems.push("host does not report jailer-v2 support");
   if (!capabilities.supports_boot_cpu_lease)
@@ -1273,150 +1270,6 @@ async function runTerminalProbe(input: {
   });
 }
 
-/**
- * Open a real browser-terminal websocket and prove that the guest shell can
- * execute a marker command. Unlike the full live-E2E probe above, this does no
- * network-isolation work and does not wait for recorder teardown; it is the
- * smallest useful terminal measurement for boot-latency sampling.
- */
-export async function runUsableTerminalMarkerProbe(input: {
-  websocketUrl: string;
-  origin: string;
-  marker: string;
-  timeoutMs: number;
-}): Promise<{ websocketReadyMs: number; markerMs: number }> {
-  if (!/^[A-Z0-9_]+$/.test(input.marker)) {
-    throw new Error(
-      "terminal benchmark marker must contain only A-Z, 0-9, and underscore",
-    );
-  }
-
-  type HeaderWebSocket = new (
-    url: string,
-    options?: { headers?: Record<string, string> },
-  ) => WebSocket;
-  const WebSocketWithHeaders =
-    globalThis.WebSocket as unknown as HeaderWebSocket;
-  const websocket = new WebSocketWithHeaders(input.websocketUrl, {
-    headers: { origin: input.origin },
-  });
-  websocket.binaryType = "arraybuffer";
-
-  const startedAt = performance.now();
-  const decoder = new TextDecoder();
-  let output = "";
-  let websocketReadyMs: number | null = null;
-  let settled = false;
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      finish(() =>
-        reject(
-          new Error(
-            `terminal did not execute benchmark marker within ${input.timeoutMs}ms`,
-          ),
-        ),
-      );
-    }, input.timeoutMs);
-
-    const close = () => {
-      try {
-        if (websocket.readyState === WebSocket.OPEN) {
-          websocket.send(JSON.stringify({ type: "close" }));
-        }
-        websocket.close();
-      } catch {
-        // The measurement is already decided; close is best effort.
-      }
-    };
-
-    const finish = (complete: () => void) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      websocket.removeEventListener("open", handleOpen);
-      websocket.removeEventListener("message", handleMessage);
-      websocket.removeEventListener("error", handleError);
-      websocket.removeEventListener("close", handleClose);
-      close();
-      complete();
-    };
-
-    const handleOpen = () => {
-      websocket.send(JSON.stringify({ type: "open", cols: 80, rows: 24 }));
-    };
-
-    const handleError = () => {
-      finish(() => reject(new Error("terminal benchmark websocket failed")));
-    };
-
-    const handleClose = () => {
-      finish(() =>
-        reject(
-          new Error("terminal benchmark websocket closed before marker output"),
-        ),
-      );
-    };
-
-    const handleMessage = (event: MessageEvent<unknown>) => {
-      void (async () => {
-        if (typeof event.data === "string") {
-          const control = parseControlMessage(event.data);
-          if (control?.type === "ready" && websocketReadyMs === null) {
-            websocketReadyMs = Math.round(performance.now() - startedAt);
-            websocket.send(
-              new TextEncoder().encode(`printf '\\n${input.marker}\\n'\n`),
-            );
-          } else if (control?.type === "error") {
-            finish(() => reject(new Error(control.message)));
-          } else if (control?.type === "exit") {
-            finish(() =>
-              reject(
-                new Error(
-                  `terminal benchmark shell exited with code ${control.code} before marker output`,
-                ),
-              ),
-            );
-          }
-          return;
-        }
-
-        const chunk = await decodeWebSocketData(event.data, decoder);
-        if (!chunk || settled) return;
-        output = `${output}${chunk}`.slice(-128 * 1024);
-        // The executed printf emits a real CR before LF. The echoed command
-        // contains the source sequence `\\n`, so it cannot satisfy this check.
-        if (output.includes(`${input.marker}\r`)) {
-          const readyMs = websocketReadyMs;
-          if (readyMs === null) {
-            finish(() =>
-              reject(
-                new Error(
-                  "terminal emitted marker before ready acknowledgement",
-                ),
-              ),
-            );
-            return;
-          }
-          finish(() =>
-            resolve({
-              websocketReadyMs: readyMs,
-              markerMs: Math.round(performance.now() - startedAt),
-            }),
-          );
-        }
-      })().catch((error: unknown) => {
-        finish(() => reject(error));
-      });
-    };
-
-    websocket.addEventListener("open", handleOpen, { once: true });
-    websocket.addEventListener("message", handleMessage);
-    websocket.addEventListener("error", handleError);
-    websocket.addEventListener("close", handleClose);
-  });
-}
-
 // Executed result lines end with a real CR; the echoed script text quotes
 // the same strings but always continues with `"` or a literal backslash, so
 // requiring the trailing CR keeps echo from satisfying these assertions.
@@ -1893,35 +1746,15 @@ async function assertArtifactReadable(
   }
 }
 
-export type ApiClientAuth =
-  | { kind: "cookie"; cookie: string }
-  | { kind: "boot_benchmark"; token: string };
-
-export interface ApiClientRequestPolicy {
-  allows(method: string, url: URL): boolean;
-}
-
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly origin: string;
-  private readonly auth: ApiClientAuth;
-  private readonly requestPolicy: ApiClientRequestPolicy | null;
+  private readonly cookie: string;
 
-  constructor(
-    baseUrl: string,
-    auth: string | ApiClientAuth,
-    requestPolicy: ApiClientRequestPolicy | null = null,
-  ) {
+  constructor(baseUrl: string, cookie: string) {
     this.baseUrl = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
     this.origin = new URL(this.baseUrl).origin;
-    this.auth =
-      typeof auth === "string" ? { kind: "cookie", cookie: auth } : auth;
-    this.requestPolicy = requestPolicy;
-    if (this.auth.kind === "boot_benchmark" && !this.requestPolicy) {
-      throw new Error(
-        "BootBenchmark API auth requires an explicit request policy",
-      );
-    }
+    this.cookie = cookie;
   }
 
   async json<T = unknown>(
@@ -1972,14 +1805,7 @@ export class ApiClient {
     } = {},
   ): Promise<Response> {
     const headers = new Headers(init.headers);
-    if (this.auth.kind === "cookie") {
-      headers.set("cookie", this.auth.cookie);
-    } else {
-      if (headers.has("cookie")) {
-        throw new Error("BootBenchmark API requests must not include Cookie");
-      }
-      headers.set("authorization", `BootBenchmark ${this.auth.token}`);
-    }
+    headers.set("cookie", this.cookie);
     headers.set("accept", "application/json");
     // Astro's CSRF protection rejects form-like POSTs without a same-site
     // Origin; bodyless mutations (e.g. run destroy) need it explicitly.
@@ -1994,9 +1820,6 @@ export class ApiClient {
     const requestInit: RequestInit = {
       method: init.method ?? "GET",
       headers,
-      ...(this.auth.kind === "boot_benchmark"
-        ? { redirect: "manual" as const }
-        : {}),
       ...(init.signal ? { signal: init.signal } : {}),
     };
     if (body !== undefined) {
@@ -2006,26 +1829,7 @@ export class ApiClient {
     if (url.origin !== this.origin) {
       throw new Error(`refused cross-origin API request: ${url.origin}`);
     }
-    const method = (init.method ?? "GET").toUpperCase();
-    if (
-      this.auth.kind === "boot_benchmark" &&
-      !this.requestPolicy!.allows(method, url)
-    ) {
-      throw new Error(
-        `BootBenchmark API request is not allowlisted: ${method} ${url.pathname}`,
-      );
-    }
-    const response = await fetch(url, requestInit);
-    if (
-      this.auth.kind === "boot_benchmark" &&
-      response.status >= 300 &&
-      response.status < 400
-    ) {
-      throw new Error(
-        `BootBenchmark API request refused redirect: ${method} ${url.pathname}`,
-      );
-    }
-    return response;
+    return fetch(url, requestInit);
   }
 }
 

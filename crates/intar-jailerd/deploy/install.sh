@@ -64,16 +64,7 @@ find_forbidden_process() {
 }
 # INTAR_INSTALL_PROCESS_AUDIT_END
 
-breaking_v6_cutover=false
-case "$#" in
-  0) ;;
-  1)
-    [ "$1" = --breaking-v6-cutover ] || \
-      die "usage: $0 [--breaking-v6-cutover]"
-    breaking_v6_cutover=true
-    ;;
-  *) die "usage: $0 [--breaking-v6-cutover]" ;;
-esac
+[ "$#" -eq 0 ] || die "usage: $0"
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 archive_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -81,8 +72,6 @@ id intar-agent >/dev/null 2>&1 || die "intar-agent system user must exist first"
 agent_uid=$(id -u intar-agent)
 agent_gid=$(id -g intar-agent)
 agent_config=/etc/intar-agent/config.toml
-agent_database=/var/cache/intar-agent/state/intar-agent/intar-agent.sqlite3
-cutover_helper=${archive_dir}/deploy/prepare-v6-cutover.py
 
 for command in \
   awk find flock getent getfacl gpasswd grep install ip mktemp mv nft \
@@ -239,7 +228,7 @@ chown root:root /run/intar-jailerd/maintenance.lock
 chmod 0600 /run/intar-jailerd/maintenance.lock
 flock -x 9
 
-# Coordinated V6 cutover cannot adopt old or partially drained VMs.
+# Installing or upgrading the host package requires a fully drained runtime.
 active_vms=$(systemctl list-units --all --type=service --no-legend --plain 'intar-vm-*.service') || \
   die "failed to enumerate Intar VM units"
 [ -z "${active_vms}" ] || {
@@ -253,7 +242,7 @@ if forbidden_process=$(find_forbidden_process); then
   forbidden_executable=${forbidden_process#*:}
   case "${forbidden_name}" in
     cloud-hypervisor|cloud-hypervisor-*)
-      die "legacy/foreign Cloud Hypervisor is still running: ${forbidden_executable}"
+      die "Cloud Hypervisor is still running: ${forbidden_executable}"
       ;;
     *) die "Intar workload/helper process is still running: ${forbidden_executable}" ;;
   esac
@@ -261,44 +250,6 @@ else
   forbidden_status=$?
   [ "${forbidden_status}" -eq 1 ] || die "failed to enumerate live host processes"
 fi
-
-# The V5 database is deliberately incompatible with V6.  Inspect every
-# install, and require an explicit destructive flag before archiving and
-# resetting a proven-drained legacy state.  The helper never prints config
-# values; its archive is root-only and contains a consistent SQLite backup.
-cutover_state=$(python3 "${cutover_helper}" \
-  --mode inspect \
-  --config "${agent_config}" \
-  --database "${agent_database}" \
-  --agent-uid "${agent_uid}" \
-  --agent-gid "${agent_gid}") || \
-  die "agent state failed the V6 cutover safety inspection"
-case "${cutover_state}" in
-  fresh|current)
-    [ "${breaking_v6_cutover}" = false ] || \
-      die "--breaking-v6-cutover was requested, but no eligible V5 state exists"
-    ;;
-  legacy-drained)
-    [ "${breaking_v6_cutover}" = true ] || \
-      die "drained V5 agent state found; rerun with --breaking-v6-cutover to archive it and continue"
-    install -d -o root -g root -m 0700 /var/lib/intar/cutover-archives
-    cutover_archive=$(mktemp -d /var/lib/intar/cutover-archives/bridge-v5-to-v6.XXXXXX)
-    chown root:root "${cutover_archive}"
-    chmod 0700 "${cutover_archive}"
-    # From this point onward an error must leave admission stopped for manual
-    # archive inspection instead of restoring a previous jailerd daemon.
-    mutated=true
-    python3 "${cutover_helper}" \
-      --mode apply \
-      --config "${agent_config}" \
-      --database "${agent_database}" \
-      --agent-uid "${agent_uid}" \
-      --agent-gid "${agent_gid}" \
-      --archive-dir "${cutover_archive}" || \
-      die "V6 agent-state cutover failed; keep the agent stopped and inspect ${cutover_archive}"
-    ;;
-  *) die "cutover helper returned an unknown state" ;;
-esac
 
 mutated=true
 
@@ -369,7 +320,6 @@ publish_file "${archive_dir}/deploy/intar-jailerd.sysctl.conf" /etc/sysctl.d/90-
 
 # Any binary/config change invalidates the boot-bound proof.
 rm -f -- \
-  /var/lib/intar/jails/self-test-attestation-v1.json \
   /var/lib/intar/jails/self-test-attestation-v2.json
 systemd-tmpfiles --create /etc/tmpfiles.d/intar-jailerd.conf
 for directory in \

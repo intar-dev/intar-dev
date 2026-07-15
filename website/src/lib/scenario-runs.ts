@@ -3,12 +3,10 @@ import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
-import type { HostDesiredStateV2 } from "@/generated/bridge";
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
   hostActualState,
-  hostDesiredState,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
@@ -27,7 +25,6 @@ import {
 } from "@/lib/desired-state-store";
 import { hostHealth } from "@/lib/host-health";
 import {
-  acquireBenchmarkHostLeaseAndReserveCpu,
   commitHostCpu,
   reserveHostCpu,
   rollbackHostCpu,
@@ -474,11 +471,6 @@ export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
   hostId?: string;
-  admissionMode?: "benchmark";
-  benchmarkCredentialWindow?: {
-    notBeforeUnixMs: number;
-    expiresAtUnixMs: number;
-  };
 }): Promise<{
   accepted: true;
   runId: string;
@@ -812,11 +804,6 @@ async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
   hostId?: string;
-  admissionMode?: "benchmark";
-  benchmarkCredentialWindow?: {
-    notBeforeUnixMs: number;
-    expiresAtUnixMs: number;
-  };
 }): Promise<{
   accepted: true;
   runId: string;
@@ -824,30 +811,6 @@ async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
-  if (params.admissionMode === "benchmark" && !params.hostId) {
-    throw appError(
-      400,
-      "benchmark_host_required",
-      "benchmark admission requires an explicit host",
-    );
-  }
-  if (
-    params.admissionMode === "benchmark" &&
-    (!params.benchmarkCredentialWindow ||
-      !Number.isSafeInteger(
-        params.benchmarkCredentialWindow.notBeforeUnixMs,
-      ) ||
-      !Number.isSafeInteger(params.benchmarkCredentialWindow.expiresAtUnixMs) ||
-      params.benchmarkCredentialWindow.notBeforeUnixMs <= 0 ||
-      params.benchmarkCredentialWindow.expiresAtUnixMs <=
-        params.benchmarkCredentialWindow.notBeforeUnixMs)
-  ) {
-    throw appError(
-      400,
-      "benchmark_credential_window_required",
-      "benchmark admission requires an authenticated credential window",
-    );
-  }
   const [[scenario], active] = await Promise.all([
     loadEnabledScenarioRows(params.scenarioId),
     loadActiveRunRow(params.userId),
@@ -856,13 +819,6 @@ async function startScenarioRunInternal(params: {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
   if (active) {
-    if (params.admissionMode === "benchmark") {
-      throw appError(
-        409,
-        "benchmark_host_not_drained",
-        "benchmark admission requires the caller to have no active scenario run",
-      );
-    }
     if (active.scenarioId === scenario.scenarioId) {
       if (params.hostId && active.hostId !== params.hostId) {
         throw appError(
@@ -887,9 +843,6 @@ async function startScenarioRunInternal(params: {
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
   const steadyCpuMillisByVm = scenario.launchSpecs.map(
     (spec) => spec.resources.cpuMillis,
-  );
-  const guestVcpuCountByVm = scenario.launchSpecs.map(
-    (spec) => spec.resources.vcpuCount,
   );
   const steadyCpuMillis = steadyCpuMillisByVm.reduce(
     (total, cpuMillis) => total + cpuMillis,
@@ -984,86 +937,27 @@ async function startScenarioRunInternal(params: {
   });
 
   let hostId: string;
-  let benchmarkDesiredState: HostDesiredStateV2 | undefined;
   if (params.hostId) {
-    if (params.admissionMode === "benchmark") {
-      const reservation = await acquireBenchmarkBootCpuWithJitter({
-        hostId: params.hostId,
-        runId,
-        userId: params.userId,
-        steadyCpuMillisByVm,
-        guestVcpuCountByVm,
-        requiredImages,
-        credentialNotBeforeUnixMs:
-          params.benchmarkCredentialWindow!.notBeforeUnixMs,
-        credentialExpiresAtUnixMs:
-          params.benchmarkCredentialWindow!.expiresAtUnixMs,
-      });
-      if (!reservation.ok) {
-        if (reservation.reason === "image_not_ready") {
-          throw appError(
+    await assertScenarioLaunchHostForUser(
+      params.hostId,
+      params.userId,
+      requiredImages,
+    );
+    const reservation = await reserveScenarioBootCpuWithJitter({
+      hostIds: [params.hostId],
+      runId,
+      steadyCpuMillisByVm,
+    });
+    if (!reservation.ok) {
+      throw reservation.reason === "boot_capacity_pending"
+        ? bootCapacityPendingError()
+        : appError(
             409,
-            "image_not_ready",
-            "scenario images are not ready on this host",
+            "scenario_host_unavailable",
+            "host cannot provide strict CPU isolation",
           );
-        }
-        if (reservation.reason === "boot_capacity_pending") {
-          throw bootCapacityPendingError();
-        }
-        if (reservation.reason === "benchmark_credential_window_invalid") {
-          throw appError(
-            403,
-            "benchmark_credential_window_invalid",
-            "benchmark credential window is not valid for this admission",
-          );
-        }
-        if (reservation.reason === "benchmark_run_limit_reached") {
-          throw appError(
-            409,
-            "benchmark_run_limit_reached",
-            "benchmark credential has already admitted its maximum run count",
-          );
-        }
-        if (
-          reservation.reason === "benchmark_host_not_drained" ||
-          reservation.reason === "host_benchmark_leased"
-        ) {
-          throw appError(
-            409,
-            "benchmark_host_not_drained",
-            "benchmark host is not exclusively drained",
-          );
-        }
-        throw appError(
-          409,
-          "scenario_host_unavailable",
-          "host cannot provide strict CPU isolation",
-        );
-      }
-      hostId = params.hostId;
-      benchmarkDesiredState = reservation.desiredState;
-    } else {
-      await assertScenarioLaunchHostForUser(
-        params.hostId,
-        params.userId,
-        requiredImages,
-      );
-      const reservation = await reserveScenarioBootCpuWithJitter({
-        hostIds: [params.hostId],
-        runId,
-        steadyCpuMillisByVm,
-      });
-      if (!reservation.ok) {
-        throw reservation.reason === "boot_capacity_pending"
-          ? bootCapacityPendingError()
-          : appError(
-              409,
-              "scenario_host_unavailable",
-              "host cannot provide strict CPU isolation",
-            );
-      }
-      hostId = reservation.hostId;
     }
+    hostId = reservation.hostId;
   } else {
     const selection = await selectScenarioHosts(requiredImages);
     if (!selection.ok) {
@@ -1148,9 +1042,6 @@ async function startScenarioRunInternal(params: {
       vms: provisionedState.vms,
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
-      ...(benchmarkDesiredState
-        ? { initialDesiredState: benchmarkDesiredState }
-        : {}),
     });
     await commitHostCpu({ hostId, runId });
   } catch (error) {
@@ -1165,13 +1056,6 @@ async function startScenarioRunInternal(params: {
     ]);
     await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId));
     await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
-    if (params.admissionMode === "benchmark") {
-      // If desired state was already mutated, a fresh applied-empty report is
-      // the only authority that may release the fail-closed benchmark lease.
-      // Direct dispatch advances that recovery fence; the HostRuntime alarm is
-      // the durable fallback if the agent is temporarily disconnected.
-      await Promise.allSettled([tryWakeHostRuntime(hostId)]);
-    }
     // Two concurrent starts race past the pre-check; the unique index on
     // active_key rejects the loser.
     if (isActiveKeyUniqueViolation(error)) {
@@ -1193,7 +1077,6 @@ async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
-  admissionMode?: "benchmark",
 ): Promise<void> {
   const now = Date.now();
   const db = drizzle(env.DB);
@@ -1204,14 +1087,10 @@ async function assertScenarioLaunchHostForUser(
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
-      desiredVersion: hostDesiredState.version,
-      desiredState: hostDesiredState.docJson,
-      appliedDesiredVersion: hostActualState.appliedDesiredVersion,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
-    .leftJoin(hostDesiredState, eq(hostDesiredState.hostId, agentHosts.id))
     .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
     .limit(1);
@@ -1222,7 +1101,6 @@ async function assertScenarioLaunchHostForUser(
   if (host.disabled) {
     throw appError(403, "scenario_host_disabled", "host is disabled");
   }
-  const benchmarkAdmission = admissionMode === "benchmark";
   if (host.role !== "agent") {
     throw appError(
       403,
@@ -1230,15 +1108,7 @@ async function assertScenarioLaunchHostForUser(
       "host cannot run scenarios",
     );
   }
-  if (benchmarkAdmission && host.scenarioEnabled) {
-    throw appError(
-      409,
-      "benchmark_host_not_drained",
-      "benchmark admission requires scenario scheduling to be disabled on the host",
-    );
-  }
   if (
-    !benchmarkAdmission &&
     !isScenarioLaunchHost({
       role: host.role,
       disabled: host.disabled,
@@ -1257,27 +1127,6 @@ async function assertScenarioLaunchHostForUser(
     hostHealth(host.actualReportedAt ?? null, now) !== "healthy"
   ) {
     throw appError(409, "scenario_host_unavailable", "host is not connected");
-  }
-  if (benchmarkAdmission && (host.actualReport?.vms.length ?? 0) !== 0) {
-    throw appError(
-      409,
-      "benchmark_host_not_drained",
-      "benchmark admission requires an empty host actual-state VM inventory",
-    );
-  }
-  if (
-    benchmarkAdmission &&
-    (host.desiredVersion === null ||
-      host.desiredState === null ||
-      host.appliedDesiredVersion === null ||
-      host.appliedDesiredVersion < host.desiredVersion ||
-      host.desiredState.vms.some((vm) => vm.desired_phase === "running"))
-  ) {
-    throw appError(
-      409,
-      "benchmark_host_not_drained",
-      "benchmark admission requires an empty, fully applied host desired state",
-    );
   }
   if (!hostHasImagesReady(host.actualReport, requiredImages)) {
     throw appError(
@@ -1572,48 +1421,6 @@ const BOOT_CAPACITY_RESERVATION_ATTEMPTS = 4;
 const BOOT_CAPACITY_RETRY_MIN_MS = 15;
 const BOOT_CAPACITY_RETRY_JITTER_MS = 30;
 
-async function acquireBenchmarkBootCpuWithJitter(input: {
-  hostId: string;
-  runId: string;
-  userId: string;
-  steadyCpuMillisByVm: readonly number[];
-  guestVcpuCountByVm: readonly number[];
-  requiredImages: readonly RequiredScenarioImage[];
-  credentialNotBeforeUnixMs: number;
-  credentialExpiresAtUnixMs: number;
-}): Promise<
-  | { ok: true; desiredState: HostDesiredStateV2 }
-  | {
-      ok: false;
-      reason:
-        | "host_not_ready"
-        | "image_not_ready"
-        | "benchmark_host_not_drained"
-        | "host_benchmark_leased"
-        | "benchmark_credential_window_invalid"
-        | "benchmark_run_limit_reached"
-        | "boot_capacity_pending"
-        | "conflict";
-    }
-> {
-  for (
-    let attempt = 0;
-    attempt < BOOT_CAPACITY_RESERVATION_ATTEMPTS;
-    attempt += 1
-  ) {
-    const result = await acquireBenchmarkHostLeaseAndReserveCpu(input);
-    if (result.ok) return { ok: true, desiredState: result.desiredState };
-    if (
-      result.reason !== "boot_capacity_pending" ||
-      attempt === BOOT_CAPACITY_RESERVATION_ATTEMPTS - 1
-    ) {
-      return { ok: false, reason: result.reason };
-    }
-    await bootCapacityRetryJitter();
-  }
-  return { ok: false, reason: "boot_capacity_pending" };
-}
-
 async function reserveScenarioBootCpuWithJitter(input: {
   hostIds: readonly string[];
   runId: string;
@@ -1701,7 +1508,6 @@ async function upsertRunVmsIntoDesiredState(input: {
   vms: RunVmStateDocument[];
   nowUnixMs: number;
   sshAuthorizedKeysByVmId: Map<string, string[]>;
-  initialDesiredState?: HostDesiredStateV2;
 }): Promise<void> {
   const desiredVms = input.vms.map((vm) => {
     const desiredVm = desiredVmFromRunVm({
@@ -1733,7 +1539,6 @@ async function upsertRunVmsIntoDesiredState(input: {
         upsertDesiredVm(draft, desiredVm);
       }
     },
-    input.initialDesiredState,
   );
 }
 

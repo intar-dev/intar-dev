@@ -6,7 +6,6 @@ import type {
   ImageCachePhase,
   SyncRequestReason,
   VmArchivePhase,
-  VmBootCpuSamplePointV1,
   VmPhase,
   VmProbeStatus,
   VmRuntimeConstraintPhaseV1,
@@ -74,14 +73,6 @@ const VM_TERMINAL_STATES = new Set<VmTerminalStateKindV1>([
 const VM_RUNTIME_CONSTRAINT_PHASES = new Set<VmRuntimeConstraintPhaseV1>([
   "boot_burst",
   "steady",
-]);
-
-const VM_BOOT_CPU_SAMPLE_POINTS = new Set<VmBootCpuSamplePointV1>([
-  "vm_boot_accepted",
-  "kino_ready",
-  "pre_seal",
-  "post_seal",
-  "terminal_published",
 ]);
 
 const VM_ARCHIVE_PHASES = new Set<VmArchivePhase>([
@@ -329,10 +320,6 @@ function isOptionalInteger(value: unknown): boolean {
   return value === undefined || value === null || isInteger(value);
 }
 
-function isOptionalPositiveInteger(value: unknown): boolean {
-  return value === undefined || value === null || isPositiveInteger(value);
-}
-
 function isOptionalNonNegativeInteger(value: unknown): boolean {
   return value === undefined || value === null || isNonNegativeInteger(value);
 }
@@ -459,7 +446,6 @@ function isHostCapabilitiesPayload(value: unknown): boolean {
     typeof value.supports_vsock === "boolean" &&
     typeof value.supports_reflink === "boolean" &&
     typeof value.supports_nftables === "boolean" &&
-    typeof value.supports_jailer_v1 === "boolean" &&
     typeof value.supports_jailer_v2 === "boolean" &&
     typeof value.supports_boot_cpu_lease === "boolean" &&
     typeof value.supports_template_backed_launch === "boolean" &&
@@ -573,115 +559,6 @@ function hasRequiredRuntimeConstraints(
     : isOptionalVmRuntimeConstraintsPayload(value);
 }
 
-function isVmBootPhaseDurationsPayload(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    [
-      "image_disk_ms",
-      "network_jailer_vmm_ms",
-      "guest_to_kino_ms",
-      "seal_ssh_publish_ms",
-      "total_ms",
-      "image_cache_ms",
-      "runtime_disk_ms",
-      "network_ms",
-      "jailer_stage_ms",
-      "vmm_start_ms",
-      "vm_api_ms",
-      "quota_seal_ms",
-      "ssh_verify_ms",
-      "terminal_publish_ms",
-    ].every((field) => isNonNegativeInteger(value[field]))
-  );
-}
-
-function isVmBootCpuSamplePayload(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const point = readString(value.point);
-  const phase = readString(value.phase);
-  const baseValid =
-    point !== null &&
-    VM_BOOT_CPU_SAMPLE_POINTS.has(point as VmBootCpuSamplePointV1) &&
-    phase !== null &&
-    VM_RUNTIME_CONSTRAINT_PHASES.has(phase as VmRuntimeConstraintPhaseV1) &&
-    isPositiveInteger(value.sampled_at_unix_ms) &&
-    isPositiveInteger(value.steady_cpu_millis) &&
-    isPositiveInteger(value.effective_cpu_millis) &&
-    isOptionalPositiveInteger(value.boot_deadline_unix_ms) &&
-    typeof value.cpu_max === "string" &&
-    /^[1-9][0-9]* [1-9][0-9]*$/.test(value.cpu_max) &&
-    value.cpu_max_burst === 0 &&
-    isPositiveInteger(value.quota_verified_at_unix_ms) &&
-    isNonNegativeInteger(value.usage_usec) &&
-    isNonNegativeInteger(value.user_usec) &&
-    isNonNegativeInteger(value.system_usec) &&
-    isNonNegativeInteger(value.nr_periods) &&
-    isNonNegativeInteger(value.nr_throttled) &&
-    isNonNegativeInteger(value.throttled_usec);
-  if (!baseValid || point === null || phase === null) return false;
-  const [quota, period] = String(value.cpu_max).split(" ").map(Number);
-  if (
-    period !== 100_000 ||
-    quota !== Number(value.effective_cpu_millis) * 100 ||
-    value.quota_verified_at_unix_ms !== value.sampled_at_unix_ms
-  ) {
-    return false;
-  }
-  const beforeSeal =
-    point === "vm_boot_accepted" ||
-    point === "kino_ready" ||
-    point === "pre_seal";
-  return beforeSeal
-    ? phase === "boot_burst" &&
-        Number(value.effective_cpu_millis) >= Number(value.steady_cpu_millis) &&
-        isPositiveInteger(value.boot_deadline_unix_ms)
-    : phase === "steady" &&
-        value.effective_cpu_millis === value.steady_cpu_millis &&
-        (value.boot_deadline_unix_ms === undefined ||
-          value.boot_deadline_unix_ms === null);
-}
-
-function isVmBootEvidencePayload(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    readString(value.generation) === null ||
-    !isPositiveInteger(value.started_at_unix_ms) ||
-    !isPositiveInteger(value.ready_at_unix_ms) ||
-    Number(value.ready_at_unix_ms) < Number(value.started_at_unix_ms) ||
-    !isVmBootPhaseDurationsPayload(value.phases) ||
-    !Array.isArray(value.cpu_samples) ||
-    value.cpu_samples.length > VM_BOOT_CPU_SAMPLE_POINTS.size ||
-    !value.cpu_samples.every(isVmBootCpuSamplePayload)
-  ) {
-    return false;
-  }
-  const points = new Set(
-    value.cpu_samples.map(
-      (sample) => (sample as Record<string, unknown>).point,
-    ),
-  );
-  return points.size === value.cpu_samples.length;
-}
-
-function isOptionalVmBootEvidencePayload(value: unknown): boolean {
-  return (
-    value === undefined || value === null || isVmBootEvidencePayload(value)
-  );
-}
-
-function hasConsistentVmBootGeneration(
-  value: Record<string, unknown>,
-): boolean {
-  if (value.boot_evidence === undefined || value.boot_evidence === null) {
-    return true;
-  }
-  return (
-    isRecord(value.boot_evidence) &&
-    isRecord(value.runtime_constraints) &&
-    value.boot_evidence.generation === value.runtime_constraints.generation
-  );
-}
-
 function isVmResourceStatePayload(value: unknown): boolean {
   return (
     isRecord(value) &&
@@ -782,8 +659,6 @@ function isVmActualStatePayload(value: unknown): boolean {
       value.runtime_constraints,
       phase as VmPhase,
     ) &&
-    isOptionalVmBootEvidencePayload(value.boot_evidence) &&
-    hasConsistentVmBootGeneration(value) &&
     isOptionalVmResourceStatePayload(value.resource_state) &&
     isOptionalVmSandboxStatePayload(value.sandbox) &&
     isStringArray(value.ssh_host_keys_openssh) &&
@@ -815,8 +690,6 @@ function isVmReportPayload(value: unknown, hostId: string): boolean {
       value.runtime_constraints,
       phase as VmPhase,
     ) &&
-    isOptionalVmBootEvidencePayload(value.boot_evidence) &&
-    hasConsistentVmBootGeneration(value) &&
     isOptionalVmResourceStatePayload(value.resource_state) &&
     isOptionalVmSandboxStatePayload(value.sandbox) &&
     isStringArray(value.ssh_host_keys_openssh) &&

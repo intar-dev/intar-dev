@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, reset } from "cloudflare:test";
 
-const migrationSources = import.meta.glob<string>("../../drizzle/*.sql", {
+const migrationSources = import.meta.glob<string>("../../migrations/*.sql", {
   eager: true,
   query: "?raw",
   import: "default",

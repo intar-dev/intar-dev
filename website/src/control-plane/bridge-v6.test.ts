@@ -114,7 +114,6 @@ describe("bridge v6 protocol", () => {
         supports_vsock: true,
         supports_reflink: true,
         supports_nftables: true,
-        supports_jailer_v1: false,
         supports_jailer_v2: true,
         supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
@@ -298,7 +297,6 @@ describe("bridge v6 protocol", () => {
 
     const activeWithoutRuntime = cloneFixture(vmReport);
     activeWithoutRuntime.runtime_constraints = null;
-    activeWithoutRuntime.boot_evidence = null;
     expect(
       parseBridgeMessageV6(
         JSON.stringify({
@@ -318,7 +316,6 @@ describe("bridge v6 protocol", () => {
       observed_at_unix_ms: vmReport.observed_at_unix_ms,
     };
     pending.runtime_constraints = null;
-    pending.boot_evidence = null;
     expect(
       parseBridgeMessageV6(
         JSON.stringify({
@@ -385,76 +382,6 @@ describe("bridge v6 protocol", () => {
           protocol_version: 6,
           host_id: vmReport.host_id,
           report: missingProbes,
-        }),
-      ),
-    ).toBeNull();
-  });
-
-  it("strictly validates generation-fenced boot phase and CPU evidence", () => {
-    const vmReport = readFixture<VmReportV2>("vm-report-v2.json");
-    expect(vmReport.boot_evidence).toBeTruthy();
-
-    const staleGeneration = cloneFixture(vmReport);
-    staleGeneration.boot_evidence!.generation = "stale-generation";
-    expect(
-      parseBridgeMessageV6(
-        JSON.stringify({
-          type: "vm_report",
-          protocol_version: 6,
-          host_id: vmReport.host_id,
-          report: staleGeneration,
-        }),
-      ),
-    ).toBeNull();
-
-    const duplicatePoint = cloneFixture(vmReport);
-    duplicatePoint.boot_evidence!.cpu_samples[4]!.point = "post_seal";
-    expect(
-      parseBridgeMessageV6(
-        JSON.stringify({
-          type: "vm_report",
-          protocol_version: 6,
-          host_id: vmReport.host_id,
-          report: duplicatePoint,
-        }),
-      ),
-    ).toBeNull();
-
-    const boundedTelemetryMiss = cloneFixture(vmReport);
-    boundedTelemetryMiss.boot_evidence!.cpu_samples.pop();
-    expect(
-      parseBridgeMessageV6(
-        JSON.stringify({
-          type: "vm_report",
-          protocol_version: 6,
-          host_id: vmReport.host_id,
-          report: boundedTelemetryMiss,
-        }),
-      )?.type,
-    ).toBe("vm_report");
-
-    const burstCredits = cloneFixture(vmReport);
-    burstCredits.boot_evidence!.cpu_samples[0]!.cpu_max_burst = 1;
-    expect(
-      parseBridgeMessageV6(
-        JSON.stringify({
-          type: "vm_report",
-          protocol_version: 6,
-          host_id: vmReport.host_id,
-          report: burstCredits,
-        }),
-      ),
-    ).toBeNull();
-
-    const negativeDuration = cloneFixture(vmReport);
-    negativeDuration.boot_evidence!.phases.guest_to_kino_ms = -1;
-    expect(
-      parseBridgeMessageV6(
-        JSON.stringify({
-          type: "vm_report",
-          protocol_version: 6,
-          host_id: vmReport.host_id,
-          report: negativeDuration,
         }),
       ),
     ).toBeNull();

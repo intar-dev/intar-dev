@@ -22,7 +22,8 @@
     {
       "binding": "DB",
       "database_id": "00000000-0000-0000-0000-000000000001",
-      "database_name": "intar-dev-local"
+      "database_name": "intar-dev-local",
+      "migrations_dir": "migrations"
     }
   ],
   "r2_buckets": [

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ApiClient,
   hostReadinessProblems,
   parseOptions,
   type HostSummary,
@@ -24,7 +25,6 @@ describe("live E2E options", () => {
         supports_vsock: true,
         supports_reflink: true,
         supports_nftables: true,
-        supports_jailer_v1: false,
         supports_jailer_v2: true,
         supports_boot_cpu_lease: true,
         supports_template_backed_launch: true,
@@ -46,13 +46,11 @@ describe("live E2E options", () => {
     expect(hostReadinessProblems(ready, [])).toEqual([]);
 
     const legacy = performanceReadyHost();
-    legacy.actualState!.capabilities.supports_jailer_v1 = true;
     legacy.actualState!.capabilities.supports_jailer_v2 = false;
     legacy.actualState!.capabilities.fast_template_store = false;
     legacy.actualState!.capabilities.boot_cpu_millis = 1_000;
     expect(hostReadinessProblems(legacy, [])).toEqual(
       expect.arrayContaining([
-        "host still advertises the rejected jailer-v1 launch path",
         "host does not report jailer-v2 support",
         "host has not attested the fast template store",
         "host boot CPU allocation is 1000m, expected 2000m",
@@ -73,6 +71,14 @@ describe("live E2E options", () => {
         INTAR_LIVE_CROSS_RUN_SCENARIO_ID: "broken-nginx",
       }),
     ).toThrow("concurrent runs on the same agent host");
+  });
+
+  it("refuses to send the admin cookie across origins", async () => {
+    const client = new ApiClient("https://intar.dev", "session=test");
+
+    await expect(client.raw("https://example.com/api/hosts")).rejects.toThrow(
+      "refused cross-origin API request: https://example.com",
+    );
   });
 
   it("accepts registered value options", () => {

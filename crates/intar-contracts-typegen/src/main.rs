@@ -464,7 +464,6 @@ export interface HostCapabilitiesV2 {
   supports_vsock: boolean;
   supports_reflink: boolean;
   supports_nftables: boolean;
-  supports_jailer_v1: boolean;
   supports_jailer_v2: boolean;
   supports_boot_cpu_lease: boolean;
   supports_template_backed_launch: boolean;
@@ -536,7 +535,6 @@ export interface VmActualStateV2 {
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
   runtime_constraints?: VmRuntimeConstraintsV1 | null;
-  boot_evidence?: VmBootEvidenceV1 | null;
   resource_state?: VmResourceStateV2 | null;
   sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];
@@ -582,56 +580,6 @@ export interface VmRuntimeConstraintsV1 {
   lease_expires_at_unix_ms?: number | null;
 }
 
-export interface VmBootEvidenceV1 {
-  generation: string;
-  started_at_unix_ms: number;
-  ready_at_unix_ms: number;
-  phases: VmBootPhaseDurationsV1;
-  cpu_samples: VmBootCpuSampleV1[];
-}
-
-export interface VmBootPhaseDurationsV1 {
-  image_disk_ms: number;
-  network_jailer_vmm_ms: number;
-  guest_to_kino_ms: number;
-  seal_ssh_publish_ms: number;
-  total_ms: number;
-  image_cache_ms: number;
-  runtime_disk_ms: number;
-  network_ms: number;
-  jailer_stage_ms: number;
-  vmm_start_ms: number;
-  vm_api_ms: number;
-  quota_seal_ms: number;
-  ssh_verify_ms: number;
-  terminal_publish_ms: number;
-}
-
-export type VmBootCpuSamplePointV1 =
-  | "vm_boot_accepted"
-  | "kino_ready"
-  | "pre_seal"
-  | "post_seal"
-  | "terminal_published";
-
-export interface VmBootCpuSampleV1 {
-  point: VmBootCpuSamplePointV1;
-  sampled_at_unix_ms: number;
-  phase: VmRuntimeConstraintPhaseV1;
-  steady_cpu_millis: number;
-  effective_cpu_millis: number;
-  boot_deadline_unix_ms?: number | null;
-  cpu_max: string;
-  cpu_max_burst: number;
-  quota_verified_at_unix_ms: number;
-  usage_usec: number;
-  user_usec: number;
-  system_usec: number;
-  nr_periods: number;
-  nr_throttled: number;
-  throttled_usec: number;
-}
-
 export type VmProbeStatus = "unknown" | "pass" | "fail";
 
 export interface VmProbeSnapshotV1 {
@@ -667,7 +615,6 @@ export interface VmReportV2 {
   network?: VmNetworkStateV1 | null;
   terminal: VmTerminalStateV1;
   runtime_constraints?: VmRuntimeConstraintsV1 | null;
-  boot_evidence?: VmBootEvidenceV1 | null;
   resource_state?: VmResourceStateV2 | null;
   sandbox?: VmSandboxStateV1 | null;
   ssh_host_keys_openssh: string[];

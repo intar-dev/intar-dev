@@ -75,7 +75,6 @@ function report(
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: false,
       supports_jailer_v2: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,

@@ -18,8 +18,8 @@ collisions before deployment.
 VM CPU declarations are steady-state entitlements. For a prepared
 `LaunchVmV2`, jailerd capacity-accounts a root-owned 2000-millicore aggregate
 VMM quota for at most 45 seconds during boot, without changing guest vCPU
-topology. Legacy `LaunchVm` is rejected: there is no steady-quota downgrade or
-copy-based launch fallback. Public SSH ports are reserved but v2 DNAT remains absent
+topology. There is no steady-quota downgrade or copy-based launch path. Public SSH
+ports are reserved but v2 DNAT remains absent
 until `FinalizeVmBoot` has lowered and read back `cpu.max`, verified
 `cpu.max.burst = 0`, persisted the steady phase, and activated ingress. An
 auxiliary root-owned systemd oneshot is created in the same transaction as
@@ -84,8 +84,6 @@ Fast-host readiness creates root-owned anonymous probes in the template store
 and every configured source filesystem, then exact-reflinks each probe into the
 root-owned generation store. One failed route withdraws v2 and fast-template
 capability for the host; launch never degrades to copying.
-Advanced/manual artifact flags remain available on `intar-jailerd self-test`,
-but bare mode without artifacts is non-attesting diagnostics.
 
 Agent doctor is read-only. The root-only self-test runs under the same
 private-mount/filesystem sandbox as the installed service and uses an isolated
@@ -98,17 +96,11 @@ network namespace. It requires the ninth 125-millicore request to fail local
 admission, proves every API/Landlock lifecycle and KVM task tree, measures all
 eight busy cgroups during one 30-second window, and exhaustively removes them.
 Only that complete artifact-backed run writes the boot-bound readiness
-attestation. Running `self-test` without artifacts is useful diagnostics, but
-deliberately writes no attestation and cannot make a host schedulable.
+attestation.
 
-This is a breaking rollout: drain all unsandboxed VMs and stop old agents,
-then run `deploy/install.sh --breaking-v6-cutover` on V5 hosts. The explicit
-mode refuses active or malformed workload state, permits only well-formed
-absent VM tombstones, archives the legacy config and a consistent SQLite
-snapshot under `/var/lib/intar/cutover-archives/`, removes only
-`cloud_hypervisor.binary`, and resets the incompatible drained database.
-Fresh or already-V6 hosts use `deploy/install.sh` without the flag. Next apply
-the CPU-reservation D1 migration, deploy bridge V6, republish catalog V3
-manifests, and start only hosts that pass both gates. The complete sequence and
-exact HCL CPU semantics are in
+Install or upgrade the package only while the agent is stopped and the host is
+fully drained. The installer rejects live VM units, populated Intar cgroups,
+and lingering VMM/helper processes, and leaves the agent stopped. Run the
+privileged self-test and agent doctor before enabling scheduling. Current
+operations and exact HCL CPU semantics are documented in
 [Scenario Host Jailer](../../docs/scenario-host-jailer.md).

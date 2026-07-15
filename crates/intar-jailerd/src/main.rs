@@ -72,25 +72,25 @@ enum Command {
         #[arg(long, default_value = "/etc/intar-jailerd/config.toml")]
         config: PathBuf,
         #[arg(long)]
-        kernel: Option<PathBuf>,
-        #[arg(long, requires = "kernel")]
-        kernel_sha256: Option<String>,
+        kernel: PathBuf,
         #[arg(long)]
+        kernel_sha256: String,
+        #[arg(long, requires = "initrd_sha256")]
         initrd: Option<PathBuf>,
         #[arg(long, requires = "initrd")]
         initrd_sha256: Option<String>,
         #[arg(long)]
-        root_disk: Option<PathBuf>,
-        #[arg(long, requires = "root_disk")]
-        root_disk_sha256: Option<String>,
+        root_disk: PathBuf,
         #[arg(long)]
-        runtime_disk: Option<PathBuf>,
-        #[arg(long, requires = "runtime_disk")]
-        runtime_disk_sha256: Option<String>,
+        root_disk_sha256: String,
         #[arg(long)]
-        recording_disk: Option<PathBuf>,
-        #[arg(long, requires = "recording_disk")]
-        recording_disk_sha256: Option<String>,
+        runtime_disk: PathBuf,
+        #[arg(long)]
+        runtime_disk_sha256: String,
+        #[arg(long)]
+        recording_disk: PathBuf,
+        #[arg(long)]
+        recording_disk_sha256: String,
     },
     #[command(hide = true)]
     SelfTestWorker {
@@ -518,60 +518,45 @@ fn validate_control_listener(listener: &OwnedFd, expected_path: &Path) -> Result
 
 #[cfg(target_os = "linux")]
 struct SelfTestCliArtifacts {
-    kernel: Option<PathBuf>,
-    kernel_sha256: Option<String>,
+    kernel: PathBuf,
+    kernel_sha256: String,
     initrd: Option<PathBuf>,
     initrd_sha256: Option<String>,
-    root_disk: Option<PathBuf>,
-    root_disk_sha256: Option<String>,
-    runtime_disk: Option<PathBuf>,
-    runtime_disk_sha256: Option<String>,
-    recording_disk: Option<PathBuf>,
-    recording_disk_sha256: Option<String>,
+    root_disk: PathBuf,
+    root_disk_sha256: String,
+    runtime_disk: PathBuf,
+    runtime_disk_sha256: String,
+    recording_disk: PathBuf,
+    recording_disk_sha256: String,
 }
 
 #[cfg(target_os = "linux")]
 impl SelfTestCliArtifacts {
-    fn into_artifacts(self) -> Result<Option<self_test::SelfTestArtifacts>> {
-        let any = self.kernel.is_some()
-            || self.kernel_sha256.is_some()
-            || self.initrd.is_some()
-            || self.initrd_sha256.is_some()
-            || self.root_disk.is_some()
-            || self.root_disk_sha256.is_some()
-            || self.runtime_disk.is_some()
-            || self.runtime_disk_sha256.is_some()
-            || self.recording_disk.is_some()
-            || self.recording_disk_sha256.is_some();
-        if !any {
-            return Ok(None);
-        }
-        let verified = |name: &str, path: Option<PathBuf>, sha256: Option<String>| {
-            Ok::<_, anyhow::Error>(self_test::VerifiedArtifact {
-                path: path.with_context(|| format!("--{name} is required for package smoke"))?,
-                sha256: sha256.with_context(|| {
-                    format!(
-                        "--{}-sha256 is required for package smoke",
-                        name.replace('_', "-")
-                    )
-                })?,
-            })
-        };
+    fn into_artifacts(self) -> Result<self_test::SelfTestArtifacts> {
         let initrd = match (self.initrd, self.initrd_sha256) {
             (None, None) => None,
-            (path, sha256) => Some(verified("initrd", path, sha256)?),
+            (Some(path), Some(sha256)) => Some(self_test::VerifiedArtifact { path, sha256 }),
+            _ => anyhow::bail!("--initrd and --initrd-sha256 must be supplied together"),
         };
-        Ok(Some(self_test::SelfTestArtifacts {
-            kernel: verified("kernel", self.kernel, self.kernel_sha256)?,
+        Ok(self_test::SelfTestArtifacts {
+            kernel: self_test::VerifiedArtifact {
+                path: self.kernel,
+                sha256: self.kernel_sha256,
+            },
             initrd,
-            root_disk: verified("root-disk", self.root_disk, self.root_disk_sha256)?,
-            runtime_disk: verified("runtime-disk", self.runtime_disk, self.runtime_disk_sha256)?,
-            recording_disk: verified(
-                "recording-disk",
-                self.recording_disk,
-                self.recording_disk_sha256,
-            )?,
-        }))
+            root_disk: self_test::VerifiedArtifact {
+                path: self.root_disk,
+                sha256: self.root_disk_sha256,
+            },
+            runtime_disk: self_test::VerifiedArtifact {
+                path: self.runtime_disk,
+                sha256: self.runtime_disk_sha256,
+            },
+            recording_disk: self_test::VerifiedArtifact {
+                path: self.recording_disk,
+                sha256: self.recording_disk_sha256,
+            },
+        })
     }
 }
 
@@ -585,10 +570,8 @@ fn run_self_test(config_path: &Path, artifacts: SelfTestCliArtifacts) -> Result<
         "acquire exclusive maintenance lock; stop intar-jailerd.service before running self-test",
     )?;
     let config = load_config(config_path)?;
-    let attestation = match artifacts.into_artifacts()? {
-        Some(artifacts) => self_test::run_with_artifacts(&config, &artifacts)?,
-        None => self_test::run(&config)?,
-    };
+    let artifacts = artifacts.into_artifacts()?;
+    let attestation = self_test::run(&config, &artifacts)?;
     println!("{}", serde_json::to_string_pretty(&attestation)?);
     Ok(())
 }

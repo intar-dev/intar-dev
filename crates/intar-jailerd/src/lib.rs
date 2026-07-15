@@ -13,15 +13,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(target_os = "linux")]
+use intar_jailer_protocol::CpuStat;
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, CLOUD_HYPERVISOR_SHA256, CLOUD_HYPERVISOR_VERSION, CpuQuota,
-    CpuQuotaAttestation, CpuStat, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
-    FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities,
-    JailerdConfig, LaunchVmV2Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT,
-    PROTOCOL_VERSION, PrepareImageV2Request, PreparedImageV2Result, ProtocolError, Request,
-    Response, RunNetworkResult, SampleVmCpuRequest, SandboxHealth, Sha256Digest, SourceArtifacts,
-    ValidatedId, VmCpuPhase, VmCpuRuntimeState, VmCpuSample, VmIdentityRequest, VmInspection,
-    VmLaunchRequest, VmLaunchResult,
+    CpuQuotaAttestation, DestroyRunNetworkRequest, EnsureRunNetworkRequest, FinalizeVmBootRequest,
+    FinalizeVmBootResult, JailPathMap, JailSpecV1, JailerCapabilities, JailerdConfig,
+    LaunchVmV2Request, OperationResult, PREPARED_IMAGE_SOURCE_ROOT, PROTOCOL_VERSION,
+    PrepareImageV2Request, PreparedImageV2Result, ProtocolError, Request, Response,
+    RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase,
+    VmCpuRuntimeState, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
 };
 use rustix::fs::{Mode, OFlags, open};
 #[cfg(target_os = "linux")]
@@ -270,14 +271,6 @@ pub trait HostBackend: Send {
     fn production_ready(&self) -> bool;
     fn start_unit(&mut self, spec: &UnitLaunchSpec) -> Result<StartedUnit>;
     fn inspect_unit(&mut self, unit_name: &str) -> Result<BackendInspection>;
-    /// Read the live CPU controller state for a previously attested cgroup.
-    /// This deliberately avoids process-tree and sandbox-security inspection.
-    fn sample_unit_cpu(
-        &mut self,
-        unit_name: &str,
-        cgroup_path: &Path,
-        expected_quota: CpuQuota,
-    ) -> Result<CpuStat>;
     /// Atomically update the unit quota and read back both `cpu.max` and
     /// `cpu.max.burst`. Success is a privileged live attestation.
     fn update_unit_cpu_quota(
@@ -345,15 +338,6 @@ impl HostBackend for UnavailableHostBackend {
     }
 
     fn inspect_unit(&mut self, _unit_name: &str) -> Result<BackendInspection> {
-        bail!("systemd transient-unit backend is not available in this build")
-    }
-
-    fn sample_unit_cpu(
-        &mut self,
-        _unit_name: &str,
-        _cgroup_path: &Path,
-        _expected_quota: CpuQuota,
-    ) -> Result<CpuStat> {
         bail!("systemd transient-unit backend is not available in this build")
     }
 
@@ -816,18 +800,6 @@ impl HostBackend for SystemdHostBackend {
 
     fn inspect_unit(&mut self, unit_name: &str) -> Result<BackendInspection> {
         self.inspect_existing(unit_name)
-    }
-
-    fn sample_unit_cpu(
-        &mut self,
-        unit_name: &str,
-        cgroup_path: &Path,
-        expected_quota: CpuQuota,
-    ) -> Result<CpuStat> {
-        assert_cpu_quota(cgroup_path, expected_quota)
-            .with_context(|| format!("attest live CPU quota for {unit_name}"))?;
-        read_cpu_stat_path(cgroup_path)
-            .with_context(|| format!("read live CPU accounting for {unit_name}"))
     }
 
     fn update_unit_cpu_quota(
@@ -3226,9 +3198,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Request::EnsureRunNetwork(request) | Request::RepairRunNetwork(request) => {
                 self.config.validate_run_network_request(request)
             }
-            Request::LaunchVm(request) => self
-                .config
-                .validate_ssh_public_port(request.ssh_public_port),
             Request::LaunchVmV2(request) => self
                 .config
                 .validate_ssh_public_port(request.launch.ssh_public_port),
@@ -3236,12 +3205,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         };
         if let Err(error) = policy_validation {
             return Response::Error(ProtocolError::new("invalid_request", error.to_string()));
-        }
-        if matches!(request, Request::LaunchVm(_)) && !self.capabilities().supports_jailer_v1 {
-            return Response::Error(ProtocolError::new(
-                "host_not_ready",
-                "host readiness attestation does not permit VM launches",
-            ));
         }
         if matches!(request, Request::LaunchVmV2(_)) {
             let capabilities = self.capabilities();
@@ -3316,13 +3279,9 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
                 }
                 Ok(Response::RepairRunNetwork(result))
             }
-            Request::LaunchVm(request) => Ok(Response::LaunchVm(self.launch_vm(*request)?)),
             Request::LaunchVmV2(request) => Ok(Response::LaunchVmV2(self.launch_vm_v2(*request)?)),
             Request::FinalizeVmBoot(request) => {
                 Ok(Response::FinalizeVmBoot(self.finalize_vm_boot(request)?))
-            }
-            Request::SampleVmCpu(request) => {
-                Ok(Response::SampleVmCpu(self.sample_vm_cpu(request)?))
             }
             Request::InspectVm(request) => Ok(Response::InspectVm(self.inspect_vm(request)?)),
             Request::StopVm(request) => Ok(Response::StopVm(OperationResult {
@@ -3376,9 +3335,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             reserved_cpu_millis: self.config.cpu_reserved_millis,
             schedulable_cpu_millis,
             committed_cpu_millis,
-            // The cutover is deliberately breaking: legacy launch requests
-            // remain decodable only so callers receive an explicit failure.
-            supports_jailer_v1: false,
             supports_jailer_v2: ready && fast_template_store,
             supports_template_backed_launch: ready && fast_template_store,
             fast_template_store,
@@ -3740,14 +3696,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
         }
     }
 
-    fn launch_vm(&mut self, request: VmLaunchRequest) -> Result<VmLaunchResult> {
-        let quota = request.validate().context("validate VM launch request")?;
-        bail!(
-            "legacy launch_vm is disabled by the breaking v2-only cutover (validated steady quota {}m)",
-            quota.cpu_millis
-        )
-    }
-
     fn launch_vm_v2(&mut self, request: LaunchVmV2Request) -> Result<VmLaunchResult> {
         let quota = request
             .validate()
@@ -4085,16 +4033,7 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
 
     fn finalize_vm_boot(&mut self, request: FinalizeVmBootRequest) -> Result<FinalizeVmBootResult> {
         let generation = request.generation;
-        let pre_seal_cpu_sample = self
-            .records
-            .get(&generation)
-            .context("unknown jail generation")?
-            .cpu_phase
-            .eq(&VmCpuPhase::BootBurst)
-            .then(|| self.best_effort_boundary_cpu_sample(&generation, "pre_seal"))
-            .flatten();
         let phase_changed = self.seal_vm_cpu(&generation)?;
-        let post_seal_cpu_sample = self.best_effort_boundary_cpu_sample(&generation, "post_seal");
         let mut record = self
             .records
             .get(&generation)
@@ -4129,8 +4068,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             changed: phase_changed || forwarding_changed,
             ssh_forward_active: record.ssh_forward_active,
             cpu_runtime: record.cpu_runtime(),
-            pre_seal_cpu_sample,
-            post_seal_cpu_sample,
         })
     }
 
@@ -4258,58 +4195,6 @@ impl<B: HostBackend, P: JailPreparer> JailerdCore<B, P> {
             Err(containment_error) => Err(failure).context(format!(
                 "boot CPU seal failed; containment was incomplete: {containment_error:#}"
             )),
-        }
-    }
-
-    fn sample_vm_cpu(&mut self, request: SampleVmCpuRequest) -> Result<VmCpuSample> {
-        let generation = request.generation;
-        let record = self
-            .records
-            .get(&generation)
-            .context("unknown jail generation")?
-            .clone();
-        let cgroup_path = record
-            .cgroup_path
-            .as_deref()
-            .context("VM cgroup identity is not persisted")?;
-        let effective_quota = record.effective_quota();
-        let cpu_stat =
-            self.backend
-                .sample_unit_cpu(&record.unit_name, cgroup_path, effective_quota)?;
-        let sampled_at_unix_ms = unix_time_millis()?;
-        let mut cpu_runtime = record.cpu_runtime();
-        cpu_runtime.attestation = Some(CpuQuotaAttestation {
-            quota: effective_quota,
-            cpu_max: effective_quota.cpu_max(),
-            cpu_max_burst: 0,
-            verified_at_unix_ms: sampled_at_unix_ms,
-        });
-        Ok(VmCpuSample {
-            generation,
-            sampled_at_unix_ms,
-            cpu_runtime,
-            cpu_stat,
-        })
-    }
-
-    fn best_effort_boundary_cpu_sample(
-        &mut self,
-        generation: &ValidatedId,
-        boundary: &'static str,
-    ) -> Option<VmCpuSample> {
-        match self.sample_vm_cpu(SampleVmCpuRequest {
-            generation: generation.clone(),
-        }) {
-            Ok(sample) => Some(sample),
-            Err(error) => {
-                tracing::warn!(
-                    generation = %generation,
-                    boundary,
-                    error = %format!("{error:#}"),
-                    "CPU boundary telemetry failed without preventing quota enforcement"
-                );
-                None
-            }
         }
     }
 
@@ -4588,9 +4473,8 @@ fn validate_protocol_request(request: &Request) -> Result<()> {
         Request::EnsureRunNetwork(request) | Request::RepairRunNetwork(request) => {
             request.validate().map_err(Into::into)
         }
-        Request::LaunchVm(request) => request.validate().map(|_| ()).map_err(Into::into),
         Request::LaunchVmV2(request) => request.validate().map(|_| ()).map_err(Into::into),
-        Request::FinalizeVmBoot(_) | Request::SampleVmCpu(_) => Ok(()),
+        Request::FinalizeVmBoot(_) => Ok(()),
         Request::InspectVm(request) | Request::StopVm(request) | Request::DestroyVm(request) => {
             request.validate().map_err(Into::into)
         }
@@ -8068,9 +7952,6 @@ mod tests {
         unit_quotas: BTreeMap<String, CpuQuota>,
         started_specs: Vec<UnitLaunchSpec>,
         inspect_unit_calls: usize,
-        cpu_sample_count: usize,
-        fail_cpu_sample: bool,
-        sampled_cpu_stat: Option<CpuStat>,
         stopped_units: Vec<String>,
         destroyed_units: Vec<String>,
         unit_operations: Vec<String>,
@@ -8142,33 +8023,6 @@ mod tests {
                 .get(unit_name)
                 .cloned()
                 .context("missing fake unit")
-        }
-        fn sample_unit_cpu(
-            &mut self,
-            unit_name: &str,
-            cgroup_path: &Path,
-            expected_quota: CpuQuota,
-        ) -> Result<CpuStat> {
-            if self.fail_cpu_sample {
-                bail!("injected CPU accounting sample failure")
-            }
-            let unit = self.units.get(unit_name).context("missing fake unit")?;
-            if unit.cgroup_path.as_deref() != Some(cgroup_path) {
-                bail!("fake cgroup identity mismatch")
-            }
-            anyhow::ensure!(
-                self.unit_quotas.get(unit_name) == Some(&expected_quota),
-                "fake CPU quota mismatch"
-            );
-            self.cpu_sample_count += 1;
-            Ok(self.sampled_cpu_stat.clone().unwrap_or(CpuStat {
-                usage_usec: 10,
-                user_usec: 7,
-                system_usec: 3,
-                nr_periods: 2,
-                nr_throttled: 1,
-                throttled_usec: 4,
-            }))
         }
         fn update_unit_cpu_quota(
             &mut self,
@@ -8365,19 +8219,6 @@ mod tests {
                 .lock()
                 .expect("backend state")
                 .inspect_unit(unit_name)
-        }
-
-        fn sample_unit_cpu(
-            &mut self,
-            unit_name: &str,
-            cgroup_path: &Path,
-            expected_quota: CpuQuota,
-        ) -> Result<CpuStat> {
-            self.state.lock().expect("backend state").sample_unit_cpu(
-                unit_name,
-                cgroup_path,
-                expected_quota,
-            )
         }
 
         fn update_unit_cpu_quota(
@@ -9230,24 +9071,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_launch_is_rejected_after_breaking_v2_cutover() {
-        let mut core = JailerdCore::new_with_readiness(
-            test_config(),
-            FakeBackend::default(),
-            FakeTemplatePreparer,
-            1_000,
-            ready_readiness(),
-        )
-        .expect("v2-only core");
-        assert!(!core.capabilities().supports_jailer_v1);
-        assert!(matches!(
-            core.handle(Request::LaunchVm(Box::new(launch(99, 125)))),
-            Response::Error(ProtocolError { ref code, .. }) if code == "host_not_ready"
-        ));
-        assert!(core.backend.started_specs.is_empty());
-    }
-
-    #[test]
     fn eight_eighth_cpu_vms_fill_exactly_one_schedulable_core() {
         let mut config = test_config();
         config.cpu_reserved_millis = 0;
@@ -9324,106 +9147,6 @@ mod tests {
     }
 
     #[test]
-    fn cpu_sampling_is_generation_fenced_phase_consistent_and_skips_inspection() {
-        let mut config = test_config();
-        config.cpu_reserved_millis = 0;
-        config.boot_cpu_millis = 2_000;
-        let mut core = JailerdCore::new_with_readiness(
-            config,
-            FakeBackend::default(),
-            FakeTemplatePreparer,
-            4_000,
-            ready_readiness(),
-        )
-        .expect("core");
-        ensure_test_network(&mut core);
-        let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-            Response::LaunchVmV2(value) => value,
-            other => panic!("unexpected launch response {other:?}"),
-        };
-        let inspections_before_sample = core.backend.inspect_unit_calls;
-
-        let boot_sample = match core.handle(Request::SampleVmCpu(SampleVmCpuRequest {
-            generation: launched.generation.clone(),
-        })) {
-            Response::SampleVmCpu(value) => value,
-            other => panic!("unexpected CPU sample response {other:?}"),
-        };
-        assert_eq!(boot_sample.generation, launched.generation);
-        assert_eq!(boot_sample.cpu_runtime.phase, VmCpuPhase::BootBurst);
-        assert_eq!(boot_sample.cpu_runtime.steady_quota.cpu_millis, 1_000);
-        assert_eq!(boot_sample.cpu_runtime.effective_quota.cpu_millis, 2_000);
-        assert_eq!(boot_sample.cpu_stat.usage_usec, 10);
-        let attestation = boot_sample
-            .cpu_runtime
-            .attestation
-            .expect("live boot-quota attestation");
-        assert_eq!(attestation.quota.cpu_millis, 2_000);
-        assert_eq!(attestation.cpu_max, "200000 100000");
-        assert_eq!(attestation.cpu_max_burst, 0);
-        assert_eq!(
-            attestation.verified_at_unix_ms,
-            boot_sample.sampled_at_unix_ms
-        );
-        assert_eq!(core.backend.inspect_unit_calls, inspections_before_sample);
-        assert_eq!(core.backend.cpu_sample_count, 1);
-
-        let finalized = core.handle(Request::FinalizeVmBoot(FinalizeVmBootRequest {
-            generation: launched.generation.clone(),
-        }));
-        let finalized = match finalized {
-            Response::FinalizeVmBoot(value) => value,
-            other => panic!("unexpected finalize response {other:?}"),
-        };
-        assert_eq!(
-            finalized
-                .pre_seal_cpu_sample
-                .as_ref()
-                .expect("atomic pre-seal sample")
-                .cpu_runtime
-                .phase,
-            VmCpuPhase::BootBurst
-        );
-        assert_eq!(
-            finalized
-                .post_seal_cpu_sample
-                .as_ref()
-                .expect("atomic post-seal sample")
-                .cpu_runtime
-                .phase,
-            VmCpuPhase::Steady
-        );
-        let steady_sample = match core.handle(Request::SampleVmCpu(SampleVmCpuRequest {
-            generation: launched.generation.clone(),
-        })) {
-            Response::SampleVmCpu(value) => value,
-            other => panic!("unexpected steady CPU sample response {other:?}"),
-        };
-        assert_eq!(steady_sample.cpu_runtime.phase, VmCpuPhase::Steady);
-        assert_eq!(steady_sample.cpu_runtime.effective_quota.cpu_millis, 1_000);
-        assert_eq!(
-            steady_sample
-                .cpu_runtime
-                .attestation
-                .expect("live steady-quota attestation")
-                .quota
-                .cpu_millis,
-            1_000
-        );
-        assert_eq!(core.backend.inspect_unit_calls, inspections_before_sample);
-        assert_eq!(core.backend.cpu_sample_count, 4);
-
-        let unknown = core.handle(Request::SampleVmCpu(SampleVmCpuRequest {
-            generation: ValidatedId::parse("stale-generation").expect("generation"),
-        }));
-        assert!(matches!(
-            unknown,
-            Response::Error(ProtocolError { ref code, .. }) if code == "not_found"
-        ));
-        assert_eq!(core.backend.cpu_sample_count, 4);
-    }
-
-    #[test]
     fn finalize_seals_quota_before_ingress_and_is_idempotent() {
         let mut config = test_config();
         config.cpu_reserved_millis = 0;
@@ -9454,24 +9177,6 @@ mod tests {
         assert_eq!(first.cpu_runtime.phase, VmCpuPhase::Steady);
         assert_eq!(first.cpu_runtime.effective_quota.cpu_millis, 1_000);
         assert_eq!(first.cpu_runtime.boot_deadline_unix_ms, None);
-        assert_eq!(
-            first
-                .pre_seal_cpu_sample
-                .as_ref()
-                .expect("first finalization captures boot quota")
-                .cpu_runtime
-                .phase,
-            VmCpuPhase::BootBurst
-        );
-        assert_eq!(
-            first
-                .post_seal_cpu_sample
-                .as_ref()
-                .expect("first finalization captures steady quota")
-                .cpu_runtime
-                .phase,
-            VmCpuPhase::Steady
-        );
         assert_eq!(core.backend.boundary_operations, ["quota:1000", "ssh:true"]);
         assert_eq!(core.capabilities().committed_cpu_millis, 1_000);
 
@@ -9481,55 +9186,10 @@ mod tests {
         };
         assert!(!second.changed);
         assert_eq!(second.cpu_runtime.phase, VmCpuPhase::Steady);
-        assert!(second.pre_seal_cpu_sample.is_none());
-        assert_eq!(
-            second
-                .post_seal_cpu_sample
-                .as_ref()
-                .expect("idempotent finalization reattests steady quota")
-                .cpu_runtime
-                .phase,
-            VmCpuPhase::Steady
-        );
         assert_eq!(
             core.backend.boundary_operations,
             ["quota:1000", "ssh:true", "quota:1000", "ssh:true"]
         );
-    }
-
-    #[test]
-    fn boundary_cpu_telemetry_failure_never_prevents_quota_sealing() {
-        let mut config = test_config();
-        config.cpu_reserved_millis = 0;
-        config.boot_cpu_millis = 2_000;
-        let mut core = JailerdCore::new_with_readiness(
-            config,
-            FakeBackend::default(),
-            TrackingPreparer::default(),
-            4_000,
-            ready_readiness(),
-        )
-        .expect("core");
-        ensure_test_network(&mut core);
-        let launched = match core.handle(Request::LaunchVmV2(Box::new(launch_v2(0, 1_000)))) {
-            Response::LaunchVmV2(value) => value,
-            other => panic!("unexpected launch response {other:?}"),
-        };
-        core.backend.fail_cpu_sample = true;
-
-        let finalized = match core.handle(Request::FinalizeVmBoot(FinalizeVmBootRequest {
-            generation: launched.generation,
-        })) {
-            Response::FinalizeVmBoot(value) => value,
-            other => panic!("unexpected finalize response {other:?}"),
-        };
-
-        assert!(finalized.pre_seal_cpu_sample.is_none());
-        assert!(finalized.post_seal_cpu_sample.is_none());
-        assert_eq!(finalized.cpu_runtime.phase, VmCpuPhase::Steady);
-        assert_eq!(finalized.cpu_runtime.effective_quota.cpu_millis, 1_000);
-        assert!(finalized.ssh_forward_active);
-        assert_eq!(core.backend.boundary_operations, ["quota:1000", "ssh:true"]);
     }
 
     #[test]
@@ -10157,7 +9817,6 @@ mod tests {
         assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
         assert_eq!(core.pending_cpu_reservations.len(), 1);
         assert_eq!(core.unresolved_recoveries.len(), 1);
-        assert!(!core.capabilities().supports_jailer_v1);
 
         core.backend.fail_stop_unit = false;
         core.backend.fail_destroy_unit = false;
@@ -10396,7 +10055,6 @@ mod tests {
             core.preparer.reserved,
             vec![(record.generation, record.uid, record.gid)]
         );
-        assert!(!core.capabilities().supports_jailer_v1);
     }
 
     #[test]
@@ -10435,7 +10093,6 @@ mod tests {
         assert_eq!(core.capabilities().committed_cpu_millis, 2_000);
         assert_eq!(core.pending_cpu_reservations.len(), 1);
         assert!(core.unresolved_recoveries.contains_key(&record.generation));
-        assert!(!core.capabilities().supports_jailer_v1);
 
         core.backend.fail_quota_update = false;
         core.backend.fail_stop_unit = false;

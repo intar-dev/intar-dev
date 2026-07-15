@@ -18,13 +18,6 @@ export default defineConfig({
           BETTER_AUTH_URL: "http://localhost",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
-          INTAR_BOOT_BENCH_TOKEN: "test-boot-benchmark-token-0123456789abcdef",
-          INTAR_BOOT_BENCH_USER_ID: "benchmark-admin",
-          INTAR_BOOT_BENCH_HOST_ID: "benchmark-agent",
-          INTAR_BOOT_BENCH_NOT_BEFORE_UNIX_MS: String(Date.now() - 60_000),
-          INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS: String(
-            Date.now() + 2 * 60 * 60 * 1_000,
-          ),
           REGISTRY_PUBLISH_TOKEN: "test-publish-token",
           SCENARIO_RUN_KEY_ENCRYPTION_SECRET: "test-run-key-secret",
           STARGATE_ADMIN_AUTH_AUDIENCE: "stargate-admin",

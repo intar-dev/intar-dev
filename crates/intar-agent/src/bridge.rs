@@ -18,10 +18,9 @@ use intar_contracts::bridge::{
     HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
     HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV6, SyncRequestReason,
     SyncRequestV6, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
-    VmBootEvidenceV1, VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2,
-    VmReportV6, VmResourceStateV2, VmResourcesV2, VmRuntimeConstraintPhaseV1,
-    VmRuntimeConstraintsV1, VmSandboxStateV1, VmTerminalStateKindV1, VmTerminalStateV1,
-    VmTerminalTargetV1,
+    VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2, VmReportV6,
+    VmResourceStateV2, VmResourcesV2, VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
+    VmSandboxStateV1, VmTerminalStateKindV1, VmTerminalStateV1, VmTerminalTargetV1,
 };
 use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmCpuPhase, VmInspection};
@@ -1100,7 +1099,6 @@ fn build_vm_report_from_status(
         network: actual.network,
         terminal: actual.terminal,
         runtime_constraints: actual.runtime_constraints,
-        boot_evidence: actual.boot_evidence,
         resource_state: actual.resource_state,
         sandbox: actual.sandbox,
         ssh_host_keys_openssh: actual.ssh_host_keys_openssh,
@@ -1135,7 +1133,6 @@ fn actual_state_from_status(
     let runtime_constraints = terminal
         .and_then(|state| state.runtime_constraints.clone())
         .or_else(|| runtime_constraints_from_status(&status));
-    let boot_evidence = boot_evidence_from_status(&status);
     let updated_at_unix_ms = terminal.map_or(status_updated_at, |state| {
         state.observed_at.max(status_updated_at)
     });
@@ -1150,7 +1147,6 @@ fn actual_state_from_status(
         network: network_state_from_status(&status, ssh_host),
         terminal: terminal_state,
         runtime_constraints,
-        boot_evidence,
         resource_state: resource_state_from_status(&status, inspection),
         sandbox: sandbox_state_from_status(&status, inspection),
         ssh_host_keys_openssh: status
@@ -1188,7 +1184,6 @@ fn failed_vm_report(
             observed_at_unix_ms,
         },
         runtime_constraints: None,
-        boot_evidence: None,
         resource_state: None,
         sandbox: None,
         ssh_host_keys_openssh: Vec::new(),
@@ -1227,16 +1222,6 @@ fn terminal_state_from_status_fallback(
         reason,
         observed_at_unix_ms,
     }
-}
-
-fn boot_evidence_from_status(status: &VmStatusResponse) -> Option<VmBootEvidenceV1> {
-    let details = status.details.as_ref()?;
-    let generation = details.jail_generation.as_deref()?;
-    details
-        .boot_evidence
-        .as_ref()
-        .filter(|evidence| evidence.generation == generation)
-        .cloned()
 }
 
 fn runtime_constraints_from_status(status: &VmStatusResponse) -> Option<VmRuntimeConstraintsV1> {
@@ -1515,7 +1500,6 @@ fn cached_image_states_with_cache_root(
 fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabilitiesV2 {
     let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
         .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
-    let supports_jailer_v1 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v1);
     let supports_jailer_v2 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2);
     HostCapabilitiesV2 {
         arch: host_architecture(),
@@ -1530,7 +1514,6 @@ fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabil
         supports_vsock: true,
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
-        supports_jailer_v1,
         supports_jailer_v2,
         supports_boot_cpu_lease: jailer
             .is_some_and(|capabilities| capabilities.supports_boot_cpu_lease),

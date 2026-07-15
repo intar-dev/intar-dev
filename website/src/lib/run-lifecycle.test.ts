@@ -9,11 +9,37 @@ import {
 } from "@/lib/run-lifecycle";
 import {
   buildInitialRunState,
+  recomputeRunState,
   type RunStateDocument,
   type RunVmStateDocument,
 } from "@/lib/run-state";
 
 describe("run lifecycle", () => {
+  it("removes retired benchmark evidence from legacy run documents", () => {
+    const current = initialRunState();
+    const legacyVm = {
+      ...current.vms[0]!,
+      bootEvidence: { generation: "retired" },
+      workerDesiredDispatchAt: 1,
+      workerDesiredDispatchVersion: 2,
+      workerTerminalReportReceivedAt: 3,
+      workerTerminalProjectionAckAt: 4,
+      workerTerminalReceiptToProjectionAckMs: 5,
+      workerTerminalProjectionGeneration: "retired",
+      workerTerminalDesiredVersion: 6,
+    };
+
+    const [vm] = recomputeRunState({ ...current, vms: [legacyVm] }).vms;
+    expect(vm).not.toHaveProperty("bootEvidence");
+    expect(vm).not.toHaveProperty("workerDesiredDispatchAt");
+    expect(vm).not.toHaveProperty("workerDesiredDispatchVersion");
+    expect(vm).not.toHaveProperty("workerTerminalReportReceivedAt");
+    expect(vm).not.toHaveProperty("workerTerminalProjectionAckAt");
+    expect(vm).not.toHaveProperty("workerTerminalReceiptToProjectionAckMs");
+    expect(vm).not.toHaveProperty("workerTerminalProjectionGeneration");
+    expect(vm).not.toHaveProperty("workerTerminalDesiredVersion");
+  });
+
   it("requires run id and vm name to match report identity", () => {
     expect(
       matchesVmReportIdentity({
@@ -235,7 +261,6 @@ describe("run lifecycle", () => {
         phase: "ready",
         observedAt: 2_000,
         sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
-        bootEvidence: vmBootEvidence("generation-1"),
         resourceState: vmResourceState(),
         ...readyTerminalEvidence({
           host: "203.0.113.7",
@@ -244,8 +269,6 @@ describe("run lifecycle", () => {
         }),
       }),
     });
-    expect(current.vms[0]?.bootEvidence?.generation).toBe("generation-1");
-    expect(current.vms[0]?.bootEvidence?.cpu_samples).toHaveLength(5);
     expect(current.vms[0]?.resourceState?.cpu_millis).toBe(1_000);
     const stale = applyVmReportToRunState({
       runId: "run-a",
@@ -276,7 +299,6 @@ describe("run lifecycle", () => {
         phase: "ready",
         observedAt: 2_000,
         sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
-        bootEvidence: vmBootEvidence("generation-1"),
         resourceState: vmResourceState(),
         ...readyTerminalEvidence({
           host: "203.0.113.7",
@@ -313,7 +335,6 @@ describe("run lifecycle", () => {
         generation: "generation-2",
         phase: "boot_burst",
       },
-      bootEvidence: null,
       resourceState: null,
       retiredRuntimeGenerations: ["generation-1"],
     });
@@ -725,7 +746,6 @@ function vmReport(input: {
   network?: VmReportV2["network"];
   terminal?: VmReportV2["terminal"];
   runtimeConstraints?: VmReportV2["runtime_constraints"];
-  bootEvidence?: VmReportV2["boot_evidence"];
   resourceState?: VmReportV2["resource_state"];
   sshHostKeysOpenssh?: string[];
   probes?: VmReportV2["probes"];
@@ -750,7 +770,6 @@ function vmReport(input: {
       observed_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
     },
     runtime_constraints: input.runtimeConstraints ?? null,
-    boot_evidence: input.bootEvidence ?? null,
     resource_state: input.resourceState ?? null,
     sandbox: null,
     ssh_host_keys_openssh: input.sshHostKeysOpenssh ?? [],
@@ -787,61 +806,6 @@ function readyTerminalEvidence(input: {
       effective_cpu_millis: 1_000,
       quota_verified_at_unix_ms: input.observedAt - 1,
     },
-  };
-}
-
-function vmBootEvidence(
-  generation: string,
-): NonNullable<VmReportV2["boot_evidence"]> {
-  const sample = (
-    point: NonNullable<
-      VmReportV2["boot_evidence"]
-    >["cpu_samples"][number]["point"],
-    phase: "boot_burst" | "steady",
-  ) => ({
-    point,
-    sampled_at_unix_ms: 2_000,
-    phase,
-    steady_cpu_millis: 1_000,
-    effective_cpu_millis: phase === "boot_burst" ? 2_000 : 1_000,
-    boot_deadline_unix_ms: phase === "boot_burst" ? 47_000 : null,
-    cpu_max: phase === "boot_burst" ? "200000 100000" : "100000 100000",
-    cpu_max_burst: 0,
-    quota_verified_at_unix_ms: 2_000,
-    usage_usec: 1,
-    user_usec: 1,
-    system_usec: 0,
-    nr_periods: 1,
-    nr_throttled: 0,
-    throttled_usec: 0,
-  });
-  return {
-    generation,
-    started_at_unix_ms: 1_000,
-    ready_at_unix_ms: 2_000,
-    phases: {
-      image_disk_ms: 100,
-      network_jailer_vmm_ms: 200,
-      guest_to_kino_ms: 600,
-      seal_ssh_publish_ms: 100,
-      total_ms: 1_000,
-      image_cache_ms: 50,
-      runtime_disk_ms: 50,
-      network_ms: 50,
-      jailer_stage_ms: 50,
-      vmm_start_ms: 50,
-      vm_api_ms: 50,
-      quota_seal_ms: 25,
-      ssh_verify_ms: 50,
-      terminal_publish_ms: 25,
-    },
-    cpu_samples: [
-      sample("vm_boot_accepted", "boot_burst"),
-      sample("kino_ready", "boot_burst"),
-      sample("pre_seal", "boot_burst"),
-      sample("post_seal", "steady"),
-      sample("terminal_published", "steady"),
-    ],
   };
 }
 
@@ -887,7 +851,6 @@ function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: false,
       supports_jailer_v2: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,

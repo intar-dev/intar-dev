@@ -91,14 +91,6 @@ Tracked VMs now use an explicit monotonic local lifecycle:
 - archive begin/complete requests are the stable completion facts
 - a late delete success does not rewrite the canonical command status
 
-This is a clean break from the old local SQLite state model. Do not remove the
-database by hand. After draining and stopping the V5 agent, use the jailed host
-package's `deploy/install.sh --breaking-v6-cutover`. It rejects active or
-malformed VM state and desired builds, permits only well-formed absent VM
-tombstones, creates a root-only config/database archive, removes only the
-obsolete `cloud_hypervisor.binary` key, and resets the proven-drained legacy
-database before installing V6.
-
 ## Configuration
 
 The config file is required and must be TOML.
@@ -177,4 +169,4 @@ the 2000-millicore boot allocation only for the first 45 seconds and then runs
 at 125 millicores. Later finalization requires an attested steady quota before
 ingress can open. See
 [Scenario Host Jailer](../../docs/scenario-host-jailer.md) for the privileged
-configuration and drain-first rollout.
+configuration and drain-first host operations.

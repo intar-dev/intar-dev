@@ -1,44 +1,13 @@
 import { env } from "cloudflare:workers";
-import { and, eq, gte, lt } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessAllowlist, agentHosts, scenarioRuns, user } from "@/db/schema";
+import { agentHosts } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { isAllowlisted } from "@/lib/allowlist";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
 const ONLINE_HEARTBEAT_TTL_MS = 90_000;
-const BOOT_BENCHMARK_SCENARIO_ID = "broken-nginx";
-const BOOT_BENCHMARK_AUTH_SCHEME = "BootBenchmark";
-const SAFE_PATH_SEGMENT_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const RUN_ROUTE_RE =
-  /^\/api\/scenarios\/runs\/([A-Za-z0-9._-]{1,128})(?:\/(destroy|ssh))?$/;
-const UNIX_MS_RE = /^(?:0|[1-9][0-9]{0,15})$/;
-const MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS = 3 * 60 * 60 * 1_000;
-const MAX_BOOT_BENCHMARK_RUNS = 35;
-const textEncoder = new TextEncoder();
-
-export interface BootBenchmarkAuthBindings {
-  DB: D1Database;
-  INTAR_BOOT_BENCH_TOKEN?: string;
-  INTAR_BOOT_BENCH_USER_ID?: string;
-  INTAR_BOOT_BENCH_HOST_ID?: string;
-  INTAR_BOOT_BENCH_NOT_BEFORE_UNIX_MS?: string;
-  INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS?: string;
-}
-
-export type UserAuthentication =
-  | {
-      method: "session";
-      purpose: "interactive";
-    }
-  | {
-      method: "boot_benchmark";
-      purpose: "broken_nginx_boot_benchmark";
-      hostId: string;
-      notBeforeUnixMs: number;
-      expiresAtUnixMs: number;
-    };
 
 export interface AgentBridgeStatus {
   hostId: string;
@@ -78,7 +47,6 @@ export interface UserContext {
   userId: string;
   role: string | null;
   isAdmin: boolean;
-  authentication: UserAuthentication;
 }
 
 type AuthzResult =
@@ -135,12 +103,6 @@ export function resolveRequestOrigin(request: Request): string {
 export async function requireUserContext(
   request: Request,
 ): Promise<AuthzResult> {
-  if (
-    isBootBenchmarkAuthorizationAttempt(request.headers.get("authorization"))
-  ) {
-    return requireBootBenchmarkUserContext(request);
-  }
-
   const session = await auth.api.getSession({ headers: request.headers });
   const sessionUser = session?.user as {
     id: string;
@@ -148,7 +110,10 @@ export async function requireUserContext(
     username?: string | null;
   } | null;
   if (!session?.session || !sessionUser?.id) {
-    return requireBootBenchmarkUserContext(request);
+    return {
+      ok: false,
+      response: jsonResponse({ error: "unauthorized" }, { status: 401 }),
+    };
   }
 
   if (!(await isAllowlisted(sessionUser.username))) {
@@ -166,302 +131,7 @@ export async function requireUserContext(
       userId: sessionUser.id,
       role,
       isAdmin: isAdminRole(role),
-      authentication: {
-        method: "session",
-        purpose: "interactive",
-      },
     },
-  };
-}
-
-/**
- * Authorizes the short-lived, host-bound operator credential used only by the
- * production broken-nginx boot benchmark. Every binding is required to enable
- * this path; absent, malformed, or expired configuration fails closed.
- */
-export async function requireBootBenchmarkUserContext(
-  request: Request,
-  bindings: BootBenchmarkAuthBindings = env,
-  nowUnixMs = Date.now(),
-): Promise<AuthzResult> {
-  const configuredToken = bindings.INTAR_BOOT_BENCH_TOKEN ?? "";
-  const suppliedToken = parseBootBenchmarkAuthorization(
-    request.headers.get("authorization"),
-  );
-  const tokenMatches = await constantTimeSecretEqual(
-    configuredToken,
-    suppliedToken,
-  );
-  const config = parseBootBenchmarkConfig(bindings, nowUnixMs);
-  if (!tokenMatches || !config) return unauthorizedResponse();
-
-  const route = parseBootBenchmarkRoute(request, config.hostId);
-  if (!route) return unauthorizedResponse();
-
-  const db = drizzle(bindings.DB);
-  let operator: {
-    id: string;
-    role: string | null;
-    banned: boolean | null;
-  } | null = null;
-  let inWindowRunCount = 0;
-
-  if (route.kind === "run") {
-    const rows = await db
-      .select({
-        id: user.id,
-        role: user.role,
-        banned: user.banned,
-      })
-      .from(user)
-      .innerJoin(
-        accessAllowlist,
-        eq(accessAllowlist.githubUsername, user.username),
-      )
-      .innerJoin(
-        scenarioRuns,
-        and(
-          eq(scenarioRuns.runId, route.runId),
-          eq(scenarioRuns.userId, user.id),
-          eq(scenarioRuns.hostId, config.hostId),
-          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
-          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
-          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
-        ),
-      )
-      .where(eq(user.id, config.userId))
-      .limit(1);
-    operator = rows[0] ?? null;
-  } else if (route.kind === "start") {
-    // A left join preserves the operator row when the credential has not
-    // started a run yet. Limiting to 35 matching rows is sufficient to decide
-    // admission and avoids a second count query or an unbounded result set.
-    const rows = await db
-      .select({
-        id: user.id,
-        role: user.role,
-        banned: user.banned,
-        runId: scenarioRuns.runId,
-      })
-      .from(user)
-      .innerJoin(
-        accessAllowlist,
-        eq(accessAllowlist.githubUsername, user.username),
-      )
-      .leftJoin(
-        scenarioRuns,
-        and(
-          eq(scenarioRuns.userId, user.id),
-          eq(scenarioRuns.hostId, config.hostId),
-          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
-          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
-          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
-        ),
-      )
-      .where(eq(user.id, config.userId))
-      .limit(MAX_BOOT_BENCHMARK_RUNS);
-    const first = rows[0];
-    operator = first
-      ? { id: first.id, role: first.role, banned: first.banned }
-      : null;
-    inWindowRunCount = rows.reduce(
-      (total, row) => total + (row.runId === null ? 0 : 1),
-      0,
-    );
-  } else {
-    const rows = await db
-      .select({
-        id: user.id,
-        role: user.role,
-        banned: user.banned,
-      })
-      .from(user)
-      .innerJoin(
-        accessAllowlist,
-        eq(accessAllowlist.githubUsername, user.username),
-      )
-      .where(eq(user.id, config.userId))
-      .limit(1);
-    operator = rows[0] ?? null;
-  }
-
-  const role = getUserRole(operator);
-  if (!operator || Boolean(operator.banned) || !isAdminRole(role)) {
-    return unauthorizedResponse();
-  }
-
-  if (route.kind === "start" && inWindowRunCount >= MAX_BOOT_BENCHMARK_RUNS) {
-    return unauthorizedResponse();
-  }
-
-  return {
-    ok: true,
-    context: {
-      userId: operator.id,
-      role,
-      isAdmin: true,
-      authentication: {
-        method: "boot_benchmark",
-        purpose: "broken_nginx_boot_benchmark",
-        hostId: config.hostId,
-        notBeforeUnixMs: config.notBeforeUnixMs,
-        expiresAtUnixMs: config.expiresAtUnixMs,
-      },
-    },
-  };
-}
-
-interface BootBenchmarkConfig {
-  userId: string;
-  hostId: string;
-  notBeforeUnixMs: number;
-  expiresAtUnixMs: number;
-}
-
-type BootBenchmarkRoute =
-  | { kind: "host" | "scenario" | "start" }
-  | { kind: "run"; runId: string };
-
-function parseBootBenchmarkConfig(
-  bindings: BootBenchmarkAuthBindings,
-  nowUnixMs: number,
-): BootBenchmarkConfig | null {
-  const token = exactNonEmptyBinding(bindings.INTAR_BOOT_BENCH_TOKEN);
-  const userId = exactNonEmptyBinding(bindings.INTAR_BOOT_BENCH_USER_ID);
-  const hostId = exactSafePathSegment(bindings.INTAR_BOOT_BENCH_HOST_ID);
-  const rawNotBefore = exactNonEmptyBinding(
-    bindings.INTAR_BOOT_BENCH_NOT_BEFORE_UNIX_MS,
-  );
-  const rawExpiresAt = exactNonEmptyBinding(
-    bindings.INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS,
-  );
-  if (!token || !userId || !hostId || !rawNotBefore || !rawExpiresAt) {
-    return null;
-  }
-  if (textEncoder.encode(token).byteLength < 32) return null;
-  if (!UNIX_MS_RE.test(rawNotBefore) || !UNIX_MS_RE.test(rawExpiresAt)) {
-    return null;
-  }
-
-  const notBeforeUnixMs = Number(rawNotBefore);
-  const expiresAtUnixMs = Number(rawExpiresAt);
-  if (
-    !Number.isSafeInteger(notBeforeUnixMs) ||
-    !Number.isSafeInteger(expiresAtUnixMs) ||
-    !Number.isSafeInteger(nowUnixMs) ||
-    notBeforeUnixMs > nowUnixMs ||
-    expiresAtUnixMs <= nowUnixMs ||
-    expiresAtUnixMs <= notBeforeUnixMs ||
-    expiresAtUnixMs - notBeforeUnixMs > MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS
-  ) {
-    return null;
-  }
-  return { userId, hostId, notBeforeUnixMs, expiresAtUnixMs };
-}
-
-function parseBootBenchmarkRoute(
-  request: Request,
-  configuredHostId: string,
-): BootBenchmarkRoute | null {
-  const url = new URL(request.url);
-  if (url.search || url.hash) return null;
-
-  if (
-    request.method === "GET" &&
-    url.pathname === `/api/agent/hosts/${configuredHostId}`
-  ) {
-    return { kind: "host" };
-  }
-  if (
-    request.method === "GET" &&
-    url.pathname === `/api/scenarios/${BOOT_BENCHMARK_SCENARIO_ID}`
-  ) {
-    return { kind: "scenario" };
-  }
-  if (
-    request.method === "POST" &&
-    url.pathname === `/api/scenarios/${BOOT_BENCHMARK_SCENARIO_ID}/start`
-  ) {
-    return { kind: "start" };
-  }
-
-  const runMatch = RUN_ROUTE_RE.exec(url.pathname);
-  if (!runMatch) return null;
-  const runId = exactSafePathSegment(runMatch[1]);
-  if (!runId) return null;
-  const operation = runMatch[2] ?? null;
-  if (
-    (operation === null && request.method !== "GET") ||
-    (operation !== null && request.method !== "POST")
-  ) {
-    return null;
-  }
-  return { kind: "run", runId };
-}
-
-function parseBootBenchmarkAuthorization(header: string | null): string {
-  if (!header) return "";
-  const prefix = `${BOOT_BENCHMARK_AUTH_SCHEME} `;
-  if (!header.startsWith(prefix)) return "";
-  const token = header.slice(prefix.length);
-  return token && !/\s/.test(token) ? token : "";
-}
-
-function isBootBenchmarkAuthorizationAttempt(header: string | null): boolean {
-  return header !== null && /^\s*BootBenchmark(?:\s|$)/i.test(header);
-}
-
-function exactNonEmptyBinding(value: string | undefined): string | null {
-  if (!value || value !== value.trim()) return null;
-  return value;
-}
-
-function exactSafePathSegment(value: string | undefined): string | null {
-  const candidate = exactNonEmptyBinding(value);
-  if (
-    !candidate ||
-    candidate === "." ||
-    candidate === ".." ||
-    !SAFE_PATH_SEGMENT_RE.test(candidate)
-  ) {
-    return null;
-  }
-  return candidate;
-}
-
-async function constantTimeSecretEqual(
-  expected: string,
-  actual: string,
-): Promise<boolean> {
-  const [expectedHash, actualHash] = await Promise.all([
-    crypto.subtle.digest("SHA-256", textEncoder.encode(expected)),
-    crypto.subtle.digest("SHA-256", textEncoder.encode(actual)),
-  ]);
-  const subtle = crypto.subtle as SubtleCrypto & {
-    timingSafeEqual?: (
-      left: ArrayBuffer | ArrayBufferView,
-      right: ArrayBuffer | ArrayBufferView,
-    ) => boolean;
-  };
-  if (typeof subtle.timingSafeEqual === "function") {
-    return subtle.timingSafeEqual(expectedHash, actualHash);
-  }
-
-  // Both inputs are fixed-size SHA-256 digests, preserving constant work in
-  // runtimes whose Web Crypto implementation does not expose timingSafeEqual.
-  const left = new Uint8Array(expectedHash);
-  const right = new Uint8Array(actualHash);
-  let mismatch = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    mismatch |= left[index]! ^ right[index]!;
-  }
-  return mismatch === 0;
-}
-
-function unauthorizedResponse(): AuthzResult {
-  return {
-    ok: false,
-    response: jsonResponse({ error: "unauthorized" }, { status: 401 }),
   };
 }
 

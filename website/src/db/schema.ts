@@ -306,36 +306,6 @@ export const imageBuildCoordinationLocks = sqliteTable(
   ],
 );
 
-export const hostBenchmarkLeases = sqliteTable(
-  "host_benchmark_leases",
-  {
-    hostId: text("host_id")
-      .primaryKey()
-      .references(() => agentHosts.id, { onDelete: "cascade" }),
-    runId: text("run_id").notNull(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "restrict" }),
-    contractSha256: text("contract_sha256").default("").notNull(),
-    credentialNotBeforeUnixMs: integer("credential_not_before_unix_ms")
-      .default(0)
-      .notNull(),
-    credentialExpiresAtUnixMs: integer("credential_expires_at_unix_ms")
-      .default(0)
-      .notNull(),
-    acquiredAt: integer("acquired_at").default(nowMsDefault).notNull(),
-    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("host_benchmark_leases_run_uidx").on(table.runId),
-    index("host_benchmark_leases_user_idx").on(table.userId, table.acquiredAt),
-    check(
-      "host_benchmark_leases_identity_nonempty",
-      sql`length(${table.hostId}) > 0 AND length(${table.runId}) > 0 AND length(${table.userId}) > 0`,
-    ),
-  ],
-);
-
 export const hostDesiredState = sqliteTable(
   "host_desired_state",
   {

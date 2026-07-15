@@ -8,7 +8,6 @@ export const prerender = false;
 
 interface StartScenarioBody {
   hostId?: unknown;
-  admissionMode?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params }) => {
@@ -23,13 +22,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 
-  const benchmarkAuthentication =
-    authz.context.authentication?.method === "boot_benchmark"
-      ? authz.context.authentication
-      : null;
-
   let hostId: string | undefined;
-  let admissionMode: "benchmark" | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -48,29 +41,9 @@ export const POST: APIRoute = async ({ request, params }) => {
       );
     }
     const body = parsedBody as StartScenarioBody;
-    if (
-      benchmarkAuthentication &&
-      Object.keys(body).some(
-        (key) => key !== "hostId" && key !== "admissionMode",
-      )
-    ) {
-      return jsonResponse(
-        { error: "boot benchmark start body contains unexpected fields" },
-        { status: 403 },
-      );
-    }
     if (body.hostId !== undefined && typeof body.hostId !== "string") {
       return jsonResponse(
         { error: "hostId must be a string" },
-        { status: 400 },
-      );
-    }
-    if (
-      body.admissionMode !== undefined &&
-      body.admissionMode !== "benchmark"
-    ) {
-      return jsonResponse(
-        { error: 'admissionMode must be "benchmark"' },
         { status: 400 },
       );
     }
@@ -81,32 +54,9 @@ export const POST: APIRoute = async ({ request, params }) => {
         { status: 400 },
       );
     }
-    admissionMode =
-      body.admissionMode === "benchmark" ? "benchmark" : undefined;
-    if (admissionMode && !hostId) {
-      return jsonResponse(
-        { error: "benchmark admission requires hostId" },
-        { status: 400 },
-      );
-    }
-    if ((hostId || admissionMode) && !authz.context.isAdmin) {
+    if (hostId && !authz.context.isAdmin) {
       return jsonResponse({ error: "admin required" }, { status: 403 });
     }
-  }
-
-  if (
-    benchmarkAuthentication &&
-    (scenarioId !== "broken-nginx" ||
-      admissionMode !== "benchmark" ||
-      hostId !== benchmarkAuthentication.hostId)
-  ) {
-    return jsonResponse(
-      {
-        error:
-          "boot benchmark credential requires broken-nginx benchmark admission on its configured host",
-      },
-      { status: 403 },
-    );
   }
 
   try {
@@ -114,15 +64,6 @@ export const POST: APIRoute = async ({ request, params }) => {
       scenarioId,
       userId: authz.context.userId,
       ...(hostId ? { hostId } : {}),
-      ...(admissionMode ? { admissionMode } : {}),
-      ...(benchmarkAuthentication
-        ? {
-            benchmarkCredentialWindow: {
-              notBeforeUnixMs: benchmarkAuthentication.notBeforeUnixMs,
-              expiresAtUnixMs: benchmarkAuthentication.expiresAtUnixMs,
-            },
-          }
-        : {}),
     });
     return jsonResponse(result, { status: 202 });
   } catch (error) {

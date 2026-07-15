@@ -1,7 +1,6 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, reset } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -20,10 +19,9 @@ import {
   hostDesiredState,
   scenarioRuns,
   user,
-  vmScenarioVms,
 } from "@/db/schema";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
-import { d1Migrations, resetD1Database } from "@/test/d1-migrations";
+import { resetD1Database } from "@/test/d1-migrations";
 import type { VmActualStateV2 } from "@/generated/bridge";
 
 describe("host CPU reservations", () => {
@@ -69,7 +67,6 @@ describe("host CPU reservations", () => {
   it("rejects legacy host reports without the complete v2 fast-launch contract", () => {
     const report = strictReport("host-legacy", 4_000, 1, 0);
     report.capabilities.supports_jailer_v2 = false;
-    report.capabilities.supports_jailer_v1 = true;
     expect(strictCpuCapacity(report)).toBeNull();
 
     report.capabilities.supports_jailer_v2 = true;
@@ -91,27 +88,33 @@ describe("host CPU reservations", () => {
     expect(strictCpuCapacity(report)).toBeNull();
   });
 
-  it("backfills integer CPU catalogs during the in-place migration", async () => {
-    await reset();
-    await applyD1Migrations(env.DB, [d1Migrations[0]!]);
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO vm_scenarios (scenario_id, title, category, description, difficulty, estimated_minutes, tags_json, briefing_markdown, solution_markdown, hints_json, enabled, created_at, updated_at) VALUES ('legacy', 'Legacy', 'test', 'Legacy', 'easy', 1, '[]', 'Briefing', 'Solution', '[]', 1, 1, 1)",
-      ),
-      env.DB.prepare(
-        "INSERT INTO vm_scenario_vms (id, scenario_id, ordinal, vm_name, image, image_format, image_virtual_size_bytes, kernel_sha256, initrd_sha256, boot_cmdline, cpu, memory_mib, disk_mib) VALUES ('legacy:vm', 'legacy', 0, 'vm', 'legacy.raw.zst', 'raw_zstd', 1024, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'root=/dev/vda', 2, 512, 4096)",
-      ),
-    ]);
-    await applyD1Migrations(env.DB, [d1Migrations[1]!]);
+  it("keeps disabled-host desired VMs fenced to an active local run", async () => {
+    const hostId = "host-disabled-run-fence";
+    const runId = "run-disabled-host";
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await seedStrictCpuHost(hostId, 2_000, now);
+    await db
+      .update(agentHosts)
+      .set({ scenarioEnabled: false })
+      .where(eq(agentHosts.id, hostId));
 
-    const [vm] = await drizzle(env.DB)
-      .select({
-        cpuMillis: vmScenarioVms.cpuMillis,
-        vcpuCount: vmScenarioVms.vcpuCount,
-      })
-      .from(vmScenarioVms)
-      .where(eq(vmScenarioVms.id, "legacy:vm"));
-    expect(vm).toEqual({ cpuMillis: 2_000, vcpuCount: 2 });
+    await expect(
+      seedRunningDesiredState(hostId, runId, `${runId}-vm`, now),
+    ).rejects.toThrow('Failed query: insert into "host_desired_state"');
+
+    await seedRun(hostId, runId, now);
+    await expect(
+      seedRunningDesiredState(hostId, runId, `${runId}-vm`, now),
+    ).resolves.toBeUndefined();
+
+    const triggers = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'host_desired_running_vm_requires_active_run_%' ORDER BY name",
+    ).all<{ name: string }>();
+    expect(triggers.results.map(({ name }) => name)).toEqual([
+      "host_desired_running_vm_requires_active_run_insert",
+      "host_desired_running_vm_requires_active_run_update",
+    ]);
   });
 
   it("serializes concurrent boot reservations and admits exactly eight 125m VMs", async () => {
@@ -544,7 +547,6 @@ function strictReport(
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: false,
       supports_jailer_v2: true,
       supports_boot_cpu_lease: true,
       supports_template_backed_launch: true,

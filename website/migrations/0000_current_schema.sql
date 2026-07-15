@@ -1,12 +1,17 @@
-CREATE TABLE `access_allowlist` (
+-- Canonical current-schema adoption baseline.
+--
+-- Every object creation is idempotent so Wrangler can adopt the already-current
+-- production database and initialize a fresh database through the same tracked
+-- migration stream. The following migration removes retired objects that may
+-- still exist in the adopted database.
+PRAGMA defer_foreign_keys=TRUE;
+CREATE TABLE IF NOT EXISTS `access_allowlist` (
 	`github_username` text PRIMARY KEY NOT NULL,
 	`approved_by` text,
 	`approved_at` integer NOT NULL,
 	FOREIGN KEY (`approved_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE set null
 );
---> statement-breakpoint
-CREATE INDEX `access_allowlist_approved_by_idx` ON `access_allowlist` (`approved_by`);--> statement-breakpoint
-CREATE TABLE `access_requests` (
+CREATE TABLE IF NOT EXISTS `access_requests` (
 	`id` text PRIMARY KEY NOT NULL,
 	`github_username` text NOT NULL,
 	`note` text,
@@ -16,10 +21,7 @@ CREATE TABLE `access_requests` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`decided_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE set null
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `access_requests_username_uidx` ON `access_requests` (`github_username`);--> statement-breakpoint
-CREATE INDEX `access_requests_status_idx` ON `access_requests` (`status`,`created_at`);--> statement-breakpoint
-CREATE TABLE `account` (
+CREATE TABLE IF NOT EXISTS `account` (
 	`id` text PRIMARY KEY NOT NULL,
 	`account_id` text NOT NULL,
 	`provider_id` text NOT NULL,
@@ -35,9 +37,7 @@ CREATE TABLE `account` (
 	`updated_at` integer NOT NULL,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `account_userId_idx` ON `account` (`user_id`);--> statement-breakpoint
-CREATE TABLE `agent_bootstrap_tokens` (
+CREATE TABLE IF NOT EXISTS `agent_bootstrap_tokens` (
 	`id` text PRIMARY KEY NOT NULL,
 	`host_id` text NOT NULL,
 	`token_hash` text NOT NULL,
@@ -46,10 +46,7 @@ CREATE TABLE `agent_bootstrap_tokens` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `agent_bootstrap_tokens_host_idx` ON `agent_bootstrap_tokens` (`host_id`);--> statement-breakpoint
-CREATE INDEX `agent_bootstrap_tokens_hash_idx` ON `agent_bootstrap_tokens` (`token_hash`);--> statement-breakpoint
-CREATE TABLE `agent_hosts` (
+CREATE TABLE IF NOT EXISTS `agent_hosts` (
 	`id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
 	`name` text NOT NULL,
@@ -70,11 +67,7 @@ CREATE TABLE `agent_hosts` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `agent_hosts_user_idx` ON `agent_hosts` (`user_id`);--> statement-breakpoint
-CREATE INDEX `agent_hosts_role_idx` ON `agent_hosts` (`role`,`connected`);--> statement-breakpoint
-CREATE INDEX `agent_hosts_connected_idx` ON `agent_hosts` (`connected`,`updated_at`);--> statement-breakpoint
-CREATE TABLE `host_actual_state` (
+CREATE TABLE IF NOT EXISTS `host_actual_state` (
 	`host_id` text PRIMARY KEY NOT NULL,
 	`applied_desired_version` integer NOT NULL,
 	`observed_at` integer NOT NULL,
@@ -83,10 +76,7 @@ CREATE TABLE `host_actual_state` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `host_actual_state_applied_version_idx` ON `host_actual_state` (`applied_desired_version`);--> statement-breakpoint
-CREATE INDEX `host_actual_state_observed_idx` ON `host_actual_state` (`observed_at`);--> statement-breakpoint
-CREATE TABLE `host_desired_state` (
+CREATE TABLE IF NOT EXISTS `host_desired_state` (
 	`host_id` text PRIMARY KEY NOT NULL,
 	`version` integer NOT NULL,
 	`doc_json` text NOT NULL,
@@ -94,9 +84,7 @@ CREATE TABLE `host_desired_state` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `host_desired_state_version_idx` ON `host_desired_state` (`version`);--> statement-breakpoint
-CREATE TABLE `image_build_bundles` (
+CREATE TABLE IF NOT EXISTS `image_build_bundles` (
 	`rev` text PRIMARY KEY NOT NULL,
 	`r2_key` text NOT NULL,
 	`kino_version` text NOT NULL,
@@ -104,8 +92,7 @@ CREATE TABLE `image_build_bundles` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
 );
---> statement-breakpoint
-CREATE TABLE `image_builds` (
+CREATE TABLE IF NOT EXISTS `image_builds` (
 	`id` text PRIMARY KEY NOT NULL,
 	`scenario_id` text NOT NULL,
 	`arch` text NOT NULL,
@@ -124,20 +111,14 @@ CREATE TABLE `image_builds` (
 	FOREIGN KEY (`rev`) REFERENCES `image_build_bundles`(`rev`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE set null
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `image_builds_scenario_arch_hash_uidx` ON `image_builds` (`scenario_id`,`arch`,`content_hash`);--> statement-breakpoint
-CREATE INDEX `image_builds_status_idx` ON `image_builds` (`status`,`updated_at`);--> statement-breakpoint
-CREATE INDEX `image_builds_host_idx` ON `image_builds` (`host_id`,`status`);--> statement-breakpoint
-CREATE INDEX `image_builds_rev_idx` ON `image_builds` (`rev`);--> statement-breakpoint
-CREATE TABLE `jwks` (
+CREATE TABLE IF NOT EXISTS `jwks` (
 	`id` text PRIMARY KEY NOT NULL,
 	`public_key` text NOT NULL,
 	`private_key` text NOT NULL,
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	`expires_at` integer
 );
---> statement-breakpoint
-CREATE TABLE `member` (
+CREATE TABLE IF NOT EXISTS `member` (
 	`id` text PRIMARY KEY NOT NULL,
 	`organization_id` text NOT NULL,
 	`user_id` text NOT NULL,
@@ -146,11 +127,7 @@ CREATE TABLE `member` (
 	FOREIGN KEY (`organization_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `member_organizationId_idx` ON `member` (`organization_id`);--> statement-breakpoint
-CREATE INDEX `member_userId_idx` ON `member` (`user_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `member_org_user_uidx` ON `member` (`organization_id`,`user_id`);--> statement-breakpoint
-CREATE TABLE `oauth_access_token` (
+CREATE TABLE IF NOT EXISTS `oauth_access_token` (
 	`id` text PRIMARY KEY NOT NULL,
 	`token` text,
 	`client_id` text NOT NULL,
@@ -171,15 +148,7 @@ CREATE TABLE `oauth_access_token` (
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`refresh_id`) REFERENCES `oauth_refresh_token`(`id`) ON UPDATE no action ON DELETE set null
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `oauth_access_token_token_unique` ON `oauth_access_token` (`token`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_clientId_idx` ON `oauth_access_token` (`client_id`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_sessionId_idx` ON `oauth_access_token` (`session_id`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_userId_idx` ON `oauth_access_token` (`user_id`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_referenceId_idx` ON `oauth_access_token` (`reference_id`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_authorizationCodeId_idx` ON `oauth_access_token` (`authorization_code_id`);--> statement-breakpoint
-CREATE INDEX `oauthAccessToken_refreshId_idx` ON `oauth_access_token` (`refresh_id`);--> statement-breakpoint
-CREATE TABLE `oauth_client` (
+CREATE TABLE IF NOT EXISTS `oauth_client` (
 	`id` text PRIMARY KEY NOT NULL,
 	`client_id` text NOT NULL,
 	`client_secret` text,
@@ -217,16 +186,11 @@ CREATE TABLE `oauth_client` (
 	`metadata` text,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `oauth_client_client_id_unique` ON `oauth_client` (`client_id`);--> statement-breakpoint
-CREATE INDEX `oauthClient_userId_idx` ON `oauth_client` (`user_id`);--> statement-breakpoint
-CREATE INDEX `oauthClient_referenceId_idx` ON `oauth_client` (`reference_id`);--> statement-breakpoint
-CREATE TABLE `oauth_client_assertion` (
+CREATE TABLE IF NOT EXISTS `oauth_client_assertion` (
 	`id` text PRIMARY KEY NOT NULL,
 	`expires_at` integer NOT NULL
 );
---> statement-breakpoint
-CREATE TABLE `oauth_client_resource` (
+CREATE TABLE IF NOT EXISTS `oauth_client_resource` (
 	`id` text PRIMARY KEY NOT NULL,
 	`client_id` text NOT NULL,
 	`resource_id` text NOT NULL,
@@ -235,11 +199,7 @@ CREATE TABLE `oauth_client_resource` (
 	FOREIGN KEY (`client_id`) REFERENCES `oauth_client`(`client_id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`resource_id`) REFERENCES `oauth_resource`(`identifier`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `oauthClientResource_clientId_idx` ON `oauth_client_resource` (`client_id`);--> statement-breakpoint
-CREATE INDEX `oauthClientResource_resourceId_idx` ON `oauth_client_resource` (`resource_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `oauthClientResource_client_resource_uidx` ON `oauth_client_resource` (`client_id`,`resource_id`);--> statement-breakpoint
-CREATE TABLE `oauth_consent` (
+CREATE TABLE IF NOT EXISTS `oauth_consent` (
 	`id` text PRIMARY KEY NOT NULL,
 	`client_id` text NOT NULL,
 	`user_id` text,
@@ -252,11 +212,7 @@ CREATE TABLE `oauth_consent` (
 	FOREIGN KEY (`client_id`) REFERENCES `oauth_client`(`client_id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `oauthConsent_clientId_idx` ON `oauth_consent` (`client_id`);--> statement-breakpoint
-CREATE INDEX `oauthConsent_userId_idx` ON `oauth_consent` (`user_id`);--> statement-breakpoint
-CREATE INDEX `oauthConsent_referenceId_idx` ON `oauth_consent` (`reference_id`);--> statement-breakpoint
-CREATE TABLE `oauth_refresh_token` (
+CREATE TABLE IF NOT EXISTS `oauth_refresh_token` (
 	`id` text PRIMARY KEY NOT NULL,
 	`token` text NOT NULL,
 	`client_id` text NOT NULL,
@@ -279,14 +235,7 @@ CREATE TABLE `oauth_refresh_token` (
 	FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON UPDATE no action ON DELETE set null,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `oauth_refresh_token_token_unique` ON `oauth_refresh_token` (`token`);--> statement-breakpoint
-CREATE INDEX `oauthRefreshToken_clientId_idx` ON `oauth_refresh_token` (`client_id`);--> statement-breakpoint
-CREATE INDEX `oauthRefreshToken_sessionId_idx` ON `oauth_refresh_token` (`session_id`);--> statement-breakpoint
-CREATE INDEX `oauthRefreshToken_userId_idx` ON `oauth_refresh_token` (`user_id`);--> statement-breakpoint
-CREATE INDEX `oauthRefreshToken_referenceId_idx` ON `oauth_refresh_token` (`reference_id`);--> statement-breakpoint
-CREATE INDEX `oauthRefreshToken_authorizationCodeId_idx` ON `oauth_refresh_token` (`authorization_code_id`);--> statement-breakpoint
-CREATE TABLE `oauth_resource` (
+CREATE TABLE IF NOT EXISTS `oauth_resource` (
 	`id` text PRIMARY KEY NOT NULL,
 	`identifier` text NOT NULL,
 	`name` text NOT NULL,
@@ -303,10 +252,7 @@ CREATE TABLE `oauth_resource` (
 	`policy_version` integer DEFAULT 1 NOT NULL,
 	`metadata` text
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `oauth_resource_identifier_unique` ON `oauth_resource` (`identifier`);--> statement-breakpoint
-CREATE INDEX `oauthResource_identifier_idx` ON `oauth_resource` (`identifier`);--> statement-breakpoint
-CREATE TABLE `organization` (
+CREATE TABLE IF NOT EXISTS `organization` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
 	`slug` text NOT NULL,
@@ -314,10 +260,7 @@ CREATE TABLE `organization` (
 	`created_at` integer NOT NULL,
 	`metadata` text
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `organization_slug_unique` ON `organization` (`slug`);--> statement-breakpoint
-CREATE UNIQUE INDEX `organization_slug_uidx` ON `organization` (`slug`);--> statement-breakpoint
-CREATE TABLE `scenario_assignments` (
+CREATE TABLE IF NOT EXISTS `scenario_assignments` (
 	`id` text PRIMARY KEY NOT NULL,
 	`organization_id` text NOT NULL,
 	`scenario_id` text NOT NULL,
@@ -326,9 +269,7 @@ CREATE TABLE `scenario_assignments` (
 	FOREIGN KEY (`organization_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`assigned_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_assignments_org_scenario_uidx` ON `scenario_assignments` (`organization_id`,`scenario_id`);--> statement-breakpoint
-CREATE TABLE `scenario_run_artifact_uploads` (
+CREATE TABLE IF NOT EXISTS `scenario_run_artifact_uploads` (
 	`artifact_id` text PRIMARY KEY NOT NULL,
 	`r2_upload_id` text,
 	`uploaded_parts_json` text NOT NULL,
@@ -336,8 +277,7 @@ CREATE TABLE `scenario_run_artifact_uploads` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`artifact_id`) REFERENCES `scenario_run_artifacts`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE TABLE `scenario_run_artifacts` (
+CREATE TABLE IF NOT EXISTS `scenario_run_artifacts` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
 	`vm_id` text NOT NULL,
@@ -353,11 +293,7 @@ CREATE TABLE `scenario_run_artifacts` (
 	`uploaded_at` integer,
 	FOREIGN KEY (`run_id`) REFERENCES `scenario_runs`(`run_id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_run_artifacts_vm_ordinal_uidx` ON `scenario_run_artifacts` (`vm_id`,`ordinal`);--> statement-breakpoint
-CREATE INDEX `scenario_run_artifacts_run_idx` ON `scenario_run_artifacts` (`run_id`,`vm_id`,`ordinal`);--> statement-breakpoint
-CREATE INDEX `scenario_run_artifacts_r2_key_idx` ON `scenario_run_artifacts` (`r2_key`);--> statement-breakpoint
-CREATE TABLE `scenario_run_probe_snapshots` (
+CREATE TABLE IF NOT EXISTS `scenario_run_probe_snapshots` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
 	`vm_id` text NOT NULL,
@@ -372,10 +308,7 @@ CREATE TABLE `scenario_run_probe_snapshots` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`run_id`) REFERENCES `scenario_runs`(`run_id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_run_probe_snapshots_run_vm_message_uidx` ON `scenario_run_probe_snapshots` (`run_id`,`vm_id`,`message_id`);--> statement-breakpoint
-CREATE INDEX `scenario_run_probe_snapshots_run_vm_idx` ON `scenario_run_probe_snapshots` (`run_id`,`vm_id`,`created_at`);--> statement-breakpoint
-CREATE TABLE `scenario_run_session_transcripts` (
+CREATE TABLE IF NOT EXISTS `scenario_run_session_transcripts` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
 	`vm_id` text NOT NULL,
@@ -384,9 +317,7 @@ CREATE TABLE `scenario_run_session_transcripts` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`run_id`) REFERENCES `scenario_runs`(`run_id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_run_session_transcripts_session_uidx` ON `scenario_run_session_transcripts` (`run_id`,`vm_id`,`session_index`);--> statement-breakpoint
-CREATE TABLE `scenario_run_ssh_keys` (
+CREATE TABLE IF NOT EXISTS `scenario_run_ssh_keys` (
 	`id` text PRIMARY KEY NOT NULL,
 	`run_id` text NOT NULL,
 	`vm_id` text NOT NULL,
@@ -397,10 +328,7 @@ CREATE TABLE `scenario_run_ssh_keys` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`run_id`) REFERENCES `scenario_runs`(`run_id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_run_ssh_keys_run_vm_uidx` ON `scenario_run_ssh_keys` (`run_id`,`vm_id`);--> statement-breakpoint
-CREATE INDEX `scenario_run_ssh_keys_run_runtime_idx` ON `scenario_run_ssh_keys` (`run_id`,`runtime_vm_name`);--> statement-breakpoint
-CREATE TABLE `scenario_runs` (
+CREATE TABLE IF NOT EXISTS `scenario_runs` (
 	`run_id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
 	`host_id` text NOT NULL,
@@ -433,11 +361,7 @@ CREATE TABLE `scenario_runs` (
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE restrict
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_runs_active_key_uidx` ON `scenario_runs` (`active_key`);--> statement-breakpoint
-CREATE INDEX `scenario_runs_user_scenario_idx` ON `scenario_runs` (`user_id`,`scenario_id`,`created_at`);--> statement-breakpoint
-CREATE INDEX `scenario_runs_host_idx` ON `scenario_runs` (`host_id`,`created_at`);--> statement-breakpoint
-CREATE TABLE `scenario_sources` (
+CREATE TABLE IF NOT EXISTS `scenario_sources` (
 	`id` text PRIMARY KEY NOT NULL,
 	`scenario_id` text NOT NULL,
 	`hcl` text NOT NULL,
@@ -447,9 +371,7 @@ CREATE TABLE `scenario_sources` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`created_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `scenario_sources_scenario_uidx` ON `scenario_sources` (`scenario_id`);--> statement-breakpoint
-CREATE TABLE `session` (
+CREATE TABLE IF NOT EXISTS `session` (
 	`id` text PRIMARY KEY NOT NULL,
 	`expires_at` integer NOT NULL,
 	`token` text NOT NULL,
@@ -461,10 +383,7 @@ CREATE TABLE `session` (
 	`impersonated_by` text,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `session_token_unique` ON `session` (`token`);--> statement-breakpoint
-CREATE INDEX `session_userId_idx` ON `session` (`user_id`);--> statement-breakpoint
-CREATE TABLE `team_invites` (
+CREATE TABLE IF NOT EXISTS `team_invites` (
 	`id` text PRIMARY KEY NOT NULL,
 	`organization_id` text NOT NULL,
 	`github_username` text NOT NULL,
@@ -475,10 +394,7 @@ CREATE TABLE `team_invites` (
 	FOREIGN KEY (`organization_id`) REFERENCES `organization`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`invited_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `team_invites_org_username_uidx` ON `team_invites` (`organization_id`,`github_username`);--> statement-breakpoint
-CREATE INDEX `team_invites_username_idx` ON `team_invites` (`github_username`,`status`);--> statement-breakpoint
-CREATE TABLE `user` (
+CREATE TABLE IF NOT EXISTS `user` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
 	`email` text NOT NULL,
@@ -493,10 +409,7 @@ CREATE TABLE `user` (
 	`ban_reason` text,
 	`ban_expires` integer
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `user_email_unique` ON `user` (`email`);--> statement-breakpoint
-CREATE UNIQUE INDEX `user_username_unique` ON `user` (`username`);--> statement-breakpoint
-CREATE TABLE `user_ssh_keys` (
+CREATE TABLE IF NOT EXISTS `user_ssh_keys` (
 	`id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
 	`label` text,
@@ -508,10 +421,7 @@ CREATE TABLE `user_ssh_keys` (
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE INDEX `user_ssh_keys_user_idx` ON `user_ssh_keys` (`user_id`,`created_at`);--> statement-breakpoint
-CREATE UNIQUE INDEX `user_ssh_keys_user_fingerprint_uidx` ON `user_ssh_keys` (`user_id`,`fingerprint_sha256`);--> statement-breakpoint
-CREATE TABLE `verification` (
+CREATE TABLE IF NOT EXISTS `verification` (
 	`id` text PRIMARY KEY NOT NULL,
 	`identifier` text NOT NULL,
 	`value` text NOT NULL,
@@ -519,9 +429,7 @@ CREATE TABLE `verification` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
 );
---> statement-breakpoint
-CREATE INDEX `verification_identifier_idx` ON `verification` (`identifier`);--> statement-breakpoint
-CREATE TABLE `vm_scenario_probes` (
+CREATE TABLE IF NOT EXISTS `vm_scenario_probes` (
 	`id` text PRIMARY KEY NOT NULL,
 	`scenario_id` text NOT NULL,
 	`scenario_vm_id` text NOT NULL,
@@ -536,10 +444,7 @@ CREATE TABLE `vm_scenario_probes` (
 	FOREIGN KEY (`scenario_id`) REFERENCES `vm_scenarios`(`scenario_id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`scenario_vm_id`) REFERENCES `vm_scenario_vms`(`id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `vm_scenario_probes_vm_ordinal_uidx` ON `vm_scenario_probes` (`scenario_vm_id`,`ordinal`);--> statement-breakpoint
-CREATE INDEX `vm_scenario_probes_scenario_idx` ON `vm_scenario_probes` (`scenario_id`,`scenario_vm_id`,`ordinal`);--> statement-breakpoint
-CREATE TABLE `vm_scenario_vms` (
+CREATE TABLE IF NOT EXISTS `vm_scenario_vms` (
 	`id` text PRIMARY KEY NOT NULL,
 	`scenario_id` text NOT NULL,
 	`ordinal` integer NOT NULL,
@@ -552,16 +457,11 @@ CREATE TABLE `vm_scenario_vms` (
 	`kernel_sha256` text NOT NULL,
 	`initrd_sha256` text NOT NULL,
 	`boot_cmdline` text NOT NULL,
-	`cpu` integer NOT NULL,
 	`memory_mib` integer NOT NULL,
-	`disk_mib` integer NOT NULL,
+	`disk_mib` integer NOT NULL, `cpu_millis` integer DEFAULT 1000 NOT NULL, `vcpu_count` integer DEFAULT 1 NOT NULL,
 	FOREIGN KEY (`scenario_id`) REFERENCES `vm_scenarios`(`scenario_id`) ON UPDATE no action ON DELETE cascade
 );
---> statement-breakpoint
-CREATE UNIQUE INDEX `vm_scenario_vms_scenario_ordinal_uidx` ON `vm_scenario_vms` (`scenario_id`,`ordinal`);--> statement-breakpoint
-CREATE UNIQUE INDEX `vm_scenario_vms_scenario_name_uidx` ON `vm_scenario_vms` (`scenario_id`,`vm_name`);--> statement-breakpoint
-CREATE INDEX `vm_scenario_vms_scenario_idx` ON `vm_scenario_vms` (`scenario_id`,`ordinal`);--> statement-breakpoint
-CREATE TABLE `vm_scenarios` (
+CREATE TABLE IF NOT EXISTS `vm_scenarios` (
 	`scenario_id` text PRIMARY KEY NOT NULL,
 	`title` text NOT NULL,
 	`category` text DEFAULT '' NOT NULL,
@@ -577,5 +477,150 @@ CREATE TABLE `vm_scenarios` (
 	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
 	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
 );
---> statement-breakpoint
-CREATE INDEX `vm_scenarios_enabled_idx` ON `vm_scenarios` (`enabled`,`enabled_at`);
+CREATE TABLE IF NOT EXISTS `image_build_coordination_locks` (
+	`key` text PRIMARY KEY NOT NULL,
+	`owner_token` text NOT NULL,
+	`expires_at` integer NOT NULL,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS `host_cpu_reservations` (
+	`run_id` text PRIMARY KEY NOT NULL,
+	`host_id` text NOT NULL,
+	`cpu_millis` integer NOT NULL,
+	`steady_cpu_millis` integer NOT NULL,
+	`boot_cpu_millis` integer NOT NULL,
+	`quota_phase` text NOT NULL,
+	`state` text NOT NULL,
+	`expires_at` integer,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	FOREIGN KEY (`host_id`) REFERENCES `agent_hosts`(`id`) ON UPDATE no action ON DELETE cascade,
+	CONSTRAINT `host_cpu_reservations_cpu_positive` CHECK (`cpu_millis` > 0),
+	CONSTRAINT `host_cpu_reservations_quota_positive` CHECK (`steady_cpu_millis` > 0 AND `boot_cpu_millis` >= `steady_cpu_millis`),
+	CONSTRAINT `host_cpu_reservations_quota_phase_valid` CHECK (`quota_phase` in ('boot', 'steady')),
+	CONSTRAINT `host_cpu_reservations_current_quota_valid` CHECK ((`quota_phase` = 'boot' AND `cpu_millis` = `boot_cpu_millis`) OR (`quota_phase` = 'steady' AND `cpu_millis` = `steady_cpu_millis`)),
+	CONSTRAINT `host_cpu_reservations_state_valid` CHECK (`state` in ('pending', 'committed'))
+);
+CREATE INDEX IF NOT EXISTS `access_allowlist_approved_by_idx` ON `access_allowlist` (`approved_by`);
+CREATE UNIQUE INDEX IF NOT EXISTS `access_requests_username_uidx` ON `access_requests` (`github_username`);
+CREATE INDEX IF NOT EXISTS `access_requests_status_idx` ON `access_requests` (`status`,`created_at`);
+CREATE INDEX IF NOT EXISTS `account_userId_idx` ON `account` (`user_id`);
+CREATE INDEX IF NOT EXISTS `agent_bootstrap_tokens_host_idx` ON `agent_bootstrap_tokens` (`host_id`);
+CREATE INDEX IF NOT EXISTS `agent_bootstrap_tokens_hash_idx` ON `agent_bootstrap_tokens` (`token_hash`);
+CREATE INDEX IF NOT EXISTS `agent_hosts_user_idx` ON `agent_hosts` (`user_id`);
+CREATE INDEX IF NOT EXISTS `agent_hosts_role_idx` ON `agent_hosts` (`role`,`connected`);
+CREATE INDEX IF NOT EXISTS `agent_hosts_connected_idx` ON `agent_hosts` (`connected`,`updated_at`);
+CREATE INDEX IF NOT EXISTS `host_actual_state_applied_version_idx` ON `host_actual_state` (`applied_desired_version`);
+CREATE INDEX IF NOT EXISTS `host_actual_state_observed_idx` ON `host_actual_state` (`observed_at`);
+CREATE INDEX IF NOT EXISTS `host_desired_state_version_idx` ON `host_desired_state` (`version`);
+CREATE UNIQUE INDEX IF NOT EXISTS `image_builds_scenario_arch_hash_uidx` ON `image_builds` (`scenario_id`,`arch`,`content_hash`);
+CREATE INDEX IF NOT EXISTS `image_builds_status_idx` ON `image_builds` (`status`,`updated_at`);
+CREATE INDEX IF NOT EXISTS `image_builds_host_idx` ON `image_builds` (`host_id`,`status`);
+CREATE INDEX IF NOT EXISTS `image_builds_rev_idx` ON `image_builds` (`rev`);
+CREATE INDEX IF NOT EXISTS `member_organizationId_idx` ON `member` (`organization_id`);
+CREATE INDEX IF NOT EXISTS `member_userId_idx` ON `member` (`user_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `member_org_user_uidx` ON `member` (`organization_id`,`user_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `oauth_access_token_token_unique` ON `oauth_access_token` (`token`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_clientId_idx` ON `oauth_access_token` (`client_id`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_sessionId_idx` ON `oauth_access_token` (`session_id`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_userId_idx` ON `oauth_access_token` (`user_id`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_referenceId_idx` ON `oauth_access_token` (`reference_id`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_authorizationCodeId_idx` ON `oauth_access_token` (`authorization_code_id`);
+CREATE INDEX IF NOT EXISTS `oauthAccessToken_refreshId_idx` ON `oauth_access_token` (`refresh_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `oauth_client_client_id_unique` ON `oauth_client` (`client_id`);
+CREATE INDEX IF NOT EXISTS `oauthClient_userId_idx` ON `oauth_client` (`user_id`);
+CREATE INDEX IF NOT EXISTS `oauthClient_referenceId_idx` ON `oauth_client` (`reference_id`);
+CREATE INDEX IF NOT EXISTS `oauthClientResource_clientId_idx` ON `oauth_client_resource` (`client_id`);
+CREATE INDEX IF NOT EXISTS `oauthClientResource_resourceId_idx` ON `oauth_client_resource` (`resource_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `oauthClientResource_client_resource_uidx` ON `oauth_client_resource` (`client_id`,`resource_id`);
+CREATE INDEX IF NOT EXISTS `oauthConsent_clientId_idx` ON `oauth_consent` (`client_id`);
+CREATE INDEX IF NOT EXISTS `oauthConsent_userId_idx` ON `oauth_consent` (`user_id`);
+CREATE INDEX IF NOT EXISTS `oauthConsent_referenceId_idx` ON `oauth_consent` (`reference_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `oauth_refresh_token_token_unique` ON `oauth_refresh_token` (`token`);
+CREATE INDEX IF NOT EXISTS `oauthRefreshToken_clientId_idx` ON `oauth_refresh_token` (`client_id`);
+CREATE INDEX IF NOT EXISTS `oauthRefreshToken_sessionId_idx` ON `oauth_refresh_token` (`session_id`);
+CREATE INDEX IF NOT EXISTS `oauthRefreshToken_userId_idx` ON `oauth_refresh_token` (`user_id`);
+CREATE INDEX IF NOT EXISTS `oauthRefreshToken_referenceId_idx` ON `oauth_refresh_token` (`reference_id`);
+CREATE INDEX IF NOT EXISTS `oauthRefreshToken_authorizationCodeId_idx` ON `oauth_refresh_token` (`authorization_code_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `oauth_resource_identifier_unique` ON `oauth_resource` (`identifier`);
+CREATE INDEX IF NOT EXISTS `oauthResource_identifier_idx` ON `oauth_resource` (`identifier`);
+CREATE UNIQUE INDEX IF NOT EXISTS `organization_slug_unique` ON `organization` (`slug`);
+CREATE UNIQUE INDEX IF NOT EXISTS `organization_slug_uidx` ON `organization` (`slug`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_assignments_org_scenario_uidx` ON `scenario_assignments` (`organization_id`,`scenario_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_run_artifacts_vm_ordinal_uidx` ON `scenario_run_artifacts` (`vm_id`,`ordinal`);
+CREATE INDEX IF NOT EXISTS `scenario_run_artifacts_run_idx` ON `scenario_run_artifacts` (`run_id`,`vm_id`,`ordinal`);
+CREATE INDEX IF NOT EXISTS `scenario_run_artifacts_r2_key_idx` ON `scenario_run_artifacts` (`r2_key`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_run_probe_snapshots_run_vm_message_uidx` ON `scenario_run_probe_snapshots` (`run_id`,`vm_id`,`message_id`);
+CREATE INDEX IF NOT EXISTS `scenario_run_probe_snapshots_run_vm_idx` ON `scenario_run_probe_snapshots` (`run_id`,`vm_id`,`created_at`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_run_session_transcripts_session_uidx` ON `scenario_run_session_transcripts` (`run_id`,`vm_id`,`session_index`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_run_ssh_keys_run_vm_uidx` ON `scenario_run_ssh_keys` (`run_id`,`vm_id`);
+CREATE INDEX IF NOT EXISTS `scenario_run_ssh_keys_run_runtime_idx` ON `scenario_run_ssh_keys` (`run_id`,`runtime_vm_name`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_runs_active_key_uidx` ON `scenario_runs` (`active_key`);
+CREATE INDEX IF NOT EXISTS `scenario_runs_user_scenario_idx` ON `scenario_runs` (`user_id`,`scenario_id`,`created_at`);
+CREATE INDEX IF NOT EXISTS `scenario_runs_host_idx` ON `scenario_runs` (`host_id`,`created_at`);
+CREATE UNIQUE INDEX IF NOT EXISTS `scenario_sources_scenario_uidx` ON `scenario_sources` (`scenario_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `session_token_unique` ON `session` (`token`);
+CREATE INDEX IF NOT EXISTS `session_userId_idx` ON `session` (`user_id`);
+CREATE UNIQUE INDEX IF NOT EXISTS `team_invites_org_username_uidx` ON `team_invites` (`organization_id`,`github_username`);
+CREATE INDEX IF NOT EXISTS `team_invites_username_idx` ON `team_invites` (`github_username`,`status`);
+CREATE UNIQUE INDEX IF NOT EXISTS `user_email_unique` ON `user` (`email`);
+CREATE UNIQUE INDEX IF NOT EXISTS `user_username_unique` ON `user` (`username`);
+CREATE INDEX IF NOT EXISTS `user_ssh_keys_user_idx` ON `user_ssh_keys` (`user_id`,`created_at`);
+CREATE UNIQUE INDEX IF NOT EXISTS `user_ssh_keys_user_fingerprint_uidx` ON `user_ssh_keys` (`user_id`,`fingerprint_sha256`);
+CREATE INDEX IF NOT EXISTS `verification_identifier_idx` ON `verification` (`identifier`);
+CREATE UNIQUE INDEX IF NOT EXISTS `vm_scenario_probes_vm_ordinal_uidx` ON `vm_scenario_probes` (`scenario_vm_id`,`ordinal`);
+CREATE INDEX IF NOT EXISTS `vm_scenario_probes_scenario_idx` ON `vm_scenario_probes` (`scenario_id`,`scenario_vm_id`,`ordinal`);
+CREATE UNIQUE INDEX IF NOT EXISTS `vm_scenario_vms_scenario_ordinal_uidx` ON `vm_scenario_vms` (`scenario_id`,`ordinal`);
+CREATE UNIQUE INDEX IF NOT EXISTS `vm_scenario_vms_scenario_name_uidx` ON `vm_scenario_vms` (`scenario_id`,`vm_name`);
+CREATE INDEX IF NOT EXISTS `vm_scenario_vms_scenario_idx` ON `vm_scenario_vms` (`scenario_id`,`ordinal`);
+CREATE INDEX IF NOT EXISTS `vm_scenarios_enabled_idx` ON `vm_scenarios` (`enabled`,`enabled_at`);
+CREATE INDEX IF NOT EXISTS `image_build_coordination_locks_expiry_idx` ON `image_build_coordination_locks` (`expires_at`);
+CREATE INDEX IF NOT EXISTS `host_cpu_reservations_host_state_idx` ON `host_cpu_reservations` (`host_id`,`state`);
+CREATE INDEX IF NOT EXISTS `host_cpu_reservations_pending_expiry_idx` ON `host_cpu_reservations` (`state`,`expires_at`);
+CREATE TRIGGER IF NOT EXISTS `host_desired_running_vm_requires_active_run_insert`
+BEFORE INSERT ON `host_desired_state`
+WHEN EXISTS (
+	SELECT 1 FROM `agent_hosts`
+	WHERE `id` = NEW.`host_id` AND `scenario_enabled` = 0
+)
+	AND EXISTS (
+	SELECT 1
+	FROM json_each(NEW.`doc_json`, '$.vms') AS `desired_vm`
+	WHERE coalesce(json_extract(`desired_vm`.`value`, '$.desired_phase'), '') = 'running'
+		AND NOT EXISTS (
+			SELECT 1
+			FROM `scenario_runs`
+			WHERE `run_id` = coalesce(json_extract(`desired_vm`.`value`, '$.run_id'), '')
+				AND `host_id` = NEW.`host_id`
+				AND `active_key` IS NOT NULL
+				AND `completed_at` IS NULL
+				AND `failed_at` IS NULL
+		)
+)
+BEGIN
+	SELECT RAISE(ABORT, 'running desired VM requires an active run on the same host');
+END;
+CREATE TRIGGER IF NOT EXISTS `host_desired_running_vm_requires_active_run_update`
+BEFORE UPDATE OF `doc_json` ON `host_desired_state`
+WHEN EXISTS (
+	SELECT 1 FROM `agent_hosts`
+	WHERE `id` = NEW.`host_id` AND `scenario_enabled` = 0
+)
+	AND EXISTS (
+	SELECT 1
+	FROM json_each(NEW.`doc_json`, '$.vms') AS `desired_vm`
+	WHERE coalesce(json_extract(`desired_vm`.`value`, '$.desired_phase'), '') = 'running'
+		AND NOT EXISTS (
+			SELECT 1
+			FROM `scenario_runs`
+			WHERE `run_id` = coalesce(json_extract(`desired_vm`.`value`, '$.run_id'), '')
+				AND `host_id` = NEW.`host_id`
+				AND `active_key` IS NOT NULL
+				AND `completed_at` IS NULL
+				AND `failed_at` IS NULL
+		)
+)
+BEGIN
+	SELECT RAISE(ABORT, 'running desired VM requires an active run on the same host');
+END;

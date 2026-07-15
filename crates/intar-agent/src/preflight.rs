@@ -1061,7 +1061,6 @@ mod tests {
             reserved_cpu_millis: 1_000,
             schedulable_cpu_millis: 7_000,
             committed_cpu_millis: 125,
-            supports_jailer_v1: false,
             supports_jailer_v2: true,
             supports_template_backed_launch: true,
             fast_template_store: true,
