@@ -57,6 +57,26 @@ describe("scenario start route", () => {
     });
   });
 
+  it("forwards explicit benchmark admission only with an administrator-owned host pin", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true },
+    });
+
+    const response = await startRequest({
+      hostId: "agent-01",
+      admissionMode: "benchmark",
+    });
+
+    expect(response.status).toBe(202);
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
+      scenarioId: "pair-ping",
+      userId: "admin-1",
+      hostId: "agent-01",
+      admissionMode: "benchmark",
+    });
+  });
+
   it("rejects a host override from a non-admin user", async () => {
     const response = await startRequest({ hostId: "agent-01" });
 
@@ -81,6 +101,39 @@ describe("scenario start route", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
       error: "hostId must not be empty",
+    });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects benchmark admission without a pinned host", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true },
+    });
+
+    const response = await startRequest({ admissionMode: "benchmark" });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "benchmark admission requires hostId",
+    });
+    expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown admission modes", async () => {
+    agentBridgeMock.requireUserContext.mockResolvedValue({
+      ok: true,
+      context: { userId: "admin-1", isAdmin: true },
+    });
+
+    const response = await startRequest({
+      hostId: "agent-01",
+      admissionMode: "ordinary",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: 'admissionMode must be "benchmark"',
     });
     expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
   });

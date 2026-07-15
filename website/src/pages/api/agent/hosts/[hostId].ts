@@ -5,10 +5,17 @@ import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
   hostActualState,
+  hostBenchmarkLeases,
+  hostDesiredState,
   imageBuilds,
   scenarioRuns,
 } from "@/db/schema";
-import type { HostStateReportV2 } from "@/generated/bridge";
+import type {
+  DesiredBuildV1,
+  DesiredCachedImageV1,
+  DesiredVmV2,
+  HostStateReportV2,
+} from "@/generated/bridge";
 import {
   buildStoredBridgeStatus,
   jsonResponse,
@@ -28,6 +35,21 @@ interface HostActualStateSummary {
   capacity: HostStateReportV2["capacity"];
   capabilities: HostStateReportV2["capabilities"];
   cachedImages: HostStateReportV2["cached_images"];
+  vms: HostStateReportV2["vms"];
+  builds: HostStateReportV2["builds"];
+}
+
+interface HostDesiredStateSummary {
+  version: number;
+  cachedImages: DesiredCachedImageV1[];
+  vms: DesiredVmV2[];
+  builds: DesiredBuildV1[];
+}
+
+interface HostBenchmarkLeaseSummary {
+  runId: string;
+  acquiredAt: number;
+  updatedAt: number;
 }
 
 export const GET: APIRoute = async ({ request, params }) => {
@@ -46,7 +68,11 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "host not found" }, { status: 404 });
   }
 
-  const actualState = await loadHostActualStateSummary(host.id);
+  const [actualState, desiredState, benchmarkLease] = await Promise.all([
+    loadHostActualStateSummary(host.id),
+    loadHostDesiredStateSummary(host.id),
+    loadHostBenchmarkLeaseSummary(host.id),
+  ]);
   return jsonResponse({
     host: {
       id: host.id,
@@ -58,6 +84,8 @@ export const GET: APIRoute = async ({ request, params }) => {
       updatedAt: host.updated_at,
       inventory: parseInventory(host.inventory_json),
       actualState,
+      desiredState,
+      benchmarkLease,
       status: buildStoredBridgeStatus(host),
     },
   });
@@ -207,5 +235,45 @@ async function loadHostActualStateSummary(
     capacity: row.reportJson.capacity,
     capabilities: row.reportJson.capabilities,
     cachedImages: row.reportJson.cached_images,
+    vms: row.reportJson.vms,
+    builds: row.reportJson.builds,
   };
+}
+
+async function loadHostDesiredStateSummary(
+  hostId: string,
+): Promise<HostDesiredStateSummary | null> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      version: hostDesiredState.version,
+      docJson: hostDesiredState.docJson,
+    })
+    .from(hostDesiredState)
+    .where(eq(hostDesiredState.hostId, hostId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    version: row.version,
+    cachedImages: row.docJson.cached_images,
+    vms: row.docJson.vms,
+    builds: row.docJson.builds,
+  };
+}
+
+async function loadHostBenchmarkLeaseSummary(
+  hostId: string,
+): Promise<HostBenchmarkLeaseSummary | null> {
+  const db = drizzle(env.DB);
+  const rows = await db
+    .select({
+      runId: hostBenchmarkLeases.runId,
+      acquiredAt: hostBenchmarkLeases.acquiredAt,
+      updatedAt: hostBenchmarkLeases.updatedAt,
+    })
+    .from(hostBenchmarkLeases)
+    .where(eq(hostBenchmarkLeases.hostId, hostId))
+    .limit(1);
+  return rows[0] ?? null;
 }

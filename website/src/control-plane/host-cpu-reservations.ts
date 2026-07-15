@@ -1,11 +1,17 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import {
+  hostBenchmarkLeases,
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
   scenarioRuns,
 } from "@/db/schema";
+import {
+  RUN_PHASE_ORDER,
+  recomputeRunState,
+  type RunStateDocument,
+} from "@/lib/run-state";
 
 export const HOST_CPU_RESERVATION_TTL_MS = 60_000;
 export const HOST_BOOT_CPU_MILLIS_PER_VM = 2_000;
@@ -30,7 +36,11 @@ export type ReserveHostCpuResult =
     }
   | {
       ok: false;
-      reason: "host_not_ready" | "boot_capacity_pending" | "conflict";
+      reason:
+        | "host_not_ready"
+        | "boot_capacity_pending"
+        | "host_benchmark_leased"
+        | "conflict";
       capacity: HostCpuReservationCapacity | null;
     };
 
@@ -79,6 +89,18 @@ export async function reserveHostCpuInD1(
   ) {
     throw new Error("invalid boot CPU reservation contract");
   }
+  const [benchmarkLease] = await db
+    .select({ runId: hostBenchmarkLeases.runId })
+    .from(hostBenchmarkLeases)
+    .where(eq(hostBenchmarkLeases.hostId, input.hostId))
+    .limit(1);
+  if (benchmarkLease) {
+    return {
+      ok: false,
+      reason: "host_benchmark_leased",
+      capacity: null,
+    };
+  }
   await reconcileHostCpuReservations(db, input.hostId, input.nowUnixMs);
 
   const [existing] = await db
@@ -94,7 +116,7 @@ export async function reserveHostCpuInD1(
     ) {
       return { ok: false, reason: "conflict", capacity: null };
     }
-    const capacity = await loadReservationCapacity(db, input.hostId);
+    const capacity = await loadHostCpuReservationCapacity(db, input.hostId);
     if (!capacity) {
       return { ok: false, reason: "host_not_ready", capacity: null };
     }
@@ -106,7 +128,7 @@ export async function reserveHostCpuInD1(
     };
   }
 
-  const capacity = await loadReservationCapacity(db, input.hostId);
+  const capacity = await loadHostCpuReservationCapacity(db, input.hostId);
   if (!capacity) {
     return { ok: false, reason: "host_not_ready", capacity: null };
   }
@@ -144,7 +166,10 @@ export async function reserveHostCpuInD1(
     ) {
       return { ok: false, reason: "conflict", capacity: null };
     }
-    const racedCapacity = await loadReservationCapacity(db, input.hostId);
+    const racedCapacity = await loadHostCpuReservationCapacity(
+      db,
+      input.hostId,
+    );
     if (!racedCapacity) {
       return { ok: false, reason: "host_not_ready", capacity: null };
     }
@@ -246,6 +271,7 @@ export async function reconcileHostCpuReservations(
       failedAt: scenarioRuns.failedAt,
       vmCount: scenarioRuns.vmCount,
       stateJson: scenarioRuns.stateJson,
+      updatedAt: scenarioRuns.updatedAt,
     })
     .from(scenarioRuns)
     .where(
@@ -258,12 +284,32 @@ export async function reconcileHostCpuReservations(
   const committedRunIds: string[] = [];
   const expiredRunIds: string[] = [];
 
+  const loadDesiredState = async () => {
+    const [row] = await db
+      .select({
+        version: hostDesiredState.version,
+        docJson: hostDesiredState.docJson,
+      })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, hostId))
+      .limit(1);
+    return row;
+  };
+  let desiredRow = await loadDesiredState();
+
   for (const reservation of reservations) {
     if (reservation.state !== "pending") {
       continue;
     }
     const run = runById.get(reservation.runId);
-    if (run?.hostId === hostId) {
+    if (
+      run?.hostId === hostId &&
+      pendingRunHasDurableDesiredVms({
+        run,
+        reservation,
+        desired: desiredRow?.docJson,
+      })
+    ) {
       await commitHostCpuReservation(db, {
         hostId,
         runId: reservation.runId,
@@ -273,6 +319,29 @@ export async function reconcileHostCpuReservations(
       continue;
     }
     if (reservation.expiresAt !== null && reservation.expiresAt <= nowUnixMs) {
+      if (
+        run?.hostId === hostId &&
+        run.activeKey !== null &&
+        run.completedAt === null &&
+        run.failedAt === null
+      ) {
+        const disposition = await failExpiredUndispatchedRun(db, {
+          hostId,
+          runId: reservation.runId,
+          steadyCpuMillis: reservation.steadyCpuMillis,
+          nowUnixMs,
+        });
+        if (disposition === "durable") {
+          await commitHostCpuReservation(db, {
+            hostId,
+            runId: reservation.runId,
+            nowUnixMs,
+          });
+          committedRunIds.push(reservation.runId);
+          desiredRow = await loadDesiredState();
+          continue;
+        }
+      }
       await rollbackPendingHostCpuReservation(db, {
         hostId,
         runId: reservation.runId,
@@ -281,11 +350,7 @@ export async function reconcileHostCpuReservations(
     }
   }
 
-  const [desiredRow] = await db
-    .select({ docJson: hostDesiredState.docJson })
-    .from(hostDesiredState)
-    .where(eq(hostDesiredState.hostId, hostId))
-    .limit(1);
+  desiredRow = await loadDesiredState();
   const [actualRow] = await db
     .select({
       appliedDesiredVersion: hostActualState.appliedDesiredVersion,
@@ -406,6 +471,192 @@ export async function reconcileHostCpuReservations(
     sealedRunIds,
     bootAccountingRunIds,
   };
+}
+
+function pendingRunHasDurableDesiredVms(input: {
+  run: { runId: string; vmCount: number; stateJson: string };
+  reservation: { steadyCpuMillis: number };
+  desired: typeof hostDesiredState.$inferSelect.docJson | undefined;
+}): boolean {
+  if (!input.desired || input.run.vmCount <= 0) {
+    return false;
+  }
+  let projected: unknown;
+  try {
+    projected = JSON.parse(input.run.stateJson) as unknown;
+  } catch {
+    return false;
+  }
+  if (!isRecord(projected) || !Array.isArray(projected.vms)) {
+    return false;
+  }
+  const projectedNames = new Set<string>();
+  for (const vm of projected.vms) {
+    if (!isRecord(vm)) return false;
+    const vmName = readNonEmptyString(vm.runtimeVmName);
+    if (!vmName || projectedNames.has(vmName)) return false;
+    projectedNames.add(vmName);
+  }
+  if (projectedNames.size !== input.run.vmCount) {
+    return false;
+  }
+
+  const desiredVms = input.desired.vms.filter(
+    (vm) => vm.run_id === input.run.runId && vm.desired_phase === "running",
+  );
+  if (desiredVms.length !== input.run.vmCount) {
+    return false;
+  }
+  let steadyCpuMillis = 0;
+  const desiredNames = new Set<string>();
+  for (const vm of desiredVms) {
+    if (
+      !projectedNames.has(vm.vm_name) ||
+      desiredNames.has(vm.vm_name) ||
+      !Number.isSafeInteger(vm.resources.cpu_millis) ||
+      vm.resources.cpu_millis <= 0
+    ) {
+      return false;
+    }
+    desiredNames.add(vm.vm_name);
+    steadyCpuMillis += vm.resources.cpu_millis;
+    if (!Number.isSafeInteger(steadyCpuMillis)) return false;
+  }
+  return steadyCpuMillis === input.reservation.steadyCpuMillis;
+}
+
+async function failExpiredUndispatchedRun(
+  db: DrizzleD1Database,
+  input: {
+    hostId: string;
+    runId: string;
+    steadyCpuMillis: number;
+    nowUnixMs: number;
+  },
+): Promise<"failed" | "terminal" | "durable"> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const [run] = await db
+      .select({
+        runId: scenarioRuns.runId,
+        hostId: scenarioRuns.hostId,
+        activeKey: scenarioRuns.activeKey,
+        completedAt: scenarioRuns.completedAt,
+        failedAt: scenarioRuns.failedAt,
+        vmCount: scenarioRuns.vmCount,
+        stateJson: scenarioRuns.stateJson,
+        updatedAt: scenarioRuns.updatedAt,
+      })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, input.runId))
+      .limit(1);
+    if (
+      !run ||
+      run.hostId !== input.hostId ||
+      run.activeKey === null ||
+      run.completedAt !== null ||
+      run.failedAt !== null
+    ) {
+      return "terminal";
+    }
+    const [desiredRow] = await db
+      .select({
+        version: hostDesiredState.version,
+        docJson: hostDesiredState.docJson,
+      })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, input.hostId))
+      .limit(1);
+    if (
+      pendingRunHasDurableDesiredVms({
+        run,
+        reservation: { steadyCpuMillis: input.steadyCpuMillis },
+        desired: desiredRow?.docJson,
+      })
+    ) {
+      return "durable";
+    }
+
+    const reason =
+      "Boot admission expired before durable desired-state dispatch completed.";
+    const failedStateJson = failedUndispatchedRunStateJson(
+      run.stateJson,
+      reason,
+      input.nowUnixMs,
+    );
+    const desiredVersionFence = desiredRow
+      ? exists(
+          db
+            .select({ hostId: hostDesiredState.hostId })
+            .from(hostDesiredState)
+            .where(
+              and(
+                eq(hostDesiredState.hostId, input.hostId),
+                eq(hostDesiredState.version, desiredRow.version),
+              ),
+            ),
+        )
+      : undefined;
+    const updatedAt = Math.max(input.nowUnixMs, run.updatedAt + 1);
+    const updated = await db
+      .update(scenarioRuns)
+      .set({
+        state: "failed",
+        stateRank: RUN_PHASE_ORDER.failed,
+        stateJson: failedStateJson,
+        activeKey: null,
+        failedAt: updatedAt,
+        updatedAt,
+      })
+      .where(
+        and(
+          eq(scenarioRuns.runId, input.runId),
+          eq(scenarioRuns.hostId, input.hostId),
+          eq(scenarioRuns.updatedAt, run.updatedAt),
+          isNull(scenarioRuns.completedAt),
+          isNull(scenarioRuns.failedAt),
+          desiredVersionFence,
+        ),
+      )
+      .returning({ runId: scenarioRuns.runId });
+    if (updated.length > 0) {
+      return "failed";
+    }
+  }
+  throw new Error(
+    `expired undispatched run ${input.runId} could not be fenced for recovery`,
+  );
+}
+
+function failedUndispatchedRunStateJson(
+  stateJson: string,
+  reason: string,
+  nowUnixMs: number,
+): string {
+  try {
+    const current = JSON.parse(stateJson) as RunStateDocument;
+    if (!current || !Array.isArray(current.vms)) return stateJson;
+    const failed = recomputeRunState({
+      ...current,
+      phase: "failed",
+      phaseDetail: reason,
+      vms: current.vms.map((vm) => ({
+        ...vm,
+        phase: "failed",
+        phaseDetail: reason,
+        terminalPhase: "failed",
+        terminalReason: reason,
+        terminalObservedAt: nowUnixMs,
+        provisioning: {
+          ...vm.provisioning,
+          status: "failed",
+          error: reason,
+        },
+      })),
+    });
+    return JSON.stringify(failed);
+  } catch {
+    return stateJson;
+  }
 }
 
 function hasGenerationFencedSteadyQuotaEvidence(input: {
@@ -544,7 +795,7 @@ export async function nextPendingHostCpuReservationExpiry(
   );
 }
 
-async function loadReservationCapacity(
+export async function loadHostCpuReservationCapacity(
   db: DrizzleD1Database,
   hostId: string,
 ): Promise<HostCpuReservationCapacity | null> {

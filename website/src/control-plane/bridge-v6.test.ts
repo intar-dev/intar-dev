@@ -75,6 +75,27 @@ describe("bridge v6 protocol", () => {
     ).toBe("build_report");
   });
 
+  it("retains unattributed VMs in authoritative host state reports", () => {
+    const hostReport = readFixture<HostStateReportV2>(
+      "host-state-report-v2.json",
+    );
+    hostReport.vms[0]!.run_id = "";
+
+    const parsed = parseBridgeMessageV6(
+      JSON.stringify({
+        type: "state_report",
+        protocol_version: 6,
+        host_id: hostReport.host_id,
+        report: hostReport,
+      }),
+    );
+
+    expect(parsed?.type).toBe("state_report");
+    expect(
+      parsed?.type === "state_report" ? parsed.report.vms[0]?.run_id : null,
+    ).toBe("");
+  });
+
   it("parses client hello only with valid host capabilities", () => {
     const clientHello = {
       type: "client_hello",

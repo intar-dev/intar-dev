@@ -7,6 +7,7 @@ import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
   hostActualState,
+  hostDesiredState,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
@@ -24,6 +25,7 @@ import {
 } from "@/lib/desired-state-store";
 import { hostHealth } from "@/lib/host-health";
 import {
+  acquireBenchmarkHostLeaseAndReserveCpu,
   commitHostCpu,
   reserveHostCpu,
   rollbackHostCpu,
@@ -80,6 +82,7 @@ import {
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 import {
   isAvailableScenarioLaunchHost,
+  isFreshHostHeartbeat,
   isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
 import {
@@ -460,6 +463,7 @@ export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
   hostId?: string;
+  admissionMode?: "benchmark";
 }): Promise<{
   accepted: true;
   runId: string;
@@ -793,6 +797,7 @@ async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
   hostId?: string;
+  admissionMode?: "benchmark";
 }): Promise<{
   accepted: true;
   runId: string;
@@ -800,6 +805,13 @@ async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
+  if (params.admissionMode === "benchmark" && !params.hostId) {
+    throw appError(
+      400,
+      "benchmark_host_required",
+      "benchmark admission requires an explicit host",
+    );
+  }
   const [scenario] = await loadEnabledScenarioRows(params.scenarioId);
   if (!scenario) {
     throw appError(404, "scenario_not_found", "scenario not found");
@@ -807,6 +819,13 @@ async function startScenarioRunInternal(params: {
 
   const active = await loadActiveRunRow(params.userId);
   if (active) {
+    if (params.admissionMode === "benchmark") {
+      throw appError(
+        409,
+        "benchmark_host_not_drained",
+        "benchmark admission requires the caller to have no active scenario run",
+      );
+    }
     if (active.scenarioId === scenario.scenarioId) {
       if (params.hostId && active.hostId !== params.hostId) {
         throw appError(
@@ -923,22 +942,53 @@ async function startScenarioRunInternal(params: {
       params.hostId,
       params.userId,
       requiredImages,
+      params.admissionMode,
     );
-    const reservation = await reserveScenarioBootCpuWithJitter({
-      hostIds: [params.hostId],
-      runId,
-      steadyCpuMillisByVm,
-    });
-    if (!reservation.ok) {
-      throw reservation.reason === "boot_capacity_pending"
-        ? bootCapacityPendingError()
-        : appError(
+    if (params.admissionMode === "benchmark") {
+      const reservation = await acquireBenchmarkBootCpuWithJitter({
+        hostId: params.hostId,
+        runId,
+        userId: params.userId,
+        steadyCpuMillisByVm,
+      });
+      if (!reservation.ok) {
+        if (reservation.reason === "boot_capacity_pending") {
+          throw bootCapacityPendingError();
+        }
+        if (
+          reservation.reason === "benchmark_host_not_drained" ||
+          reservation.reason === "host_benchmark_leased"
+        ) {
+          throw appError(
             409,
-            "scenario_host_unavailable",
-            "host cannot provide strict CPU isolation",
+            "benchmark_host_not_drained",
+            "benchmark host is not exclusively drained",
           );
+        }
+        throw appError(
+          409,
+          "scenario_host_unavailable",
+          "host cannot provide strict CPU isolation",
+        );
+      }
+      hostId = params.hostId;
+    } else {
+      const reservation = await reserveScenarioBootCpuWithJitter({
+        hostIds: [params.hostId],
+        runId,
+        steadyCpuMillisByVm,
+      });
+      if (!reservation.ok) {
+        throw reservation.reason === "boot_capacity_pending"
+          ? bootCapacityPendingError()
+          : appError(
+              409,
+              "scenario_host_unavailable",
+              "host cannot provide strict CPU isolation",
+            );
+      }
+      hostId = reservation.hostId;
     }
-    hostId = reservation.hostId;
   } else {
     const selection = await selectScenarioHosts(requiredImages);
     if (!selection.ok) {
@@ -1027,6 +1077,13 @@ async function startScenarioRunInternal(params: {
     ]);
     await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId));
     await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
+    if (params.admissionMode === "benchmark") {
+      // If desired state was already mutated, a fresh applied-empty report is
+      // the only authority that may release the fail-closed benchmark lease.
+      // Direct dispatch advances that recovery fence; the HostRuntime alarm is
+      // the durable fallback if the agent is temporarily disconnected.
+      await Promise.allSettled([tryWakeHostRuntime(hostId)]);
+    }
     // Two concurrent starts race past the pre-check; the unique index on
     // active_key rejects the loser.
     if (isActiveKeyUniqueViolation(error)) {
@@ -1050,6 +1107,7 @@ async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
+  admissionMode?: "benchmark",
 ): Promise<void> {
   const now = Date.now();
   const db = drizzle(env.DB);
@@ -1060,10 +1118,14 @@ async function assertScenarioLaunchHostForUser(
       scenarioEnabled: agentHosts.scenarioEnabled,
       connected: agentHosts.connected,
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
+      desiredVersion: hostDesiredState.version,
+      desiredState: hostDesiredState.docJson,
+      appliedDesiredVersion: hostActualState.appliedDesiredVersion,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
     })
     .from(agentHosts)
+    .leftJoin(hostDesiredState, eq(hostDesiredState.hostId, agentHosts.id))
     .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
     .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
     .limit(1);
@@ -1074,7 +1136,23 @@ async function assertScenarioLaunchHostForUser(
   if (host.disabled) {
     throw appError(403, "scenario_host_disabled", "host is disabled");
   }
+  const benchmarkAdmission = admissionMode === "benchmark";
+  if (host.role !== "agent") {
+    throw appError(
+      403,
+      "scenario_host_not_launchable",
+      "host cannot run scenarios",
+    );
+  }
+  if (benchmarkAdmission && host.scenarioEnabled) {
+    throw appError(
+      409,
+      "benchmark_host_not_drained",
+      "benchmark admission requires scenario scheduling to be disabled on the host",
+    );
+  }
   if (
+    !benchmarkAdmission &&
     !isScenarioLaunchHost({
       role: host.role,
       disabled: host.disabled,
@@ -1088,20 +1166,32 @@ async function assertScenarioLaunchHostForUser(
     );
   }
   if (
-    !isAvailableScenarioLaunchHost(
-      {
-        role: host.role,
-        disabled: host.disabled,
-        scenarioEnabled: host.scenarioEnabled,
-        connected: host.connected,
-        lastHeartbeatAt: host.lastHeartbeatAt,
-      },
-      now,
-      HOST_HEARTBEAT_TTL_MS,
-    ) ||
+    !host.connected ||
+    !isFreshHostHeartbeat(host.lastHeartbeatAt, now, HOST_HEARTBEAT_TTL_MS) ||
     hostHealth(host.actualReportedAt ?? null, now) !== "healthy"
   ) {
     throw appError(409, "scenario_host_unavailable", "host is not connected");
+  }
+  if (benchmarkAdmission && (host.actualReport?.vms.length ?? 0) !== 0) {
+    throw appError(
+      409,
+      "benchmark_host_not_drained",
+      "benchmark admission requires an empty host actual-state VM inventory",
+    );
+  }
+  if (
+    benchmarkAdmission &&
+    (host.desiredVersion === null ||
+      host.desiredState === null ||
+      host.appliedDesiredVersion === null ||
+      host.appliedDesiredVersion < host.desiredVersion ||
+      host.desiredState.vms.some((vm) => vm.desired_phase === "running"))
+  ) {
+    throw appError(
+      409,
+      "benchmark_host_not_drained",
+      "benchmark admission requires an empty, fully applied host desired state",
+    );
   }
   if (!hostHasImagesReady(host.actualReport, requiredImages)) {
     throw appError(
@@ -1396,6 +1486,41 @@ const BOOT_CAPACITY_RESERVATION_ATTEMPTS = 4;
 const BOOT_CAPACITY_RETRY_MIN_MS = 15;
 const BOOT_CAPACITY_RETRY_JITTER_MS = 30;
 
+async function acquireBenchmarkBootCpuWithJitter(input: {
+  hostId: string;
+  runId: string;
+  userId: string;
+  steadyCpuMillisByVm: readonly number[];
+}): Promise<
+  | { ok: true }
+  | {
+      ok: false;
+      reason:
+        | "host_not_ready"
+        | "benchmark_host_not_drained"
+        | "host_benchmark_leased"
+        | "boot_capacity_pending"
+        | "conflict";
+    }
+> {
+  for (
+    let attempt = 0;
+    attempt < BOOT_CAPACITY_RESERVATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const result = await acquireBenchmarkHostLeaseAndReserveCpu(input);
+    if (result.ok) return { ok: true };
+    if (
+      result.reason !== "boot_capacity_pending" ||
+      attempt === BOOT_CAPACITY_RESERVATION_ATTEMPTS - 1
+    ) {
+      return { ok: false, reason: result.reason };
+    }
+    await bootCapacityRetryJitter();
+  }
+  return { ok: false, reason: "boot_capacity_pending" };
+}
+
 async function reserveScenarioBootCpuWithJitter(input: {
   hostIds: readonly string[];
   runId: string;
@@ -1433,12 +1558,7 @@ async function reserveScenarioBootCpuWithJitter(input: {
     ) {
       break;
     }
-    await new Promise<void>((resolve) => {
-      const jitterMs =
-        BOOT_CAPACITY_RETRY_MIN_MS +
-        Math.floor(Math.random() * (BOOT_CAPACITY_RETRY_JITTER_MS + 1));
-      setTimeout(resolve, jitterMs);
-    });
+    await bootCapacityRetryJitter();
   }
   return {
     ok: false,
@@ -1446,6 +1566,15 @@ async function reserveScenarioBootCpuWithJitter(input: {
       ? "boot_capacity_pending"
       : "host_unavailable",
   };
+}
+
+async function bootCapacityRetryJitter(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const jitterMs =
+      BOOT_CAPACITY_RETRY_MIN_MS +
+      Math.floor(Math.random() * (BOOT_CAPACITY_RETRY_JITTER_MS + 1));
+    setTimeout(resolve, jitterMs);
+  });
 }
 
 function bootCapacityPendingError() {

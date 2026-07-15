@@ -8,6 +8,7 @@ export const prerender = false;
 
 interface StartScenarioBody {
   hostId?: unknown;
+  admissionMode?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params }) => {
@@ -23,6 +24,7 @@ export const POST: APIRoute = async ({ request, params }) => {
   }
 
   let hostId: string | undefined;
+  let admissionMode: "benchmark" | undefined;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -42,7 +44,19 @@ export const POST: APIRoute = async ({ request, params }) => {
     }
     const body = parsedBody as StartScenarioBody;
     if (body.hostId !== undefined && typeof body.hostId !== "string") {
-      return jsonResponse({ error: "hostId must be a string" }, { status: 400 });
+      return jsonResponse(
+        { error: "hostId must be a string" },
+        { status: 400 },
+      );
+    }
+    if (
+      body.admissionMode !== undefined &&
+      body.admissionMode !== "benchmark"
+    ) {
+      return jsonResponse(
+        { error: 'admissionMode must be "benchmark"' },
+        { status: 400 },
+      );
     }
     hostId = typeof body.hostId === "string" ? body.hostId.trim() : undefined;
     if (body.hostId !== undefined && !hostId) {
@@ -51,7 +65,15 @@ export const POST: APIRoute = async ({ request, params }) => {
         { status: 400 },
       );
     }
-    if (hostId && !authz.context.isAdmin) {
+    admissionMode =
+      body.admissionMode === "benchmark" ? "benchmark" : undefined;
+    if (admissionMode && !hostId) {
+      return jsonResponse(
+        { error: "benchmark admission requires hostId" },
+        { status: 400 },
+      );
+    }
+    if ((hostId || admissionMode) && !authz.context.isAdmin) {
       return jsonResponse({ error: "admin required" }, { status: 403 });
     }
   }
@@ -61,13 +83,11 @@ export const POST: APIRoute = async ({ request, params }) => {
       scenarioId,
       userId: authz.context.userId,
       ...(hostId ? { hostId } : {}),
+      ...(admissionMode ? { admissionMode } : {}),
     });
     return jsonResponse(result, { status: 202 });
   } catch (error) {
-    const { status, body } = toErrorResponse(
-      error,
-      "failed to start scenario",
-    );
+    const { status, body } = toErrorResponse(error, "failed to start scenario");
     return jsonResponse(body, { status });
   }
 };

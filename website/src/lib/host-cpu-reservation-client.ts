@@ -1,4 +1,8 @@
 import { env } from "cloudflare:workers";
+import type {
+  AcquireHostBenchmarkLeaseResult,
+  ReleaseHostBenchmarkLeaseResult,
+} from "@/control-plane/host-benchmark-leases";
 import type { HostCpuReservationCapacity } from "@/control-plane/host-cpu-reservations";
 
 const HOST_CPU_RESERVATION_TIMEOUT_MS = 10_000;
@@ -12,9 +16,42 @@ export type HostCpuReservationResult =
     }
   | {
       ok: false;
-      reason: "host_not_ready" | "boot_capacity_pending" | "conflict";
+      reason:
+        | "host_not_ready"
+        | "boot_capacity_pending"
+        | "host_benchmark_leased"
+        | "conflict";
       capacity: HostCpuReservationCapacity | null;
     };
+
+export type BenchmarkHostLeaseAcquisitionResult =
+  AcquireHostBenchmarkLeaseResult;
+export type BenchmarkHostLeaseReleaseResult = ReleaseHostBenchmarkLeaseResult;
+
+export async function acquireBenchmarkHostLeaseAndReserveCpu(input: {
+  hostId: string;
+  runId: string;
+  userId: string;
+  steadyCpuMillisByVm: readonly number[];
+}): Promise<BenchmarkHostLeaseAcquisitionResult> {
+  return reservationRequest<BenchmarkHostLeaseAcquisitionResult>(
+    input.hostId,
+    "benchmark-acquire",
+    input,
+  );
+}
+
+export async function releaseBenchmarkHostLease(input: {
+  hostId: string;
+  runId: string;
+  userId: string;
+}): Promise<BenchmarkHostLeaseReleaseResult> {
+  return reservationRequest<BenchmarkHostLeaseReleaseResult>(
+    input.hostId,
+    "benchmark-release",
+    input,
+  );
+}
 
 export async function reserveHostCpu(input: {
   hostId: string;
@@ -51,7 +88,12 @@ export async function rollbackHostCpu(input: {
 
 async function reservationRequest<T>(
   hostId: string,
-  operation: "reserve" | "commit" | "rollback",
+  operation:
+    | "reserve"
+    | "commit"
+    | "rollback"
+    | "benchmark-acquire"
+    | "benchmark-release",
   body: Record<string, unknown>,
 ): Promise<T> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));

@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast};
+use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
@@ -593,7 +593,13 @@ struct Inner {
     probe_updates_tx: broadcast::Sender<ProbeUpdateEnvelope>,
     terminal_tasks: Mutex<BTreeMap<String, VmTerminalTask>>,
     terminal_state_fingerprints: Mutex<BTreeMap<String, String>>,
+    terminal_states: RwLock<BTreeMap<String, VmTerminalState>>,
     terminal_updates_tx: broadcast::Sender<VmTerminalState>,
+    /// Monotonic, coalescing notification for changes that must be reflected
+    /// in the host's actual VM inventory. The bridge owns the receiver and
+    /// publishes a fresh state report immediately instead of waiting for the
+    /// periodic repair/report loop.
+    inventory_updates_tx: watch::Sender<u64>,
     kino_vsock_cid_lock: Mutex<()>,
     create_sem: Arc<Semaphore>,
     delete_requests: Mutex<BTreeSet<String>>,
@@ -619,6 +625,7 @@ impl VmManager {
         let (kino_readiness_tx, _) = broadcast::channel(256);
         let (probe_updates_tx, _) = broadcast::channel(256);
         let (terminal_updates_tx, _) = broadcast::channel(256);
+        let (inventory_updates_tx, _) = watch::channel(0);
         let inner = Inner {
             ch_spawn_timeout_seconds: cfg.cloud_hypervisor.spawn_timeout_seconds,
             jailer_socket: cfg.jailer.socket.clone(),
@@ -636,7 +643,9 @@ impl VmManager {
             probe_updates_tx,
             terminal_tasks: Mutex::new(BTreeMap::new()),
             terminal_state_fingerprints: Mutex::new(BTreeMap::new()),
+            terminal_states: RwLock::new(BTreeMap::new()),
             terminal_updates_tx,
+            inventory_updates_tx,
             kino_vsock_cid_lock: Mutex::new(()),
             create_sem: Arc::new(Semaphore::new(8)),
             delete_requests: Mutex::new(BTreeSet::new()),
@@ -663,8 +672,51 @@ impl VmManager {
         self.inner.terminal_updates_tx.subscribe()
     }
 
-    pub async fn terminal_state(&self, vm_name: &str) -> Result<Option<VmTerminalState>> {
-        current_terminal_state_for_vm(&self.inner, vm_name, None).await
+    /// Subscribe to coalesced VM inventory mutations.
+    ///
+    /// A watch channel is intentional here: a burst of adjacent boot phases
+    /// needs one fresh host snapshot, while an update that arrives during that
+    /// snapshot must remain observable for the next send.
+    pub fn subscribe_inventory_updates(&self) -> watch::Receiver<u64> {
+        self.inner.inventory_updates_tx.subscribe()
+    }
+
+    /// Project terminal state from the generation-fenced inventory without a
+    /// fresh guest TCP probe.
+    ///
+    /// `Running` is committed only after quota sealing, DNAT activation, SSH
+    /// host-key authentication, and the Kino snapshot are durable, so it is a
+    /// safe authority for every bridge report. Live TCP checks are performed
+    /// only by the terminal worker, which starts after secure finalization.
+    pub async fn committed_terminal_state(&self, vm_name: &str) -> Option<VmTerminalState> {
+        let vm = {
+            let states = self.inner.states.read().await;
+            states.get(vm_name).cloned()
+        }?;
+        if vm.state == VmLifecycleState::Running {
+            let run_id = vm
+                .details
+                .as_ref()
+                .and_then(|details| details.run_id.as_deref());
+            let generation = vm
+                .details
+                .as_ref()
+                .and_then(|details| details.jail_generation.as_deref());
+            let cached = {
+                let terminal_states = self.inner.terminal_states.read().await;
+                terminal_states.get(vm_name).cloned()
+            };
+            if cached
+                .as_ref()
+                .is_some_and(|state| terminal_state_matches_inventory(state, run_id, generation))
+            {
+                return cached;
+            }
+        }
+        // A persisted Running row is not terminal-ready authority after an
+        // agent restart. Until fresh readiness emits a generation-matched
+        // terminal event, fail closed to Pending without probing the guest.
+        terminal_state_from_vm(&vm, &self.inner.ssh_access, false, now_unix_ms())
     }
 
     /// Publicly routable address for this host's per-VM SSH forwards, from
@@ -744,40 +796,6 @@ impl VmManager {
             kept_inconclusive,
             "reconciled tracked vm state on startup"
         );
-
-        Ok(())
-    }
-
-    pub async fn restore_probe_workers(&self) -> Result<()> {
-        let running_vms = {
-            let states = self.inner.states.read().await;
-            states
-                .values()
-                .filter(|vm| vm.state == VmLifecycleState::Running)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-
-        for vm in running_vms {
-            let Some(details) = vm.details.as_ref() else {
-                warn!(vm = vm.name, "skipping probe restore; vm has no details");
-                continue;
-            };
-            let Some(_) = details.kino_vsock_path.as_ref() else {
-                warn!(
-                    vm = vm.name,
-                    "skipping probe restore; missing kino_vsock_path"
-                );
-                continue;
-            };
-
-            if let Err(e) = start_probe_worker(&self.inner, &vm.name, details).await {
-                warn!(error = %e, vm = vm.name, "failed to restore probe worker");
-            }
-            if let Err(e) = start_terminal_worker(&self.inner, &vm.name).await {
-                warn!(error = %e, vm = vm.name, "failed to restore terminal worker");
-            }
-        }
 
         Ok(())
     }
@@ -1116,6 +1134,7 @@ impl VmManager {
                 None => format!("failed to persist queued VM before launch: {error:#}"),
             }));
         }
+        publish_inventory_update(&self.inner);
         drop(cid_guard);
 
         let staging_result = async {
@@ -2161,6 +2180,8 @@ async fn commit_ready_vm_and_probe(
         .await
         .context("atomically persist running VM and Kino snapshot")?;
     *current = committed;
+    drop(states);
+    publish_inventory_update(inner);
     Ok(())
 }
 
@@ -2232,7 +2253,9 @@ async fn persist_cpu_runtime(
         .db
         .upsert_vm(persisted.to_db_row())
         .await
-        .context("persist finalized VM CPU runtime")
+        .context("persist finalized VM CPU runtime")?;
+    publish_inventory_update(inner);
+    Ok(())
 }
 
 async fn seal_ready_vm_cpu(
@@ -2344,7 +2367,9 @@ async fn persist_jail_launch(
         .db
         .upsert_vm(persisted.to_db_row())
         .await
-        .context("persist jailed VM runtime identity")
+        .context("persist jailed VM runtime identity")?;
+    publish_inventory_update(inner);
+    Ok(())
 }
 
 async fn remove_agent_launch_sources(req: &RunCreateInput<'_>) -> Result<()> {
@@ -2438,6 +2463,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
                 "failed to persist vm cached image identity"
             );
         }
+        publish_inventory_update(inner);
     }
     ensure_create_not_deleted(inner, req.name).await?;
     set_state(inner, req.name, VmLifecycleState::PreparingDisks).await;
@@ -3348,6 +3374,7 @@ async fn detect_tracked_vm_runtime(
             details.cpu_runtime = Some(cpu_runtime);
         }
     }
+    publish_inventory_update(inner);
 
     match inspection.health {
         SandboxHealth::Exited => return Ok(TrackedVmRuntimeStatus::Dead),
@@ -4343,8 +4370,14 @@ async fn rollback_persisted_queued_vm(
 }
 
 async fn remove_matching_tracked_vm_state(inner: &Inner, expected: &VmStatusResponse) -> bool {
-    let mut states = inner.states.write().await;
-    remove_matching_vm_state(&mut states, expected)
+    let removed = {
+        let mut states = inner.states.write().await;
+        remove_matching_vm_state(&mut states, expected)
+    };
+    if removed {
+        publish_inventory_update(inner);
+    }
+    removed
 }
 
 fn remove_matching_vm_state(
@@ -4444,6 +4477,10 @@ async fn local_cleanup_tracked_vm(
     {
         let mut fingerprints = inner.terminal_state_fingerprints.lock().await;
         fingerprints.remove(&vm.name);
+    }
+    {
+        let mut terminal_states = inner.terminal_states.write().await;
+        terminal_states.remove(&vm.name);
     }
 
     info!(vm = vm.name, "cleaned up tracked vm");
@@ -5192,6 +5229,10 @@ async fn publish_terminal_state_update(inner: &Inner, vm_name: &str, force: bool
 
 async fn emit_terminal_state_update(inner: &Inner, state: VmTerminalState, force: bool) {
     let fingerprint = state.fingerprint();
+    {
+        let mut terminal_states = inner.terminal_states.write().await;
+        terminal_states.insert(state.vm_name.clone(), state.clone());
+    }
     let should_send = {
         let mut fingerprints = inner.terminal_state_fingerprints.lock().await;
         let changed = fingerprints
@@ -5208,6 +5249,7 @@ async fn emit_terminal_state_update(inner: &Inner, state: VmTerminalState, force
 
     if should_send {
         let _ = inner.terminal_updates_tx.send(state);
+        publish_inventory_update(inner);
     }
 }
 
@@ -5958,6 +6000,25 @@ fn runtime_constraints_from_details(details: &VmDetails) -> Option<VmRuntimeCons
     })
 }
 
+fn terminal_state_matches_inventory(
+    state: &VmTerminalState,
+    run_id: Option<&str>,
+    generation: Option<&str>,
+) -> bool {
+    let Some(run_id) = run_id else {
+        return false;
+    };
+    let Some(generation) = generation else {
+        return false;
+    };
+    state.run_id == run_id
+        && state
+            .runtime_constraints
+            .as_ref()
+            .map(|constraints| constraints.generation.as_str())
+            == Some(generation)
+}
+
 async fn ssh_terminal_target_ready(vm: &VmStatusResponse) -> bool {
     if !matches!(vm.state, VmLifecycleState::Running) {
         return false;
@@ -6529,6 +6590,16 @@ fn next_lease_expiry_error_log_state(
     }
 }
 
+fn publish_inventory_update(inner: &Inner) {
+    advance_inventory_revision(&inner.inventory_updates_tx);
+}
+
+fn advance_inventory_revision(updates: &watch::Sender<u64>) {
+    updates.send_modify(|revision| {
+        *revision = revision.wrapping_add(1);
+    });
+}
+
 async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState) {
     debug_assert_ne!(
         state,
@@ -6559,6 +6630,7 @@ async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState) {
     if let Err(e) = inner.db.upsert_vm(persisted.to_db_row()).await {
         error!(error = %e, vm = persisted.name, "failed to persist vm status");
     }
+    publish_inventory_update(inner);
     if matches!(
         state,
         VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts
@@ -6589,6 +6661,7 @@ async fn mark_vm_failed(inner: &Inner, name: &str, message: String) {
     if let Err(e) = inner.db.upsert_vm(persisted.to_db_row()).await {
         error!(error = %e, vm = persisted.name, "failed to persist vm status");
     }
+    publish_inventory_update(inner);
     stop_terminal_worker(inner, name).await;
     publish_terminal_state_update(inner, name, false).await;
 }
@@ -6615,6 +6688,7 @@ async fn mark_vm_delete_failed(inner: &Inner, name: &str, message: String) {
     if let Err(e) = inner.db.upsert_vm(persisted.to_db_row()).await {
         error!(error = %e, vm = persisted.name, "failed to persist vm upload failure");
     }
+    publish_inventory_update(inner);
     stop_terminal_worker(inner, name).await;
     publish_terminal_state_update(inner, name, false).await;
 }
@@ -7819,6 +7893,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inventory_revision_is_immediate_and_coalesces_bursts() {
+        let (updates, mut receiver) = watch::channel(0_u64);
+
+        advance_inventory_revision(&updates);
+        advance_inventory_revision(&updates);
+
+        timeout(Duration::from_millis(250), receiver.changed())
+            .await
+            .expect("inventory update must be observable inside the freshness budget")
+            .expect("inventory update channel stays open");
+        assert_eq!(*receiver.borrow(), 2, "adjacent mutations are coalesced");
+
+        advance_inventory_revision(&updates);
+        timeout(Duration::from_millis(250), receiver.changed())
+            .await
+            .expect("a mutation after the observed snapshot must remain pending")
+            .expect("inventory update channel stays open");
+        assert_eq!(*receiver.borrow(), 3);
+    }
+
+    #[tokio::test]
     async fn staging_rollback_removes_only_the_reserved_vm_paths() {
         let temp = tempdir().expect("temp dir");
         let vm_dir = temp.path().join("vms").join("vm-1");
@@ -8575,6 +8670,57 @@ mod tests {
                 checked_at: 1234,
             })
         );
+        assert!(terminal_state_matches_inventory(
+            &state,
+            Some("run-1"),
+            Some("generation-1")
+        ));
+        assert!(!terminal_state_matches_inventory(
+            &state,
+            Some("run-1"),
+            Some("generation-2")
+        ));
+        assert!(!terminal_state_matches_inventory(
+            &state,
+            Some("run-replaced"),
+            Some("generation-1")
+        ));
+        assert!(!terminal_state_matches_inventory(
+            &state,
+            Some("run-1"),
+            None
+        ));
+    }
+
+    #[test]
+    fn recovered_running_vm_stays_pending_without_fresh_terminal_event() {
+        let mut vm = test_vm_status("vm-recovered", Some("run-1"));
+        vm.state = VmLifecycleState::Running;
+        let quota = CpuQuota::from_millis(1_000).expect("quota");
+        let details = vm.details.as_mut().expect("details");
+        details.ssh_public_port = Some(2222);
+        details.jail_generation = Some("generation-1".to_string());
+        details.cpu_runtime = Some(VmCpuRuntimeState {
+            phase: VmCpuPhase::Steady,
+            steady_quota: quota,
+            effective_quota: quota,
+            boot_deadline_unix_ms: None,
+            attestation: Some(CpuQuotaAttestation {
+                quota,
+                cpu_max: quota.cpu_max(),
+                cpu_max_burst: 0,
+                verified_at_unix_ms: 1_200,
+            }),
+        });
+
+        // committed_terminal_state deliberately takes this no-probe path when
+        // the process-local generation cache is empty after restart.
+        let state = terminal_state_from_vm(&vm, &test_ssh_access_config(), false, 1234)
+            .expect("terminal state");
+
+        assert_eq!(state.state, VmTerminalStateKind::Pending);
+        assert_eq!(state.terminal_target, None);
+        assert!(state.runtime_constraints.is_some());
     }
 
     #[test]

@@ -69,7 +69,7 @@ jobs:
         run: just generate-scenario-wasm
 
       - name: Upload browser scenario validator
-        if: github.event_name == 'pull_request'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: scenario-wasm

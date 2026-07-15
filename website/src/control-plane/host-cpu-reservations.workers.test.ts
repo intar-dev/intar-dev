@@ -159,7 +159,7 @@ describe("host CPU reservations", () => {
     );
   });
 
-  it("commits a pending reservation when its run survives the caller", async () => {
+  it("commits a pending reservation only after its exact desired VMs survive the caller", async () => {
     const hostId = "host-crash-recovery";
     const runId = "run-survived";
     const now = Date.now();
@@ -173,7 +173,14 @@ describe("host CPU reservations", () => {
         nowUnixMs: now,
       }),
     ).resolves.toMatchObject({ ok: true, state: "pending" });
-    await seedRun(hostId, runId, now);
+    const vmName = `${runId}-vm`;
+    await seedRun(
+      hostId,
+      runId,
+      now,
+      projectedQuotaState("generation-survived", "boot_burst", null, vmName),
+    );
+    await seedRunningDesiredState(hostId, runId, vmName, now, 125);
 
     await expect(
       reconcileHostCpuReservations(db, hostId, now + 1),
@@ -647,6 +654,7 @@ async function seedRunningDesiredState(
   runId: string,
   vmName: string,
   now: number,
+  cpuMillis = 1_000,
 ): Promise<void> {
   const empty = createEmptyHostDesiredState({ hostId, nowUnixMs: now });
   const desired = {
@@ -660,7 +668,7 @@ async function seedRunningDesiredState(
         image_key: { scenario: "scenario", vm: "vm", arch: "x86_64" as const },
         image_sha256: "2".repeat(64),
         resources: {
-          cpu_millis: 1_000,
+          cpu_millis: cpuMillis,
           vcpu_count: 1,
           memory_mib: 512,
           disk_mib: 4_096,

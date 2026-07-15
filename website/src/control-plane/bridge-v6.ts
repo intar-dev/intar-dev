@@ -765,7 +765,11 @@ function isVmActualStatePayload(value: unknown): boolean {
   }
   const phase = readString(value.phase);
   return (
-    readString(value.run_id) !== null &&
+    // Host inventory is authoritative even for a VM that cannot be
+    // attributed to a control-plane run. The agent deliberately reports that
+    // condition as an empty run_id; only per-run vm_report envelopes require
+    // a non-empty run identity.
+    typeof value.run_id === "string" &&
     readString(value.vm_name) !== null &&
     isOptionalNonNegativeInteger(value.desired_version) &&
     phase !== null &&

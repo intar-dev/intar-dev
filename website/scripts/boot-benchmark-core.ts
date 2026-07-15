@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { ScenarioManifestV3 } from "../src/generated/catalog";
 import type { VmBootEvidenceV1 } from "../src/generated/bridge";
 
-export const BOOT_BENCHMARK_SCHEMA_VERSION = 1 as const;
+export const BOOT_BENCHMARK_SCHEMA_VERSION = 2 as const;
 export const PROMOTION_WARMUP_COUNT = 5;
 export const PROMOTION_SAMPLE_COUNT = 30;
 export const PROMOTION_P50_MAX_MS = 7_000;
@@ -167,6 +167,13 @@ export interface PassedBootSampleV1 {
     } | null;
     unavailable_reason: string | null;
   };
+  isolation_evidence?: {
+    lease_run_id: string;
+    first_owned_observed_at_unix_ms: number;
+    last_owned_observed_at_unix_ms: number;
+    released_observed_at_unix_ms: number;
+    observation_count: number;
+  };
   teardown_ms: number;
 }
 
@@ -284,10 +291,18 @@ export interface BootBenchmarkResultV1 {
     terminal_probe_timeout_ms: number;
   };
   isolation: {
+    admission_mode: "benchmark";
+    host_scenario_enabled: false;
     preflight_idle_required: true;
+    preflight_actual_state_drained: true;
+    preflight_desired_state_drained: true;
+    preflight_desired_state_applied: true;
     continuous_foreign_vm_monitor: true;
+    continuous_foreign_desired_vm_monitor: true;
+    continuous_scheduling_disabled_monitor: true;
+    authoritative_vm_source: "host_desired_and_actual_state";
     monitor_poll_max_ms: number;
-    atomic_host_lease: false;
+    atomic_host_lease: true;
   };
   warmups: BootSampleV1[];
   measured: BootSampleV1[];
@@ -295,8 +310,30 @@ export interface BootBenchmarkResultV1 {
   promotion: BootPromotionGateV1;
 }
 
-export interface BootBenchmarkComparisonV1 {
+/**
+ * Immutable input contract for results captured before exclusive benchmark
+ * admission existed. This is accepted only by the offline comparer; the live
+ * runner and the schema-v2 parser never normalize it into a v2 claim.
+ */
+export type HistoricalBootBenchmarkResultV1 = Omit<
+  BootBenchmarkResultV1,
+  "schema_version" | "isolation"
+> & {
   schema_version: 1;
+  isolation: {
+    preflight_idle_required: true;
+    continuous_foreign_vm_monitor: true;
+    monitor_poll_max_ms: number;
+    atomic_host_lease: false;
+  };
+};
+
+export type BootBenchmarkComparisonInput =
+  | BootBenchmarkResultV1
+  | HistoricalBootBenchmarkResultV1;
+
+export interface BootBenchmarkComparisonV1 {
+  schema_version: typeof BOOT_BENCHMARK_SCHEMA_VERSION;
   generated_at_unix_ms: number;
   host_id: string;
   scenario_id: string;
@@ -473,7 +510,31 @@ export function evaluatePromotionGate(input: {
   measured: readonly BootSampleV1[];
   summary: BootBenchmarkSummaryV1;
   performanceReady: boolean;
+  cpuPolicy: BootBenchmarkCpuPolicyV1;
 }): BootPromotionGateV1 {
+  return evaluatePromotionGateInternal(input, true);
+}
+
+function evaluateHistoricalPromotionGateV1(input: {
+  warmups: readonly BootSampleV1[];
+  measured: readonly BootSampleV1[];
+  summary: BootBenchmarkSummaryV1;
+  performanceReady: boolean;
+  cpuPolicy: BootBenchmarkCpuPolicyV1;
+}): BootPromotionGateV1 {
+  return evaluatePromotionGateInternal(input, false);
+}
+
+function evaluatePromotionGateInternal(
+  input: {
+    warmups: readonly BootSampleV1[];
+    measured: readonly BootSampleV1[];
+    summary: BootBenchmarkSummaryV1;
+    performanceReady: boolean;
+    cpuPolicy: BootBenchmarkCpuPolicyV1;
+  },
+  requireV2Evidence: boolean,
+): BootPromotionGateV1 {
   const reasons: string[] = [];
   if (!input.performanceReady) {
     reasons.push("host did not attest the complete fast-launch capability set");
@@ -504,11 +565,16 @@ export function evaluatePromotionGate(input: {
     isPassedSample,
   );
   const missingBootEvidence = passedSamples.filter(
-    (sample) => !hasCompleteBootEvidence(sample),
+    (sample) =>
+      !(requireV2Evidence
+        ? hasExactCpuContractEvidence(sample, input.cpuPolicy)
+        : hasLegacyCompleteBootEvidence(sample)),
   );
   if (missingBootEvidence.length > 0) {
     reasons.push(
-      `${missingBootEvidence.length} successful boot(s) lacked complete generation-fenced phase/CPU evidence`,
+      requireV2Evidence
+        ? `${missingBootEvidence.length} successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence`
+        : `${missingBootEvidence.length} successful boot(s) lacked complete generation-fenced phase/CPU evidence`,
     );
   }
 
@@ -579,25 +645,139 @@ export function evaluatePromotionGate(input: {
   };
 }
 
-function hasCompleteBootEvidence(sample: PassedBootSampleV1): boolean {
+const CPU_SAMPLE_POINTS = [
+  "vm_boot_accepted",
+  "kino_ready",
+  "pre_seal",
+  "post_seal",
+  "terminal_published",
+] as const;
+
+export function hasExactBootCpuSamples(
+  evidence: VmBootEvidenceV1 | null,
+  policy: BootBenchmarkCpuPolicyV1,
+): evidence is VmBootEvidenceV1 {
+  if (
+    !evidence ||
+    policy.kind !== "boot_lease" ||
+    policy.host_boot_cpu_millis === null ||
+    policy.host_steady_cpu_millis === null ||
+    policy.boot_cpu_lease_ms === null ||
+    evidence.cpu_samples.length !== CPU_SAMPLE_POINTS.length
+  ) {
+    return false;
+  }
+  const bootCpuMax = cpuMax(policy.host_boot_cpu_millis);
+  const steadyCpuMax = cpuMax(policy.host_steady_cpu_millis);
+  let bootDeadline: number | null = null;
+  let previousSampledAt = -1;
+  for (const [index, point] of CPU_SAMPLE_POINTS.entries()) {
+    const sample = evidence.cpu_samples[index];
+    if (!sample || sample.point !== point) return false;
+    const bootPhase = index <= 2;
+    const expectedCpuMillis = bootPhase
+      ? policy.host_boot_cpu_millis
+      : policy.host_steady_cpu_millis;
+    if (
+      sample.phase !== (bootPhase ? "boot_burst" : "steady") ||
+      sample.steady_cpu_millis !== policy.scenario_steady_cpu_millis ||
+      sample.effective_cpu_millis !== expectedCpuMillis ||
+      normalizeCpuMax(sample.cpu_max) !==
+        (bootPhase ? bootCpuMax : steadyCpuMax) ||
+      sample.cpu_max_burst !== 0 ||
+      sample.quota_verified_at_unix_ms !== sample.sampled_at_unix_ms ||
+      sample.sampled_at_unix_ms < previousSampledAt
+    ) {
+      return false;
+    }
+    previousSampledAt = sample.sampled_at_unix_ms;
+    if (bootPhase) {
+      const bootDeadlineUnixMs = Number(sample.boot_deadline_unix_ms);
+      const remainingBootLeaseMs =
+        bootDeadlineUnixMs - sample.sampled_at_unix_ms;
+      if (
+        !Number.isSafeInteger(sample.boot_deadline_unix_ms) ||
+        remainingBootLeaseMs <= 0 ||
+        remainingBootLeaseMs > policy.boot_cpu_lease_ms
+      ) {
+        return false;
+      }
+      bootDeadline ??= bootDeadlineUnixMs;
+      if (sample.boot_deadline_unix_ms !== bootDeadline) return false;
+    } else if (sample.boot_deadline_unix_ms != null) {
+      return false;
+    }
+  }
+  return bootDeadline !== null;
+}
+
+export function hasExactSteadyResourceState(
+  resourceState: PassedBootSampleV1["cpu_evidence"]["resource_state"],
+  policy: BootBenchmarkCpuPolicyV1,
+): boolean {
+  if (
+    !resourceState ||
+    policy.host_steady_cpu_millis === null ||
+    policy.guest_vcpu_count !== 1
+  ) {
+    return false;
+  }
+  return (
+    resourceState.cpu_millis === policy.scenario_steady_cpu_millis &&
+    resourceState.vcpu_count === policy.guest_vcpu_count &&
+    resourceState.cpu_period_us === 100_000 &&
+    resourceState.cpu_quota_us === policy.host_steady_cpu_millis * 100
+  );
+}
+
+function hasExactCpuContractEvidence(
+  sample: PassedBootSampleV1,
+  policy: BootBenchmarkCpuPolicyV1,
+): boolean {
+  const evidence = sample.host_boot_evidence;
+  const isolation = sample.isolation_evidence;
+  return Boolean(
+    hasExactBootCpuSamples(evidence, policy) &&
+      evidence.generation === sample.runtime_evidence.generation &&
+      sample.runtime_evidence.phase === "steady" &&
+      sample.runtime_evidence.steady_cpu_millis ===
+        policy.scenario_steady_cpu_millis &&
+      sample.runtime_evidence.effective_cpu_millis ===
+        policy.scenario_steady_cpu_millis &&
+      sample.runtime_evidence.lease_expires_at_unix_ms === null &&
+      sample.cpu_evidence.status === "available" &&
+      sample.cpu_evidence.generation === sample.runtime_evidence.generation &&
+      sample.cpu_evidence.observed_at_unix_ms !== null &&
+      hasExactSteadyResourceState(sample.cpu_evidence.resource_state, policy) &&
+      isolation &&
+      isolation.lease_run_id === sample.run_id &&
+      isolation.observation_count >= 2 &&
+      isolation.first_owned_observed_at_unix_ms <=
+        isolation.last_owned_observed_at_unix_ms &&
+      isolation.last_owned_observed_at_unix_ms <=
+        isolation.released_observed_at_unix_ms,
+  );
+}
+
+function hasLegacyCompleteBootEvidence(sample: PassedBootSampleV1): boolean {
   const evidence = sample.host_boot_evidence;
   if (!evidence || evidence.generation !== sample.runtime_evidence.generation) {
     return false;
   }
   const points = new Set(evidence.cpu_samples.map((cpu) => cpu.point));
-  const requiredPoints: Array<(typeof evidence.cpu_samples)[number]["point"]> =
-    [
-      "vm_boot_accepted",
-      "kino_ready",
-      "pre_seal",
-      "post_seal",
-      "terminal_published",
-    ];
   return (
     evidence.cpu_samples.length === 5 &&
-    requiredPoints.every((point) => points.has(point)) &&
+    CPU_SAMPLE_POINTS.every((point) => points.has(point)) &&
     evidence.cpu_samples.every((cpu) => cpu.cpu_max_burst === 0)
   );
+}
+
+function cpuMax(cpuMillis: number): string {
+  return `${cpuMillis * 100} 100000`;
+}
+
+function normalizeCpuMax(value: string): string {
+  return value.trim().split(/\s+/).join(" ");
 }
 
 function checkPhaseP95(
@@ -648,7 +828,7 @@ export function bootArtifactFingerprint(
 }
 
 export function compareBootBenchmarkResults(
-  results: readonly BootBenchmarkResultV1[],
+  results: readonly BootBenchmarkComparisonInput[],
   nowUnixMs = Date.now(),
 ): BootBenchmarkComparisonV1 {
   if (results.length !== BOOT_BENCHMARK_VARIANTS.length) {
@@ -786,12 +966,17 @@ export function compareBootBenchmarkResults(
       throw new Error(`browser version mismatch for ${result.variant}`);
     }
     const recomputedSummary = recomputeSummary(result, result.variant);
-    const recomputedPromotion = evaluatePromotionGate({
+    const promotionInput = {
       warmups: result.warmups,
       measured: result.measured,
       summary: recomputedSummary,
       performanceReady: result.host.performance_ready,
-    });
+      cpuPolicy: expectedPolicy,
+    };
+    const recomputedPromotion =
+      result.schema_version === 1
+        ? evaluateHistoricalPromotionGateV1(promotionInput)
+        : evaluatePromotionGate(promotionInput);
     if (!sameJsonValue(result.summary, recomputedSummary)) {
       throw new Error(
         `benchmark ${result.variant} summary does not match its samples`,
@@ -819,7 +1004,7 @@ export function compareBootBenchmarkResults(
   }
 
   return {
-    schema_version: 1,
+    schema_version: BOOT_BENCHMARK_SCHEMA_VERSION,
     generated_at_unix_ms: nowUnixMs,
     host_id: first.host_id,
     scenario_id: first.scenario_id,
@@ -868,7 +1053,55 @@ export function parseBootBenchmarkResult(
     !isRecord(value) ||
     value.schema_version !== BOOT_BENCHMARK_SCHEMA_VERSION
   ) {
-    throw new Error(`${label} is not a boot benchmark schema_version 1 result`);
+    throw new Error(
+      `${label} is not a boot benchmark schema_version ${BOOT_BENCHMARK_SCHEMA_VERSION} result`,
+    );
+  }
+  return parseBootBenchmarkResultForSchema(
+    value,
+    label,
+    BOOT_BENCHMARK_SCHEMA_VERSION,
+  ) as BootBenchmarkResultV1;
+}
+
+export function parseBootBenchmarkComparisonInput(
+  value: unknown,
+  label: string,
+): BootBenchmarkComparisonInput {
+  if (!isRecord(value)) {
+    throw new Error(`${label} is not a boot benchmark result`);
+  }
+  if (value.schema_version === BOOT_BENCHMARK_SCHEMA_VERSION) {
+    return parseBootBenchmarkResult(value, label);
+  }
+  if (value.schema_version !== 1) {
+    throw new Error(`${label} has unsupported boot benchmark schema_version`);
+  }
+  const historical = parseBootBenchmarkResultForSchema(
+    value,
+    label,
+    1,
+  ) as HistoricalBootBenchmarkResultV1;
+  if (BOOT_BENCHMARK_CPU_POLICIES[historical.variant].kind === "boot_lease") {
+    throw new Error(
+      `${label} uses historical schema_version 1 for non-historical variant ${historical.variant}`,
+    );
+  }
+  return historical;
+}
+
+function parseBootBenchmarkResultForSchema(
+  value: unknown,
+  label: string,
+  schemaVersion: 1 | typeof BOOT_BENCHMARK_SCHEMA_VERSION,
+): BootBenchmarkComparisonInput {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== schemaVersion
+  ) {
+    throw new Error(
+      `${label} is not a boot benchmark schema_version ${schemaVersion} result`,
+    );
   }
   if (!isNonNegativeSafeInteger(value.generated_at_unix_ms)) {
     throw new Error(`${label} has invalid generated_at_unix_ms`);
@@ -958,12 +1191,22 @@ export function parseBootBenchmarkResult(
   }
   assertPrewarmEvidence(value.prewarm, `${label}.prewarm`);
   assertParameters(value.parameters, `${label}.parameters`);
-  assertIsolation(value.isolation, `${label}.isolation`);
+  if (schemaVersion === 1) {
+    assertHistoricalIsolation(value.isolation, `${label}.isolation`);
+  } else {
+    assertIsolation(value.isolation, `${label}.isolation`);
+  }
   if (!Array.isArray(value.warmups) || !Array.isArray(value.measured)) {
     throw new Error(`${label} is missing benchmark samples`);
   }
   value.warmups.forEach((sample, index) =>
-    assertBootSample(sample, "warmup", index + 1, `${label}.warmups[${index}]`),
+    assertBootSample(
+      sample,
+      "warmup",
+      index + 1,
+      `${label}.warmups[${index}]`,
+      schemaVersion,
+    ),
   );
   value.measured.forEach((sample, index) =>
     assertBootSample(
@@ -971,6 +1214,7 @@ export function parseBootBenchmarkResult(
       "measured",
       index + 1,
       `${label}.measured[${index}]`,
+      schemaVersion,
     ),
   );
   if (
@@ -983,14 +1227,19 @@ export function parseBootBenchmarkResult(
   assertSummary(value.summary, `${label}.summary`);
   assertPromotion(value.promotion, `${label}.promotion`);
 
-  const result = value as unknown as BootBenchmarkResultV1;
+  const result = value as unknown as BootBenchmarkComparisonInput;
   const recomputedSummary = recomputeSummary(result, label);
-  const recomputedPromotion = evaluatePromotionGate({
+  const promotionInput = {
     warmups: result.warmups,
     measured: result.measured,
     summary: recomputedSummary,
     performanceReady: result.host.performance_ready,
-  });
+    cpuPolicy: expectedPolicy,
+  };
+  const recomputedPromotion =
+    schemaVersion === 1
+      ? evaluateHistoricalPromotionGateV1(promotionInput)
+      : evaluatePromotionGate(promotionInput);
   if (!sameJsonValue(result.summary, recomputedSummary)) {
     throw new Error(`${label} summary does not match its samples`);
   }
@@ -1166,12 +1415,35 @@ function assertIsolation(
 ): asserts value is BootBenchmarkResultV1["isolation"] {
   if (
     !isRecord(value) ||
+    value.admission_mode !== "benchmark" ||
+    value.host_scenario_enabled !== false ||
+    value.preflight_idle_required !== true ||
+    value.preflight_actual_state_drained !== true ||
+    value.preflight_desired_state_drained !== true ||
+    value.preflight_desired_state_applied !== true ||
+    value.continuous_foreign_vm_monitor !== true ||
+    value.continuous_foreign_desired_vm_monitor !== true ||
+    value.continuous_scheduling_disabled_monitor !== true ||
+    value.authoritative_vm_source !== "host_desired_and_actual_state" ||
+    value.atomic_host_lease !== true ||
+    !isNonNegativeSafeInteger(value.monitor_poll_max_ms)
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
+function assertHistoricalIsolation(
+  value: unknown,
+  label: string,
+): asserts value is HistoricalBootBenchmarkResultV1["isolation"] {
+  if (
+    !isRecord(value) ||
     value.preflight_idle_required !== true ||
     value.continuous_foreign_vm_monitor !== true ||
     value.atomic_host_lease !== false ||
     !isNonNegativeSafeInteger(value.monitor_poll_max_ms)
   ) {
-    throw new Error(`${label} is invalid`);
+    throw new Error(`${label} is not genuine schema-v1 isolation evidence`);
   }
 }
 
@@ -1180,6 +1452,7 @@ function assertBootSample(
   expectedKind: BootSampleV1["kind"],
   expectedOrdinal: number,
   label: string,
+  schemaVersion: 1 | typeof BOOT_BENCHMARK_SCHEMA_VERSION,
 ): asserts value is BootSampleV1 {
   if (
     !isRecord(value) ||
@@ -1264,6 +1537,34 @@ function assertBootSample(
     );
   }
   assertCpuEvidence(value.cpu_evidence, `${label}.cpu_evidence`);
+  if (schemaVersion === BOOT_BENCHMARK_SCHEMA_VERSION) {
+    assertIsolationEvidence(
+      value.isolation_evidence,
+      value.run_id as string,
+      `${label}.isolation_evidence`,
+    );
+  }
+}
+
+function assertIsolationEvidence(
+  value: unknown,
+  runId: string,
+  label: string,
+): asserts value is NonNullable<PassedBootSampleV1["isolation_evidence"]> {
+  if (
+    !isRecord(value) ||
+    value.lease_run_id !== runId ||
+    !isPositiveSafeInteger(value.first_owned_observed_at_unix_ms) ||
+    !isPositiveSafeInteger(value.last_owned_observed_at_unix_ms) ||
+    !isPositiveSafeInteger(value.released_observed_at_unix_ms) ||
+    !isPositiveSafeInteger(value.observation_count) ||
+    value.observation_count < 2 ||
+    value.first_owned_observed_at_unix_ms >
+      value.last_owned_observed_at_unix_ms ||
+    value.last_owned_observed_at_unix_ms > value.released_observed_at_unix_ms
+  ) {
+    throw new Error(`${label} is invalid`);
+  }
 }
 
 function assertPhaseEvidence(

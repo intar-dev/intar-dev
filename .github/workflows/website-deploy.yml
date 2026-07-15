@@ -84,6 +84,15 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: bun run db:migrate:boot-cpu:production
 
+      - name: Apply exclusive benchmark-host lease migration
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: >-
+          bunx wrangler d1 execute DB --remote
+          --file drizzle/0004_host_benchmark_leases.sql
+          --config wrangler.jsonc
+
       - name: Deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -8,19 +8,22 @@ import {
   durationDistribution,
   evaluatePromotionGate,
   nearestRankPercentile,
+  parseBootBenchmarkComparisonInput,
   parseBootBenchmarkResult,
   sealProjectionReadyDurationMs,
   sealProjectionUiReadyDurationMs,
   summarizeBootSamples,
+  type BootBenchmarkComparisonInput,
   type BootBenchmarkResultV1,
   type BootBenchmarkVariant,
   type BootSampleV1,
+  type HistoricalBootBenchmarkResultV1,
   type PassedBootSampleV1,
 } from "../../scripts/boot-benchmark-core";
 import {
   assertLiveRunnerVariant,
-  assertNoForeignHostRuns,
-  assertOwnedHostRun,
+  assertNoForeignHostActualVms,
+  assertOwnedHostActualVm,
   browserMarkerCommand,
   hasBootBenchmarkReadyVm,
   parseBrowserCookies,
@@ -60,6 +63,8 @@ describe("boot benchmark statistics", () => {
         measured,
         summary,
         performanceReady: true,
+        cpuPolicy:
+          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }),
     ).toMatchObject({ passed: true, reasons: [] });
     expect(summary.usable_terminal_ms).toMatchObject({
@@ -91,6 +96,7 @@ describe("boot benchmark statistics", () => {
       measured,
       summary,
       performanceReady: true,
+      cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
     });
 
     expect(gate.passed).toBe(false);
@@ -115,6 +121,7 @@ describe("boot benchmark statistics", () => {
       measured,
       summary,
       performanceReady: true,
+      cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
     });
 
     expect(gate.passed).toBe(false);
@@ -139,11 +146,12 @@ describe("boot benchmark statistics", () => {
       measured,
       summary,
       performanceReady: true,
+      cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
     });
 
     expect(gate.passed).toBe(false);
     expect(gate.reasons).toContain(
-      "1 successful boot(s) lacked complete generation-fenced phase/CPU evidence",
+      "1 successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence",
     );
     expect(gate.reasons).toContain(
       "guest-to-Kino evidence covered 29 measured boot(s), expected 30",
@@ -169,6 +177,8 @@ describe("boot benchmark statistics", () => {
         measured: completeMeasured,
         summary: completeSummary,
         performanceReady: true,
+        cpuPolicy:
+          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }).reasons,
     ).toContain("guest-to-Kino p95 6501ms exceeds 6500ms");
   });
@@ -191,6 +201,8 @@ describe("boot benchmark statistics", () => {
         measured,
         summary,
         performanceReady: true,
+        cpuPolicy:
+          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }).reasons,
     ).toContain("seal/projection/UI-ready p95 501ms exceeds 500ms");
     expect(sealProjectionReadyDurationMs(bootEvidence(), 5_000)).toBe(300);
@@ -422,11 +434,105 @@ describe("boot benchmark result schema", () => {
       ),
     ).toThrow("promotion does not match its evidence");
   });
+
+  it("requires exact boot-to-steady quota and one-vCPU evidence", () => {
+    const wrongBootQuota = benchmarkResult("fully-optimized-current-path");
+    const wrongBootQuotaSample = wrongBootQuota
+      .measured[0] as PassedBootSampleV1;
+    wrongBootQuotaSample.host_boot_evidence!.cpu_samples[1]!.cpu_max =
+      "100000 100000";
+    wrongBootQuota.summary = summarizeBootSamples(wrongBootQuota);
+    wrongBootQuota.promotion = evaluatePromotionGate({
+      warmups: wrongBootQuota.warmups,
+      measured: wrongBootQuota.measured,
+      summary: wrongBootQuota.summary,
+      performanceReady: true,
+      cpuPolicy: wrongBootQuota.cpu_policy,
+    });
+    expect(wrongBootQuota.promotion.reasons).toContain(
+      "1 successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence",
+    );
+
+    const overlongBootLease = benchmarkResult(
+      "fully-optimized-current-path",
+    );
+    const overlongBootLeaseSample = overlongBootLease
+      .measured[0] as PassedBootSampleV1;
+    for (const sample of overlongBootLeaseSample.host_boot_evidence!.cpu_samples.slice(
+      0,
+      3,
+    )) {
+      sample.boot_deadline_unix_ms = 50_001;
+    }
+    overlongBootLease.summary = summarizeBootSamples(overlongBootLease);
+    overlongBootLease.promotion = evaluatePromotionGate({
+      warmups: overlongBootLease.warmups,
+      measured: overlongBootLease.measured,
+      summary: overlongBootLease.summary,
+      performanceReady: true,
+      cpuPolicy: overlongBootLease.cpu_policy,
+    });
+    expect(overlongBootLease.promotion.reasons).toContain(
+      "1 successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence",
+    );
+
+    const wrongVcpu = benchmarkResult("fully-optimized-current-path");
+    const wrongVcpuSample = wrongVcpu.measured[0] as PassedBootSampleV1;
+    wrongVcpuSample.cpu_evidence.resource_state!.vcpu_count = 2;
+    wrongVcpu.summary = summarizeBootSamples(wrongVcpu);
+    wrongVcpu.promotion = evaluatePromotionGate({
+      warmups: wrongVcpu.warmups,
+      measured: wrongVcpu.measured,
+      summary: wrongVcpu.summary,
+      performanceReady: true,
+      cpuPolicy: wrongVcpu.cpu_policy,
+    });
+    expect(wrongVcpu.promotion.reasons).toContain(
+      "1 successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence",
+    );
+  });
+
+  it("accepts genuine schema-v1 artifacts only through the offline comparison parser", () => {
+    const historical = historicalBenchmarkResult("pre-jailer-direct");
+
+    expect(() => parseBootBenchmarkResult(historical, "historical")).toThrow(
+      "schema_version 2",
+    );
+    expect(parseBootBenchmarkComparisonInput(historical, "historical")).toEqual(
+      historical,
+    );
+    expect(() =>
+      parseBootBenchmarkComparisonInput(
+        {
+          ...historical,
+          variant: "current-2000m-boot-to-1000m-steady",
+          cpu_policy:
+            BOOT_BENCHMARK_CPU_POLICIES[
+              "current-2000m-boot-to-1000m-steady"
+            ],
+          host: {
+            ...historical.host,
+            capabilities: {
+              ...historical.host.capabilities,
+              boot_cpu_millis: 2_000,
+              boot_cpu_lease_ms: 45_000,
+            },
+          },
+        },
+        "fake-historical-lease",
+      ),
+    ).toThrow("non-historical variant");
+  });
 });
 
 describe("boot benchmark comparison", () => {
   it("requires the exact five variants and identical execution identity", () => {
-    const results = BOOT_BENCHMARK_VARIANTS.map(benchmarkResult);
+    const results: BootBenchmarkComparisonInput[] = BOOT_BENCHMARK_VARIANTS.map(
+      (variant) =>
+        isHistoricalVariant(variant)
+          ? historicalBenchmarkResult(variant)
+          : benchmarkResult(variant),
+    );
     const comparison = compareBootBenchmarkResults(results, 123);
 
     expect(comparison.generated_at_unix_ms).toBe(123);
@@ -530,14 +636,14 @@ describe("boot benchmark readiness and isolation", () => {
 
   it("rejects attributed and unattributed foreign VMs", () => {
     expect(() =>
-      assertNoForeignHostRuns(
-        { liveVms: [{ name: "owned", run_id: "run-1" }] },
+      assertNoForeignHostActualVms(
+        [{ vm_name: "owned", run_id: "run-1", phase: "running" }],
         "run-1",
       ),
     ).not.toThrow();
     expect(() =>
-      assertNoForeignHostRuns(
-        { liveVms: [{ name: "foreign", run_id: null }] },
+      assertNoForeignHostActualVms(
+        [{ vm_name: "foreign", run_id: "", phase: "running" }],
         "run-1",
       ),
     ).toThrow("foreign VM(s)");
@@ -545,22 +651,20 @@ describe("boot benchmark readiness and isolation", () => {
 
   it("requires the measured run to remain present on the pinned host", () => {
     expect(() =>
-      assertOwnedHostRun(
-        { liveVms: [{ name: "owned", run_id: "run-1" }] },
+      assertOwnedHostActualVm(
+        [{ vm_name: "owned", run_id: "run-1", phase: "ready" }],
         "run-1",
       ),
     ).not.toThrow();
-    expect(() => assertOwnedHostRun({ liveVms: [] }, "run-1")).toThrow(
+    expect(() => assertOwnedHostActualVm([], "run-1")).toThrow(
       "was not observed on the pinned host",
     );
     expect(() =>
-      assertOwnedHostRun(
-        {
-          liveVms: [
-            { name: "owned", run_id: "run-1" },
-            { name: "foreign", run_id: "run-2" },
-          ],
-        },
+      assertOwnedHostActualVm(
+        [
+          { vm_name: "owned", run_id: "run-1", phase: "ready" },
+          { vm_name: "foreign", run_id: "run-2", phase: "booting" },
+        ],
         "run-1",
       ),
     ).toThrow("foreign VM(s)");
@@ -618,11 +722,29 @@ function passedSample(
     },
     host_boot_evidence: bootEvidence(),
     cpu_evidence: {
-      status: "unavailable",
-      observed_at_unix_ms: null,
+      status: "available",
+      observed_at_unix_ms: 5_201,
       generation: "generation-1",
-      resource_state: null,
-      unavailable_reason: "test fixture",
+      resource_state: {
+        cpu_millis: 1_000,
+        vcpu_count: 1,
+        cpu_quota_us: 100_000,
+        cpu_period_us: 100_000,
+        cpu_usage_usec: 1,
+        cpu_user_usec: 1,
+        cpu_system_usec: 0,
+        cpu_nr_periods: 1,
+        cpu_nr_throttled: 0,
+        cpu_throttled_usec: 0,
+      },
+      unavailable_reason: null,
+    },
+    isolation_evidence: {
+      lease_run_id: `${kind}-${ordinal}`,
+      first_owned_observed_at_unix_ms: 102,
+      last_owned_observed_at_unix_ms: 5_200,
+      released_observed_at_unix_ms: 5_300,
+      observation_count: 3,
     },
     teardown_ms: 100,
   };
@@ -634,16 +756,17 @@ function bootEvidence(): NonNullable<PassedBootSampleV1["host_boot_evidence"]> {
       PassedBootSampleV1["host_boot_evidence"]
     >["cpu_samples"][number]["point"],
     phase: "boot_burst" | "steady",
+    sampledAtUnixMs: number,
   ) => ({
     point,
-    sampled_at_unix_ms: 2,
+    sampled_at_unix_ms: sampledAtUnixMs,
     phase,
     steady_cpu_millis: 1_000,
     effective_cpu_millis: phase === "boot_burst" ? 2_000 : 1_000,
     boot_deadline_unix_ms: phase === "boot_burst" ? 45_000 : null,
     cpu_max: phase === "boot_burst" ? "200000 100000" : "100000 100000",
     cpu_max_burst: 0,
-    quota_verified_at_unix_ms: 2,
+    quota_verified_at_unix_ms: sampledAtUnixMs,
     usage_usec: 1,
     user_usec: 1,
     system_usec: 0,
@@ -672,11 +795,11 @@ function bootEvidence(): NonNullable<PassedBootSampleV1["host_boot_evidence"]> {
       terminal_publish_ms: 100,
     },
     cpu_samples: [
-      cpuSample("vm_boot_accepted", "boot_burst"),
-      cpuSample("kino_ready", "boot_burst"),
-      cpuSample("pre_seal", "boot_burst"),
-      cpuSample("post_seal", "steady"),
-      cpuSample("terminal_published", "steady"),
+      cpuSample("vm_boot_accepted", "boot_burst", 1_001),
+      cpuSample("kino_ready", "boot_burst", 2_001),
+      cpuSample("pre_seal", "boot_burst", 3_001),
+      cpuSample("post_seal", "steady", 4_001),
+      cpuSample("terminal_published", "steady", 5_001),
     ],
   };
 }
@@ -694,7 +817,7 @@ function benchmarkResult(variant: BootBenchmarkVariant): BootBenchmarkResultV1 {
     vms: [artifactVm("webserver")],
   } satisfies BootBenchmarkResultV1["artifacts"];
   return {
-    schema_version: 1,
+    schema_version: 2,
     generated_at_unix_ms: 1,
     variant,
     scenario_id: "broken-nginx",
@@ -745,10 +868,18 @@ function benchmarkResult(variant: BootBenchmarkVariant): BootBenchmarkResultV1 {
       terminal_probe_timeout_ms: 15_000,
     },
     isolation: {
+      admission_mode: "benchmark",
+      host_scenario_enabled: false,
       preflight_idle_required: true,
+      preflight_actual_state_drained: true,
+      preflight_desired_state_drained: true,
+      preflight_desired_state_applied: true,
       continuous_foreign_vm_monitor: true,
+      continuous_foreign_desired_vm_monitor: true,
+      continuous_scheduling_disabled_monitor: true,
+      authoritative_vm_source: "host_desired_and_actual_state",
       monitor_poll_max_ms: 250,
-      atomic_host_lease: false,
+      atomic_host_lease: true,
     },
     warmups,
     measured,
@@ -758,7 +889,61 @@ function benchmarkResult(variant: BootBenchmarkVariant): BootBenchmarkResultV1 {
       measured,
       summary,
       performanceReady: true,
+      cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES[variant],
     }),
+  };
+}
+
+type HistoricalBootBenchmarkVariant =
+  | "pre-jailer-direct"
+  | "exact-jailer-cutover"
+  | "current-1000m-baseline";
+
+function isHistoricalVariant(
+  variant: BootBenchmarkVariant,
+): variant is HistoricalBootBenchmarkVariant {
+  return BOOT_BENCHMARK_CPU_POLICIES[variant].kind !== "boot_lease";
+}
+
+function historicalBenchmarkResult(
+  variant: HistoricalBootBenchmarkVariant,
+): HistoricalBootBenchmarkResultV1 {
+  const current = benchmarkResult("fully-optimized-current-path");
+  const withoutLeaseEvidence = (samples: BootSampleV1[]): BootSampleV1[] =>
+    samples.map((sample) => {
+      if (sample.status === "failed") return sample;
+      const { isolation_evidence: _isolationEvidence, ...historical } = sample;
+      return historical;
+    });
+  const warmups = withoutLeaseEvidence(current.warmups);
+  const measured = withoutLeaseEvidence(current.measured);
+  const summary = summarizeBootSamples({ warmups, measured });
+  const policy = BOOT_BENCHMARK_CPU_POLICIES[variant];
+  return {
+    ...current,
+    schema_version: 1,
+    variant,
+    implementation_sha256: (BOOT_BENCHMARK_VARIANTS.indexOf(variant) + 1)
+      .toString(16)
+      .repeat(64),
+    cpu_policy: policy,
+    host: {
+      ...current.host,
+      capabilities: {
+        ...current.host.capabilities,
+        boot_cpu_millis: policy.host_boot_cpu_millis,
+        boot_cpu_lease_ms: policy.boot_cpu_lease_ms,
+      },
+    },
+    isolation: {
+      preflight_idle_required: true,
+      continuous_foreign_vm_monitor: true,
+      monitor_poll_max_ms: 250,
+      atomic_host_lease: false,
+    },
+    warmups,
+    measured,
+    summary,
   };
 }
 
@@ -786,13 +971,14 @@ function artifactVm(
 }
 
 function replaceResult(
-  results: readonly BootBenchmarkResultV1[],
+  results: readonly BootBenchmarkComparisonInput[],
   index: number,
   patch: Partial<BootBenchmarkResultV1>,
-): BootBenchmarkResultV1[] {
-  return results.map((result, candidateIndex) =>
-    candidateIndex === index ? { ...result, ...patch } : result,
-  );
+): BootBenchmarkComparisonInput[] {
+  return results.map((result, candidateIndex) => {
+    if (candidateIndex !== index) return result;
+    return { ...result, ...patch } as BootBenchmarkComparisonInput;
+  });
 }
 
 function readyScenarioRun(generation: string): ScenarioRunRecord {

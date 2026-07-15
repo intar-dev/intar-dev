@@ -7,6 +7,11 @@ import {
 } from "@/control-plane/bridge-v6";
 import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import {
+  acquireHostBenchmarkLeaseAndReserveCpuInD1,
+  clearDrainedHostBenchmarkLeaseInD1,
+  releaseHostBenchmarkLeaseInD1,
+} from "@/control-plane/host-benchmark-leases";
+import {
   commitHostCpuReservation,
   nextPendingHostCpuReservationExpiry,
   reconcileHostCpuReservations,
@@ -267,6 +272,42 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     return this.withCpuReservationLock(async () => {
       const db = drizzle(this.env.DB);
       const now = Date.now();
+      if (pathname.endsWith("/benchmark-acquire")) {
+        if (input.steadyCpuMillisByVm === null || input.userId === null) {
+          return jsonResponse(
+            { error: "steadyCpuMillisByVm and userId are required" },
+            400,
+          );
+        }
+        const result = await acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+          hostId: input.hostId,
+          runId: input.runId,
+          userId: input.userId,
+          steadyCpuMillisByVm: input.steadyCpuMillisByVm,
+          nowUnixMs: now,
+        });
+        if (
+          result.ok &&
+          result.state === "pending" &&
+          result.expiresAt !== null
+        ) {
+          await this.scheduleAlarmNoLaterThan(result.expiresAt);
+        }
+        return jsonResponse(result, result.ok ? 201 : 409);
+      }
+      if (pathname.endsWith("/benchmark-release")) {
+        if (input.userId === null) {
+          return jsonResponse({ error: "userId is required" }, 400);
+        }
+        await reconcileHostCpuReservations(db, input.hostId, now);
+        const result = await releaseHostBenchmarkLeaseInD1(db, {
+          hostId: input.hostId,
+          runId: input.runId,
+          userId: input.userId,
+          nowUnixMs: now,
+        });
+        return jsonResponse(result, result.ok ? 200 : 409);
+      }
       if (pathname.endsWith("/reserve")) {
         if (input.steadyCpuMillisByVm === null) {
           return jsonResponse(
@@ -299,6 +340,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       }
       if (pathname.endsWith("/rollback")) {
         const rolledBack = await rollbackPendingHostCpuReservation(db, input);
+        await clearDrainedHostBenchmarkLeaseInD1(db, input.hostId, now);
         return jsonResponse({ ok: true, rolledBack });
       }
       return jsonResponse({ error: "not found" }, 404);
@@ -561,9 +603,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         );
       });
     }
-    await this.withCpuReservationLock(() =>
-      reconcileHostCpuReservations(db, hostId, now),
-    );
+    await this.withCpuReservationLock(async () => {
+      await reconcileHostCpuReservations(db, hostId, now);
+      await clearDrainedHostBenchmarkLeaseInD1(db, hostId, now);
+    });
   }
 
   private async applyBridgeVmReport(
@@ -633,9 +676,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       wakeHostRuntime: false,
     });
     if (options?.reconcileCpuReservations !== false) {
-      await this.withCpuReservationLock(() =>
-        reconcileHostCpuReservations(db, hostId, now),
-      );
+      await this.withCpuReservationLock(async () => {
+        await reconcileHostCpuReservations(db, hostId, now);
+        await clearDrainedHostBenchmarkLeaseInD1(db, hostId, now);
+      });
     }
 
     const activeSocket = await this.findActiveSocket(hostId);
@@ -1252,18 +1296,21 @@ function parseRunState(raw: string): RunStateDocument {
 async function parseCpuReservationRequest(request: Request): Promise<{
   hostId: string;
   runId: string;
+  userId: string | null;
   steadyCpuMillisByVm: number[] | null;
 } | null> {
   try {
     const value = (await request.json()) as Record<string, unknown>;
     const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
     const runId = typeof value.runId === "string" ? value.runId.trim() : "";
+    const userId = typeof value.userId === "string" ? value.userId.trim() : "";
     const steadyCpuMillisByVm = value.steadyCpuMillisByVm;
     if (
       !hostId ||
       hostId.length > 128 ||
       !runId ||
       runId.length > 128 ||
+      (value.userId !== undefined && (!userId || userId.length > 128)) ||
       (steadyCpuMillisByVm !== undefined &&
         (!Array.isArray(steadyCpuMillisByVm) ||
           steadyCpuMillisByVm.length === 0 ||
@@ -1275,6 +1322,7 @@ async function parseCpuReservationRequest(request: Request): Promise<{
     return {
       hostId,
       runId,
+      userId: userId || null,
       steadyCpuMillisByVm: Array.isArray(steadyCpuMillisByVm)
         ? (steadyCpuMillisByVm as number[])
         : null,

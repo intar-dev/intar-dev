@@ -86,9 +86,6 @@ async fn main() -> Result<()> {
     vm.reconcile_tracked_vms()
         .await
         .context("failed to reconcile tracked vm state on startup")?;
-    vm.restore_probe_workers()
-        .await
-        .context("failed to restore vm probe workers")?;
     vm.retry_archive_jobs()
         .await
         .context("failed to restore queued archive uploads")?;

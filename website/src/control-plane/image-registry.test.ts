@@ -2521,6 +2521,14 @@ describe("image registry routes", () => {
         role: "agent",
         disabled: false,
         scenarioEnabled: false,
+        benchmarkLeased: true,
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeImageCacheHost({
+        role: "agent",
+        disabled: false,
+        scenarioEnabled: false,
       }),
     ).toBe(true);
     expect(

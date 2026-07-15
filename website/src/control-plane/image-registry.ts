@@ -1113,11 +1113,21 @@ async function bumpHostCachedImages(
     if (!isRuntimeImageCacheHost(host)) {
       continue;
     }
-    await mutateStoredHostDesiredState(db, host.id, nowUnixMs, (draft) => {
-      for (const image of images) {
-        upsertDesiredCachedImage(draft, image);
+    try {
+      await mutateStoredHostDesiredState(db, host.id, nowUnixMs, (draft) => {
+        for (const image of images) {
+          upsertDesiredCachedImage(draft, image);
+        }
+      });
+    } catch (error) {
+      // A lease can be acquired after the host query above. The D1 trigger is
+      // the final atomic fence; this host intentionally misses the prewarm and
+      // is skipped rather than contaminating the isolated benchmark.
+      if (isBenchmarkDesiredCacheFreezeError(error)) {
+        continue;
       }
-    });
+      throw error;
+    }
     await tryWakeHostRuntime(host.id);
   }
 }
@@ -1126,11 +1136,36 @@ export function isRuntimeImageCacheHost(host: {
   role: AgentHostRole;
   disabled: boolean;
   scenarioEnabled: boolean;
+  benchmarkLeased?: boolean;
 }): boolean {
   // Maintenance disables placement, not cache convergence. Keeping this
   // independent from scenarioEnabled lets a drained host prewarm the newly
   // published generation before starts are re-enabled.
-  return host.role === "agent" && !host.disabled;
+  return host.role === "agent" && !host.disabled && !host.benchmarkLeased;
+}
+
+function isBenchmarkDesiredCacheFreezeError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const message =
+      current instanceof Error
+        ? current.message
+        : typeof current === "object" && "message" in current
+          ? String(current.message)
+          : "";
+    if (
+      /benchmark lease freezes desired image-cache and build work/i.test(
+        message,
+      )
+    ) {
+      return true;
+    }
+    current =
+      typeof current === "object" && "cause" in current ? current.cause : null;
+  }
+  return false;
 }
 
 async function handleAgentImageIndex(

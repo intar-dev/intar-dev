@@ -7,7 +7,7 @@ use std::os::unix::fs::FileTypeExt as _;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -27,6 +27,7 @@ use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmCpuPhase, VmInspection};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{RwLock, mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -48,7 +49,51 @@ const RETRY_MIN_MS: u64 = 1_000;
 const RETRY_MAX_MS: u64 = 30_000;
 const SERVER_HELLO_TIMEOUT_SECS: u64 = 10;
 const STATE_REPORT_INTERVAL_SECS: u64 = 20;
+const INVENTORY_REPORT_JAILER_BUDGET_MS: u64 = 50;
+const OUTBOUND_SEND_BUDGET_MS: u64 = 75;
+#[cfg(test)]
+const INVENTORY_DELIVERY_TARGET_MS: u64 = 250;
+const INVENTORY_OUTBOUND_CAPACITY: usize = 1;
+const NORMAL_OUTBOUND_CAPACITY: usize = 64;
 const DEFAULT_KINO_VSOCK_PORT: u32 = 18_080;
+
+#[derive(Clone)]
+struct BridgeReportCache {
+    host_profile: Arc<RwLock<host_profile::HostProfile>>,
+    jailer_capabilities: Arc<RwLock<Option<JailerCapabilities>>>,
+    host_capabilities: Arc<RwLock<HostCapabilitiesV2>>,
+    cached_images: Arc<RwLock<Vec<CachedImageStateV1>>>,
+}
+
+impl BridgeReportCache {
+    fn new(
+        host_profile: host_profile::HostProfile,
+        jailer_capabilities: Option<JailerCapabilities>,
+        host_capabilities: HostCapabilitiesV2,
+    ) -> Self {
+        Self {
+            host_profile: Arc::new(RwLock::new(host_profile)),
+            jailer_capabilities: Arc::new(RwLock::new(jailer_capabilities)),
+            host_capabilities: Arc::new(RwLock::new(host_capabilities)),
+            cached_images: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BridgeOutbound {
+    inventory: mpsc::Sender<BridgeMessageV6>,
+    normal: mpsc::Sender<BridgeMessageV6>,
+}
+
+#[derive(Clone)]
+struct BridgeReportSources {
+    cfg: BridgeConfig,
+    vm: VmManager,
+    db: Db,
+    disk_probe_path: PathBuf,
+    cache: BridgeReportCache,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +186,7 @@ async fn connect_once(
 
     let (mut write, mut read) = ws_stream.split();
     let hello_jailer = vm.jailer_capabilities().await.ok();
+    let hello_capabilities = collect_host_capabilities(hello_jailer.as_ref());
     send_bridge_message(
         &mut write,
         &BridgeMessageV6::ClientHello(ClientHelloV6 {
@@ -149,7 +195,7 @@ async fn connect_once(
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
             role: HostRoleV1::Agent,
             last_applied_desired_version: current_desired_state.as_ref().map(|state| state.version),
-            capabilities: collect_host_capabilities(hello_jailer.as_ref()),
+            capabilities: hello_capabilities.clone(),
         }),
     )
     .await?;
@@ -189,119 +235,167 @@ async fn connect_once(
         },
     )
     .await?;
-    send_state_report(
-        &mut write,
-        cfg,
-        vm,
-        db,
-        disk_probe_path,
-        current_desired_state.as_ref(),
-    )
-    .await?;
+    // Subscribe before either report builder starts so a mutation that races
+    // the initial full snapshot remains pending for the independent fast path.
+    let inventory_updates = vm.subscribe_inventory_updates();
+    let (desired_state_tx, desired_state_rx) = watch::channel(current_desired_state.clone());
+    let report_cache = BridgeReportCache::new(
+        host_profile::collect(disk_probe_path),
+        hello_jailer.clone(),
+        hello_capabilities,
+    );
+    let report_sources = BridgeReportSources {
+        cfg: cfg.clone(),
+        vm: vm.clone(),
+        db: db.clone(),
+        disk_probe_path: disk_probe_path.to_path_buf(),
+        cache: report_cache,
+    };
+    let (inventory_tx, inventory_rx) = mpsc::channel(INVENTORY_OUTBOUND_CAPACITY);
+    let (normal_tx, normal_rx) = mpsc::channel(NORMAL_OUTBOUND_CAPACITY);
+    let outbound = BridgeOutbound {
+        inventory: inventory_tx,
+        normal: normal_tx,
+    };
 
-    let mut state_report_interval = interval(Duration::from_secs(STATE_REPORT_INTERVAL_SECS));
-    state_report_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    state_report_interval.tick().await;
-    let mut probe_updates = vm.subscribe_probe_updates();
-    let mut terminal_updates = vm.subscribe_terminal_updates();
+    // One task owns the websocket sink. Inventory reports have a dedicated
+    // queue and strict priority, while every individual socket send is bounded
+    // so a blocked ordinary report cannot consume the 250 ms freshness budget.
+    let mut writer_task = tokio::spawn(run_bridge_writer(write, inventory_rx, normal_rx));
+    let mut inventory_task = tokio::spawn(run_inventory_reporter(
+        report_sources.clone(),
+        inventory_updates,
+        desired_state_rx,
+        outbound.inventory.clone(),
+    ));
 
-    loop {
-        tokio::select! {
-            inbound = read.next() => {
-                let Some(inbound) = inbound else {
-                    anyhow::bail!("bridge websocket closed");
-                };
-                let inbound = inbound.context("failed reading bridge message")?;
-                if let Some(message) = parse_bridge_message(inbound)? {
-                    validate_bridge_message(&message, &cfg.host_id)?;
-                    handle_server_message(
-                        &mut write,
-                        cfg,
-                        vm,
-                        db,
-                        disk_probe_path,
-                        current_desired_state,
-                        message,
-                    ).await?;
-                }
-            }
-            _ = state_report_interval.tick() => {
-                send_state_report(
-                    &mut write,
-                    cfg,
-                    vm,
-                    db,
-                    disk_probe_path,
-                    current_desired_state.as_ref(),
-                )
-                .await?;
-            }
-            update = probe_updates.recv() => {
-                match update {
-                    Ok(update) => {
-                        if let Some(report) = build_vm_report_from_probe_update(
-                            &cfg.host_id,
-                            vm,
-                            current_desired_state.as_ref(),
-                            &update,
-                        )
-                        .await {
-                            send_vm_report(&mut write, &cfg.host_id, report).await?;
-                        }
-                    }
-                    Err(error) => {
-                        debug!(error = %error, "probe update channel lagged");
+    let connection_result = async {
+        send_state_report(
+            &outbound.normal,
+            &report_sources,
+            current_desired_state.as_ref(),
+        )
+        .await?;
+
+        let mut state_report_interval = interval(Duration::from_secs(STATE_REPORT_INTERVAL_SECS));
+        state_report_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        state_report_interval.tick().await;
+        let mut probe_updates = vm.subscribe_probe_updates();
+        let mut terminal_updates = vm.subscribe_terminal_updates();
+
+        loop {
+            tokio::select! {
+                inbound = read.next() => {
+                    let Some(inbound) = inbound else {
+                        anyhow::bail!("bridge websocket closed");
+                    };
+                    let inbound = inbound.context("failed reading bridge message")?;
+                    if let Some(message) = parse_bridge_message(inbound)? {
+                        validate_bridge_message(&message, &cfg.host_id)?;
+                        handle_server_message(
+                            &outbound.normal,
+                            &report_sources,
+                            current_desired_state,
+                            &desired_state_tx,
+                            message,
+                        ).await?;
                     }
                 }
-            }
-            update = terminal_updates.recv() => {
-                match update {
-                    Ok(update) => {
-                        if let Some(status) = vm.get_vm(&update.vm_name).await {
-                            let probes = load_probe_snapshots_for_vm(
-                                db,
-                                &update.run_id,
-                                &update.vm_name,
-                                update
-                                    .runtime_constraints
-                                    .as_ref()
-                                    .map(|constraints| constraints.generation.as_str()),
-                            )
-                            .await;
-                            let report = build_vm_report_from_status(
+                _ = state_report_interval.tick() => {
+                    send_state_report(
+                        &outbound.normal,
+                        &report_sources,
+                        current_desired_state.as_ref(),
+                    )
+                    .await?;
+                }
+                update = probe_updates.recv() => {
+                    match update {
+                        Ok(update) => {
+                            if let Some(report) = build_vm_report_from_probe_update(
                                 &cfg.host_id,
-                                vm.ssh_advertised_host().as_deref(),
+                                vm,
                                 current_desired_state.as_ref(),
-                                status,
-                                probes,
-                                None,
-                                Some(&update),
-                            );
-                            send_vm_report(&mut write, &cfg.host_id, report).await?;
+                                &update,
+                            )
+                            .await {
+                                send_vm_report(&outbound.normal, &cfg.host_id, report).await?;
+                            }
+                        }
+                        Err(error) => {
+                            debug!(error = %error, "probe update channel lagged");
                         }
                     }
-                    Err(error) => {
-                        debug!(error = %error, "terminal update channel lagged");
+                }
+                update = terminal_updates.recv() => {
+                    match update {
+                        Ok(update) => {
+                            if let Some(status) = vm.get_vm(&update.vm_name).await {
+                                if !terminal_update_matches_status(&update, &status) {
+                                    warn!(
+                                        vm = update.vm_name,
+                                        run_id = update.run_id,
+                                        update_generation = ?update.runtime_constraints.as_ref().map(|constraints| &constraints.generation),
+                                        current_generation = ?status.details.as_ref().and_then(|details| details.jail_generation.as_deref()),
+                                        "dropping stale-generation terminal projection"
+                                    );
+                                    continue;
+                                }
+                                let probes = load_probe_snapshots_for_vm(
+                                    db,
+                                    &update.run_id,
+                                    &update.vm_name,
+                                    update
+                                        .runtime_constraints
+                                        .as_ref()
+                                        .map(|constraints| constraints.generation.as_str()),
+                                )
+                                .await;
+                                let report = build_vm_report_from_status(
+                                    &cfg.host_id,
+                                    vm.ssh_advertised_host().as_deref(),
+                                    current_desired_state.as_ref(),
+                                    status,
+                                    probes,
+                                    None,
+                                    Some(&update),
+                                );
+                                send_vm_report(&outbound.normal, &cfg.host_id, report).await?;
+                            }
+                        }
+                        Err(error) => {
+                            debug!(error = %error, "terminal update channel lagged");
+                        }
                     }
+                }
+                result = &mut writer_task => {
+                    result.context("bridge writer task panicked")??;
+                    anyhow::bail!("bridge writer task exited");
+                }
+                result = &mut inventory_task => {
+                    result.context("inventory reporter task panicked")??;
+                    anyhow::bail!("inventory reporter task exited");
                 }
             }
         }
     }
+    .await;
+
+    writer_task.abort();
+    inventory_task.abort();
+    connection_result
 }
 
-async fn handle_server_message<W>(
-    write: &mut W,
-    cfg: &BridgeConfig,
-    vm: &VmManager,
-    db: &Db,
-    disk_probe_path: &Path,
+async fn handle_server_message(
+    outbound: &mpsc::Sender<BridgeMessageV6>,
+    sources: &BridgeReportSources,
     current_desired_state: &mut Option<HostDesiredStateV2>,
+    desired_state_tx: &watch::Sender<Option<HostDesiredStateV2>>,
     message: BridgeMessageV6,
-) -> Result<()>
-where
-    W: Sink<Message> + Unpin,
-    W::Error: std::error::Error + Send + Sync + 'static,
-{
+) -> Result<()> {
+    let cfg = &sources.cfg;
+    let vm = &sources.vm;
+    let db = &sources.db;
     match message {
         BridgeMessageV6::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
@@ -314,15 +408,7 @@ where
                     incoming_version = desired_state.version,
                     current_version, "ignoring stale desired state"
                 );
-                send_state_report(
-                    write,
-                    cfg,
-                    vm,
-                    db,
-                    disk_probe_path,
-                    current_desired_state.as_ref(),
-                )
-                .await?;
+                send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
                 return Ok(());
             }
             cache_desired_state(db, &desired_state)
@@ -330,29 +416,14 @@ where
                 .context("failed to cache desired state")?;
             let failure_reports = apply_desired_state(cfg, vm, &message).await?;
             *current_desired_state = Some(desired_state);
+            desired_state_tx.send_replace(current_desired_state.clone());
             for report in failure_reports {
-                send_vm_report(write, &cfg.host_id, report).await?;
+                send_vm_report(outbound, &cfg.host_id, report).await?;
             }
-            send_state_report(
-                write,
-                cfg,
-                vm,
-                db,
-                disk_probe_path,
-                current_desired_state.as_ref(),
-            )
-            .await?;
+            send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
         BridgeMessageV6::SyncRequest(_) => {
-            send_state_report(
-                write,
-                cfg,
-                vm,
-                db,
-                disk_probe_path,
-                current_desired_state.as_ref(),
-            )
-            .await?;
+            send_state_report(outbound, sources, current_desired_state.as_ref()).await?;
         }
         BridgeMessageV6::ServerHello(_) => {
             anyhow::bail!("received duplicate server_hello after handshake");
@@ -601,38 +672,131 @@ async fn delete_vm_if_present(vm: &VmManager, vm_name: &str) {
     }
 }
 
-async fn send_state_report<W>(
-    write: &mut W,
-    cfg: &BridgeConfig,
-    vm: &VmManager,
-    db: &Db,
-    disk_probe_path: &Path,
-    desired: Option<&HostDesiredStateV2>,
+async fn run_bridge_writer<W>(
+    mut write: W,
+    mut inventory: mpsc::Receiver<BridgeMessageV6>,
+    mut normal: mpsc::Receiver<BridgeMessageV6>,
 ) -> Result<()>
 where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
-    let report = build_host_state_report(&cfg.host_id, vm, db, disk_probe_path, desired).await;
-    send_bridge_message(
-        write,
-        &BridgeMessageV6::StateReport(StateReportV6 {
+    while let Some(message) = next_outbound_message(&mut inventory, &mut normal).await {
+        timeout(
+            Duration::from_millis(OUTBOUND_SEND_BUDGET_MS),
+            send_bridge_message(&mut write, &message),
+        )
+        .await
+        .context("bridge websocket send exceeded bounded writer budget")??;
+    }
+    Ok(())
+}
+
+async fn next_outbound_message(
+    inventory: &mut mpsc::Receiver<BridgeMessageV6>,
+    normal: &mut mpsc::Receiver<BridgeMessageV6>,
+) -> Option<BridgeMessageV6> {
+    tokio::select! {
+        biased;
+        message = inventory.recv() => message,
+        message = normal.recv() => message,
+    }
+}
+
+async fn run_inventory_reporter(
+    sources: BridgeReportSources,
+    mut inventory_updates: watch::Receiver<u64>,
+    mut desired_state: watch::Receiver<Option<HostDesiredStateV2>>,
+    outbound: mpsc::Sender<BridgeMessageV6>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            update = inventory_updates.changed() => {
+                update.context("VM inventory update channel closed")?;
+            }
+            update = desired_state.changed() => {
+                update.context("desired-state report channel closed")?;
+            }
+        }
+        let desired = desired_state.borrow().clone();
+        send_inventory_state_report(&outbound, &sources, desired.as_ref()).await?;
+    }
+}
+
+async fn enqueue_bridge_message(
+    outbound: &mpsc::Sender<BridgeMessageV6>,
+    message: BridgeMessageV6,
+) -> Result<()> {
+    outbound
+        .send(message)
+        .await
+        .map_err(|_| anyhow::anyhow!("bridge writer channel closed"))
+}
+
+async fn send_state_report(
+    outbound: &mpsc::Sender<BridgeMessageV6>,
+    sources: &BridgeReportSources,
+    desired: Option<&HostDesiredStateV2>,
+) -> Result<()> {
+    let report = build_host_state_report(
+        &sources.cfg.host_id,
+        &sources.vm,
+        &sources.db,
+        &sources.disk_probe_path,
+        desired,
+        true,
+        &sources.cache,
+    )
+    .await;
+    enqueue_bridge_message(
+        outbound,
+        BridgeMessageV6::StateReport(StateReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
-            host_id: cfg.host_id.clone(),
+            host_id: sources.cfg.host_id.clone(),
             report,
         }),
     )
     .await
 }
 
-async fn send_vm_report<W>(write: &mut W, host_id: &str, report: VmReportV2) -> Result<()>
-where
-    W: Sink<Message> + Unpin,
-    W::Error: std::error::Error + Send + Sync + 'static,
-{
-    send_bridge_message(
-        write,
-        &BridgeMessageV6::VmReport(VmReportV6 {
+async fn send_inventory_state_report(
+    outbound: &mpsc::Sender<BridgeMessageV6>,
+    sources: &BridgeReportSources,
+    desired: Option<&HostDesiredStateV2>,
+) -> Result<()> {
+    // Lifecycle-triggered snapshots use the generation-fenced state already
+    // committed by VmManager. Full process/cgroup inspection is deliberately
+    // left to the periodic report so readiness publication never inherits an
+    // InspectVm round trip.
+    let report = build_host_state_report(
+        &sources.cfg.host_id,
+        &sources.vm,
+        &sources.db,
+        &sources.disk_probe_path,
+        desired,
+        false,
+        &sources.cache,
+    )
+    .await;
+    enqueue_bridge_message(
+        outbound,
+        BridgeMessageV6::StateReport(StateReportV6 {
+            protocol_version: BRIDGE_PROTOCOL_VERSION,
+            host_id: sources.cfg.host_id.clone(),
+            report,
+        }),
+    )
+    .await
+}
+
+async fn send_vm_report(
+    outbound: &mpsc::Sender<BridgeMessageV6>,
+    host_id: &str,
+    report: VmReportV2,
+) -> Result<()> {
+    enqueue_bridge_message(
+        outbound,
+        BridgeMessageV6::VmReport(VmReportV6 {
             protocol_version: BRIDGE_PROTOCOL_VERSION,
             host_id: host_id.to_string(),
             report,
@@ -663,15 +827,31 @@ async fn build_host_state_report(
     db: &Db,
     disk_probe_path: &Path,
     desired: Option<&HostDesiredStateV2>,
+    inspect_runtime: bool,
+    report_cache: &BridgeReportCache,
 ) -> HostStateReportV2 {
     let now = now_ms();
-    let profile = host_profile::collect(disk_probe_path);
-    let probe_rows = match db.load_all_vm_probe_states().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            warn!(error = %error, "failed to load persisted probe state for bridge report");
-            Vec::new()
+    let profile = if inspect_runtime {
+        let profile = host_profile::collect(disk_probe_path);
+        *report_cache.host_profile.write().await = profile.clone();
+        profile
+    } else {
+        // statfs and route discovery are synchronous host probes. Reuse the
+        // last periodic snapshot so they cannot consume inventory latency.
+        report_cache.host_profile.read().await.clone()
+    };
+    let probe_rows = if inspect_runtime {
+        match db.load_all_vm_probe_states().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(error = %error, "failed to load persisted probe state for bridge report");
+                Vec::new()
+            }
         }
+    } else {
+        // Probe transitions already have their own targeted VM report. Avoid
+        // putting SQLite actor latency in the inventory freshness path.
+        Vec::new()
     };
     let probes_by_vm = probe_snapshots_by_vm(probe_rows);
     let ssh_host = vm.ssh_advertised_host();
@@ -683,9 +863,40 @@ async fn build_host_state_report(
         .iter()
         .filter_map(|status| status.details.as_ref()?.cpu_millis)
         .fold(0_u32, u32::saturating_add);
-    let jailer = vm.jailer_capabilities().await.ok();
+    let live_jailer = if inspect_runtime {
+        vm.jailer_capabilities().await.ok()
+    } else {
+        match timeout(
+            Duration::from_millis(INVENTORY_REPORT_JAILER_BUDGET_MS),
+            vm.jailer_capabilities(),
+        )
+        .await
+        {
+            Ok(Ok(capabilities)) => Some(capabilities),
+            Ok(Err(error)) => {
+                warn!(error = %error, "failed to refresh jailer capacity for inventory report");
+                None
+            }
+            Err(_) => {
+                warn!(
+                    budget_ms = INVENTORY_REPORT_JAILER_BUDGET_MS,
+                    "timed out refreshing jailer capacity for inventory report"
+                );
+                None
+            }
+        }
+    };
+    if let Some(capabilities) = live_jailer.as_ref() {
+        *report_cache.jailer_capabilities.write().await = Some(capabilities.clone());
+    }
+    // Feature and template-store attestations are immutable for a jailerd
+    // process lifetime. A short capacity refresh timeout must not make a
+    // performance-ready host flap, while mutable capacity below still fails
+    // closed by using only the live response.
+    let cached_jailer = report_cache.jailer_capabilities.read().await.clone();
+    let attested_jailer = preserve_last_attestation(live_jailer.as_ref(), cached_jailer.as_ref());
     let (total_cpu_millis, reserved_cpu_millis, schedulable_cpu_millis, committed_cpu_millis) =
-        jailer.as_ref().map_or_else(
+        live_jailer.as_ref().map_or_else(
             || {
                 // Helper unavailability is fail-closed: advertise no
                 // schedulable CPU even when the host profile is otherwise
@@ -711,26 +922,46 @@ async fn build_host_state_report(
             .details
             .as_ref()
             .and_then(|details| details.jail_generation.as_deref());
-        let inspection = match generation {
-            Some(generation) => match vm.inspect_jailed_vm(generation).await {
+        let inspection = match (inspect_runtime, generation) {
+            (true, Some(generation)) => match vm.inspect_jailed_vm(generation).await {
                 Ok(inspection) => inspection,
                 Err(error) => {
                     warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for host report");
                     None
                 }
             },
-            None => None,
+            (false, _) | (true, None) => None,
         };
-        let terminal = match vm.terminal_state(&status.name).await {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                warn!(vm = status.name, error = %error, "failed to collect explicit terminal state for host report");
-                None
-            }
-        };
+        // Never recreate terminal readiness from a direct TCP probe. The event
+        // cache is empty after restart until resumed Kino readiness and
+        // FinalizeVmBoot publish a fresh generation-matched terminal event.
+        let terminal = vm.committed_terminal_state(&status.name).await;
         (inspection, terminal)
     }))
     .await;
+    let (reported_capabilities, reported_cached_images) = if inspect_runtime {
+        let capabilities = collect_host_capabilities(attested_jailer.as_ref());
+        let cached_images = desired
+            .map(|state| {
+                cached_image_states(
+                    state,
+                    now,
+                    attested_jailer.as_ref().is_some_and(|capabilities| {
+                        capabilities.supports_template_backed_launch
+                            && capabilities.fast_template_store
+                    }),
+                )
+            })
+            .unwrap_or_default();
+        *report_cache.host_capabilities.write().await = capabilities.clone();
+        *report_cache.cached_images.write().await = cached_images.clone();
+        (capabilities, cached_images)
+    } else {
+        (
+            report_cache.host_capabilities.read().await.clone(),
+            report_cache.cached_images.read().await.clone(),
+        )
+    };
 
     HostStateReportV2 {
         schema_version: HOST_STATE_REPORT_SCHEMA_VERSION,
@@ -753,19 +984,8 @@ async fn build_host_state_report(
             primary_ipv4: profile.primary_ipv4,
             primary_ipv6: profile.primary_ipv6,
         },
-        capabilities: collect_host_capabilities(jailer.as_ref()),
-        cached_images: desired
-            .map(|state| {
-                cached_image_states(
-                    state,
-                    now,
-                    jailer.as_ref().is_some_and(|capabilities| {
-                        capabilities.supports_template_backed_launch
-                            && capabilities.fast_template_store
-                    }),
-                )
-            })
-            .unwrap_or_default(),
+        capabilities: reported_capabilities,
+        cached_images: reported_cached_images,
         vms: statuses
             .into_iter()
             .zip(observations)
@@ -816,17 +1036,7 @@ async fn build_vm_report_from_probe_update(
         );
         return None;
     }
-    let terminal = match vm.terminal_state(&status.name).await {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            warn!(
-                vm = status.name,
-                error = %error,
-                "failed to collect explicit terminal state for Kino report"
-            );
-            None
-        }
-    };
+    let terminal = vm.committed_terminal_state(&status.name).await;
     Some(build_vm_report_from_status(
         host_id,
         vm.ssh_advertised_host().as_deref(),
@@ -1058,7 +1268,10 @@ fn vm_phase_from_status(status: &VmStatusResponse, probes: &[VmProbeSnapshotV1])
         VmLifecycleState::Queued => VmPhase::Pending,
         VmLifecycleState::CachingImage => VmPhase::PullingImage,
         VmLifecycleState::PreparingDisks => VmPhase::CreatingDisks,
-        VmLifecycleState::CreatingVm | VmLifecycleState::BootingVm => VmPhase::Booting,
+        VmLifecycleState::CreatingVm => {
+            creating_vm_report_phase(runtime_constraints_from_status(status).is_some())
+        }
+        VmLifecycleState::BootingVm => VmPhase::Booting,
         VmLifecycleState::Running => {
             if !probes.is_empty()
                 && probes
@@ -1079,6 +1292,18 @@ fn vm_phase_from_status(status: &VmStatusResponse, probes: &[VmProbeSnapshotV1])
         }
         VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts => VmPhase::Stopping,
         VmLifecycleState::Failed | VmLifecycleState::DeleteFailed => VmPhase::Failed,
+    }
+}
+
+fn creating_vm_report_phase(has_runtime_constraints: bool) -> VmPhase {
+    if has_runtime_constraints {
+        VmPhase::Booting
+    } else {
+        // The external Booting phase requires a generation and live CPU
+        // contract. Keep the pre-jailer launch window in disk/staging state;
+        // persist_jail_launch emits another inventory revision as soon as the
+        // boot quota is available.
+        VmPhase::CreatingDisks
     }
 }
 
@@ -1589,6 +1814,47 @@ fn local_run_id(status: &VmStatusResponse) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn preserve_last_attestation<T: Clone>(live: Option<&T>, cached: Option<&T>) -> Option<T> {
+    live.or(cached).cloned()
+}
+
+fn terminal_update_matches_status(update: &VmTerminalState, status: &VmStatusResponse) -> bool {
+    let update_generation = update
+        .runtime_constraints
+        .as_ref()
+        .map(|constraints| constraints.generation.as_str());
+    let current_generation = status
+        .details
+        .as_ref()
+        .and_then(|details| details.jail_generation.as_deref());
+    terminal_identities_match(
+        &update.run_id,
+        update_generation,
+        &update.state,
+        local_run_id(status).as_deref(),
+        current_generation,
+    )
+}
+
+fn terminal_identities_match(
+    update_run_id: &str,
+    update_generation: Option<&str>,
+    update_state: &VmTerminalStateKind,
+    current_run_id: Option<&str>,
+    current_generation: Option<&str>,
+) -> bool {
+    if current_run_id != Some(update_run_id) {
+        return false;
+    }
+    match (update_generation, current_generation) {
+        (Some(update), Some(current)) => update == current,
+        // A pre-launch failure or deletion can legitimately have no jail
+        // generation. Ready is never accepted without an explicit fence.
+        (None, None) => *update_state != VmTerminalStateKind::Ready,
+        _ => false,
+    }
+}
+
 fn resources_from_desired(resources: &VmResourcesV2) -> CreateVmResources {
     CreateVmResources {
         cpu_millis: resources.cpu_millis,
@@ -1721,6 +1987,95 @@ mod tests {
         assert!(error.to_string().contains("expected v6"));
     }
 
+    #[tokio::test]
+    async fn outbound_writer_prioritizes_inventory_reports() {
+        let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
+        let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        normal_tx
+            .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+                protocol_version: BRIDGE_PROTOCOL_VERSION,
+                host_id: "normal".to_string(),
+                reason: SyncRequestReason::Connect,
+            }))
+            .await
+            .expect("queue normal message");
+        inventory_tx
+            .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+                protocol_version: BRIDGE_PROTOCOL_VERSION,
+                host_id: "inventory".to_string(),
+                reason: SyncRequestReason::Reconnect,
+            }))
+            .await
+            .expect("queue inventory message");
+
+        let next = timeout(
+            Duration::from_millis(INVENTORY_DELIVERY_TARGET_MS),
+            next_outbound_message(&mut inventory_rx, &mut normal_rx),
+        )
+        .await
+        .expect("priority dequeue stays inside inventory budget")
+        .expect("queued message");
+
+        assert_eq!(bridge_message_host_id(&next), "inventory");
+    }
+
+    #[test]
+    fn bounded_inventory_path_fits_delivery_target() {
+        let worst_case_ms = INVENTORY_REPORT_JAILER_BUDGET_MS
+            .saturating_add(OUTBOUND_SEND_BUDGET_MS)
+            .saturating_add(OUTBOUND_SEND_BUDGET_MS);
+        assert!(worst_case_ms < INVENTORY_DELIVERY_TARGET_MS);
+    }
+
+    #[test]
+    fn terminal_updates_are_run_and_generation_fenced() {
+        assert!(terminal_identities_match(
+            "run-1",
+            Some("generation-2"),
+            &VmTerminalStateKind::Ready,
+            Some("run-1"),
+            Some("generation-2"),
+        ));
+        assert!(!terminal_identities_match(
+            "run-1",
+            Some("generation-1"),
+            &VmTerminalStateKind::Ready,
+            Some("run-1"),
+            Some("generation-2"),
+        ));
+        assert!(!terminal_identities_match(
+            "run-old",
+            Some("generation-2"),
+            &VmTerminalStateKind::Ready,
+            Some("run-new"),
+            Some("generation-2"),
+        ));
+        assert!(!terminal_identities_match(
+            "run-1",
+            None,
+            &VmTerminalStateKind::Ready,
+            Some("run-1"),
+            None,
+        ));
+        assert!(terminal_identities_match(
+            "run-1",
+            None,
+            &VmTerminalStateKind::Failed,
+            Some("run-1"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn immutable_attestation_survives_transient_live_refresh_failure() {
+        assert_eq!(preserve_last_attestation(None, Some(&42_u8)), Some(42));
+        assert_eq!(
+            preserve_last_attestation(Some(&7_u8), Some(&42_u8)),
+            Some(7)
+        );
+        assert_eq!(preserve_last_attestation::<u8>(None, None), None);
+    }
+
     #[test]
     fn explicit_terminal_contract_exposes_targets_only_when_ready() {
         let ready = terminal_state_from_manager(&VmTerminalState {
@@ -1807,6 +2162,12 @@ mod tests {
             image_cache_key(&desired_vm().image_key),
             "broken-nginx-web-x86_64"
         );
+    }
+
+    #[test]
+    fn creating_vm_is_booting_only_after_runtime_constraints_exist() {
+        assert_eq!(creating_vm_report_phase(false), VmPhase::CreatingDisks);
+        assert_eq!(creating_vm_report_phase(true), VmPhase::Booting);
     }
 
     #[test]

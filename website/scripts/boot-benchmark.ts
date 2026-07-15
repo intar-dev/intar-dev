@@ -20,6 +20,8 @@ import {
   bootArtifactFingerprint,
   bootArtifactIdentity,
   evaluatePromotionGate,
+  hasExactBootCpuSamples,
+  hasExactSteadyResourceState,
   sealProjectionReadyDurationMs,
   sealProjectionUiReadyDurationMs,
   summarizeBootSamples,
@@ -78,6 +80,7 @@ interface HostResponse {
       agentVersion: string | null;
     };
     actualState: {
+      appliedDesiredVersion: number;
       observedAt: number;
       health: "healthy" | "degraded" | "unknown";
       capacity: {
@@ -95,13 +98,37 @@ interface HostResponse {
         error?: string | null;
         updated_at_unix_ms: number;
       }>;
+      builds: Array<{ build_id: string; phase: string }>;
+      vms: Array<{
+        run_id: string;
+        vm_name: string;
+        phase: string;
+      }>;
+    } | null;
+    desiredState: {
+      version: number;
+      cachedImages: Array<{
+        image_key: { scenario: string; vm: string; arch: string };
+        image_sha256: string;
+      }>;
+      vms: Array<{
+        run_id: string;
+        vm_name: string;
+        desired_phase: string;
+      }>;
+      builds: Array<{ build_id: string }>;
+    } | null;
+    benchmarkLease: {
+      runId: string;
+      acquiredAt: number;
+      updatedAt: number;
     } | null;
   };
 }
 
-interface HostRunsResponse {
-  liveVms: Array<{ name: string; run_id: string | null }>;
-}
+type HostActualVm = NonNullable<
+  HostResponse["host"]["actualState"]
+>["vms"][number];
 
 interface StartRunResponse {
   accepted: true;
@@ -122,10 +149,17 @@ interface HostEvidence {
   cloudHypervisorSha256: string;
   performanceReady: boolean;
   cachedImages: BootBenchmarkResultV1["prewarm"]["cached_images"];
+  capabilitiesFingerprint: string;
+  desiredCachedImagesFingerprint: string;
+  actualCachedImagesFingerprint: string;
 }
 
 interface IsolationMonitor {
   failure: Promise<never>;
+  beginTeardown: () => void;
+  attest: (host: HostResponse["host"]) => void;
+  evidence: () => NonNullable<PassedBootSampleV1["isolation_evidence"]>;
+  failureReason: () => FatalIsolationError | null;
   stop: () => void;
 }
 
@@ -372,7 +406,10 @@ class BrowserBenchmarkDriver {
         headers["content-type"] = "application/json";
         await route.continue({
           headers,
-          postData: JSON.stringify({ hostId: this.hostId }),
+          postData: JSON.stringify({
+            hostId: this.hostId,
+            admissionMode: "benchmark",
+          }),
         });
       } catch (error) {
         routeFailure =
@@ -714,6 +751,7 @@ export async function runBootBenchmark(
           client,
           options,
           manifest,
+          expectedHost: host,
           kind: "warmup",
           ordinal: index + 1,
         }),
@@ -727,6 +765,7 @@ export async function runBootBenchmark(
           client,
           options,
           manifest,
+          expectedHost: host,
           kind: "measured",
           ordinal: index + 1,
         }),
@@ -742,6 +781,7 @@ export async function runBootBenchmark(
     measured,
     summary,
     performanceReady: host.performanceReady,
+    cpuPolicy,
   });
   return {
     schema_version: BOOT_BENCHMARK_SCHEMA_VERSION,
@@ -794,10 +834,18 @@ export async function runBootBenchmark(
       terminal_probe_timeout_ms: options.terminalProbeTimeoutMs,
     },
     isolation: {
+      admission_mode: "benchmark",
+      host_scenario_enabled: false,
       preflight_idle_required: true,
+      preflight_actual_state_drained: true,
+      preflight_desired_state_drained: true,
+      preflight_desired_state_applied: true,
       continuous_foreign_vm_monitor: true,
+      continuous_foreign_desired_vm_monitor: true,
+      continuous_scheduling_disabled_monitor: true,
+      authoritative_vm_source: "host_desired_and_actual_state",
       monitor_poll_max_ms: Math.min(options.pollMs, 250),
-      atomic_host_lease: false,
+      atomic_host_lease: true,
     },
     warmups,
     measured,
@@ -819,15 +867,17 @@ async function measureBoot(input: {
   client: ApiClient;
   options: BootBenchmarkOptions;
   manifest: ReturnType<typeof parseManifest>;
+  expectedHost: HostEvidence;
   kind: "warmup" | "measured";
   ordinal: number;
 }): Promise<BootSampleV1> {
-  await loadHostEvidence({
+  const sampleHost = await loadHostEvidence({
     client: input.client,
     hostId: input.options.hostId,
     manifest: input.manifest,
     requireIdle: true,
   });
+  assertStableHostEvidence(sampleHost, input.expectedHost);
 
   let startedAtUnixMs = Date.now();
   let startedAt = performance.now();
@@ -862,6 +912,7 @@ async function measureBoot(input: {
       hostId: input.options.hostId,
       runId: start.runId,
       pollMs: input.options.pollMs,
+      expectedHost: input.expectedHost,
     });
     const readyObservationPromise = waitForRunReady(
       input.client,
@@ -884,20 +935,24 @@ async function measureBoot(input: {
       terminalReportReadyMs,
     } = readyObservation;
     const vm = ready.vms[0]!;
-    const hostRuns = await withIsolationGuard(
-      input.client.json<HostRunsResponse>(
-        `/api/agent/hosts/${encodeURIComponent(input.options.hostId)}/runs`,
+    const hostActualVms = await withIsolationGuard(
+      loadAuthoritativeHostVms(
+        input.client,
+        input.options.hostId,
+        start.runId,
+        input.expectedHost,
       ),
       isolationMonitor,
     );
-    assertOwnedHostRun(hostRuns, start.runId);
+    assertOwnedHostActualVm(hostActualVms, start.runId);
     const cpuEvidence = await withIsolationGuard(
       loadVmCpuEvidence({
         client: input.client,
         runId: start.runId,
         vmName: vm.runtimeVmName,
         generation: vm.runtimeConstraints!.generation,
-        timeoutMs: 2_000,
+        cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES[input.options.variant],
+        timeoutMs: 30_000,
         pollMs: Math.min(input.options.pollMs, 100),
       }),
       isolationMonitor,
@@ -962,7 +1017,6 @@ async function measureBoot(input: {
   }
 
   measurementAbort.abort();
-  isolationMonitor?.stop();
 
   let browserResetFailure: string | null = null;
   try {
@@ -972,20 +1026,36 @@ async function measureBoot(input: {
   }
 
   const teardownStartedAt = performance.now();
+  let teardownFailure: string | null = null;
   if (ownedRun && runId) {
     try {
-      if (fatalFailure) {
-        await destroyAndWaitForOwnedRun(input.client, input.options, runId);
-      } else {
-        await destroyAndWaitForIsolation(input.client, input.options, runId);
-      }
-    } catch (error) {
-      throw new FatalIsolationError(
-        `could not restore host isolation after ${input.kind} ${input.ordinal}: ${errorMessage(error)}`,
+      await destroyAndWaitForIsolation(
+        input.client,
+        input.options,
+        runId,
+        isolationMonitor,
       );
+    } catch (error) {
+      teardownFailure = errorMessage(error);
     }
   }
   const teardownMs = elapsedMs(teardownStartedAt);
+  const monitorFailure = isolationMonitor?.failureReason() ?? null;
+  let isolationEvidence: PassedBootSampleV1["isolation_evidence"];
+  if (passed && isolationMonitor && !monitorFailure && !teardownFailure) {
+    try {
+      isolationEvidence = isolationMonitor.evidence();
+    } catch (error) {
+      teardownFailure = errorMessage(error);
+    }
+  }
+  isolationMonitor?.stop();
+
+  if (teardownFailure) {
+    throw new FatalIsolationError(
+      `could not restore host isolation after ${input.kind} ${input.ordinal}: ${teardownFailure}`,
+    );
+  }
 
   if (browserResetFailure) {
     throw new FatalIsolationError(
@@ -993,13 +1063,18 @@ async function measureBoot(input: {
     );
   }
 
+  if (monitorFailure) throw monitorFailure;
   if (fatalFailure) throw fatalFailure;
 
   if (passed) {
     log(
       `${input.kind} ${input.ordinal} passed: accepted=${passed.accepted_ms}ms ready=${passed.terminal_report_ready_ms}ms usable=${passed.usable_terminal_ms}ms`,
     );
-    return { ...passed, teardown_ms: teardownMs };
+    return {
+      ...passed,
+      isolation_evidence: isolationEvidence!,
+      teardown_ms: teardownMs,
+    };
   }
   const failed: BootSampleV1 = {
     kind: input.kind,
@@ -1116,6 +1191,7 @@ async function loadVmCpuEvidence(input: {
   runId: string;
   vmName: string;
   generation: string;
+  cpuPolicy: BootBenchmarkResultV1["cpu_policy"];
   timeoutMs: number;
   pollMs: number;
 }): Promise<
@@ -1132,7 +1208,9 @@ async function loadVmCpuEvidence(input: {
     vm = run.vms.find((candidate) => candidate.runtimeVmName === input.vmName);
     if (
       vm?.bootEvidence?.generation === input.generation &&
-      hasCompleteCpuSampleSet(vm.bootEvidence.cpu_samples)
+      hasExactBootCpuSamples(vm.bootEvidence, input.cpuPolicy) &&
+      vm.runtimeConstraints?.generation === input.generation &&
+      hasExactSteadyResourceState(vm.resourceState ?? null, input.cpuPolicy)
     ) {
       break;
     }
@@ -1140,7 +1218,7 @@ async function loadVmCpuEvidence(input: {
   } while (Date.now() <= deadline);
   const bootEvidence =
     vm?.bootEvidence?.generation === input.generation &&
-    hasCompleteCpuSampleSet(vm.bootEvidence.cpu_samples)
+    hasExactBootCpuSamples(vm.bootEvidence, input.cpuPolicy)
       ? vm.bootEvidence
       : null;
   const resourceState =
@@ -1162,45 +1240,113 @@ async function loadVmCpuEvidence(input: {
   };
 }
 
-function hasCompleteCpuSampleSet(
-  samples: NonNullable<
-    ScenarioRunRecord["vms"][number]["bootEvidence"]
-  >["cpu_samples"],
-): boolean {
-  const points = new Set(samples.map((sample) => sample.point));
-  return [
-    "vm_boot_accepted",
-    "kino_ready",
-    "pre_seal",
-    "post_seal",
-    "terminal_published",
-  ].every((point) => points.has(point as (typeof samples)[number]["point"]));
-}
-
-export function assertNoForeignHostRuns(
-  runs: HostRunsResponse,
+export function assertNoForeignHostActualVms(
+  vms: readonly HostActualVm[],
   ownedRunId: string,
 ): void {
-  const foreign = runs.liveVms.filter((vm) => vm.run_id !== ownedRunId);
+  const foreign = vms.filter((vm) => vm.run_id !== ownedRunId);
   if (foreign.length > 0) {
     throw new FatalIsolationError(
       `foreign VM(s) appeared on the benchmark host: ${foreign
-        .map((vm) => `${vm.name}[${vm.run_id ?? "unattributed"}]`)
+        .map(
+          (vm) =>
+            `${vm.vm_name}[${vm.run_id.trim() || "unattributed"}:${vm.phase}]`,
+        )
         .join(",")}`,
     );
   }
 }
 
-export function assertOwnedHostRun(
-  runs: HostRunsResponse,
+export function assertOwnedHostActualVm(
+  vms: readonly HostActualVm[],
   ownedRunId: string,
 ): void {
-  assertNoForeignHostRuns(runs, ownedRunId);
-  if (!runs.liveVms.some((vm) => vm.run_id === ownedRunId)) {
+  assertNoForeignHostActualVms(vms, ownedRunId);
+  if (!vms.some((vm) => vm.run_id === ownedRunId)) {
     throw new FatalIsolationError(
       `benchmark run ${ownedRunId} was not observed on the pinned host`,
     );
   }
+}
+
+async function loadAuthoritativeHostVms(
+  client: ApiClient,
+  hostId: string,
+  ownedRunId: string,
+  expectedHost: HostEvidence,
+): Promise<HostActualVm[]> {
+  const { host } = await client.json<HostResponse>(
+    `/api/agent/hosts/${encodeURIComponent(hostId)}`,
+  );
+  return assertAuthoritativeHostSnapshot(host, {
+    hostId,
+    ownedRunId,
+    expectedHost,
+    allowLeaseRelease: false,
+  });
+}
+
+function assertAuthoritativeHostSnapshot(
+  host: HostResponse["host"],
+  input: {
+    hostId: string;
+    ownedRunId: string;
+    expectedHost: HostEvidence;
+    allowLeaseRelease: boolean;
+  },
+): HostActualVm[] {
+  if (host.id !== input.hostId) {
+    throw new FatalIsolationError(
+      `host actual-state lookup returned ${host.id}, expected ${input.hostId}`,
+    );
+  }
+  if (!host.status.connected) {
+    throw new FatalIsolationError(
+      "benchmark host bridge disconnected during isolation monitoring",
+    );
+  }
+  if (host.scenarioEnabled) {
+    throw new FatalIsolationError(
+      "benchmark host was re-enabled for ordinary scenario scheduling",
+    );
+  }
+  if (
+    host.benchmarkLease?.runId !== input.ownedRunId &&
+    !(input.allowLeaseRelease && host.benchmarkLease === null)
+  ) {
+    throw new FatalIsolationError(
+      host.benchmarkLease
+        ? `benchmark host lease belongs to ${host.benchmarkLease.runId}, expected ${input.ownedRunId}`
+        : `benchmark host lease for ${input.ownedRunId} disappeared before teardown`,
+    );
+  }
+  if (!host.actualState || host.actualState.health !== "healthy") {
+    throw new FatalIsolationError(
+      `benchmark host actual state is ${host.actualState?.health ?? "missing"}`,
+    );
+  }
+  if (!host.desiredState) {
+    throw new FatalIsolationError(
+      "benchmark host desired state is missing during isolation monitoring",
+    );
+  }
+  assertStableHostResponse(host, input.expectedHost);
+  const foreignDesired = host.desiredState.vms.filter(
+    (vm) =>
+      vm.desired_phase === "running" && vm.run_id !== input.ownedRunId,
+  );
+  if (foreignDesired.length > 0) {
+    throw new FatalIsolationError(
+      `foreign desired VM(s) appeared on the benchmark host: ${foreignDesired
+        .map(
+          (vm) =>
+            `${vm.vm_name}[${vm.run_id.trim() || "unattributed"}:${vm.desired_phase}]`,
+        )
+        .join(",")}`,
+    );
+  }
+  assertNoForeignHostActualVms(host.actualState.vms, input.ownedRunId);
+  return host.actualState.vms;
 }
 
 function startIsolationMonitor(input: {
@@ -1208,21 +1354,32 @@ function startIsolationMonitor(input: {
   hostId: string;
   runId: string;
   pollMs: number;
+  expectedHost: HostEvidence;
 }): IsolationMonitor {
   let stopped = false;
+  let teardown = false;
+  let leaseReleased = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let rejectFailure!: (error: FatalIsolationError) => void;
+  let recordedFailure: FatalIsolationError | null = null;
+  let firstOwnedObservedAt: number | null = null;
+  let lastOwnedObservedAt: number | null = null;
+  let releasedObservedAt: number | null = null;
+  let observationCount = 0;
+  let recordFailure!: (error: FatalIsolationError) => void;
+  let attest!: (host: HostResponse["host"]) => void;
   const failure = new Promise<never>((_resolve, reject) => {
+    rejectFailure = reject;
     const poll = async () => {
       if (stopped) return;
       try {
-        const runs = await input.client.json<HostRunsResponse>(
-          `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
+        const { host } = await input.client.json<HostResponse>(
+          `/api/agent/hosts/${encodeURIComponent(input.hostId)}`,
         );
         if (stopped) return;
-        assertNoForeignHostRuns(runs, input.runId);
+        attest(host);
       } catch (error) {
-        stopped = true;
-        reject(
+        recordFailure(
           error instanceof FatalIsolationError
             ? error
             : new FatalIsolationError(
@@ -1235,8 +1392,75 @@ function startIsolationMonitor(input: {
     };
     void poll();
   });
+  recordFailure = (error: FatalIsolationError) => {
+    if (recordedFailure) return;
+    recordedFailure = error;
+    stopped = true;
+    if (timer !== null) clearTimeout(timer);
+    rejectFailure(error);
+  };
+  attest = (host: HostResponse["host"]) => {
+    if (recordedFailure) return;
+    try {
+      assertAuthoritativeHostSnapshot(host, {
+        hostId: input.hostId,
+        ownedRunId: input.runId,
+        expectedHost: input.expectedHost,
+        allowLeaseRelease: teardown,
+      });
+      const observedAt = Date.now();
+      observationCount += 1;
+      if (host.benchmarkLease?.runId === input.runId) {
+        if (leaseReleased) {
+          throw new FatalIsolationError(
+            `benchmark lease for ${input.runId} reappeared after drained release`,
+          );
+        }
+        firstOwnedObservedAt ??= observedAt;
+        lastOwnedObservedAt = observedAt;
+      } else {
+        if (!teardown) {
+          throw new FatalIsolationError(
+            `benchmark lease for ${input.runId} released before destroy`,
+          );
+        }
+        leaseReleased = true;
+        releasedObservedAt ??= observedAt;
+      }
+    } catch (error) {
+      recordFailure(
+        error instanceof FatalIsolationError
+          ? error
+          : new FatalIsolationError(errorMessage(error)),
+      );
+    }
+  };
   return {
     failure,
+    beginTeardown: () => {
+      teardown = true;
+    },
+    attest,
+    evidence: () => {
+      if (
+        firstOwnedObservedAt === null ||
+        lastOwnedObservedAt === null ||
+        releasedObservedAt === null ||
+        observationCount < 2
+      ) {
+        throw new FatalIsolationError(
+          `benchmark lease transition evidence is incomplete for ${input.runId}`,
+        );
+      }
+      return {
+        lease_run_id: input.runId,
+        first_owned_observed_at_unix_ms: firstOwnedObservedAt,
+        last_owned_observed_at_unix_ms: lastOwnedObservedAt,
+        released_observed_at_unix_ms: releasedObservedAt,
+        observation_count: observationCount,
+      };
+    },
+    failureReason: () => recordedFailure,
     stop: () => {
       stopped = true;
       if (timer !== null) clearTimeout(timer);
@@ -1255,7 +1479,9 @@ async function destroyAndWaitForIsolation(
   client: ApiClient,
   options: BootBenchmarkOptions,
   runId: string,
+  isolationMonitor: IsolationMonitor | null,
 ): Promise<void> {
+  isolationMonitor?.beginTeardown();
   await client.json(
     `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
     { method: "POST" },
@@ -1263,32 +1489,45 @@ async function destroyAndWaitForIsolation(
   const deadline = Date.now() + options.waitIdleMs;
   let lastDetail = "cleanup not observed";
   while (Date.now() <= deadline) {
-    const [runResult, hostResult, hostRunsResult] = await Promise.allSettled([
+    const [runResult, hostResult] = await Promise.allSettled([
       client.json<RunResponse>(
         `/api/scenarios/runs/${encodeURIComponent(runId)}`,
       ),
       client.json<HostResponse>(
         `/api/agent/hosts/${encodeURIComponent(options.hostId)}`,
       ),
-      client.json<HostRunsResponse>(
-        `/api/agent/hosts/${encodeURIComponent(options.hostId)}/runs`,
-      ),
     ]);
-    if (
-      runResult.status === "fulfilled" &&
-      hostResult.status === "fulfilled" &&
-      hostRunsResult.status === "fulfilled"
-    ) {
+    if (runResult.status === "fulfilled" && hostResult.status === "fulfilled") {
+      isolationMonitor?.attest(hostResult.value.host);
       const terminalRun = ["completed", "failed"].includes(
         runResult.value.run.phase,
       );
       const committed =
         hostResult.value.host.actualState?.capacity.committed_cpu_millis;
-      const noVisibleVms = hostRunsResult.value.liveVms.length === 0;
-      if (terminalRun && committed === 0 && noVisibleVms) return;
-      lastDetail = `run=${runResult.value.run.phase} committed=${String(committed)} live_vms=${hostRunsResult.value.liveVms.length}`;
+      const actualVms = hostResult.value.host.actualState?.vms ?? null;
+      const actualAppliedVersion =
+        hostResult.value.host.actualState?.appliedDesiredVersion ?? null;
+      const desiredState = hostResult.value.host.desiredState;
+      const desiredRunningVms =
+        desiredState?.vms.filter((vm) => vm.desired_phase === "running") ??
+        null;
+      const desiredApplied =
+        desiredState !== null &&
+        actualAppliedVersion !== null &&
+        actualAppliedVersion >= desiredState.version;
+      if (
+        terminalRun &&
+        committed === 0 &&
+        actualVms?.length === 0 &&
+        desiredRunningVms?.length === 0 &&
+        desiredApplied &&
+        hostResult.value.host.benchmarkLease === null
+      ) {
+        return;
+      }
+      lastDetail = `run=${runResult.value.run.phase} committed=${String(committed)} actual_vms=${actualVms?.length ?? "missing"} desired_running_vms=${desiredRunningVms?.length ?? "missing"} desired_applied=${String(desiredApplied)} benchmark_lease=${hostResult.value.host.benchmarkLease?.runId ?? "absent"}`;
     } else {
-      lastDetail = [runResult, hostResult, hostRunsResult]
+      lastDetail = [runResult, hostResult]
         .filter(
           (result): result is PromiseRejectedResult =>
             result.status === "rejected",
@@ -1301,54 +1540,44 @@ async function destroyAndWaitForIsolation(
   throw new Error(`timed out waiting for isolated host cleanup: ${lastDetail}`);
 }
 
-async function destroyAndWaitForOwnedRun(
-  client: ApiClient,
-  options: BootBenchmarkOptions,
-  runId: string,
-): Promise<void> {
-  await client.json(
-    `/api/scenarios/runs/${encodeURIComponent(runId)}/destroy`,
-    { method: "POST" },
-  );
-  const deadline = Date.now() + options.waitIdleMs;
-  let lastDetail = "cleanup not observed";
-  while (Date.now() <= deadline) {
-    const { run } = await client.json<RunResponse>(
-      `/api/scenarios/runs/${encodeURIComponent(runId)}`,
-    );
-    if (["completed", "failed"].includes(run.phase)) return;
-    lastDetail = run.phase;
-    await sleep(options.pollMs);
-  }
-  throw new Error(`timed out waiting for owned run cleanup: ${lastDetail}`);
-}
-
 async function loadHostEvidence(input: {
   client: ApiClient;
   hostId: string;
   manifest: ReturnType<typeof parseManifest>;
   requireIdle: boolean;
 }): Promise<HostEvidence> {
-  const [{ host }, runs] = await Promise.all([
-    input.client.json<HostResponse>(
-      `/api/agent/hosts/${encodeURIComponent(input.hostId)}`,
-    ),
-    input.client.json<HostRunsResponse>(
-      `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
-    ),
-  ]);
+  const { host } = await input.client.json<HostResponse>(
+    `/api/agent/hosts/${encodeURIComponent(input.hostId)}`,
+  );
   const problems: string[] = [];
   const cachedImages: HostEvidence["cachedImages"] = [];
   if (host.id !== input.hostId) problems.push(`API returned host ${host.id}`);
   if (host.role !== "agent") problems.push(`host role is ${host.role}`);
   if (host.disabled) problems.push("host is disabled");
-  if (!host.scenarioEnabled) problems.push("scenario execution is disabled");
+  if (host.scenarioEnabled) {
+    problems.push(
+      "scenario scheduling must be disabled for benchmark admission",
+    );
+  }
+  if (input.requireIdle && host.benchmarkLease !== null) {
+    problems.push(
+      `host has benchmark lease for run ${host.benchmarkLease.runId}`,
+    );
+  }
   if (!host.status.connected) problems.push("host bridge is disconnected");
+  if (!host.status.agentVersion?.trim()) {
+    problems.push("host bridge did not report an agent version");
+  }
   if (!host.actualState) {
     problems.push("host has no actual-state report");
   } else {
     if (host.actualState.health !== "healthy") {
       problems.push(`host actual state is ${host.actualState.health}`);
+    }
+    if (host.actualState.builds.length > 0) {
+      problems.push(
+        `host actual state has ${host.actualState.builds.length} active build report(s)`,
+      );
     }
     const expectedArch = input.manifest.vms[0]?.image_key.arch;
     if (host.actualState.capabilities.arch !== expectedArch) {
@@ -1396,6 +1625,10 @@ async function loadHostEvidence(input: {
         problems.push(
           `image ${vm.image_key.scenario}/${vm.image_key.vm} is ${cached.phase}${cached.error ? `: ${cached.error}` : ""}`,
         );
+      } else if (cached.error) {
+        problems.push(
+          `image ${vm.image_key.scenario}/${vm.image_key.vm} has a ready-state error: ${cached.error}`,
+        );
       } else if (
         !Number.isSafeInteger(cached.updated_at_unix_ms) ||
         cached.updated_at_unix_ms <= 0 ||
@@ -1423,9 +1656,60 @@ async function loadHostEvidence(input: {
       );
     }
   }
-  if (input.requireIdle && runs.liveVms.length > 0) {
+  if (!host.desiredState) {
+    problems.push("host has no desired-state document");
+  } else if (!host.actualState) {
+    problems.push("host desired state has no matching actual-state fence");
+  } else {
+    if (host.desiredState.builds.length > 0) {
+      problems.push(
+        `host desired state has ${host.desiredState.builds.length} active build assignment(s)`,
+      );
+    }
+    if (
+      host.actualState.appliedDesiredVersion < host.desiredState.version
+    ) {
+      problems.push(
+        `host has applied desired version ${host.actualState.appliedDesiredVersion}, expected at least ${host.desiredState.version}`,
+      );
+    }
+    const runningDesired = host.desiredState.vms.filter(
+      (vm) => vm.desired_phase === "running",
+    );
+    if (input.requireIdle && runningDesired.length > 0) {
+      problems.push(
+        `host desired state has running VMs: ${runningDesired
+          .map(
+            (vm) =>
+              `${vm.vm_name}[${vm.run_id.trim() || "unattributed"}:${vm.desired_phase}]`,
+          )
+          .join(",")}`,
+      );
+    }
+    for (const vm of input.manifest.vms) {
+      if (
+        !host.desiredState.cachedImages.some(
+          (image) =>
+            image.image_key.scenario === vm.image_key.scenario &&
+            image.image_key.vm === vm.image_key.vm &&
+            image.image_key.arch === vm.image_key.arch &&
+            image.image_sha256.toLowerCase() === vm.image_sha256.toLowerCase(),
+        )
+      ) {
+        problems.push(
+          `image ${vm.image_key.scenario}/${vm.image_key.vm} is absent from desired cache fencing`,
+        );
+      }
+    }
+  }
+  if (input.requireIdle && (host.actualState?.vms.length ?? 0) > 0) {
     problems.push(
-      `authenticated host view has live VMs: ${runs.liveVms.map((vm) => vm.name).join(",")}`,
+      `host actual state has VMs: ${host
+        .actualState!.vms.map(
+          (vm) =>
+            `${vm.vm_name}[${vm.run_id.trim() || "unattributed"}:${vm.phase}]`,
+        )
+        .join(",")}`,
     );
   }
   if (problems.length > 0) {
@@ -1434,13 +1718,21 @@ async function loadHostEvidence(input: {
     );
   }
   const actual = host.actualState!;
+  const capabilities = normalizeCapabilities(actual.capabilities);
   return {
     agentVersion: host.status.agentVersion,
     observedAt: actual.observedAt,
-    capabilities: normalizeCapabilities(actual.capabilities),
+    capabilities,
     cloudHypervisorSha256: String(actual.capabilities.cloud_hypervisor_sha256),
     performanceReady: true,
     cachedImages,
+    capabilitiesFingerprint: stableRecordFingerprint(capabilities),
+    desiredCachedImagesFingerprint: desiredCachedImagesFingerprint(
+      host.desiredState!.cachedImages,
+    ),
+    actualCachedImagesFingerprint: actualCachedImagesFingerprint(
+      actual.cachedImages,
+    ),
   };
 }
 
@@ -1627,6 +1919,127 @@ function normalizeCapabilities(
       )
       .sort(([left], [right]) => left.localeCompare(right)),
   ) as Record<string, boolean | string | number | null>;
+}
+
+function assertStableHostEvidence(
+  actual: HostEvidence,
+  expected: HostEvidence,
+): void {
+  if (
+    actual.agentVersion !== expected.agentVersion ||
+    actual.cloudHypervisorSha256 !== expected.cloudHypervisorSha256 ||
+    actual.capabilitiesFingerprint !== expected.capabilitiesFingerprint ||
+    actual.desiredCachedImagesFingerprint !==
+      expected.desiredCachedImagesFingerprint ||
+    actual.actualCachedImagesFingerprint !==
+      expected.actualCachedImagesFingerprint
+  ) {
+    throw new FatalIsolationError(
+      "benchmark host execution identity, runtime hash, capabilities, or prewarm set changed between samples",
+    );
+  }
+}
+
+function assertStableHostResponse(
+  host: HostResponse["host"],
+  expected: HostEvidence,
+): void {
+  if (host.role !== "agent" || host.disabled) {
+    throw new FatalIsolationError(
+      "benchmark host role or enabled state changed during measurement",
+    );
+  }
+  if (host.status.agentVersion !== expected.agentVersion) {
+    throw new FatalIsolationError(
+      `benchmark agent version changed from ${String(expected.agentVersion)} to ${String(host.status.agentVersion)}`,
+    );
+  }
+  if (!host.actualState || !host.desiredState) {
+    throw new FatalIsolationError(
+      "benchmark host lost desired or actual state during measurement",
+    );
+  }
+  const capabilities = normalizeCapabilities(host.actualState.capabilities);
+  if (
+    stableRecordFingerprint(capabilities) !== expected.capabilitiesFingerprint ||
+    capabilities.cloud_hypervisor_sha256 !== expected.cloudHypervisorSha256
+  ) {
+    throw new FatalIsolationError(
+      "benchmark host runtime hash or capability set changed during measurement",
+    );
+  }
+  if (
+    desiredCachedImagesFingerprint(host.desiredState.cachedImages) !==
+    expected.desiredCachedImagesFingerprint
+  ) {
+    throw new FatalIsolationError(
+      "benchmark host desired prewarm set changed during measurement",
+    );
+  }
+  if (
+    actualCachedImagesFingerprint(host.actualState.cachedImages) !==
+    expected.actualCachedImagesFingerprint
+  ) {
+    throw new FatalIsolationError(
+      "benchmark host actual prewarm readiness changed during measurement",
+    );
+  }
+  if (
+    host.desiredState.builds.length > 0 ||
+    host.actualState.builds.length > 0
+  ) {
+    throw new FatalIsolationError(
+      "build work appeared on the isolated benchmark host",
+    );
+  }
+}
+
+function stableRecordFingerprint(
+  value: Record<string, boolean | string | number | null>,
+): string {
+  return JSON.stringify(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function desiredCachedImagesFingerprint(
+  images: NonNullable<HostResponse["host"]["desiredState"]>["cachedImages"],
+): string {
+  return JSON.stringify(
+    images
+      .map((image) => ({
+        scenario: image.image_key.scenario,
+        vm: image.image_key.vm,
+        arch: image.image_key.arch,
+        sha256: image.image_sha256.toLowerCase(),
+      }))
+      .sort((left, right) =>
+        `${left.scenario}/${left.vm}/${left.arch}/${left.sha256}`.localeCompare(
+          `${right.scenario}/${right.vm}/${right.arch}/${right.sha256}`,
+        ),
+      ),
+  );
+}
+
+function actualCachedImagesFingerprint(
+  images: NonNullable<HostResponse["host"]["actualState"]>["cachedImages"],
+): string {
+  return JSON.stringify(
+    images
+      .map((image) => ({
+        scenario: image.image_key.scenario,
+        vm: image.image_key.vm,
+        arch: image.image_key.arch,
+        sha256: image.image_sha256.toLowerCase(),
+        phase: image.phase,
+        error: image.error ?? null,
+      }))
+      .sort((left, right) =>
+        `${left.scenario}/${left.vm}/${left.arch}/${left.sha256}`.localeCompare(
+          `${right.scenario}/${right.vm}/${right.arch}/${right.sha256}`,
+        ),
+      ),
+  );
 }
 
 function benchmarkMarker(kind: "warmup" | "measured", ordinal: number): string {

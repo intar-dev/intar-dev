@@ -293,11 +293,17 @@ dedicated benchmark for promotion latency. It pins every run to one host,
 requires the complete fast-launch capability set and an already-ready image,
 rejects reused or non-isolated runs, executes five warmups, then records thirty
 serial measured boots. An isolation monitor keeps polling the authenticated host
-view for the entire owned run, including terminal session creation and the shell
-probe; any attributed or unattributed foreign VM aborts the benchmark.
-This is continuous conflict detection, not an atomic control-plane host lease;
-keep general scheduling drained from the canary for the full matrix. The result
-records `atomic_host_lease: false` so release evidence cannot imply otherwise.
+view for the entire owned run, including terminal session creation, the shell
+probe, browser reset, and the explicit destroy transition; any attributed or
+unattributed foreign VM aborts the benchmark.
+Benchmark admission atomically acquires an exclusive host lease with its boot
+CPU reservation under the host runtime's serialized D1 boundary. D1 triggers
+keep ordinary reservations and scenario re-enablement fail-closed while that
+lease exists. The continuous monitor remains an independent runtime proof, and
+the result records `atomic_host_lease: true` only after observing the owned
+lease throughout the run and its drained release during teardown. Every passed
+sample records the first and last owned-lease observations plus the observed
+release, and rejects a lease that disappears early or reappears after release.
 
 The runner launches one headless Chromium instance and reuses exactly one
 Playwright browser context and page for all five warmups and thirty measured
@@ -316,7 +322,9 @@ Run this only on a drained canary host. The host report must show zero committed
 CPU and attest KVM, vsock, nftables, reflink, jailer v2, hard quota, boot CPU
 lease, template-backed launch, fast template storage, Landlock, and cgroup v2.
 `Ready` must mean the raw image, boot artifacts, descriptor, and jail template
-are all prepared.
+are all prepared. The runner freezes the agent version, runtime hash, complete
+capability set, desired prewarm set, and actual ready-cache set at preflight and
+continuously rejects identity drift or build work through every sample.
 
 Before the boot-quota cutover, disable scenario placement and builder
 assignment, drain all active runs/reservations/builds, and stop the old agent
@@ -325,6 +333,16 @@ and builder services. Apply
 matching Worker, and do not restart either host role until its matching binary
 and readiness checks are in place. This is distinct from the historical
 `0001_host_cpu_reservations.sql` V6 migration and is forward-fix-only.
+Apply `website/drizzle/0004_host_benchmark_leases.sql` before deploying the
+benchmark-admission Worker; it is likewise a breaking, forward-only migration.
+
+For measurement, keep the target agent itself enabled but set its
+`scenario_enabled` flag to false. The benchmark uses the explicit admin-only
+`admissionMode: "benchmark"` start contract to pin each run to that owned host;
+ordinary pinned starts and automatic placement continue to exclude it. The
+control plane rejects benchmark admission unless the fresh authoritative host
+report has an empty VM inventory and the stored desired state is empty and
+fully applied, so a previously admitted VM cannot arrive after preflight.
 
 ```sh
 bun --cwd website run bench:boot:install
@@ -355,18 +373,28 @@ both, preflight requires the root-owned 2000m boot CPU allocation and 45000ms
 hard lease exactly. It refuses to execute the three historical variants and has
 no direct-spawn or v1 compatibility path.
 
-The JSON result has `schema_version: 1`, the exact manifest-derived artifact
+The JSON result has `schema_version: 2`, the exact manifest-derived artifact
 fingerprint, host and capability evidence, every warmup and measured sample,
 generation-fenced quota evidence, report/projection/UI phase timestamps, any
-matching-generation host boot phase and five-point CPU samples, the latest
-periodic cgroup counters when available, nearest-rank distributions, and the
-promotion decision. Its browser evidence records the Playwright and Chromium
+matching-generation host boot phase and five-point CPU samples, exact steady
+cgroup quota and one-vCPU evidence, nearest-rank distributions, and the
+promotion decision. After the measured browser boundary completes, the runner
+waits up to 30 seconds for the periodic matching-generation cgroup report; that
+wait is excluded from click-to-usable-terminal latency and never issues a
+critical-path `InspectVm`. Missing or inexact evidence fails promotion.
+Isolation evidence records the drained benchmark admission
+gate and the continuously polled host desired and actual VM inventories,
+including unattributed VMs that are not visible through scenario-run
+projections. Its
+browser evidence records the Playwright and Chromium
 versions, headless mode, context/page reuse, and exact measurement boundary.
 The comparer requires identical browser versions and boundary metadata across
-all five results. Missing periodic cgroup evidence is explicit and never causes
-an `InspectVm` call on the critical path. Warmups and failures are never included
-in percentile values, but any failed boot fails promotion. Promotion requires
+all five results. Warmups and failures are never included in percentile values,
+but any failed boot fails promotion. Promotion requires
 exactly five successful warmups, exactly thirty successful measured boots,
+an exact 2000m boot-to-1000m steady transition with `cpu.max.burst=0`, one guest
+vCPU, matching-generation live quota readback, and complete lease-transition
+evidence for every successful boot,
 request-acceptance p95 at most 500 ms, usable-terminal p50 at most 7000 ms,
 usable-terminal p95 strictly below 10000 ms, and seal-to-projection-to-UI-ready
 (`seal_projection_ui_ready_ms`) p95 at most 500 ms. An overridden sample count
@@ -397,10 +425,12 @@ artifact fingerprints, missing or duplicate implementation digests, missing or
 non-host-attested runtime hashes, duplicate labels, different runtime hashes,
 browser-version mismatches, measurement-boundary mismatches, or a CPU policy
 that does not exactly match the named variant. Variants 1-3 are offline A/B
-evidence only: they must be previously captured, same-host result artifacts
-from the corresponding historical deployments. The v2 live runner can compare
-those artifacts but will never recreate them, deploy them, or downgrade
-production to obtain them.
+evidence only: they must be previously captured, same-host schema-v1 result
+artifacts with `atomic_host_lease: false` from the corresponding historical
+deployments. Only the offline comparer accepts that immutable legacy shape and
+recomputes its original promotion contract; the schema-v2 parser and live runner
+reject it. Schema v1 is never accepted for either boot-lease variant, and no
+code recreates a historical deployment or downgrades production to obtain one.
 
 ```sh
 just boot-benchmark-compare "\

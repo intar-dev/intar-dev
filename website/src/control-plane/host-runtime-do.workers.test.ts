@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentHosts,
   hostActualState,
+  hostBenchmarkLeases,
+  hostCpuReservations,
   hostDesiredState,
   scenarioRuns,
   user,
@@ -17,6 +19,7 @@ import {
 import type {
   BridgeMessageV6,
   HostStateReportV2,
+  VmActualStateV2,
   VmPhase,
   VmReportV2,
 } from "@/generated/bridge";
@@ -715,6 +718,159 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("admits a pinned benchmark only on a scheduling-disabled, actual-state-drained host", async () => {
+    const hostId = "host-isolated-benchmark";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { ws } = await connectHost(hostId);
+    await seedEnabledScenario(drizzle(env.DB), now);
+    const cachedImages = [
+      {
+        image_key: testImageKey,
+        image_sha256: "2".repeat(64),
+        phase: "ready" as const,
+        updated_at_unix_ms: now,
+      },
+    ];
+
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        cachedImages,
+      }),
+    );
+    await waitForHostActualState(
+      drizzle(env.DB),
+      hostId,
+      (row) => row.observedAt === now,
+    );
+
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+        hostId,
+        admissionMode: "benchmark",
+      }),
+    ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
+
+    await drizzle(env.DB)
+      .update(agentHosts)
+      .set({ scenarioEnabled: false, updatedAt: now + 1 })
+      .where(eq(agentHosts.id, hostId));
+
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+      }),
+    ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+        hostId,
+      }),
+    ).rejects.toMatchObject({ code: "scenario_host_not_launchable" });
+
+    const benchmarkDesired = await mutateStoredHostDesiredState(
+      drizzle(env.DB),
+      hostId,
+      now + 1,
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: testImageKey,
+          image_sha256: "2".repeat(64),
+        });
+      },
+    );
+
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now + 1,
+        appliedDesiredVersion: benchmarkDesired.version,
+        cachedImages,
+        vms: [actualVm("", "unattributed-vm", now + 1)],
+      }),
+    );
+    await waitForHostActualState(
+      drizzle(env.DB),
+      hostId,
+      (row) => row.observedAt === now + 1,
+    );
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+        hostId,
+        admissionMode: "benchmark",
+      }),
+    ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
+
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now + 2,
+        appliedDesiredVersion: benchmarkDesired.version,
+        cachedImages,
+      }),
+    );
+    await waitForHostActualState(
+      drizzle(env.DB),
+      hostId,
+      (row) => row.observedAt === now + 2,
+    );
+    const started = await startScenarioRunForUser({
+      scenarioId: "broken-nginx",
+      userId: "user-1",
+      hostId,
+      admissionMode: "benchmark",
+    });
+    const [run] = await drizzle(env.DB)
+      .select({ hostId: scenarioRuns.hostId })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, started.runId));
+    expect(run?.hostId).toBe(hostId);
+    await expect(
+      drizzle(env.DB)
+        .select()
+        .from(hostBenchmarkLeases)
+        .where(eq(hostBenchmarkLeases.hostId, hostId)),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        hostId,
+        runId: started.runId,
+        userId: "user-1",
+      }),
+    ]);
+    await expect(
+      drizzle(env.DB)
+        .select()
+        .from(hostCpuReservations)
+        .where(eq(hostCpuReservations.runId, started.runId)),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        hostId,
+        runId: started.runId,
+        state: "committed",
+        bootCpuMillis: 2_000,
+        steadyCpuMillis: 125,
+      }),
+    ]);
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+        hostId,
+        admissionMode: "benchmark",
+      }),
+    ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
+    ws.close();
+  });
+
   it("returns boot_capacity_pending for a pinned saturated host", async () => {
     const hostId = "host-pinned-saturated";
     const now = Date.now();
@@ -1292,6 +1448,32 @@ function stateReport(
       vms: input.vms ?? [],
       builds: [],
     },
+  };
+}
+
+function actualVm(
+  runId: string,
+  vmName: string,
+  observedAt: number,
+): VmActualStateV2 {
+  return {
+    run_id: runId,
+    vm_name: vmName,
+    phase: "running",
+    terminal: {
+      state: "pending",
+      observed_at_unix_ms: observedAt,
+    },
+    runtime_constraints: {
+      generation: `generation-${vmName}`,
+      phase: "steady",
+      steady_cpu_millis: 1_000,
+      effective_cpu_millis: 1_000,
+      quota_verified_at_unix_ms: observedAt,
+    },
+    ssh_host_keys_openssh: [],
+    probes: [],
+    updated_at_unix_ms: observedAt,
   };
 }
 

@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import {
   BOOT_BENCHMARK_VARIANTS,
   compareBootBenchmarkResults,
-  parseBootBenchmarkResult,
+  parseBootBenchmarkComparisonInput,
 } from "./boot-benchmark-core";
 
 async function main(): Promise<void> {
@@ -12,7 +12,7 @@ async function main(): Promise<void> {
     paths.map(async (path) => {
       const absolute = resolve(path);
       const value = JSON.parse(await readFile(absolute, "utf8")) as unknown;
-      return parseBootBenchmarkResult(value, absolute);
+      return parseBootBenchmarkComparisonInput(value, absolute);
     }),
   );
   const comparison = compareBootBenchmarkResults(results);

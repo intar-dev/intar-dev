@@ -40,6 +40,7 @@ interface HostActualStateSummary {
   capacity: HostStateReportV2["capacity"];
   capabilities: HostStateReportV2["capabilities"];
   cachedImages: HostStateReportV2["cached_images"];
+  vms: HostStateReportV2["vms"];
 }
 
 export const prerender = false;
@@ -264,6 +265,7 @@ async function loadHostActualStateSummary(
     capacity: row.reportJson.capacity,
     capabilities: row.reportJson.capabilities,
     cachedImages: row.reportJson.cached_images,
+    vms: row.reportJson.vms,
   };
 }
 
