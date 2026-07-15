@@ -168,6 +168,7 @@ interface IsolationMonitor {
   attest: (host: HostResponse["host"]) => void;
   evidence: () => NonNullable<PassedBootSampleV1["isolation_evidence"]>;
   failureReason: () => FatalIsolationError | null;
+  releaseObserved: () => boolean;
   stop: () => void;
 }
 
@@ -1775,7 +1776,7 @@ function assertAuthoritativeHostSnapshot(
   return host.actualState.vms;
 }
 
-function startIsolationMonitor(input: {
+export function startIsolationMonitor(input: {
   client: ApiClient;
   hostId: string;
   runId: string;
@@ -1793,7 +1794,7 @@ function startIsolationMonitor(input: {
   let releasedObservedAt: number | null = null;
   let observationCount = 0;
   let recordFailure!: (error: FatalIsolationError) => void;
-  let attest!: (host: HostResponse["host"]) => void;
+  let attestSnapshot!: (host: HostResponse["host"]) => void;
   const failure = new Promise<never>((_resolve, reject) => {
     rejectFailure = reject;
     const poll = async () => {
@@ -1802,9 +1803,10 @@ function startIsolationMonitor(input: {
         const { host } = await input.client.json<HostResponse>(
           `/api/agent/hosts/${encodeURIComponent(input.hostId)}`,
         );
-        if (stopped) return;
-        attest(host);
+        if (stopped || teardown) return;
+        attestSnapshot(host);
       } catch (error) {
+        if (stopped || teardown) return;
         recordFailure(
           error instanceof FatalIsolationError
             ? error
@@ -1825,7 +1827,12 @@ function startIsolationMonitor(input: {
     if (timer !== null) clearTimeout(timer);
     rejectFailure(error);
   };
-  attest = (host: HostResponse["host"]) => {
+  // This state machine has exactly one sequential snapshot source per phase:
+  // the continuous poller before teardown, then the teardown loop after the
+  // handoff. In-flight pre-teardown responses are invalidated at the handoff
+  // so an older leased response cannot complete after a newer drained response
+  // and falsely present a lease reappearance.
+  attestSnapshot = (host: HostResponse["host"]) => {
     if (recordedFailure) return;
     try {
       assertAuthoritativeHostSnapshot(host, {
@@ -1865,8 +1872,15 @@ function startIsolationMonitor(input: {
     failure,
     beginTeardown: () => {
       teardown = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
     },
-    attest,
+    attest: (host) => {
+      if (!teardown || stopped) return;
+      attestSnapshot(host);
+    },
     evidence: () => {
       if (
         firstOwnedObservedAt === null ||
@@ -1887,6 +1901,7 @@ function startIsolationMonitor(input: {
       };
     },
     failureReason: () => recordedFailure,
+    releaseObserved: () => releasedObservedAt !== null,
     stop: () => {
       stopped = true;
       if (timer !== null) clearTimeout(timer);
@@ -1914,6 +1929,7 @@ async function destroyAndWaitForIsolation(
   );
   const deadline = Date.now() + options.waitIdleMs;
   let lastDetail = "cleanup not observed";
+  let consecutiveDrainedObservations = 0;
   while (Date.now() <= deadline) {
     const [runResult, hostResult] = await Promise.allSettled([
       client.json<RunResponse>(
@@ -1925,6 +1941,8 @@ async function destroyAndWaitForIsolation(
     ]);
     if (runResult.status === "fulfilled" && hostResult.status === "fulfilled") {
       isolationMonitor?.attest(hostResult.value.host);
+      const isolationFailure = isolationMonitor?.failureReason();
+      if (isolationFailure) throw isolationFailure;
       const terminalRun = ["completed", "failed"].includes(
         runResult.value.run.phase,
       );
@@ -1941,18 +1959,23 @@ async function destroyAndWaitForIsolation(
         desiredState !== null &&
         actualAppliedVersion !== null &&
         actualAppliedVersion >= desiredState.version;
-      if (
+      const drained =
         terminalRun &&
         committed === 0 &&
         actualVms?.length === 0 &&
         desiredRunningVms?.length === 0 &&
         desiredApplied &&
-        hostResult.value.host.benchmarkLease === null
-      ) {
+        hostResult.value.host.benchmarkLease === null &&
+        (isolationMonitor?.releaseObserved() ?? true);
+      consecutiveDrainedObservations = drained
+        ? consecutiveDrainedObservations + 1
+        : 0;
+      if (consecutiveDrainedObservations >= 2) {
         return;
       }
-      lastDetail = `run=${runResult.value.run.phase} committed=${String(committed)} actual_vms=${actualVms?.length ?? "missing"} desired_running_vms=${desiredRunningVms?.length ?? "missing"} desired_applied=${String(desiredApplied)} benchmark_lease=${hostResult.value.host.benchmarkLease?.runId ?? "absent"}`;
+      lastDetail = `run=${runResult.value.run.phase} committed=${String(committed)} actual_vms=${actualVms?.length ?? "missing"} desired_running_vms=${desiredRunningVms?.length ?? "missing"} desired_applied=${String(desiredApplied)} benchmark_lease=${hostResult.value.host.benchmarkLease?.runId ?? "absent"} monitor_release_observed=${String(isolationMonitor?.releaseObserved() ?? true)} consecutive_drained_observations=${consecutiveDrainedObservations}`;
     } else {
+      consecutiveDrainedObservations = 0;
       lastDetail = [runResult, hostResult]
         .filter(
           (result): result is PromiseRejectedResult =>

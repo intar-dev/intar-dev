@@ -37,6 +37,7 @@ import {
   observeBootBenchmarkReadinessPoll,
   parseBrowserCookies,
   parseBootBenchmarkOptions,
+  startIsolationMonitor,
 } from "../../scripts/boot-benchmark";
 import type { ScenarioRunRecord } from "./scenario-runs";
 import {
@@ -1335,6 +1336,130 @@ describe("boot benchmark readiness and isolation", () => {
     ).toThrow("foreign VM(s)");
   });
 });
+
+describe("boot benchmark isolation monitor", () => {
+  it("invalidates an in-flight pre-teardown lease response before serial drained observations", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = isolationMonitorFixture();
+      let resolveStalePoll!: (value: unknown) => void;
+      const stalePoll = new Promise((resolve) => {
+        resolveStalePoll = resolve;
+      });
+      const json = vi
+        .fn()
+        .mockResolvedValueOnce({ host: fixture.leasedHost })
+        .mockImplementationOnce(() => stalePoll);
+      const monitor = startIsolationMonitor({
+        client: { json } as unknown as ApiClient,
+        hostId: fixture.hostId,
+        runId: fixture.runId,
+        pollMs: 100,
+        expectedHost: fixture.expectedHost,
+      });
+      void monitor.failure.catch(() => undefined);
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(json).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(json).toHaveBeenCalledTimes(2);
+
+      monitor.beginTeardown();
+      monitor.attest(fixture.drainedHost);
+      monitor.attest(fixture.drainedHost);
+      resolveStalePoll({ host: fixture.leasedHost });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(monitor.failureReason()).toBeNull();
+      expect(monitor.releaseObserved()).toBe(true);
+      expect(monitor.evidence()).toMatchObject({
+        lease_run_id: fixture.runId,
+        observation_count: 3,
+      });
+      monitor.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still rejects a lease that reappears in the serial teardown stream", async () => {
+    const fixture = isolationMonitorFixture();
+    const json = vi.fn().mockResolvedValue({ host: fixture.leasedHost });
+    const monitor = startIsolationMonitor({
+      client: { json } as unknown as ApiClient,
+      hostId: fixture.hostId,
+      runId: fixture.runId,
+      pollMs: 100,
+      expectedHost: fixture.expectedHost,
+    });
+    void monitor.failure.catch(() => undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    monitor.beginTeardown();
+    monitor.attest(fixture.drainedHost);
+    monitor.attest(fixture.leasedHost);
+
+    expect(monitor.failureReason()?.message).toContain(
+      "reappeared after drained release",
+    );
+    monitor.stop();
+  });
+});
+
+function isolationMonitorFixture() {
+  const hostId = "benchmark-host";
+  const runId = "benchmark-run";
+  const cloudHypervisorSha256 = "a".repeat(64);
+  const capabilities = { cloud_hypervisor_sha256: cloudHypervisorSha256 };
+  const host = {
+    id: hostId,
+    role: "agent",
+    disabled: false,
+    scenarioEnabled: false,
+    status: { connected: true, agentVersion: "0.11.3" },
+    actualState: {
+      appliedDesiredVersion: 1,
+      observedAt: 1,
+      health: "healthy" as const,
+      capacity: { committed_cpu_millis: 0 },
+      capabilities,
+      cachedImages: [],
+      builds: [],
+      vms: [],
+    },
+    desiredState: {
+      version: 1,
+      cachedImages: [],
+      vms: [],
+      builds: [],
+    },
+  };
+  return {
+    hostId,
+    runId,
+    expectedHost: {
+      agentVersion: "0.11.3",
+      observedAt: 1,
+      capabilities,
+      cloudHypervisorSha256,
+      performanceReady: true,
+      cachedImages: [],
+      capabilitiesFingerprint: JSON.stringify([
+        ["cloud_hypervisor_sha256", cloudHypervisorSha256],
+      ]),
+      desiredCachedImagesFingerprint: "[]",
+      actualCachedImagesFingerprint: "[]",
+    },
+    leasedHost: {
+      ...host,
+      benchmarkLease: { runId, acquiredAt: 1, updatedAt: 1 },
+    },
+    drainedHost: { ...host, benchmarkLease: null },
+  };
+}
 
 function passedSample(
   kind: "warmup" | "measured",
