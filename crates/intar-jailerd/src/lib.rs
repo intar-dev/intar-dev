@@ -179,6 +179,15 @@ fn boot_cpu_guardian_unit_name(generation: &ValidatedId) -> String {
     format!("intar-vm-boot-lease-{generation}.service")
 }
 
+#[cfg(target_os = "linux")]
+fn restrict_all_namespaces_dbus_value() -> zbus::zvariant::Value<'static> {
+    // systemd exposes RestrictNamespaces as the uint64 namespace-type mask on
+    // D-Bus. `yes` in a unit file maps to every bit set; a boolean variant
+    // makes StartTransientUnit reject the entire auxiliary unit with
+    // "Unexpected message contents".
+    zbus::zvariant::Value::new(u64::MAX)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn vm_cgroup_path(unit_name: &str) -> PathBuf {
     Path::new("/intar.slice/intar-vms.slice").join(unit_name)
@@ -730,7 +739,7 @@ impl HostBackend for SystemdHostBackend {
                         ("ProtectClock", Value::new(true)),
                         ("LockPersonality", Value::new(true)),
                         ("MemoryDenyWriteExecute", Value::new(true)),
-                        ("RestrictNamespaces", Value::new(true)),
+                        ("RestrictNamespaces", restrict_all_namespaces_dbus_value()),
                         ("RestrictRealtime", Value::new(true)),
                         ("DevicePolicy", Value::new("closed")),
                         ("CapabilityBoundingSet", Value::new(0_u64)),
@@ -10518,6 +10527,13 @@ mod tests {
         )
         .expect_err("cross-generation guardian must fail");
         assert!(mismatch.to_string().contains("unit mismatch"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn boot_cpu_guardian_encodes_namespace_lockdown_as_systemd_uint64_mask() {
+        let value = restrict_all_namespaces_dbus_value();
+        assert_eq!(value.value_signature(), "t");
     }
 
     #[test]
