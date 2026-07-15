@@ -1126,12 +1126,16 @@ fn render_nft_rules(state: &RunState) -> Result<String> {
     let host_transit = cidr_address(&state.result.host_transit_cidr)?;
     // A destination owned by the host is routed through the input hook, not
     // the forward hook, so the forward-chain `fib daddr type local` guard
-    // cannot protect host services by itself. Drop every packet entering from
-    // this run's veth at input while leaving all other host interfaces and the
-    // run's forwarded traffic untouched.
+    // cannot protect host services by itself. Permit only conntrack-established
+    // replies from this run's guest CIDR so root-owned host readiness checks can
+    // complete, then drop every other packet entering from the run veth. New
+    // guest-to-host flows remain blocked, and all other host interfaces and the
+    // run's forwarded traffic stay untouched.
     let mut rules = format!(
-        "table inet {} {{\n  chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" counter drop\n  }}\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{}\" meta nfproto ipv6 drop\n    iifname \"{}\" ip saddr != {} drop\n    iifname \"{}\" ct state established,related accept\n    iifname \"{}\" fib daddr type local drop\n",
+        "table inet {} {{\n  chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" ip saddr {} ct state established,related accept\n    iifname \"{}\" counter drop\n  }}\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{}\" meta nfproto ipv6 drop\n    iifname \"{}\" ip saddr != {} drop\n    iifname \"{}\" ct state established,related accept\n    iifname \"{}\" fib daddr type local drop\n",
         state.nft_table,
+        state.result.host_veth_name,
+        state.request.guest_cidr,
         state.result.host_veth_name,
         state.result.host_veth_name,
         state.result.host_veth_name,
@@ -1922,18 +1926,39 @@ mod tests {
         );
 
         let input_chain = format!(
-            "chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" counter drop\n  }}",
-            state.result.host_veth_name
+            "chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" ip saddr 10.77.0.0/29 ct state established,related accept\n    iifname \"{}\" counter drop\n  }}",
+            state.result.host_veth_name, state.result.host_veth_name
         );
         assert!(
             rules.contains(&input_chain),
-            "host-local traffic must be dropped in the input hook, scoped to the run veth"
+            "only host-initiated guest-CIDR replies may precede the run-veth input drop"
         );
         let input_position = rules.find("chain input {").unwrap();
         let forward_position = rules.find("chain forward {").unwrap();
         assert!(
             input_position < forward_position,
             "the independent input guard must be installed before the forward policy"
+        );
+        let input_rules = &rules[input_position..forward_position];
+        let input_reply_accept = format!(
+            "iifname \"{}\" ip saddr 10.77.0.0/29 ct state established,related accept",
+            state.result.host_veth_name
+        );
+        let input_drop = format!("iifname \"{}\" counter drop", state.result.host_veth_name);
+        assert!(
+            input_rules.find(&input_reply_accept).unwrap() < input_rules.find(&input_drop).unwrap(),
+            "established guest-CIDR replies must be accepted before the blanket input drop"
+        );
+        assert!(
+            !input_rules.contains("ct state new accept"),
+            "new guest-to-host flows must remain denied"
+        );
+        assert!(
+            !input_rules.contains(&format!(
+                "iifname \"{}\" ct state established,related accept",
+                state.result.host_veth_name
+            )),
+            "the input reply exception must retain its guest-CIDR source constraint"
         );
         let source_guard = format!(
             "iifname \"{}\" ip saddr != 10.77.0.0/29 drop",

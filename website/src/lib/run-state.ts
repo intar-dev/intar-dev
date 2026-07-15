@@ -643,15 +643,18 @@ function describeRunPhase(
         detail: "The run has finished cleanly.",
         progressPercent: 100,
       };
-    case "failed":
+    case "failed": {
+      const failedVm = vms.find((vm) => vm.phase === "failed");
       return {
         title: "Failed",
         detail:
-          currentDetail ||
-          vms.find((vm) => vm.phase === "failed")?.phaseDetail ||
+          failedVm?.terminalReason ||
+          failedVm?.provisioning.error ||
+          failedVm?.phaseDetail ||
           "The run hit a terminal failure.",
         progressPercent: 100,
       };
+    }
   }
 }
 

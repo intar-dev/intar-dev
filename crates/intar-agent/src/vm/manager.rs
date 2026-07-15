@@ -3855,14 +3855,8 @@ async fn prepare_vm_for_delete(inner: &Inner, vm: &VmStatusResponse) -> Result<P
     )
     .await?;
 
-    if let Some(recording_disk_path) = details.recording_disk_path.as_deref() {
-        if details.jail_generation.is_some() && !Path::new(recording_disk_path).is_file() {
-            anyhow::bail!(
-                "jailerd did not publish the drained recording export at {}",
-                recording_disk_path
-            );
-        }
-        extract_recordings_to_spool(Path::new(recording_disk_path), &artifacts_dir).await?;
+    if let Some(recording_disk_path) = recording_export_path_for_cleanup(details)? {
+        extract_recordings_to_spool(recording_disk_path, &artifacts_dir).await?;
     }
 
     Ok(PreparedVmDeletion {
@@ -4635,22 +4629,112 @@ async fn copy_vm_log_to_spool(
     let Some(details) = vm.details.as_ref() else {
         return Ok(());
     };
-    let source = if let Some(jail_root) = details.jail_root_path.as_deref() {
-        PathBuf::from(jail_root).join("logs").join(source_name)
+    let (source, ownership) = if let Some(jail_root) = details.jail_root_path.as_deref() {
+        (
+            PathBuf::from(jail_root).join("logs").join(source_name),
+            VmLogSourceOwnership::JailOwned,
+        )
     } else if let Some(vm_dir) = agent_owned_vm_dir_for_status(vm) {
-        vm_dir.join(source_name)
+        (vm_dir.join(source_name), VmLogSourceOwnership::AgentOwned)
     } else {
         return Ok(());
     };
-    match tokio::fs::copy(&source, destination).await {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow::anyhow!(
-            "failed to copy {} to {}: {e}",
-            source.display(),
-            destination.display()
-        )),
+
+    // Open the source separately so a jail traversal denial can be treated as
+    // best-effort without accidentally swallowing an agent-owned spool error.
+    // Once the jailed file is open, all destination creation and copy errors
+    // remain actionable and continue to fail artifact preparation.
+    let mut source_file = match tokio::fs::File::open(&source).await {
+        Ok(source_file) => source_file,
+        Err(error) => {
+            return handle_vm_log_source_open_error(ownership, &source, destination, error);
+        }
+    };
+    let mut destination_options = tokio::fs::OpenOptions::new();
+    destination_options.write(true).create_new(true);
+    #[cfg(unix)]
+    destination_options.mode(0o600);
+    let mut destination_file = match destination_options.open(destination).await {
+        Ok(destination_file) => destination_file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "failed to create {} while copying {}: {error}",
+                destination.display(),
+                source.display()
+            ));
+        }
+    };
+
+    if let Err(error) = tokio::io::copy(&mut source_file, &mut destination_file).await {
+        drop(destination_file);
+        let cleanup_error = match tokio::fs::remove_file(destination).await {
+            Ok(()) => None,
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(cleanup_error) => Some(cleanup_error),
+        };
+        return Err(match cleanup_error {
+            Some(cleanup_error) => anyhow::anyhow!(
+                "failed to copy {} to {}: {error}; failed to remove partial destination: {cleanup_error}",
+                source.display(),
+                destination.display()
+            ),
+            None => anyhow::anyhow!(
+                "failed to copy {} to {}: {error}",
+                source.display(),
+                destination.display()
+            ),
+        });
     }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmLogSourceOwnership {
+    JailOwned,
+    AgentOwned,
+}
+
+fn handle_vm_log_source_open_error(
+    ownership: VmLogSourceOwnership,
+    source: &Path,
+    destination: &Path,
+    error: std::io::Error,
+) -> Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return Ok(());
+    }
+    if ownership == VmLogSourceOwnership::JailOwned
+        && error.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        warn!(
+            error = %error,
+            source = %source.display(),
+            destination = %destination.display(),
+            "skipping inaccessible jail-owned VM log during cleanup"
+        );
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "failed to copy {} to {}: {error}",
+        source.display(),
+        destination.display()
+    ))
+}
+
+fn recording_export_path_for_cleanup(details: &VmDetails) -> Result<Option<&Path>> {
+    let Some(recording_disk_path) = details.recording_disk_path.as_deref() else {
+        return Ok(None);
+    };
+    let recording_disk_path = Path::new(recording_disk_path);
+    if details.jail_generation.is_some() && !recording_disk_path.is_file() {
+        anyhow::bail!(
+            "jailerd did not publish the drained recording export at {}",
+            recording_disk_path.display()
+        );
+    }
+    Ok(Some(recording_disk_path))
 }
 
 async fn extract_recordings_to_spool(
@@ -7486,6 +7570,70 @@ mod tests {
             updated_at_s: 0,
             running_at_s: None,
         }
+    }
+
+    #[test]
+    fn jailed_log_permission_denied_is_best_effort_but_agent_owned_is_actionable() {
+        let source = Path::new("/var/lib/intar/jails/generation/root/logs/console.log");
+        let destination = Path::new("/var/cache/intar-agent/run-spool/run/vm/console.log");
+
+        handle_vm_log_source_open_error(
+            VmLogSourceOwnership::JailOwned,
+            source,
+            destination,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected denial"),
+        )
+        .expect("an unreadable jail-owned diagnostic log must not block cleanup");
+
+        let error = handle_vm_log_source_open_error(
+            VmLogSourceOwnership::AgentOwned,
+            source,
+            destination,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "injected denial"),
+        )
+        .expect_err("agent-owned source failures must remain actionable");
+        let message = error.to_string();
+        assert!(message.contains("failed to copy"));
+        assert!(message.contains("injected denial"));
+    }
+
+    #[tokio::test]
+    async fn agent_owned_log_destination_error_is_actionable() {
+        let temp = tempdir().expect("temp dir");
+        let vm_dir = temp.path().join("vm");
+        tokio::fs::create_dir_all(&vm_dir).await.expect("vm dir");
+        tokio::fs::write(vm_dir.join("console.log"), b"console output")
+            .await
+            .expect("console log");
+        let mut vm = test_vm_status("vm", Some("run"));
+        vm.details.as_mut().expect("details").root_disk_path =
+            vm_dir.join("root.raw").display().to_string();
+        let destination = temp.path().join("missing-parent").join("console.log");
+
+        let error = copy_vm_log_to_spool(&vm, "console.log", &destination)
+            .await
+            .expect_err("agent-owned destination errors must fail artifact preparation");
+        let message = error.to_string();
+        assert!(message.contains("failed to create"));
+        assert!(message.contains(&destination.display().to_string()));
+    }
+
+    #[test]
+    fn missing_jailed_recording_export_remains_fatal() {
+        let temp = tempdir().expect("temp dir");
+        let missing_export = temp.path().join("recordings.vfat");
+        let mut vm = test_vm_status("vm", Some("run"));
+        let details = vm.details.as_mut().expect("details");
+        details.jail_generation = Some("generation".to_string());
+        details.recording_disk_path = Some(missing_export.display().to_string());
+
+        let error = recording_export_path_for_cleanup(details)
+            .expect_err("missing jailerd recording export must remain fatal");
+        assert!(
+            error
+                .to_string()
+                .contains("jailerd did not publish the drained recording export")
+        );
     }
 
     fn test_ssh_access_config() -> SshAccessConfig {

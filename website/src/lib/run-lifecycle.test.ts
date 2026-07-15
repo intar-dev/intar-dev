@@ -443,6 +443,10 @@ describe("run lifecycle", () => {
       canOpenTerminal: true,
       terminalTarget: { host: "203.0.113.7", port: 2201 },
     });
+    expect(stillReady).toMatchObject({
+      phase: "active_full",
+      phaseDetail: "All required VMs are ready.",
+    });
 
     const failed = applyVmReportToRunState({
       runId: "run-a",
@@ -478,6 +482,8 @@ describe("run lifecycle", () => {
       },
     });
     expect(failed).toMatchObject({
+      phase: "failed",
+      phaseDetail: "SSH host-key verification failed.",
       terminalPhase: "failed",
       canOpenTerminal: false,
       terminalTarget: { host: null, port: 22 },
