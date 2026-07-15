@@ -5053,6 +5053,7 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
         .as_ref()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!("vm details missing kino_vsock_path"))?;
+    #[cfg(not(target_os = "linux"))]
     let kino_vsock_port = details.kino_vsock_port.unwrap_or(KINO_VSOCK_PORT);
     let jail_uid = details
         .jail_uid
@@ -5073,8 +5074,6 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
             vm_name_owned,
             run_id,
             jail_generation,
-            kino_vsock_path,
-            kino_vsock_port,
             jail_uid,
             ready_listener,
             ready_socket_path,
@@ -5249,8 +5248,6 @@ async fn run_probe_worker_task(
     vm_name: String,
     run_id: String,
     jail_generation: String,
-    _kino_vsock_path: PathBuf,
-    _kino_vsock_port: u32,
     jail_uid: u32,
     listener: tokio::net::UnixListener,
     ready_socket_path: PathBuf,
