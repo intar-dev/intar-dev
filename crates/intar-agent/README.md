@@ -167,9 +167,14 @@ millicores and `2` remains 2000 millicores. Zero, exponent notation, excess
 precision, and values greater than `vcpus * 1000` millicores are rejected.
 Catalog manifests use V3 (`cpu_millis`, `vcpu_count`) and the coordinated bridge
 uses V6 with V2 desired-state/resource/report documents. No old-version shim is
-provided. Guest runtime readiness keeps the historical 45-second one-core
-budget but scales its wall-clock deadline inversely for sub-core quotas, capped
-at 360 seconds; `cpu = 0.125` therefore receives a 360-second boot window while
-remaining hard-capped at 125 millicores. See
+provided. Jailerd capacity-accounts `max(2000m, steady_cpu_millis)` and applies
+that aggregate VMM quota for at most 45 seconds without changing guest vCPU
+topology, then a root-owned generation-bound guardian seals the VM to steady
+CPU without exposing ingress. Separately, agent runtime readiness scales its
+wall-clock timeout inversely from the steady CPU contract, capped at 360
+seconds. A `cpu = 0.125` VM may therefore wait 360 seconds for Kino, but it uses
+the 2000-millicore boot allocation only for the first 45 seconds and then runs
+at 125 millicores. Later finalization requires an attested steady quota before
+ingress can open. See
 [Scenario Host Jailer](../../docs/scenario-host-jailer.md) for the privileged
 configuration and drain-first rollout.

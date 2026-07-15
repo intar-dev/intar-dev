@@ -71,17 +71,18 @@ async fn main() -> Result<()> {
     let (db, persisted) = db::Db::open()
         .await
         .context("failed to open sqlite db for persisted vm state")?;
+    let vm = vm::VmManager::new(&cfg, db.clone(), persisted)
+        .context("failed to initialize VM manager HTTP clients")?;
     image_cache::spawn_warm_cache_with_bridge(
         cfg.image_registry.clone(),
         cfg.bridge.clone(),
         cfg.image_cache.clone(),
         db.clone(),
+        vm.clone(),
     );
-    let vm = vm::VmManager::new(&cfg, db.clone(), persisted)
-        .context("failed to initialize VM manager HTTP clients")?;
-    vm.ensure_host_networking()
+    vm.repair_host_networking()
         .await
-        .context("failed to reconcile vm host networking")?;
+        .context("failed to repair vm host networking")?;
     vm.reconcile_tracked_vms()
         .await
         .context("failed to reconcile tracked vm state on startup")?;
@@ -91,6 +92,21 @@ async fn main() -> Result<()> {
     vm.retry_archive_jobs()
         .await
         .context("failed to restore queued archive uploads")?;
+    tokio::spawn({
+        let vm = vm.clone();
+        async move {
+            let period = Duration::from_secs(60);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(e) = vm.repair_host_networking().await {
+                    tracing::error!(error = %e, "vm host network repair iteration failed");
+                }
+            }
+        }
+    });
     tokio::spawn({
         let vm = vm.clone();
         async move {

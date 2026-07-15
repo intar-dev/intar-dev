@@ -166,9 +166,9 @@ export interface ScenarioStatusStep {
 }
 
 export const POLL_INTERVALS: Record<ScenarioRunRecord["phase"], number> = {
-  launching: 1_500,
-  booting: 1_500,
-  waiting_for_target: 1_500,
+  launching: 100,
+  booting: 100,
+  waiting_for_target: 100,
   running: 1_500,
   solved: 1_500,
   deleting: 1_500,

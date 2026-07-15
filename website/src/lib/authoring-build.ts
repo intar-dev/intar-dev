@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import type { ImageBuildBundleMeta } from "@/db/schema";
 import { appError } from "@/lib/app-error";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
@@ -90,8 +91,8 @@ export async function queueDraftBuild(params: {
   const meta: ImageBuildBundleMeta = {
     rev,
     kino_version: kinoVersion,
-    build_format_version: "intar-image-build-v7",
-    buildFormatVersion: "intar-image-build-v7",
+    build_format_version: IMAGE_BUILD_FORMAT_VERSION,
+    buildFormatVersion: IMAGE_BUILD_FORMAT_VERSION,
     scenarios: [
       {
         scenarioId: params.scenarioId,

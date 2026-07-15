@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "host_id": "host-alpha",
   "run_id": "run-20260702-a",
   "vm_name": "webserver",
@@ -12,6 +12,129 @@
     "guest_cidr": "10.77.0.2/28",
     "gateway": "10.77.0.1",
     "ssh_host_port": 22001
+  },
+  "terminal": {
+    "state": "ready",
+    "target": {
+      "host": "203.0.113.10",
+      "port": 22001,
+      "username": "ubuntu",
+      "checked_at_unix_ms": 1762041659000
+    },
+    "observed_at_unix_ms": 1762041659000
+  },
+  "runtime_constraints": {
+    "generation": "vm-01jz8w5pjcr7xz6j8p8q2c49ds",
+    "phase": "steady",
+    "steady_cpu_millis": 125,
+    "effective_cpu_millis": 125,
+    "quota_verified_at_unix_ms": 1762041658000
+  },
+  "boot_evidence": {
+    "generation": "vm-01jz8w5pjcr7xz6j8p8q2c49ds",
+    "started_at_unix_ms": 1762041652000,
+    "ready_at_unix_ms": 1762041658800,
+    "phases": {
+      "image_disk_ms": 380,
+      "network_jailer_vmm_ms": 1100,
+      "guest_to_kino_ms": 4800,
+      "seal_ssh_publish_ms": 520,
+      "total_ms": 6800,
+      "image_cache_ms": 250,
+      "runtime_disk_ms": 130,
+      "network_ms": 180,
+      "jailer_stage_ms": 600,
+      "vmm_start_ms": 200,
+      "vm_api_ms": 120,
+      "quota_seal_ms": 80,
+      "ssh_verify_ms": 350,
+      "terminal_publish_ms": 90
+    },
+    "cpu_samples": [
+      {
+        "point": "vm_boot_accepted",
+        "sampled_at_unix_ms": 1762041653480,
+        "phase": "boot_burst",
+        "steady_cpu_millis": 125,
+        "effective_cpu_millis": 2000,
+        "boot_deadline_unix_ms": 1762041697000,
+        "cpu_max": "200000 100000",
+        "cpu_max_burst": 0,
+        "quota_verified_at_unix_ms": 1762041653480,
+        "usage_usec": 120000,
+        "user_usec": 90000,
+        "system_usec": 30000,
+        "nr_periods": 12,
+        "nr_throttled": 1,
+        "throttled_usec": 2500
+      },
+      {
+        "point": "kino_ready",
+        "sampled_at_unix_ms": 1762041658280,
+        "phase": "boot_burst",
+        "steady_cpu_millis": 125,
+        "effective_cpu_millis": 2000,
+        "boot_deadline_unix_ms": 1762041697000,
+        "cpu_max": "200000 100000",
+        "cpu_max_burst": 0,
+        "quota_verified_at_unix_ms": 1762041658280,
+        "usage_usec": 3120000,
+        "user_usec": 2490000,
+        "system_usec": 630000,
+        "nr_periods": 60,
+        "nr_throttled": 3,
+        "throttled_usec": 12000
+      },
+      {
+        "point": "pre_seal",
+        "sampled_at_unix_ms": 1762041658300,
+        "phase": "boot_burst",
+        "steady_cpu_millis": 125,
+        "effective_cpu_millis": 2000,
+        "boot_deadline_unix_ms": 1762041697000,
+        "cpu_max": "200000 100000",
+        "cpu_max_burst": 0,
+        "quota_verified_at_unix_ms": 1762041658300,
+        "usage_usec": 3121000,
+        "user_usec": 2490500,
+        "system_usec": 630500,
+        "nr_periods": 60,
+        "nr_throttled": 3,
+        "throttled_usec": 12000
+      },
+      {
+        "point": "post_seal",
+        "sampled_at_unix_ms": 1762041658360,
+        "phase": "steady",
+        "steady_cpu_millis": 125,
+        "effective_cpu_millis": 125,
+        "cpu_max": "12500 100000",
+        "cpu_max_burst": 0,
+        "quota_verified_at_unix_ms": 1762041658360,
+        "usage_usec": 3123000,
+        "user_usec": 2492000,
+        "system_usec": 631000,
+        "nr_periods": 61,
+        "nr_throttled": 4,
+        "throttled_usec": 15000
+      },
+      {
+        "point": "terminal_published",
+        "sampled_at_unix_ms": 1762041658810,
+        "phase": "steady",
+        "steady_cpu_millis": 125,
+        "effective_cpu_millis": 125,
+        "cpu_max": "12500 100000",
+        "cpu_max_burst": 0,
+        "quota_verified_at_unix_ms": 1762041658810,
+        "usage_usec": 3125000,
+        "user_usec": 2500000,
+        "system_usec": 625000,
+        "nr_periods": 66,
+        "nr_throttled": 9,
+        "throttled_usec": 45000
+      }
+    ]
   },
   "resource_state": {
     "cpu_millis": 125,

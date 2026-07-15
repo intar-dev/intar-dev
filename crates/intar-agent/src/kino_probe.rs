@@ -46,6 +46,7 @@ pub struct ProbeView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(test, target_os = "linux"))]
 pub struct ProbeSnapshotView {
     pub generated_at_ms: Option<i64>,
     pub summary: ProbeSummary,
@@ -53,11 +54,14 @@ pub struct ProbeSnapshotView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProbeUpdateEnvelope {
     pub update_id: String,
     pub vm_name: String,
     pub run_id: String,
+    /// Jailer generation that owned the readiness socket which produced this
+    /// update. Generation fencing is mandatory in the v2-only cutover.
+    pub jail_generation: String,
     pub generated_at_ms: i64,
     pub collection_state: ProbeCollectionState,
     pub collection_error: Option<String>,
@@ -95,13 +99,19 @@ pub fn build_probe_snapshot_view(result: &ProbePollResult) -> ProbeSnapshotView 
 
 impl ProbeUpdateEnvelope {
     #[cfg(target_os = "linux")]
-    pub fn from_poll_result(vm_name: &str, run_id: &str, result: ProbePollResult) -> Self {
+    pub fn from_poll_result(
+        vm_name: &str,
+        run_id: &str,
+        jail_generation: &str,
+        result: ProbePollResult,
+    ) -> Self {
         let snapshot = build_probe_snapshot_view(&result);
         let generated_at_ms = result.generated_at_ms.unwrap_or_else(now_unix_ms);
         Self {
             update_id: random_update_id(),
             vm_name: vm_name.to_string(),
             run_id: run_id.to_string(),
+            jail_generation: jail_generation.to_string(),
             generated_at_ms,
             collection_state: ProbeCollectionState::Ok,
             collection_error: None,
@@ -109,15 +119,6 @@ impl ProbeUpdateEnvelope {
             summary: snapshot.summary,
             ssh_host_keys_openssh: result.ssh_host_keys_openssh,
             probes: snapshot.probes,
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn snapshot_view(&self) -> ProbeSnapshotView {
-        ProbeSnapshotView {
-            generated_at_ms: Some(self.generated_at_ms),
-            summary: self.summary.clone(),
-            probes: self.probes.clone(),
         }
     }
 }
@@ -348,7 +349,8 @@ fn random_update_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeCollectionState, ProbeSnapshotView, ProbeSummary, ProbeView, fingerprint_for_state,
+        ProbeCollectionState, ProbeSnapshotView, ProbeSummary, ProbeUpdateEnvelope, ProbeView,
+        fingerprint_for_state,
     };
     use serde_json::json;
 
@@ -419,5 +421,25 @@ mod tests {
         );
 
         assert_ne!(without_key, with_key);
+    }
+
+    #[test]
+    fn persisted_probe_envelope_requires_generation_fence() {
+        let legacy = json!({
+            "updateId": "update-1",
+            "vmName": "vm-1",
+            "runId": "run-1",
+            "generatedAtMs": 1,
+            "collectionState": "ok",
+            "collectionError": null,
+            "fingerprint": "fingerprint-1",
+            "summary": {"total": 0, "pass": 0, "fail": 0, "unknown": 0},
+            "sshHostKeysOpenssh": [],
+            "probes": []
+        });
+
+        let error = serde_json::from_value::<ProbeUpdateEnvelope>(legacy)
+            .expect_err("generation-less probe state must not be recovered");
+        assert!(error.to_string().contains("jailGeneration"));
     }
 }

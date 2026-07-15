@@ -119,8 +119,9 @@ enum Op {
     LoadAllVmProbeStates {
         resp: oneshot::Sender<Result<Vec<VmProbeStateRow>>>,
     },
-    UpsertVmProbeState {
-        row: Box<VmProbeStateRow>,
+    UpsertReadyVmAndProbeState {
+        vm: Box<VmRow>,
+        probe: Box<VmProbeStateRow>,
         resp: oneshot::Sender<Result<()>>,
     },
     UpsertArchiveJob {
@@ -287,11 +288,20 @@ impl Db {
             .context("db thread dropped all vm probe states response")?
     }
 
-    pub async fn upsert_vm_probe_state(&self, row: VmProbeStateRow) -> Result<()> {
+    /// Commit the externally visible ready boundary in one SQLite
+    /// transaction. Callers must not publish terminal readiness unless this
+    /// operation succeeds: a running VM row without its authenticated Kino
+    /// snapshot (or vice versa) is not a durable ready state.
+    pub async fn upsert_ready_vm_and_probe_state(
+        &self,
+        vm: VmRow,
+        probe: VmProbeStateRow,
+    ) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel::<Result<()>>();
         self.tx
-            .send(Op::UpsertVmProbeState {
-                row: Box::new(row),
+            .send(Op::UpsertReadyVmAndProbeState {
+                vm: Box::new(vm),
+                probe: Box::new(probe),
                 resp: resp_tx,
             })
             .await
@@ -299,7 +309,7 @@ impl Db {
 
         resp_rx
             .await
-            .context("db thread dropped vm probe state upsert response")?
+            .context("db thread dropped ready VM transaction response")?
     }
 
     pub async fn upsert_archive_job(&self, row: ArchiveJobRow) -> Result<()> {
@@ -468,7 +478,7 @@ fn db_thread_main(
     mut rx: mpsc::Receiver<Op>,
     init_tx: oneshot::Sender<Result<Vec<VmRow>>>,
 ) {
-    let conn = match open_or_reset_database(&db_path) {
+    let mut conn = match open_or_reset_database(&db_path) {
         Ok(conn) => conn,
         Err(error) => {
             let _ = init_tx.send(Err(error));
@@ -507,8 +517,16 @@ fn db_thread_main(
             Op::LoadAllVmProbeStates { resp } => {
                 let _ = resp.send(load_all_vm_probe_states(&conn));
             }
-            Op::UpsertVmProbeState { row, resp } => {
-                let _ = resp.send(upsert_vm_probe_state(&conn, &row));
+            Op::UpsertReadyVmAndProbeState { vm, probe, resp } => {
+                let result = upsert_ready_vm_and_probe_state(&mut conn, &vm, &probe);
+                if let Err(error) = &result {
+                    error!(
+                        error = %error,
+                        vm = vm.name,
+                        "sqlite ready VM transaction failed"
+                    );
+                }
+                let _ = resp.send(result);
             }
             Op::UpsertArchiveJob { row, resp } => {
                 let _ = resp.send(upsert_archive_job(&conn, &row));
@@ -1031,6 +1049,34 @@ ON CONFLICT(vm_name) DO UPDATE SET
     Ok(())
 }
 
+fn upsert_ready_vm_and_probe_state(
+    conn: &mut Connection,
+    vm: &VmRow,
+    probe: &VmProbeStateRow,
+) -> Result<()> {
+    anyhow::ensure!(
+        vm.name == probe.vm_name,
+        "ready VM and probe rows identify different VMs"
+    );
+    anyhow::ensure!(
+        vm.run_id.as_deref() == Some(probe.run_id.as_str()),
+        "ready VM and probe rows identify different runs"
+    );
+    anyhow::ensure!(
+        vm.state == "running",
+        "ready VM transaction requires the running lifecycle state"
+    );
+
+    let transaction = conn
+        .transaction()
+        .context("begin ready VM SQLite transaction")?;
+    upsert_vm(&transaction, vm).context("persist ready VM row")?;
+    upsert_vm_probe_state(&transaction, probe).context("persist ready probe row")?;
+    transaction
+        .commit()
+        .context("commit ready VM SQLite transaction")
+}
+
 fn upsert_archive_job(conn: &Connection, row: &ArchiveJobRow) -> Result<()> {
     conn.execute(
         r#"
@@ -1459,6 +1505,20 @@ mod tests {
         }
     }
 
+    fn test_probe_row() -> VmProbeStateRow {
+        VmProbeStateRow {
+            vm_name: "vm-1".to_string(),
+            run_id: "run-1".to_string(),
+            fingerprint: "ready-fingerprint".to_string(),
+            collection_state: "ok".to_string(),
+            collection_error: None,
+            summary_json: r#"{"total":1,"pass":1,"fail":0,"unknown":0}"#.to_string(),
+            snapshot_json: r#"{"generation":"generation-1"}"#.to_string(),
+            generated_at_ms: 200_000,
+            updated_at_ms: 200_001,
+        }
+    }
+
     async fn open_test_db_thread(path: PathBuf) -> Db {
         let (tx, rx) = mpsc::channel::<Op>(16);
         let (init_tx, init_rx) = oneshot::channel::<Result<Vec<VmRow>>>();
@@ -1497,6 +1557,48 @@ mod tests {
         assert_eq!(
             load_local_vm_image_shas(&conn).expect("load vm image shas"),
             vec![image_sha]
+        );
+    }
+
+    #[test]
+    fn ready_vm_and_probe_commit_is_atomic() {
+        let path = test_db_path();
+        let mut conn = open_prepared_connection(&path).expect("open db");
+        conn.execute_batch(
+            r#"
+CREATE TRIGGER fail_ready_probe
+BEFORE INSERT ON vm_probe_state
+BEGIN
+  SELECT RAISE(ABORT, 'injected ready probe failure');
+END;
+"#,
+        )
+        .expect("install failure trigger");
+
+        let error = upsert_ready_vm_and_probe_state(&mut conn, &test_vm_row(), &test_probe_row())
+            .expect_err("probe failure must abort ready transaction");
+        assert!(error.to_string().contains("persist ready probe row"));
+        assert!(
+            load_all_vms(&conn)
+                .expect("load rolled back VMs")
+                .is_empty()
+        );
+        assert!(
+            load_all_vm_probe_states(&conn)
+                .expect("load rolled back probes")
+                .is_empty()
+        );
+
+        conn.execute_batch("DROP TRIGGER fail_ready_probe;")
+            .expect("remove failure trigger");
+        upsert_ready_vm_and_probe_state(&mut conn, &test_vm_row(), &test_probe_row())
+            .expect("commit ready transaction");
+        assert_eq!(load_all_vms(&conn).expect("load ready VM").len(), 1);
+        assert_eq!(
+            load_all_vm_probe_states(&conn)
+                .expect("load ready probe")
+                .len(),
+            1
         );
     }
 

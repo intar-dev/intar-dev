@@ -192,9 +192,7 @@ type HostSelectionResult =
   | { ok: true; hostIds: string[] }
   | { ok: false; reason: "unavailable" | "image_not_ready" };
 
-type ScenarioRouteType =
-  | "browser"
-  | "native_profile_keys";
+type ScenarioRouteType = "browser" | "native_profile_keys";
 
 export type ScenarioTerminalSessionResult =
   | BrowserTerminalSessionResult
@@ -232,7 +230,10 @@ export async function loadEnabledScenarioForUser(params: {
   const active = await loadActiveRunRow(params.userId);
   const activeHere =
     active && active.scenarioId === enabled.scenarioId ? active : null;
-  const finishedRuns = await loadFinishedRuns(params.userId, enabled.scenarioId);
+  const finishedRuns = await loadFinishedRuns(
+    params.userId,
+    enabled.scenarioId,
+  );
   return {
     scenarioId: enabled.scenarioId,
     slug: slugify(enabled.scenarioId),
@@ -450,7 +451,8 @@ export async function listScenarioCatalogForUser(
   ]);
   return scenarios.map((scenario) => ({
     ...scenario,
-    progress: progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
+    progress:
+      progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
   }));
 }
 
@@ -486,26 +488,23 @@ export async function destroyScenarioRunForUser(params: {
   const teardownVms = runVmsRequiringDesiredAbsence(row.state);
   if (!["completed", "failed"].includes(row.state.phase)) {
     const teardownVmIds = new Set(teardownVms.map((vm) => vm.id));
-    const next = recomputeRunState({
-      ...row.state,
-      phase: "teardown_requested",
-      phaseTitle: "Teardown requested",
-      phaseDetail: "Waiting for the host to acknowledge teardown.",
-      vms: row.state.vms.map((vm) =>
-        teardownVmIds.has(vm.id)
-          ? {
-              ...vm,
-              phaseDetail: "Teardown requested. Waiting for host delivery.",
-            }
-          : vm,
-      ),
-    });
     await updateRunState(row.runId, {
-      state: next,
-      activeKey: row.activeKey,
+      mutate: (current) =>
+        recomputeRunState({
+          ...current,
+          phase: "teardown_requested",
+          phaseTitle: "Teardown requested",
+          phaseDetail: "Waiting for the host to acknowledge teardown.",
+          vms: current.vms.map((vm) =>
+            teardownVmIds.has(vm.id)
+              ? {
+                  ...vm,
+                  phaseDetail: "Teardown requested. Waiting for host delivery.",
+                }
+              : vm,
+          ),
+        }),
       deleteRequestedAt: acceptedAt,
-      solvedAt: row.solvedAt,
-      currentPhase: row.state.phase,
     });
   } else if (teardownVms.length > 0) {
     // A failed outcome is terminal for scoring, not for infrastructure. Keep
@@ -578,7 +577,10 @@ export async function deleteFinishedScenarioRunForUser(params: {
       eq(scenarioRunArtifactUploads.artifactId, scenarioRunArtifacts.id),
     )
     .where(eq(scenarioRunArtifacts.runId, row.runId));
-  const purgeBlockReason = scenarioRunPurgeBlockReason(row.state, storageRecords);
+  const purgeBlockReason = scenarioRunPurgeBlockReason(
+    row.state,
+    storageRecords,
+  );
   if (purgeBlockReason) {
     throw appError(
       409,
@@ -613,7 +615,11 @@ export async function expireOverdueRunLeases(
   },
 ): Promise<{ expiredRunIds: string[] }> {
   const db = options?.db ?? drizzle(env.DB);
-  const desiredState = await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
+  const desiredState = await loadOrCreateHostDesiredState(
+    db,
+    hostId,
+    nowUnixMs,
+  );
   const overdue = selectOverdueRunLeases(desiredState, nowUnixMs);
   const expiredRunIds: string[] = [];
 
@@ -627,29 +633,25 @@ export async function expireOverdueRunLeases(
       row.failedAt === null &&
       row.state.vms.some((vm) => expiredVmNames.has(vm.runtimeVmName))
     ) {
-      const next = recomputeRunState({
-        ...row.state,
-        phase: "failed",
-        phaseDetail: "The run lease expired before teardown completed.",
-        vms: row.state.vms.map((vm) =>
-          expiredVmNames.has(vm.runtimeVmName)
-            ? {
-                ...vm,
-                phase: "failed",
-                phaseDetail: "The run lease expired.",
-                terminalPhase: "failed",
-                terminalReason: "The run lease expired.",
-              }
-            : vm,
-        ),
-      });
-
       await updateRunState(row.runId, {
-        state: next,
-        activeKey: row.activeKey,
+        mutate: (current) =>
+          recomputeRunState({
+            ...current,
+            phase: "failed",
+            phaseDetail: "The run lease expired before teardown completed.",
+            vms: current.vms.map((vm) =>
+              expiredVmNames.has(vm.runtimeVmName)
+                ? {
+                    ...vm,
+                    phase: "failed",
+                    phaseDetail: "The run lease expired.",
+                    terminalPhase: "failed",
+                    terminalReason: "The run lease expired.",
+                  }
+                : vm,
+            ),
+          }),
         deleteRequestedAt: row.deleteRequestedAt,
-        solvedAt: row.solvedAt,
-        currentPhase: row.state.phase,
       });
     }
 
@@ -735,9 +737,7 @@ export async function createScenarioSshSessionForUser(params: {
     );
   }
   const routeType =
-    requestedMode === "browser"
-      ? "browser"
-      : "native_profile_keys";
+    requestedMode === "browser" ? "browser" : "native_profile_keys";
   const routeUsername = buildRunVmRouteUsername(
     row.runId,
     row.state.vms,
@@ -829,11 +829,14 @@ async function startScenarioRunInternal(params: {
   const runId = createAppId();
   const createdAt = Date.now();
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
-  const cpuMillis = scenario.launchSpecs.reduce(
-    (total, spec) => total + spec.resources.cpuMillis,
+  const steadyCpuMillisByVm = scenario.launchSpecs.map(
+    (spec) => spec.resources.cpuMillis,
+  );
+  const steadyCpuMillis = steadyCpuMillisByVm.reduce(
+    (total, cpuMillis) => total + cpuMillis,
     0,
   );
-  if (!Number.isSafeInteger(cpuMillis) || cpuMillis <= 0) {
+  if (!Number.isSafeInteger(steadyCpuMillis) || steadyCpuMillis <= 0) {
     throw appError(
       500,
       "scenario_catalog_invalid",
@@ -877,10 +880,7 @@ async function startScenarioRunInternal(params: {
     }),
   );
   const sshAuthorizedKeysByVmId = new Map(
-    sshKeyDrafts.map((draft) => [
-      draft.vmId,
-      [draft.publicKeyOpenssh],
-    ]),
+    sshKeyDrafts.map((draft) => [draft.vmId, [draft.publicKeyOpenssh]]),
   );
 
   const initial = buildInitialRunState({
@@ -924,21 +924,21 @@ async function startScenarioRunInternal(params: {
       params.userId,
       requiredImages,
     );
-    const reservation = await reserveHostCpu({
-      hostId: params.hostId,
+    const reservation = await reserveScenarioBootCpuWithJitter({
+      hostIds: [params.hostId],
       runId,
-      cpuMillis,
+      steadyCpuMillisByVm,
     });
     if (!reservation.ok) {
-      throw reservation.reason === "exhausted"
-        ? scenarioHostCpuExhaustedError()
+      throw reservation.reason === "boot_capacity_pending"
+        ? bootCapacityPendingError()
         : appError(
             409,
             "scenario_host_unavailable",
             "host cannot provide strict CPU isolation",
           );
     }
-    hostId = params.hostId;
+    hostId = reservation.hostId;
   } else {
     const selection = await selectScenarioHosts(requiredImages);
     if (!selection.ok) {
@@ -956,36 +956,21 @@ async function startScenarioRunInternal(params: {
       );
     }
 
-    let sawCpuExhaustion = false;
-    let selectedHostId: string | null = null;
-    for (const candidateHostId of selection.hostIds) {
-      const reservation = await reserveHostCpu({
-        hostId: candidateHostId,
-        runId,
-        cpuMillis,
-      });
-      if (reservation.ok) {
-        selectedHostId = candidateHostId;
-        break;
-      }
-      if (reservation.reason === "exhausted") {
-        sawCpuExhaustion = true;
-        continue;
-      }
-      if (reservation.reason === "conflict") {
-        throw new Error(`CPU reservation conflict for run ${runId}`);
-      }
-    }
-    if (!selectedHostId) {
-      throw sawCpuExhaustion
-        ? scenarioHostCpuExhaustedError()
+    const reservation = await reserveScenarioBootCpuWithJitter({
+      hostIds: selection.hostIds,
+      runId,
+      steadyCpuMillisByVm,
+    });
+    if (!reservation.ok) {
+      throw reservation.reason === "boot_capacity_pending"
+        ? bootCapacityPendingError()
         : appError(
             409,
             "scenario_host_unavailable",
             "no scenario host can provide strict CPU isolation",
           );
     }
-    hostId = selectedHostId;
+    hostId = reservation.hostId;
   }
 
   const db = drizzle(env.DB);
@@ -1116,17 +1101,20 @@ async function assertScenarioLaunchHostForUser(
     ) ||
     hostHealth(host.actualReportedAt ?? null, now) !== "healthy"
   ) {
-    throw appError(
-      409,
-      "scenario_host_unavailable",
-      "host is not connected",
-    );
+    throw appError(409, "scenario_host_unavailable", "host is not connected");
   }
   if (!hostHasImagesReady(host.actualReport, requiredImages)) {
     throw appError(
       409,
       "image_not_ready",
       "scenario images are not ready on this host",
+    );
+  }
+  if (strictCpuCapacity(host.actualReport) === null) {
+    throw appError(
+      409,
+      "scenario_host_not_performance_ready",
+      "host does not attest the required v2 template, boot-quota, and fast-filesystem launch path",
     );
   }
 }
@@ -1254,36 +1242,55 @@ async function loadRunRow(runId: string, userId?: string) {
 async function updateRunState(
   runId: string,
   input: {
-    state: RunStateDocument;
-    activeKey: string | null;
+    mutate: (current: RunStateDocument) => RunStateDocument;
     deleteRequestedAt?: number | null;
-    solvedAt?: number | null;
-    currentPhase?: RunPhase;
   },
 ): Promise<void> {
   const db = drizzle(env.DB);
-  const nextState = recomputeRunState(input.state);
-  const terminal = nextState.phase === "completed" || nextState.phase === "failed";
-  const now = Date.now();
-  await db
-    .update(scenarioRuns)
-    .set({
-      state: nextState.phase,
-      stateRank: RUN_PHASE_ORDER[nextState.phase],
-      stateJson: JSON.stringify(nextState),
-      activeKey: terminal ? null : input.activeKey,
-      deleteRequestedAt: input.deleteRequestedAt ?? null,
-      solvedAt: nextSolvedAt({
-        currentPhase: input.currentPhase ?? nextState.phase,
-        nextPhase: nextState.phase,
-        existingSolvedAt: input.solvedAt ?? null,
-        now,
-      }),
-      completedAt: nextState.phase === "completed" ? now : null,
-      failedAt: nextState.phase === "failed" ? now : null,
-      updatedAt: now,
-    })
-    .where(eq(scenarioRuns.runId, runId));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const row = await loadRunRow(runId);
+    if (!row) {
+      return;
+    }
+    const current = recomputeRunState(row.state);
+    const nextState = recomputeRunState(input.mutate(current));
+    const terminal =
+      nextState.phase === "completed" || nextState.phase === "failed";
+    const now = Math.max(Date.now(), row.updatedAt + 1);
+    const updated = await db
+      .update(scenarioRuns)
+      .set({
+        state: nextState.phase,
+        stateRank: RUN_PHASE_ORDER[nextState.phase],
+        stateJson: JSON.stringify(nextState),
+        activeKey: terminal ? null : row.activeKey,
+        deleteRequestedAt:
+          input.deleteRequestedAt === undefined
+            ? row.deleteRequestedAt
+            : input.deleteRequestedAt,
+        solvedAt: nextSolvedAt({
+          currentPhase: current.phase,
+          nextPhase: nextState.phase,
+          existingSolvedAt: row.solvedAt,
+          now,
+        }),
+        completedAt:
+          nextState.phase === "completed" ? (row.completedAt ?? now) : null,
+        failedAt: nextState.phase === "failed" ? (row.failedAt ?? now) : null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(scenarioRuns.runId, runId),
+          eq(scenarioRuns.updatedAt, row.updatedAt),
+        ),
+      )
+      .returning({ runId: scenarioRuns.runId });
+    if (updated.length) {
+      return;
+    }
+  }
+  throw new Error(`run state CAS did not converge for ${runId}`);
 }
 
 function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
@@ -1322,7 +1329,9 @@ function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
   };
 }
 
-function toScenarioRunRecord(row: ReturnType<typeof fromDbRow>): ScenarioRunRecord {
+function toScenarioRunRecord(
+  row: ReturnType<typeof fromDbRow>,
+): ScenarioRunRecord {
   return {
     id: row.runId,
     scenarioId: row.scenarioId,
@@ -1383,11 +1392,67 @@ function activeRunConflictError(activeRunTitle?: string) {
   );
 }
 
-function scenarioHostCpuExhaustedError() {
+const BOOT_CAPACITY_RESERVATION_ATTEMPTS = 4;
+const BOOT_CAPACITY_RETRY_MIN_MS = 15;
+const BOOT_CAPACITY_RETRY_JITTER_MS = 30;
+
+async function reserveScenarioBootCpuWithJitter(input: {
+  hostIds: readonly string[];
+  runId: string;
+  steadyCpuMillisByVm: readonly number[];
+}): Promise<
+  | { ok: true; hostId: string }
+  | { ok: false; reason: "boot_capacity_pending" | "host_unavailable" }
+> {
+  let sawBootCapacityPending = false;
+  for (
+    let attempt = 0;
+    attempt < BOOT_CAPACITY_RESERVATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    for (const hostId of input.hostIds) {
+      const reservation = await reserveHostCpu({
+        hostId,
+        runId: input.runId,
+        steadyCpuMillisByVm: input.steadyCpuMillisByVm,
+      });
+      if (reservation.ok) {
+        return { ok: true, hostId };
+      }
+      if (reservation.reason === "boot_capacity_pending") {
+        sawBootCapacityPending = true;
+        continue;
+      }
+      if (reservation.reason === "conflict") {
+        throw new Error(`CPU reservation conflict for run ${input.runId}`);
+      }
+    }
+    if (
+      !sawBootCapacityPending ||
+      attempt === BOOT_CAPACITY_RESERVATION_ATTEMPTS - 1
+    ) {
+      break;
+    }
+    await new Promise<void>((resolve) => {
+      const jitterMs =
+        BOOT_CAPACITY_RETRY_MIN_MS +
+        Math.floor(Math.random() * (BOOT_CAPACITY_RETRY_JITTER_MS + 1));
+      setTimeout(resolve, jitterMs);
+    });
+  }
+  return {
+    ok: false,
+    reason: sawBootCapacityPending
+      ? "boot_capacity_pending"
+      : "host_unavailable",
+  };
+}
+
+function bootCapacityPendingError() {
   return appError(
     409,
-    "scenario_host_cpu_exhausted",
-    "scenario CPU capacity is exhausted",
+    "boot_capacity_pending",
+    "scenario boot CPU capacity is pending; retry shortly",
   );
 }
 
@@ -1400,7 +1465,11 @@ function isActiveKeyUniqueViolation(error: unknown): boolean {
   );
 }
 
-function deterministicRuntimeVmName(prefix: string, runId: string, index: number) {
+function deterministicRuntimeVmName(
+  prefix: string,
+  runId: string,
+  index: number,
+) {
   return `${prefix}-${runId.slice(0, 6)}-${index + 1}`.slice(0, 63);
 }
 
@@ -1471,7 +1540,10 @@ async function markRunVmsAbsentInDesiredState(input: {
 }
 
 function requiredImagesForScenarioLaunch(
-  launchSpecs: Array<{ imageKey: RequiredScenarioImage["imageKey"] | null; imageSha256: string | null }>,
+  launchSpecs: Array<{
+    imageKey: RequiredScenarioImage["imageKey"] | null;
+    imageSha256: string | null;
+  }>,
 ): RequiredScenarioImage[] {
   const byIdentity = new Map<string, RequiredScenarioImage>();
   for (const spec of launchSpecs) {
@@ -1502,8 +1574,11 @@ function buildRunVmRouteUsername(
   const runPrefix = slugifyVmAlias(runId) || runId.toLowerCase();
   const suffix = routeSuffixForType(routeType);
 
-  for (const vm of [...vms].sort((left, right) => left.ordinal - right.ordinal)) {
-    const baseSlug = slugifyVmAlias(vm.scenarioVmName) || `vm-${vm.ordinal + 1}`;
+  for (const vm of [...vms].sort(
+    (left, right) => left.ordinal - right.ordinal,
+  )) {
+    const baseSlug =
+      slugifyVmAlias(vm.scenarioVmName) || `vm-${vm.ordinal + 1}`;
     const count = (counts.get(baseSlug) ?? 0) + 1;
     counts.set(baseSlug, count);
     const ordinalSuffix = count > 1 ? `-${count}` : "";
@@ -1517,15 +1592,13 @@ function buildRunVmRouteUsername(
 }
 
 function slugifyVmAlias(value: string): string {
-  return (
-    value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 96)
-  );
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
 }
 
 function routeSuffixForType(routeType: ScenarioRouteType): string {
@@ -1625,10 +1698,7 @@ async function selectScenarioHosts(
       // and capacity; the legacy inventory upload no longer exists.
       const capacity = row.actualReport?.capacity ?? null;
       const inventoryVmCount = row.actualReport?.vms?.length ?? 0;
-      const cpuCores = Math.max(
-        1,
-        (capacity?.total_cpu_millis ?? 0) / 1000,
-      );
+      const cpuCores = Math.max(1, (capacity?.total_cpu_millis ?? 0) / 1000);
       const loadPerCpu =
         typeof capacity?.load_avg_1m === "number" && capacity.load_avg_1m >= 0
           ? capacity.load_avg_1m / cpuCores
@@ -1742,25 +1812,31 @@ function parseObjectives(raw: string): ScenarioObjective[] {
       ) {
         return [];
       }
-      return [{
-        probeName: item.probeName,
-        vmName: item.vmName,
-        label: item.label,
-        title: typeof item.title === "string" ? item.title : null,
-        bodyMarkdown:
-          typeof item.bodyMarkdown === "string" ? item.bodyMarkdown : null,
-        hintCount:
-          typeof item.hintCount === "number" && Number.isFinite(item.hintCount)
-            ? Math.max(0, Math.floor(item.hintCount))
-            : 0,
-      } satisfies ScenarioObjective];
+      return [
+        {
+          probeName: item.probeName,
+          vmName: item.vmName,
+          label: item.label,
+          title: typeof item.title === "string" ? item.title : null,
+          bodyMarkdown:
+            typeof item.bodyMarkdown === "string" ? item.bodyMarkdown : null,
+          hintCount:
+            typeof item.hintCount === "number" &&
+            Number.isFinite(item.hintCount)
+              ? Math.max(0, Math.floor(item.hintCount))
+              : 0,
+        } satisfies ScenarioObjective,
+      ];
     });
   } catch {
     return [];
   }
 }
 
-function scenarioRunDifficulty(runId: string, value: string): ScenarioDifficulty {
+function scenarioRunDifficulty(
+  runId: string,
+  value: string,
+): ScenarioDifficulty {
   const parsed = parseScenarioDifficulty(value);
   if (parsed) {
     return parsed;

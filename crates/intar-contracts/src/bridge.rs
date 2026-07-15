@@ -5,9 +5,9 @@ use crate::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
 
 pub const BRIDGE_PROTOCOL_VERSION: u16 = 6;
 pub const HOST_DESIRED_STATE_SCHEMA_VERSION: u16 = 3;
-pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 3;
+pub const HOST_STATE_REPORT_SCHEMA_VERSION: u16 = 4;
 pub const BUILD_REPORT_SCHEMA_VERSION: u16 = 1;
-pub const VM_REPORT_SCHEMA_VERSION: u16 = 2;
+pub const VM_REPORT_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -171,7 +171,7 @@ pub struct VmResourcesV2 {
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HostStateReportV2 {
-    #[schemars(range(min = 3, max = 3))]
+    #[schemars(range(min = 4, max = 4))]
     pub schema_version: u16,
     pub host_id: String,
     pub observed_at_unix_ms: i64,
@@ -212,11 +212,20 @@ pub struct HostCapacityV2 {
 #[serde(rename_all = "snake_case")]
 pub struct HostCapabilitiesV2 {
     pub arch: ImageArchitecture,
+    /// Root-owned runtime identity and lease policy. `None` means the host has
+    /// no live jailerd attestation and is never performance-ready.
+    pub cloud_hypervisor_sha256: Option<String>,
+    pub boot_cpu_millis: Option<u32>,
+    pub boot_cpu_lease_ms: Option<u64>,
     pub supports_kvm: bool,
     pub supports_vsock: bool,
     pub supports_reflink: bool,
     pub supports_nftables: bool,
     pub supports_jailer_v1: bool,
+    pub supports_jailer_v2: bool,
+    pub supports_boot_cpu_lease: bool,
+    pub supports_template_backed_launch: bool,
+    pub fast_template_store: bool,
     pub supports_hard_cpu_quota: bool,
     pub supports_landlock: bool,
     pub supports_cgroup_v2: bool,
@@ -290,6 +299,19 @@ pub struct VmActualStateV2 {
     pub image_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<VmNetworkStateV1>,
+    /// Explicit shell-readiness evidence. Network metadata alone is not a
+    /// readiness signal because the forward may be reserved before ingress is
+    /// published.
+    pub terminal: VmTerminalStateV1,
+    /// Live CPU-boundary evidence for the VM process tree. This is distinct
+    /// from the guest vCPU topology and from periodic usage accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
+    /// Generation-fenced, best-effort host measurements captured during the
+    /// v2 boot path. These observations are benchmark evidence only: missing
+    /// telemetry must never hold the CPU lease open or suppress readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_evidence: Option<VmBootEvidenceV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_state: Option<VmResourceStateV2>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -337,6 +359,133 @@ pub struct VmNetworkStateV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum VmTerminalStateKindV1 {
+    Pending,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmTerminalTargetV1 {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub checked_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmTerminalStateV1 {
+    pub state: VmTerminalStateKindV1,
+    /// Present only when `state` is `ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<VmTerminalTargetV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub observed_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmRuntimeConstraintPhaseV1 {
+    BootBurst,
+    Steady,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmRuntimeConstraintsV1 {
+    /// Jailer-owned generation to which every quota and ingress attestation
+    /// in this object applies. The breaking v2 contract never accepts
+    /// generation-less quota evidence.
+    pub generation: String,
+    pub phase: VmRuntimeConstraintPhaseV1,
+    #[schemars(range(min = 1))]
+    pub steady_cpu_millis: u32,
+    #[schemars(range(min = 1))]
+    pub effective_cpu_millis: u32,
+    /// Timestamp of the authoritative live cgroup readback. Required by the
+    /// control plane before a `steady` runtime can expose a terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_verified_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmBootEvidenceV1 {
+    /// Jailer-owned generation shared by every CPU sample in this object.
+    pub generation: String,
+    pub started_at_unix_ms: i64,
+    pub ready_at_unix_ms: i64,
+    pub phases: VmBootPhaseDurationsV1,
+    /// Best-effort samples. A point can be absent when the 50 ms telemetry
+    /// budget expires; readiness and quota sealing never wait for a retry.
+    pub cpu_samples: Vec<VmBootCpuSampleV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmBootPhaseDurationsV1 {
+    /// Image preparation plus runtime-disk staging work. Runtime-disk and
+    /// network construction overlap, so this excludes `network_ms`.
+    pub image_disk_ms: u64,
+    /// Network construction plus the jailer/VMM path through `vm.boot`
+    /// acceptance. This may overlap the runtime-disk portion above.
+    pub network_jailer_vmm_ms: u64,
+    pub guest_to_kino_ms: u64,
+    pub seal_ssh_publish_ms: u64,
+    pub total_ms: u64,
+    /// Component durations retained so a regression can be attributed without
+    /// introducing another launch-time inspection.
+    pub image_cache_ms: u64,
+    pub runtime_disk_ms: u64,
+    pub network_ms: u64,
+    pub jailer_stage_ms: u64,
+    pub vmm_start_ms: u64,
+    pub vm_api_ms: u64,
+    pub quota_seal_ms: u64,
+    pub ssh_verify_ms: u64,
+    pub terminal_publish_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmBootCpuSamplePointV1 {
+    VmBootAccepted,
+    KinoReady,
+    PreSeal,
+    PostSeal,
+    TerminalPublished,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VmBootCpuSampleV1 {
+    pub point: VmBootCpuSamplePointV1,
+    pub sampled_at_unix_ms: i64,
+    pub phase: VmRuntimeConstraintPhaseV1,
+    #[schemars(range(min = 1))]
+    pub steady_cpu_millis: u32,
+    #[schemars(range(min = 1))]
+    pub effective_cpu_millis: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_deadline_unix_ms: Option<i64>,
+    pub cpu_max: String,
+    pub cpu_max_burst: u64,
+    pub quota_verified_at_unix_ms: i64,
+    pub usage_usec: u64,
+    pub user_usec: u64,
+    pub system_usec: u64,
+    pub nr_periods: u64,
+    pub nr_throttled: u64,
+    pub throttled_usec: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub struct VmProbeSnapshotV1 {
     pub id: String,
     pub phase: ProbePhase,
@@ -378,7 +527,7 @@ pub enum VmArchivePhase {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct VmReportV2 {
-    #[schemars(range(min = 2, max = 2))]
+    #[schemars(range(min = 3, max = 3))]
     pub schema_version: u16,
     pub host_id: String,
     pub run_id: String,
@@ -389,6 +538,11 @@ pub struct VmReportV2 {
     pub phase: VmPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<VmNetworkStateV1>,
+    pub terminal: VmTerminalStateV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_evidence: Option<VmBootEvidenceV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_state: Option<VmResourceStateV2>,
     #[serde(skip_serializing_if = "Option::is_none")]

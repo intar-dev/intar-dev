@@ -56,7 +56,11 @@ state bleed.
 `website/drizzle/0000_baseline.sql` describes a fresh control plane. The jailer
 cutover adds `0001_host_cpu_reservations.sql`; the per-host runtime Durable
 Object serializes pending and committed CPU reservations so concurrent starts
-cannot overcommit a host.
+cannot overcommit a host. The later v2-only boot-quota cutover adds
+`0003_boot_cpu_reservation_phases.sql`. It requires an empty reservation ledger
+and no active scenario run before replacing the ledger with explicit boot and
+steady quota phases; it is not part of the historical `0001` migration and has
+no downgrade path.
 
 ## Image Registry
 
@@ -110,8 +114,9 @@ the desired build.
   after restart or while temporarily offline.
 - It compares desired VMs with typed jailerd inspection results and requests
   launch, stop, destroy, and run-network operations as needed.
-- It prewarms raw images and creates per-run root disks with reflink copy when the
-  agent data filesystem supports it, falling back loudly to sparse copy.
+- It prewarms complete, root-owned jail templates and launches generations only
+  through an attested same-filesystem reflink. A host that cannot prove the fast
+  template path remains unschedulable; there is no launch-time copy fallback.
 - It persists VM identity, network details, Kino probe state, SSH host keys, and
   archive jobs locally for crash recovery.
 
@@ -144,29 +149,38 @@ admission authority. For a fixed 100 ms period, 125 millicores is
 `cpu.max = 12500 100000` with `cpu.max.burst = 0`; eight such VMs consume one
 schedulable core exactly.
 
+For a v2 launch, jailerd capacity-accounts `max(2000m, steady_cpu_millis)` and
+applies that hard aggregate VMM quota for at most 45 seconds without changing
+the guest's vCPU topology. This is a root-controlled lease, not cgroup burst
+credit. A generation-bound systemd guardian seals the unit to its steady quota
+at the deadline even if jailerd has restarted. Deadline sealing never activates
+SSH ingress; failed or unattested sealing leaves the VM quarantined and its
+capacity conservatively accounted.
+
 Kino readiness is push-based. Each guest receives `KINO_HOST_READY_PORT` in
 `runtime.env`; Kino connects to the host over vsock, streams protobuf probe
 snapshots, and includes generated SSH host public keys. The agent persists those
-host keys and includes them in VM reports. The launch deadline treats 45 seconds
-as a one-core CPU-time budget and scales wall time as
-`ceil(45 * 1000 / cpu_millis)`, bounded to 45–360 seconds. A 125-millicore VM
-therefore gets up to 360 seconds to complete its first boot without relaxing its
-hard CPU ceiling. The generated guest supervisor gives `sshd` 120 seconds from
-the start of its activation, measured against Linux's monotonic uptime instead
-of a fixed retry count. That covers the quota-scaled 80-second equivalent of the
-old ten-second budget with 50% headroom. This caps the SSH phase at one third of
-the 360-second agent deadline; earlier and later first-boot work shares the same
-whole-runtime deadline. Readiness is only accepted after the queued nonblocking
-SSH start job has drained. Image finalization disables both SSH service aliases,
-masks socket activation, and gates `ssh.service` on `/run/intar/ssh-ready` before
-removing baked host keys. On first boot the supervisor configures networking and
-access, generates and validates the keys, creates the root-only gate, and then
-explicitly starts `ssh.service`. Image content hashes use build format
-`intar-image-build-v7`, ensuring images with bounded first-boot network-device
-discovery, failure diagnostics, and a race-free build-only SSH bootstrap are
-rebuilt rather than reused. When a newer hash is queued for the same scenario
-and architecture, nonterminal older hashes are retired and removed from builder
-desired state before the replacement is assigned.
+host keys and includes them in VM reports. Separately, the agent's readiness
+timeout scales from the scenario's steady CPU as
+`ceil(45 * 1000 / cpu_millis)`, bounded to 45–360 seconds. A 125-millicore VM may
+therefore wait up to 360 seconds for Kino, but only its first 45 seconds use the
+2000-millicore boot allocation; after sealing it runs at 125 millicores. If Kino
+becomes ready later, finalization can expose ingress only after jailerd attests
+the steady quota. The generated guest supervisor gives `sshd` an independent
+120-second bound from the start of its activation, measured against Linux's
+monotonic uptime instead of a fixed retry count; the agent's whole-runtime
+readiness timeout remains authoritative when it is shorter. Readiness is only
+accepted after the queued nonblocking SSH start job has drained. Image
+finalization disables both SSH service aliases, masks socket activation, and
+gates `ssh.service` on `/run/intar/ssh-ready` before removing baked host keys. On
+first boot the supervisor configures networking and access, generates and
+validates the keys, creates the root-only gate, and then explicitly starts
+`ssh.service`. Image content hashes use build format
+`intar-image-build-v8`, ensuring images with the boot-path supervisor changes,
+conditional root resizing, scenario-specific module preload, and faster normal-
+capacity SSH startup are rebuilt rather than reused. When a newer hash is queued
+for the same scenario and architecture, nonterminal older hashes are retired and
+removed from builder desired state before the replacement is assigned.
 
 ## Guest Runtime
 
@@ -228,10 +242,22 @@ and expect active runs on that host to fail.
 The V3/V6 jailer rollout is always destructive maintenance because existing
 unsandboxed VMs cannot be adopted. Drain every run and stop old agents first;
 install jailerd, jailer, the pinned Cloud Hypervisor v53.0 runtime, and systemd
-units while agents remain stopped; apply the D1 reservation migration and
-deploy the V6 Worker; republish every V3 manifest; then start only hosts that
-pass agent doctor and the root-only jailerd self-test. Validate a real
-`cpu = 0.125` run and the eight-VM saturation case before re-enabling starts.
+units while agents remain stopped; apply the historical
+`0001_host_cpu_reservations.sql` migration and deploy the V6 Worker; republish
+every V3 manifest; then start only hosts that pass agent doctor and the
+root-only jailerd self-test. Validate a real `cpu = 0.125` run and the eight-VM
+saturation case before re-enabling starts.
+
+The later boot-quota rollout is a separate breaking boundary. Disable both
+scenario placement and builder assignment, drain runs and builds, and stop all
+old `intar-agent` and `intar-builder` services before applying
+`0003_boot_cpu_reservation_phases.sql` or deploying its Worker. Deploy the
+coordinated Worker, agent/jailerd package, and builder revision without mixing
+old and new protocol participants. Keep scheduling off until the agent reports
+the exact boot lease, quota-seal attestation, fast template store, required
+reflink routes, and ready images, and until the privileged and latency gates
+pass. A failure is forward-fix-only; do not reverse the D1 migration or roll any
+component back across this schema/protocol boundary.
 
 ## Terminal Access
 

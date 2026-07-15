@@ -19,7 +19,8 @@ const INITRAMFS_MODULES: &[&str] = &[
     "crc32c",
 ];
 
-const RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "nf_tables", "vxlan"];
+pub(crate) const BASE_RUNTIME_MODULES: &[&str] = &["nf_tables"];
+pub(crate) const KUBERNETES_RUNTIME_MODULES: &[&str] = &["overlay", "br_netfilter", "vxlan"];
 
 // QMP system_powerdown injects this ACPI event, but the minimal image has no
 // D-Bus-backed logind consumer. Bash resolves the libc-relative RTMIN+4 name;
@@ -434,7 +435,16 @@ EOF
 }
 
 fn render_customize_hook(build_service: &str, build_start_script: &str) -> String {
-    let runtime_module_lines = RUNTIME_MODULES.join("\n");
+    // The generic build rootfs may provision either kind of scenario, so make
+    // every module available during the image build. The scenario provisioner
+    // rewrites this file for the final guest and keeps the Kubernetes-only
+    // modules only when that VM actually uses Kubernetes actions or probes.
+    let runtime_module_lines = BASE_RUNTIME_MODULES
+        .iter()
+        .chain(KUBERNETES_RUNTIME_MODULES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
     let intar_acpi_event_path = INTAR_ACPI_EVENT_PATH;
     let intar_acpi_poweroff_path = INTAR_ACPI_POWEROFF_PATH;
     let intar_acpi_event_rule = INTAR_ACPI_EVENT_RULE;
@@ -515,7 +525,7 @@ ln -sf /etc/systemd/system/intar-build.service "$root/etc/systemd/system/multi-u
 fn render_intar_build_service() -> String {
     r#"[Unit]
 Description=Intar image build bootstrap
-After=local-fs.target systemd-udev-trigger.service
+After=local-fs.target
 Before=multi-user.target
 
 [Service]
@@ -638,7 +648,9 @@ mod tests {
 
     use intar_image_scenario::BaseImageCatalog;
 
-    use super::{MASKED_UNITS, RUNTIME_MODULES, render_rootfs_build_plan};
+    use super::{
+        BASE_RUNTIME_MODULES, KUBERNETES_RUNTIME_MODULES, MASKED_UNITS, render_rootfs_build_plan,
+    };
     use crate::config::QemuBuildConfig;
 
     fn base_image() -> intar_image_scenario::BaseImageSpec {
@@ -736,7 +748,10 @@ base_image "trixie" {
             plan.customize_hook
                 .contains("/etc/modules-load.d/90-intar-runtime.conf")
         );
-        for module in RUNTIME_MODULES {
+        for module in BASE_RUNTIME_MODULES
+            .iter()
+            .chain(KUBERNETES_RUNTIME_MODULES)
+        {
             assert!(plan.customize_hook.contains(module));
         }
         assert!(
@@ -748,10 +763,8 @@ base_image "trixie" {
             plan.customize_hook
                 .contains("HostKey /etc/ssh/ssh_host_ed25519_key")
         );
-        assert!(
-            plan.build_service
-                .contains("After=local-fs.target systemd-udev-trigger.service")
-        );
+        assert!(plan.build_service.contains("After=local-fs.target"));
+        assert!(!plan.build_service.contains("systemd-udev-trigger.service"));
         assert!(plan.build_service.contains("Before=multi-user.target"));
         assert!(plan.build_service.contains("RuntimeDirectory=sshd"));
         assert!(plan.build_service.contains("RuntimeDirectoryMode=0755"));

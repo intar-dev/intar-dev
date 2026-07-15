@@ -96,6 +96,12 @@ bundle-images scenario="" config="builder.sample.amd64.hcl" rev="" no_upload="fa
 live-e2e args="":
     cd website && bun run e2e:live -- {{args}}
 
+boot-benchmark args="":
+    cd website && bun run bench:boot -- {{args}}
+
+boot-benchmark-compare args="":
+    cd website && bun run bench:boot:compare -- {{args}}
+
 docker-smoke:
     just docker-smoke-probes
     just docker-smoke-ssh-recording

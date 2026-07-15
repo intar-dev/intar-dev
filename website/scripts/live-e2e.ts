@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 import type {
   ScenarioManifestV3,
   ScenarioVmManifestV3,
@@ -47,12 +48,12 @@ interface LoadedManifest {
   manifest: ScenarioManifestV3;
 }
 
-interface RequiredImage {
+export interface RequiredImage {
   image_key: ScenarioVmManifestV3["image_key"];
   image_sha256: string;
 }
 
-interface HostSummary {
+export interface HostSummary {
   id: string;
   disabled: boolean;
   scenarioEnabled: boolean;
@@ -68,6 +69,17 @@ interface HostSummary {
       supports_vsock: boolean;
       supports_reflink: boolean;
       supports_nftables: boolean;
+      supports_jailer_v1: boolean;
+      supports_jailer_v2: boolean;
+      supports_boot_cpu_lease: boolean;
+      supports_template_backed_launch: boolean;
+      fast_template_store: boolean;
+      supports_hard_cpu_quota: boolean;
+      supports_landlock: boolean;
+      supports_cgroup_v2: boolean;
+      boot_cpu_millis: number | null;
+      boot_cpu_lease_ms: number | null;
+      cloud_hypervisor_sha256: string | null;
       arch: string;
     };
     cachedImages: Array<{
@@ -224,12 +236,13 @@ async function runLiveE2e(options: Options): Promise<void> {
     selectedHostId = host.id;
     logStep(`host ready: ${host.id}`);
 
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const start = await startRun(client, options, host.id, options.scenarioId);
     const primaryRunId = start.runId;
     runIdsToTeardown.push(primaryRunId);
+    const acceptedElapsedMs = Math.round(performance.now() - startedAt);
     logStep(
-      `run accepted: ${primaryRunId}${start.reused ? " (reused active run)" : ""}`,
+      `run accepted in ${acceptedElapsedMs}ms: ${primaryRunId}${start.reused ? " (reused active run)" : ""}`,
     );
 
     const readyRun = await waitForRunReady(
@@ -248,20 +261,15 @@ async function runLiveE2e(options: Options): Promise<void> {
             pollMs: options.pollMs,
           })
         : new Map<string, string[]>();
-    const readyElapsedMs = Date.now() - startedAt;
+    const readyElapsedMs = Math.round(performance.now() - startedAt);
     if (readyElapsedMs > options.warmStartBudgetMs) {
-      // The budget encodes reflink-speed disk materialization; hosts on
-      // filesystems without reflink pay a full sparse copy per VM disk.
-      if (host.actualState?.capabilities.supports_reflink) {
-        throw new Error(
-          `warm start budget exceeded: ${readyElapsedMs}ms > ${options.warmStartBudgetMs}ms`,
-        );
-      }
-      logStep(
-        `warm start took ${readyElapsedMs}ms (> ${options.warmStartBudgetMs}ms budget); acceptable without reflink support`,
+      throw new Error(
+        `warm start budget exceeded on mandatory fast-template host: ${readyElapsedMs}ms > ${options.warmStartBudgetMs}ms`,
       );
     } else {
-      logStep(`terminal ready in ${readyElapsedMs}ms`);
+      logStep(
+        `terminal ready in ${readyElapsedMs}ms (${readyElapsedMs - acceptedElapsedMs}ms after acceptance)`,
+      );
     }
 
     await verifyRunContentGating(client, readyRun);
@@ -552,7 +560,9 @@ async function waitForBuildsSucceeded(
     return [];
   }
   if (scenarioIds.length === 0) {
-    throw new Error("at least one scenario id is required when waiting for builds");
+    throw new Error(
+      "at least one scenario id is required when waiting for builds",
+    );
   }
 
   const deadline = Date.now() + options.waitBuildMs;
@@ -567,7 +577,9 @@ async function waitForBuildsSucceeded(
       })),
   );
   const expectedBuildKeys = new Set(
-    expectedBuilds.map((target) => buildTargetKey(target.scenarioId, target.arch)),
+    expectedBuilds.map((target) =>
+      buildTargetKey(target.scenarioId, target.arch),
+    ),
   );
 
   while (Date.now() <= deadline) {
@@ -594,7 +606,10 @@ async function waitForBuildsSucceeded(
         scenarioIds,
         expectedBuilds,
       );
-      if (missingBuildTargets.length === 0 && builds.every((build) => build.status === "succeeded")) {
+      if (
+        missingBuildTargets.length === 0 &&
+        builds.every((build) => build.status === "succeeded")
+      ) {
         logStep(
           `build rev ${buildRev} succeeded for ${formatExpectedBuildScope(scenarioIds, expectedBuilds)}: ${builds.map((build) => `${build.id}:${build.arch}/${build.contentHash.slice(0, 12)}${build.hostId ? `@${build.hostId}` : ""}`).join(",")}`,
         );
@@ -642,7 +657,9 @@ function missingExpectedBuildTargets(
   expectedBuilds: ExpectedBuildTarget[],
 ): string[] {
   if (expectedBuilds.length === 0) {
-    const scenariosWithBuilds = new Set(builds.map((build) => build.scenarioId));
+    const scenariosWithBuilds = new Set(
+      builds.map((build) => build.scenarioId),
+    );
     return scenarioIds
       .filter((scenarioId) => !scenariosWithBuilds.has(scenarioId))
       .map((scenarioId) => `${scenarioId}:any-arch`);
@@ -653,7 +670,8 @@ function missingExpectedBuildTargets(
   );
   return expectedBuilds
     .filter(
-      (target) => !buildsByTarget.has(buildTargetKey(target.scenarioId, target.arch)),
+      (target) =>
+        !buildsByTarget.has(buildTargetKey(target.scenarioId, target.arch)),
     )
     .map((target) => `${target.scenarioId}:${target.arch}`);
 }
@@ -692,7 +710,7 @@ async function selectBestHost(client: ApiClient): Promise<HostSummary | null> {
   );
 }
 
-function hostReadinessProblems(
+export function hostReadinessProblems(
   host: HostSummary,
   requiredImages: RequiredImage[],
 ): string[] {
@@ -712,13 +730,37 @@ function hostReadinessProblems(
     problems.push("host does not report vsock support");
   if (!capabilities.supports_nftables)
     problems.push("host does not report nftables support");
-  // Reflink is a performance optimization, not a scheduling requirement: the
-  // agent falls back to sparse copies on filesystems without reflink support
-  // (e.g. ext4), and the control plane does not gate run placement on it.
-  if (!capabilities.supports_reflink) {
-    logStep(
-      "host does not report reflink support; VM root disks fall back to sparse copies",
+  if (!capabilities.supports_reflink)
+    problems.push("host does not report mandatory reflink support");
+  if (capabilities.supports_jailer_v1)
+    problems.push("host still advertises the rejected jailer-v1 launch path");
+  if (!capabilities.supports_jailer_v2)
+    problems.push("host does not report jailer-v2 support");
+  if (!capabilities.supports_boot_cpu_lease)
+    problems.push("host does not report boot CPU lease support");
+  if (!capabilities.supports_template_backed_launch)
+    problems.push("host does not report template-backed launch support");
+  if (!capabilities.fast_template_store)
+    problems.push("host has not attested the fast template store");
+  if (!capabilities.supports_hard_cpu_quota)
+    problems.push("host does not report hard CPU quota support");
+  if (!capabilities.supports_landlock)
+    problems.push("host does not report Landlock support");
+  if (!capabilities.supports_cgroup_v2)
+    problems.push("host does not report cgroup-v2 support");
+  if (capabilities.boot_cpu_millis !== 2_000)
+    problems.push(
+      `host boot CPU allocation is ${capabilities.boot_cpu_millis ?? "missing"}m, expected 2000m`,
     );
+  if (capabilities.boot_cpu_lease_ms !== 45_000)
+    problems.push(
+      `host boot CPU lease is ${capabilities.boot_cpu_lease_ms ?? "missing"}ms, expected 45000ms`,
+    );
+  if (
+    typeof capabilities.cloud_hypervisor_sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(capabilities.cloud_hypervisor_sha256)
+  ) {
+    problems.push("host does not report a pinned Cloud Hypervisor SHA-256");
   }
 
   const requiredArchitectures = unique(
@@ -867,7 +909,9 @@ async function verifyRunContentGating(
       );
     }
     if (hint.title !== null || hint.bodyMarkdown !== null) {
-      throw new Error(`hint ${hint.key} sealed content was exposed before reveal`);
+      throw new Error(
+        `hint ${hint.key} sealed content was exposed before reveal`,
+      );
     }
   }
   if (run.solution.revealed) {
@@ -879,7 +923,9 @@ async function verifyRunContentGating(
   const preRevealPayloads = [
     {
       label: "initial run payload",
-      text: await client.text(`/api/scenarios/runs/${encodeURIComponent(run.id)}`),
+      text: await client.text(
+        `/api/scenarios/runs/${encodeURIComponent(run.id)}`,
+      ),
     },
   ];
   const expectSolutionAssisted = !run.solution.unlocked;
@@ -1227,6 +1273,150 @@ async function runTerminalProbe(input: {
   });
 }
 
+/**
+ * Open a real browser-terminal websocket and prove that the guest shell can
+ * execute a marker command. Unlike the full live-E2E probe above, this does no
+ * network-isolation work and does not wait for recorder teardown; it is the
+ * smallest useful terminal measurement for boot-latency sampling.
+ */
+export async function runUsableTerminalMarkerProbe(input: {
+  websocketUrl: string;
+  origin: string;
+  marker: string;
+  timeoutMs: number;
+}): Promise<{ websocketReadyMs: number; markerMs: number }> {
+  if (!/^[A-Z0-9_]+$/.test(input.marker)) {
+    throw new Error(
+      "terminal benchmark marker must contain only A-Z, 0-9, and underscore",
+    );
+  }
+
+  type HeaderWebSocket = new (
+    url: string,
+    options?: { headers?: Record<string, string> },
+  ) => WebSocket;
+  const WebSocketWithHeaders =
+    globalThis.WebSocket as unknown as HeaderWebSocket;
+  const websocket = new WebSocketWithHeaders(input.websocketUrl, {
+    headers: { origin: input.origin },
+  });
+  websocket.binaryType = "arraybuffer";
+
+  const startedAt = performance.now();
+  const decoder = new TextDecoder();
+  let output = "";
+  let websocketReadyMs: number | null = null;
+  let settled = false;
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      finish(() =>
+        reject(
+          new Error(
+            `terminal did not execute benchmark marker within ${input.timeoutMs}ms`,
+          ),
+        ),
+      );
+    }, input.timeoutMs);
+
+    const close = () => {
+      try {
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({ type: "close" }));
+        }
+        websocket.close();
+      } catch {
+        // The measurement is already decided; close is best effort.
+      }
+    };
+
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      websocket.removeEventListener("open", handleOpen);
+      websocket.removeEventListener("message", handleMessage);
+      websocket.removeEventListener("error", handleError);
+      websocket.removeEventListener("close", handleClose);
+      close();
+      complete();
+    };
+
+    const handleOpen = () => {
+      websocket.send(JSON.stringify({ type: "open", cols: 80, rows: 24 }));
+    };
+
+    const handleError = () => {
+      finish(() => reject(new Error("terminal benchmark websocket failed")));
+    };
+
+    const handleClose = () => {
+      finish(() =>
+        reject(
+          new Error("terminal benchmark websocket closed before marker output"),
+        ),
+      );
+    };
+
+    const handleMessage = (event: MessageEvent<unknown>) => {
+      void (async () => {
+        if (typeof event.data === "string") {
+          const control = parseControlMessage(event.data);
+          if (control?.type === "ready" && websocketReadyMs === null) {
+            websocketReadyMs = Math.round(performance.now() - startedAt);
+            websocket.send(
+              new TextEncoder().encode(`printf '\\n${input.marker}\\n'\n`),
+            );
+          } else if (control?.type === "error") {
+            finish(() => reject(new Error(control.message)));
+          } else if (control?.type === "exit") {
+            finish(() =>
+              reject(
+                new Error(
+                  `terminal benchmark shell exited with code ${control.code} before marker output`,
+                ),
+              ),
+            );
+          }
+          return;
+        }
+
+        const chunk = await decodeWebSocketData(event.data, decoder);
+        if (!chunk || settled) return;
+        output = `${output}${chunk}`.slice(-128 * 1024);
+        // The executed printf emits a real CR before LF. The echoed command
+        // contains the source sequence `\\n`, so it cannot satisfy this check.
+        if (output.includes(`${input.marker}\r`)) {
+          const readyMs = websocketReadyMs;
+          if (readyMs === null) {
+            finish(() =>
+              reject(
+                new Error(
+                  "terminal emitted marker before ready acknowledgement",
+                ),
+              ),
+            );
+            return;
+          }
+          finish(() =>
+            resolve({
+              websocketReadyMs: readyMs,
+              markerMs: Math.round(performance.now() - startedAt),
+            }),
+          );
+        }
+      })().catch((error: unknown) => {
+        finish(() => reject(error));
+      });
+    };
+
+    websocket.addEventListener("open", handleOpen, { once: true });
+    websocket.addEventListener("message", handleMessage);
+    websocket.addEventListener("error", handleError);
+    websocket.addEventListener("close", handleClose);
+  });
+}
+
 // Executed result lines end with a real CR; the echoed script text quotes
 // the same strings but always continues with `"` or a literal backslash, so
 // requiring the trailing CR keeps echo from satisfying these assertions.
@@ -1282,7 +1472,9 @@ async function waitForSameRunPeerIps(input: {
       `/api/agent/hosts/${encodeURIComponent(input.hostId)}/runs`,
     );
     const guestIpByVmName = guestIpMapForRun(response, input.run.id);
-    const missing = expectedVmNames.filter((name) => !guestIpByVmName.has(name));
+    const missing = expectedVmNames.filter(
+      (name) => !guestIpByVmName.has(name),
+    );
     if (!missing.length) {
       const peersByVm = sameRunPeerIpsByVmName(input.run, guestIpByVmName);
       const peerCount = [...peersByVm.values()].reduce(
@@ -1439,9 +1631,11 @@ async function waitForCompletedArchive(input: {
       return archived;
     }
     lastDetail = archived
-      ? `upload_status=${archived.uploadStatus} artifacts=${archived.artifacts
-          .map((artifact) => `${artifact.kind}:${artifact.uploadStatus}`)
-          .join(",") || "none"}`
+      ? `upload_status=${archived.uploadStatus} artifacts=${
+          archived.artifacts
+            .map((artifact) => `${artifact.kind}:${artifact.uploadStatus}`)
+            .join(",") || "none"
+        }`
       : lastDetail;
     await sleep(input.pollMs);
   }
@@ -1552,15 +1746,18 @@ async function assertOldTerminalWebSocketRejected(
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    const timeout = setTimeout(() => {
-      finish(() =>
-        reject(
-          new Error(
-            `old terminal websocket stayed open after teardown for ${session.runtimeVmName}`,
+    const timeout = setTimeout(
+      () => {
+        finish(() =>
+          reject(
+            new Error(
+              `old terminal websocket stayed open after teardown for ${session.runtimeVmName}`,
+            ),
           ),
-        ),
-      );
-    }, Math.min(2_000, options.terminalProbeTimeoutMs));
+        );
+      },
+      Math.min(2_000, options.terminalProbeTimeoutMs),
+    );
 
     const finish = (complete: () => void) => {
       if (settled) return;
@@ -1696,7 +1893,7 @@ async function assertArtifactReadable(
   }
 }
 
-class ApiClient {
+export class ApiClient {
   private readonly baseUrl: string;
   private readonly cookie: string;
 
@@ -1711,6 +1908,7 @@ class ApiClient {
       method?: string;
       headers?: Record<string, string>;
       json?: unknown;
+      signal?: AbortSignal;
     } = {},
   ): Promise<T> {
     const response = await this.raw(path, init);
@@ -1727,6 +1925,7 @@ class ApiClient {
       method?: string;
       headers?: Record<string, string>;
       json?: unknown;
+      signal?: AbortSignal;
     } = {},
   ): Promise<string> {
     const response = await this.raw(path, init);
@@ -1747,6 +1946,7 @@ class ApiClient {
       method?: string;
       headers?: Record<string, string>;
       json?: unknown;
+      signal?: AbortSignal;
     } = {},
   ): Promise<Response> {
     const headers = new Headers(init.headers);
@@ -1765,6 +1965,7 @@ class ApiClient {
     const requestInit: RequestInit = {
       method: init.method ?? "GET",
       headers,
+      ...(init.signal ? { signal: init.signal } : {}),
     };
     if (body !== undefined) {
       requestInit.body = body;
@@ -1783,7 +1984,10 @@ async function loadManifests(paths: string[]): Promise<LoadedManifest[]> {
   return loaded;
 }
 
-export function parseManifest(value: unknown, path: string): ScenarioManifestV3 {
+export function parseManifest(
+  value: unknown,
+  path: string,
+): ScenarioManifestV3 {
   if (!isRecord(value)) {
     throw new Error(`manifest ${path} is not a JSON object`);
   }
@@ -1810,7 +2014,8 @@ function assertManifestVmDirectBootMetadata(
   if (!isRecord(value)) {
     throw new Error(`manifest ${path} VM ${index} is not an object`);
   }
-  const name = typeof value.name === "string" && value.name ? value.name : index;
+  const name =
+    typeof value.name === "string" && value.name ? value.name : index;
   if (value.image_format !== "raw_zstd") {
     throw new Error(
       `manifest ${path} VM ${name} must use image_format raw_zstd`,
@@ -1822,7 +2027,10 @@ function assertManifestVmDirectBootMetadata(
       `manifest ${path} VM ${name} has invalid image_virtual_size_bytes`,
     );
   }
-  if (typeof value.image_sha256 !== "string" || !isSha256Hex(value.image_sha256)) {
+  if (
+    typeof value.image_sha256 !== "string" ||
+    !isSha256Hex(value.image_sha256)
+  ) {
     throw new Error(`manifest ${path} VM ${name} has invalid image_sha256`);
   }
   if (!isRecord(value.image_key)) {
@@ -2040,7 +2248,7 @@ export function parseOptions(
     waitBuildMs: parseMs(last(values, "wait-build-ms"), 900_000),
     waitReadyMs: parseMs(last(values, "wait-ready-ms"), 480_000),
     waitCompleteMs: parseMs(last(values, "wait-complete-ms"), 240_000),
-    pollMs: parseMs(last(values, "poll-ms"), 2_000),
+    pollMs: parseMs(last(values, "poll-ms"), 100),
     warmStartBudgetMs: parseMs(last(values, "warm-start-ms"), 10_000),
     terminalProbeTimeoutMs: parseMs(
       last(values, "terminal-probe-timeout-ms"),
@@ -2110,7 +2318,9 @@ function isSha256Hex(value: string): boolean {
   return /^[a-f0-9]{64}$/.test(value);
 }
 
-function isImageArchitecture(value: unknown): value is RequiredImage["image_key"]["arch"] {
+function isImageArchitecture(
+  value: unknown,
+): value is RequiredImage["image_key"]["arch"] {
   return value === "x86_64" || value === "aarch64";
 }
 

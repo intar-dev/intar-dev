@@ -45,6 +45,7 @@ pub(crate) struct VmNetworkAttachment {
     pub tap_mac_address: String,
     pub guest_ip_cidr: String,
     pub ssh_public_port: Option<u16>,
+    pub ssh_forward_active: bool,
     pub vsock_cid: u32,
     pub uid: u32,
     pub gid: u32,
@@ -108,13 +109,27 @@ impl NetworkManager {
         self.policy
             .validate_run_network_request(request)
             .context("validate root-owned run network policy")?;
-        if let Some(existing) = self.runs.get(&request.run_id).cloned() {
+        if let Some(existing) = self.runs.get(&request.run_id) {
             if existing.request != *request {
                 bail!("run network already exists with different topology")
             }
+            // An exact hit in the current daemon lifetime is already backed by
+            // the namespace/TAP state and nftables transaction that set
+            // `installed`. Re-running the full topology construction here adds
+            // dozens of `ip`/`nsenter` processes to every VM launch in a run.
+            // Recovered records deliberately start with `installed = false`,
+            // so daemon recovery still takes the validating reconciliation
+            // path below before the result becomes fast-path eligible.
+            if existing.installed {
+                return Ok(existing.result.clone());
+            }
+            // Clone only for the recovery path, after the O(1) exact-hit
+            // return. `attachments` can grow with the run and must not be
+            // copied on every VM launch.
+            let existing = existing.clone();
             self.construct_run(&existing)
                 .context("reconcile existing run network")?;
-            self.render_all()
+            self.render_run(&request.run_id)
                 .context("reconcile existing run network policy")?;
             return Ok(existing.result.clone());
         }
@@ -155,7 +170,7 @@ impl NetworkManager {
         result.namespace_inode = self.construct_run(&state)?;
         state.result = result.clone();
         self.runs.insert(request.run_id.clone(), state);
-        if let Err(error) = self.render_all() {
+        if let Err(error) = self.render_run(&request.run_id) {
             let cleanup = self.destroy_run_physical(&result);
             if cleanup.is_ok() {
                 self.runs.remove(&request.run_id);
@@ -168,6 +183,39 @@ impl NetworkManager {
             };
         }
         Ok(result)
+    }
+
+    /// Perform the expensive repair path for an already tracked run even when
+    /// its in-memory installation marker is current. Launches use `ensure_run`
+    /// so exact hits remain O(1); only startup and periodic repair call this.
+    pub(crate) fn repair_run(
+        &mut self,
+        request: &EnsureRunNetworkRequest,
+    ) -> Result<RunNetworkResult> {
+        self.policy
+            .validate_run_network_request(request)
+            .context("validate root-owned run network repair policy")?;
+        let existing = self
+            .runs
+            .get(&request.run_id)
+            .cloned()
+            .context("cannot repair an untracked run network")?;
+        if existing.request != *request {
+            bail!("run network repair topology differs from tracked state")
+        }
+        self.construct_run(&existing)
+            .context("repair existing run network")?;
+        // The in-memory marker is only a launch fast-path hint. Refresh it
+        // before repair so an externally removed nftables table is recreated
+        // instead of producing a failing `delete table` transaction.
+        let installed = self.nft_succeeds(&["list", "table", "inet", &existing.nft_table]);
+        self.runs
+            .get_mut(&request.run_id)
+            .context("run network state disappeared during repair")?
+            .installed = installed;
+        self.render_run(&request.run_id)
+            .context("repair existing run network policy")?;
+        Ok(existing.result)
     }
 
     pub(crate) fn ensure_vm(
@@ -224,6 +272,7 @@ impl NetworkManager {
             tap_mac_address,
             guest_ip_cidr: request.guest_ip_cidr.clone(),
             ssh_public_port: request.ssh_public_port,
+            ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
             uid,
             gid,
@@ -241,7 +290,7 @@ impl NetworkManager {
             .context("run state disappeared during TAP creation")?
             .attachments
             .insert(generation.clone(), attachment);
-        if let Err(error) = self.render_all() {
+        if let Err(error) = self.render_run(&run.run_id) {
             let _ = self.destroy_vm(&run.run_id, generation);
             return Err(error).context("install VM forwarding policy");
         }
@@ -287,6 +336,7 @@ impl NetworkManager {
             tap_mac_address,
             guest_ip_cidr: request.guest_ip_cidr.clone(),
             ssh_public_port: request.ssh_public_port,
+            ssh_forward_active: false,
             vsock_cid: request.vsock_cid,
             uid,
             gid,
@@ -330,7 +380,7 @@ impl NetworkManager {
             .context("run state disappeared during TAP recovery")?
             .attachments
             .insert(generation.clone(), attachment);
-        if let Err(error) = self.render_all() {
+        if let Err(error) = self.render_run(&run.run_id) {
             self.runs
                 .get_mut(&run.run_id)
                 .context("run state disappeared during policy rollback")?
@@ -370,13 +420,44 @@ impl NetworkManager {
                 .insert(generation.clone(), attachment);
             return Err(error).context("delete VM TAP");
         }
-        if let Err(error) = self.render_all() {
+        if let Err(error) = self.render_run(run_id) {
             self.runs
                 .get_mut(run_id)
                 .context("run state disappeared during policy rollback")?
                 .attachments
                 .insert(generation.clone(), attachment);
             return Err(error).context("remove VM forwarding policy");
+        }
+        Ok(true)
+    }
+
+    /// Change only the externally reachable SSH rule for an existing VM.
+    /// The requested port remains reserved while inactive, so another launch
+    /// cannot claim it during the boot phase.
+    pub(crate) fn set_vm_ssh_forwarding(
+        &mut self,
+        run_id: &ValidatedId,
+        generation: &ValidatedId,
+        active: bool,
+    ) -> Result<bool> {
+        let attachment = self
+            .runs
+            .get_mut(run_id)
+            .and_then(|state| state.attachments.get_mut(generation))
+            .context("VM network attachment is not active")?;
+        let desired = active && attachment.ssh_public_port.is_some();
+        if attachment.ssh_forward_active == desired {
+            return Ok(false);
+        }
+        let previous = attachment.ssh_forward_active;
+        attachment.ssh_forward_active = desired;
+        if let Err(error) = self.render_run(run_id) {
+            self.runs
+                .get_mut(run_id)
+                .and_then(|state| state.attachments.get_mut(generation))
+                .context("VM network attachment disappeared during policy rollback")?
+                .ssh_forward_active = previous;
+            return Err(error).context("update VM SSH forwarding policy");
         }
         Ok(true)
     }
@@ -430,6 +511,9 @@ impl NetworkManager {
         let namespace_veth = &state.result.namespace_veth_name;
         let namespace_path = self.host_netns_root.join(namespace);
         let created_namespace = !path_entry_exists(&namespace_path)?;
+        if created_namespace && state.result.namespace_inode != 0 {
+            bail!("refusing to replace a missing tracked run network namespace")
+        }
         let namespace_inode = if created_namespace {
             self.create_namespace(namespace)?
         } else {
@@ -694,53 +778,33 @@ impl NetworkManager {
         verify_link_mac(&output, expected_mac)
     }
 
-    fn render_all(&mut self) -> Result<()> {
-        let run_cidrs = self
+    fn render_run(&mut self, run_id: &ValidatedId) -> Result<()> {
+        let state = self
             .runs
-            .values()
-            .map(|state| state.request.guest_cidr.as_str())
-            .collect::<Vec<_>>();
+            .get(run_id)
+            .context("run network state disappeared before nftables render")?;
         let mut transaction = String::new();
-        for state in self.runs.values() {
-            if state.installed {
-                transaction.push_str(&format!("delete table inet {}\n", state.nft_table));
-            }
-            transaction.push_str(&render_nft_rules(state, &run_cidrs)?);
+        if state.installed {
+            transaction.push_str(&format!("delete table inet {}\n", state.nft_table));
         }
-        if !transaction.is_empty() {
-            self.nft_script(&transaction)
-                .context("atomically install run nftables policy")?;
-        }
-        for state in self.runs.values_mut() {
-            state.installed = true;
-        }
+        transaction.push_str(&render_nft_rules(state)?);
+        self.nft_script(&transaction)
+            .context("atomically install affected run nftables policy")?;
+        self.runs
+            .get_mut(run_id)
+            .context("run network state disappeared after nftables render")?
+            .installed = true;
         Ok(())
     }
 
     fn render_without_run(&mut self, removed: &ValidatedId) -> Result<()> {
-        let run_cidrs = self
+        let state = self
             .runs
-            .iter()
-            .filter(|(run_id, _)| *run_id != removed)
-            .map(|(_, state)| state.request.guest_cidr.as_str())
-            .collect::<Vec<_>>();
-        let mut transaction = String::new();
-        for (run_id, state) in &self.runs {
-            if state.installed {
-                transaction.push_str(&format!("delete table inet {}\n", state.nft_table));
-            }
-            if run_id != removed {
-                transaction.push_str(&render_nft_rules(state, &run_cidrs)?);
-            }
-        }
-        if !transaction.is_empty() {
-            self.nft_script(&transaction)
-                .context("atomically remove run nftables policy")?;
-        }
-        for (run_id, state) in &mut self.runs {
-            if run_id != removed {
-                state.installed = true;
-            }
+            .get(removed)
+            .context("removed run network state disappeared before nftables cleanup")?;
+        if state.installed {
+            self.nft_script(&format!("delete table inet {}\n", state.nft_table))
+                .context("atomically remove affected run nftables policy")?;
         }
         Ok(())
     }
@@ -1058,7 +1122,7 @@ fn mac_conflicts_with_bridge(bridge_mac: &str, guest_mac: &str, tap_mac: &str) -
     bridge_mac == guest_mac || bridge_mac == tap_mac
 }
 
-fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
+fn render_nft_rules(state: &RunState) -> Result<String> {
     let host_transit = cidr_address(&state.result.host_transit_cidr)?;
     // A destination owned by the host is routed through the input hook, not
     // the forward hook, so the forward-chain `fib daddr type local` guard
@@ -1075,6 +1139,10 @@ fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
         state.result.host_veth_name,
         state.result.host_veth_name
     );
+    // The root-owned guest pool is constrained to 10.77.0.0/16, so the 10/8
+    // guard isolates every other run without embedding the mutable active-run
+    // set in each table. Adding or removing a run can therefore update exactly
+    // one nftables table.
     for blocked in [
         "0.0.0.0/8",
         "10.0.0.0/8",
@@ -1096,20 +1164,14 @@ fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
         "    iifname \"{}\" ip daddr {host_transit} drop\n",
         state.result.host_veth_name
     ));
-    for cidr in run_cidrs {
-        if *cidr != state.request.guest_cidr {
-            rules.push_str(&format!(
-                "    iifname \"{}\" ip daddr {cidr} drop\n",
-                state.result.host_veth_name
-            ));
-        }
-    }
     rules.push_str(&format!(
         "    iifname \"{}\" accept\n  }}\n  chain prerouting {{\n    type nat hook prerouting priority dstnat; policy accept;\n",
         state.result.host_veth_name
     ));
     for attachment in state.attachments.values() {
-        if let Some(port) = attachment.ssh_public_port {
+        if attachment.ssh_forward_active
+            && let Some(port) = attachment.ssh_public_port
+        {
             let guest = cidr_address(&attachment.guest_ip_cidr)?;
             rules.push_str(&format!(
                 "    iifname != \"{}\" fib daddr type local tcp dport {port} dnat ip to {guest}:22\n",
@@ -1537,6 +1599,42 @@ mod tests {
     }
 
     #[test]
+    fn repair_never_replaces_a_missing_tracked_namespace_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = EnsureRunNetworkRequest {
+            run_id: ValidatedId::parse("run").unwrap(),
+            guest_cidr: "10.77.0.0/28".to_owned(),
+            gateway: "10.77.0.1".to_owned(),
+        };
+        let (mut result, nft_table) = derived_topology(&request).unwrap();
+        result.namespace_inode = 17;
+        let manager = NetworkManager {
+            ip: PathBuf::from("/unreachable/ip"),
+            nft: PathBuf::from("/unreachable/nft"),
+            nsenter: PathBuf::from("/unreachable/nsenter"),
+            netns_root: directory.path().to_path_buf(),
+            host_netns_root: directory.path().to_path_buf(),
+            policy: JailerdConfig::default(),
+            runs: BTreeMap::new(),
+        };
+        let error = manager
+            .construct_run(&RunState {
+                request,
+                result,
+                nft_table,
+                attachments: BTreeMap::new(),
+                installed: true,
+            })
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace a missing tracked run network namespace"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn derived_interface_names_are_stable_distinct_and_fit_linux_limit() {
         let request = EnsureRunNetworkRequest {
             run_id: ValidatedId::parse("run-with-a-very-long-identifier").unwrap(),
@@ -1617,6 +1715,7 @@ mod tests {
             tap_mac_address: "06:11:22:33:44:55".to_owned(),
             guest_ip_cidr: "10.77.0.2/24".to_owned(),
             ssh_public_port: None,
+            ssh_forward_active: false,
             vsock_cid: 3,
             uid: 200_000,
             gid: 200_000,
@@ -1662,6 +1761,7 @@ mod tests {
             tap_mac_address: derived_tap_mac("02:11:22:33:44:55").unwrap(),
             guest_ip_cidr: "10.77.0.2/24".to_owned(),
             ssh_public_port: None,
+            ssh_forward_active: false,
             vsock_cid: 3,
             uid: 200_000,
             gid: 200_000,
@@ -1747,6 +1847,7 @@ mod tests {
             cpu_millis: 125,
             vcpu_count: 1,
             memory_mib: 512,
+            root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
             tap_name: "tap0".to_owned(),
             mac_address: "02:00:00:00:00:01".to_owned(),
             guest_ip_cidr: address.to_owned(),
@@ -1791,6 +1892,7 @@ mod tests {
                 tap_mac_address: "06:00:00:00:00:01".to_owned(),
                 guest_ip_cidr: "10.77.0.2/29".to_owned(),
                 ssh_public_port: Some(22_001),
+                ssh_forward_active: true,
                 vsock_cid: 3,
                 uid: 200_000,
                 gid: 200_000,
@@ -1804,7 +1906,20 @@ mod tests {
             installed: false,
         };
 
-        let rules = render_nft_rules(&state, &["10.77.0.0/29", "10.78.0.0/29"]).unwrap();
+        let rules = render_nft_rules(&state).unwrap();
+
+        let mut inactive = state.clone();
+        inactive
+            .attachments
+            .values_mut()
+            .next()
+            .expect("attachment")
+            .ssh_forward_active = false;
+        let inactive_rules = render_nft_rules(&inactive).unwrap();
+        assert!(
+            !inactive_rules.contains("tcp dport 22001"),
+            "reserved boot-phase SSH port became externally reachable"
+        );
 
         let input_chain = format!(
             "chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" counter drop\n  }}",
@@ -1852,7 +1967,6 @@ mod tests {
             "ip daddr 168.63.129.16/32 drop",
             "ip daddr 172.16.0.0/12 drop",
             "ip daddr 192.168.0.0/16 drop",
-            "ip daddr 10.78.0.0/29 drop",
         ] {
             assert!(rules.contains(required), "missing nft rule: {required}");
         }

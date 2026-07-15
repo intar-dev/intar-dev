@@ -1,5 +1,5 @@
 name: Images
-run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || format('Image validate {0}', github.ref_name) }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_run' && format('Image publish {0}', github.event.workflow_run.head_sha) || format('Image validate {0}', github.ref_name) }}"
 
 on:
   pull_request:
@@ -31,37 +31,11 @@ on:
       - "website/src/lib/scenario-hosts.ts"
       - "website/src/db/schema.ts"
       - "website/src/pages/api/agent/hosts.ts"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/images.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "justfile"
-      - "crates/kino/**"
-      - "crates/intar-kino-proto/**"
-      - "crates/intar-builder/**"
-      - "crates/intar-contracts/**"
-      - "crates/intar-contracts-typegen/**"
-      - "crates/intar-image-*/**"
-      - "base-images.hcl"
-      - "build-tools.hcl"
-      - "builder.*.hcl"
-      - "scenarios/**"
-      - "website/drizzle/**"
-      - "website/src/control-plane/auth.ts"
-      - "website/src/control-plane/bridge-v6.ts"
-      - "website/src/control-plane/host-runtime-do.ts"
-      - "website/src/control-plane/image-registry.ts"
-      - "website/src/generated/**"
-      - "website/src/lib/build-scheduler*.ts"
-      - "website/src/lib/desired-state*.ts"
-      - "website/src/lib/host-runtime-wake.ts"
-      - "website/src/lib/scenario-hosts.ts"
-      - "website/src/db/schema.ts"
-      - "website/src/pages/api/agent/hosts.ts"
+  workflow_run:
+    workflows:
+      - Website production
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       reset_generation_ready:
@@ -76,10 +50,28 @@ jobs:
   images:
     name: Validate and queue images
     runs-on: namespace-profile-intar-dev
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main')
+    env:
+      SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify checked out revision
+        run: |
+          if [[ ! "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Expected a full lowercase commit SHA, got '${SOURCE_SHA}'." >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
 
       - name: Install Rust toolchain
         run: |
@@ -113,7 +105,7 @@ jobs:
 
       - name: Verify bundle upload token
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'workflow_run' ||
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
@@ -125,8 +117,10 @@ jobs:
 
       - name: Upload scenario source bundle
         if: >-
-          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'workflow_run' ||
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.reset_generation_ready)
         env:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: just bundle-images "" builder.sample.amd64.hcl "${GITHUB_SHA::12}" false "https://intar.dev/registry/v1/bundles"
+        run: |
+          revision="${SOURCE_SHA:0:12}"
+          just bundle-images "" builder.sample.amd64.hcl "${revision}" false "https://intar.dev/registry/v1/bundles"

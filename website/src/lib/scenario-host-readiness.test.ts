@@ -51,7 +51,7 @@ function report(
   ],
 ): HostStateReportV2 {
   return {
-    schema_version: 3,
+    schema_version: 4,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 1,
@@ -68,11 +68,18 @@ function report(
     },
     capabilities: {
       arch: "x86_64",
+      cloud_hypervisor_sha256: "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+      boot_cpu_millis: 2_000,
+      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: true,
+      supports_jailer_v1: false,
+      supports_jailer_v2: true,
+      supports_boot_cpu_lease: true,
+      supports_template_backed_launch: true,
+      fast_template_store: true,
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,

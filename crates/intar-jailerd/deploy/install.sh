@@ -368,7 +368,9 @@ publish_file "${archive_dir}/deploy/intar-jailerd.tmpfiles" /etc/tmpfiles.d/inta
 publish_file "${archive_dir}/deploy/intar-jailerd.sysctl.conf" /etc/sysctl.d/90-intar-jailerd.conf 0644
 
 # Any binary/config change invalidates the boot-bound proof.
-rm -f -- /var/lib/intar/jails/self-test-attestation-v1.json
+rm -f -- \
+  /var/lib/intar/jails/self-test-attestation-v1.json \
+  /var/lib/intar/jails/self-test-attestation-v2.json
 systemd-tmpfiles --create /etc/tmpfiles.d/intar-jailerd.conf
 for directory in \
   /var/cache/intar-agent \

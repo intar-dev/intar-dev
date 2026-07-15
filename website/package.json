@@ -23,10 +23,14 @@
     "types:cf": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types",
     "types:cf:check": "wrangler types worker-configuration.d.ts --env-interface WorkerEnv --include-runtime false --env-file .env.types --check",
     "e2e:live": "bun scripts/live-e2e.ts",
+    "bench:boot:install": "playwright install --with-deps chromium",
+    "bench:boot": "bun scripts/boot-benchmark.ts",
+    "bench:boot:compare": "bun scripts/boot-benchmark-compare.ts",
     "preview": "astro preview",
     "astro": "astro",
     "db:bootstrap:local": "bun scripts/apply-d1-sql.ts",
-    "db:migrate:remote": "bun scripts/apply-d1-sql.ts --remote"
+    "db:migrate:remote": "bun scripts/apply-d1-sql.ts --remote",
+    "db:migrate:boot-cpu:production": "bun scripts/apply-boot-cpu-migration.ts"
   },
   "overrides": {
     "@better-auth/core": "1.7.0-beta.10",

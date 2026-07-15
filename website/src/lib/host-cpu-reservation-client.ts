@@ -12,16 +12,20 @@ export type HostCpuReservationResult =
     }
   | {
       ok: false;
-      reason: "host_not_ready" | "exhausted" | "conflict";
+      reason: "host_not_ready" | "boot_capacity_pending" | "conflict";
       capacity: HostCpuReservationCapacity | null;
     };
 
 export async function reserveHostCpu(input: {
   hostId: string;
   runId: string;
-  cpuMillis: number;
+  steadyCpuMillisByVm: readonly number[];
 }): Promise<HostCpuReservationResult> {
-  return reservationRequest<HostCpuReservationResult>(input.hostId, "reserve", input);
+  return reservationRequest<HostCpuReservationResult>(
+    input.hostId,
+    "reserve",
+    input,
+  );
 }
 
 export async function commitHostCpu(input: {

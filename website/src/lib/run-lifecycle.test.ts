@@ -15,65 +15,79 @@ import {
 
 describe("run lifecycle", () => {
   it("requires run id and vm name to match report identity", () => {
-    expect(matchesVmReportIdentity({
-      runId: "run-a",
-      runtimeVmName: "webserver",
-      reportRunId: "run-a",
-      reportVmName: "webserver",
-    })).toBe(true);
+    expect(
+      matchesVmReportIdentity({
+        runId: "run-a",
+        runtimeVmName: "webserver",
+        reportRunId: "run-a",
+        reportVmName: "webserver",
+      }),
+    ).toBe(true);
 
-    expect(matchesVmReportIdentity({
-      runId: "run-a",
-      runtimeVmName: "webserver",
-      reportRunId: "run-b",
-      reportVmName: "webserver",
-    })).toBe(false);
+    expect(
+      matchesVmReportIdentity({
+        runId: "run-a",
+        runtimeVmName: "webserver",
+        reportRunId: "run-b",
+        reportVmName: "webserver",
+      }),
+    ).toBe(false);
 
-    expect(matchesVmReportIdentity({
-      runId: "run-a",
-      runtimeVmName: "webserver",
-      reportRunId: "run-a",
-      reportVmName: "database",
-    })).toBe(false);
+    expect(
+      matchesVmReportIdentity({
+        runId: "run-a",
+        runtimeVmName: "webserver",
+        reportRunId: "run-a",
+        reportVmName: "database",
+      }),
+    ).toBe(false);
   });
 
   it("matches inventory by run id and vm name when a run id is present", () => {
-    expect(matchesInventoryVmIdentity({
-      value: {
-        run_id: "run-a",
-        vm_name: "webserver",
-      },
-      runId: "run-a",
-      runtimeVmName: "webserver",
-    })).toBe(true);
+    expect(
+      matchesInventoryVmIdentity({
+        value: {
+          run_id: "run-a",
+          vm_name: "webserver",
+        },
+        runId: "run-a",
+        runtimeVmName: "webserver",
+      }),
+    ).toBe(true);
 
-    expect(matchesInventoryVmIdentity({
-      value: {
-        run_id: "run-b",
-        vm_name: "webserver",
-      },
-      runId: "run-a",
-      runtimeVmName: "webserver",
-    })).toBe(false);
+    expect(
+      matchesInventoryVmIdentity({
+        value: {
+          run_id: "run-b",
+          vm_name: "webserver",
+        },
+        runId: "run-a",
+        runtimeVmName: "webserver",
+      }),
+    ).toBe(false);
 
-    expect(matchesInventoryVmIdentity({
-      value: {
-        run_id: "run-a",
-        vm_name: "database",
-      },
-      runId: "run-a",
-      runtimeVmName: "webserver",
-    })).toBe(false);
+    expect(
+      matchesInventoryVmIdentity({
+        value: {
+          run_id: "run-a",
+          vm_name: "database",
+        },
+        runId: "run-a",
+        runtimeVmName: "webserver",
+      }),
+    ).toBe(false);
   });
 
   it("rejects inventory snapshots without run identity", () => {
-    expect(matchesInventoryVmIdentity({
-      value: {
-        name: "webserver",
-      },
-      runId: "run-a",
-      runtimeVmName: "webserver",
-    })).toBe(false);
+    expect(
+      matchesInventoryVmIdentity({
+        value: {
+          name: "webserver",
+        },
+        runId: "run-a",
+        runtimeVmName: "webserver",
+      }),
+    ).toBe(false);
   });
 
   it("ignores reports with a matching vm name from a different run", () => {
@@ -134,6 +148,11 @@ describe("run lifecycle", () => {
           run_id: "run-b",
           vm_name: "webserver",
           phase: "failed",
+          terminal: {
+            state: "failed",
+            reason: "other run failed",
+            observed_at_unix_ms: 1_762_041_660_000,
+          },
           ssh_host_keys_openssh: [],
           probes: [],
           error: "other run failed",
@@ -143,6 +162,11 @@ describe("run lifecycle", () => {
           run_id: "run-a",
           vm_name: "webserver",
           phase: "ready",
+          terminal: {
+            state: "pending",
+            reason: "terminal readiness pending",
+            observed_at_unix_ms: 1_762_041_660_000,
+          },
           ssh_host_keys_openssh: [],
           probes: [
             {
@@ -180,9 +204,12 @@ describe("run lifecycle", () => {
           ssh_host: "203.0.113.7",
           ssh_host_port: 2201,
         },
-        sshHostKeysOpenssh: [
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey",
-        ],
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey"],
+        ...readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 1_762_041_660_000,
+        }),
       }),
     });
 
@@ -207,8 +234,19 @@ describe("run lifecycle", () => {
         vmName: "webserver",
         phase: "ready",
         observedAt: 2_000,
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+        bootEvidence: vmBootEvidence("generation-1"),
+        resourceState: vmResourceState(),
+        ...readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 2_000,
+        }),
       }),
     });
+    expect(current.vms[0]?.bootEvidence?.generation).toBe("generation-1");
+    expect(current.vms[0]?.bootEvidence?.cpu_samples).toHaveLength(5);
+    expect(current.vms[0]?.resourceState?.cpu_millis).toBe(1_000);
     const stale = applyVmReportToRunState({
       runId: "run-a",
       current,
@@ -223,7 +261,308 @@ describe("run lifecycle", () => {
 
     expect(stale.vms[0]?.phase).toBe("ready");
     expect(stale.vms[0]?.runtimeObservedAt).toBe(2_000);
+    expect(stale.vms[0]?.terminalPhase).toBe("ready");
+    expect(stale.vms[0]?.canOpenTerminal).toBe(true);
     expect(stale.phase).toBe("active_full");
+  });
+
+  it("revokes sticky terminal evidence when a new jail generation boots", () => {
+    const ready = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        observedAt: 2_000,
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+        bootEvidence: vmBootEvidence("generation-1"),
+        resourceState: vmResourceState(),
+        ...readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 2_000,
+          generation: "generation-1",
+        }),
+      }),
+    });
+
+    const rebooting = applyVmReportToRunState({
+      runId: "run-a",
+      current: ready,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "booting",
+        observedAt: 2_001,
+        runtimeConstraints: {
+          generation: "generation-2",
+          phase: "boot_burst",
+          steady_cpu_millis: 1_000,
+          effective_cpu_millis: 2_000,
+          lease_expires_at_unix_ms: 47_001,
+        },
+      }),
+    });
+
+    expect(rebooting.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalTarget: { host: null, hostKeyOpenssh: null },
+      runtimeConstraints: {
+        generation: "generation-2",
+        phase: "boot_burst",
+      },
+      bootEvidence: null,
+      resourceState: null,
+      retiredRuntimeGenerations: ["generation-1"],
+    });
+    expect(rebooting.vms[0]?.bootProbes[0]?.status).toBe("pending");
+
+    const staleFirstGeneration = applyVmReportToRunState({
+      runId: "run-a",
+      current: rebooting,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        observedAt: 2_002,
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAstalehostkey"],
+        ...readyTerminalEvidence({
+          host: "203.0.113.8",
+          port: 2202,
+          observedAt: 2_002,
+          generation: "generation-1",
+        }),
+      }),
+    });
+
+    expect(staleFirstGeneration).toEqual(rebooting);
+
+    const generationlessFailure = applyVmReportToRunState({
+      runId: "run-a",
+      current: rebooting,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "failed",
+        observedAt: 2_003,
+        error: "legacy report raced the generation-aware projection",
+      }),
+    });
+
+    expect(generationlessFailure).toEqual(rebooting);
+  });
+
+  it("never retains an endpoint for pending or failed terminal state", () => {
+    const pendingWithLegacyEndpoint = initialRunState();
+    const pendingVm = pendingWithLegacyEndpoint.vms[0];
+    if (!pendingVm) {
+      throw new Error("expected initial vm");
+    }
+    pendingVm.terminalTarget = {
+      host: "203.0.113.7",
+      port: 2201,
+      username: "ubuntu",
+      hostKeyOpenssh: "ssh-ed25519 AAAAlegacyhostkey",
+      checkedAt: 1_999,
+    };
+
+    const pending = applyVmReportToRunState({
+      runId: "run-a",
+      current: pendingWithLegacyEndpoint,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "running",
+        observedAt: 2_000,
+      }),
+    });
+
+    expect(pending.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalTarget: {
+        host: null,
+        port: 22,
+        hostKeyOpenssh: null,
+        checkedAt: null,
+      },
+    });
+    expect(pending).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalTarget: { host: null, port: 22 },
+    });
+
+    const ready = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        observedAt: 2_000,
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+        ...readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 2_000,
+          generation: "generation-1",
+        }),
+      }),
+    });
+    const stillReady = applyVmReportToRunState({
+      runId: "run-a",
+      current: ready,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "running",
+        observedAt: 2_001,
+        terminal: {
+          state: "pending",
+          reason: "A periodic TCP probe is retrying.",
+          observed_at_unix_ms: 2_001,
+        },
+        runtimeConstraints: {
+          generation: "generation-1",
+          phase: "steady",
+          steady_cpu_millis: 1_000,
+          effective_cpu_millis: 1_000,
+          quota_verified_at_unix_ms: 1_999,
+        },
+      }),
+    });
+
+    // A same-generation pending observation cannot create a pending state
+    // carrying an endpoint. Once readiness is attested it remains ready until
+    // an explicit failure or a new generation revokes it.
+    expect(stillReady.vms[0]).toMatchObject({
+      terminalPhase: "ready",
+      canOpenTerminal: true,
+      terminalTarget: { host: "203.0.113.7", port: 2201 },
+    });
+
+    const failed = applyVmReportToRunState({
+      runId: "run-a",
+      current: stillReady,
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "failed",
+        observedAt: 2_002,
+        terminal: {
+          state: "failed",
+          reason: "SSH host-key verification failed.",
+          observed_at_unix_ms: 2_002,
+        },
+        runtimeConstraints: {
+          generation: "generation-1",
+          phase: "steady",
+          steady_cpu_millis: 1_000,
+          effective_cpu_millis: 1_000,
+          quota_verified_at_unix_ms: 1_999,
+        },
+      }),
+    });
+
+    expect(failed.vms[0]).toMatchObject({
+      terminalPhase: "failed",
+      canOpenTerminal: false,
+      terminalTarget: {
+        host: null,
+        port: 22,
+        hostKeyOpenssh: null,
+        checkedAt: null,
+      },
+    });
+    expect(failed).toMatchObject({
+      terminalPhase: "failed",
+      canOpenTerminal: false,
+      terminalTarget: { host: null, port: 22 },
+    });
+  });
+
+  it("does not infer terminal readiness from a reserved network endpoint", () => {
+    const next = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        network: {
+          bridge_name: "intar-run-a",
+          guest_ip: "10.77.0.2",
+          guest_cidr: "10.77.0.2/28",
+          gateway: "10.77.0.1",
+          ssh_host: "203.0.113.7",
+          ssh_host_port: 2201,
+        },
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+      }),
+    });
+
+    expect(next.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalTarget: { host: null, port: 22 },
+    });
+  });
+
+  it("requires exact verified steady CPU evidence before accepting ready", () => {
+    const unsealed = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+        terminal: readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 2_000,
+        }).terminal,
+        runtimeConstraints: {
+          generation: "generation-1",
+          phase: "boot_burst",
+          steady_cpu_millis: 1_000,
+          effective_cpu_millis: 2_000,
+          lease_expires_at_unix_ms: 47_000,
+        },
+      }),
+    });
+    expect(unsealed.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalReason: "Waiting for verified steady CPU quota.",
+    });
+
+    const wrongQuota = applyVmReportToRunState({
+      runId: "run-a",
+      current: initialRunState(),
+      report: vmReport({
+        runId: "run-a",
+        vmName: "webserver",
+        phase: "ready",
+        sshHostKeysOpenssh: ["ssh-ed25519 AAAAhostkey"],
+        terminal: readyTerminalEvidence({
+          host: "203.0.113.7",
+          port: 2201,
+          observedAt: 2_000,
+        }).terminal,
+        runtimeConstraints: {
+          generation: "generation-1",
+          phase: "steady",
+          steady_cpu_millis: 1_000,
+          effective_cpu_millis: 2_000,
+          quota_verified_at_unix_ms: 1_999,
+        },
+      }),
+    });
+    expect(wrongQuota.vms[0]?.canOpenTerminal).toBe(false);
   });
 
   it("keeps duplicate reports idempotent", () => {
@@ -327,7 +666,7 @@ describe("run lifecycle", () => {
 });
 
 function initialRunState(): RunStateDocument {
-  return buildInitialRunState({
+  const state = buildInitialRunState({
     vms: [
       {
         id: "vm-row-1",
@@ -361,6 +700,16 @@ function initialRunState(): RunStateDocument {
       },
     ],
   });
+  const vm = state.vms[0];
+  if (vm) {
+    vm.provisioning.resources = {
+      cpuMillis: 1_000,
+      vcpuCount: 1,
+      memoryMib: 512,
+      diskMib: 4_096,
+    };
+  }
+  return state;
 }
 
 function vmReport(input: {
@@ -368,13 +717,17 @@ function vmReport(input: {
   vmName: string;
   phase: VmReportV2["phase"];
   network?: VmReportV2["network"];
+  terminal?: VmReportV2["terminal"];
+  runtimeConstraints?: VmReportV2["runtime_constraints"];
+  bootEvidence?: VmReportV2["boot_evidence"];
+  resourceState?: VmReportV2["resource_state"];
   sshHostKeysOpenssh?: string[];
   probes?: VmReportV2["probes"];
   error?: string | null;
   observedAt?: number;
 }): VmReportV2 {
   return {
-    schema_version: 2,
+    schema_version: 3,
     host_id: "host-alpha",
     run_id: input.runId,
     vm_name: input.vmName,
@@ -382,6 +735,18 @@ function vmReport(input: {
     observed_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
     phase: input.phase,
     network: input.network ?? null,
+    terminal: input.terminal ?? {
+      state: input.phase === "failed" ? "failed" : "pending",
+      reason:
+        input.phase === "failed"
+          ? (input.error ?? "vm failed")
+          : "terminal readiness pending",
+      observed_at_unix_ms: input.observedAt ?? 1_762_041_660_000,
+    },
+    runtime_constraints: input.runtimeConstraints ?? null,
+    boot_evidence: input.bootEvidence ?? null,
+    resource_state: input.resourceState ?? null,
+    sandbox: null,
     ssh_host_keys_openssh: input.sshHostKeysOpenssh ?? [],
     probes: input.probes ?? [],
     archive: null,
@@ -389,9 +754,109 @@ function vmReport(input: {
   };
 }
 
+function readyTerminalEvidence(input: {
+  host: string;
+  port: number;
+  observedAt: number;
+  generation?: string;
+}): {
+  terminal: NonNullable<VmReportV2["terminal"]>;
+  runtimeConstraints: NonNullable<VmReportV2["runtime_constraints"]>;
+} {
+  return {
+    terminal: {
+      state: "ready",
+      target: {
+        host: input.host,
+        port: input.port,
+        username: "ubuntu",
+        checked_at_unix_ms: input.observedAt,
+      },
+      observed_at_unix_ms: input.observedAt,
+    },
+    runtimeConstraints: {
+      generation: input.generation ?? "generation-1",
+      phase: "steady",
+      steady_cpu_millis: 1_000,
+      effective_cpu_millis: 1_000,
+      quota_verified_at_unix_ms: input.observedAt - 1,
+    },
+  };
+}
+
+function vmBootEvidence(
+  generation: string,
+): NonNullable<VmReportV2["boot_evidence"]> {
+  const sample = (
+    point: NonNullable<
+      VmReportV2["boot_evidence"]
+    >["cpu_samples"][number]["point"],
+    phase: "boot_burst" | "steady",
+  ) => ({
+    point,
+    sampled_at_unix_ms: 2_000,
+    phase,
+    steady_cpu_millis: 1_000,
+    effective_cpu_millis: phase === "boot_burst" ? 2_000 : 1_000,
+    boot_deadline_unix_ms: phase === "boot_burst" ? 47_000 : null,
+    cpu_max: phase === "boot_burst" ? "200000 100000" : "100000 100000",
+    cpu_max_burst: 0,
+    quota_verified_at_unix_ms: 2_000,
+    usage_usec: 1,
+    user_usec: 1,
+    system_usec: 0,
+    nr_periods: 1,
+    nr_throttled: 0,
+    throttled_usec: 0,
+  });
+  return {
+    generation,
+    started_at_unix_ms: 1_000,
+    ready_at_unix_ms: 2_000,
+    phases: {
+      image_disk_ms: 100,
+      network_jailer_vmm_ms: 200,
+      guest_to_kino_ms: 600,
+      seal_ssh_publish_ms: 100,
+      total_ms: 1_000,
+      image_cache_ms: 50,
+      runtime_disk_ms: 50,
+      network_ms: 50,
+      jailer_stage_ms: 50,
+      vmm_start_ms: 50,
+      vm_api_ms: 50,
+      quota_seal_ms: 25,
+      ssh_verify_ms: 50,
+      terminal_publish_ms: 25,
+    },
+    cpu_samples: [
+      sample("vm_boot_accepted", "boot_burst"),
+      sample("kino_ready", "boot_burst"),
+      sample("pre_seal", "boot_burst"),
+      sample("post_seal", "steady"),
+      sample("terminal_published", "steady"),
+    ],
+  };
+}
+
+function vmResourceState(): NonNullable<VmReportV2["resource_state"]> {
+  return {
+    cpu_millis: 1_000,
+    vcpu_count: 1,
+    cpu_quota_us: 100_000,
+    cpu_period_us: 100_000,
+    cpu_usage_usec: 1,
+    cpu_user_usec: 1,
+    cpu_system_usec: 0,
+    cpu_nr_periods: 1,
+    cpu_nr_throttled: 0,
+    cpu_throttled_usec: 0,
+  };
+}
+
 function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
   return {
-    schema_version: 3,
+    schema_version: 4,
     host_id: "host-alpha",
     observed_at_unix_ms: 1_762_041_660_000,
     applied_desired_version: 42,
@@ -408,11 +873,19 @@ function hostReport(vms: HostStateReportV2["vms"]): HostStateReportV2 {
     },
     capabilities: {
       arch: "x86_64",
+      cloud_hypervisor_sha256:
+        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+      boot_cpu_millis: 2_000,
+      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: true,
+      supports_jailer_v1: false,
+      supports_jailer_v2: true,
+      supports_boot_cpu_lease: true,
+      supports_template_backed_launch: true,
+      fast_template_store: true,
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,

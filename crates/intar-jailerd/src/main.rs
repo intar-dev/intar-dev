@@ -27,13 +27,14 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "linux")]
 use intar_jailer_protocol::{
-    JailerdConfig, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, RequestEnvelope, Response,
-    ResponseEnvelope,
+    CpuQuota, JailerdConfig, MAX_FRAME_BYTES, PROTOCOL_VERSION, ProtocolError, Request,
+    RequestEnvelope, Response, ResponseEnvelope, ValidatedId,
 };
 #[cfg(target_os = "linux")]
 use intar_jailerd::{
-    FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
-    host_cpu_capacity_millis, self_test,
+    BootCpuGuardianRequest, FileSystemJailPreparer, HostReadiness, JailerdCore, SystemdHostBackend,
+    host_cpu_capacity_millis, launch_vm_v2_response, prepare_image_v2_response,
+    run_boot_cpu_guardian, self_test,
 };
 #[cfg(target_os = "linux")]
 use rustix::net::{
@@ -50,6 +51,8 @@ const MAINTENANCE_LOCK_PATH: &str = "/run/intar-jailerd/maintenance.lock";
 const MAX_CLIENT_CONNECTIONS: usize = 32;
 #[cfg(target_os = "linux")]
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "linux")]
+const BOOT_LEASE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Parser)]
 #[command(name = "intar-jailerd")]
@@ -106,6 +109,17 @@ enum Command {
         expected_uid: u32,
         #[arg(long)]
         expected_gid: u32,
+    },
+    #[command(hide = true)]
+    BootCpuLeaseGuardian {
+        #[arg(long)]
+        generation: String,
+        #[arg(long)]
+        unit_name: String,
+        #[arg(long)]
+        steady_cpu_millis: u32,
+        #[arg(long)]
+        deadline_uptime_millis: u64,
     },
 }
 
@@ -166,6 +180,25 @@ fn run() -> Result<()> {
             expected_uid,
             expected_gid,
         } => self_test::agent_api_worker(&socket, expected_uid, expected_gid),
+        Command::BootCpuLeaseGuardian {
+            generation,
+            unit_name,
+            steady_cpu_millis,
+            deadline_uptime_millis,
+        } => {
+            require_root()?;
+            let generation =
+                ValidatedId::parse(generation).context("validate guardian generation")?;
+            let steady_quota = CpuQuota::from_millis(steady_cpu_millis)
+                .context("validate guardian steady CPU quota")?;
+            let request = BootCpuGuardianRequest::new(
+                generation,
+                unit_name,
+                steady_quota,
+                deadline_uptime_millis,
+            )?;
+            run_boot_cpu_guardian(request)
+        }
     }
 }
 
@@ -199,6 +232,7 @@ fn run_server(config_path: &Path) -> Result<()> {
     readiness.privileged_self_test_passed = verified_self_test.as_ref().is_some_and(|value| {
         value.quota_verified
             && value.burst_verified
+            && value.boot_quota_transition_verified
             && value.network_verified
             && value.landlock_negative_access
             && value.cloud_hypervisor_lifecycle_verified
@@ -209,10 +243,32 @@ fn run_server(config_path: &Path) -> Result<()> {
     let core = Arc::new(Mutex::new(JailerdCore::new_with_readiness(
         config.clone(),
         backend,
-        FileSystemJailPreparer,
+        FileSystemJailPreparer::default(),
         total_cpu_millis,
         readiness,
     )?));
+    let watchdog_core = Arc::clone(&core);
+    std::thread::Builder::new()
+        .name("jailerd-boot-lease-watchdog".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(BOOT_LEASE_WATCHDOG_INTERVAL);
+                match watchdog_core.lock() {
+                    Ok(mut core) => match core.enforce_boot_deadlines() {
+                        Ok(sealed) if sealed > 0 => {
+                            info!(sealed, "sealed expired VM boot CPU leases")
+                        }
+                        Ok(_) => {}
+                        Err(error) => error!(?error, "boot CPU lease watchdog failed"),
+                    },
+                    Err(_) => {
+                        error!("jailerd state lock poisoned; boot CPU lease watchdog exiting");
+                        return;
+                    }
+                }
+            }
+        })
+        .context("spawn boot CPU lease watchdog")?;
     info!(
         socket = %config.socket_path.display(),
         total_cpu_millis,
@@ -310,10 +366,32 @@ fn serve_connection(
         } else {
             match RequestEnvelope::decode(&buffer[..length]) {
                 Ok(envelope) if envelope.version == PROTOCOL_VERSION => {
-                    let response = core
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
-                        .handle(envelope.request);
+                    let response = match envelope.request {
+                        Request::PrepareImageV2(request) => {
+                            // Importing and hashing a raw image can take many
+                            // seconds. Snapshot the root-owned policy under the
+                            // lifecycle lock, then release it so the boot-lease
+                            // watchdog and VM finalization remain responsive.
+                            let config = core
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
+                                .template_prepare_config();
+                            config.map_or_else(
+                                || {
+                                    Response::Error(ProtocolError::new(
+                                        "host_not_ready",
+                                        "host readiness attestation does not permit template-backed image preparation",
+                                    ))
+                                },
+                                |config| prepare_image_v2_response(&config, *request),
+                            )
+                        }
+                        Request::LaunchVmV2(request) => launch_vm_v2_response(core, *request),
+                        request => core
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("jailerd state lock poisoned"))?
+                            .handle(request),
+                    };
                     (envelope.request_id, response)
                 }
                 Ok(envelope) => (

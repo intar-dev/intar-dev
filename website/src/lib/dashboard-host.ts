@@ -140,10 +140,14 @@ export async function loadDashboardHostRuns(params: {
             terminal_target: {
               state: terminalReady ? "ready" : "pending",
               reason: terminalReady ? null : vm.phaseDetail,
-              host: vm.terminalTarget.host,
-              port: vm.terminalTarget.port,
+              // Gate serialized routing data independently of stored state so
+              // a legacy pending document cannot leak its reserved endpoint.
+              host: terminalReady ? vm.terminalTarget.host : null,
+              port: terminalReady ? vm.terminalTarget.port : 22,
               username: vm.terminalTarget.username,
-              checkedAt: vm.terminalTarget.checkedAt ?? run.updatedAt,
+              checkedAt: terminalReady
+                ? (vm.terminalTarget.checkedAt ?? run.updatedAt)
+                : run.updatedAt,
             },
             scenario_meta: {
               scenarioName: run.title,
@@ -463,6 +467,8 @@ function isArchivePhase(phase: ScenarioRunRecord["phase"]) {
 function hasVmTerminalReady(vm: ScenarioRunRecord["vms"][number]) {
   return (
     (vm.phase === "ready" || vm.phase === "solved") &&
+    vm.terminalPhase === "ready" &&
+    vm.canOpenTerminal === true &&
     Boolean(vm.terminalTarget.host && vm.terminalTarget.port > 0)
   );
 }
@@ -486,4 +492,3 @@ function hasReportedProbeResults(
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
-

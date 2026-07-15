@@ -21,11 +21,18 @@ use thiserror::Error;
 use tokio::io::unix::AsyncFd;
 
 /// Current on-wire protocol version.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// Maximum request or response packet, including its JSON envelope.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Reserved source-root selector for artifacts in jailerd's root-owned image
+/// template store. It is never an index into `allowed_source_roots`.
+pub const PREPARED_IMAGE_SOURCE_ROOT: u16 = u16::MAX;
 /// Fixed cgroup-v2 CPU period used by Intar VM units.
 pub const CPU_PERIOD_MICROS: u64 = 100_000;
+/// Root-owned default aggregate VMM quota while a VM boots.
+pub const DEFAULT_BOOT_CPU_MILLIS: u32 = 2_000;
+/// Root-owned maximum duration of a boot CPU lease.
+pub const DEFAULT_BOOT_CPU_LEASE_MS: u64 = 45_000;
 /// Root-owned default pool reserved for per-run guest networks.
 pub const DEFAULT_GUEST_NETWORK_POOL: &str = "10.77.0.0/16";
 /// Prefix allocated to each run by the unprivileged agent.
@@ -205,6 +212,62 @@ pub struct SourceArtifacts {
     pub recording_disk: ArtifactSource,
 }
 
+/// Import a verified agent-cache boot bundle into jailerd's root-owned,
+/// content-addressed template store.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareImageV2Request {
+    /// Registry image identity. The raw disk has its own digest because the
+    /// registry identity covers the compressed image payload.
+    pub image_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub root_disk: ArtifactSource,
+    pub kernel: ArtifactSource,
+    pub initrd: Option<ArtifactSource>,
+}
+
+impl PrepareImageV2Request {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.virtual_size_bytes == 0 {
+            return Err(ValidationError::ZeroImageSize);
+        }
+        for source in [
+            Some(&self.root_disk),
+            Some(&self.kernel),
+            self.initrd.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            source.validate()?;
+            if source.source_root == PREPARED_IMAGE_SOURCE_ROOT {
+                return Err(ValidationError::InvalidTemplateSource);
+            }
+            if source.access != ArtifactAccess::ReadOnly {
+                return Err(ValidationError::InvalidTemplateArtifactAccess);
+            }
+            if source.sha256.is_none() {
+                return Err(ValidationError::MissingTemplateArtifactHash);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Root-owned sources returned by `PrepareImageV2`. These descriptors are
+/// accepted only through `LaunchVmV2Request`; jailerd resolves the reserved
+/// source root without exposing its filesystem path to the agent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedImageV2Result {
+    pub image_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub root_disk: ArtifactSource,
+    pub kernel: ArtifactSource,
+    pub initrd: Option<ArtifactSource>,
+    pub fast_template_store: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnsureRunNetworkRequest {
@@ -253,6 +316,10 @@ pub struct VmLaunchRequest {
     pub cpu_millis: u32,
     pub vcpu_count: u16,
     pub memory_mib: u32,
+    /// Exact size of the mutable generation root disk. For V2 launches this
+    /// may exceed the immutable prepared image size, but it may never shrink
+    /// the prepared filesystem image.
+    pub root_disk_size_bytes: u64,
     pub tap_name: String,
     pub mac_address: String,
     pub guest_ip_cidr: String,
@@ -263,6 +330,13 @@ pub struct VmLaunchRequest {
 
 impl VmLaunchRequest {
     pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
+        self.validate_inner(false)
+    }
+
+    fn validate_inner(
+        &self,
+        allow_prepared_boot_artifacts: bool,
+    ) -> Result<CpuQuota, ValidationError> {
         if self.vcpu_count == 0 {
             return Err(ValidationError::ZeroVcpus);
         }
@@ -271,6 +345,9 @@ impl VmLaunchRequest {
         }
         if self.memory_mib == 0 {
             return Err(ValidationError::ZeroMemory);
+        }
+        if self.root_disk_size_bytes == 0 {
+            return Err(ValidationError::ZeroRootDiskSize);
         }
         validate_tap_name(&self.tap_name)?;
         validate_mac(&self.mac_address)?;
@@ -305,6 +382,24 @@ impl VmLaunchRequest {
         {
             source.validate()?;
         }
+        let boot_artifacts = [
+            Some(&self.artifacts.root_disk),
+            Some(&self.artifacts.kernel),
+            self.artifacts.initrd.as_ref(),
+        ];
+        if !allow_prepared_boot_artifacts
+            && boot_artifacts
+                .into_iter()
+                .flatten()
+                .any(|source| source.source_root == PREPARED_IMAGE_SOURCE_ROOT)
+        {
+            return Err(ValidationError::TemplateLaunchRequiresV2);
+        }
+        if self.artifacts.runtime_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
+            || self.artifacts.recording_disk.source_root == PREPARED_IMAGE_SOURCE_ROOT
+        {
+            return Err(ValidationError::InvalidTemplateRuntimeSource);
+        }
         if self.artifacts.kernel.sha256.is_none()
             || self
                 .artifacts
@@ -318,12 +413,100 @@ impl VmLaunchRequest {
     }
 }
 
+/// Capability-gated template-backed launch. The image identity and size bind
+/// the prepared boot descriptors to one root-owned template generation; the
+/// mutable/runtime artifacts remain in the regular launch request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchVmV2Request {
+    pub image_sha256: Sha256Digest,
+    pub virtual_size_bytes: u64,
+    pub launch: VmLaunchRequest,
+}
+
+impl LaunchVmV2Request {
+    pub fn validate(&self) -> Result<CpuQuota, ValidationError> {
+        if self.virtual_size_bytes == 0 {
+            return Err(ValidationError::ZeroImageSize);
+        }
+        if self.launch.root_disk_size_bytes < self.virtual_size_bytes {
+            return Err(ValidationError::RootDiskSmallerThanTemplate);
+        }
+        let quota = self.launch.validate_inner(true)?;
+        for (source, file_name, expected_access) in [
+            (
+                &self.launch.artifacts.root_disk,
+                "root.raw",
+                ArtifactAccess::ReadWrite,
+            ),
+            (
+                &self.launch.artifacts.kernel,
+                "kernel",
+                ArtifactAccess::ReadOnly,
+            ),
+        ] {
+            validate_prepared_launch_artifact(
+                source,
+                &self.image_sha256,
+                file_name,
+                expected_access,
+            )?;
+        }
+        if let Some(initrd) = &self.launch.artifacts.initrd {
+            validate_prepared_launch_artifact(
+                initrd,
+                &self.image_sha256,
+                "initrd",
+                ArtifactAccess::ReadOnly,
+            )?;
+        }
+        Ok(quota)
+    }
+}
+
+fn validate_prepared_launch_artifact(
+    source: &ArtifactSource,
+    image_sha256: &Sha256Digest,
+    file_name: &str,
+    expected_access: ArtifactAccess,
+) -> Result<(), ValidationError> {
+    if source.source_root != PREPARED_IMAGE_SOURCE_ROOT
+        || source.relative_path != PathBuf::from(image_sha256.as_str()).join(file_name)
+        || source.sha256.is_none()
+        || source.access != expected_access
+    {
+        return Err(ValidationError::InvalidPreparedLaunchArtifact);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmIdentityRequest {
     pub generation: Option<ValidatedId>,
     pub run_id: Option<ValidatedId>,
     pub vm_id: Option<ValidatedId>,
+}
+
+/// A generation-fenced request to complete the privileged portion of VM boot.
+///
+/// The unprivileged caller cannot select either quota. Jailerd derives both
+/// from its root-owned configuration and the persisted launch request.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizeVmBootRequest {
+    pub generation: ValidatedId,
+}
+
+/// A generation-fenced request for a low-overhead live CPU accounting sample.
+///
+/// Jailerd reads only the persisted cgroup identity and the CPU controller
+/// files. Unlike `InspectVm`, this operation does not walk the process tree or
+/// repeat executable and sandbox-security verification.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SampleVmCpuRequest {
+    pub generation: ValidatedId,
 }
 
 impl VmIdentityRequest {
@@ -366,8 +549,13 @@ pub struct DestroyRunNetworkRequest {
 )]
 pub enum Request {
     Capabilities,
+    PrepareImageV2(Box<PrepareImageV2Request>),
     EnsureRunNetwork(EnsureRunNetworkRequest),
+    RepairRunNetwork(EnsureRunNetworkRequest),
     LaunchVm(Box<VmLaunchRequest>),
+    LaunchVmV2(Box<LaunchVmV2Request>),
+    FinalizeVmBoot(FinalizeVmBootRequest),
+    SampleVmCpu(SampleVmCpuRequest),
     InspectVm(VmIdentityRequest),
     StopVm(VmIdentityRequest),
     DestroyVm(VmIdentityRequest),
@@ -411,7 +599,16 @@ pub struct JailerCapabilities {
     pub schedulable_cpu_millis: u64,
     pub committed_cpu_millis: u64,
     pub supports_jailer_v1: bool,
+    /// Breaking v2 launch and readiness contract. These attestations are
+    /// required on the v2 wire; an old daemon cannot decode as performance
+    /// ready by omission.
+    pub supports_jailer_v2: bool,
+    pub supports_template_backed_launch: bool,
+    pub fast_template_store: bool,
     pub supports_hard_cpu_quota: bool,
+    pub supports_boot_cpu_lease: bool,
+    pub boot_cpu_millis: u32,
+    pub boot_cpu_lease_ms: u64,
     pub supports_landlock: bool,
     pub supports_cgroup_v2: bool,
     pub uid_gid_start: u32,
@@ -435,6 +632,34 @@ pub struct JailerCapabilities {
     pub run_guest_network_prefix: u8,
     pub ssh_public_port_start: u16,
     pub ssh_public_port_end: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmCpuPhase {
+    BootBurst,
+    #[default]
+    Steady,
+}
+
+/// Live cgroup readback produced only by the privileged daemon.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CpuQuotaAttestation {
+    pub quota: CpuQuota,
+    pub cpu_max: String,
+    pub cpu_max_burst: u64,
+    pub verified_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmCpuRuntimeState {
+    pub phase: VmCpuPhase,
+    pub steady_quota: CpuQuota,
+    pub effective_quota: CpuQuota,
+    pub boot_deadline_unix_ms: Option<u64>,
+    pub attestation: Option<CpuQuotaAttestation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -477,6 +702,7 @@ pub struct VmLaunchResult {
     pub pid_start_time_ticks: Option<u64>,
     pub jail_root_inode: Option<u64>,
     pub cloud_hypervisor_sha256: String,
+    pub cpu_runtime: VmCpuRuntimeState,
     pub paths: JailPathMap,
 }
 
@@ -501,6 +727,17 @@ pub struct CpuStat {
     pub throttled_usec: u64,
 }
 
+/// A phase-consistent snapshot of the persisted CPU runtime contract and the
+/// live cgroup CPU accounting counters for one exact VM generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VmCpuSample {
+    pub generation: ValidatedId,
+    pub sampled_at_unix_ms: u64,
+    pub cpu_runtime: VmCpuRuntimeState,
+    pub cpu_stat: CpuStat,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmInspection {
@@ -517,6 +754,7 @@ pub struct VmInspection {
     pub jail_root_inode: Option<u64>,
     pub cloud_hypervisor_sha256: String,
     pub cpu_quota: CpuQuota,
+    pub cpu_runtime: VmCpuRuntimeState,
     pub vcpu_count: u16,
     pub health: SandboxHealth,
     pub cpu_stat: Option<CpuStat>,
@@ -525,6 +763,25 @@ pub struct VmInspection {
     pub no_new_privs: bool,
     pub capabilities_empty: bool,
     pub paths: JailPathMap,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FinalizeVmBootResult {
+    pub generation: ValidatedId,
+    pub changed: bool,
+    pub ssh_forward_active: bool,
+    pub cpu_runtime: VmCpuRuntimeState,
+    /// Exact live boot-quota sample taken while jailerd held the lifecycle
+    /// lock and immediately before mutating `cpu.max`. This is the pre-seal
+    /// boundary and is intentionally distinct from the caller's earlier Kino
+    /// readiness sample. Absent for an idempotent finalization or when the
+    /// watchdog already sealed the lease.
+    pub pre_seal_cpu_sample: Option<VmCpuSample>,
+    /// Exact live steady-quota sample taken immediately after the quota
+    /// mutation and readback. CPU accounting telemetry is best effort and can
+    /// be absent without reopening ingress or extending the boot lease.
+    pub post_seal_cpu_sample: Option<VmCpuSample>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -555,8 +812,13 @@ pub struct OperationResult {
 )]
 pub enum Response {
     Capabilities(JailerCapabilities),
+    PrepareImageV2(PreparedImageV2Result),
     EnsureRunNetwork(RunNetworkResult),
+    RepairRunNetwork(RunNetworkResult),
     LaunchVm(VmLaunchResult),
+    LaunchVmV2(VmLaunchResult),
+    FinalizeVmBoot(FinalizeVmBootResult),
+    SampleVmCpu(VmCpuSample),
     InspectVm(VmInspection),
     StopVm(OperationResult),
     DestroyVm(OperationResult),
@@ -619,6 +881,10 @@ pub struct JailerdConfig {
     pub agent_gid: u32,
     pub allow_uid_gid_collisions: bool,
     pub cpu_reserved_millis: u64,
+    /// Aggregate VMM-process quota used only during the bounded boot phase.
+    pub boot_cpu_millis: u32,
+    /// Maximum boot phase duration before jailerd seals the VM to steady CPU.
+    pub boot_cpu_lease_ms: u64,
     pub vmm_file_size_limit_bytes: Option<u64>,
     pub uid_gid_start: u32,
     pub uid_gid_end: u32,
@@ -643,6 +909,8 @@ impl Default for JailerdConfig {
             agent_gid: 0,
             allow_uid_gid_collisions: false,
             cpu_reserved_millis: 1_000,
+            boot_cpu_millis: DEFAULT_BOOT_CPU_MILLIS,
+            boot_cpu_lease_ms: DEFAULT_BOOT_CPU_LEASE_MS,
             vmm_file_size_limit_bytes: None,
             uid_gid_start: 200_000,
             uid_gid_end: 265_535,
@@ -682,6 +950,10 @@ impl JailerdConfig {
         }
         if self.vmm_file_size_limit_bytes == Some(0) {
             return Err(ValidationError::InvalidFileSizeLimit);
+        }
+        CpuQuota::from_millis(self.boot_cpu_millis)?;
+        if self.boot_cpu_lease_ms == 0 || self.boot_cpu_lease_ms > DEFAULT_BOOT_CPU_LEASE_MS {
+            return Err(ValidationError::InvalidBootCpuLease);
         }
         if self.allowed_source_roots.is_empty()
             || self
@@ -800,6 +1072,10 @@ pub enum ValidationError {
     QuotaExceedsTopology,
     #[error("memory must be positive")]
     ZeroMemory,
+    #[error("generation root disk size must be positive")]
+    ZeroRootDiskSize,
+    #[error("generation root disk cannot be smaller than its prepared image template")]
+    RootDiskSmallerThanTemplate,
     #[error("invalid TAP interface name")]
     InvalidTapName,
     #[error("invalid MAC address")]
@@ -828,6 +1104,20 @@ pub enum ValidationError {
     InvalidRelativeArtifactPath,
     #[error("kernel and initrd artifacts require SHA-256 digests")]
     MissingBootArtifactHash,
+    #[error("prepared image virtual size must be positive")]
+    ZeroImageSize,
+    #[error("image preparation sources cannot reference the root-owned template store")]
+    InvalidTemplateSource,
+    #[error("image preparation artifacts must be read-only")]
+    InvalidTemplateArtifactAccess,
+    #[error("image preparation artifacts require SHA-256 digests")]
+    MissingTemplateArtifactHash,
+    #[error("root-owned prepared boot artifacts require launch_vm_v2")]
+    TemplateLaunchRequiresV2,
+    #[error("runtime and recording artifacts cannot reference the root-owned template store")]
+    InvalidTemplateRuntimeSource,
+    #[error("launch_vm_v2 boot descriptors must exactly reference one prepared image template")]
+    InvalidPreparedLaunchArtifact,
     #[error("VM selector must contain either a generation or a run/VM logical ID")]
     InvalidVmSelector,
     #[error("path must be absolute: {0}")]
@@ -852,6 +1142,8 @@ pub enum ValidationError {
     InvalidNofileLimit,
     #[error("configured RLIMIT_FSIZE must be positive")]
     InvalidFileSizeLimit,
+    #[error("boot CPU lease duration must be within 1..=45000 milliseconds")]
+    InvalidBootCpuLease,
 }
 
 #[derive(Debug, Error)]
@@ -1089,6 +1381,284 @@ mod tests {
     }
 
     #[test]
+    fn boot_cpu_defaults_are_root_owned_and_bounded() {
+        let config = JailerdConfig::default();
+        assert_eq!(config.boot_cpu_millis, 2_000);
+        assert_eq!(config.boot_cpu_lease_ms, 45_000);
+
+        let mut invalid = JailerdConfig {
+            agent_uid: 991,
+            agent_gid: 991,
+            ..config
+        };
+        invalid.boot_cpu_lease_ms = 0;
+        assert_eq!(
+            invalid.validate(),
+            Err(ValidationError::InvalidBootCpuLease)
+        );
+        invalid.boot_cpu_lease_ms = 1;
+        invalid.boot_cpu_millis = 0;
+        assert_eq!(invalid.validate(), Err(ValidationError::ZeroCpu));
+        invalid.boot_cpu_millis = 1;
+        invalid.boot_cpu_lease_ms = DEFAULT_BOOT_CPU_LEASE_MS + 1;
+        assert_eq!(
+            invalid.validate(),
+            Err(ValidationError::InvalidBootCpuLease)
+        );
+    }
+
+    #[test]
+    fn run_network_repair_is_a_distinct_typed_operation() {
+        let run_id = ValidatedId::parse("run").expect("run ID");
+        let request = RequestEnvelope::new(
+            6,
+            Request::RepairRunNetwork(EnsureRunNetworkRequest {
+                run_id: run_id.clone(),
+                guest_cidr: "10.77.0.0/28".to_owned(),
+                gateway: "10.77.0.1".to_owned(),
+            }),
+        );
+        assert_eq!(
+            RequestEnvelope::decode(&request.encode().expect("encode")).expect("decode"),
+            request
+        );
+
+        let response = ResponseEnvelope::new(
+            6,
+            Response::RepairRunNetwork(RunNetworkResult {
+                run_id,
+                namespace_name: "intar-ns-run".to_owned(),
+                namespace_inode: 17,
+                bridge_name: "ibr-run".to_owned(),
+                host_veth_name: "ivh-run".to_owned(),
+                namespace_veth_name: "ivn-run".to_owned(),
+                host_transit_cidr: "198.18.0.1/30".to_owned(),
+                namespace_transit_cidr: "198.18.0.2/30".to_owned(),
+            }),
+        );
+        assert_eq!(
+            ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
+            response
+        );
+    }
+
+    #[test]
+    fn finalize_boot_is_generation_fenced_and_rejects_extra_authority() {
+        let generation = ValidatedId::parse("generation-1").expect("generation");
+        let envelope = RequestEnvelope::new(
+            7,
+            Request::FinalizeVmBoot(FinalizeVmBootRequest {
+                generation: generation.clone(),
+            }),
+        );
+        assert_eq!(
+            RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
+            envelope
+        );
+        let with_quota = br#"{"version":1,"request_id":7,"request":{"operation":"finalize_vm_boot","parameters":{"generation":"generation-1","cpu_millis":4000}}}"#;
+        assert!(RequestEnvelope::decode(with_quota).is_err());
+
+        let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
+        let boot_quota = CpuQuota::from_millis(2_000).expect("boot quota");
+        let sample = |phase, effective_quota, sampled_at_unix_ms| VmCpuSample {
+            generation: generation.clone(),
+            sampled_at_unix_ms,
+            cpu_runtime: VmCpuRuntimeState {
+                phase,
+                steady_quota,
+                effective_quota,
+                boot_deadline_unix_ms: (phase == VmCpuPhase::BootBurst).then_some(45_123),
+                attestation: Some(CpuQuotaAttestation {
+                    quota: effective_quota,
+                    cpu_max: effective_quota.cpu_max(),
+                    cpu_max_burst: 0,
+                    verified_at_unix_ms: sampled_at_unix_ms,
+                }),
+            },
+            cpu_stat: CpuStat {
+                usage_usec: 10,
+                user_usec: 7,
+                system_usec: 3,
+                nr_periods: 2,
+                nr_throttled: 1,
+                throttled_usec: 4,
+            },
+        };
+        let response = ResponseEnvelope::new(
+            7,
+            Response::FinalizeVmBoot(FinalizeVmBootResult {
+                generation: generation.clone(),
+                changed: true,
+                ssh_forward_active: true,
+                cpu_runtime: sample(VmCpuPhase::Steady, steady_quota, 124).cpu_runtime,
+                pre_seal_cpu_sample: Some(sample(VmCpuPhase::BootBurst, boot_quota, 123)),
+                post_seal_cpu_sample: Some(sample(VmCpuPhase::Steady, steady_quota, 124)),
+            }),
+        );
+        assert_eq!(
+            ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
+            response
+        );
+    }
+
+    #[test]
+    fn cpu_sampling_is_generation_fenced_and_round_trips_runtime_evidence() {
+        let generation = ValidatedId::parse("generation-1").expect("generation");
+        let request = RequestEnvelope::new(
+            8,
+            Request::SampleVmCpu(SampleVmCpuRequest {
+                generation: generation.clone(),
+            }),
+        );
+        assert_eq!(
+            RequestEnvelope::decode(&request.encode().expect("encode")).expect("decode"),
+            request
+        );
+
+        let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
+        let effective_quota = CpuQuota::from_millis(2_000).expect("boot quota");
+        let response = ResponseEnvelope::new(
+            8,
+            Response::SampleVmCpu(VmCpuSample {
+                generation,
+                sampled_at_unix_ms: 123,
+                cpu_runtime: VmCpuRuntimeState {
+                    phase: VmCpuPhase::BootBurst,
+                    steady_quota,
+                    effective_quota,
+                    boot_deadline_unix_ms: Some(45_123),
+                    attestation: Some(CpuQuotaAttestation {
+                        quota: effective_quota,
+                        cpu_max: effective_quota.cpu_max(),
+                        cpu_max_burst: 0,
+                        verified_at_unix_ms: 123,
+                    }),
+                },
+                cpu_stat: CpuStat {
+                    usage_usec: 10,
+                    user_usec: 7,
+                    system_usec: 3,
+                    nr_periods: 2,
+                    nr_throttled: 1,
+                    throttled_usec: 4,
+                },
+            }),
+        );
+        assert_eq!(
+            ResponseEnvelope::decode(&response.encode().expect("encode")).expect("decode"),
+            response
+        );
+
+        let with_selector = br#"{"version":1,"request_id":8,"request":{"operation":"sample_vm_cpu","parameters":{"generation":"generation-1","run_id":"run-1"}}}"#;
+        assert!(RequestEnvelope::decode(with_selector).is_err());
+    }
+
+    #[test]
+    fn prepare_image_v2_is_hash_bound_and_cannot_reimport_templates() {
+        let digest = Sha256Digest::parse("a".repeat(64)).expect("digest");
+        let source = |path: &str| ArtifactSource {
+            source_root: 0,
+            relative_path: PathBuf::from(path),
+            sha256: Some(digest.clone()),
+            access: ArtifactAccess::ReadOnly,
+        };
+        let request = PrepareImageV2Request {
+            image_sha256: digest.clone(),
+            virtual_size_bytes: 4 * 1024 * 1024 * 1024,
+            root_disk: source("images/root.raw"),
+            kernel: source("artifacts/kernel"),
+            initrd: Some(source("artifacts/initrd")),
+        };
+        request.validate().expect("valid prepared image request");
+        let envelope = RequestEnvelope::new(9, Request::PrepareImageV2(Box::new(request.clone())));
+        assert_eq!(
+            RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
+            envelope
+        );
+
+        let mut invalid = request;
+        invalid.root_disk.source_root = PREPARED_IMAGE_SOURCE_ROOT;
+        assert_eq!(
+            invalid.validate(),
+            Err(ValidationError::InvalidTemplateSource)
+        );
+        invalid.root_disk.source_root = 0;
+        invalid.root_disk.sha256 = None;
+        assert_eq!(
+            invalid.validate(),
+            Err(ValidationError::MissingTemplateArtifactHash)
+        );
+    }
+
+    #[test]
+    fn launch_vm_v2_is_template_bound_and_v1_rejects_prepared_sources() {
+        let image_sha256 = Sha256Digest::parse("b".repeat(64)).expect("image digest");
+        let artifact_sha256 = Sha256Digest::parse("c".repeat(64)).expect("artifact digest");
+        let prepared = |name: &str, access| ArtifactSource {
+            source_root: PREPARED_IMAGE_SOURCE_ROOT,
+            relative_path: PathBuf::from(image_sha256.as_str()).join(name),
+            sha256: Some(artifact_sha256.clone()),
+            access,
+        };
+        let agent_owned = |name: &str, access| ArtifactSource {
+            source_root: 0,
+            relative_path: PathBuf::from(name),
+            sha256: None,
+            access,
+        };
+        let launch = VmLaunchRequest {
+            run_id: ValidatedId::parse("run-1").expect("run ID"),
+            vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
+            cpu_millis: 1_000,
+            vcpu_count: 1,
+            memory_mib: 512,
+            root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
+            tap_name: "tap-test".to_string(),
+            mac_address: "02:00:00:00:00:01".to_string(),
+            guest_ip_cidr: "10.77.0.2/28".to_string(),
+            ssh_public_port: Some(22_000),
+            vsock_cid: 3,
+            artifacts: SourceArtifacts {
+                kernel: prepared("kernel", ArtifactAccess::ReadOnly),
+                initrd: Some(prepared("initrd", ArtifactAccess::ReadOnly)),
+                root_disk: prepared("root.raw", ArtifactAccess::ReadWrite),
+                runtime_disk: agent_owned("runtime.raw", ArtifactAccess::ReadOnly),
+                recording_disk: agent_owned("recordings.vfat", ArtifactAccess::ReadWrite),
+            },
+        };
+        assert_eq!(
+            launch.validate(),
+            Err(ValidationError::TemplateLaunchRequiresV2)
+        );
+
+        let request = LaunchVmV2Request {
+            image_sha256,
+            virtual_size_bytes: 4 * 1024 * 1024 * 1024,
+            launch,
+        };
+        request.validate().expect("valid v2 launch");
+        let mut undersized = request.clone();
+        undersized.launch.root_disk_size_bytes = undersized.virtual_size_bytes - 1;
+        assert_eq!(
+            undersized.validate(),
+            Err(ValidationError::RootDiskSmallerThanTemplate)
+        );
+        let envelope = RequestEnvelope::new(10, Request::LaunchVmV2(Box::new(request.clone())));
+        assert_eq!(
+            RequestEnvelope::decode(&envelope.encode().expect("encode")).expect("decode"),
+            envelope
+        );
+
+        let mut wrong_bundle = request;
+        wrong_bundle.launch.artifacts.kernel.relative_path =
+            PathBuf::from(wrong_bundle.image_sha256.as_str()).join("other-kernel");
+        assert_eq!(
+            wrong_bundle.validate(),
+            Err(ValidationError::InvalidPreparedLaunchArtifact)
+        );
+    }
+
+    #[test]
     fn identifiers_cannot_escape_paths_or_units() {
         for invalid in ["", ".", "../vm", "vm/name", "vm.name", "vm name"] {
             assert!(ValidatedId::parse(invalid).is_err(), "accepted {invalid:?}");
@@ -1106,9 +1676,83 @@ mod tests {
     }
 
     #[test]
+    fn protocol_v2_rejects_legacy_handshake_authority() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+        let legacy = RequestEnvelope::decode(
+            br#"{"version":1,"request_id":1,"request":{"operation":"capabilities"}}"#,
+        )
+        .expect("legacy envelope remains syntactically decodable");
+        assert_ne!(legacy.version, PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn protocol_v2_capabilities_require_every_fast_launch_attestation() {
+        let capabilities = JailerCapabilities {
+            protocol_version: PROTOCOL_VERSION,
+            cloud_hypervisor_version: CLOUD_HYPERVISOR_VERSION.to_owned(),
+            cloud_hypervisor_sha256: CLOUD_HYPERVISOR_SHA256.to_owned(),
+            total_cpu_millis: 8_000,
+            reserved_cpu_millis: 1_000,
+            schedulable_cpu_millis: 7_000,
+            committed_cpu_millis: 2_000,
+            supports_jailer_v1: false,
+            supports_jailer_v2: true,
+            supports_template_backed_launch: true,
+            fast_template_store: true,
+            supports_hard_cpu_quota: true,
+            supports_boot_cpu_lease: true,
+            boot_cpu_millis: DEFAULT_BOOT_CPU_MILLIS,
+            boot_cpu_lease_ms: DEFAULT_BOOT_CPU_LEASE_MS,
+            supports_landlock: true,
+            supports_cgroup_v2: true,
+            uid_gid_start: 200_000,
+            uid_gid_end: 265_535,
+            uid_gid_range_collision_free: true,
+            config_trusted: true,
+            source_roots_trusted: true,
+            jailer_binary_trusted: true,
+            runtime_hash_verified: true,
+            runtime_statically_linked: true,
+            systemd_version: Some("systemd 252".to_string()),
+            supports_systemd_transient_units: true,
+            seccomp_supported: true,
+            landlock_abi: Some(3),
+            privileged_self_test_passed: true,
+            kvm_accounting_proven: true,
+            allow_uid_gid_collisions: false,
+            allowed_source_roots: vec![PathBuf::from("/var/lib/intar/source")],
+            posix_acl_supported: true,
+            guest_network_pool: DEFAULT_GUEST_NETWORK_POOL.to_string(),
+            run_guest_network_prefix: RUN_GUEST_NETWORK_PREFIX,
+            ssh_public_port_start: DEFAULT_SSH_PUBLIC_PORT_START,
+            ssh_public_port_end: DEFAULT_SSH_PUBLIC_PORT_END,
+        };
+        let encoded = serde_json::to_value(capabilities).expect("serialize capabilities");
+        for required in [
+            "supports_jailer_v2",
+            "supports_template_backed_launch",
+            "fast_template_store",
+        ] {
+            let mut missing = encoded.clone();
+            missing
+                .as_object_mut()
+                .expect("capability object")
+                .remove(required);
+            assert!(
+                serde_json::from_value::<JailerCapabilities>(missing).is_err(),
+                "missing {required} was accepted"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_run_network_fields_are_rejected() {
-        let json = br#"{"version":1,"request_id":1,"request":{"operation":"ensure_run_network","parameters":{"run_id":"run","guest_cidr":"10.77.0.0/28","gateway":"10.77.0.1","host_route":"0.0.0.0/0"}}}"#;
-        assert!(RequestEnvelope::decode(json).is_err());
+        for operation in ["ensure_run_network", "repair_run_network"] {
+            let json = format!(
+                r#"{{"version":1,"request_id":1,"request":{{"operation":"{operation}","parameters":{{"run_id":"run","guest_cidr":"10.77.0.0/28","gateway":"10.77.0.1","host_route":"0.0.0.0/0"}}}}}}"#
+            );
+            assert!(RequestEnvelope::decode(json.as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -1140,6 +1784,7 @@ mod tests {
             cpu_millis: 1_001,
             vcpu_count: 1,
             memory_mib: 512,
+            root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
             tap_name: "tap0".to_owned(),
             mac_address: "02:00:00:00:00:01".to_owned(),
             guest_ip_cidr: "10.77.0.2/28".to_owned(),

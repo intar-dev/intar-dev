@@ -6,7 +6,22 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/images.yml"
       - ".github/workflows/website-deploy.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "crates/kino/**"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-builder/**"
+      - "crates/intar-contracts/**"
+      - "crates/intar-contracts-typegen/**"
+      - "crates/intar-image-*/**"
+      - "base-images.hcl"
+      - "build-tools.hcl"
+      - "builder.*.hcl"
+      - "scenarios/**"
       - "website/**"
 
 permissions:
@@ -29,6 +44,9 @@ jobs:
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Verify deployment revision
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -59,6 +77,12 @@ jobs:
           bunx wrangler d1 execute DB --remote
           --file drizzle/0002_image_build_coordination_locks.sql
           --config wrangler.jsonc
+
+      - name: Apply boot CPU reservation migration
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bun run db:migrate:boot-cpu:production
 
       - name: Deploy
         env:

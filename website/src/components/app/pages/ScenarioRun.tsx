@@ -109,7 +109,7 @@ export function ScenarioRun() {
     refetchInterval: (query) => {
       const record = query.state.data?.run;
       if (!record) {
-        return projectionPending ? 1_500 : false;
+        return projectionPending ? 100 : false;
       }
       // Poll eagerly while the session media is still rendering on the host
       // so the timeline appears as soon as the agent submits it.

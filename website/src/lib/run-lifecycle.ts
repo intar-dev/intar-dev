@@ -1,15 +1,17 @@
 import type {
   HostStateReportV2,
   VmActualStateV2,
-  VmNetworkStateV1,
   VmPhase as BridgeVmPhase,
   VmReportV2,
+  VmRuntimeConstraintsV1,
+  VmTerminalStateV1,
 } from "@/generated/bridge";
 import {
   applyProbeSnapshotToVm,
   canAdvanceVmPhase,
   decorateVmState,
   recomputeRunState,
+  type RuntimeConstraintsEvidence,
   type RunStateDocument,
   type RunVmStateDocument,
   type VmPhase,
@@ -76,6 +78,10 @@ export function applyVmReportToRunState(input: {
           vm_name: input.report.vm_name,
           phase: input.report.phase,
           network: input.report.network ?? null,
+          terminal: input.report.terminal ?? null,
+          runtime_constraints: input.report.runtime_constraints ?? null,
+          boot_evidence: input.report.boot_evidence ?? null,
+          resource_state: input.report.resource_state ?? null,
           ssh_host_keys_openssh: input.report.ssh_host_keys_openssh,
           probes: input.report.probes,
           error: input.report.error ?? null,
@@ -148,6 +154,10 @@ function applyReportedVmState(input: {
     | "vm_name"
     | "phase"
     | "network"
+    | "terminal"
+    | "runtime_constraints"
+    | "boot_evidence"
+    | "resource_state"
     | "ssh_host_keys_openssh"
     | "probes"
     | "error"
@@ -172,7 +182,27 @@ function applyReportedVmState(input: {
     return input.vm;
   }
 
-  const withProbes = applyProbeSnapshotToVm(input.vm, {
+  const reportedGeneration =
+    input.report.runtime_constraints?.generation?.trim() || null;
+  const currentGeneration = input.vm.runtimeConstraints?.generation ?? null;
+  if (
+    (reportedGeneration &&
+      input.vm.retiredRuntimeGenerations?.includes(reportedGeneration)) ||
+    (!reportedGeneration && currentGeneration)
+  ) {
+    return input.vm;
+  }
+  const generationChanged = Boolean(
+    reportedGeneration &&
+    ((currentGeneration && currentGeneration !== reportedGeneration) ||
+      (!currentGeneration &&
+        input.vm.terminalPhase === "ready" &&
+        input.report.runtime_constraints?.phase === "boot_burst")),
+  );
+  const generationBase = generationChanged
+    ? resetVmForRuntimeGeneration(input.vm)
+    : input.vm;
+  const withProbes = applyProbeSnapshotToVm(generationBase, {
     probes: input.report.probes.map((probe) => ({
       id: probe.id,
       status: probe.status,
@@ -180,30 +210,49 @@ function applyReportedVmState(input: {
       value: probe.value,
     })),
   });
+  const runtimeConstraints = mergeRuntimeConstraints(
+    withProbes.runtimeConstraints,
+    input.report.runtime_constraints,
+  );
+  const bootEvidence =
+    input.report.boot_evidence?.generation.trim() &&
+    input.report.boot_evidence.generation === runtimeConstraints?.generation
+      ? input.report.boot_evidence
+      : (withProbes.bootEvidence ?? null);
+  const resourceState =
+    input.report.resource_state &&
+    input.report.runtime_constraints?.generation ===
+      runtimeConstraints?.generation
+      ? input.report.resource_state
+      : (withProbes.resourceState ?? null);
+  const terminal = projectTerminalReadiness(
+    input.report.terminal,
+    runtimeConstraints,
+    input.report.ssh_host_keys_openssh,
+    withProbes,
+    input.report.phase,
+  );
+  const withRuntimeEvidence: RunVmStateDocument = {
+    ...withProbes,
+    terminalPhase: terminal.phase,
+    terminalReason: terminal.reason,
+    terminalObservedAt: terminal.observedAt,
+    terminalTarget: terminal.target,
+    runtimeConstraints,
+    bootEvidence,
+    resourceState,
+  };
   const derived = deriveVmPhase({
-    vm: withProbes,
+    vm: withRuntimeEvidence,
     reportPhase: input.report.phase,
     collectionError: input.report.error ?? null,
   });
-  const terminalTarget = terminalTargetFromNetwork(
-    input.report.network,
-    input.report.ssh_host_keys_openssh,
-    withProbes.terminalTarget,
-    input.report.updated_at_unix_ms,
-  );
-  const terminalReady = hasTerminalEndpoint(terminalTarget);
 
   return decorateVmState({
-    ...withProbes,
+    ...withRuntimeEvidence,
     guestIp: input.report.network?.guest_ip?.trim() || withProbes.guestIp,
     phase: derived.phase,
     phaseDetail: derived.phaseDetail,
-    terminalPhase: terminalReady ? "ready" : withProbes.terminalPhase,
-    terminalReason: terminalReady ? null : withProbes.terminalReason,
-    terminalObservedAt: terminalReady
-      ? input.report.updated_at_unix_ms
-      : withProbes.terminalObservedAt,
-    terminalTarget,
     runtimeState: input.report.phase,
     runtimeObservedAt: input.report.updated_at_unix_ms,
     vmCreatedAt:
@@ -284,40 +333,186 @@ function isPassingProbe(status: string): boolean {
   );
 }
 
-function hasTerminalEndpoint(target: RunVmStateDocument["terminalTarget"]): boolean {
+function hasTerminalEndpoint(
+  target: RunVmStateDocument["terminalTarget"],
+): boolean {
   return Boolean(target.host && target.port > 0);
 }
 
-// Guest images are provisioned with a fixed SSH login user (DEFAULT_USERNAME
-// in intar-image-build); stargate authenticates as this user, not the VM
-// hostname.
-const GUEST_SSH_USERNAME = "ubuntu";
-
-function terminalTargetFromNetwork(
-  network: VmNetworkStateV1 | null | undefined,
-  sshHostKeysOpenssh: string[] | null | undefined,
-  current: RunVmStateDocument["terminalTarget"],
-  observedAt: number,
-): RunVmStateDocument["terminalTarget"] {
-  // The terminal target must be routable from stargate: the agent's
-  // advertised host plus the per-VM SSH forward port. The guest IP is only
-  // reachable inside the agent's VM network and is tracked separately.
-  const host = network?.ssh_host?.trim() || current.host;
-  const port = network?.ssh_host_port ?? current.port;
-  const hostKeyOpenssh =
-    sshHostKeysOpenssh?.find((key) => key.trim().length > 0)?.trim() ??
-    current.hostKeyOpenssh;
-  if (!host || !port) {
-    return hostKeyOpenssh === current.hostKeyOpenssh
-      ? current
-      : { ...current, hostKeyOpenssh };
+function mergeRuntimeConstraints(
+  current: RunVmStateDocument["runtimeConstraints"],
+  reported: VmRuntimeConstraintsV1 | null | undefined,
+): RuntimeConstraintsEvidence | null {
+  if (!reported) {
+    return current ?? null;
+  }
+  const generation = reported.generation.trim();
+  // Quota sealing is one-way for a VM generation. A later inventory snapshot
+  // must not regress already-attested steady state back to boot capacity.
+  const sameGeneration =
+    !current?.generation || current.generation === generation;
+  if (
+    sameGeneration &&
+    current?.phase === "steady" &&
+    reported.phase === "boot_burst"
+  ) {
+    return current;
   }
   return {
-    host,
-    port,
-    username: GUEST_SSH_USERNAME,
-    hostKeyOpenssh,
-    checkedAt: observedAt,
+    generation,
+    phase: reported.phase,
+    steadyCpuMillis: reported.steady_cpu_millis,
+    effectiveCpuMillis: reported.effective_cpu_millis,
+    quotaVerifiedAt: reported.quota_verified_at_unix_ms ?? null,
+    leaseExpiresAt: reported.lease_expires_at_unix_ms ?? null,
+  };
+}
+
+function resetVmForRuntimeGeneration(
+  current: RunVmStateDocument,
+): RunVmStateDocument {
+  const resetProbes = (probes: RunVmStateDocument["bootProbes"]) =>
+    probes.map((probe) => ({
+      ...probe,
+      status: "pending",
+      error: null,
+      value: null,
+    }));
+  return {
+    ...current,
+    retiredRuntimeGenerations: [
+      ...(current.retiredRuntimeGenerations ?? []),
+      ...(current.runtimeConstraints?.generation
+        ? [current.runtimeConstraints.generation]
+        : []),
+    ].filter(
+      (generation, index, values) => values.indexOf(generation) === index,
+    ),
+    phase: "booting",
+    phaseDetail: "A new VM generation is waiting for fresh readiness evidence.",
+    terminalPhase: "pending",
+    terminalReason: "Waiting for the new VM generation to seal its CPU quota.",
+    terminalObservedAt: null,
+    terminalTarget: {
+      host: null,
+      port: 22,
+      username: current.terminalTarget.username,
+      hostKeyOpenssh: null,
+      checkedAt: null,
+    },
+    runtimeConstraints: null,
+    bootEvidence: null,
+    resourceState: null,
+    bootProbes: resetProbes(current.bootProbes),
+    scenarioProbes: resetProbes(current.scenarioProbes),
+  };
+}
+
+function projectTerminalReadiness(
+  reported: VmTerminalStateV1 | null | undefined,
+  runtimeConstraints: RunVmStateDocument["runtimeConstraints"],
+  sshHostKeysOpenssh: string[] | null | undefined,
+  current: RunVmStateDocument,
+  reportPhase: BridgeVmPhase,
+): {
+  phase: RunVmStateDocument["terminalPhase"];
+  reason: string | null;
+  observedAt: number | null;
+  target: RunVmStateDocument["terminalTarget"];
+} {
+  if (!reported) {
+    return currentTerminalProjection(current);
+  }
+
+  if (reported.state === "failed" || reportPhase === "failed") {
+    return {
+      phase: "failed",
+      reason: reported.reason?.trim() || "Terminal readiness failed.",
+      observedAt: reported.observed_at_unix_ms,
+      target: clearedTerminalTarget(current),
+    };
+  }
+
+  const expectedCpuMillis = current.provisioning.resources?.cpuMillis ?? null;
+  const quotaReady =
+    expectedCpuMillis !== null &&
+    expectedCpuMillis > 0 &&
+    Boolean(runtimeConstraints?.generation?.trim()) &&
+    runtimeConstraints?.phase === "steady" &&
+    runtimeConstraints.steadyCpuMillis === expectedCpuMillis &&
+    runtimeConstraints.effectiveCpuMillis === expectedCpuMillis &&
+    typeof runtimeConstraints.quotaVerifiedAt === "number" &&
+    Number.isInteger(runtimeConstraints.quotaVerifiedAt) &&
+    runtimeConstraints.quotaVerifiedAt > 0 &&
+    runtimeConstraints.quotaVerifiedAt <= reported.observed_at_unix_ms;
+  const target = reported.state === "ready" ? reported.target : null;
+  const hostKeyOpenssh =
+    sshHostKeysOpenssh?.find((key) => key.trim().length > 0)?.trim() ?? null;
+  const explicitReady = Boolean(
+    target?.host.trim() &&
+    target.port > 0 &&
+    target.username.trim() &&
+    hostKeyOpenssh &&
+    quotaReady &&
+    runtimeConstraints?.quotaVerifiedAt !== null &&
+    runtimeConstraints?.quotaVerifiedAt !== undefined &&
+    target.checked_at_unix_ms >= runtimeConstraints.quotaVerifiedAt,
+  );
+
+  if (explicitReady && target) {
+    return {
+      phase: "ready",
+      reason: null,
+      observedAt: reported.observed_at_unix_ms,
+      target: {
+        host: target.host.trim(),
+        port: target.port,
+        username: target.username.trim(),
+        hostKeyOpenssh,
+        checkedAt: target.checked_at_unix_ms,
+      },
+    };
+  }
+
+  // Once accepted, readiness remains sticky across later periodic/probe
+  // reports which omit evidence or temporarily observe a pending TCP check.
+  // Explicit failure above is still authoritative.
+  if (current.terminalPhase === "ready") {
+    return currentTerminalProjection(current);
+  }
+
+  return {
+    phase: "pending",
+    reason:
+      reported.state === "ready"
+        ? quotaReady
+          ? "Waiting for a complete verified SSH target."
+          : "Waiting for verified steady CPU quota."
+        : (reported.reason?.trim() ?? null),
+    observedAt: reported.observed_at_unix_ms,
+    target: clearedTerminalTarget(current),
+  };
+}
+
+function clearedTerminalTarget(current: RunVmStateDocument) {
+  return {
+    host: null,
+    port: 22,
+    username: current.terminalTarget.username,
+    hostKeyOpenssh: null,
+    checkedAt: null,
+  };
+}
+
+function currentTerminalProjection(current: RunVmStateDocument) {
+  return {
+    phase: current.terminalPhase,
+    reason: current.terminalReason,
+    observedAt: current.terminalObservedAt,
+    target:
+      current.terminalPhase === "ready"
+        ? current.terminalTarget
+        : clearedTerminalTarget(current),
   };
 }
 

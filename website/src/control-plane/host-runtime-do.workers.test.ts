@@ -68,7 +68,10 @@ describe("HostRuntimeDO workers integration", () => {
     const { messages, stub, ws } = await connectHost(hostId);
 
     expect(
-      await waitForBridgeMessage(messages, (message) => message.type === "server_hello"),
+      await waitForBridgeMessage(
+        messages,
+        (message) => message.type === "server_hello",
+      ),
     ).toMatchObject({ type: "server_hello", desired_version: 0 });
     expect(
       await waitForBridgeMessage(
@@ -87,12 +90,11 @@ describe("HostRuntimeDO workers integration", () => {
       });
     });
 
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await runNextScheduledAlarm(stub);
     const desired = await waitForBridgeMessage(
       messages,
       (message) =>
-        message.type === "desired_state" &&
-        message.desired_state.version === 1,
+        message.type === "desired_state" && message.desired_state.version === 1,
     );
     expect(desired).toMatchObject({
       type: "desired_state",
@@ -109,6 +111,177 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("dispatches a changed desired state immediately when the host is woken", async () => {
+    const hostId = "host-wake-dispatch";
+    await seedHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+
+    const db = drizzle(env.DB);
+    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "1".repeat(64),
+      });
+    });
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    const wake = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+      body: JSON.stringify({ hostId }),
+    });
+    expect(wake.status).toBe(202);
+    await expect(wake.json()).resolves.toEqual({ ok: true, hostId });
+
+    const desired = await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 1,
+    );
+    expect(desired).toMatchObject({
+      type: "desired_state",
+      desired_state: {
+        cached_images: [
+          {
+            image_key: testImageKey,
+            image_sha256: "1".repeat(64),
+          },
+        ],
+      },
+    });
+
+    ws.close();
+  });
+
+  it("never dispatches a desired version older than the socket has seen", async () => {
+    const hostId = "host-monotonic-dispatch";
+    await seedHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+
+    const db = drizzle(env.DB);
+    const desiredV1 = await mutateStoredHostDesiredState(
+      db,
+      hostId,
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: testImageKey,
+          image_sha256: "1".repeat(64),
+        });
+      },
+    );
+    await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+      body: JSON.stringify({ hostId }),
+    });
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 1,
+    );
+
+    await db
+      .update(hostDesiredState)
+      .set({
+        version: 0,
+        docJson: { ...desiredV1, version: 0 },
+        updatedAt: Date.now(),
+      })
+      .where(eq(hostDesiredState.hostId, hostId));
+    const desiredCount = messages.filter(
+      (message) => message.type === "desired_state",
+    ).length;
+
+    const staleWake = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+      body: JSON.stringify({ hostId }),
+    });
+    expect(staleWake.status).toBe(202);
+    await sleep(20);
+    expect(
+      messages.filter((message) => message.type === "desired_state"),
+    ).toHaveLength(desiredCount);
+
+    ws.close();
+  });
+
+  it("keeps desired delivery on the lightweight VM-report path", async () => {
+    const hostId = "host-vm-report-dispatch";
+    await seedHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+
+    await mutateStoredHostDesiredState(
+      drizzle(env.DB),
+      hostId,
+      Date.now(),
+      (draft) => {
+        upsertDesiredCachedImage(draft, {
+          image_key: testImageKey,
+          image_sha256: "1".repeat(64),
+        });
+      },
+    );
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        "missing-run",
+        "runtime-web",
+        "booting",
+        Date.now(),
+        22_001,
+        "10.77.0.2",
+      ),
+    );
+
+    await expect(
+      waitForBridgeMessage(
+        messages,
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).resolves.toMatchObject({ type: "desired_state" });
+    ws.close();
+  });
+
   it("expires overdue run leases from a durable-object alarm", async () => {
     const hostId = "host-lease-expiry";
     const runId = "run-expired";
@@ -116,7 +289,10 @@ describe("HostRuntimeDO workers integration", () => {
     const now = Date.now();
     await seedHost(hostId);
     const { messages, stub, ws } = await connectHost(hostId);
-    await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
 
     const db = drizzle(env.DB);
     await seedRun({
@@ -148,9 +324,7 @@ describe("HostRuntimeDO workers integration", () => {
       method: "POST",
     });
     expect(wake.status).toBe(202);
-    if (!(await runDurableObjectAlarm(stub))) {
-      await sleep(20);
-    }
+    await runNextScheduledAlarm(stub);
 
     const [run] = await db
       .select()
@@ -206,11 +380,66 @@ describe("HostRuntimeDO workers integration", () => {
       ],
     });
 
-    sendBridge(ws, vmReport(hostId, runId, "runtime-db", "ready", now + 100, 22002, "10.77.0.3"));
-    sendBridge(ws, vmReport(hostId, runId, "runtime-web", "booting", now + 90, 22001, "10.77.0.2"));
-    sendBridge(ws, vmReport(hostId, runId, "runtime-web", "ready", now + 110, 22001, "10.77.0.2"));
-    sendBridge(ws, vmReport(hostId, runId, "runtime-web", "running", now + 95, 22001, "10.77.0.2"));
-    sendBridge(ws, vmReport(hostId, runId, "unknown-vm", "failed", now + 120, 22999, "10.77.0.99"));
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-db",
+        "ready",
+        now + 100,
+        22002,
+        "10.77.0.3",
+      ),
+    );
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "booting",
+        now + 90,
+        22001,
+        "10.77.0.2",
+      ),
+    );
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "ready",
+        now + 110,
+        22001,
+        "10.77.0.2",
+      ),
+    );
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "running",
+        now + 95,
+        22001,
+        "10.77.0.2",
+      ),
+    );
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "unknown-vm",
+        "failed",
+        now + 120,
+        22999,
+        "10.77.0.99",
+      ),
+    );
 
     const state = await waitForRunState(db, runId, (state) => {
       const web = state.vms.find((vm) => vm.runtimeVmName === "runtime-web");
@@ -238,11 +467,147 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("keeps SSH closed until explicit ready and exact steady quota evidence arrive", async () => {
+    const hostId = "host-explicit-terminal-ready";
+    const runId = "run-explicit-terminal-ready";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { ws } = await connectHost(hostId);
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+
+    const legacy = vmReport(
+      hostId,
+      runId,
+      "runtime-web",
+      "ready",
+      now + 10,
+      22_001,
+      "10.77.0.2",
+    );
+    if (legacy.type !== "vm_report") {
+      throw new Error("expected vm report");
+    }
+    legacy.report.terminal = {
+      state: "pending",
+      observed_at_unix_ms: now + 10,
+    };
+    legacy.report.phase = "pending";
+    delete legacy.report.runtime_constraints;
+    sendBridge(ws, legacy);
+
+    let state = await waitForRunState(
+      db,
+      runId,
+      (candidate) => candidate.vms[0]?.runtimeObservedAt === now + 10,
+    );
+    expect(state.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalTarget: { host: null, port: 22 },
+    });
+
+    const unsealed = vmReport(
+      hostId,
+      runId,
+      "runtime-web",
+      "ready",
+      now + 20,
+      22_001,
+      "10.77.0.2",
+    );
+    if (unsealed.type !== "vm_report" || !unsealed.report.runtime_constraints) {
+      throw new Error("expected runtime constraints");
+    }
+    unsealed.report.runtime_constraints = {
+      generation: "generation-runtime-web",
+      phase: "boot_burst",
+      steady_cpu_millis: 1_000,
+      effective_cpu_millis: 2_000,
+      lease_expires_at_unix_ms: now + 45_000,
+    };
+    sendBridge(ws, unsealed);
+
+    state = await waitForRunState(
+      db,
+      runId,
+      (candidate) => candidate.vms[0]?.runtimeObservedAt === now + 20,
+    );
+    expect(state.vms[0]).toMatchObject({
+      terminalPhase: "pending",
+      canOpenTerminal: false,
+      terminalReason: "Waiting for verified steady CPU quota.",
+      runtimeConstraints: {
+        phase: "boot_burst",
+        steadyCpuMillis: 1_000,
+        effectiveCpuMillis: 2_000,
+      },
+    });
+
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "ready",
+        now + 30,
+        22_001,
+        "10.77.0.2",
+      ),
+    );
+    state = await waitForRunState(
+      db,
+      runId,
+      (candidate) => candidate.vms[0]?.canOpenTerminal === true,
+    );
+    expect(state.vms[0]).toMatchObject({
+      terminalPhase: "ready",
+      canOpenTerminal: true,
+      terminalTarget: { host: "203.0.113.9", port: 22_001 },
+      runtimeConstraints: {
+        phase: "steady",
+        steadyCpuMillis: 1_000,
+        effectiveCpuMillis: 1_000,
+        quotaVerifiedAt: now + 29,
+      },
+    });
+
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "failed",
+        now + 25,
+        22_001,
+        "10.77.0.2",
+      ),
+    );
+    await sleep(30);
+    const afterStale = await waitForRunState(
+      db,
+      runId,
+      (candidate) => candidate.vms[0]?.runtimeObservedAt === now + 30,
+    );
+    expect(afterStale.vms[0]).toMatchObject({
+      terminalPhase: "ready",
+      canOpenTerminal: true,
+      runtimeObservedAt: now + 30,
+    });
+
+    ws.close();
+  });
+
   it("re-pushes desired state after reconnect sync and persists applied version catch-up", async () => {
     const hostId = "host-reconnect-sync";
     await seedHost(hostId);
     const first = await connectHost(hostId);
-    await waitForBridgeMessage(first.messages, (message) => message.type === "server_hello");
+    await waitForBridgeMessage(
+      first.messages,
+      (message) => message.type === "server_hello",
+    );
     first.ws.close();
 
     const db = drizzle(env.DB);
@@ -281,19 +646,26 @@ describe("HostRuntimeDO workers integration", () => {
       ),
     ).toBe(2);
 
-    sendBridge(ws, stateReport(hostId, {
-      observedAt: Date.now(),
-      appliedDesiredVersion: 1,
-      cachedImages: [{
-        image_key: testImageKey,
-        image_sha256: "3".repeat(64),
-        phase: "ready",
-        updated_at_unix_ms: Date.now(),
-      }],
-    }));
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: Date.now(),
+        appliedDesiredVersion: 1,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "3".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: Date.now(),
+          },
+        ],
+      }),
+    );
 
-    await waitForHostActualState(db, hostId, (row) =>
-      row.appliedDesiredVersion === 1,
+    await waitForHostActualState(
+      db,
+      hostId,
+      (row) => row.appliedDesiredVersion === 1,
     );
     ws.close();
   });
@@ -305,16 +677,21 @@ describe("HostRuntimeDO workers integration", () => {
     const { ws } = await connectHost(hostId);
     await seedEnabledScenario(drizzle(env.DB), now);
 
-    sendBridge(ws, stateReport(hostId, {
-      observedAt: now,
-      appliedDesiredVersion: 0,
-      cachedImages: [{
-        image_key: testImageKey,
-        image_sha256: "2".repeat(64),
-        phase: "ready",
-        updated_at_unix_ms: now,
-      }],
-    }));
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "2".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: now,
+          },
+        ],
+      }),
+    );
     await waitForHostActualState(
       drizzle(env.DB),
       hostId,
@@ -338,29 +715,42 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
-  it("returns scenario_host_cpu_exhausted for a pinned saturated host", async () => {
+  it("returns boot_capacity_pending for a pinned saturated host", async () => {
     const hostId = "host-pinned-saturated";
     const now = Date.now();
     await seedHost(hostId);
     const { stub, ws } = await connectHost(hostId);
     await seedEnabledScenario(drizzle(env.DB), now);
-    sendBridge(ws, stateReport(hostId, {
-      observedAt: now,
-      appliedDesiredVersion: 0,
-      schedulableCpuMillis: 125,
-      cachedImages: [{
-        image_key: testImageKey,
-        image_sha256: "2".repeat(64),
-        phase: "ready",
-        updated_at_unix_ms: now,
-      }],
-    }));
-    await waitForHostActualState(drizzle(env.DB), hostId, (row) => row.observedAt === now);
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 2_000,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "2".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: now,
+          },
+        ],
+      }),
+    );
+    await waitForHostActualState(
+      drizzle(env.DB),
+      hostId,
+      (row) => row.observedAt === now,
+    );
     const fill = await stub.fetch(
       "http://host-runtime/_internal/cpu-reservations/reserve",
       {
         method: "POST",
-        body: JSON.stringify({ hostId, runId: "capacity-fill", cpuMillis: 125 }),
+        body: JSON.stringify({
+          hostId,
+          runId: "capacity-fill",
+          steadyCpuMillisByVm: [125],
+        }),
       },
     );
     expect(fill.status).toBe(201);
@@ -371,7 +761,7 @@ describe("HostRuntimeDO workers integration", () => {
         userId: "user-1",
         hostId,
       }),
-    ).rejects.toMatchObject({ code: "scenario_host_cpu_exhausted" });
+    ).rejects.toMatchObject({ code: "boot_capacity_pending" });
     ws.close();
   });
 
@@ -385,28 +775,38 @@ describe("HostRuntimeDO workers integration", () => {
     const second = await connectHost(secondHostId);
     await seedEnabledScenario(drizzle(env.DB), now);
 
-    sendBridge(second.ws, stateReport(secondHostId, {
-      observedAt: now,
-      appliedDesiredVersion: 0,
-      schedulableCpuMillis: 1_000,
-      cachedImages: [{
-        image_key: testImageKey,
-        image_sha256: "2".repeat(64),
-        phase: "ready",
-        updated_at_unix_ms: now,
-      }],
-    }));
-    sendBridge(first.ws, stateReport(firstHostId, {
-      observedAt: now + 1,
-      appliedDesiredVersion: 0,
-      schedulableCpuMillis: 2_000,
-      cachedImages: [{
-        image_key: testImageKey,
-        image_sha256: "2".repeat(64),
-        phase: "ready",
-        updated_at_unix_ms: now,
-      }],
-    }));
+    sendBridge(
+      second.ws,
+      stateReport(secondHostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 2_000,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "2".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: now,
+          },
+        ],
+      }),
+    );
+    sendBridge(
+      first.ws,
+      stateReport(firstHostId, {
+        observedAt: now + 1,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 2_000,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "2".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: now,
+          },
+        ],
+      }),
+    );
     await Promise.all([
       waitForHostActualState(
         drizzle(env.DB),
@@ -427,7 +827,7 @@ describe("HostRuntimeDO workers integration", () => {
         body: JSON.stringify({
           hostId: firstHostId,
           runId: "first-host-fill",
-          cpuMillis: 2_000,
+          steadyCpuMillisByVm: [2_000],
         }),
       },
     );
@@ -451,7 +851,10 @@ describe("HostRuntimeDO workers integration", () => {
     const hostId = "host-lag-repush";
     await seedHost(hostId);
     const { messages, stub, ws } = await connectHost(hostId);
-    await waitForBridgeMessage(messages, (message) => message.type === "server_hello");
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
 
     const db = drizzle(env.DB);
     await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
@@ -470,20 +873,24 @@ describe("HostRuntimeDO workers integration", () => {
     await waitForBridgeMessage(
       messages,
       (message) =>
-        message.type === "desired_state" &&
-        message.desired_state.version === 1,
+        message.type === "desired_state" && message.desired_state.version === 1,
     );
 
-    sendBridge(ws, stateReport(hostId, {
-      observedAt: Date.now(),
-      appliedDesiredVersion: 0,
-    }));
-    await waitForHostActualState(db, hostId, (row) =>
-      row.appliedDesiredVersion === 0,
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: Date.now(),
+        appliedDesiredVersion: 0,
+      }),
+    );
+    await waitForHostActualState(
+      db,
+      hostId,
+      (row) => row.appliedDesiredVersion === 0,
     );
     await sleep(10_050);
 
-    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await runNextScheduledAlarm(stub);
     expect(
       await waitForMessageCount(
         messages,
@@ -575,18 +982,27 @@ function clientHello(
     role: "agent",
     capabilities: {
       arch: "x86_64",
+      cloud_hypervisor_sha256:
+        "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+      boot_cpu_millis: 2_000,
+      boot_cpu_lease_ms: 45_000,
       supports_kvm: true,
       supports_vsock: true,
       supports_reflink: true,
       supports_nftables: true,
-      supports_jailer_v1: true,
+      supports_jailer_v1: false,
+      supports_jailer_v2: true,
+      supports_boot_cpu_lease: true,
+      supports_template_backed_launch: true,
+      fast_template_store: true,
       supports_hard_cpu_quota: true,
       supports_landlock: true,
       supports_cgroup_v2: true,
     },
   };
   if (options && "lastAppliedDesiredVersion" in options) {
-    message.last_applied_desired_version = options.lastAppliedDesiredVersion ?? null;
+    message.last_applied_desired_version =
+      options.lastAppliedDesiredVersion ?? null;
   }
   return message;
 }
@@ -611,6 +1027,20 @@ async function waitForBridgeMessage(
   throw new Error(
     `timed out waiting for bridge message; got ${JSON.stringify(messages)}`,
   );
+}
+
+async function runNextScheduledAlarm(
+  stub: DurableObjectStub,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (await runDurableObjectAlarm(stub)) {
+      return;
+    }
+    await sleep(10);
+  }
+  throw new Error("timed out waiting for Durable Object alarm");
 }
 
 async function waitForMessageCount(
@@ -723,26 +1153,26 @@ async function seedRun(input: {
   const state = recomputeRunState({
     ...initial,
     vms: initial.vms.map((vm) => ({
-        ...vm,
-        phase: "booting",
-        provisioning: {
-          image: `broken-nginx-${vm.scenarioVmName}-x86_64`,
-          imageKey: testImageKey,
-          imageSha256: "2".repeat(64),
-          resources: {
-            cpuMillis: 1_000,
-            vcpuCount: 1,
-            memoryMib: 512,
-            diskMib: 4096,
-          },
-          leaseDurationSeconds: 1,
-          groupName: null,
-          groupId: null,
-          setupKeyId: null,
-          status: "queued",
-          error: null,
+      ...vm,
+      phase: "booting",
+      provisioning: {
+        image: `broken-nginx-${vm.scenarioVmName}-x86_64`,
+        imageKey: testImageKey,
+        imageSha256: "2".repeat(64),
+        resources: {
+          cpuMillis: 1_000,
+          vcpuCount: 1,
+          memoryMib: 512,
+          diskMib: 4096,
         },
-      })),
+        leaseDurationSeconds: 1,
+        groupName: null,
+        groupId: null,
+        setupKeyId: null,
+        status: "queued",
+        error: null,
+      },
+    })),
   });
 
   await input.db.insert(scenarioRuns).values({
@@ -841,11 +1271,19 @@ function stateReport(
       },
       capabilities: {
         arch: "x86_64",
+        cloud_hypervisor_sha256:
+          "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+        boot_cpu_millis: 2_000,
+        boot_cpu_lease_ms: 45_000,
         supports_kvm: true,
         supports_vsock: true,
         supports_reflink: true,
         supports_nftables: true,
-        supports_jailer_v1: true,
+        supports_jailer_v1: false,
+        supports_jailer_v2: true,
+        supports_boot_cpu_lease: true,
+        supports_template_backed_launch: true,
+        fast_template_store: true,
         supports_hard_cpu_quota: true,
         supports_landlock: true,
         supports_cgroup_v2: true,
@@ -866,12 +1304,14 @@ function vmReport(
   sshHostPort: number,
   guestIp: string,
 ): BridgeMessageV6 {
+  const terminalReady = phase === "ready" || phase === "solved";
+  const terminalFailed = phase === "failed";
   return {
     type: "vm_report",
     protocol_version: 6,
     host_id: hostId,
     report: {
-      schema_version: 2,
+      schema_version: 3,
       host_id: hostId,
       run_id: runId,
       vm_name: vmName,
@@ -885,6 +1325,29 @@ function vmReport(
         gateway: "10.77.0.1",
         ssh_host: "203.0.113.9",
         ssh_host_port: sshHostPort,
+      },
+      terminal: {
+        state: terminalReady ? "ready" : terminalFailed ? "failed" : "pending",
+        ...(terminalReady
+          ? {
+              target: {
+                host: "203.0.113.9",
+                port: sshHostPort,
+                username: "ubuntu",
+                checked_at_unix_ms: observedAt,
+              },
+            }
+          : {}),
+        observed_at_unix_ms: observedAt,
+      },
+      runtime_constraints: {
+        generation: `generation-${vmName}`,
+        phase: terminalReady ? "steady" : "boot_burst",
+        steady_cpu_millis: 1_000,
+        effective_cpu_millis: terminalReady ? 1_000 : 2_000,
+        ...(terminalReady
+          ? { quota_verified_at_unix_ms: observedAt - 1 }
+          : { lease_expires_at_unix_ms: observedAt + 45_000 }),
       },
       ssh_host_keys_openssh: [
         `ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI${vmName} host-key`,

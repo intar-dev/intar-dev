@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -14,32 +17,43 @@ use cloud_hypervisor_client::{
 };
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use getrandom::fill as getrandom_fill;
-use intar_contracts::guest::RECORDING_DISK_LABEL;
+use intar_contracts::bridge::{
+    VmBootCpuSamplePointV1, VmBootCpuSampleV1, VmBootEvidenceV1, VmBootPhaseDurationsV1,
+    VmRuntimeConstraintPhaseV1, VmRuntimeConstraintsV1,
+};
 use intar_jailer_protocol::{
     ArtifactAccess, ArtifactSource, AsyncSeqpacketClient, DestroyRunNetworkRequest,
-    EnsureRunNetworkRequest, JailPathMap, JailerCapabilities, Request as JailerRequest,
-    Response as JailerResponse, RunNetworkResult, SandboxHealth, Sha256Digest, SourceArtifacts,
-    ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
+    EnsureRunNetworkRequest, FinalizeVmBootRequest, FinalizeVmBootResult, JailPathMap,
+    JailerCapabilities, LaunchVmV2Request, PREPARED_IMAGE_SOURCE_ROOT, PrepareImageV2Request,
+    PreparedImageV2Result, Request as JailerRequest, Response as JailerResponse, RunNetworkResult,
+    SampleVmCpuRequest, SandboxHealth, Sha256Digest, SourceArtifacts, ValidatedId, VmCpuPhase,
+    VmCpuRuntimeState, VmCpuSample, VmIdentityRequest, VmInspection, VmLaunchRequest,
+    VmLaunchResult,
 };
 use reqwest::Client as HttpClient;
+use russh::{
+    Disconnect, Preferred,
+    client::{self as ssh_client},
+    kex,
+    keys::ssh_key::PublicKey,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
-use tokio::process::Command;
-use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, Semaphore, broadcast};
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, OnceCell, OwnedMutexGuard, RwLock, Semaphore, broadcast};
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    AgentConfig, BridgeConfig, ImageRegistryConfig, SshAccessConfig, VmDefaultsConfig,
+    AgentConfig, BridgeConfig, SshAccessConfig, VmDefaultsConfig, normalize_sha256,
 };
 use crate::db::{ArchiveJobRow, Db, VmProbeStateRow, VmRow};
 use crate::image_cache;
 use crate::kino_probe::{ProbeCollectionState, ProbeUpdateEnvelope};
 #[cfg(target_os = "linux")]
-use crate::kino_probe::{ProbePollResult, ProbeSnapshotView, decode_probe_snapshot};
+use crate::kino_probe::{ProbePollResult, decode_probe_snapshot};
 
 use super::{mac, replay_media, runtime_disk};
 
@@ -58,6 +72,7 @@ pub struct CreateScenarioVmRequest {
     pub name: String,
     pub run_id: String,
     pub image: String,
+    pub image_sha256: String,
     pub resources: Option<CreateVmResources>,
     pub hostname: Option<String>,
     pub lease_duration_seconds: Option<u64>,
@@ -159,6 +174,13 @@ pub struct VmDetails {
     pub kino_vsock_port: Option<u32>,
     pub kino_vsock_path: Option<String>,
     pub ssh_host_keys_openssh: Vec<String>,
+    #[serde(skip_serializing)]
+    pub cpu_runtime: Option<VmCpuRuntimeState>,
+    /// In-memory boot evidence for the live generation. It is deliberately
+    /// absent after recovery: recovery attests the current sandbox and quota,
+    /// but cannot recreate measurements it did not observe.
+    #[serde(skip_serializing)]
+    pub boot_evidence: Option<VmBootEvidenceV1>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -349,6 +371,7 @@ struct QueueVmCreateRequest {
     requested_name: String,
     requested_run_id: String,
     requested_image: String,
+    requested_image_sha256: String,
     requested_resources: Option<CreateVmResources>,
     requested_hostname: Option<String>,
     lease_duration_seconds: Option<u64>,
@@ -360,7 +383,6 @@ const RUN_SUBNET_PREFIX: u8 = 28;
 const KINO_VSOCK_PORT: u32 = 18_080;
 const KINO_HOST_READY_PORT: u32 = 18_081;
 const KINO_VSOCK_CID_MIN: u32 = 10_000;
-const RECORDING_DISK_BYTES: u64 = 256 * 1024 * 1024;
 const ARTIFACT_UPLOAD_PART_BYTES: usize = 16 * 1024 * 1024;
 const ARTIFACT_UPLOAD_CONCURRENCY: usize = 4;
 const ARCHIVE_JOB_BATCH_SIZE: usize = 4;
@@ -378,7 +400,9 @@ const TERMINAL_READY_POLL_INTERVAL_SECONDS: u64 = 5;
 const SCENARIO_READY_BASE_TIMEOUT_SECONDS: u64 = 45;
 const SCENARIO_READY_REFERENCE_CPU_MILLIS: u32 = 1_000;
 const SCENARIO_READY_MAX_TIMEOUT_SECONDS: u64 = 6 * 60;
-const SCENARIO_READY_POLL_INTERVAL_MILLIS: u64 = 500;
+const JAILER_PREPARE_IMAGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS: u64 = 500;
+const SCENARIO_READY_API_POLL_INTERVAL_SECONDS: u64 = 3;
 const SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS: u64 = 2;
 #[cfg(target_os = "linux")]
 const MAX_KINO_READY_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -390,6 +414,12 @@ const RUNTIME_DISK_ID_SUFFIX: &str = "runtime";
 struct LeaseExpiryErrorLogState {
     signature: String,
     last_logged_at_s: i64,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("jailerd boot capacity is temporarily unavailable: {message}")]
+struct BootCapacityPending {
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +473,14 @@ struct VmTerminalTask {
     join: JoinHandle<()>,
 }
 
+struct AbortTaskOnDrop(AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VmTerminalStateKind {
@@ -469,6 +507,7 @@ pub struct VmTerminalState {
     pub terminal_target: Option<VmTerminalTarget>,
     pub reason: Option<String>,
     pub observed_at: i64,
+    pub runtime_constraints: Option<VmRuntimeConstraintsV1>,
 }
 
 impl VmTerminalState {
@@ -484,6 +523,7 @@ impl VmTerminalState {
             "state": self.state,
             "terminalTarget": terminal_target,
             "reason": self.reason,
+            "runtimeConstraints": self.runtime_constraints,
         });
         let mut hasher = Sha256::new();
         hasher.update(payload.to_string().as_bytes());
@@ -537,16 +577,19 @@ struct Inner {
     ch_spawn_timeout_seconds: u64,
     jailer_socket: PathBuf,
     jailer_request_timeout_seconds: u64,
+    jailer_launch_capabilities: OnceCell<JailerCapabilities>,
     bridge: BridgeConfig,
     ssh_access: SshAccessConfig,
     db: Db,
     http: HttpClient,
-    registry_http: HttpClient,
-    image_registry: ImageRegistryConfig,
     defaults: VmDefaultsConfig,
     states: RwLock<BTreeMap<String, VmStatusResponse>>,
     lease_expiry_error_log: RwLock<BTreeMap<String, LeaseExpiryErrorLogState>>,
     probe_tasks: Mutex<BTreeMap<String, VmProbeTask>>,
+    /// Guest readiness is an internal launch signal. It is deliberately
+    /// separate from `probe_updates_tx`, whose subscribers project data to the
+    /// control plane only after the ready boundary is durably committed.
+    kino_readiness_tx: broadcast::Sender<ProbeUpdateEnvelope>,
     probe_updates_tx: broadcast::Sender<ProbeUpdateEnvelope>,
     terminal_tasks: Mutex<BTreeMap<String, VmTerminalTask>>,
     terminal_state_fingerprints: Mutex<BTreeMap<String, String>>,
@@ -573,23 +616,23 @@ impl VmManager {
             }
         }
 
+        let (kino_readiness_tx, _) = broadcast::channel(256);
         let (probe_updates_tx, _) = broadcast::channel(256);
         let (terminal_updates_tx, _) = broadcast::channel(256);
-        let registry_http = image_cache::registry_http_client()?;
         let inner = Inner {
             ch_spawn_timeout_seconds: cfg.cloud_hypervisor.spawn_timeout_seconds,
             jailer_socket: cfg.jailer.socket.clone(),
             jailer_request_timeout_seconds: cfg.jailer.request_timeout_seconds,
+            jailer_launch_capabilities: OnceCell::new(),
             bridge: cfg.bridge.clone(),
             ssh_access: cfg.ssh_access.clone(),
             db,
             http: HttpClient::new(),
-            registry_http,
-            image_registry: cfg.image_registry.clone(),
             defaults: cfg.vm_defaults.clone(),
             states: RwLock::new(states),
             lease_expiry_error_log: RwLock::new(BTreeMap::new()),
             probe_tasks: Mutex::new(BTreeMap::new()),
+            kino_readiness_tx,
             probe_updates_tx,
             terminal_tasks: Mutex::new(BTreeMap::new()),
             terminal_state_fingerprints: Mutex::new(BTreeMap::new()),
@@ -606,8 +649,10 @@ impl VmManager {
         })
     }
 
-    pub async fn ensure_host_networking(&self) -> Result<()> {
-        ensure_vm_network_reconciled(&self.inner).await
+    /// Run the full jailerd-owned repair path for every persisted run.
+    /// VM launch uses the separate O(1) `EnsureRunNetwork` exact-hit path.
+    pub async fn repair_host_networking(&self) -> Result<()> {
+        repair_vm_networks(&self.inner).await
     }
 
     pub fn subscribe_probe_updates(&self) -> broadcast::Receiver<ProbeUpdateEnvelope> {
@@ -616,6 +661,10 @@ impl VmManager {
 
     pub fn subscribe_terminal_updates(&self) -> broadcast::Receiver<VmTerminalState> {
         self.inner.terminal_updates_tx.subscribe()
+    }
+
+    pub async fn terminal_state(&self, vm_name: &str) -> Result<Option<VmTerminalState>> {
+        current_terminal_state_for_vm(&self.inner, vm_name, None).await
     }
 
     /// Publicly routable address for this host's per-VM SSH forwards, from
@@ -641,6 +690,16 @@ impl VmManager {
                 "jailerd returned unexpected response to capabilities request: {response:?}"
             ),
         }
+    }
+
+    /// Ensure a cached boot bundle is also present in jailerd's root-owned
+    /// clone-only template store. A missing v2 capability is a hard launch
+    /// incompatibility; this breaking path never downgrades to v1.
+    pub async fn ensure_cached_image_template(
+        &self,
+        image: &image_cache::CachedImage,
+    ) -> Result<PreparedImageV2Result> {
+        ensure_jailer_image_template(&self.inner, image).await
     }
 
     pub async fn inspect_jailed_vm(&self, generation: &str) -> Result<Option<VmInspection>> {
@@ -761,6 +820,7 @@ impl VmManager {
             requested_name: req.name,
             requested_run_id: req.run_id,
             requested_image: req.image,
+            requested_image_sha256: req.image_sha256,
             requested_resources: req.resources,
             requested_hostname: req.hostname,
             lease_duration_seconds: req.lease_duration_seconds,
@@ -777,6 +837,7 @@ impl VmManager {
             requested_name,
             requested_run_id,
             requested_image,
+            requested_image_sha256,
             requested_resources,
             requested_hostname,
             lease_duration_seconds,
@@ -805,6 +866,8 @@ impl VmManager {
         if !is_safe_key(&image_key) {
             return Err(ApiError::bad_request("image must match [A-Za-z0-9_-]+"));
         }
+        let image_sha256 = normalize_sha256(requested_image_sha256.trim())
+            .ok_or_else(|| ApiError::bad_request("image_sha256 must be a SHA-256 digest"))?;
 
         {
             let states = self.inner.states.read().await;
@@ -981,7 +1044,7 @@ impl VmManager {
 
         let details = VmDetails {
             image_key: Some(image_key.clone()),
-            image_sha256: None,
+            image_sha256: Some(image_sha256.clone()),
             run_id: Some(run_id.clone()),
             root_disk_path: root_disk_path.display().to_string(),
             seed_disk_path: config_disk_path.display().to_string(),
@@ -1013,6 +1076,8 @@ impl VmManager {
             kino_vsock_port: Some(kino_vsock_port),
             kino_vsock_path: Some(kino_vsock_path.display().to_string()),
             ssh_host_keys_openssh: Vec::new(),
+            cpu_runtime: None,
+            boot_evidence: None,
         };
 
         let status = VmStatusResponse {
@@ -1063,18 +1128,6 @@ impl VmManager {
                     format!("failed to create run spool at {}", spool_dir.display())
                 })?;
 
-            let recording_disk_path_for_create = recording_disk_path.clone();
-            tokio::task::spawn_blocking(move || {
-                create_recording_disk(&recording_disk_path_for_create)
-            })
-            .await
-            .context("recording disk task panicked")?
-            .with_context(|| {
-                format!(
-                    "failed to create recording disk at {}",
-                    recording_disk_path.display()
-                )
-            })?;
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -1098,20 +1151,13 @@ impl VmManager {
             }
             return Err(ApiError::internal(message));
         }
-        if let Err(error) = ensure_vm_network_reconciled(&self.inner).await {
-            warn!(
-                error = %error,
-                vm = name,
-                "failed to reconcile ssh forwarding after queueing vm"
-            );
-        }
-
         let resp_name = name.clone();
         let inner = Arc::clone(&self.inner);
         let network_for_task = network.clone();
         let peer_guest_ips_for_task = peer_guest_ips.clone();
         let name_for_task = name.clone();
         let image_key_for_task = image_key.clone();
+        let image_sha256_for_task = image_sha256.clone();
         let hostname_for_task = hostname.clone();
         let runtime_for_task = runtime.clone();
         let tap_for_task = tap_name.clone();
@@ -1126,6 +1172,7 @@ impl VmManager {
                 name: &name_for_task,
                 run_id: &run_id,
                 image_key: &image_key_for_task,
+                expected_image_sha256: &image_sha256_for_task,
                 runtime: &runtime_for_task,
                 tap: &tap_for_task,
                 ssh_public_port,
@@ -1380,6 +1427,7 @@ struct RunCreateInput<'a> {
     name: &'a str,
     run_id: &'a str,
     image_key: &'a str,
+    expected_image_sha256: &'a str,
     runtime: &'a CreateScenarioVmRuntime,
     tap: &'a str,
     ssh_public_port: Option<u16>,
@@ -1478,46 +1526,202 @@ fn build_cloud_hypervisor_vm_config(input: CloudHypervisorVmConfigInput<'_>) -> 
     })
 }
 
+async fn cached_jailer_launch_capabilities(inner: &Inner) -> Result<&JailerCapabilities> {
+    inner
+        .jailer_launch_capabilities
+        .get_or_try_init(|| async {
+            match request_jailerd(inner, JailerRequest::Capabilities).await? {
+                JailerResponse::Capabilities(capabilities) => Ok(capabilities),
+                JailerResponse::Error(error) => {
+                    anyhow::bail!("jailerd {}: {}", error.code, error.message)
+                }
+                response => anyhow::bail!(
+                    "jailerd returned unexpected response to capabilities request: {response:?}"
+                ),
+            }
+        })
+        .await
+}
+
+async fn ensure_jailer_image_template(
+    inner: &Inner,
+    image: &image_cache::CachedImage,
+) -> Result<PreparedImageV2Result> {
+    let capabilities = cached_jailer_launch_capabilities(inner).await?;
+    if !(capabilities.supports_jailer_v2
+        && capabilities.supports_template_backed_launch
+        && capabilities.fast_template_store)
+    {
+        anyhow::bail!("jailerd does not attest the mandatory template-backed v2 launch contract");
+    }
+
+    let request = PrepareImageV2Request {
+        image_sha256: Sha256Digest::parse(image.image_sha256.to_ascii_lowercase())
+            .context("validate prepared image identity")?,
+        virtual_size_bytes: image.virtual_size_bytes,
+        root_disk: artifact_source(
+            &image.raw_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.raw_sha256),
+            ArtifactAccess::ReadOnly,
+        )?,
+        kernel: artifact_source(
+            &image.kernel_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.kernel_sha256),
+            ArtifactAccess::ReadOnly,
+        )?,
+        initrd: Some(artifact_source(
+            &image.initrd_path,
+            &capabilities.allowed_source_roots,
+            Some(&image.initrd_sha256),
+            ArtifactAccess::ReadOnly,
+        )?),
+    };
+    request
+        .validate()
+        .context("validate prepared image request")?;
+    let result = match request_jailerd_with_timeout(
+        inner,
+        JailerRequest::PrepareImageV2(Box::new(request.clone())),
+        JAILER_PREPARE_IMAGE_TIMEOUT,
+    )
+    .await?
+    {
+        JailerResponse::PrepareImageV2(result) => result,
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => {
+            anyhow::bail!("jailerd returned unexpected response to prepare_image_v2: {response:?}")
+        }
+    };
+    validate_prepared_image_result(&request, &result)?;
+    image_cache::mark_template_ready(image, &result)
+        .await
+        .context("persist prepared jail template readiness")?;
+    Ok(result)
+}
+
+fn validate_prepared_image_result(
+    request: &PrepareImageV2Request,
+    result: &PreparedImageV2Result,
+) -> Result<()> {
+    anyhow::ensure!(
+        result.image_sha256 == request.image_sha256
+            && result.virtual_size_bytes == request.virtual_size_bytes
+            && result.fast_template_store,
+        "jailerd prepared image identity or fast-store attestation mismatch"
+    );
+    let expected = [
+        (
+            &result.root_disk,
+            "root.raw",
+            request.root_disk.sha256.as_ref(),
+            ArtifactAccess::ReadWrite,
+        ),
+        (
+            &result.kernel,
+            "kernel",
+            request.kernel.sha256.as_ref(),
+            ArtifactAccess::ReadOnly,
+        ),
+    ];
+    for (source, name, sha256, access) in expected {
+        anyhow::ensure!(
+            source.source_root == PREPARED_IMAGE_SOURCE_ROOT
+                && source.relative_path == PathBuf::from(request.image_sha256.as_str()).join(name)
+                && source.sha256.as_ref() == sha256
+                && source.access == access,
+            "jailerd returned an invalid prepared {name} descriptor"
+        );
+    }
+    match (&request.initrd, &result.initrd) {
+        (Some(request_source), Some(source)) => anyhow::ensure!(
+            source.source_root == PREPARED_IMAGE_SOURCE_ROOT
+                && source.relative_path
+                    == PathBuf::from(request.image_sha256.as_str()).join("initrd")
+                && source.sha256 == request_source.sha256
+                && source.access == ArtifactAccess::ReadOnly,
+            "jailerd returned an invalid prepared initrd descriptor"
+        ),
+        (None, None) => {}
+        _ => anyhow::bail!("jailerd prepared image initrd shape mismatch"),
+    }
+    Ok(())
+}
+
+fn build_jailer_launch_operation(
+    request: VmLaunchRequest,
+    prepared_image: Option<&PreparedImageV2Result>,
+) -> Result<JailerRequest> {
+    let prepared = prepared_image
+        .context("prepared v2 image is mandatory; this breaking launch path has no v1 fallback")?;
+    let request = LaunchVmV2Request {
+        image_sha256: prepared.image_sha256.clone(),
+        virtual_size_bytes: prepared.virtual_size_bytes,
+        launch: request,
+    };
+    request
+        .validate()
+        .context("validate jailer template-backed launch request")?;
+    Ok(JailerRequest::LaunchVmV2(Box::new(request)))
+}
+
+async fn request_v2_launch_with_single_retry<F, Fut>(
+    operation: JailerRequest,
+    mut send: F,
+) -> Result<JailerResponse>
+where
+    F: FnMut(JailerRequest) -> Fut,
+    Fut: Future<Output = Result<JailerResponse>>,
+{
+    anyhow::ensure!(
+        matches!(operation, JailerRequest::LaunchVmV2(_)),
+        "v2 launch retry requires an exact LaunchVmV2 operation"
+    );
+    let retry_operation = operation.clone();
+    match send(operation).await {
+        Ok(response) => Ok(response),
+        Err(first_error) => send(retry_operation).await.with_context(|| {
+            format!(
+                "identical LaunchVmV2 retry failed after the first transport attempt failed: {first_error:#}"
+            )
+        }),
+    }
+}
+
 async fn launch_jailed_cloud_hypervisor(
     inner: &Inner,
     req: &RunCreateInput<'_>,
     cached_image: &image_cache::CachedImage,
-) -> Result<(VmLaunchResult, RunNetworkResult)> {
+    prepared: &PreparedImageV2Result,
+) -> Result<VmLaunchResult> {
     let run_id = ValidatedId::parse(req.run_id.to_string()).context("validate jailer run ID")?;
     let vm_id = ValidatedId::parse(req.name.to_string()).context("validate jailer VM ID")?;
-    let (guest_ip, prefix) = parse_ipv4_cidr(&req.network.guest_ip_cidr, "network.guest_ip_cidr")?;
-    let run_cidr = format!(
-        "{}/{prefix}",
-        Ipv4Addr::from(ipv4_network_u32(guest_ip, prefix))
-    );
 
-    let capabilities = match request_jailerd(inner, JailerRequest::Capabilities).await? {
-        JailerResponse::Capabilities(capabilities) => capabilities,
-        JailerResponse::Error(error) => {
-            anyhow::bail!("jailerd {}: {}", error.code, error.message)
-        }
-        response => anyhow::bail!(
-            "jailerd returned unexpected response to capabilities request: {response:?}"
-        ),
-    };
+    let capabilities = cached_jailer_launch_capabilities(inner).await?;
 
-    let run_network = match request_jailerd(
-        inner,
-        JailerRequest::EnsureRunNetwork(EnsureRunNetworkRequest {
-            run_id: run_id.clone(),
-            guest_cidr: run_cidr,
-            gateway: req.network.gateway.clone(),
-        }),
-    )
-    .await?
-    {
-        JailerResponse::EnsureRunNetwork(result) => result,
-        JailerResponse::Error(error) => {
-            anyhow::bail!("jailerd {}: {}", error.code, error.message)
-        }
-        response => anyhow::bail!(
-            "jailerd returned unexpected response to ensure_run_network: {response:?}"
-        ),
+    let root_disk_size_bytes = req
+        .disk_mib
+        .map(|target_disk_mib| u64::from(target_disk_mib) * 1024 * 1024)
+        .unwrap_or(cached_image.virtual_size_bytes);
+    let artifacts = SourceArtifacts {
+        kernel: prepared.kernel.clone(),
+        initrd: prepared.initrd.clone(),
+        root_disk: prepared.root_disk.clone(),
+        runtime_disk: artifact_source(
+            req.config_disk_path,
+            &capabilities.allowed_source_roots,
+            None,
+            ArtifactAccess::ReadOnly,
+        )?,
+        recording_disk: artifact_source(
+            req.recording_disk_path,
+            &capabilities.allowed_source_roots,
+            None,
+            ArtifactAccess::ReadWrite,
+        )?,
     };
 
     let request = VmLaunchRequest {
@@ -1526,118 +1730,542 @@ async fn launch_jailed_cloud_hypervisor(
         cpu_millis: req.cpu_millis,
         vcpu_count: u16::try_from(req.vcpus).context("vCPU count exceeds jailer contract")?,
         memory_mib: req.memory_mib,
+        root_disk_size_bytes,
         tap_name: req.tap.to_string(),
         mac_address: req.mac.to_string(),
         guest_ip_cidr: req.network.guest_ip_cidr.clone(),
         ssh_public_port: req.ssh_public_port,
         vsock_cid: req.kino_vsock_cid,
-        artifacts: SourceArtifacts {
-            kernel: artifact_source(
-                &cached_image.kernel_path,
-                &capabilities.allowed_source_roots,
-                Some(&cached_image.kernel_sha256),
-                ArtifactAccess::ReadOnly,
-            )?,
-            initrd: Some(artifact_source(
-                &cached_image.initrd_path,
-                &capabilities.allowed_source_roots,
-                Some(&cached_image.initrd_sha256),
-                ArtifactAccess::ReadOnly,
-            )?),
-            root_disk: artifact_source(
-                req.root_disk_path,
-                &capabilities.allowed_source_roots,
-                None,
-                ArtifactAccess::ReadWrite,
-            )?,
-            runtime_disk: artifact_source(
-                req.config_disk_path,
-                &capabilities.allowed_source_roots,
-                None,
-                ArtifactAccess::ReadOnly,
-            )?,
-            recording_disk: artifact_source(
-                req.recording_disk_path,
-                &capabilities.allowed_source_roots,
-                None,
-                ArtifactAccess::ReadWrite,
-            )?,
-        },
+        artifacts,
     };
-    request
-        .validate()
-        .context("validate jailer launch request")?;
+    let launch_operation = build_jailer_launch_operation(request, Some(prepared))?;
 
-    let launch_response = match request_jailerd(
-        inner,
-        JailerRequest::LaunchVm(Box::new(request.clone())),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(launch_error) => {
-            // A SOCK_SEQPACKET timeout can happen after jailerd committed the
-            // idempotent logical VM but before the response reached us. Resolve
-            // by (run_id, vm_id) before deciding that the launch failed.
-            let selector =
-                VmIdentityRequest::by_logical_id(request.run_id.clone(), request.vm_id.clone());
-            match request_jailerd(inner, JailerRequest::InspectVm(selector)).await {
-                Ok(JailerResponse::InspectVm(inspection)) => {
-                    if inspection.health != SandboxHealth::Healthy {
-                        anyhow::bail!(
-                            "jailerd launch outcome is {:?} after the request failed: {launch_error:#}",
-                            inspection.health
-                        )
-                    }
-                    return Ok((launch_result_from_inspection(inspection), run_network));
-                }
-                Ok(JailerResponse::Error(error)) if error.code == "not_found" => {
-                    anyhow::bail!(
-                        "jailerd launch request failed and no logical VM was committed: {launch_error:#}"
-                    )
-                }
-                Ok(JailerResponse::Error(error)) => anyhow::bail!(
-                    "jailerd launch request failed ({launch_error:#}); outcome inspection failed with {}: {}",
-                    error.code,
-                    error.message
-                ),
-                Ok(response) => anyhow::bail!(
-                    "jailerd launch request failed ({launch_error:#}); outcome inspection returned {response:?}"
-                ),
-                Err(inspect_error) => anyhow::bail!(
-                    "jailerd launch request failed ({launch_error:#}); outcome inspection also failed: {inspect_error:#}"
-                ),
-            }
-        }
-    };
+    // A transport timeout can occur after jailerd committed the launch but
+    // before the response arrived. Replay the byte-equivalent v2 operation so
+    // jailerd's fingerprint and generation fences remain authoritative. Never
+    // synthesize success from InspectVm, which cannot attest the request.
+    let launch_response = request_v2_launch_with_single_retry(launch_operation, |operation| {
+        request_jailerd(inner, operation)
+    })
+    .await?;
 
     match launch_response {
-        JailerResponse::LaunchVm(result) => Ok((result, run_network)),
+        JailerResponse::LaunchVmV2(result) => Ok(result),
+        JailerResponse::Error(error) if error.code == "boot_capacity_pending" => {
+            Err(BootCapacityPending {
+                message: error.message,
+            }
+            .into())
+        }
         JailerResponse::Error(error) => {
             anyhow::bail!("jailerd {}: {}", error.code, error.message)
         }
         response => {
-            anyhow::bail!("jailerd returned unexpected response to launch_vm: {response:?}")
+            anyhow::bail!("jailerd returned unexpected response to v2 launch: {response:?}")
         }
     }
 }
 
-fn launch_result_from_inspection(inspection: VmInspection) -> VmLaunchResult {
-    VmLaunchResult {
-        generation: inspection.generation,
-        unit_name: inspection.unit_name,
-        pid: inspection.pid,
-        cgroup_path: inspection.cgroup_path,
-        uid: inspection.uid,
-        gid: inspection.gid,
-        netns_name: inspection.netns_name,
-        netns_inode: inspection.netns_inode,
-        host_boot_id: inspection.host_boot_id,
-        pid_start_time_ticks: inspection.pid_start_time_ticks,
-        jail_root_inode: inspection.jail_root_inode,
-        cloud_hypervisor_sha256: inspection.cloud_hypervisor_sha256,
-        paths: inspection.paths,
+async fn ensure_jailed_run_network(
+    inner: &Inner,
+    run_id: &str,
+    network: &CreateVmNetwork,
+) -> Result<RunNetworkResult> {
+    let run_id = ValidatedId::parse(run_id.to_string()).context("validate jailer run ID")?;
+    let (guest_ip, prefix) = parse_ipv4_cidr(&network.guest_ip_cidr, "network.guest_ip_cidr")?;
+    let run_cidr = format!(
+        "{}/{prefix}",
+        Ipv4Addr::from(ipv4_network_u32(guest_ip, prefix))
+    );
+    match request_jailerd(
+        inner,
+        JailerRequest::EnsureRunNetwork(EnsureRunNetworkRequest {
+            run_id,
+            guest_cidr: run_cidr,
+            gateway: network.gateway.clone(),
+        }),
+    )
+    .await?
+    {
+        JailerResponse::EnsureRunNetwork(result) => Ok(result),
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => anyhow::bail!(
+            "jailerd returned unexpected response to ensure_run_network: {response:?}"
+        ),
     }
+}
+
+async fn finalize_jailed_vm_boot(
+    inner: &Inner,
+    generation: &ValidatedId,
+    expect_ssh_forward: bool,
+) -> Result<FinalizeVmBootResult> {
+    let response = request_jailerd(
+        inner,
+        JailerRequest::FinalizeVmBoot(FinalizeVmBootRequest {
+            generation: generation.clone(),
+        }),
+    )
+    .await?;
+    let result = match response {
+        JailerResponse::FinalizeVmBoot(result) => result,
+        JailerResponse::Error(error) => {
+            anyhow::bail!("jailerd {}: {}", error.code, error.message)
+        }
+        response => {
+            anyhow::bail!("jailerd returned unexpected response to finalize_vm_boot: {response:?}")
+        }
+    };
+    anyhow::ensure!(
+        result.generation == *generation,
+        "jailerd finalized a different VM generation"
+    );
+    anyhow::ensure!(
+        result.cpu_runtime.phase == VmCpuPhase::Steady,
+        "jailerd finalized VM without entering steady CPU phase"
+    );
+    let attestation = result
+        .cpu_runtime
+        .attestation
+        .as_ref()
+        .context("jailerd finalized VM without quota readback attestation")?;
+    anyhow::ensure!(
+        attestation.quota == result.cpu_runtime.steady_quota
+            && result.cpu_runtime.effective_quota == result.cpu_runtime.steady_quota
+            && attestation.cpu_max == result.cpu_runtime.steady_quota.cpu_max()
+            && attestation.cpu_max_burst == 0,
+        "jailerd steady quota attestation did not match the recorded entitlement"
+    );
+    anyhow::ensure!(
+        !expect_ssh_forward || result.ssh_forward_active,
+        "jailerd finalized VM without activating its reserved SSH forward"
+    );
+    Ok(result)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VmCpuSamplePoint {
+    VmBootAccepted,
+    KinoReady,
+    PreSeal,
+    PostSeal,
+    TerminalPublished,
+}
+
+impl VmCpuSamplePoint {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::VmBootAccepted => "vm_boot_accepted",
+            Self::KinoReady => "kino_ready",
+            Self::PreSeal => "pre_seal",
+            Self::PostSeal => "post_seal",
+            Self::TerminalPublished => "terminal_published",
+        }
+    }
+
+    const fn contract(self) -> VmBootCpuSamplePointV1 {
+        match self {
+            Self::VmBootAccepted => VmBootCpuSamplePointV1::VmBootAccepted,
+            Self::KinoReady => VmBootCpuSamplePointV1::KinoReady,
+            Self::PreSeal => VmBootCpuSamplePointV1::PreSeal,
+            Self::PostSeal => VmBootCpuSamplePointV1::PostSeal,
+            Self::TerminalPublished => VmBootCpuSamplePointV1::TerminalPublished,
+        }
+    }
+}
+
+const fn vm_cpu_phase_label(phase: VmCpuPhase) -> &'static str {
+    match phase {
+        VmCpuPhase::BootBurst => "boot_burst",
+        VmCpuPhase::Steady => "steady",
+    }
+}
+
+fn validate_vm_cpu_sample(expected_generation: &ValidatedId, sample: &VmCpuSample) -> Result<()> {
+    anyhow::ensure!(
+        sample.generation == *expected_generation,
+        "jailerd sampled a different VM generation"
+    );
+    let attestation = sample
+        .cpu_runtime
+        .attestation
+        .as_ref()
+        .context("jailerd CPU sample omitted live quota attestation")?;
+    anyhow::ensure!(
+        attestation.quota == sample.cpu_runtime.effective_quota
+            && attestation.cpu_max == sample.cpu_runtime.effective_quota.cpu_max()
+            && attestation.cpu_max_burst == 0
+            && attestation.verified_at_unix_ms == sample.sampled_at_unix_ms,
+        "jailerd CPU sample quota attestation did not match the live runtime state"
+    );
+    Ok(())
+}
+
+fn validate_vm_cpu_sample_point(point: VmCpuSamplePoint, sample: &VmCpuSample) -> Result<()> {
+    let expected_phase = match point {
+        VmCpuSamplePoint::VmBootAccepted
+        | VmCpuSamplePoint::KinoReady
+        | VmCpuSamplePoint::PreSeal => VmCpuPhase::BootBurst,
+        VmCpuSamplePoint::PostSeal | VmCpuSamplePoint::TerminalPublished => VmCpuPhase::Steady,
+    };
+    anyhow::ensure!(
+        sample.cpu_runtime.phase == expected_phase,
+        "CPU sample point {} observed {} instead of {}",
+        point.as_str(),
+        vm_cpu_phase_label(sample.cpu_runtime.phase),
+        vm_cpu_phase_label(expected_phase),
+    );
+    Ok(())
+}
+
+fn accept_vm_cpu_sample(
+    name: &str,
+    generation: &ValidatedId,
+    point: VmCpuSamplePoint,
+    sample: &VmCpuSample,
+) -> Option<VmBootCpuSampleV1> {
+    if let Err(error) = validate_vm_cpu_sample(generation, sample)
+        .and_then(|()| validate_vm_cpu_sample_point(point, sample))
+    {
+        warn!(
+            vm = name,
+            generation = %generation,
+            sample_point = point.as_str(),
+            error = %format!("{error:#}"),
+            "rejected invalid VM CPU sample"
+        );
+        return None;
+    }
+    let runtime = &sample.cpu_runtime;
+    let attestation = runtime
+        .attestation
+        .as_ref()
+        .expect("validated CPU sample includes an attestation");
+    info!(
+        event = "vm_cpu_sample",
+        vm = name,
+        generation = %sample.generation,
+        sample_point = point.as_str(),
+        sampled_at_unix_ms = sample.sampled_at_unix_ms,
+        cpu_phase = vm_cpu_phase_label(runtime.phase),
+        steady_cpu_millis = runtime.steady_quota.cpu_millis,
+        effective_cpu_millis = runtime.effective_quota.cpu_millis,
+        boot_deadline_unix_ms = ?runtime.boot_deadline_unix_ms,
+        cpu_max = %attestation.cpu_max,
+        cpu_max_burst = attestation.cpu_max_burst,
+        quota_verified_at_unix_ms = attestation.verified_at_unix_ms,
+        usage_usec = sample.cpu_stat.usage_usec,
+        user_usec = sample.cpu_stat.user_usec,
+        system_usec = sample.cpu_stat.system_usec,
+        nr_periods = sample.cpu_stat.nr_periods,
+        nr_throttled = sample.cpu_stat.nr_throttled,
+        throttled_usec = sample.cpu_stat.throttled_usec,
+        "captured VM CPU runtime sample"
+    );
+    let sampled_at_unix_ms = match i64::try_from(sample.sampled_at_unix_ms) {
+        Ok(value) => value,
+        Err(_) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                "discarding VM CPU sample with out-of-range timestamp"
+            );
+            return None;
+        }
+    };
+    let quota_verified_at_unix_ms = match i64::try_from(attestation.verified_at_unix_ms) {
+        Ok(value) => value,
+        Err(_) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                "discarding VM CPU sample with out-of-range quota timestamp"
+            );
+            return None;
+        }
+    };
+    Some(VmBootCpuSampleV1 {
+        point: point.contract(),
+        sampled_at_unix_ms,
+        phase: match runtime.phase {
+            VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
+            VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
+        },
+        steady_cpu_millis: runtime.steady_quota.cpu_millis,
+        effective_cpu_millis: runtime.effective_quota.cpu_millis,
+        boot_deadline_unix_ms: runtime
+            .boot_deadline_unix_ms
+            .and_then(|value| i64::try_from(value).ok()),
+        cpu_max: attestation.cpu_max.clone(),
+        cpu_max_burst: attestation.cpu_max_burst,
+        quota_verified_at_unix_ms,
+        usage_usec: sample.cpu_stat.usage_usec,
+        user_usec: sample.cpu_stat.user_usec,
+        system_usec: sample.cpu_stat.system_usec,
+        nr_periods: sample.cpu_stat.nr_periods,
+        nr_throttled: sample.cpu_stat.nr_throttled,
+        throttled_usec: sample.cpu_stat.throttled_usec,
+    })
+}
+
+async fn capture_vm_cpu_sample(
+    inner: &Inner,
+    name: &str,
+    generation: &ValidatedId,
+    point: VmCpuSamplePoint,
+) -> Option<VmBootCpuSampleV1> {
+    // Telemetry must never extend the privileged boot lease. A healthy local
+    // SOCK_SEQPACKET/cgroup read completes in a few milliseconds; abandon the
+    // sample if the daemon is busy and let quota finalization proceed.
+    let response = match timeout(
+        Duration::from_millis(50),
+        request_jailerd(
+            inner,
+            JailerRequest::SampleVmCpu(SampleVmCpuRequest {
+                generation: generation.clone(),
+            }),
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                "skipping VM CPU sample because the 50ms telemetry budget expired"
+            );
+            return None;
+        }
+    };
+    let sample = match response {
+        Ok(JailerResponse::SampleVmCpu(sample)) => sample,
+        Ok(JailerResponse::Error(error)) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                error_code = %error.code,
+                error_message = %error.message,
+                "failed to capture VM CPU sample"
+            );
+            return None;
+        }
+        Ok(response) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                response = ?response,
+                "jailerd returned an unexpected VM CPU sample response"
+            );
+            return None;
+        }
+        Err(error) => {
+            warn!(
+                vm = name,
+                generation = %generation,
+                sample_point = point.as_str(),
+                error = %format!("{error:#}"),
+                "failed to request VM CPU sample"
+            );
+            return None;
+        }
+    };
+    accept_vm_cpu_sample(name, generation, point, &sample)
+}
+
+async fn commit_ready_vm_and_probe(
+    inner: &Inner,
+    name: &str,
+    generation: &ValidatedId,
+    ready: &ProbeUpdateEnvelope,
+) -> Result<()> {
+    anyhow::ensure!(
+        ready.vm_name == name,
+        "Kino ready snapshot identifies a different VM"
+    );
+    anyhow::ensure!(
+        ready.jail_generation == generation.as_str(),
+        "Kino ready snapshot generation does not match the live generation"
+    );
+    anyhow::ensure!(
+        ready.collection_state == ProbeCollectionState::Ok,
+        "Kino ready snapshot is not successful"
+    );
+    let probe_row = probe_state_row(ready)?;
+    let now_s = now_unix_s();
+    let observed_at = now_unix_ms();
+
+    // Hold the state generation fence until SQLite acknowledges both rows.
+    // This prevents a delete/recreate from being overwritten by a stale ready
+    // commit while keeping external publication strictly after durability.
+    let mut states = inner.states.write().await;
+    let current = states
+        .get_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("VM state disappeared during ready commit"))?;
+    let mut committed = current.clone();
+    let details = committed
+        .details
+        .as_mut()
+        .context("VM details disappeared during ready commit")?;
+    anyhow::ensure!(
+        details.run_id.as_deref() == Some(ready.run_id.as_str()),
+        "Kino ready snapshot run does not match the live VM"
+    );
+    anyhow::ensure!(
+        details.jail_generation.as_deref() == Some(generation.as_str()),
+        "VM generation changed during ready commit"
+    );
+    let runtime = details
+        .cpu_runtime
+        .as_ref()
+        .context("VM has no live CPU quota attestation during ready commit")?;
+    anyhow::ensure!(
+        runtime.phase == VmCpuPhase::Steady
+            && runtime.effective_quota == runtime.steady_quota
+            && runtime.attestation.is_some(),
+        "VM CPU quota is not attested steady during ready commit"
+    );
+    details.ssh_host_keys_openssh = normalize_ssh_host_keys(ready.ssh_host_keys_openssh.clone());
+    committed.state = VmLifecycleState::Running;
+    committed.updated_at_s = now_s;
+    committed.updated_at = format_rfc3339_s(now_s);
+    committed.error = None;
+    committed.running_at_s.get_or_insert(now_s);
+    committed.lease_expires_at =
+        compute_lease_expires_at(committed.running_at_s, committed.lease_duration_seconds);
+
+    let terminal = terminal_state_from_vm(&committed, &inner.ssh_access, true, observed_at)
+        .context("ready VM is missing terminal identity")?;
+    if committed
+        .details
+        .as_ref()
+        .and_then(|details| details.ssh_public_port)
+        .is_some()
+    {
+        anyhow::ensure!(
+            terminal.state == VmTerminalStateKind::Ready && terminal.terminal_target.is_some(),
+            "authenticated SSH did not produce a terminal-ready state"
+        );
+    }
+
+    inner
+        .db
+        .upsert_ready_vm_and_probe_state(committed.to_db_row(), probe_row)
+        .await
+        .context("atomically persist running VM and Kino snapshot")?;
+    *current = committed;
+    Ok(())
+}
+
+async fn terminal_state_for_attested_ready(
+    inner: &Inner,
+    name: &str,
+    generation: &ValidatedId,
+    boot_evidence: Option<VmBootEvidenceV1>,
+) -> Result<VmTerminalState> {
+    if let Some(evidence) = &boot_evidence {
+        anyhow::ensure!(
+            evidence.generation == generation.as_str(),
+            "VM boot evidence generation does not match the live generation"
+        );
+    }
+    let mut states = inner.states.write().await;
+    let vm = states
+        .get_mut(name)
+        .context("VM state disappeared before terminal-ready publication")?;
+    let expects_terminal = {
+        let details = vm
+            .details
+            .as_mut()
+            .context("VM details disappeared before terminal-ready publication")?;
+        anyhow::ensure!(
+            details.jail_generation.as_deref() == Some(generation.as_str()),
+            "VM generation changed before terminal-ready publication"
+        );
+        details.boot_evidence = boot_evidence;
+        details.ssh_public_port.is_some()
+    };
+    anyhow::ensure!(
+        vm.state == VmLifecycleState::Running,
+        "VM is not durably running before terminal-ready publication"
+    );
+    let terminal = terminal_state_from_vm(vm, &inner.ssh_access, true, now_unix_ms())
+        .context("ready VM is missing terminal identity")?;
+    if expects_terminal {
+        anyhow::ensure!(
+            terminal.state == VmTerminalStateKind::Ready && terminal.terminal_target.is_some(),
+            "authenticated SSH did not produce a terminal-ready state"
+        );
+    }
+    Ok(terminal)
+}
+
+async fn persist_cpu_runtime(
+    inner: &Inner,
+    name: &str,
+    generation: &ValidatedId,
+    runtime: VmCpuRuntimeState,
+) -> Result<()> {
+    let persisted = {
+        let mut states = inner.states.write().await;
+        let vm = states
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("VM state disappeared during CPU quota finalization"))?;
+        let details = vm.details.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("VM details disappeared during CPU quota finalization")
+        })?;
+        anyhow::ensure!(
+            details.jail_generation.as_deref() == Some(generation.as_str()),
+            "VM generation changed during CPU quota finalization"
+        );
+        details.cpu_runtime = Some(runtime);
+        vm.clone()
+    };
+    inner
+        .db
+        .upsert_vm(persisted.to_db_row())
+        .await
+        .context("persist finalized VM CPU runtime")
+}
+
+async fn seal_ready_vm_cpu(
+    inner: &Inner,
+    name: &str,
+    generation: &ValidatedId,
+    expect_ssh_forward: bool,
+) -> Result<FinalizeVmBootResult> {
+    let host_keys = {
+        let states = inner.states.read().await;
+        let details = states
+            .get(name)
+            .and_then(|vm| vm.details.as_ref())
+            .context("VM details disappeared before CPU quota finalization")?;
+        anyhow::ensure!(
+            details.jail_generation.as_deref() == Some(generation.as_str()),
+            "VM generation changed before CPU quota finalization"
+        );
+        details.ssh_host_keys_openssh.clone()
+    };
+    if expect_ssh_forward {
+        anyhow::ensure!(
+            !host_keys.is_empty(),
+            "Kino readiness did not include an SSH host key"
+        );
+    }
+    let finalized = finalize_jailed_vm_boot(inner, generation, expect_ssh_forward)
+        .await
+        .context("seal VM boot CPU and activate steady-state ingress")?;
+    persist_cpu_runtime(inner, name, generation, finalized.cpu_runtime.clone())
+        .await
+        .context("persist steady CPU quota evidence")?;
+    Ok(finalized)
 }
 
 fn artifact_source(
@@ -1707,6 +2335,7 @@ async fn persist_jail_launch(
         details.jail_uid = Some(launch.uid);
         details.jail_gid = Some(launch.gid);
         details.jail_netns_name = Some(launch.netns_name.clone());
+        details.cpu_runtime = Some(launch.cpu_runtime.clone());
         details.bridge_name = Some(run_network.bridge_name.clone());
         details.kino_vsock_path = Some(launch.paths.host_vsock_socket.display().to_string());
         vm.clone()
@@ -1751,19 +2380,37 @@ async fn remove_agent_launch_sources(req: &RunCreateInput<'_>) -> Result<()> {
 }
 
 async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
+    let create_started_at = Instant::now();
+    let create_started_at_unix_ms = now_unix_ms();
+    let mut cpu_samples = Vec::with_capacity(5);
     set_state(inner, req.name, VmLifecycleState::CachingImage).await;
 
+    // New-run network construction and descriptor validation are independent.
+    // Hold the per-run lifecycle fence while both proceed so a concurrent
+    // cleanup cannot remove topology underneath this launch.
+    let run_launch_guard = acquire_run_cleanup_lock(&inner.run_cleanup_locks, req.run_id).await;
+    ensure_create_not_deleted(inner, req.name).await?;
     let cache_root =
         image_cache::default_cache_root().context("failed to determine image cache root")?;
-    let cached_image = image_cache::ensure_cached_image(
-        req.image_key,
-        &inner.image_registry,
-        Some(&inner.bridge),
+    let network_inner = Arc::clone(inner);
+    let network_run_id = req.run_id.to_string();
+    let network_config = req.network.clone();
+    let network_task = tokio::spawn(async move {
+        let result =
+            ensure_jailed_run_network(&network_inner, &network_run_id, &network_config).await;
+        (result, Instant::now())
+    });
+    let _network_abort = AbortTaskOnDrop(network_task.abort_handle());
+    let ready_image = image_cache::require_ready_image_launch(
         &cache_root,
-        &inner.registry_http,
+        req.image_key,
+        Some(req.expected_image_sha256),
     )
     .await
-    .context("failed to ensure image and boot artifacts are cached")?;
+    .context("image is not eligible for foreground launch")?;
+    let image_ready_at = Instant::now();
+    let cached_image = ready_image.image;
+    let prepared_image = ready_image.prepared_image;
     if let Err(error) = image_cache::touch_cached_image(&inner.db, &cached_image).await {
         warn!(
             error = %error,
@@ -1792,22 +2439,10 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             );
         }
     }
-    let base_path = cached_image.raw_path.clone();
     ensure_create_not_deleted(inner, req.name).await?;
-
     set_state(inner, req.name, VmLifecycleState::PreparingDisks).await;
 
-    info!(
-        base_path = %base_path.display(),
-        root_path = %req.root_disk_path.display(),
-        "creating CoW root disk from cached raw image"
-    );
     let base_virtual_size_bytes = cached_image.virtual_size_bytes;
-
-    copy_root_disk_reflink(&base_path, req.root_disk_path)
-        .await
-        .context("failed to create root disk from cached raw image")?;
-
     if let Some(target_disk_mib) = req.disk_mib {
         let target_bytes = u64::from(target_disk_mib) * 1024 * 1024;
         if target_bytes < base_virtual_size_bytes {
@@ -1817,17 +2452,11 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
                 base_virtual_size_bytes / (1024 * 1024)
             );
         }
-        if target_bytes > base_virtual_size_bytes {
-            tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(req.root_disk_path)
-                .await
-                .with_context(|| format!("failed to open {}", req.root_disk_path.display()))?
-                .set_len(target_bytes)
-                .await
-                .context("failed to resize root disk")?;
-        }
     }
+    let root_resize_required = req.disk_mib.is_some_and(|target_disk_mib| {
+        u64::from(target_disk_mib) * 1024 * 1024 > base_virtual_size_bytes
+    });
+
     ensure_create_not_deleted(inner, req.name).await?;
 
     let runtime = req.runtime;
@@ -1843,8 +2472,8 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
     let network = req.network.clone();
     let peer_guest_ips = req.peer_guest_ips.clone();
     let hostname = req.hostname.to_string();
-    tokio::task::spawn_blocking(move || {
-        runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
+    let runtime_disk_task = tokio::task::spawn_blocking(move || {
+        let result = runtime_disk::write_runtime_disk(&runtime_disk::RuntimeDiskInput {
             path: &config_disk_path,
             ssh_authorized_keys_openssh: &ssh_authorized_keys_openssh,
             kino_vsock_cid,
@@ -1852,24 +2481,45 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             kino_host_ready_port,
             hostname: &hostname,
             network: &network,
+            root_resize_required,
             peer_guest_ips: &peer_guest_ips,
-        })
-    })
-    .await
-    .context("scenario runtime disk task panicked")?
-    .context("failed to write scenario runtime disk")?;
+        });
+        (result, Instant::now())
+    });
+    let (runtime_disk_result, network_result) = tokio::join!(runtime_disk_task, network_task);
+    let (runtime_disk_result, runtime_disk_ready_at) =
+        runtime_disk_result.context("scenario runtime disk task panicked")?;
+    let (run_network, network_ready_at) = network_result.context("run network task panicked")?;
+    let run_network = run_network.context("failed to ensure jailed run network")?;
+    runtime_disk_result.context("failed to write scenario runtime disk")?;
     ensure_create_not_deleted(inner, req.name).await?;
+    let disks_ready_at = Instant::now();
 
     set_state(inner, req.name, VmLifecycleState::CreatingVm).await;
 
-    // Launches and cleanup for the same run share one ordering domain. This
-    // prevents a new EnsureRunNetwork from interleaving between the last
-    // cleanup's sibling check and its DestroyRunNetwork request. Re-check a
-    // queued delete after this potentially blocking acquire so cancellation
-    // does not unnecessarily commit a jailed generation.
-    let run_launch_guard = acquire_run_cleanup_lock(&inner.run_cleanup_locks, req.run_id).await;
-    ensure_create_not_deleted(inner, req.name).await?;
-    let (launch, run_network) = launch_jailed_cloud_hypervisor(inner, &req, &cached_image).await?;
+    let launch_deadline = Instant::now() + Duration::from_secs(SCENARIO_READY_MAX_TIMEOUT_SECONDS);
+    let mut capacity_attempt = 0_u32;
+    let launch = loop {
+        match launch_jailed_cloud_hypervisor(inner, &req, &cached_image, &prepared_image).await {
+            Ok(result) => break result,
+            Err(error) if error.downcast_ref::<BootCapacityPending>().is_some() => {
+                ensure_create_not_deleted(inner, req.name).await?;
+                if Instant::now() >= launch_deadline {
+                    return Err(error).context("timed out waiting for jailerd boot CPU capacity");
+                }
+                let delay = boot_capacity_retry_delay(capacity_attempt);
+                capacity_attempt = capacity_attempt.saturating_add(1);
+                debug!(
+                    vm = req.name,
+                    attempt = capacity_attempt,
+                    delay_ms = delay.as_millis(),
+                    "waiting for capacity-accounted VM boot CPU"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
     persist_jail_launch(inner, req.name, &launch, &run_network).await?;
     drop(run_launch_guard);
 
@@ -1877,6 +2527,7 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         .await
         .context("remove unprivileged launch staging files")?;
     ensure_create_not_deleted(inner, req.name).await?;
+    let jail_ready_at = Instant::now();
 
     let vm_cfg = build_cloud_hypervisor_vm_config(CloudHypervisorVmConfigInput {
         name: req.name,
@@ -1889,11 +2540,13 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         kino_vsock_cid: req.kino_vsock_cid,
     })?;
 
-    let ch = wait_for_ch_ready(
-        &launch.paths.host_api_socket,
-        inner.ch_spawn_timeout_seconds,
-    )
-    .await?;
+    // LaunchVm returns only after jailerd has pinned and pinged the API socket.
+    // Repeating the readiness loop here adds another VMM API request and up to
+    // one polling interval to every boot. Recovery still uses the bounded
+    // readiness helper because it does not inherit that launch attestation.
+    let ch = ChClient::new(launch.paths.host_api_socket.display().to_string())
+        .context("open jailerd-attested cloud-hypervisor API socket")?;
+    let vmm_ready_at = Instant::now();
 
     debug!("calling cloud-hypervisor vm.create");
     ch.vm_create(&vm_cfg)
@@ -1901,12 +2554,6 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
         .context("cloud-hypervisor vm.create failed")?;
 
     set_state(inner, req.name, VmLifecycleState::BootingVm).await;
-
-    debug!("calling cloud-hypervisor vm.boot");
-    ch.vm_boot()
-        .await
-        .context("cloud-hypervisor vm.boot failed")?;
-    ensure_create_not_deleted(inner, req.name).await?;
 
     let mut details = {
         let states = inner.states.read().await;
@@ -1916,86 +2563,208 @@ async fn run_create(inner: &Arc<Inner>, req: RunCreateInput<'_>) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("VM state disappeared after jailed launch"))?
     };
     details.ssh_host_keys_openssh = current_ssh_host_keys(inner, req.name).await;
-    // The probe worker owns the per-VM Kino readiness push listener, so it
-    // must be running before we wait for the first readiness snapshot.
+    let readiness_updates = inner.kino_readiness_tx.subscribe();
+    // Bind and activate the guest-initiated readiness socket before boot. A
+    // fast guest's first Kino push must not race listener startup and fall
+    // through to Kino's reconnect interval.
     start_probe_worker(inner, req.name, &details)
         .await
         .context("failed to start vm probe worker")?;
-    let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details)
+
+    debug!("calling cloud-hypervisor vm.boot");
+    ch.vm_boot()
+        .await
+        .context("cloud-hypervisor vm.boot failed")?;
+    ensure_create_not_deleted(inner, req.name).await?;
+    let boot_accepted_at = Instant::now();
+    if let Some(sample) = capture_vm_cpu_sample(
+        inner,
+        req.name,
+        &launch.generation,
+        VmCpuSamplePoint::VmBootAccepted,
+    )
+    .await
+    {
+        cpu_samples.push(sample);
+    }
+
+    let ready = wait_for_scenario_runtime_ready(inner, req.name, &ch, &details, readiness_updates)
         .await
         .context("scenario runtime did not become ready")?;
-    persist_probe_update(inner, &ready).await;
-    let _ = inner.probe_updates_tx.send(ready);
     ensure_create_not_deleted(inner, req.name).await?;
-    // Render the nftables SSH forwards before flipping to Running: terminal
-    // readiness (and thus the advertised terminal target) is gated on the
-    // Running state, and a concurrent Kino-readiness report can observe the
-    // Running transition and advertise the terminal before a reconcile that
-    // ran afterwards would install the DNAT forward. The queue-time reconcile
-    // can also miss this VM's port because a run's VMs are created
-    // concurrently, so this is the reconcile that guarantees the forward.
-    ensure_vm_network_reconciled(inner)
+    let guest_ready_at = Instant::now();
+    if let Some(sample) = capture_vm_cpu_sample(
+        inner,
+        req.name,
+        &launch.generation,
+        VmCpuSamplePoint::KinoReady,
+    )
+    .await
+    {
+        cpu_samples.push(sample);
+    }
+    let finalized = seal_ready_vm_cpu(
+        inner,
+        req.name,
+        &launch.generation,
+        req.ssh_public_port.is_some(),
+    )
+    .await?;
+    let quota_sealed_at = Instant::now();
+    if let Some(sample) = finalized.pre_seal_cpu_sample.as_ref().and_then(|sample| {
+        accept_vm_cpu_sample(
+            req.name,
+            &launch.generation,
+            VmCpuSamplePoint::PreSeal,
+            sample,
+        )
+    }) {
+        cpu_samples.push(sample);
+    }
+    if let Some(sample) = finalized.post_seal_cpu_sample.as_ref().and_then(|sample| {
+        accept_vm_cpu_sample(
+            req.name,
+            &launch.generation,
+            VmCpuSamplePoint::PostSeal,
+            sample,
+        )
+    }) {
+        cpu_samples.push(sample);
+    }
+    if req.ssh_public_port.is_some() {
+        wait_for_guest_ssh_before_running(inner, req.name, &launch.generation).await?;
+    }
+    ensure_create_not_deleted(inner, req.name).await?;
+    let ssh_verified_at = Instant::now();
+
+    // The VM can become externally ready only after jailerd has live-read the
+    // steady cgroup quota, activated DNAT, and the agent has authenticated the
+    // guest host key. Capture the final quota boundary, atomically commit
+    // Running + Kino state, then emit exactly one composite ready event.
+    if let Some(sample) = capture_vm_cpu_sample(
+        inner,
+        req.name,
+        &launch.generation,
+        VmCpuSamplePoint::TerminalPublished,
+    )
+    .await
+    {
+        cpu_samples.push(sample);
+    }
+    commit_ready_vm_and_probe(inner, req.name, &launch.generation, &ready)
         .await
-        .context("failed to reconcile ssh forwarding for running vm")?;
-    set_state(inner, req.name, VmLifecycleState::Running).await;
-    publish_terminal_state_update(inner, req.name, false).await;
+        .context("durably commit sealed VM readiness")?;
+    let terminal_ready_at = Instant::now();
+    let ready_at_unix_ms = now_unix_ms();
+    let phases = VmBootTimeline {
+        create_started_at,
+        image_ready_at,
+        runtime_disk_ready_at,
+        network_ready_at,
+        disks_ready_at,
+        jail_ready_at,
+        vmm_ready_at,
+        boot_accepted_at,
+        guest_ready_at,
+        quota_sealed_at,
+        ssh_verified_at,
+        terminal_ready_at,
+    }
+    .phase_durations();
+    let boot_evidence = VmBootEvidenceV1 {
+        generation: launch.generation.as_str().to_string(),
+        started_at_unix_ms: create_started_at_unix_ms,
+        ready_at_unix_ms,
+        phases,
+        cpu_samples,
+    };
+    let terminal =
+        terminal_state_for_attested_ready(inner, req.name, &launch.generation, Some(boot_evidence))
+            .await
+            .context("build generation-fenced terminal-ready projection")?;
+    emit_terminal_state_update(inner, terminal, false).await;
     start_terminal_worker(inner, req.name)
         .await
         .context("failed to start vm terminal worker")?;
-    info!("vm booted");
+    info!(
+        image_cache_ms = image_ready_at.duration_since(create_started_at).as_millis(),
+        disk_stage_ms = disks_ready_at.duration_since(image_ready_at).as_millis(),
+        jail_launch_ms = jail_ready_at.duration_since(disks_ready_at).as_millis(),
+        vmm_start_ms = vmm_ready_at.duration_since(jail_ready_at).as_millis(),
+        vm_api_ms = boot_accepted_at.duration_since(vmm_ready_at).as_millis(),
+        guest_ready_ms = guest_ready_at.duration_since(boot_accepted_at).as_millis(),
+        quota_seal_ms = quota_sealed_at.duration_since(guest_ready_at).as_millis(),
+        ssh_verify_ms = ssh_verified_at.duration_since(quota_sealed_at).as_millis(),
+        terminal_publish_ms = terminal_ready_at
+            .duration_since(ssh_verified_at)
+            .as_millis(),
+        total_ms = terminal_ready_at
+            .duration_since(create_started_at)
+            .as_millis(),
+        "vm booted"
+    );
 
     Ok(())
 }
 
-async fn copy_root_disk_reflink(src: &Path, dest: &Path) -> Result<()> {
-    if let Err(error) = tokio::fs::remove_file(dest).await
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error)
-            .with_context(|| format!("failed to remove stale root disk {}", dest.display()));
-    }
+#[derive(Clone, Copy, Debug)]
+struct VmBootTimeline {
+    create_started_at: Instant,
+    image_ready_at: Instant,
+    runtime_disk_ready_at: Instant,
+    network_ready_at: Instant,
+    disks_ready_at: Instant,
+    jail_ready_at: Instant,
+    vmm_ready_at: Instant,
+    boot_accepted_at: Instant,
+    guest_ready_at: Instant,
+    quota_sealed_at: Instant,
+    ssh_verified_at: Instant,
+    terminal_ready_at: Instant,
+}
 
-    let reflink = Command::new("cp")
-        // coreutils >= 9.2 rejects --reflink=always combined with
-        // --sparse=always; reflink clones share extents, so sparseness is
-        // preserved without an explicit sparse mode.
-        .arg("--reflink=always")
-        .arg("--sparse=auto")
-        .arg(src)
-        .arg(dest)
-        .output()
-        .await
-        .context("failed to execute cp --reflink=always")?;
-    if reflink.status.success() {
-        info!(
-            src = %src.display(),
-            dest = %dest.display(),
-            "created reflink root disk"
+impl VmBootTimeline {
+    fn phase_durations(self) -> VmBootPhaseDurationsV1 {
+        let network_ms = duration_ms(
+            self.network_ready_at
+                .saturating_duration_since(self.create_started_at),
         );
-        return Ok(());
+        VmBootPhaseDurationsV1 {
+            image_disk_ms: duration_ms(self.image_ready_at - self.create_started_at)
+                .saturating_add(duration_ms(
+                    self.runtime_disk_ready_at - self.image_ready_at,
+                )),
+            network_jailer_vmm_ms: network_ms
+                .saturating_add(duration_ms(self.jail_ready_at - self.disks_ready_at))
+                .saturating_add(duration_ms(self.vmm_ready_at - self.jail_ready_at))
+                .saturating_add(duration_ms(self.boot_accepted_at - self.vmm_ready_at)),
+            guest_to_kino_ms: duration_ms(self.guest_ready_at - self.boot_accepted_at),
+            seal_ssh_publish_ms: duration_ms(self.terminal_ready_at - self.guest_ready_at),
+            total_ms: duration_ms(self.terminal_ready_at - self.create_started_at),
+            image_cache_ms: duration_ms(self.image_ready_at - self.create_started_at),
+            runtime_disk_ms: duration_ms(self.runtime_disk_ready_at - self.image_ready_at),
+            network_ms,
+            jailer_stage_ms: duration_ms(self.jail_ready_at - self.disks_ready_at),
+            vmm_start_ms: duration_ms(self.vmm_ready_at - self.jail_ready_at),
+            vm_api_ms: duration_ms(self.boot_accepted_at - self.vmm_ready_at),
+            quota_seal_ms: duration_ms(self.quota_sealed_at - self.guest_ready_at),
+            ssh_verify_ms: duration_ms(self.ssh_verified_at - self.quota_sealed_at),
+            terminal_publish_ms: duration_ms(self.terminal_ready_at - self.ssh_verified_at),
+        }
     }
+}
 
-    let stderr = String::from_utf8_lossy(&reflink.stderr).trim().to_string();
-    warn!(
-        src = %src.display(),
-        dest = %dest.display(),
-        error = %stderr,
-        "root disk reflink failed; falling back to sparse copy"
-    );
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
-    let sparse = Command::new("cp")
-        .arg("--sparse=always")
-        .arg(src)
-        .arg(dest)
-        .output()
-        .await
-        .context("failed to execute cp --sparse=always")?;
-    if !sparse.status.success() {
-        let stderr = String::from_utf8_lossy(&sparse.stderr).trim().to_string();
-        anyhow::bail!("cp --sparse=always failed: {stderr}");
-    }
-
-    Ok(())
+fn boot_capacity_retry_delay(attempt: u32) -> Duration {
+    let exponent = attempt.min(3);
+    let base_ms = 100_u64.saturating_mul(1_u64 << exponent);
+    let mut jitter_bytes = [0_u8; 2];
+    let _ = getrandom_fill(&mut jitter_bytes);
+    let jitter_ms = u64::from(u16::from_le_bytes(jitter_bytes)) % 201;
+    Duration::from_millis(base_ms.saturating_add(jitter_ms).min(1_000))
 }
 
 async fn wait_for_scenario_runtime_ready(
@@ -2003,6 +2772,7 @@ async fn wait_for_scenario_runtime_ready(
     vm_name: &str,
     ch: &ChClient,
     details: &VmDetails,
+    mut updates: broadcast::Receiver<ProbeUpdateEnvelope>,
 ) -> Result<ProbeUpdateEnvelope> {
     let run_id = details
         .run_id
@@ -2010,6 +2780,11 @@ async fn wait_for_scenario_runtime_ready(
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("vm details missing run_id"))?;
+    let jail_generation = details
+        .jail_generation
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("vm details missing jail_generation"))?;
     let kino_vsock_path = details
         .kino_vsock_path
         .as_ref()
@@ -2020,10 +2795,19 @@ async fn wait_for_scenario_runtime_ready(
         .ok_or_else(|| anyhow::anyhow!("vm details missing cpu_millis"))?;
     let ready_timeout = scenario_runtime_ready_timeout(cpu_millis)?;
     let mut saw_kino_vsock_socket = false;
-    let mut updates = inner.probe_updates_tx.subscribe();
-    let mut ch_interval =
-        tokio::time::interval(Duration::from_millis(SCENARIO_READY_POLL_INTERVAL_MILLIS));
+    let mut process_interval = tokio::time::interval(Duration::from_millis(
+        SCENARIO_READY_PROCESS_POLL_INTERVAL_MILLIS,
+    ));
+    process_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume Tokio's immediate first tick: vm.boot has just succeeded and the
+    // readiness push is the primary signal, so neither liveness path needs to
+    // steal quota from the VMM at t=0.
+    process_interval.tick().await;
+    let mut ch_interval = tokio::time::interval(Duration::from_secs(
+        SCENARIO_READY_API_POLL_INTERVAL_SECONDS,
+    ));
     ch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ch_interval.tick().await;
     let mut last_error = None;
 
     let wait_result = timeout(ready_timeout, async {
@@ -2033,7 +2817,10 @@ async fn wait_for_scenario_runtime_ready(
             tokio::select! {
                 update = updates.recv() => {
                     match update {
-                        Ok(update) if update.vm_name == vm_name && update.run_id == run_id => {
+                        Ok(update)
+                            if update.vm_name == vm_name
+                                && update.run_id == run_id
+                                && update.jail_generation == jail_generation => {
                             if update.collection_state == ProbeCollectionState::Ok {
                                 ensure_scenario_runtime_process_live(vm_name, details).await?;
                                 return Ok(update);
@@ -2051,7 +2838,7 @@ async fn wait_for_scenario_runtime_ready(
                         }
                     }
                 }
-                _ = ch_interval.tick() => {
+                _ = process_interval.tick() => {
                     ensure_scenario_runtime_process_live(vm_name, details).await?;
 
                     let socket_exists = kino_vsock_path.exists();
@@ -2064,6 +2851,8 @@ async fn wait_for_scenario_runtime_ready(
                         saw_kino_vsock_socket = true;
                     }
 
+                }
+                _ = ch_interval.tick() => {
                     match timeout(
                         Duration::from_secs(SCENARIO_READY_API_PROBE_TIMEOUT_SECONDS),
                         ch.vm_info(),
@@ -2547,6 +3336,19 @@ async fn detect_tracked_vm_runtime(
         return Ok(TrackedVmRuntimeStatus::Inconclusive);
     }
 
+    // Inspection is adoption evidence only. Never activate ingress merely
+    // because SQLite says Running: the resumed worker must receive fresh Kino
+    // readiness for this generation and execute the normal secure finalizer.
+    let cpu_runtime = inspection.cpu_runtime.clone();
+    {
+        let mut states = inner.states.write().await;
+        if let Some(current) = states.get_mut(&vm.name)
+            && let Some(details) = current.details.as_mut()
+        {
+            details.cpu_runtime = Some(cpu_runtime);
+        }
+    }
+
     match inspection.health {
         SandboxHealth::Exited => return Ok(TrackedVmRuntimeStatus::Dead),
         SandboxHealth::Quarantined => return Ok(TrackedVmRuntimeStatus::Inconclusive),
@@ -2693,6 +3495,11 @@ async fn resume_tracked_vm_on_startup(
                 )
             })?;
 
+            let readiness_updates = inner_for_task.kino_readiness_tx.subscribe();
+            start_probe_worker(&inner_for_task, &vm_name, &details)
+                .await
+                .context("failed to restart vm probe worker after startup resume")?;
+
             if live_state == TrackedVmLiveState::Created {
                 debug!(vm = vm_name, "restarting boot for startup-recovered vm");
                 ch.vm_boot()
@@ -2700,17 +3507,37 @@ async fn resume_tracked_vm_on_startup(
                     .context("cloud-hypervisor vm.boot failed during startup resume")?;
             }
 
-            // The probe worker owns the per-VM Kino readiness push listener,
-            // so it must be running before waiting for a readiness snapshot.
-            start_probe_worker(&inner_for_task, &vm_name, &details)
+            let ready = wait_for_scenario_runtime_ready(
+                &inner_for_task,
+                &vm_name,
+                &ch,
+                &details,
+                readiness_updates,
+            )
+            .await?;
+            let generation = ValidatedId::parse(
+                details
+                    .jail_generation
+                    .clone()
+                    .context("startup-recovered VM is missing its jail generation")?,
+            )
+            .context("validate startup-recovered jail generation")?;
+            let expect_ssh_forward = details.ssh_public_port.is_some();
+            seal_ready_vm_cpu(&inner_for_task, &vm_name, &generation, expect_ssh_forward)
                 .await
-                .context("failed to restart vm probe worker after startup resume")?;
-            let ready =
-                wait_for_scenario_runtime_ready(&inner_for_task, &vm_name, &ch, &details).await?;
-            persist_probe_update(&inner_for_task, &ready).await;
-            let _ = inner_for_task.probe_updates_tx.send(ready);
-            set_state(&inner_for_task, &vm_name, VmLifecycleState::Running).await;
-            publish_terminal_state_update(&inner_for_task, &vm_name, false).await;
+                .context("securely finalize startup-recovered VM")?;
+            if expect_ssh_forward {
+                wait_for_guest_ssh_before_running(&inner_for_task, &vm_name, &generation).await?;
+            }
+            ensure_create_not_deleted(&inner_for_task, &vm_name).await?;
+            commit_ready_vm_and_probe(&inner_for_task, &vm_name, &generation, &ready)
+                .await
+                .context("durably commit recovered VM readiness")?;
+            let terminal =
+                terminal_state_for_attested_ready(&inner_for_task, &vm_name, &generation, None)
+                    .await
+                    .context("build recovered terminal-ready projection")?;
+            emit_terminal_state_update(&inner_for_task, terminal, false).await;
             start_terminal_worker(&inner_for_task, &vm_name)
                 .await
                 .context("failed to restart vm terminal worker after startup resume")?;
@@ -4024,6 +4851,7 @@ async fn run_probe_worker_task(
     inner: Arc<Inner>,
     vm_name: String,
     run_id: String,
+    jail_generation: String,
     _kino_vsock_path: PathBuf,
     _kino_vsock_port: u32,
     _jail_uid: u32,
@@ -4041,11 +4869,11 @@ async fn run_probe_worker_task(
             match states.get(&vm_name) {
                 Some(vm) => {
                     vm.state == VmLifecycleState::Running
-                        && vm
-                            .details
-                            .as_ref()
-                            .and_then(|details| details.run_id.as_ref())
-                            .is_some_and(|current| current == &run_id)
+                        && vm.details.as_ref().is_some_and(|details| {
+                            details.run_id.as_deref() == Some(run_id.as_str())
+                                && details.jail_generation.as_deref()
+                                    == Some(jail_generation.as_str())
+                        })
                 }
                 None => false,
             }
@@ -4061,6 +4889,7 @@ async fn handle_kino_ready_stream(
     inner: Arc<Inner>,
     vm_name: &str,
     run_id: &str,
+    jail_generation: &str,
     mut stream: tokio::net::UnixStream,
 ) -> Result<()> {
     use std::io::ErrorKind;
@@ -4087,7 +4916,7 @@ async fn handle_kino_ready_stream(
             .context("failed to read Kino readiness frame body")?;
 
         let result = decode_probe_snapshot(&frame)?;
-        apply_kino_ready_snapshot(&inner, vm_name, run_id, result).await?;
+        apply_kino_ready_snapshot(&inner, vm_name, run_id, jail_generation, result).await?;
     }
 }
 
@@ -4096,31 +4925,88 @@ async fn apply_kino_ready_snapshot(
     inner: &Arc<Inner>,
     vm_name: &str,
     run_id: &str,
+    jail_generation: &str,
     result: ProbePollResult,
 ) -> Result<()> {
     let current_run_matches = {
         let states = inner.states.read().await;
         states.get(vm_name).is_some_and(|vm| {
-            vm.details
-                .as_ref()
-                .and_then(|details| details.run_id.as_deref())
-                .is_some_and(|current| current == run_id)
+            vm.details.as_ref().is_some_and(|details| {
+                details.run_id.as_deref() == Some(run_id)
+                    && details.jail_generation.as_deref() == Some(jail_generation)
+            })
         })
     };
     anyhow::ensure!(
         current_run_matches,
-        "dropping Kino readiness snapshot for stale run {run_id} of vm {vm_name}"
+        "dropping Kino readiness snapshot for stale run/generation {run_id}/{jail_generation} of vm {vm_name}"
     );
 
-    update_vm_ssh_host_keys(inner, vm_name, result.ssh_host_keys_openssh.clone()).await;
-    let update = ProbeUpdateEnvelope::from_poll_result(vm_name, run_id, result);
-    persist_probe_update(inner, &update).await;
-    let _ = inner.probe_updates_tx.send(update);
+    stage_vm_ssh_host_keys(
+        inner,
+        vm_name,
+        jail_generation,
+        result.ssh_host_keys_openssh.clone(),
+    )
+    .await;
+    let still_current = {
+        let states = inner.states.read().await;
+        states.get(vm_name).is_some_and(|vm| {
+            vm.details.as_ref().is_some_and(|details| {
+                details.run_id.as_deref() == Some(run_id)
+                    && details.jail_generation.as_deref() == Some(jail_generation)
+            })
+        })
+    };
+    anyhow::ensure!(
+        still_current,
+        "dropping Kino readiness snapshot after generation changed"
+    );
+    let update = ProbeUpdateEnvelope::from_poll_result(vm_name, run_id, jail_generation, result);
+    // Always wake the generation-fenced launch waiter internally. Projection
+    // is permitted only for an already committed steady VM; the first ready
+    // snapshot is published through the atomic ready transaction instead.
+    let _ = inner.kino_readiness_tx.send(update.clone());
+    let may_project = {
+        let states = inner.states.read().await;
+        let Some(vm) = states.get(vm_name) else {
+            return Ok(());
+        };
+        let committed = vm.state == VmLifecycleState::Running
+            && vm.details.as_ref().is_some_and(|details| {
+                details.run_id.as_deref() == Some(run_id)
+                    && details.jail_generation.as_deref() == Some(jail_generation)
+                    && details.cpu_runtime.as_ref().is_some_and(|runtime| {
+                        runtime.phase == VmCpuPhase::Steady
+                            && runtime.effective_quota == runtime.steady_quota
+                            && runtime.attestation.is_some()
+                    })
+            });
+        if committed {
+            // Persist host-key changes and their Kino snapshot in the same
+            // transaction used by the initial ready boundary. Holding the
+            // read fence prevents a concurrent generation replacement.
+            inner
+                .db
+                .upsert_ready_vm_and_probe_state(vm.to_db_row(), probe_state_row(&update)?)
+                .await
+                .context("atomically persist post-ready Kino snapshot")?;
+        }
+        committed
+    };
+    if may_project {
+        let _ = inner.probe_updates_tx.send(update);
+    }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-async fn update_vm_ssh_host_keys(inner: &Inner, vm_name: &str, keys: Vec<String>) {
+async fn stage_vm_ssh_host_keys(
+    inner: &Inner,
+    vm_name: &str,
+    jail_generation: &str,
+    keys: Vec<String>,
+) {
     let keys = normalize_ssh_host_keys(keys);
     if keys.is_empty() {
         return;
@@ -4128,7 +5014,7 @@ async fn update_vm_ssh_host_keys(inner: &Inner, vm_name: &str, keys: Vec<String>
 
     let now_s = now_unix_s();
     let updated_at = format_rfc3339_s(now_s);
-    let persisted = {
+    {
         let mut states = inner.states.write().await;
         let Some(vm) = states.get_mut(vm_name) else {
             return;
@@ -4136,6 +5022,9 @@ async fn update_vm_ssh_host_keys(inner: &Inner, vm_name: &str, keys: Vec<String>
         let Some(details) = vm.details.as_mut() else {
             return;
         };
+        if details.jail_generation.as_deref() != Some(jail_generation) {
+            return;
+        }
         if details.ssh_host_keys_openssh == keys {
             return;
         }
@@ -4143,11 +5032,6 @@ async fn update_vm_ssh_host_keys(inner: &Inner, vm_name: &str, keys: Vec<String>
         vm.updated_at_s = now_s;
         vm.updated_at = updated_at;
         vm.lease_expires_at = compute_lease_expires_at(vm.running_at_s, vm.lease_duration_seconds);
-        vm.clone()
-    };
-
-    if let Err(error) = inner.db.upsert_vm(persisted.to_db_row()).await {
-        warn!(error = %error, vm = vm_name, "failed to persist ssh host keys");
     }
 }
 
@@ -4158,6 +5042,12 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("vm details missing run_id"))?;
+    let jail_generation = details
+        .jail_generation
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("vm details missing jail_generation"))?;
     let kino_vsock_path = details
         .kino_vsock_path
         .as_ref()
@@ -4170,13 +5060,34 @@ async fn start_probe_worker(inner: &Arc<Inner>, vm_name: &str, details: &VmDetai
 
     stop_probe_worker(inner, vm_name).await;
 
+    #[cfg(target_os = "linux")]
+    let (ready_listener, ready_socket_path) =
+        prepare_kino_ready_listener(&kino_vsock_path, jail_uid).await?;
+
     let vm_name_owned = vm_name.to_string();
     let inner_for_task = Arc::clone(inner);
+    #[cfg(target_os = "linux")]
     let join = tokio::spawn(async move {
         run_probe_worker_task(
             inner_for_task,
             vm_name_owned,
             run_id,
+            jail_generation,
+            kino_vsock_path,
+            kino_vsock_port,
+            jail_uid,
+            ready_listener,
+            ready_socket_path,
+        )
+        .await;
+    });
+    #[cfg(not(target_os = "linux"))]
+    let join = tokio::spawn(async move {
+        run_probe_worker_task(
+            inner_for_task,
+            vm_name_owned,
+            run_id,
+            jail_generation,
             kino_vsock_path,
             kino_vsock_port,
             jail_uid,
@@ -4313,18 +5224,46 @@ fn kino_ready_socket_path(kino_vsock_path: &Path) -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
+async fn prepare_kino_ready_listener(
+    kino_vsock_path: &Path,
+    jail_uid: u32,
+) -> Result<(tokio::net::UnixListener, PathBuf)> {
+    let ready_socket_path = kino_ready_socket_path(kino_vsock_path);
+    let _ = tokio::fs::remove_file(&ready_socket_path).await;
+    let listener = tokio::net::UnixListener::bind(&ready_socket_path).with_context(|| {
+        format!(
+            "bind Kino readiness listener at {}",
+            ready_socket_path.display()
+        )
+    })?;
+    if let Err(error) = activate_kino_ready_socket(&ready_socket_path, jail_uid).await {
+        let _ = tokio::fs::remove_file(&ready_socket_path).await;
+        return Err(error).context("activate Kino readiness socket ACL mask");
+    }
+    Ok((listener, ready_socket_path))
+}
+
+#[cfg(target_os = "linux")]
 async fn run_probe_worker_task(
     inner: Arc<Inner>,
     vm_name: String,
     run_id: String,
-    kino_vsock_path: PathBuf,
+    jail_generation: String,
+    _kino_vsock_path: PathBuf,
     _kino_vsock_port: u32,
     jail_uid: u32,
+    listener: tokio::net::UnixListener,
+    ready_socket_path: PathBuf,
 ) {
     match inner.db.load_vm_probe_state(vm_name.clone()).await {
         Ok(Some(row)) if row.run_id == run_id => {
-            if let Some(update) = probe_update_from_state_row(&row) {
-                let _ = inner.probe_updates_tx.send(update);
+            if let Some(update) = probe_update_from_state_row(&row)
+                && update.jail_generation == jail_generation
+            {
+                // A recovered durable snapshot is an internal readiness input.
+                // Recovery must reseal and re-attest SSH before any external
+                // projection is emitted.
+                let _ = inner.kino_readiness_tx.send(update);
             }
         }
         Ok(_) => {}
@@ -4333,31 +5272,6 @@ async fn run_probe_worker_task(
         }
     }
 
-    let ready_socket_path = kino_ready_socket_path(&kino_vsock_path);
-    let _ = tokio::fs::remove_file(&ready_socket_path).await;
-    let listener = match tokio::net::UnixListener::bind(&ready_socket_path) {
-        Ok(listener) => listener,
-        Err(error) => {
-            error!(
-                error = %error,
-                vm = vm_name,
-                path = %ready_socket_path.display(),
-                "failed to bind Kino readiness push listener"
-            );
-            return;
-        }
-    };
-    if let Err(error) = activate_kino_ready_socket(&ready_socket_path, jail_uid).await {
-        error!(
-            error = %error,
-            vm = vm_name,
-            vm_uid = jail_uid,
-            path = %ready_socket_path.display(),
-            "failed to activate Kino readiness socket ACL mask"
-        );
-        let _ = tokio::fs::remove_file(&ready_socket_path).await;
-        return;
-    }
     info!(
         vm = vm_name,
         vm_uid = jail_uid,
@@ -4382,11 +5296,13 @@ async fn run_probe_worker_task(
                         let inner_for_task = Arc::clone(&inner);
                         let vm_name_for_task = vm_name.clone();
                         let run_id_for_task = run_id.clone();
+                        let generation_for_task = jail_generation.clone();
                         connection_task = Some(tokio::spawn(async move {
                             if let Err(error) = handle_kino_ready_stream(
                                 inner_for_task,
                                 &vm_name_for_task,
                                 &run_id_for_task,
+                                &generation_for_task,
                                 stream,
                             )
                             .await
@@ -4418,11 +5334,11 @@ async fn run_probe_worker_task(
                                 VmLifecycleState::CreatingVm
                                     | VmLifecycleState::BootingVm
                                     | VmLifecycleState::Running
-                            ) && vm
-                                .details
-                                .as_ref()
-                                .and_then(|details| details.run_id.as_ref())
-                                .is_some_and(|current| current == &run_id)
+                            ) && vm.details.as_ref().is_some_and(|details| {
+                                details.run_id.as_deref() == Some(run_id.as_str())
+                                    && details.jail_generation.as_deref()
+                                        == Some(jail_generation.as_str())
+                            })
                         }
                         None => false,
                     }
@@ -4529,22 +5445,11 @@ async fn activate_kino_ready_socket(path: &Path, jail_uid: u32) -> Result<()> {
     Ok(())
 }
 
-async fn persist_probe_update(inner: &Inner, update: &ProbeUpdateEnvelope) {
-    let summary_json = match serde_json::to_string(&update.summary) {
-        Ok(value) => value,
-        Err(error) => {
-            warn!(error = %error, vm = update.vm_name, "failed to serialize probe summary");
-            return;
-        }
-    };
-    let snapshot_json = match serde_json::to_string(update) {
-        Ok(value) => value,
-        Err(error) => {
-            warn!(error = %error, vm = update.vm_name, "failed to serialize current probe snapshot");
-            return;
-        }
-    };
-    let state_row = VmProbeStateRow {
+fn probe_state_row(update: &ProbeUpdateEnvelope) -> Result<VmProbeStateRow> {
+    let summary_json = serde_json::to_string(&update.summary).context("serialize probe summary")?;
+    let snapshot_json =
+        serde_json::to_string(update).context("serialize current probe snapshot")?;
+    Ok(VmProbeStateRow {
         vm_name: update.vm_name.clone(),
         run_id: update.run_id.clone(),
         fingerprint: update.fingerprint.clone(),
@@ -4557,54 +5462,25 @@ async fn persist_probe_update(inner: &Inner, update: &ProbeUpdateEnvelope) {
         snapshot_json,
         generated_at_ms: update.generated_at_ms,
         updated_at_ms: now_unix_ms(),
-    };
-    if let Err(error) = inner.db.upsert_vm_probe_state(state_row).await {
-        warn!(error = %error, vm = update.vm_name, "failed to persist current probe state");
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn probe_snapshot_from_state_row(row: &VmProbeStateRow) -> Option<ProbeSnapshotView> {
-    serde_json::from_str::<ProbeSnapshotView>(&row.snapshot_json)
-        .ok()
-        .or_else(|| {
-            serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json)
-                .ok()
-                .map(|update| update.snapshot_view())
-        })
+    })
 }
 
 #[cfg(target_os = "linux")]
 fn probe_update_from_state_row(row: &VmProbeStateRow) -> Option<ProbeUpdateEnvelope> {
-    if let Ok(update) = serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json) {
-        return Some(update);
-    }
-
-    let snapshot = probe_snapshot_from_state_row(row)?;
-    Some(ProbeUpdateEnvelope {
-        update_id: format!(
-            "replay:{}:{}:{}",
-            row.vm_name, row.fingerprint, row.generated_at_ms
-        ),
-        vm_name: row.vm_name.clone(),
-        run_id: row.run_id.clone(),
-        generated_at_ms: row.generated_at_ms,
-        fingerprint: row.fingerprint.clone(),
-        collection_state: match row.collection_state.trim() {
-            "ok" => ProbeCollectionState::Ok,
-            "error" => ProbeCollectionState::Error,
-            _ => return None,
-        },
-        collection_error: row.collection_error.clone(),
-        summary: serde_json::from_str(&row.summary_json).ok()?,
-        ssh_host_keys_openssh: Vec::new(),
-        probes: snapshot.probes,
-    })
+    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json).ok()
 }
 
 async fn request_jailerd(inner: &Inner, request: JailerRequest) -> Result<JailerResponse> {
-    let socket = inner.jailer_socket.clone();
     let timeout_duration = Duration::from_secs(inner.jailer_request_timeout_seconds);
+    request_jailerd_with_timeout(inner, request, timeout_duration).await
+}
+
+async fn request_jailerd_with_timeout(
+    inner: &Inner,
+    request: JailerRequest,
+    timeout_duration: Duration,
+) -> Result<JailerResponse> {
+    let socket = inner.jailer_socket.clone();
     timeout(timeout_duration, async move {
         let mut client = AsyncSeqpacketClient::connect(&socket)
             .with_context(|| format!("connect to intar-jailerd at {}", socket.display()))?;
@@ -4616,8 +5492,8 @@ async fn request_jailerd(inner: &Inner, request: JailerRequest) -> Result<Jailer
     .await
     .with_context(|| {
         format!(
-            "intar-jailerd request timed out after {} seconds",
-            inner.jailer_request_timeout_seconds
+            "intar-jailerd request timed out after {} milliseconds",
+            timeout_duration.as_millis()
         )
     })?
 }
@@ -4735,33 +5611,53 @@ struct RunNftNetwork {
     prefix: u8,
 }
 
-async fn ensure_vm_network_reconciled(inner: &Inner) -> Result<()> {
+async fn repair_vm_networks(inner: &Inner) -> Result<()> {
     let run_networks = collect_run_networks(inner).await?;
+    let mut failures = Vec::new();
     for network in &run_networks {
-        let run_id = ValidatedId::parse(network.run_id.clone())
-            .with_context(|| format!("validate persisted run ID {}", network.run_id))?;
+        let run_id = match ValidatedId::parse(network.run_id.clone()) {
+            Ok(run_id) => run_id,
+            Err(error) => {
+                failures.push(format!(
+                    "run {} has an invalid persisted ID: {error}",
+                    network.run_id
+                ));
+                continue;
+            }
+        };
         match request_jailerd(
             inner,
-            JailerRequest::EnsureRunNetwork(EnsureRunNetworkRequest {
+            JailerRequest::RepairRunNetwork(EnsureRunNetworkRequest {
                 run_id,
                 guest_cidr: network.subnet_cidr.clone(),
                 gateway: network.gateway.to_string(),
             }),
         )
-        .await?
+        .await
         {
-            JailerResponse::EnsureRunNetwork(_) => {}
-            JailerResponse::Error(error) => {
-                anyhow::bail!("jailerd {}: {}", error.code, error.message)
+            Ok(JailerResponse::RepairRunNetwork(_)) => {}
+            Ok(JailerResponse::Error(error)) => failures.push(format!(
+                "run {}: jailerd {}: {}",
+                network.run_id, error.code, error.message
+            )),
+            Ok(response) => failures.push(format!(
+                "run {}: jailerd returned unexpected response to repair_run_network: {response:?}",
+                network.run_id
+            )),
+            Err(error) => {
+                failures.push(format!("run {}: {error:#}", network.run_id));
             }
-            response => anyhow::bail!(
-                "jailerd returned unexpected response to ensure_run_network: {response:?}"
-            ),
         }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "one or more run network repairs failed: {}",
+            failures.join("; ")
+        )
     }
     debug!(
         run_network_count = run_networks.len(),
-        "reconciled run networks through intar-jailerd"
+        "repaired run networks through intar-jailerd"
     );
     Ok(())
 }
@@ -4774,6 +5670,12 @@ async fn collect_run_networks(inner: &Inner) -> Result<Vec<RunNftNetwork>> {
         let Some(details) = vm.details.as_ref() else {
             continue;
         };
+        // Queued or failed-before-launch rows can carry provisional network
+        // fields without ever having crossed the jailer generation boundary.
+        // Repair is intentionally not an implicit ensure/create fallback.
+        if details.jail_generation.is_none() {
+            continue;
+        }
         let Some(run_id) = details.run_id.as_deref().filter(|value| !value.is_empty()) else {
             continue;
         };
@@ -4991,17 +5893,26 @@ fn terminal_state_from_vm(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let terminal_target =
-        if vm.state == VmLifecycleState::Running && ssh_access.enabled && ssh_ready {
-            details.ssh_public_port.map(|port| VmTerminalTarget {
-                host: advertised_host,
-                port,
-                username: "ubuntu".to_string(),
-                checked_at: observed_at,
-            })
-        } else {
-            None
-        };
+    let runtime_constraints = runtime_constraints_from_details(details);
+    let steady_quota_verified = runtime_constraints.as_ref().is_some_and(|constraints| {
+        constraints.phase == VmRuntimeConstraintPhaseV1::Steady
+            && constraints.effective_cpu_millis == constraints.steady_cpu_millis
+            && constraints.quota_verified_at_unix_ms.is_some()
+    });
+    let terminal_target = if vm.state == VmLifecycleState::Running
+        && ssh_access.enabled
+        && ssh_ready
+        && steady_quota_verified
+    {
+        details.ssh_public_port.map(|port| VmTerminalTarget {
+            host: advertised_host,
+            port,
+            username: "ubuntu".to_string(),
+            checked_at: observed_at,
+        })
+    } else {
+        None
+    };
     let (state, reason) = if terminal_target.is_some() {
         (VmTerminalStateKind::Ready, None)
     } else {
@@ -5024,6 +5935,29 @@ fn terminal_state_from_vm(
         terminal_target,
         reason,
         observed_at,
+        runtime_constraints,
+    })
+}
+
+fn runtime_constraints_from_details(details: &VmDetails) -> Option<VmRuntimeConstraintsV1> {
+    let runtime = details.cpu_runtime.as_ref()?;
+    let generation = details.jail_generation.clone()?;
+    let phase = match runtime.phase {
+        VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
+        VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
+    };
+    Some(VmRuntimeConstraintsV1 {
+        generation,
+        phase,
+        steady_cpu_millis: runtime.steady_quota.cpu_millis,
+        effective_cpu_millis: runtime.effective_quota.cpu_millis,
+        quota_verified_at_unix_ms: runtime
+            .attestation
+            .as_ref()
+            .and_then(|attestation| i64::try_from(attestation.verified_at_unix_ms).ok()),
+        lease_expires_at_unix_ms: runtime
+            .boot_deadline_unix_ms
+            .and_then(|deadline| i64::try_from(deadline).ok()),
     })
 }
 
@@ -5049,6 +5983,141 @@ async fn ssh_terminal_target_ready(vm: &VmStatusResponse) -> bool {
     )
     .await
     .is_ok_and(|result| result.is_ok())
+}
+
+struct StrictGuestHostKeys {
+    expected: Arc<[PublicKey]>,
+    mismatch_observed: Arc<AtomicBool>,
+}
+
+impl ssh_client::Handler for StrictGuestHostKeys {
+    type Error = anyhow::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
+        // OpenSSH comments are not part of the key sent over the wire. Kino
+        // reports the contents of /etc/ssh/ssh_host_*.pub, so compare only
+        // authenticated key material rather than full PublicKey equality.
+        let accepted = self
+            .expected
+            .iter()
+            .any(|expected| expected.key_data() == server_public_key.key_data());
+        if !accepted {
+            self.mismatch_observed.store(true, Ordering::Release);
+        }
+        Ok(accepted)
+    }
+}
+
+fn parse_guest_ssh_host_keys(raw_keys: &[String]) -> Result<Arc<[PublicKey]>> {
+    anyhow::ensure!(
+        !raw_keys.is_empty(),
+        "Kino readiness did not include an SSH host key"
+    );
+    raw_keys
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            PublicKey::from_openssh(raw)
+                .with_context(|| format!("Kino reported invalid SSH host key at index {index}"))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Arc::from)
+}
+
+fn guest_ssh_readiness_client_config() -> Arc<ssh_client::Config> {
+    // Keep the same conservative KEX set as Stargate's outbound SSH client.
+    // OpenSSH 10 guests and russh otherwise choose incompatible post-quantum
+    // algorithms before the host-key check can run.
+    let preferred = Preferred {
+        kex: Cow::Borrowed(&[kex::CURVE25519, kex::CURVE25519_PRE_RFC_8731]),
+        ..Preferred::DEFAULT
+    };
+    Arc::new(ssh_client::Config {
+        client_id: russh::SshId::Standard("SSH-2.0-Intar-Agent-Readiness".into()),
+        inactivity_timeout: Some(Duration::from_millis(500)),
+        nodelay: true,
+        preferred,
+        ..Default::default()
+    })
+}
+
+async fn wait_for_guest_ssh_before_running(
+    inner: &Inner,
+    vm_name: &str,
+    generation: &ValidatedId,
+) -> Result<()> {
+    let (guest_ip, raw_host_keys) = {
+        let states = inner.states.read().await;
+        let details = states
+            .get(vm_name)
+            .and_then(|vm| vm.details.as_ref())
+            .context("VM details missing for SSH readiness")?;
+        anyhow::ensure!(
+            details.jail_generation.as_deref() == Some(generation.as_str()),
+            "VM generation changed before SSH readiness verification"
+        );
+        let guest_ip = details
+            .guest_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .context("VM details missing guest IP for SSH readiness")?;
+        (guest_ip, details.ssh_host_keys_openssh.clone())
+    };
+    let expected_host_keys = parse_guest_ssh_host_keys(&raw_host_keys)?;
+    let client_config = guest_ssh_readiness_client_config();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let mismatch_observed = Arc::new(AtomicBool::new(false));
+        let attempt = timeout(
+            Duration::from_millis(500),
+            ssh_client::connect(
+                Arc::clone(&client_config),
+                (guest_ip.as_str(), 22),
+                StrictGuestHostKeys {
+                    expected: Arc::clone(&expected_host_keys),
+                    mismatch_observed: Arc::clone(&mismatch_observed),
+                },
+            ),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(session)) => {
+                let _ = session
+                    .disconnect(Disconnect::ByApplication, "", "en")
+                    .await;
+                let states = inner.states.read().await;
+                let generation_is_current = states
+                    .get(vm_name)
+                    .and_then(|vm| vm.details.as_ref())
+                    .is_some_and(|details| {
+                        details.jail_generation.as_deref() == Some(generation.as_str())
+                    });
+                anyhow::ensure!(
+                    generation_is_current,
+                    "VM generation changed during SSH readiness verification"
+                );
+                return Ok(());
+            }
+            _ if mismatch_observed.load(Ordering::Acquire) => {
+                anyhow::bail!(
+                    "guest SSH presented a host key that was not reported by Kino; refusing to publish terminal readiness"
+                )
+            }
+            _ if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            _ => {
+                anyhow::bail!(
+                    "guest SSH did not complete a Kino-attested host-key handshake after steady quota sealing"
+                )
+            }
+        }
+    }
 }
 
 fn normalize_peer_vm_topology(
@@ -5464,6 +6533,11 @@ fn next_lease_expiry_error_log_state(
 }
 
 async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState) {
+    debug_assert_ne!(
+        state,
+        VmLifecycleState::Running,
+        "Running must use the generation-fenced atomic ready commit"
+    );
     let now_s = now_unix_s();
     let updated_at = format_rfc3339_s(now_s);
 
@@ -5480,9 +6554,6 @@ async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState) {
             vm.error = None;
         }
 
-        if state == VmLifecycleState::Running && vm.running_at_s.is_none() {
-            vm.running_at_s = Some(now_s);
-        }
         vm.lease_expires_at = compute_lease_expires_at(vm.running_at_s, vm.lease_duration_seconds);
 
         vm.clone()
@@ -5493,9 +6564,7 @@ async fn set_state(inner: &Inner, name: &str, state: VmLifecycleState) {
     }
     if matches!(
         state,
-        VmLifecycleState::Running
-            | VmLifecycleState::DeletingVm
-            | VmLifecycleState::ArchivingArtifacts
+        VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts
     ) {
         publish_terminal_state_update(inner, name, false).await;
     }
@@ -5601,6 +6670,8 @@ fn vm_status_from_row(row: VmRow) -> Result<VmStatusResponse> {
             ssh_host_keys_openssh: parse_ssh_host_keys_json(
                 row.ssh_host_keys_openssh_json.as_deref(),
             ),
+            cpu_runtime: None,
+            boot_evidence: None,
         }),
         _ => None,
     };
@@ -5746,27 +6817,6 @@ fn resolve_work_dir(defaults: &VmDefaultsConfig) -> Result<PathBuf> {
     }
     let base = dirs::cache_dir().ok_or_else(|| anyhow::anyhow!("cache dir unavailable"))?;
     Ok(base.join("intar-agent"))
-}
-
-fn create_recording_disk(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let mut image = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .with_context(|| format!("failed to create recording disk at {}", path.display()))?;
-    image
-        .set_len(RECORDING_DISK_BYTES)
-        .with_context(|| format!("failed to size recording disk at {}", path.display()))?;
-    let options = fatfs::FormatVolumeOptions::new().volume_label(RECORDING_DISK_LABEL);
-    fatfs::format_volume(&mut image, options).context("failed to format recording disk as vfat")?;
-    Ok(())
 }
 
 async fn ensure_guest_ip_available(inner: &Inner, guest_ip_cidr: &str) -> Result<(), ApiError> {
@@ -5948,11 +6998,294 @@ mod tests {
     #[cfg(target_os = "linux")]
     use crate::kino_probe::{ProbeSummary, ProbeView};
     use cloud_hypervisor_client::Error as ChError;
+    use intar_jailer_protocol::{CpuQuota, CpuQuotaAttestation, CpuStat};
+    use russh::client::Handler as _;
     use serde_json::json;
     use tempfile::tempdir;
 
     fn ch_is_not_created_error(err: &ChError) -> bool {
         matches!(err, ChError::HttpStatus { status: 404, .. })
+    }
+
+    fn launch_operation_fixture() -> (VmLaunchRequest, PreparedImageV2Result) {
+        let image_sha256 = Sha256Digest::parse("e".repeat(64)).expect("image digest");
+        let artifact_sha256 = Sha256Digest::parse("f".repeat(64)).expect("artifact digest");
+        let prepared_source = |name: &str, access| ArtifactSource {
+            source_root: PREPARED_IMAGE_SOURCE_ROOT,
+            relative_path: PathBuf::from(image_sha256.as_str()).join(name),
+            sha256: Some(artifact_sha256.clone()),
+            access,
+        };
+        let agent_source = |name: &str, access| ArtifactSource {
+            source_root: 0,
+            relative_path: PathBuf::from(name),
+            sha256: None,
+            access,
+        };
+        let prepared = PreparedImageV2Result {
+            image_sha256: image_sha256.clone(),
+            virtual_size_bytes: 4 * 1024 * 1024 * 1024,
+            root_disk: prepared_source("root.raw", ArtifactAccess::ReadWrite),
+            kernel: prepared_source("kernel", ArtifactAccess::ReadOnly),
+            initrd: Some(prepared_source("initrd", ArtifactAccess::ReadOnly)),
+            fast_template_store: true,
+        };
+        let request = VmLaunchRequest {
+            run_id: ValidatedId::parse("run-1").expect("run ID"),
+            vm_id: ValidatedId::parse("vm-1").expect("VM ID"),
+            cpu_millis: 1_000,
+            vcpu_count: 1,
+            memory_mib: 512,
+            root_disk_size_bytes: 4 * 1024 * 1024 * 1024,
+            tap_name: "tap-test".to_string(),
+            mac_address: "02:00:00:00:00:01".to_string(),
+            guest_ip_cidr: "10.77.0.2/28".to_string(),
+            ssh_public_port: Some(22_000),
+            vsock_cid: 3,
+            artifacts: SourceArtifacts {
+                root_disk: prepared.root_disk.clone(),
+                kernel: prepared.kernel.clone(),
+                initrd: prepared.initrd.clone(),
+                runtime_disk: agent_source("runtime.raw", ArtifactAccess::ReadOnly),
+                recording_disk: agent_source("recordings.vfat", ArtifactAccess::ReadWrite),
+            },
+        };
+        (request, prepared)
+    }
+
+    #[test]
+    fn launch_requires_a_prepared_v2_image_and_never_downgrades() {
+        let (prepared_request, prepared) = launch_operation_fixture();
+        let operation =
+            build_jailer_launch_operation(prepared_request, Some(&prepared)).expect("v2 request");
+        assert!(matches!(operation, JailerRequest::LaunchVmV2(_)));
+
+        let (mut regular_request, _) = launch_operation_fixture();
+        let regular = |name: &str, access, sha256: Option<Sha256Digest>| ArtifactSource {
+            source_root: 0,
+            relative_path: PathBuf::from(name),
+            sha256,
+            access,
+        };
+        let boot_digest = Sha256Digest::parse("1".repeat(64)).expect("boot digest");
+        regular_request.artifacts.root_disk = regular("root.raw", ArtifactAccess::ReadWrite, None);
+        regular_request.artifacts.kernel = regular(
+            "kernel",
+            ArtifactAccess::ReadOnly,
+            Some(boot_digest.clone()),
+        );
+        regular_request.artifacts.initrd = Some(regular(
+            "initrd",
+            ArtifactAccess::ReadOnly,
+            Some(boot_digest),
+        ));
+        let error = build_jailer_launch_operation(regular_request, None)
+            .expect_err("missing prepared template must fail instead of selecting v1");
+        assert!(error.to_string().contains("no v1 fallback"));
+    }
+
+    #[tokio::test]
+    async fn v2_launch_transport_retry_replays_the_exact_request_and_preserves_conflict() {
+        let (request, prepared) = launch_operation_fixture();
+        let operation =
+            build_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
+        let expected = operation.clone();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_by_request = Arc::clone(&sent);
+
+        let response = request_v2_launch_with_single_retry(operation, move |operation| {
+            let attempt = {
+                let mut sent = sent_by_request.lock().expect("sent requests");
+                sent.push(operation);
+                sent.len()
+            };
+            async move {
+                if attempt == 1 {
+                    Err(anyhow::anyhow!("injected lost launch response"))
+                } else {
+                    Ok(JailerResponse::Error(
+                        intar_jailer_protocol::ProtocolError::new(
+                            "conflict",
+                            "logical VM already exists with a different launch request",
+                        ),
+                    ))
+                }
+            }
+        })
+        .await
+        .expect("retry response");
+
+        assert!(matches!(
+            response,
+            JailerResponse::Error(ref error) if error.code == "conflict"
+        ));
+        let sent = sent.lock().expect("sent requests");
+        assert_eq!(sent.as_slice(), &[expected.clone(), expected]);
+        assert!(
+            sent.iter()
+                .all(|request| matches!(request, JailerRequest::LaunchVmV2(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn v2_launch_transport_retry_fails_closed_after_two_transport_errors() {
+        let (request, prepared) = launch_operation_fixture();
+        let operation =
+            build_jailer_launch_operation(request, Some(&prepared)).expect("v2 operation");
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_by_request = Arc::clone(&sent);
+
+        let error = request_v2_launch_with_single_retry(operation, move |operation| {
+            let attempt = {
+                let mut sent = sent_by_request.lock().expect("sent requests");
+                sent.push(operation);
+                sent.len()
+            };
+            async move { Err(anyhow::anyhow!("injected transport failure {attempt}")) }
+        })
+        .await
+        .expect_err("two transport failures must fail closed");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("first transport attempt failed"));
+        assert!(message.contains("injected transport failure 1"));
+        assert!(message.contains("injected transport failure 2"));
+        let sent = sent.lock().expect("sent requests");
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent.iter()
+                .all(|request| matches!(request, JailerRequest::LaunchVmV2(_)))
+        );
+        assert_eq!(sent[0], sent[1]);
+    }
+
+    #[test]
+    fn cpu_sample_validation_is_generation_fenced_and_attestation_bound() {
+        let generation = ValidatedId::parse("generation-1").expect("generation");
+        let steady_quota = CpuQuota::from_millis(1_000).expect("steady quota");
+        let effective_quota = CpuQuota::from_millis(2_000).expect("boot quota");
+        let mut sample = VmCpuSample {
+            generation: generation.clone(),
+            sampled_at_unix_ms: 123,
+            cpu_runtime: VmCpuRuntimeState {
+                phase: VmCpuPhase::BootBurst,
+                steady_quota,
+                effective_quota,
+                boot_deadline_unix_ms: Some(45_123),
+                attestation: Some(CpuQuotaAttestation {
+                    quota: effective_quota,
+                    cpu_max: effective_quota.cpu_max(),
+                    cpu_max_burst: 0,
+                    verified_at_unix_ms: 123,
+                }),
+            },
+            cpu_stat: CpuStat {
+                usage_usec: 10,
+                user_usec: 7,
+                system_usec: 3,
+                nr_periods: 2,
+                nr_throttled: 1,
+                throttled_usec: 4,
+            },
+        };
+
+        validate_vm_cpu_sample(&generation, &sample).expect("valid CPU sample");
+        validate_vm_cpu_sample_point(VmCpuSamplePoint::VmBootAccepted, &sample)
+            .expect("boot acceptance is sampled under the boot quota");
+        validate_vm_cpu_sample_point(VmCpuSamplePoint::KinoReady, &sample)
+            .expect("Kino readiness is sampled under the boot quota");
+        validate_vm_cpu_sample_point(VmCpuSamplePoint::PreSeal, &sample)
+            .expect("pre-seal is sampled under the boot quota");
+        let evidence =
+            accept_vm_cpu_sample("vm-1", &generation, VmCpuSamplePoint::PreSeal, &sample)
+                .expect("valid protocol sample becomes bridge evidence");
+        assert_eq!(evidence.point, VmBootCpuSamplePointV1::PreSeal);
+        assert_eq!(evidence.phase, VmRuntimeConstraintPhaseV1::BootBurst);
+        assert_eq!(evidence.steady_cpu_millis, 1_000);
+        assert_eq!(evidence.effective_cpu_millis, 2_000);
+        assert_eq!(evidence.cpu_max, "200000 100000");
+        assert_eq!(evidence.cpu_max_burst, 0);
+        assert_eq!(evidence.usage_usec, 10);
+        assert!(validate_vm_cpu_sample_point(VmCpuSamplePoint::PostSeal, &sample).is_err());
+        sample.cpu_runtime.phase = VmCpuPhase::Steady;
+        validate_vm_cpu_sample_point(VmCpuSamplePoint::PostSeal, &sample)
+            .expect("post-seal evidence is steady");
+        validate_vm_cpu_sample_point(VmCpuSamplePoint::TerminalPublished, &sample)
+            .expect("terminal publication evidence is steady");
+        sample.cpu_runtime.phase = VmCpuPhase::BootBurst;
+        assert_eq!(vm_cpu_phase_label(sample.cpu_runtime.phase), "boot_burst");
+        assert_eq!(
+            VmCpuSamplePoint::VmBootAccepted.as_str(),
+            "vm_boot_accepted"
+        );
+        assert_eq!(VmCpuSamplePoint::KinoReady.as_str(), "kino_ready");
+        assert_eq!(VmCpuSamplePoint::PreSeal.as_str(), "pre_seal");
+        assert_eq!(VmCpuSamplePoint::PostSeal.as_str(), "post_seal");
+        assert_eq!(
+            VmCpuSamplePoint::TerminalPublished.as_str(),
+            "terminal_published"
+        );
+        assert_eq!(
+            VmCpuSamplePoint::VmBootAccepted.contract(),
+            VmBootCpuSamplePointV1::VmBootAccepted
+        );
+        assert_eq!(
+            VmCpuSamplePoint::KinoReady.contract(),
+            VmBootCpuSamplePointV1::KinoReady
+        );
+        assert_eq!(
+            VmCpuSamplePoint::PreSeal.contract(),
+            VmBootCpuSamplePointV1::PreSeal
+        );
+        assert_eq!(
+            VmCpuSamplePoint::PostSeal.contract(),
+            VmBootCpuSamplePointV1::PostSeal
+        );
+        assert_eq!(
+            VmCpuSamplePoint::TerminalPublished.contract(),
+            VmBootCpuSamplePointV1::TerminalPublished
+        );
+
+        let stale_generation = ValidatedId::parse("generation-2").expect("different generation");
+        assert!(validate_vm_cpu_sample(&stale_generation, &sample).is_err());
+
+        sample
+            .cpu_runtime
+            .attestation
+            .as_mut()
+            .expect("attestation")
+            .cpu_max_burst = 1;
+        assert!(validate_vm_cpu_sample(&generation, &sample).is_err());
+    }
+
+    #[test]
+    fn boot_phase_evidence_preserves_overlapped_network_and_disk_work() {
+        let base = Instant::now();
+        let at = |milliseconds| base + Duration::from_millis(milliseconds);
+        let phases = VmBootTimeline {
+            create_started_at: base,
+            image_ready_at: at(250),
+            runtime_disk_ready_at: at(380),
+            network_ready_at: at(430),
+            disks_ready_at: at(430),
+            jail_ready_at: at(1_030),
+            vmm_ready_at: at(1_230),
+            boot_accepted_at: at(1_350),
+            guest_ready_at: at(6_150),
+            quota_sealed_at: at(6_230),
+            ssh_verified_at: at(6_580),
+            terminal_ready_at: at(6_670),
+        }
+        .phase_durations();
+
+        assert_eq!(phases.image_cache_ms, 250);
+        assert_eq!(phases.runtime_disk_ms, 130);
+        assert_eq!(phases.network_ms, 430);
+        assert_eq!(phases.image_disk_ms, 380);
+        assert_eq!(phases.network_jailer_vmm_ms, 1_350);
+        assert_eq!(phases.guest_to_kino_ms, 4_800);
+        assert_eq!(phases.seal_ssh_publish_ms, 520);
+        assert_eq!(phases.total_ms, 6_670);
     }
 
     fn ch_is_not_started_error(err: &ChError) -> bool {
@@ -5969,6 +7302,67 @@ mod tests {
 
     fn ch_delete_confirms_absence_status(status: u16) -> bool {
         status == 204 || status == 404
+    }
+
+    #[tokio::test]
+    async fn ssh_readiness_accepts_only_kino_reported_host_key_material() {
+        let reported = vec![
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR root@broken-nginx"
+                .to_string(),
+        ];
+        let expected = parse_guest_ssh_host_keys(&reported).expect("reported key parses");
+        let wire_key = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR",
+        )
+        .expect("matching wire key parses");
+        let other_key = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA8ax6Yk1ZMSRpAkk8cIriNXtVufy6mxst2stQk66n+d",
+        )
+        .expect("other wire key parses");
+
+        let mismatch_observed = Arc::new(AtomicBool::new(false));
+        let mut verifier = StrictGuestHostKeys {
+            expected: Arc::clone(&expected),
+            mismatch_observed: Arc::clone(&mismatch_observed),
+        };
+        assert!(
+            verifier
+                .check_server_key(&wire_key)
+                .await
+                .expect("host-key check succeeds")
+        );
+        assert!(!mismatch_observed.load(Ordering::Acquire));
+
+        let mismatch_observed = Arc::new(AtomicBool::new(false));
+        let mut verifier = StrictGuestHostKeys {
+            expected,
+            mismatch_observed: Arc::clone(&mismatch_observed),
+        };
+        assert!(
+            !verifier
+                .check_server_key(&other_key)
+                .await
+                .expect("host-key check succeeds")
+        );
+        assert!(mismatch_observed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ssh_readiness_rejects_missing_or_malformed_kino_host_keys() {
+        let missing = parse_guest_ssh_host_keys(&[]).expect_err("missing keys must fail closed");
+        assert!(
+            missing
+                .to_string()
+                .contains("did not include an SSH host key")
+        );
+
+        let malformed = parse_guest_ssh_host_keys(&["ssh-ed25519 not-base64".to_string()])
+            .expect_err("malformed key must fail closed");
+        assert!(
+            malformed
+                .to_string()
+                .contains("invalid SSH host key at index 0")
+        );
     }
 
     fn test_vm_status(name: &str, run_id: Option<&str>) -> VmStatusResponse {
@@ -6011,6 +7405,8 @@ mod tests {
                 kino_vsock_port: None,
                 kino_vsock_path: None,
                 ssh_host_keys_openssh: Vec::new(),
+                cpu_runtime: None,
+                boot_evidence: None,
             }),
             error: None,
             lease_duration_seconds: None,
@@ -6553,6 +7949,7 @@ mod tests {
             update_id: "update-1".to_string(),
             vm_name: "vm-1".to_string(),
             run_id: "run-1".to_string(),
+            jail_generation: "generation-1".to_string(),
             generated_at_ms: 123,
             collection_state: ProbeCollectionState::Ok,
             collection_error: None,
@@ -6850,6 +8247,7 @@ mod tests {
             image_key: "broken".to_string(),
             image_sha256: "a".repeat(64),
             raw_path: PathBuf::from("/cache/images/broken.raw"),
+            raw_sha256: "d".repeat(64),
             kernel_path: PathBuf::from("/cache/artifacts/vmlinuz"),
             initrd_path: PathBuf::from("/cache/artifacts/initrd.img"),
             kernel_sha256: "b".repeat(64),
@@ -7002,6 +8400,7 @@ mod tests {
             "name": "demo",
             "run_id": "abc123demo",
             "image": "broken-nginx-webserver-amd64",
+            "image_sha256": "a".repeat(64),
             "runtime": {
                 "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"],
                 "network": {
@@ -7019,6 +8418,7 @@ mod tests {
         .expect("request should parse");
 
         assert_eq!(req.lease_duration_seconds, Some(300));
+        assert_eq!(req.image_sha256, "a".repeat(64));
         assert!(req.runtime.peer_vm_names.is_empty());
         assert!(req.runtime.peer_vm_aliases.is_empty());
         assert_eq!(
@@ -7048,7 +8448,8 @@ mod tests {
         let err = serde_json::from_value::<CreateScenarioVmRequest>(json!({
             "name": "demo",
             "run_id": "abc123demo",
-            "image": "broken-nginx-webserver-amd64"
+            "image": "broken-nginx-webserver-amd64",
+            "image_sha256": "a".repeat(64)
         }))
         .expect_err("missing runtime field should be rejected");
 
@@ -7060,11 +8461,26 @@ mod tests {
     }
 
     #[test]
+    fn create_scenario_vm_request_rejects_missing_image_digest() {
+        let error = serde_json::from_value::<CreateScenarioVmRequest>(json!({
+            "name": "demo",
+            "run_id": "abc123demo",
+            "image": "broken-nginx-webserver-amd64",
+            "runtime": {
+                "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
+            }
+        }))
+        .expect_err("the v2 launch descriptor digest must be explicit");
+        assert!(error.to_string().contains("image_sha256"));
+    }
+
+    #[test]
     fn create_scenario_vm_request_rejects_unknown_field() {
         let err = serde_json::from_value::<CreateScenarioVmRequest>(json!({
             "name": "demo",
             "run_id": "abc123demo",
             "image": "broken-nginx-webserver-amd64",
+            "image_sha256": "a".repeat(64),
             "runtime": {
                 "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
             },
@@ -7085,6 +8501,7 @@ mod tests {
             "name": "demo",
             "run_id": "abc123demo",
             "image": "broken-nginx-webserver-amd64",
+            "image_sha256": "a".repeat(64),
             "runtime": {
                 "ssh_authorized_keys_openssh": ["ssh-ed25519 AAAATEST stargate-target"]
             },
@@ -7121,7 +8538,22 @@ mod tests {
     fn terminal_state_reports_ready_when_running_and_ssh_is_ready() {
         let mut vm = test_vm_status("vm-ready", Some("run-1"));
         vm.state = VmLifecycleState::Running;
-        vm.details.as_mut().expect("details").ssh_public_port = Some(2222);
+        let quota = CpuQuota::from_millis(125).expect("quota");
+        let details = vm.details.as_mut().expect("details");
+        details.ssh_public_port = Some(2222);
+        details.jail_generation = Some("generation-1".to_string());
+        details.cpu_runtime = Some(VmCpuRuntimeState {
+            phase: VmCpuPhase::Steady,
+            steady_quota: quota,
+            effective_quota: quota,
+            boot_deadline_unix_ms: None,
+            attestation: Some(CpuQuotaAttestation {
+                quota,
+                cpu_max: quota.cpu_max(),
+                cpu_max_burst: 0,
+                verified_at_unix_ms: 1_200,
+            }),
+        });
 
         let state = terminal_state_from_vm(&vm, &test_ssh_access_config(), true, 1234)
             .expect("terminal state");
@@ -7130,6 +8562,13 @@ mod tests {
         assert_eq!(state.vm_name, "vm-ready");
         assert_eq!(state.state, VmTerminalStateKind::Ready);
         assert_eq!(state.reason, None);
+        assert_eq!(
+            state
+                .runtime_constraints
+                .as_ref()
+                .map(|constraints| constraints.phase.clone()),
+            Some(VmRuntimeConstraintPhaseV1::Steady)
+        );
         assert_eq!(
             state.terminal_target,
             Some(VmTerminalTarget {
@@ -7153,6 +8592,20 @@ mod tests {
         assert_eq!(state.state, VmTerminalStateKind::Pending);
         assert_eq!(state.reason.as_deref(), Some("destroying"));
         assert_eq!(state.terminal_target, None);
+    }
+
+    #[test]
+    fn terminal_state_stays_pending_without_steady_quota_attestation() {
+        let mut vm = test_vm_status("vm-unsealed", Some("run-1"));
+        vm.state = VmLifecycleState::Running;
+        vm.details.as_mut().expect("details").ssh_public_port = Some(2222);
+
+        let state = terminal_state_from_vm(&vm, &test_ssh_access_config(), true, 1234)
+            .expect("terminal state");
+
+        assert_eq!(state.state, VmTerminalStateKind::Pending);
+        assert_eq!(state.terminal_target, None);
+        assert_eq!(state.runtime_constraints, None);
     }
 
     #[test]

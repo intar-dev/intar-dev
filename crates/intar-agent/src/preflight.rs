@@ -531,10 +531,10 @@ fn push_jailerd_capabilities_check(
     });
     push_bool_check(
         checks,
-        "jailer isolation capability",
-        capabilities.supports_jailer_v1,
-        "jailerd advertises the complete jailer-v1 isolation contract",
-        "jailerd does not advertise the complete jailer-v1 isolation contract",
+        "jailer v2 isolation capability",
+        capabilities.supports_jailer_v2,
+        "jailerd advertises the required template-backed jailer-v2 contract",
+        "jailerd does not advertise the required jailer-v2 contract",
     );
     push_bool_check(
         checks,
@@ -542,6 +542,42 @@ fn push_jailerd_capabilities_check(
         capabilities.supports_hard_cpu_quota,
         "jailerd advertises aggregate hard CPU quotas",
         "jailerd does not advertise aggregate hard CPU quotas",
+    );
+    checks.push(
+        if capabilities.supports_jailer_v2
+            && capabilities.supports_boot_cpu_lease
+            && capabilities.boot_cpu_millis >= 1_000
+            && capabilities.boot_cpu_lease_ms > 0
+        {
+            pass(
+                "boot CPU lease capability",
+                format!(
+                    "jailerd advertises a capacity-accounted {}m / {}ms boot lease",
+                    capabilities.boot_cpu_millis, capabilities.boot_cpu_lease_ms
+                ),
+            )
+        } else {
+            fail(
+                "boot CPU lease capability",
+                "jailerd does not attest the mandatory capacity-accounted boot CPU lease",
+            )
+        },
+    );
+    checks.push(
+        if capabilities.supports_jailer_v2
+            && capabilities.supports_template_backed_launch
+            && capabilities.fast_template_store
+        {
+            pass(
+                "fast jail template store",
+                "jailerd attests content-addressed same-filesystem template launch",
+            )
+        } else {
+            fail(
+                "fast jail template store",
+                "jailerd does not attest mandatory template-backed same-filesystem reflinks",
+            )
+        },
     );
     push_bool_check(
         checks,
@@ -1025,8 +1061,14 @@ mod tests {
             reserved_cpu_millis: 1_000,
             schedulable_cpu_millis: 7_000,
             committed_cpu_millis: 125,
-            supports_jailer_v1: true,
+            supports_jailer_v1: false,
+            supports_jailer_v2: true,
+            supports_template_backed_launch: true,
+            fast_template_store: true,
             supports_hard_cpu_quota: true,
+            supports_boot_cpu_lease: true,
+            boot_cpu_millis: intar_jailer_protocol::DEFAULT_BOOT_CPU_MILLIS,
+            boot_cpu_lease_ms: intar_jailer_protocol::DEFAULT_BOOT_CPU_LEASE_MS,
             supports_landlock: true,
             supports_cgroup_v2: true,
             uid_gid_start: 200_000,
@@ -1235,7 +1277,10 @@ mod tests {
         capabilities.runtime_statically_linked = false;
         capabilities.landlock_abi = Some(2);
         capabilities.kvm_accounting_proven = false;
-        capabilities.supports_jailer_v1 = false;
+        capabilities.supports_jailer_v2 = false;
+        capabilities.supports_boot_cpu_lease = false;
+        capabilities.supports_template_backed_launch = false;
+        capabilities.fast_template_store = false;
         capabilities.supports_hard_cpu_quota = false;
 
         let env = PreflightEnvironment {
@@ -1267,7 +1312,9 @@ mod tests {
             "Cloud Hypervisor static linkage",
             "Landlock ABI",
             "KVM helper accounting",
-            "jailer isolation capability",
+            "jailer v2 isolation capability",
+            "boot CPU lease capability",
+            "fast jail template store",
             "hard CPU quota capability",
         ] {
             assert!(
@@ -1278,6 +1325,23 @@ mod tests {
                 "missing failure for {name}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_legacy_jailerd_protocol_v1() {
+        let temp = TempDir::new().unwrap();
+        let mut capabilities = ready_capabilities(temp.path().to_path_buf());
+        capabilities.protocol_version = 1;
+        let env = minimally_ready_environment(&temp);
+
+        let report =
+            collect_preflight_with_environment(&AgentConfig::default(), &env, &Ok(capabilities));
+
+        assert!(report.checks.iter().any(|check| {
+            check.name == "jailerd protocol"
+                && check.status == PreflightStatus::Fail
+                && check.detail.contains("required version 2")
+        }));
     }
 
     #[test]

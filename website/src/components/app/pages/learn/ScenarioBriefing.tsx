@@ -86,7 +86,11 @@ export function ScenarioBriefing() {
   const startScenario = useMutation({
     mutationFn: () => requestScenarioStart(scenarioId),
     onSuccess: (runId) => {
-      window.location.assign(`/runs/${encodeURIComponent(runId)}?pending=1`);
+      void navigate({
+        to: "/runs/$runId",
+        params: { runId },
+        search: { pending: "1" },
+      });
     },
   });
 

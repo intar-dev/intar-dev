@@ -32,6 +32,7 @@ import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
+import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 
 const textEncoder = new TextEncoder();
@@ -39,7 +40,6 @@ const textDecoder = new TextDecoder();
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 const IMAGE_KEY_RE = /^[A-Za-z0-9._-]+$/;
 const BUILD_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
-const EXPECTED_BUILD_FORMAT_VERSION = "intar-image-build-v7";
 const TAR_BLOCK_SIZE = 512;
 const MAX_BUNDLE_TAR_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGES_PER_KEY = 2;
@@ -1622,7 +1622,7 @@ async function readBundleMeta(value: FormDataEntryValue | null): Promise<
   const buildFormatVersion =
     readString(parsed.build_format_version) ??
     readString(parsed.buildFormatVersion);
-  if (buildFormatVersion !== EXPECTED_BUILD_FORMAT_VERSION) {
+  if (buildFormatVersion !== IMAGE_BUILD_FORMAT_VERSION) {
     return {
       ok: false,
       response: jsonResponse(

@@ -32,6 +32,7 @@ export interface ScenarioRunHintSnapshot {
 
 export type AgentHostRole = "agent" | "builder";
 export type HostCpuReservationState = "pending" | "committed";
+export type HostCpuReservationQuotaPhase = "boot" | "steady";
 export type ImageBuildStatus =
   | "queued"
   | "assigned"
@@ -265,7 +266,10 @@ export const imageBuilds = sqliteTable(
     hostId: text("host_id").references(() => agentHosts.id, {
       onDelete: "set null",
     }),
-    status: text("status").$type<ImageBuildStatus>().default("queued").notNull(),
+    status: text("status")
+      .$type<ImageBuildStatus>()
+      .default("queued")
+      .notNull(),
     phase: text("phase").$type<BuildPhase>().default("queued").notNull(),
     attempt: integer("attempt").default(0).notNull(),
     error: text("error"),
@@ -344,6 +348,11 @@ export const hostCpuReservations = sqliteTable(
       .notNull()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     cpuMillis: integer("cpu_millis").notNull(),
+    steadyCpuMillis: integer("steady_cpu_millis").notNull(),
+    bootCpuMillis: integer("boot_cpu_millis").notNull(),
+    quotaPhase: text("quota_phase")
+      .$type<HostCpuReservationQuotaPhase>()
+      .notNull(),
     state: text("state").$type<HostCpuReservationState>().notNull(),
     expiresAt: integer("expires_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
@@ -352,13 +361,22 @@ export const hostCpuReservations = sqliteTable(
   (table) => [
     check("host_cpu_reservations_cpu_positive", sql`${table.cpuMillis} > 0`),
     check(
+      "host_cpu_reservations_quota_positive",
+      sql`${table.steadyCpuMillis} > 0 AND ${table.bootCpuMillis} >= ${table.steadyCpuMillis}`,
+    ),
+    check(
+      "host_cpu_reservations_quota_phase_valid",
+      sql`${table.quotaPhase} in ('boot', 'steady')`,
+    ),
+    check(
+      "host_cpu_reservations_current_quota_valid",
+      sql`(${table.quotaPhase} = 'boot' AND ${table.cpuMillis} = ${table.bootCpuMillis}) OR (${table.quotaPhase} = 'steady' AND ${table.cpuMillis} = ${table.steadyCpuMillis})`,
+    ),
+    check(
       "host_cpu_reservations_state_valid",
       sql`${table.state} in ('pending', 'committed')`,
     ),
-    index("host_cpu_reservations_host_state_idx").on(
-      table.hostId,
-      table.state,
-    ),
+    index("host_cpu_reservations_host_state_idx").on(table.hostId, table.state),
     index("host_cpu_reservations_pending_expiry_idx").on(
       table.state,
       table.expiresAt,
@@ -736,9 +754,7 @@ export const oauthResource = sqliteTable(
     )
       .default(false)
       .notNull(),
-    disabled: integer("disabled", { mode: "boolean" })
-      .default(false)
-      .notNull(),
+    disabled: integer("disabled", { mode: "boolean" }).default(false).notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .default(nowMsDefault)
       .notNull(),

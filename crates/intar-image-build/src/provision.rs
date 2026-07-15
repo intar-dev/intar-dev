@@ -1,15 +1,16 @@
 #![allow(clippy::too_many_lines)]
 
 use anyhow::{Context, Result};
+use intar_contracts::guest::RUNTIME_AUTHORIZED_KEYS_FILENAME;
 use intar_image_scenario::{
-    KINO_VSOCK_CID_PLACEHOLDER, KINO_VSOCK_PORT_PLACEHOLDER, Scenario, VmAction, VmDefinition,
-    VmStep,
+    KINO_VSOCK_CID_PLACEHOLDER, KINO_VSOCK_PORT_PLACEHOLDER, KinoProbeKind, Scenario, VmAction,
+    VmDefinition, VmStep,
 };
 use std::fmt::Write as _;
 
 use crate::rootfs::{
-    INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE, INTAR_ACPI_POWEROFF_PATH,
-    INTAR_ACPI_POWEROFF_SCRIPT,
+    BASE_RUNTIME_MODULES, INTAR_ACPI_EVENT_PATH, INTAR_ACPI_EVENT_RULE, INTAR_ACPI_POWEROFF_PATH,
+    INTAR_ACPI_POWEROFF_SCRIPT, KUBERNETES_RUNTIME_MODULES,
 };
 
 const DEFAULT_USERNAME: &str = "ubuntu";
@@ -39,6 +40,24 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
     let kino_template = derived_kino.config_hcl.clone();
     let scenario_motd = render_scenario_motd(scenario, &derived_kino.probe_descriptors)
         .context("failed to render scenario motd")?;
+    let requires_kubernetes_modules = derived_kino
+        .probe_descriptors
+        .iter()
+        .any(|probe| probe.kind == KinoProbeKind::K8sPodState)
+        || vm
+            .steps
+            .iter()
+            .flat_map(|step| &step.actions)
+            .any(|action| {
+                matches!(
+                    action,
+                    VmAction::K8sApply { .. }
+                        | VmAction::K8sNamespace { .. }
+                        | VmAction::K8sDeployment { .. }
+                        | VmAction::K8sService { .. }
+                        | VmAction::K8sScaleDeployment { .. }
+                )
+            });
     let step_scripts = render_vm_step_scripts(vm)?;
 
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
@@ -71,8 +90,8 @@ pub fn render_scenario_provision_script(scenario: &Scenario, vm: &VmDefinition) 
         &kino_template,
         &scenario_motd,
         &step_scripts,
-        scenario,
         vm,
+        requires_kubernetes_modules,
     )?;
     Ok(script)
 }
@@ -168,8 +187,8 @@ fn append_script_body(
     kino_template: &str,
     scenario_motd: &str,
     step_scripts: &[GeneratedStepScript],
-    _scenario: &Scenario,
     vm: &VmDefinition,
+    requires_kubernetes_modules: bool,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /usr/share/keyrings").context("format error")?;
     writeln!(
@@ -193,7 +212,13 @@ fn append_script_body(
 
     append_step_scripts(script, step_scripts)?;
 
-    append_runtime_assets(script, kino_template, scenario_motd, vm)?;
+    append_runtime_assets(
+        script,
+        kino_template,
+        scenario_motd,
+        vm,
+        requires_kubernetes_modules,
+    )?;
 
     writeln!(
         script,
@@ -487,9 +512,26 @@ fn append_runtime_assets(
     script: &mut String,
     kino_template: &str,
     scenario_motd: &str,
-    _vm: &VmDefinition,
+    vm: &VmDefinition,
+    requires_kubernetes_modules: bool,
 ) -> Result<()> {
     writeln!(script, "install -d -m 0755 /etc/kino /etc/intar").context("format error")?;
+    writeln!(script).context("format error")?;
+
+    writeln!(
+        script,
+        "cat >/etc/modules-load.d/90-intar-runtime.conf <<'EOF_RUNTIME_MODULES'"
+    )
+    .context("format error")?;
+    for module in BASE_RUNTIME_MODULES {
+        writeln!(script, "{module}").context("format error")?;
+    }
+    if requires_kubernetes_modules {
+        for module in KUBERNETES_RUNTIME_MODULES {
+            writeln!(script, "{module}").context("format error")?;
+        }
+    }
+    writeln!(script, "EOF_RUNTIME_MODULES").context("format error")?;
     writeln!(script).context("format error")?;
 
     writeln!(
@@ -663,10 +705,16 @@ fn append_runtime_assets(
         "runtime_env_path=\"$runtime_mount_path/runtime.env\""
     )
     .context("format error")?;
+    writeln!(
+        script,
+        "runtime_authorized_keys_path=\"$runtime_mount_path/{RUNTIME_AUTHORIZED_KEYS_FILENAME}\""
+    )
+    .context("format error")?;
     writeln!(script, "kino_config_path=\"{KINO_RUNTIME_CONFIG_PATH}\"").context("format error")?;
     writeln!(script, "kino_log_path=\"$runtime_state_path/kino.log\"").context("format error")?;
     writeln!(script, "recording_mount_path=\"{RECORDING_MOUNT_PATH}\"").context("format error")?;
     writeln!(script, "recording_user=\"{DEFAULT_USERNAME}\"").context("format error")?;
+    writeln!(script, "vm_cpu_millis={}", vm.cpu_millis).context("format error")?;
     writeln!(
         script,
         "ssh_ready_timeout_seconds={GUEST_SSH_READY_TIMEOUT_SECONDS}"
@@ -680,9 +728,11 @@ fn append_runtime_assets(
     writeln!(script, "KINO_PID=\"\"").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase() {{").context("format error")?;
+    writeln!(script, "  local uptime").context("format error")?;
+    writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
     writeln!(
         script,
-        "  printf '[intar-runtime] ts=%s phase=%s status=%s\\n' \"$(date -Ins)\" \"$1\" \"$2\""
+        "  printf '[intar-runtime] ts=boot+%ss phase=%s status=%s\\n' \"$uptime\" \"$1\" \"$2\""
     )
     .context("format error")?;
     writeln!(script, "}}").context("format error")?;
@@ -691,10 +741,12 @@ fn append_runtime_assets(
     writeln!(script, "  local status=\"$1\"").context("format error")?;
     writeln!(script, "  local line=\"$2\"").context("format error")?;
     writeln!(script, "  local command=\"$3\"").context("format error")?;
+    writeln!(script, "  local uptime").context("format error")?;
     writeln!(script, "  trap - ERR").context("format error")?;
+    writeln!(script, "  read -r uptime _ </proc/uptime").context("format error")?;
     writeln!(
         script,
-        "  printf '[intar-runtime] ts=%s error=command_failed status=%s line=%s command=%q\\n' \"$(date -Ins)\" \"$status\" \"$line\" \"$command\" >&2"
+        "  printf '[intar-runtime] ts=boot+%ss error=command_failed status=%s line=%s command=%q\\n' \"$uptime\" \"$status\" \"$line\" \"$command\" >&2"
     )
     .context("format error")?;
     writeln!(script, "  return \"$status\"").context("format error")?;
@@ -738,6 +790,21 @@ fn append_runtime_assets(
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "grow_root_filesystem() {{").context("format error")?;
+    writeln!(script, "  case \"${{INTAR_ROOT_RESIZE_REQUIRED:-1}}\" in").context("format error")?;
+    writeln!(script, "    0|false)").context("format error")?;
+    writeln!(script, "      log_phase root_resize skipped").context("format error")?;
+    writeln!(script, "      return 0").context("format error")?;
+    writeln!(script, "      ;;").context("format error")?;
+    writeln!(script, "    1|true) ;;").context("format error")?;
+    writeln!(script, "    *)").context("format error")?;
+    writeln!(
+        script,
+        "      echo \"invalid INTAR_ROOT_RESIZE_REQUIRED value: $INTAR_ROOT_RESIZE_REQUIRED\" >&2"
+    )
+    .context("format error")?;
+    writeln!(script, "      return 1").context("format error")?;
+    writeln!(script, "      ;;").context("format error")?;
+    writeln!(script, "  esac").context("format error")?;
     writeln!(script, "  log_phase root_resize start").context("format error")?;
     writeln!(
         script,
@@ -967,17 +1034,13 @@ fn append_runtime_assets(
     writeln!(script).context("format error")?;
     writeln!(script, "configure_ssh_access() {{").context("format error")?;
     writeln!(script, "  log_phase ssh_access start").context("format error")?;
+    writeln!(script, "  local home_dir authorized_keys tmp_path").context("format error")?;
+    writeln!(script, "  home_dir=\"/home/$recording_user\"").context("format error")?;
     writeln!(
         script,
-        "  local home_dir authorized_keys tmp_path decoded_keys key"
+        "  [ -d \"$home_dir\" ] || {{ echo \"missing home for $recording_user\" >&2; exit 1; }}"
     )
     .context("format error")?;
-    writeln!(
-        script,
-        "  home_dir=\"$(getent passwd \"$recording_user\" | cut -d: -f6)\""
-    )
-    .context("format error")?;
-    writeln!(script, "  [ -n \"$home_dir\" ] || {{ echo \"failed to resolve home for $recording_user\" >&2; exit 1; }}").context("format error")?;
     writeln!(
         script,
         "  install -d -m 0700 -o \"$recording_user\" -g \"$recording_user\" \"$home_dir/.ssh\""
@@ -988,27 +1051,15 @@ fn append_runtime_assets(
         "  authorized_keys=\"$home_dir/.ssh/authorized_keys\""
     )
     .context("format error")?;
-    writeln!(script, "  tmp_path=\"$(mktemp)\"").context("format error")?;
+    writeln!(script, "  [ -s \"$runtime_authorized_keys_path\" ] || {{ echo 'runtime disk authorized_keys is empty' >&2; exit 1; }}").context("format error")?;
     writeln!(
         script,
-        "  if [ -f \"$authorized_keys\" ]; then cat \"$authorized_keys\" >\"$tmp_path\"; fi"
+        "  tmp_path=\"$home_dir/.ssh/.authorized_keys.intar.$$\""
     )
     .context("format error")?;
-    writeln!(script, "  decoded_keys=\"$(mktemp)\"").context("format error")?;
-    writeln!(
-        script,
-        "  printf '%s' \"$INTAR_SSH_AUTHORIZED_KEYS_B64\" | base64 -d >\"$decoded_keys\""
-    )
-    .context("format error")?;
-    writeln!(script, "  [ -s \"$decoded_keys\" ] || {{ echo 'INTAR_SSH_AUTHORIZED_KEYS_B64 decoded no keys' >&2; exit 1; }}").context("format error")?;
-    // `|| [ -n "$key" ]` processes a final line with no trailing newline,
-    // which a plain `while read` would otherwise drop.
-    writeln!(script, "  while IFS= read -r key || [ -n \"$key\" ]; do").context("format error")?;
-    writeln!(script, "    [ -n \"$key\" ] || continue").context("format error")?;
-    writeln!(script, "    if ! grep -qxF \"$key\" \"$tmp_path\" 2>/dev/null; then printf '%s\\n' \"$key\" >>\"$tmp_path\"; fi").context("format error")?;
-    writeln!(script, "  done <\"$decoded_keys\"").context("format error")?;
-    writeln!(script, "  install -m 0600 -o \"$recording_user\" -g \"$recording_user\" \"$tmp_path\" \"$authorized_keys\"").context("format error")?;
-    writeln!(script, "  rm -f \"$tmp_path\" \"$decoded_keys\"").context("format error")?;
+    writeln!(script, "  rm -f \"$tmp_path\"").context("format error")?;
+    writeln!(script, "  install -m 0600 -o \"$recording_user\" -g \"$recording_user\" \"$runtime_authorized_keys_path\" \"$tmp_path\"").context("format error")?;
+    writeln!(script, "  mv -f \"$tmp_path\" \"$authorized_keys\"").context("format error")?;
     writeln!(script, "  log_phase ssh_access end").context("format error")?;
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
@@ -1061,12 +1112,14 @@ fn append_runtime_assets(
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "start_sshd() {{").context("format error")?;
-    writeln!(script, "  local deadline_seconds now_seconds ssh_active_state ssh_job ssh_properties property value").context("format error")?;
-    writeln!(
-        script,
-        "  deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
-    )
-    .context("format error")?;
+    if vm.cpu_millis < 1_000 {
+        writeln!(script, "  local deadline_seconds now_seconds ssh_active_state ssh_job ssh_properties property value").context("format error")?;
+        writeln!(
+            script,
+            "  deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
+        )
+        .context("format error")?;
+    }
     writeln!(script, "  log_phase ssh_boot start").context("format error")?;
     writeln!(script, "  generate_ssh_host_keys").context("format error")?;
     writeln!(script, "  install -d -o root -g root -m 0755 /run/sshd").context("format error")?;
@@ -1084,71 +1137,96 @@ fn append_runtime_assets(
         "  install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready"
     )
     .context("format error")?;
-    writeln!(
-        script,
-        "  if ! systemctl start --no-block ssh.service; then"
-    )
-    .context("format error")?;
-    writeln!(script, "    echo 'failed to enqueue ssh.service start' >&2")
+    if vm.cpu_millis >= 1_000 {
+        // `systemctl start` waits for the job to finish. The distribution unit's
+        // TimeoutStartSec bounds the wait, and a single postcondition check avoids
+        // adding up to one second of polling latency to normal-capacity guests.
+        writeln!(script, "  if ! systemctl start ssh.service; then").context("format error")?;
+        writeln!(script, "    echo 'failed to start ssh.service' >&2").context("format error")?;
+        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
+        writeln!(script, "    return 1").context("format error")?;
+        writeln!(script, "  fi").context("format error")?;
+        writeln!(
+            script,
+            "  if ! systemctl is-active --quiet ssh.service; then"
+        )
         .context("format error")?;
-    writeln!(script, "    print_sshd_diagnostics").context("format error")?;
-    writeln!(script, "    return 1").context("format error")?;
-    writeln!(script, "  fi").context("format error")?;
-    writeln!(script, "  while true; do").context("format error")?;
-    writeln!(script, "    ssh_active_state=unknown").context("format error")?;
-    writeln!(script, "    ssh_job=unknown").context("format error")?;
-    writeln!(
-        script,
-        "    ssh_properties=\"$(systemctl show ssh.service --property=ActiveState --property=Job 2>/dev/null || true)\""
-    )
-    .context("format error")?;
-    writeln!(script, "    while IFS='=' read -r property value; do").context("format error")?;
-    writeln!(script, "      case \"$property\" in").context("format error")?;
-    writeln!(
-        script,
-        "        ActiveState) ssh_active_state=\"$value\" ;;"
-    )
-    .context("format error")?;
-    writeln!(script, "        Job) ssh_job=\"$value\" ;;").context("format error")?;
-    writeln!(script, "      esac").context("format error")?;
-    writeln!(script, "    done <<<\"$ssh_properties\"").context("format error")?;
-    writeln!(script, "    if [ -z \"$ssh_job\" ]; then").context("format error")?;
-    writeln!(script, "      case \"$ssh_active_state\" in").context("format error")?;
-    writeln!(script, "        active)").context("format error")?;
-    writeln!(script, "          log_phase ssh_boot end").context("format error")?;
-    writeln!(script, "          return 0").context("format error")?;
-    writeln!(script, "          ;;").context("format error")?;
-    writeln!(script, "        failed)").context("format error")?;
-    writeln!(
-        script,
-        "          echo 'ssh.service entered failed state during startup' >&2"
-    )
-    .context("format error")?;
-    writeln!(script, "          print_sshd_diagnostics").context("format error")?;
-    writeln!(script, "          return 1").context("format error")?;
-    writeln!(script, "          ;;").context("format error")?;
-    writeln!(script, "      esac").context("format error")?;
-    writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    now_seconds=\"$(monotonic_seconds)\"").context("format error")?;
-    writeln!(
-        script,
-        "    if [ \"$now_seconds\" -ge \"$deadline_seconds\" ]; then"
-    )
-    .context("format error")?;
-    writeln!(script, "      break").context("format error")?;
-    writeln!(script, "    fi").context("format error")?;
-    writeln!(script, "    sleep 1").context("format error")?;
-    writeln!(script, "  done").context("format error")?;
-    writeln!(script, "  print_sshd_diagnostics").context("format error")?;
-    writeln!(
-        script,
-        "  echo \"timed out after ${{ssh_ready_timeout_seconds}}s waiting for ssh service to become active\" >&2"
-    )
-    .context("format error")?;
-    writeln!(script, "  return 1").context("format error")?;
+        writeln!(
+            script,
+            "    echo 'ssh.service did not become active after its start job completed' >&2"
+        )
+        .context("format error")?;
+        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
+        writeln!(script, "    return 1").context("format error")?;
+        writeln!(script, "  fi").context("format error")?;
+        writeln!(script, "  log_phase ssh_boot end").context("format error")?;
+    } else {
+        writeln!(
+            script,
+            "  if ! systemctl start --no-block ssh.service; then"
+        )
+        .context("format error")?;
+        writeln!(script, "    echo 'failed to enqueue ssh.service start' >&2")
+            .context("format error")?;
+        writeln!(script, "    print_sshd_diagnostics").context("format error")?;
+        writeln!(script, "    return 1").context("format error")?;
+        writeln!(script, "  fi").context("format error")?;
+        writeln!(script, "  while true; do").context("format error")?;
+        writeln!(script, "    ssh_active_state=unknown").context("format error")?;
+        writeln!(script, "    ssh_job=unknown").context("format error")?;
+        writeln!(
+            script,
+            "    ssh_properties=\"$(systemctl show ssh.service --property=ActiveState --property=Job 2>/dev/null || true)\""
+        )
+        .context("format error")?;
+        writeln!(script, "    while IFS='=' read -r property value; do").context("format error")?;
+        writeln!(script, "      case \"$property\" in").context("format error")?;
+        writeln!(
+            script,
+            "        ActiveState) ssh_active_state=\"$value\" ;;"
+        )
+        .context("format error")?;
+        writeln!(script, "        Job) ssh_job=\"$value\" ;;").context("format error")?;
+        writeln!(script, "      esac").context("format error")?;
+        writeln!(script, "    done <<<\"$ssh_properties\"").context("format error")?;
+        writeln!(script, "    if [ -z \"$ssh_job\" ]; then").context("format error")?;
+        writeln!(script, "      case \"$ssh_active_state\" in").context("format error")?;
+        writeln!(script, "        active)").context("format error")?;
+        writeln!(script, "          log_phase ssh_boot end").context("format error")?;
+        writeln!(script, "          return 0").context("format error")?;
+        writeln!(script, "          ;;").context("format error")?;
+        writeln!(script, "        failed)").context("format error")?;
+        writeln!(
+            script,
+            "          echo 'ssh.service entered failed state during startup' >&2"
+        )
+        .context("format error")?;
+        writeln!(script, "          print_sshd_diagnostics").context("format error")?;
+        writeln!(script, "          return 1").context("format error")?;
+        writeln!(script, "          ;;").context("format error")?;
+        writeln!(script, "      esac").context("format error")?;
+        writeln!(script, "    fi").context("format error")?;
+        writeln!(script, "    now_seconds=\"$(monotonic_seconds)\"").context("format error")?;
+        writeln!(
+            script,
+            "    if [ \"$now_seconds\" -ge \"$deadline_seconds\" ]; then"
+        )
+        .context("format error")?;
+        writeln!(script, "      break").context("format error")?;
+        writeln!(script, "    fi").context("format error")?;
+        writeln!(script, "    sleep 0.1").context("format error")?;
+        writeln!(script, "  done").context("format error")?;
+        writeln!(script, "  print_sshd_diagnostics").context("format error")?;
+        writeln!(
+            script,
+            "  echo \"timed out after ${{ssh_ready_timeout_seconds}}s waiting for ssh service to become active\" >&2"
+        )
+        .context("format error")?;
+        writeln!(script, "  return 1").context("format error")?;
+    }
     writeln!(script, "}}").context("format error")?;
     writeln!(script).context("format error")?;
-    writeln!(script, "grow_root_filesystem").context("format error")?;
+    writeln!(script, "# intar-runtime-main").context("format error")?;
     writeln!(script, "log_phase runtime_disk start").context("format error")?;
     writeln!(script, "wait_for_block_device \"$runtime_device\" INTARRUN")
         .context("format error")?;
@@ -1181,11 +1259,6 @@ fn append_runtime_assets(
     writeln!(script, "}} > /etc/profile.d/intar-peers.sh").context("format error")?;
     writeln!(script, "chmod 0644 /etc/profile.d/intar-peers.sh").context("format error")?;
     writeln!(script, "log_phase runtime_disk end").context("format error")?;
-    writeln!(
-        script,
-        ": \"${{INTAR_SSH_AUTHORIZED_KEYS_B64:?INTAR_SSH_AUTHORIZED_KEYS_B64 is required}}\""
-    )
-    .context("format error")?;
     writeln!(
         script,
         ": \"${{KINO_VSOCK_CID:?KINO_VSOCK_CID is required}}\""
@@ -1221,6 +1294,8 @@ fn append_runtime_assets(
         ": \"${{INTAR_DNS_SERVERS:?INTAR_DNS_SERVERS is required}}\""
     )
     .context("format error")?;
+    writeln!(script).context("format error")?;
+    writeln!(script, "grow_root_filesystem").context("format error")?;
     writeln!(script).context("format error")?;
     writeln!(script, "log_phase recording_mount start").context("format error")?;
     writeln!(
@@ -1273,8 +1348,7 @@ fn append_runtime_assets(
     .context("format error")?;
     writeln!(script, "[Unit]").context("format error")?;
     writeln!(script, "Description=Intar scenario supervisor").context("format error")?;
-    writeln!(script, "After=local-fs.target systemd-udev-trigger.service")
-        .context("format error")?;
+    writeln!(script, "After=local-fs.target").context("format error")?;
     writeln!(script, "Before=multi-user.target").context("format error")?;
     writeln!(script, "FailureAction=poweroff-force").context("format error")?;
     writeln!(script).context("format error")?;
@@ -1696,8 +1770,11 @@ mod tests {
     use super::{render_scenario_provision_script, shell_quote};
 
     fn render_minimal_provision_script() -> String {
-        let scenario = Scenario::parse(
-            r#"
+        render_minimal_provision_script_with_cpu("1")
+    }
+
+    fn render_minimal_provision_script_with_cpu(cpu: &str) -> String {
+        let source = r#"
 scenario "ssh-readiness" {
   title = "SSH Readiness"
   category = "linux"
@@ -1722,13 +1799,14 @@ scenario "ssh-readiness" {
   }
 
   vm "server" {
+    cpu = __CPU__
     image = "debian-13-minimal"
     probes = ["ssh-running"]
   }
 }
-"#,
-        )
-        .unwrap();
+"#
+        .replace("__CPU__", cpu);
+        let scenario = Scenario::parse(&source).unwrap();
         let vm = scenario.vm_by_name("server").unwrap();
         render_scenario_provision_script(&scenario, vm).unwrap()
     }
@@ -1742,7 +1820,7 @@ scenario "ssh-readiness" {
 
     fn render_minimal_supervisor_prefix() -> String {
         let runtime = render_minimal_supervisor();
-        let (prefix, _) = runtime.split_once("\ngrow_root_filesystem\n").unwrap();
+        let (prefix, _) = runtime.split_once("\n# intar-runtime-main\n").unwrap();
         format!("{prefix}\n")
     }
 
@@ -1846,7 +1924,7 @@ scenario "ssh-readiness" {
     }
 
     #[test]
-    fn scenario_supervisor_uses_a_monotonic_ssh_readiness_deadline() {
+    fn scenario_supervisor_uses_blocking_ssh_start_at_normal_cpu() {
         let script = render_minimal_provision_script();
         assert!(script.contains("ssh_ready_timeout_seconds=120"));
         assert!(script.contains("read -r uptime _ </proc/uptime"));
@@ -1883,15 +1961,15 @@ scenario "ssh-readiness" {
 
         let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
         let (start_sshd, _) = start_sshd_and_rest
-            .split_once("\n}\n\ngrow_root_filesystem")
+            .split_once("\n}\n\n# intar-runtime-main")
             .unwrap();
-        assert!(
-            start_sshd.contains(
-                "deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
-            )
-        );
-        assert!(start_sshd.contains("while true; do"));
-        assert!(start_sshd.contains("systemctl start --no-block ssh.service"));
+        assert!(start_sshd.contains("systemctl start ssh.service"));
+        assert!(start_sshd.contains("systemctl is-active --quiet ssh.service"));
+        assert!(!start_sshd.contains("systemctl start --no-block ssh.service"));
+        assert!(!start_sshd.contains("systemctl show ssh.service"));
+        assert!(!start_sshd.contains("while true; do"));
+        assert!(!start_sshd.contains("sleep 1"));
+        assert!(!start_sshd.contains("deadline_seconds="));
         assert!(!start_sshd.contains("systemctl restart"));
         assert!(!start_sshd.contains("systemctl reset-failed"));
         let generate_keys = start_sshd.find("generate_ssh_host_keys").unwrap();
@@ -1902,46 +1980,17 @@ scenario "ssh-readiness" {
         let create_ready_gate = start_sshd
             .find("install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready")
             .unwrap();
-        let start_service = start_sshd
-            .find("systemctl start --no-block ssh.service")
-            .unwrap();
+        let start_service = start_sshd.find("systemctl start ssh.service").unwrap();
         assert!(generate_keys < create_sshd_runtime);
         assert!(create_sshd_runtime < validate_sshd);
         assert!(validate_sshd < create_ready_gate);
         assert!(create_ready_gate < start_service);
         assert!(start_sshd.contains(
-            "install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready\n  if ! systemctl start --no-block ssh.service"
+            "install -D -o root -g root -m 0600 /dev/null /run/intar/ssh-ready\n  if ! systemctl start ssh.service"
         ));
-        assert_eq!(start_sshd.matches("systemctl show ssh.service").count(), 1);
-        assert!(
-            start_sshd.contains("systemctl show ssh.service --property=ActiveState --property=Job")
-        );
-        assert!(start_sshd.contains("while IFS='=' read -r property value; do"));
-        assert!(start_sshd.contains("done <<<\"$ssh_properties\""));
-        assert!(start_sshd.contains("ssh_job=unknown"));
-        assert!(start_sshd.contains("if [ -z \"$ssh_job\" ]; then"));
-        let (_, drained_job_and_rest) = start_sshd
-            .split_once("if [ -z \"$ssh_job\" ]; then\n")
-            .unwrap();
-        let (drained_job, _) = drained_job_and_rest
-            .split_once("\n    fi\n    now_seconds=")
-            .unwrap();
-        assert!(drained_job.contains("case \"$ssh_active_state\" in"));
-        assert!(drained_job.contains("active)"));
-        assert!(drained_job.contains("failed)"));
-        assert!(!start_sshd.contains("systemctl is-active"));
-        assert!(start_sshd.contains("failed)"));
+        assert!(start_sshd.contains("log_phase ssh_boot end"));
         assert!(start_sshd.contains("print_sshd_diagnostics"));
-        assert!(start_sshd.contains("sleep 1"));
-        assert!(!start_sshd.contains("sleep 0.1"));
         assert!(!start_sshd.contains("sshd.service"));
-        assert!(start_sshd.contains("now_seconds=\"$(monotonic_seconds)\""));
-        assert!(start_sshd.contains("-ge \"$deadline_seconds\""));
-        assert!(start_sshd.find("deadline_seconds=").unwrap() < generate_keys);
-        assert!(start_sshd.contains(
-            "timed out after ${ssh_ready_timeout_seconds}s waiting for ssh service to become active"
-        ));
-        assert!(!start_sshd.contains("for _ in {1..100}"));
         assert!(script.contains("systemctl status --no-pager --full ssh.service >&2"));
         assert!(script.contains("journalctl --no-pager --full --unit ssh.service --lines 100 >&2"));
 
@@ -1950,6 +1999,36 @@ scenario "ssh-readiness" {
         let start_sshd_call = script.rfind("\nstart_sshd\n").unwrap();
         assert!(configure_network < configure_access);
         assert!(configure_access < start_sshd_call);
+    }
+
+    #[test]
+    fn scenario_supervisor_retains_bounded_async_ssh_start_for_fractional_cpu() {
+        let script = render_minimal_provision_script_with_cpu("0.125");
+        assert!(script.contains("vm_cpu_millis=125"));
+
+        let (_, start_sshd_and_rest) = script.split_once("start_sshd() {\n").unwrap();
+        let (start_sshd, _) = start_sshd_and_rest
+            .split_once("\n}\n\n# intar-runtime-main")
+            .unwrap();
+        assert!(
+            start_sshd.contains(
+                "deadline_seconds=$(( $(monotonic_seconds) + ssh_ready_timeout_seconds ))"
+            )
+        );
+        assert!(start_sshd.contains("systemctl start --no-block ssh.service"));
+        assert!(
+            start_sshd.contains("systemctl show ssh.service --property=ActiveState --property=Job")
+        );
+        assert!(start_sshd.contains("while true; do"));
+        assert!(start_sshd.contains("sleep 0.1"));
+        assert!(!start_sshd.contains("sleep 1"));
+        assert!(start_sshd.contains("now_seconds=\"$(monotonic_seconds)\""));
+        assert!(start_sshd.contains("-ge \"$deadline_seconds\""));
+        assert!(start_sshd.contains(
+            "timed out after ${ssh_ready_timeout_seconds}s waiting for ssh service to become active"
+        ));
+        assert!(!start_sshd.contains("if ! systemctl start ssh.service; then"));
+        assert!(!start_sshd.contains("systemctl is-active"));
     }
 
     #[test]
@@ -1962,7 +2041,8 @@ scenario "ssh-readiness" {
             script.contains("trap 'report_runtime_error \"$?\" \"$LINENO\" \"$BASH_COMMAND\"' ERR")
         );
         assert!(script.contains("error=command_failed status=%s line=%s command=%q\\n"));
-        assert!(script.contains("After=local-fs.target systemd-udev-trigger.service"));
+        assert!(script.contains("After=local-fs.target"));
+        assert!(!script.contains("systemd-udev-trigger.service"));
 
         let (_, runtime_unit_and_rest) = script
             .split_once("cat >/etc/systemd/system/intar-scenario.service <<'EOF_RUNTIME_UNIT'\n")
@@ -2031,10 +2111,57 @@ scenario "ssh-readiness" {
 
     #[test]
     fn rendered_scenario_supervisor_is_valid_bash() {
-        let output = run_bash(&render_minimal_supervisor(), true);
+        let supervisor = render_minimal_supervisor();
+        assert!(!supervisor.contains("date -Ins"));
+        assert!(supervisor.contains("ts=boot+%ss phase=%s status=%s"));
+        assert!(supervisor.contains("read -r uptime _ </proc/uptime"));
+
+        let output = run_bash(&supervisor, true);
         assert!(
             output.status.success(),
             "bash -n rejected the rendered supervisor: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn scenario_supervisor_resizes_root_only_when_runtime_flag_requires_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let resize_calls = temp.path().join("resize-calls");
+        std::fs::write(&resize_calls, "").unwrap();
+
+        let harness = r#"
+trap - EXIT INT TERM
+resize_calls=__RESIZE_CALLS__
+log_phase() { :; }
+resize2fs() { printf 'resize\n' >>"$resize_calls"; }
+
+INTAR_ROOT_RESIZE_REQUIRED=false
+grow_root_filesystem
+test ! -s "$resize_calls"
+
+INTAR_ROOT_RESIZE_REQUIRED=true
+grow_root_filesystem
+test "$(wc -l <"$resize_calls")" -eq 1
+
+unset INTAR_ROOT_RESIZE_REQUIRED
+grow_root_filesystem
+test "$(wc -l <"$resize_calls")" -eq 2
+
+INTAR_ROOT_RESIZE_REQUIRED=invalid
+if grow_root_filesystem; then
+  echo 'invalid resize flag was accepted' >&2
+  exit 1
+fi
+"#
+        .replace(
+            "__RESIZE_CALLS__",
+            &shell_quote(&resize_calls.display().to_string()),
+        );
+        let output = run_bash(&(render_minimal_supervisor_prefix() + &harness), false);
+        assert!(
+            output.status.success(),
+            "root resize flag harness failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -2279,7 +2406,11 @@ scenario "broken-nginx" {
                     "kino record-ssh --config \"$config_path\" --shell-startup interactive"
                 ));
                 assert!(script.contains("configure_ssh_access() {"));
-                assert!(script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
+                assert!(script.contains(
+                    "runtime_authorized_keys_path=\"$runtime_mount_path/authorized_keys\""
+                ));
+                assert!(script.contains("mv -f \"$tmp_path\" \"$authorized_keys\""));
+                assert!(!script.contains("INTAR_SSH_AUTHORIZED_KEYS_B64 is required"));
                 assert!(script.contains("KINO_HOST_READY_PORT is required"));
                 assert!(script.contains("root_device=\"/dev/vda\""));
                 assert!(script.contains("runtime_device=\"/dev/vdb\""));
@@ -2287,6 +2418,9 @@ scenario "broken-nginx" {
                 assert!(script.contains("actual_label=\"$(blkid -s LABEL -o value"));
                 assert!(script.contains("grow_root_filesystem() {"));
                 assert!(script.contains("resize2fs \"$root_device\""));
+                assert!(script.contains("${INTAR_ROOT_RESIZE_REQUIRED:-1}"));
+                assert!(script.contains("0|false)"));
+                assert!(script.contains("log_phase root_resize skipped"));
                 assert!(script.contains("wait_for_block_device \"$runtime_device\" INTARRUN"));
                 assert!(script.contains("wait_for_block_device \"$recording_device\" INTARREC"));
                 assert!(script.contains("compgen -v INTAR_PEER_"));
@@ -2300,7 +2434,13 @@ scenario "broken-nginx" {
                 );
                 assert!(!script.contains("ssh-keygen -A"));
                 assert!(!script.contains("modprobe vsock"));
-                assert!(script.contains("After=local-fs.target systemd-udev-trigger.service"));
+                assert!(script.contains("After=local-fs.target"));
+                assert!(!script.contains("systemd-udev-trigger.service"));
+                let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
+                let (modules, _) = modules_and_rest
+                    .split_once("\nEOF_RUNTIME_MODULES")
+                    .unwrap();
+                assert_eq!(modules, "nf_tables");
                 assert!(!script.contains("INTAR_STARGATE_TARGET_PUBLIC_KEY_OPENSSH"));
                 assert!(script.contains("wait -n \"$KINO_PID\" || true"));
                 assert!(script.contains("start_sshd"));
@@ -2383,5 +2523,10 @@ scenario "workshop-cluster" {
                 "kubectl scale 'deployment/hello-web' --replicas=0 --namespace 'workshop'"
             )
         );
+        let (_, modules_and_rest) = script.split_once("<<'EOF_RUNTIME_MODULES'\n").unwrap();
+        let (modules, _) = modules_and_rest
+            .split_once("\nEOF_RUNTIME_MODULES")
+            .unwrap();
+        assert_eq!(modules, "nf_tables\noverlay\nbr_netfilter\nvxlan");
     }
 }

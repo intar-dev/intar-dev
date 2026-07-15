@@ -36,6 +36,10 @@
         "type": "string"
       }
     },
+    "root_resize_required": {
+      "description": "Whether the host expanded the root block device beyond the image's\nbuilt filesystem size. Older runtime disks omit this value and guests\nconservatively retain the resize step.",
+      "type": "boolean"
+    },
     "ssh_authorized_keys_openssh": {
       "type": "array",
       "items": {
@@ -55,6 +59,7 @@
     "guest_ip_cidr",
     "gateway",
     "dns_servers",
+    "root_resize_required",
     "peer_guest_ips"
   ]
 }

@@ -15,6 +15,23 @@ reserves 1000 host millicores by default, and allocates per-generation
 identities from `200000..=265535`. Audit that range for local/directory identity
 collisions before deployment.
 
+VM CPU declarations are steady-state entitlements. For a prepared
+`LaunchVmV2`, jailerd capacity-accounts a root-owned 2000-millicore aggregate
+VMM quota for at most 45 seconds during boot, without changing guest vCPU
+topology. Legacy `LaunchVm` is rejected: there is no steady-quota downgrade or
+copy-based launch fallback. Public SSH ports are reserved but v2 DNAT remains absent
+until `FinalizeVmBoot` has lowered and read back `cpu.max`, verified
+`cpu.max.burst = 0`, persisted the steady phase, and activated ingress. An
+auxiliary root-owned systemd oneshot is created in the same transaction as
+each v2 VM and is lifecycle-bound to that exact generation. It runs a hidden,
+typed `intar-jailerd` worker at an absolute `/proc/uptime` deadline, applies the
+steady quota through `SetUnitProperties`, clears `cpu.max.burst`, and reads both
+files back. The VM launch is contained unless the guardian process is active;
+because systemd owns it, the hard lease survives a jailerd crash. The local
+controller and daemon watchdog remain as redundant enforcement and persisted
+state/recovery reconciliation, and none of these deadline paths activates
+ingress.
+
 The root-owned network policy reserves `10.77.0.0/16` for canonical per-run
 `/28`s and `22000..=22999` for SSH DNAT by default. Keep the agent values in
 sync; doctor compares them with jailerd's advertised effective policy. Jailerd
@@ -63,6 +80,10 @@ For an offline host, pre-seed the two files listed in the wrapper/notices under
 `/var/lib/intar/self-test-assets/downloads/`, then pass `--offline`. The
 production `allowed_source_roots` remains agent-cache-only: the binary adds the
 fresh fixture root solely to its isolated in-memory self-test configuration.
+Fast-host readiness creates root-owned anonymous probes in the template store
+and every configured source filesystem, then exact-reflinks each probe into the
+root-owned generation store. One failed route withdraws v2 and fast-template
+capability for the host; launch never degrades to copying.
 Advanced/manual artifact flags remain available on `intar-jailerd self-test`,
 but bare mode without artifacts is non-attesting diagnostics.
 

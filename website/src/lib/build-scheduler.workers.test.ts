@@ -41,7 +41,7 @@ describe("build scheduler bundle supersession", () => {
       r2Key: "builds/bundles/bundle-old.tar.gz",
       kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v7",
+        buildFormatVersion: "intar-image-build-v8",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -80,7 +80,7 @@ describe("build scheduler bundle supersession", () => {
         r2Key: "builds/bundles/bundle-new.tar.gz",
         kinoVersion: "0.4.0",
         meta: {
-          buildFormatVersion: "intar-image-build-v7",
+          buildFormatVersion: "intar-image-build-v8",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -147,7 +147,7 @@ describe("build scheduler bundle supersession", () => {
         r2Key: "builds/bundles/bundle-same-hash.tar.gz",
         kinoVersion: "0.4.0",
         meta: {
-          buildFormatVersion: "intar-image-build-v7",
+          buildFormatVersion: "intar-image-build-v8",
           scenarios: [
             {
               scenarioId: "broken-nginx",
@@ -202,7 +202,7 @@ describe("build scheduler bundle supersession", () => {
       r2Key: "builds/bundles/bundle-old.tar.gz",
       kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v7",
+        buildFormatVersion: "intar-image-build-v8",
         scenarios: [],
       },
       createdAt: now - 1_000,
@@ -257,7 +257,7 @@ describe("build scheduler bundle supersession", () => {
       r2Key: "builds/bundles/bundle-old.tar.gz",
       kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v7",
+        buildFormatVersion: "intar-image-build-v8",
         scenarios: [],
       },
       createdAt: now,
@@ -301,7 +301,7 @@ describe("build scheduler bundle supersession", () => {
       r2Key: "builds/bundles/bundle-old.tar.gz",
       kinoVersion: "0.4.0",
       metaJson: {
-        buildFormatVersion: "intar-image-build-v7",
+        buildFormatVersion: "intar-image-build-v8",
         scenarios: [],
       },
       createdAt: now,
@@ -400,7 +400,7 @@ async function queueBundle(
     r2Key: `builds/bundles/${rev}.tar.gz`,
     kinoVersion: "0.4.0",
     meta: {
-      buildFormatVersion: "intar-image-build-v7",
+      buildFormatVersion: "intar-image-build-v8",
       scenarios: [
         {
           scenarioId: "broken-nginx",

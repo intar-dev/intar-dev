@@ -18,11 +18,13 @@ use intar_contracts::bridge::{
     HOST_STATE_REPORT_SCHEMA_VERSION, HostCapabilitiesV2, HostCapacityV2, HostDesiredStateV2,
     HostRoleV1, HostStateReportV2, ImageCachePhase, StateReportV6, SyncRequestReason,
     SyncRequestV6, VM_REPORT_SCHEMA_VERSION, VmActualStateV2, VmArchivePhase, VmArchiveStateV1,
-    VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2, VmReportV6,
-    VmResourceStateV2, VmResourcesV2, VmSandboxStateV1,
+    VmBootEvidenceV1, VmNetworkStateV1, VmPhase, VmProbeSnapshotV1, VmProbeStatus, VmReportV2,
+    VmReportV6, VmResourceStateV2, VmResourcesV2, VmRuntimeConstraintPhaseV1,
+    VmRuntimeConstraintsV1, VmSandboxStateV1, VmTerminalStateKindV1, VmTerminalStateV1,
+    VmTerminalTargetV1,
 };
 use intar_contracts::catalog::{ImageArchitecture, ImageKey, Mib, ProbePhase};
-use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmInspection};
+use intar_jailer_protocol::{JailerCapabilities, SandboxHealth, VmCpuPhase, VmInspection};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
@@ -35,11 +37,11 @@ use tracing::{debug, info, warn};
 use crate::config::BridgeConfig;
 use crate::db::{Db, DesiredStateRow, VmProbeStateRow};
 use crate::host_profile;
-use crate::kino_probe::{ProbeSnapshotView, ProbeUpdateEnvelope, ProbeView};
+use crate::kino_probe::{ProbeUpdateEnvelope, ProbeView};
 use crate::vm::{
     CreateScenarioVmRequest, CreateScenarioVmRuntime, CreateScenarioVmRuntimeKino,
     CreateScenarioVmRuntimeNetwork, CreateVmResources, VmLifecycleState, VmManager,
-    VmStatusResponse,
+    VmStatusResponse, VmTerminalState, VmTerminalStateKind,
 };
 
 const RETRY_MIN_MS: u64 = 1_000;
@@ -256,15 +258,25 @@ async fn connect_once(
                 match update {
                     Ok(update) => {
                         if let Some(status) = vm.get_vm(&update.vm_name).await {
-                            let probes = load_probe_snapshots_for_vm(db, &update.run_id, &update.vm_name).await;
+                            let probes = load_probe_snapshots_for_vm(
+                                db,
+                                &update.run_id,
+                                &update.vm_name,
+                                update
+                                    .runtime_constraints
+                                    .as_ref()
+                                    .map(|constraints| constraints.generation.as_str()),
+                            )
+                            .await;
                             let report = build_vm_report_from_status(
                                 &cfg.host_id,
-                                vm,
                                 vm.ssh_advertised_host().as_deref(),
                                 current_desired_state.as_ref(),
                                 status,
                                 probes,
-                            ).await;
+                                None,
+                                Some(&update),
+                            );
                             send_vm_report(&mut write, &cfg.host_id, report).await?;
                         }
                     }
@@ -293,6 +305,26 @@ where
     match message {
         BridgeMessageV6::DesiredState(message) => {
             let desired_state = message.desired_state.clone();
+            if desired_state_is_stale(current_desired_state.as_ref(), &desired_state) {
+                let current_version = current_desired_state
+                    .as_ref()
+                    .map(|current| current.version)
+                    .unwrap_or_default();
+                warn!(
+                    incoming_version = desired_state.version,
+                    current_version, "ignoring stale desired state"
+                );
+                send_state_report(
+                    write,
+                    cfg,
+                    vm,
+                    db,
+                    disk_probe_path,
+                    current_desired_state.as_ref(),
+                )
+                .await?;
+                return Ok(());
+            }
             cache_desired_state(db, &desired_state)
                 .await
                 .context("failed to cache desired state")?;
@@ -333,6 +365,13 @@ where
         }
     }
     Ok(())
+}
+
+fn desired_state_is_stale(
+    current: Option<&HostDesiredStateV2>,
+    incoming: &HostDesiredStateV2,
+) -> bool {
+    current.is_some_and(|current| incoming.version < current.version)
 }
 
 async fn load_cached_desired_state(cfg: &BridgeConfig, db: &Db) -> Option<HostDesiredStateV2> {
@@ -521,6 +560,7 @@ async fn reconcile_desired_vm(
         name: desired_vm.vm_name.clone(),
         run_id: desired_vm.run_id.clone(),
         image: image_cache_key(&desired_vm.image_key),
+        image_sha256: desired_vm.image_sha256.clone(),
         resources: Some(resources_from_desired(&desired_vm.resources)),
         hostname: Some(desired_vm.vm_name.clone()),
         lease_duration_seconds: Some(lease_duration_seconds),
@@ -666,18 +706,29 @@ async fn build_host_state_report(
                 )
             },
         );
-    let inspections = join_all(statuses.iter().map(|status| async {
+    let observations = join_all(statuses.iter().map(|status| async {
         let generation = status
             .details
             .as_ref()
-            .and_then(|details| details.jail_generation.as_deref())?;
-        match vm.inspect_jailed_vm(generation).await {
-            Ok(inspection) => inspection,
+            .and_then(|details| details.jail_generation.as_deref());
+        let inspection = match generation {
+            Some(generation) => match vm.inspect_jailed_vm(generation).await {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for host report");
+                    None
+                }
+            },
+            None => None,
+        };
+        let terminal = match vm.terminal_state(&status.name).await {
+            Ok(terminal) => terminal,
             Err(error) => {
-                warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for host report");
+                warn!(vm = status.name, error = %error, "failed to collect explicit terminal state for host report");
                 None
             }
-        }
+        };
+        (inspection, terminal)
     }))
     .await;
 
@@ -704,16 +755,30 @@ async fn build_host_state_report(
         },
         capabilities: collect_host_capabilities(jailer.as_ref()),
         cached_images: desired
-            .map(|state| cached_image_states(state, now))
+            .map(|state| {
+                cached_image_states(
+                    state,
+                    now,
+                    jailer.as_ref().is_some_and(|capabilities| {
+                        capabilities.supports_template_backed_launch
+                            && capabilities.fast_template_store
+                    }),
+                )
+            })
             .unwrap_or_default(),
         vms: statuses
             .into_iter()
-            .zip(inspections)
-            .map(|(status, inspection)| {
+            .zip(observations)
+            .map(|(status, (inspection, terminal))| {
                 let run_id = local_run_id(&status).unwrap_or_default();
+                let current_generation = status
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.jail_generation.as_deref());
                 let probes = probes_by_vm
                     .get(&(run_id.clone(), status.name.clone()))
-                    .cloned()
+                    .filter(|(generation, _)| generation.as_deref() == current_generation)
+                    .map(|(_, probes)| probes.clone())
                     .unwrap_or_default();
                 actual_state_from_status(
                     host_id,
@@ -722,6 +787,7 @@ async fn build_host_state_report(
                     status,
                     probes,
                     inspection.as_ref(),
+                    terminal.as_ref(),
                 )
             })
             .collect(),
@@ -736,48 +802,53 @@ async fn build_vm_report_from_probe_update(
     update: &ProbeUpdateEnvelope,
 ) -> Option<VmReportV2> {
     let status = vm.get_vm(&update.vm_name).await?;
-    Some(
-        build_vm_report_from_status(
-            host_id,
-            vm,
-            vm.ssh_advertised_host().as_deref(),
-            desired,
-            status,
-            probe_snapshots_from_update(update),
-        )
-        .await,
-    )
+    let current_generation = status
+        .details
+        .as_ref()
+        .and_then(|details| details.jail_generation.as_deref());
+    if Some(update.jail_generation.as_str()) != current_generation {
+        warn!(
+            vm = update.vm_name,
+            run_id = update.run_id,
+            update_generation = ?update.jail_generation,
+            current_generation = ?current_generation,
+            "dropping stale-generation Kino projection"
+        );
+        return None;
+    }
+    let terminal = match vm.terminal_state(&status.name).await {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            warn!(
+                vm = status.name,
+                error = %error,
+                "failed to collect explicit terminal state for Kino report"
+            );
+            None
+        }
+    };
+    Some(build_vm_report_from_status(
+        host_id,
+        vm.ssh_advertised_host().as_deref(),
+        desired,
+        status,
+        probe_snapshots_from_update(update),
+        None,
+        terminal.as_ref(),
+    ))
 }
 
-async fn build_vm_report_from_status(
+fn build_vm_report_from_status(
     host_id: &str,
-    vm: &VmManager,
     ssh_host: Option<&str>,
     desired: Option<&HostDesiredStateV2>,
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
+    inspection: Option<&VmInspection>,
+    terminal: Option<&VmTerminalState>,
 ) -> VmReportV2 {
-    let inspection = match status
-        .details
-        .as_ref()
-        .and_then(|details| details.jail_generation.as_deref())
-    {
-        Some(generation) => match vm.inspect_jailed_vm(generation).await {
-            Ok(inspection) => inspection,
-            Err(error) => {
-                warn!(vm = status.name, generation, error = %error, "failed to inspect jailed VM for VM report");
-                None
-            }
-        },
-        None => None,
-    };
     let actual = actual_state_from_status(
-        host_id,
-        ssh_host,
-        desired,
-        status,
-        probes,
-        inspection.as_ref(),
+        host_id, ssh_host, desired, status, probes, inspection, terminal,
     );
     VmReportV2 {
         schema_version: VM_REPORT_SCHEMA_VERSION,
@@ -788,6 +859,9 @@ async fn build_vm_report_from_status(
         observed_at_unix_ms: actual.updated_at_unix_ms,
         phase: actual.phase,
         network: actual.network,
+        terminal: actual.terminal,
+        runtime_constraints: actual.runtime_constraints,
+        boot_evidence: actual.boot_evidence,
         resource_state: actual.resource_state,
         sandbox: actual.sandbox,
         ssh_host_keys_openssh: actual.ssh_host_keys_openssh,
@@ -804,6 +878,7 @@ fn actual_state_from_status(
     status: VmStatusResponse,
     probes: Vec<VmProbeSnapshotV1>,
     inspection: Option<&VmInspection>,
+    terminal: Option<&VmTerminalState>,
 ) -> VmActualStateV2 {
     let run_id = local_run_id(&status).unwrap_or_default();
     let desired_vm = desired.and_then(|state| {
@@ -811,6 +886,19 @@ fn actual_state_from_status(
             .vms
             .iter()
             .find(|vm| vm.run_id == run_id && vm.vm_name == status.name)
+    });
+
+    let status_updated_at = parse_rfc3339_ms(&status.updated_at).unwrap_or_else(now_ms);
+    let terminal_state = terminal.map_or_else(
+        || terminal_state_from_status_fallback(&status, status_updated_at),
+        terminal_state_from_manager,
+    );
+    let runtime_constraints = terminal
+        .and_then(|state| state.runtime_constraints.clone())
+        .or_else(|| runtime_constraints_from_status(&status));
+    let boot_evidence = boot_evidence_from_status(&status);
+    let updated_at_unix_ms = terminal.map_or(status_updated_at, |state| {
+        state.observed_at.max(status_updated_at)
     });
 
     VmActualStateV2 {
@@ -821,6 +909,9 @@ fn actual_state_from_status(
         image_key: desired_vm.map(|vm| vm.image_key.clone()),
         image_sha256: desired_vm.map(|vm| vm.image_sha256.clone()),
         network: network_state_from_status(&status, ssh_host),
+        terminal: terminal_state,
+        runtime_constraints,
+        boot_evidence,
         resource_state: resource_state_from_status(&status, inspection),
         sandbox: sandbox_state_from_status(&status, inspection),
         ssh_host_keys_openssh: status
@@ -831,7 +922,7 @@ fn actual_state_from_status(
         probes,
         archive: archive_state_from_status(&status),
         error: status.error.clone(),
-        updated_at_unix_ms: parse_rfc3339_ms(&status.updated_at).unwrap_or_else(now_ms),
+        updated_at_unix_ms,
     }
 }
 
@@ -851,12 +942,114 @@ fn failed_vm_report(
         observed_at_unix_ms,
         phase: VmPhase::Failed,
         network: None,
+        terminal: VmTerminalStateV1 {
+            state: VmTerminalStateKindV1::Failed,
+            target: None,
+            reason: Some(error.clone()),
+            observed_at_unix_ms,
+        },
+        runtime_constraints: None,
+        boot_evidence: None,
         resource_state: None,
         sandbox: None,
         ssh_host_keys_openssh: Vec::new(),
         probes: Vec::new(),
         archive: None,
         error: Some(error),
+    }
+}
+
+fn terminal_state_from_status_fallback(
+    status: &VmStatusResponse,
+    observed_at_unix_ms: i64,
+) -> VmTerminalStateV1 {
+    let (state, reason) = match status.state {
+        VmLifecycleState::Failed | VmLifecycleState::DeleteFailed => (
+            VmTerminalStateKindV1::Failed,
+            Some(
+                status
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "vm failed".to_string()),
+            ),
+        ),
+        VmLifecycleState::DeletingVm | VmLifecycleState::ArchivingArtifacts => (
+            VmTerminalStateKindV1::Pending,
+            Some("destroying".to_string()),
+        ),
+        _ => (
+            VmTerminalStateKindV1::Pending,
+            Some("terminal readiness pending".to_string()),
+        ),
+    };
+    VmTerminalStateV1 {
+        state,
+        target: None,
+        reason,
+        observed_at_unix_ms,
+    }
+}
+
+fn boot_evidence_from_status(status: &VmStatusResponse) -> Option<VmBootEvidenceV1> {
+    let details = status.details.as_ref()?;
+    let generation = details.jail_generation.as_deref()?;
+    details
+        .boot_evidence
+        .as_ref()
+        .filter(|evidence| evidence.generation == generation)
+        .cloned()
+}
+
+fn runtime_constraints_from_status(status: &VmStatusResponse) -> Option<VmRuntimeConstraintsV1> {
+    let details = status.details.as_ref()?;
+    let generation = details.jail_generation.clone()?;
+    let runtime = details.cpu_runtime.as_ref()?;
+    Some(VmRuntimeConstraintsV1 {
+        generation,
+        phase: match runtime.phase {
+            VmCpuPhase::BootBurst => VmRuntimeConstraintPhaseV1::BootBurst,
+            VmCpuPhase::Steady => VmRuntimeConstraintPhaseV1::Steady,
+        },
+        steady_cpu_millis: runtime.steady_quota.cpu_millis,
+        effective_cpu_millis: runtime.effective_quota.cpu_millis,
+        quota_verified_at_unix_ms: runtime
+            .attestation
+            .as_ref()
+            .and_then(|attestation| i64::try_from(attestation.verified_at_unix_ms).ok()),
+        lease_expires_at_unix_ms: runtime
+            .boot_deadline_unix_ms
+            .and_then(|deadline| i64::try_from(deadline).ok()),
+    })
+}
+
+fn terminal_state_from_manager(state: &VmTerminalState) -> VmTerminalStateV1 {
+    let target = state.terminal_target.as_ref().and_then(|target| {
+        let host = target
+            .host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())?;
+        (state.state == VmTerminalStateKind::Ready).then(|| VmTerminalTargetV1 {
+            host: host.to_string(),
+            port: target.port,
+            username: target.username.clone(),
+            checked_at_unix_ms: target.checked_at,
+        })
+    });
+    let (kind, reason) = match state.state {
+        VmTerminalStateKind::Ready if target.is_some() => (VmTerminalStateKindV1::Ready, None),
+        VmTerminalStateKind::Ready => (
+            VmTerminalStateKindV1::Pending,
+            Some("advertised ssh host unavailable".to_string()),
+        ),
+        VmTerminalStateKind::Pending => (VmTerminalStateKindV1::Pending, state.reason.clone()),
+        VmTerminalStateKind::Failed => (VmTerminalStateKindV1::Failed, state.reason.clone()),
+    };
+    VmTerminalStateV1 {
+        state: kind,
+        target,
+        reason,
+        observed_at_unix_ms: state.observed_at,
     }
 }
 
@@ -942,9 +1135,15 @@ async fn load_probe_snapshots_for_vm(
     db: &Db,
     run_id: &str,
     vm_name: &str,
+    generation: Option<&str>,
 ) -> Vec<VmProbeSnapshotV1> {
     match db.load_vm_probe_state(vm_name.to_string()).await {
-        Ok(Some(row)) if row.run_id == run_id => probe_snapshots_from_state_row(&row),
+        Ok(Some(row))
+            if row.run_id == run_id
+                && probe_generation_from_state_row(&row).as_deref() == generation =>
+        {
+            probe_snapshots_from_state_row(&row)
+        }
         Ok(_) => Vec::new(),
         Err(error) => {
             warn!(error = %error, run_id, vm = vm_name, "failed to load vm probe state");
@@ -955,40 +1154,34 @@ async fn load_probe_snapshots_for_vm(
 
 fn probe_snapshots_by_vm(
     rows: Vec<VmProbeStateRow>,
-) -> BTreeMap<(String, String), Vec<VmProbeSnapshotV1>> {
+) -> BTreeMap<(String, String), (Option<String>, Vec<VmProbeSnapshotV1>)> {
     rows.into_iter()
         .map(|row| {
             (
                 (row.run_id.clone(), row.vm_name.clone()),
-                probe_snapshots_from_state_row(&row),
+                (
+                    probe_generation_from_state_row(&row),
+                    probe_snapshots_from_state_row(&row),
+                ),
             )
         })
         .collect()
 }
 
+fn probe_generation_from_state_row(row: &VmProbeStateRow) -> Option<String> {
+    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json)
+        .ok()
+        .map(|update| update.jail_generation)
+}
+
 fn probe_snapshots_from_state_row(row: &VmProbeStateRow) -> Vec<VmProbeSnapshotV1> {
-    if let Ok(update) = serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json) {
-        return probe_snapshots_from_update(&update);
-    }
-    serde_json::from_str::<ProbeSnapshotView>(&row.snapshot_json)
-        .map(|snapshot| probe_snapshots_from_snapshot(row.generated_at_ms, &snapshot))
+    serde_json::from_str::<ProbeUpdateEnvelope>(&row.snapshot_json)
+        .map(|update| probe_snapshots_from_update(&update))
         .unwrap_or_default()
 }
 
 fn probe_snapshots_from_update(update: &ProbeUpdateEnvelope) -> Vec<VmProbeSnapshotV1> {
     probe_snapshots_from_probes(update.generated_at_ms, &update.probes)
-}
-
-fn probe_snapshots_from_snapshot(
-    fallback_observed_at_unix_ms: i64,
-    snapshot: &ProbeSnapshotView,
-) -> Vec<VmProbeSnapshotV1> {
-    probe_snapshots_from_probes(
-        snapshot
-            .generated_at_ms
-            .unwrap_or(fallback_observed_at_unix_ms),
-        &snapshot.probes,
-    )
 }
 
 fn probe_snapshots_from_probes(
@@ -1021,15 +1214,20 @@ fn probe_status(status: &str) -> VmProbeStatus {
     }
 }
 
-fn cached_image_states(desired: &HostDesiredStateV2, now: i64) -> Vec<CachedImageStateV1> {
+fn cached_image_states(
+    desired: &HostDesiredStateV2,
+    now: i64,
+    require_template: bool,
+) -> Vec<CachedImageStateV1> {
     let cache_root = crate::image_cache::default_cache_root().ok();
-    cached_image_states_with_cache_root(desired, now, cache_root.as_deref())
+    cached_image_states_with_cache_root(desired, now, cache_root.as_deref(), require_template)
 }
 
 fn cached_image_states_with_cache_root(
     desired: &HostDesiredStateV2,
     now: i64,
     cache_root: Option<&Path>,
+    require_template: bool,
 ) -> Vec<CachedImageStateV1> {
     desired
         .cached_images
@@ -1037,10 +1235,11 @@ fn cached_image_states_with_cache_root(
         .map(|desired_image| {
             let key = image_cache_key(&desired_image.image_key);
             let metadata = cache_root.and_then(|root| {
-                crate::image_cache::verified_cached_raw_image_metadata(
+                crate::image_cache::verified_cached_image_metadata(
                     root,
                     &key,
                     &desired_image.image_sha256,
+                    require_template,
                 )
             });
             CachedImageStateV1 {
@@ -1063,16 +1262,27 @@ fn collect_host_capabilities(jailer: Option<&JailerCapabilities>) -> HostCapabil
     let supports_cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/cgroup.controllers")
         .is_ok_and(|value| value.split_whitespace().any(|item| item == "cpu"));
     let supports_jailer_v1 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v1);
+    let supports_jailer_v2 = jailer.is_some_and(|capabilities| capabilities.supports_jailer_v2);
     HostCapabilitiesV2 {
         arch: host_architecture(),
+        cloud_hypervisor_sha256: jailer
+            .map(|capabilities| capabilities.cloud_hypervisor_sha256.clone()),
+        boot_cpu_millis: jailer.map(|capabilities| capabilities.boot_cpu_millis),
+        boot_cpu_lease_ms: jailer.map(|capabilities| capabilities.boot_cpu_lease_ms),
         // The service deliberately runs with PrivateDevices=true. A successful
         // jailerd readiness attestation, not agent-visible device access, is
         // the authority for KVM availability and complete helper accounting.
-        supports_kvm: supports_jailer_v1,
+        supports_kvm: supports_jailer_v2,
         supports_vsock: true,
         supports_reflink: supports_reflink_for_image_cache(),
         supports_nftables: command_exists("nft"),
         supports_jailer_v1,
+        supports_jailer_v2,
+        supports_boot_cpu_lease: jailer
+            .is_some_and(|capabilities| capabilities.supports_boot_cpu_lease),
+        supports_template_backed_launch: jailer
+            .is_some_and(|capabilities| capabilities.supports_template_backed_launch),
+        fast_template_store: jailer.is_some_and(|capabilities| capabilities.fast_template_store),
         supports_hard_cpu_quota: jailer
             .is_some_and(|capabilities| capabilities.supports_hard_cpu_quota),
         supports_landlock: jailer.is_some_and(|capabilities| capabilities.supports_landlock),
@@ -1441,6 +1651,8 @@ fn now_ms() -> i64 {
 mod tests {
     use intar_contracts::bridge::DesiredCachedImageV1;
 
+    use crate::vm::VmTerminalTarget;
+
     use super::*;
 
     fn desired_vm() -> DesiredVmV2 {
@@ -1462,6 +1674,18 @@ mod tests {
             },
             ssh_authorized_keys_openssh: vec!["ssh-ed25519 AAAATEST run".to_string()],
             lease_expires_at_unix_ms: now_ms() + 60_000,
+        }
+    }
+
+    fn empty_desired_state(version: u64) -> HostDesiredStateV2 {
+        HostDesiredStateV2 {
+            schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
+            host_id: "host-1".to_string(),
+            version,
+            generated_at_unix_ms: 123,
+            cached_images: Vec::new(),
+            vms: Vec::new(),
+            builds: Vec::new(),
         }
     }
 
@@ -1498,16 +1722,48 @@ mod tests {
     }
 
     #[test]
+    fn explicit_terminal_contract_exposes_targets_only_when_ready() {
+        let ready = terminal_state_from_manager(&VmTerminalState {
+            run_id: "run-1".to_string(),
+            vm_name: "web".to_string(),
+            state: VmTerminalStateKind::Ready,
+            terminal_target: Some(VmTerminalTarget {
+                host: Some("203.0.113.7".to_string()),
+                port: 22_001,
+                username: "ubuntu".to_string(),
+                checked_at: 2_000,
+            }),
+            reason: None,
+            observed_at: 2_000,
+            runtime_constraints: None,
+        });
+        assert_eq!(ready.state, VmTerminalStateKindV1::Ready);
+        assert_eq!(
+            ready.target.as_ref().map(|target| target.port),
+            Some(22_001)
+        );
+
+        let pending = terminal_state_from_manager(&VmTerminalState {
+            run_id: "run-1".to_string(),
+            vm_name: "web".to_string(),
+            state: VmTerminalStateKind::Pending,
+            terminal_target: Some(VmTerminalTarget {
+                host: Some("203.0.113.7".to_string()),
+                port: 22_001,
+                username: "ubuntu".to_string(),
+                checked_at: 2_000,
+            }),
+            reason: Some("sealing CPU quota".to_string()),
+            observed_at: 2_000,
+            runtime_constraints: None,
+        });
+        assert_eq!(pending.state, VmTerminalStateKindV1::Pending);
+        assert_eq!(pending.target, None);
+    }
+
+    #[test]
     fn agent_desired_state_rejects_build_assignments() {
-        let mut desired = HostDesiredStateV2 {
-            schema_version: HOST_DESIRED_STATE_SCHEMA_VERSION,
-            host_id: "host-1".to_string(),
-            version: 1,
-            generated_at_unix_ms: 123,
-            cached_images: Vec::new(),
-            vms: Vec::new(),
-            builds: Vec::new(),
-        };
+        let mut desired = empty_desired_state(1);
         validate_desired_state("host-1", &desired).expect("empty builds should be valid");
 
         desired
@@ -1524,6 +1780,25 @@ mod tests {
         let error = validate_desired_state("host-1", &desired)
             .expect_err("agents must reject builder assignments");
         assert!(format!("{error:#}").contains("must not contain build assignments"));
+    }
+
+    #[test]
+    fn desired_state_versions_never_regress() {
+        let current = empty_desired_state(7);
+
+        assert!(desired_state_is_stale(
+            Some(&current),
+            &empty_desired_state(6)
+        ));
+        assert!(!desired_state_is_stale(
+            Some(&current),
+            &empty_desired_state(7)
+        ));
+        assert!(!desired_state_is_stale(
+            Some(&current),
+            &empty_desired_state(8)
+        ));
+        assert!(!desired_state_is_stale(None, &empty_desired_state(1)));
     }
 
     #[test]
@@ -1572,8 +1847,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cached_image_state_requires_verified_raw_marker() {
+    #[tokio::test]
+    async fn cached_image_state_requires_verified_launch_descriptor() {
         let temp = tempfile::tempdir().expect("tempdir");
         let vm = desired_vm();
         let image_sha256 = vm.image_sha256.clone();
@@ -1595,21 +1870,89 @@ mod tests {
             builds: Vec::new(),
         };
 
-        let unverified = cached_image_states_with_cache_root(&desired, 456, Some(temp.path()));
+        let unverified =
+            cached_image_states_with_cache_root(&desired, 456, Some(temp.path()), false);
         assert_eq!(unverified[0].phase, ImageCachePhase::Missing);
         assert_eq!(unverified[0].bytes_on_disk, None);
 
         std::fs::write(
             image_dir.join(format!("{image_sha256}.raw.verified.json")),
             format!(
-                r#"{{"schema_version":1,"image_key":"{cache_key}","image_sha256":"{image_sha256}","image_virtual_size_bytes":3}}"#
+                r#"{{"schema_version":3,"image_key":"{cache_key}","image_sha256":"{image_sha256}","image_virtual_size_bytes":3,"raw_sha256":"{}","kernel_sha256":"{}","initrd_sha256":"{}","cmdline":"root=/dev/vda rw"}}"#,
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
             ),
         )
         .expect("raw cache marker");
 
-        let verified = cached_image_states_with_cache_root(&desired, 789, Some(temp.path()));
+        let verified = cached_image_states_with_cache_root(&desired, 789, Some(temp.path()), false);
         assert_eq!(verified[0].phase, ImageCachePhase::Ready);
         assert_eq!(verified[0].bytes_on_disk, Some(3));
+
+        let template_missing =
+            cached_image_states_with_cache_root(&desired, 790, Some(temp.path()), true);
+        assert_eq!(template_missing[0].phase, ImageCachePhase::Missing);
+        let artifacts = temp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).expect("boot artifact cache");
+        let kernel_sha256 = "b".repeat(64);
+        let initrd_sha256 = "c".repeat(64);
+        let raw_sha256 = "a".repeat(64);
+        let kernel_path = artifacts.join(&kernel_sha256);
+        let initrd_path = artifacts.join(&initrd_sha256);
+        std::fs::write(&kernel_path, b"kernel").expect("cached kernel artifact");
+        std::fs::write(&initrd_path, b"initrd").expect("cached initrd artifact");
+        let prepared_source =
+            |name: &str, sha256: &str, access: intar_jailer_protocol::ArtifactAccess| {
+                intar_jailer_protocol::ArtifactSource {
+                    source_root: intar_jailer_protocol::PREPARED_IMAGE_SOURCE_ROOT,
+                    relative_path: PathBuf::from(&image_sha256).join(name),
+                    sha256: Some(
+                        intar_jailer_protocol::Sha256Digest::parse(sha256.to_string())
+                            .expect("prepared digest"),
+                    ),
+                    access,
+                }
+            };
+        let cached = crate::image_cache::CachedImage {
+            image_key: cache_key,
+            image_sha256: image_sha256.clone(),
+            raw_path,
+            raw_sha256: raw_sha256.clone(),
+            kernel_path,
+            initrd_path,
+            kernel_sha256: kernel_sha256.clone(),
+            initrd_sha256: initrd_sha256.clone(),
+            cmdline: "root=/dev/vda rw".to_string(),
+            virtual_size_bytes: 3,
+        };
+        let prepared = intar_jailer_protocol::PreparedImageV2Result {
+            image_sha256: intar_jailer_protocol::Sha256Digest::parse(image_sha256.clone())
+                .expect("image digest"),
+            virtual_size_bytes: 3,
+            root_disk: prepared_source(
+                "root.raw",
+                &raw_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadWrite,
+            ),
+            kernel: prepared_source(
+                "kernel",
+                &kernel_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadOnly,
+            ),
+            initrd: Some(prepared_source(
+                "initrd",
+                &initrd_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadOnly,
+            )),
+            fast_template_store: true,
+        };
+        crate::image_cache::mark_template_ready(&cached, &prepared)
+            .await
+            .expect("publish launch descriptor");
+        let template_ready =
+            cached_image_states_with_cache_root(&desired, 791, Some(temp.path()), true);
+        assert_eq!(template_ready[0].phase, ImageCachePhase::Ready);
     }
 
     #[test]

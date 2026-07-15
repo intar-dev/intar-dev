@@ -13,8 +13,8 @@ use anyhow::{Result, bail};
 use intar_jailer_protocol::JailerdConfig;
 use serde::{Deserialize, Serialize};
 
-const ATTESTATION_VERSION: u16 = 1;
-const ATTESTATION_FILE: &str = "self-test-attestation-v1.json";
+const ATTESTATION_VERSION: u16 = 2;
+const ATTESTATION_FILE: &str = "self-test-attestation-v2.json";
 const SELF_TEST_CPU_MILLIS: u32 = 125;
 const SELF_TEST_CPU_PERIOD_US: u64 = 100_000;
 const SELF_TEST_CPU_QUOTA_US: u64 = 12_500;
@@ -30,7 +30,7 @@ const SELF_TEST_RESOURCE_HEADROOM_MIB: u64 = 512;
 /// successful test non-transferable across host reboots.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SelfTestAttestationV1 {
+pub struct SelfTestAttestationV2 {
     pub version: u16,
     pub config_runtime_fingerprint_sha256: String,
     pub cloud_hypervisor_sha256: String,
@@ -42,6 +42,7 @@ pub struct SelfTestAttestationV1 {
     pub landlock_abi: u32,
     pub quota_verified: bool,
     pub burst_verified: bool,
+    pub boot_quota_transition_verified: bool,
     pub network_verified: bool,
     pub landlock_negative_access: bool,
     pub kvm_accounting_proven: bool,
@@ -97,12 +98,12 @@ impl SelfTestArtifacts {
 /// plumbing.  Only [`run_with_artifacts`] boots the pinned VMM and can publish
 /// the durable proof consumed by production readiness.
 #[cfg(target_os = "linux")]
-pub fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV1> {
+pub fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
     linux::run(config)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn run(_config: &JailerdConfig) -> Result<SelfTestAttestationV1> {
+pub fn run(_config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
     bail!("the jailerd self-test is supported only on Linux")
 }
 
@@ -115,7 +116,7 @@ pub fn run(_config: &JailerdConfig) -> Result<SelfTestAttestationV1> {
 pub fn run_with_artifacts(
     config: &JailerdConfig,
     artifacts: &SelfTestArtifacts,
-) -> Result<SelfTestAttestationV1> {
+) -> Result<SelfTestAttestationV2> {
     artifacts.validate()?;
     #[cfg(target_os = "linux")]
     {
@@ -131,12 +132,12 @@ pub fn run_with_artifacts(
 /// Load an attestation only when it is trusted and still matches this boot,
 /// configuration, and the currently installed runtime bytes.
 #[cfg(target_os = "linux")]
-pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV1>> {
+pub fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
     linux::load_verified(config)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn load_verified(_config: &JailerdConfig) -> Result<Option<SelfTestAttestationV1>> {
+pub fn load_verified(_config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
     Ok(None)
 }
 
@@ -196,7 +197,8 @@ mod linux {
     };
     use intar_jailer_protocol::{
         ArtifactAccess, ArtifactSource, DestroyRunNetworkRequest, EnsureRunNetworkRequest,
-        JailerdConfig, Request, Response, SandboxHealth, Sha256Digest, SourceArtifacts,
+        FinalizeVmBootRequest, JailerdConfig, LaunchVmV2Request, PrepareImageV2Request,
+        PreparedImageV2Result, Request, Response, SandboxHealth, Sha256Digest, SourceArtifacts,
         ValidatedId, VmIdentityRequest, VmInspection, VmLaunchRequest, VmLaunchResult,
     };
     use kvm_ioctls::Kvm;
@@ -216,7 +218,7 @@ mod linux {
         ATTESTATION_FILE, ATTESTATION_VERSION, SELF_TEST_CPU_MILLIS, SELF_TEST_CPU_PERIOD_US,
         SELF_TEST_CPU_QUOTA_US, SELF_TEST_RESOURCE_HEADROOM_MIB, SELF_TEST_SATURATION_CPU_MILLIS,
         SELF_TEST_SATURATION_VM_COUNT, SELF_TEST_VM_MEMORY_MIB, SelfTestArtifacts,
-        SelfTestAttestationV1, VerifiedArtifact,
+        SelfTestAttestationV2, VerifiedArtifact,
     };
     use crate::network::{
         add_host_visible_namespace, checked_host_mount_ip, delete_host_visible_namespace,
@@ -302,14 +304,14 @@ mod linux {
         }
     }
 
-    pub(super) fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV1> {
+    pub(super) fn run(config: &JailerdConfig) -> Result<SelfTestAttestationV2> {
         run_inner(config, None)
     }
 
     pub(super) fn run_with_artifacts(
         config: &JailerdConfig,
         artifacts: &SelfTestArtifacts,
-    ) -> Result<SelfTestAttestationV1> {
+    ) -> Result<SelfTestAttestationV2> {
         // Artifact hashing is performed even before the disposable host proof
         // so a release job cannot accidentally attest a different smoke image.
         let artifact_root = verify_artifacts(artifacts)?;
@@ -319,13 +321,17 @@ mod linux {
     fn run_inner(
         config: &JailerdConfig,
         artifacts: Option<(&SelfTestArtifacts, &Path)>,
-    ) -> Result<SelfTestAttestationV1> {
+    ) -> Result<SelfTestAttestationV2> {
         require_root()?;
         crate::require_supervisor_process_inspection_capability()
             .context("prove cross-UID VMM executable inspection capability")?;
         config
             .validate()
             .context("validate jailerd configuration")?;
+        ensure!(
+            config.boot_cpu_millis > SELF_TEST_CPU_MILLIS,
+            "privileged self-test requires a boot CPU quota above the 125m steady quota"
+        );
         ensure!(
             config.netns_root == Path::new("/run/netns"),
             "self-test requires netns_root=/run/netns"
@@ -451,6 +457,7 @@ mod linux {
             &allowed_dir,
             &denied_path,
             &config.netns_root.join(&namespace_name),
+            config.boot_cpu_millis,
         )?;
         cleanup.unit_name = Some(unit_name.clone());
 
@@ -474,6 +481,10 @@ mod linux {
         );
 
         let cgroup_directory = cgroup_directory(&unit.control_group)?;
+        assert_cpu_quota_millis(&cgroup_directory, config.boot_cpu_millis)
+            .context("verify privileged self-test boot CPU quota")?;
+        update_worker_cpu_quota(&unit_name, SELF_TEST_CPU_MILLIS)
+            .context("lower privileged self-test to steady CPU quota")?;
         assert_cpu_quota(&cgroup_directory)?;
         wait_for_throttling(&cgroup_directory, Duration::from_secs(5))?;
         ensure_unit_tasks_accounted(&unit, &cgroup_directory)?;
@@ -521,7 +532,7 @@ mod linux {
         }
 
         let lifecycle_verified = artifacts.is_some();
-        let attestation = SelfTestAttestationV1 {
+        let attestation = SelfTestAttestationV2 {
             version: ATTESTATION_VERSION,
             config_runtime_fingerprint_sha256,
             cloud_hypervisor_sha256: actual_runtime_sha256,
@@ -533,6 +544,7 @@ mod linux {
             landlock_abi: worker_report.landlock_abi,
             quota_verified: true,
             burst_verified: true,
+            boot_quota_transition_verified: true,
             network_verified: true,
             landlock_negative_access: true,
             kvm_accounting_proven: lifecycle_verified,
@@ -549,7 +561,7 @@ mod linux {
         Ok(attestation)
     }
 
-    pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV1>> {
+    pub(super) fn load_verified(config: &JailerdConfig) -> Result<Option<SelfTestAttestationV2>> {
         config
             .validate()
             .context("validate jailerd configuration")?;
@@ -573,7 +585,7 @@ mod linux {
             bytes.len() as u64 <= MAX_ATTESTATION_BYTES,
             "self-test attestation exceeds 64 KiB"
         );
-        let attestation: SelfTestAttestationV1 =
+        let attestation: SelfTestAttestationV2 =
             serde_json::from_slice(&bytes).context("parse self-test attestation")?;
         validate_attestation(&attestation)?;
 
@@ -804,7 +816,7 @@ mod linux {
         Ok(root.to_path_buf())
     }
 
-    fn validate_attestation(attestation: &SelfTestAttestationV1) -> Result<()> {
+    fn validate_attestation(attestation: &SelfTestAttestationV2) -> Result<()> {
         ensure!(
             attestation.version == ATTESTATION_VERSION,
             "unsupported self-test attestation version"
@@ -828,6 +840,10 @@ mod linux {
         ensure!(attestation.landlock_abi >= 3, "Landlock ABI 3 is required");
         ensure!(attestation.quota_verified, "CPU quota was not verified");
         ensure!(attestation.burst_verified, "CPU burst was not disabled");
+        ensure!(
+            attestation.boot_quota_transition_verified,
+            "boot-to-steady CPU quota transition was not verified"
+        );
         ensure!(
             attestation.network_verified,
             "run networking was not verified"
@@ -853,7 +869,7 @@ mod linux {
 
     fn write_attestation(
         config: &JailerdConfig,
-        attestation: &SelfTestAttestationV1,
+        attestation: &SelfTestAttestationV2,
     ) -> Result<()> {
         let root = open_trusted_attestation_root(config)?;
         let temporary = format!(".{ATTESTATION_FILE}.{}.tmp", Uuid::new_v4());
@@ -1564,7 +1580,7 @@ mod linux {
         jailer_sha256: &str,
     ) -> Result<String> {
         let mut hasher = Sha256::new();
-        hasher.update(b"intar-jailerd-self-test-attestation-v1\0");
+        hasher.update(b"intar-jailerd-self-test-attestation-v2\0");
         hasher.update(serde_json::to_vec(config)?);
         hasher.update(b"\0");
         hasher.update(runtime_sha256.as_bytes());
@@ -1650,6 +1666,11 @@ mod linux {
         // reserve is validated by the normal daemon; retaining it here would
         // make the proof impossible on an otherwise empty one-core CI host.
         smoke_config.cpu_reserved_millis = 0;
+        // The saturation proof intentionally exercises eight 125m cgroups in
+        // one isolated 1000m authority. Production boot-lease defaults are
+        // covered separately; using them here would test the boot pool rather
+        // than the steady hard-quota invariant this proof exists to attest.
+        smoke_config.boot_cpu_millis = SELF_TEST_CPU_MILLIS;
         smoke_config.guest_network_pool = "10.77.255.240/28".to_owned();
         if !smoke_config
             .allowed_source_roots
@@ -1688,7 +1709,7 @@ mod linux {
         let mut core = JailerdCore::new_with_readiness(
             smoke_config.clone(),
             backend,
-            FileSystemJailPreparer,
+            FileSystemJailPreparer::default(),
             // The disposable authority intentionally advertises exactly one
             // schedulable core. This makes the ninth 125m launch exercise the
             // same final local admission path used in production even on a
@@ -1705,8 +1726,11 @@ mod linux {
             gateway: "10.77.255.241".to_owned(),
         };
         expect_run_network(core.handle(Request::EnsureRunNetwork(network_request.clone())))?;
+        let prepared_image = prepare_smoke_image(&mut core, &smoke_config, artifacts)
+            .context("prepare the package-smoke image in the root-owned v2 template store")?;
 
-        // Boot eight independent VMMs in the same run network. Their 125m
+        // Boot eight independent v2 template-backed VMMs in the same run
+        // network. Their 125m
         // reservations fill exactly one advertised schedulable core while
         // retaining separate generations, identities, TAPs, units and leaf
         // cgroups. A ninth typed request is then required to fail admission
@@ -1716,6 +1740,7 @@ mod linux {
                 smoke_launch_request(
                     &smoke_config,
                     artifacts,
+                    &prepared_image,
                     &run_id,
                     &suffix,
                     u8::try_from(index).expect("saturation VM index fits in u8"),
@@ -1747,6 +1772,7 @@ mod linux {
             &mut core,
             &smoke_config,
             artifacts,
+            &prepared_image,
             &run_id,
             &suffix,
             &mut selectors,
@@ -1784,7 +1810,7 @@ mod linux {
                     format!("prove package-smoke VM {index} API access as the agent identity")
                 })?;
                 let client = CloudHypervisorClient::new(path_utf8(&launch.paths.host_api_socket)?)?;
-                let vm_config = smoke_vm_config(launch, request)?;
+                let vm_config = smoke_vm_config(launch, &request.launch)?;
                 runtime
                     .block_on(start_smoke_vm(&client, &vm_config))
                     .with_context(|| format!("start package-smoke VM {index}"))?;
@@ -1804,6 +1830,21 @@ mod linux {
                     SATURATION_GUEST_READY_TIMEOUT,
                 )
                 .with_context(|| format!("wait for package-smoke VM {index}"))?;
+                match core.handle(Request::FinalizeVmBoot(FinalizeVmBootRequest {
+                    generation: launch.generation.clone(),
+                })) {
+                    Response::FinalizeVmBoot(result)
+                        if result.cpu_runtime.phase
+                            == intar_jailer_protocol::VmCpuPhase::Steady => {}
+                    Response::Error(error) => bail!(
+                        "finalize package-smoke VM {index}: {}: {}",
+                        error.code,
+                        error.message
+                    ),
+                    response => bail!(
+                        "finalize package-smoke VM {index} returned unexpected response: {response:?}"
+                    ),
+                }
                 assert_smoke_inspection(&inspection)
                     .with_context(|| format!("validate package-smoke VM {index}"))?;
                 runtime
@@ -1991,6 +2032,7 @@ mod linux {
         core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
         config: &JailerdConfig,
         artifacts: &SelfTestArtifacts,
+        prepared_image: &PreparedImageV2Result,
         run_id: &ValidatedId,
         suffix: &str,
         selectors: &mut Vec<VmIdentityRequest>,
@@ -2008,21 +2050,31 @@ mod linux {
             "eight 125m VM reservations did not fill exactly one schedulable core"
         );
         ensure!(
-            before.supports_jailer_v1 && before.supports_hard_cpu_quota,
-            "saturation authority stopped advertising hard jailed CPU quotas"
+            before.supports_jailer_v2
+                && before.supports_template_backed_launch
+                && before.fast_template_store
+                && before.supports_hard_cpu_quota,
+            "saturation authority stopped advertising hard v2 template-backed CPU quotas"
         );
 
         let rejected_index =
             u8::try_from(SELF_TEST_SATURATION_VM_COUNT).expect("saturation VM count fits in u8");
-        let ninth = smoke_launch_request(config, artifacts, run_id, suffix, rejected_index)?;
-        match core.handle(Request::LaunchVm(Box::new(ninth))) {
+        let ninth = smoke_launch_request(
+            config,
+            artifacts,
+            prepared_image,
+            run_id,
+            suffix,
+            rejected_index,
+        )?;
+        match core.handle(Request::LaunchVmV2(Box::new(ninth))) {
             Response::Error(error) => ensure!(
-                error.code == "cpu_capacity_exhausted",
+                error.code == "boot_capacity_pending",
                 "ninth 125m launch failed with unexpected error {}: {}",
                 error.code,
                 error.message
             ),
-            Response::LaunchVm(launch) => {
+            Response::LaunchVmV2(launch) => {
                 // Retain the selector so the caller's fail-closed cleanup also
                 // drains an erroneously admitted ninth unit and jail.
                 selectors.push(VmIdentityRequest::by_generation(launch.generation));
@@ -2042,67 +2094,104 @@ mod linux {
     fn smoke_launch_request(
         config: &JailerdConfig,
         artifacts: &SelfTestArtifacts,
+        prepared_image: &PreparedImageV2Result,
         run_id: &ValidatedId,
         suffix: &str,
         index: u8,
-    ) -> Result<VmLaunchRequest> {
+    ) -> Result<LaunchVmV2Request> {
         ensure!(
             usize::from(index) <= SELF_TEST_SATURATION_VM_COUNT,
             "package smoke supports eight VMs plus one rejected admission probe"
         );
-        Ok(VmLaunchRequest {
-            run_id: run_id.clone(),
-            vm_id: ValidatedId::parse(format!("vm-{index}"))?,
-            cpu_millis: SELF_TEST_CPU_MILLIS,
-            vcpu_count: 1,
-            memory_mib: SELF_TEST_VM_MEMORY_MIB,
-            tap_name: format!("is{index}{}", &suffix[..10]),
-            mac_address: format!(
-                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                u8::from_str_radix(&suffix[0..2], 16)?,
-                u8::from_str_radix(&suffix[2..4], 16)?,
-                u8::from_str_radix(&suffix[4..6], 16)?,
-                u8::from_str_radix(&suffix[6..8], 16)?,
-                index.saturating_add(1),
-            ),
-            guest_ip_cidr: format!("10.77.255.{}/28", index.saturating_add(242)),
-            ssh_public_port: None,
-            vsock_cid: 4_294_000_001_u32.saturating_add(u32::from(index)),
-            artifacts: protocol_artifacts(config, artifacts)?,
+        Ok(LaunchVmV2Request {
+            image_sha256: prepared_image.image_sha256.clone(),
+            virtual_size_bytes: prepared_image.virtual_size_bytes,
+            launch: VmLaunchRequest {
+                run_id: run_id.clone(),
+                vm_id: ValidatedId::parse(format!("vm-{index}"))?,
+                cpu_millis: SELF_TEST_CPU_MILLIS,
+                vcpu_count: 1,
+                memory_mib: SELF_TEST_VM_MEMORY_MIB,
+                root_disk_size_bytes: prepared_image.virtual_size_bytes,
+                tap_name: format!("is{index}{}", &suffix[..10]),
+                mac_address: format!(
+                    "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    u8::from_str_radix(&suffix[0..2], 16)?,
+                    u8::from_str_radix(&suffix[2..4], 16)?,
+                    u8::from_str_radix(&suffix[4..6], 16)?,
+                    u8::from_str_radix(&suffix[6..8], 16)?,
+                    index.saturating_add(1),
+                ),
+                guest_ip_cidr: format!("10.77.255.{}/28", index.saturating_add(242)),
+                ssh_public_port: None,
+                vsock_cid: 4_294_000_001_u32.saturating_add(u32::from(index)),
+                artifacts: protocol_artifacts(config, artifacts, prepared_image)?,
+            },
         })
     }
 
     fn launch_smoke_vm(
         core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
-        request: &VmLaunchRequest,
+        request: &LaunchVmV2Request,
     ) -> Result<VmLaunchResult> {
-        match core.handle(Request::LaunchVm(Box::new(request.clone()))) {
-            Response::LaunchVm(launch) => Ok(launch),
+        match core.handle(Request::LaunchVmV2(Box::new(request.clone()))) {
+            Response::LaunchVmV2(launch) => Ok(launch),
             Response::Error(error) => bail!(
                 "jailerd package-smoke launch failed for {}: {}: {}",
-                request.vm_id,
+                request.launch.vm_id,
                 error.code,
                 error.message
             ),
             response => bail!(
                 "unexpected package-smoke launch response for {}: {response:?}",
-                request.vm_id
+                request.launch.vm_id
             ),
         }
     }
 
-    fn protocol_artifacts(
+    fn prepare_smoke_image(
+        core: &mut JailerdCore<SystemdHostBackend, FileSystemJailPreparer>,
         config: &JailerdConfig,
         artifacts: &SelfTestArtifacts,
-    ) -> Result<SourceArtifacts> {
-        Ok(SourceArtifacts {
+    ) -> Result<PreparedImageV2Result> {
+        let request = PrepareImageV2Request {
+            // The package self-test has no registry descriptor, so the verified
+            // raw-root digest is its stable content-addressed image identity.
+            image_sha256: Sha256Digest::parse(artifacts.root_disk.sha256.clone())?,
+            virtual_size_bytes: std::fs::metadata(&artifacts.root_disk.path)
+                .context("stat package-smoke root image")?
+                .len(),
+            root_disk: protocol_artifact(config, &artifacts.root_disk, ArtifactAccess::ReadOnly)?,
             kernel: protocol_artifact(config, &artifacts.kernel, ArtifactAccess::ReadOnly)?,
             initrd: artifacts
                 .initrd
                 .as_ref()
                 .map(|artifact| protocol_artifact(config, artifact, ArtifactAccess::ReadOnly))
                 .transpose()?,
-            root_disk: protocol_artifact(config, &artifacts.root_disk, ArtifactAccess::ReadWrite)?,
+        };
+        match core.handle(Request::PrepareImageV2(Box::new(request))) {
+            Response::PrepareImageV2(prepared) if prepared.fast_template_store => Ok(prepared),
+            Response::PrepareImageV2(_) => {
+                bail!("package-smoke image preparation did not attest the fast template store")
+            }
+            Response::Error(error) => bail!(
+                "jailerd package-smoke image preparation failed: {}: {}",
+                error.code,
+                error.message
+            ),
+            response => bail!("unexpected package-smoke image preparation response: {response:?}"),
+        }
+    }
+
+    fn protocol_artifacts(
+        config: &JailerdConfig,
+        artifacts: &SelfTestArtifacts,
+        prepared_image: &PreparedImageV2Result,
+    ) -> Result<SourceArtifacts> {
+        Ok(SourceArtifacts {
+            kernel: prepared_image.kernel.clone(),
+            initrd: prepared_image.initrd.clone(),
+            root_disk: prepared_image.root_disk.clone(),
             runtime_disk: protocol_artifact(
                 config,
                 &artifacts.runtime_disk,
@@ -3205,6 +3294,7 @@ mod linux {
         allowed_dir: &Path,
         denied_path: &Path,
         netns_path: &Path,
+        boot_cpu_millis: u32,
     ) -> Result<()> {
         let connection = zbus::blocking::Connection::system()?;
         let manager = systemd_manager(&connection)?;
@@ -3234,7 +3324,10 @@ mod linux {
             ("Type", Value::new("simple")),
             ("ExecStart", Value::new(exec_start)),
             ("CPUAccounting", Value::new(true)),
-            ("CPUQuotaPerSecUSec", Value::new(125_000_u64)),
+            (
+                "CPUQuotaPerSecUSec",
+                Value::new(u64::from(boot_cpu_millis) * 1_000),
+            ),
             ("CPUQuotaPeriodUSec", Value::new(SELF_TEST_CPU_PERIOD_US)),
             ("KillMode", Value::new("control-group")),
             ("Restart", Value::new("no")),
@@ -3256,6 +3349,22 @@ mod linux {
             "StartTransientUnit",
             &(unit_name, "fail", properties, auxiliary),
         )?;
+        Ok(())
+    }
+
+    fn update_worker_cpu_quota(unit_name: &str, cpu_millis: u32) -> Result<()> {
+        let connection = zbus::blocking::Connection::system()?;
+        let manager = systemd_manager(&connection)?;
+        let properties = vec![
+            (
+                "CPUQuotaPerSecUSec",
+                Value::new(u64::from(cpu_millis) * 1_000),
+            ),
+            ("CPUQuotaPeriodUSec", Value::new(SELF_TEST_CPU_PERIOD_US)),
+        ];
+        let _: () = manager
+            .call("SetUnitProperties", &(unit_name, true, properties))
+            .with_context(|| format!("set self-test CPU quota for {unit_name}"))?;
         Ok(())
     }
 
@@ -3366,15 +3475,26 @@ mod linux {
     }
 
     fn assert_cpu_quota(directory: &Path) -> Result<()> {
+        assert_cpu_quota_millis(directory, SELF_TEST_CPU_MILLIS)
+    }
+
+    fn assert_cpu_quota_millis(directory: &Path, cpu_millis: u32) -> Result<()> {
+        let quota_micros = u64::from(cpu_millis)
+            .checked_mul(SELF_TEST_CPU_PERIOD_US)
+            .context("self-test CPU quota arithmetic overflow")?
+            / 1_000;
         let cpu_max = std::fs::read_to_string(directory.join("cpu.max"))?;
         ensure!(
-            cpu_max.trim() == format!("{SELF_TEST_CPU_QUOTA_US} {SELF_TEST_CPU_PERIOD_US}"),
+            cpu_max.trim() == format!("{quota_micros} {SELF_TEST_CPU_PERIOD_US}"),
             "self-test cpu.max mismatch: {}",
             cpu_max.trim()
         );
         let burst = std::fs::read_to_string(directory.join("cpu.max.burst"))?;
         ensure!(burst.trim() == "0", "self-test cpu.max.burst is not zero");
-        ensure!(SELF_TEST_CPU_MILLIS == 125);
+        ensure!(
+            SELF_TEST_CPU_QUOTA_US
+                == u64::from(SELF_TEST_CPU_MILLIS) * SELF_TEST_CPU_PERIOD_US / 1_000
+        );
         Ok(())
     }
 
@@ -4228,7 +4348,7 @@ mod linux {
                     b"jails".to_vec(),
                     b"quarantine".to_vec(),
                     b"generation-one".to_vec(),
-                    b"metadata-v1.json".to_vec(),
+                    b"metadata-v2.json".to_vec(),
                 ]),
                 None
             );
@@ -4456,11 +4576,32 @@ mod linux {
             };
             let run_id = ValidatedId::parse("selftest-fixed").expect("run ID");
             let suffix = "0123456789abcdef0123456789abcdef";
+            let image_sha256 = Sha256Digest::parse("b".repeat(64)).expect("image digest");
+            let artifact_sha256 = Sha256Digest::parse(digest).expect("artifact digest");
+            let prepared_image = PreparedImageV2Result {
+                image_sha256: image_sha256.clone(),
+                virtual_size_bytes: 4 * 1024 * 1024 * 1024,
+                root_disk: crate::template_artifact_source(
+                    &image_sha256,
+                    "root.raw",
+                    &artifact_sha256,
+                    ArtifactAccess::ReadWrite,
+                ),
+                kernel: crate::template_artifact_source(
+                    &image_sha256,
+                    "kernel",
+                    &artifact_sha256,
+                    ArtifactAccess::ReadOnly,
+                ),
+                initrd: None,
+                fast_template_store: true,
+            };
             let requests = (0..=SELF_TEST_SATURATION_VM_COUNT)
                 .map(|index| {
                     smoke_launch_request(
                         &config,
                         &artifacts,
+                        &prepared_image,
                         &run_id,
                         suffix,
                         u8::try_from(index).expect("request index"),
@@ -4469,19 +4610,28 @@ mod linux {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(requests.len(), 9);
-            assert!(requests.iter().all(|request| request.run_id == run_id));
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.launch.run_id == run_id)
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.image_sha256 == image_sha256)
+            );
             assert_eq!(
                 requests
                     .iter()
                     .take(SELF_TEST_SATURATION_VM_COUNT)
-                    .map(|request| u64::from(request.cpu_millis))
+                    .map(|request| u64::from(request.launch.cpu_millis))
                     .sum::<u64>(),
                 SELF_TEST_SATURATION_CPU_MILLIS
             );
             assert_eq!(
                 requests
                     .iter()
-                    .map(|request| request.vm_id.as_str())
+                    .map(|request| request.launch.vm_id.as_str())
                     .collect::<BTreeSet<_>>()
                     .len(),
                 requests.len()
@@ -4489,7 +4639,7 @@ mod linux {
             assert_eq!(
                 requests
                     .iter()
-                    .map(|request| request.tap_name.as_str())
+                    .map(|request| request.launch.tap_name.as_str())
                     .collect::<BTreeSet<_>>()
                     .len(),
                 requests.len()
@@ -4497,7 +4647,7 @@ mod linux {
             assert_eq!(
                 requests
                     .iter()
-                    .map(|request| request.mac_address.as_str())
+                    .map(|request| request.launch.mac_address.as_str())
                     .collect::<BTreeSet<_>>()
                     .len(),
                 requests.len()
@@ -4505,7 +4655,7 @@ mod linux {
             assert_eq!(
                 requests
                     .iter()
-                    .map(|request| request.guest_ip_cidr.as_str())
+                    .map(|request| request.launch.guest_ip_cidr.as_str())
                     .collect::<BTreeSet<_>>()
                     .len(),
                 requests.len()
@@ -4513,21 +4663,22 @@ mod linux {
             assert_eq!(
                 requests
                     .iter()
-                    .map(|request| request.vsock_cid)
+                    .map(|request| request.launch.vsock_cid)
                     .collect::<BTreeSet<_>>()
                     .len(),
                 requests.len()
             );
             assert!(
-                smoke_launch_request(&config, &artifacts, &run_id, suffix, 9).is_err(),
+                smoke_launch_request(&config, &artifacts, &prepared_image, &run_id, suffix, 9,)
+                    .is_err(),
                 "only the eight saturation VMs and ninth rejection probe are valid"
             );
         }
 
         #[test]
         fn attestation_requires_every_proof() {
-            let mut attestation = SelfTestAttestationV1 {
-                version: 1,
+            let mut attestation = SelfTestAttestationV2 {
+                version: ATTESTATION_VERSION,
                 config_runtime_fingerprint_sha256: "a".repeat(64),
                 cloud_hypervisor_sha256: "b".repeat(64),
                 intar_jailerd_sha256: "c".repeat(64),
@@ -4538,6 +4689,7 @@ mod linux {
                 landlock_abi: 3,
                 quota_verified: true,
                 burst_verified: true,
+                boot_quota_transition_verified: true,
                 network_verified: true,
                 landlock_negative_access: true,
                 kvm_accounting_proven: true,
@@ -4545,6 +4697,9 @@ mod linux {
                 passed_at_unix_s: 1,
             };
             validate_attestation(&attestation).expect("complete attestation");
+            attestation.boot_quota_transition_verified = false;
+            assert!(validate_attestation(&attestation).is_err());
+            attestation.boot_quota_transition_verified = true;
             attestation.kvm_accounting_proven = false;
             assert!(validate_attestation(&attestation).is_err());
         }
@@ -4582,6 +4737,31 @@ mod tests {
     #[test]
     fn attestation_rejects_unknown_fields() {
         let value = serde_json::json!({
+            "version": ATTESTATION_VERSION,
+            "config_runtime_fingerprint_sha256": "a".repeat(64),
+            "cloud_hypervisor_sha256": "b".repeat(64),
+            "intar_jailerd_sha256": "c".repeat(64),
+            "intar_jailer_sha256": "d".repeat(64),
+            "boot_id": "boot",
+            "kernel_version": "kernel",
+            "systemd_version": "systemd",
+            "landlock_abi": 3,
+            "quota_verified": true,
+            "burst_verified": true,
+            "boot_quota_transition_verified": true,
+            "network_verified": true,
+            "landlock_negative_access": true,
+            "kvm_accounting_proven": true,
+            "cloud_hypervisor_lifecycle_verified": true,
+            "passed_at_unix_s": 1,
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<SelfTestAttestationV2>(value).is_err());
+    }
+
+    #[test]
+    fn legacy_attestation_without_boot_transition_proof_is_rejected() {
+        let value = serde_json::json!({
             "version": 1,
             "config_runtime_fingerprint_sha256": "a".repeat(64),
             "cloud_hypervisor_sha256": "b".repeat(64),
@@ -4597,9 +4777,8 @@ mod tests {
             "landlock_negative_access": true,
             "kvm_accounting_proven": true,
             "cloud_hypervisor_lifecycle_verified": true,
-            "passed_at_unix_s": 1,
-            "unexpected": true
+            "passed_at_unix_s": 1
         });
-        assert!(serde_json::from_value::<SelfTestAttestationV1>(value).is_err());
+        assert!(serde_json::from_value::<SelfTestAttestationV2>(value).is_err());
     }
 }

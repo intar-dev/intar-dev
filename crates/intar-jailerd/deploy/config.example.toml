@@ -25,6 +25,14 @@ ssh_public_port_end = 22999
 # Unschedulable host allowance. A one-CPU host therefore advertises zero by
 # default; lower this only as an explicit operator capacity decision.
 cpu_reserved_millis = 1000
+# Root-owned, capacity-accounted aggregate quota for a prepared LaunchVmV2
+# Cloud Hypervisor process tree while the guest boots. Legacy v1 launches are
+# rejected and guest vCPU topology is unchanged.
+boot_cpu_millis = 2000
+# A root-owned auxiliary systemd guardian seals the cgroup back to the scenario
+# CPU limit after this monotonic deadline even if jailerd dies. SSH DNAT stays
+# closed until explicit finalize and quota readback.
+boot_cpu_lease_ms = 45000
 # Optional RLIMIT_FSIZE for the VMM process tree. Omit for no byte limit; when
 # set it must exceed zero and should cover the host's largest VM disk policy.
 # vmm_file_size_limit_bytes = 68719476736
@@ -33,4 +41,7 @@ cpu_reserved_millis = 1000
 uid_gid_start = 200000
 uid_gid_end = 265535
 # Jailerd accepts typed artifact descriptors only below trusted source roots.
+# Every configured root must support an exact reflink into the jail generation
+# filesystem; startup withdraws all v2/fast-template capability if any route
+# fails. There is no copy fallback.
 allowed_source_roots = ["/var/cache/intar-agent"]

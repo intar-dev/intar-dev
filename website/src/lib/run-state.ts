@@ -1,5 +1,6 @@
 import type { ScenarioLaunchSummary } from "@/lib/scenario-model";
 import type { ImageKey } from "@/generated/catalog";
+import type { VmBootEvidenceV1, VmResourceStateV2 } from "@/generated/bridge";
 
 export type RunPhase =
   | "queued"
@@ -70,6 +71,15 @@ export interface TerminalTarget {
   checkedAt: number | null;
 }
 
+export interface RuntimeConstraintsEvidence {
+  generation: string;
+  phase: "boot_burst" | "steady";
+  steadyCpuMillis: number;
+  effectiveCpuMillis: number;
+  quotaVerifiedAt: number | null;
+  leaseExpiresAt: number | null;
+}
+
 export interface RunVmProvisioningSpec {
   image: string | null;
   imageKey: ImageKey | null;
@@ -114,6 +124,18 @@ export interface RunVmStateDocument {
   /// asynchronously afterwards. Optional: older stored docs lack it.
   hasRecording?: boolean;
   terminalTarget: TerminalTarget;
+  /// Explicit live cgroup boundary reported by the agent. Optional for stored
+  /// run documents written before boot quota sealing was introduced.
+  runtimeConstraints?: RuntimeConstraintsEvidence | null;
+  /// Generation-fenced host phase durations and four cgroup samples. The
+  /// terminal-ready report may precede this non-critical follow-up.
+  bootEvidence?: VmBootEvidenceV1 | null;
+  /// Latest periodic cgroup counters when the host inventory includes them.
+  /// Their absence must not trigger an InspectVm call during launch.
+  resourceState?: VmResourceStateV2 | null;
+  /// Generations superseded by a newer runtime report. Optional for stored
+  /// documents written before generation-fenced projection.
+  retiredRuntimeGenerations?: string[];
   /// Reported guest IP inside the agent's VM network (not publicly routable).
   guestIp: string | null;
   launchSummary: ScenarioLaunchSummary;
@@ -226,6 +248,7 @@ export function buildInitialVmState(input: {
     replayArtifacts: [],
     sessionTimeline: null,
     terminalTarget: defaultTerminalTarget(),
+    runtimeConstraints: null,
     guestIp: null,
     launchSummary: input.launchSummary,
     runtimeState: null,
@@ -295,7 +318,21 @@ export function canAdvanceVmPhase(current: VmPhase, next: VmPhase): boolean {
 }
 
 export function decorateVmState(vm: RunVmStateDocument): RunVmStateDocument {
-  const descriptor = describeVmPhase(vm.phase, vm);
+  // A routable endpoint is evidence, not merely configuration. Older stored
+  // run documents could carry a reserved SSH address while readiness was
+  // still pending; scrub that legacy shape whenever state is projected so a
+  // non-ready terminal can never be opened accidentally.
+  const terminalTarget =
+    vm.terminalPhase === "ready"
+      ? vm.terminalTarget
+      : {
+          host: null,
+          port: 22,
+          username: vm.terminalTarget.username,
+          hostKeyOpenssh: null,
+          checkedAt: null,
+        };
+  const descriptor = describeVmPhase(vm.phase, { ...vm, terminalTarget });
   return {
     ...vm,
     phaseTitle: descriptor.title,
@@ -303,8 +340,12 @@ export function decorateVmState(vm: RunVmStateDocument): RunVmStateDocument {
     progressPercent: descriptor.progressPercent,
     terminalPhase: vm.terminalPhase,
     runtimeObservedAt: vm.runtimeObservedAt ?? null,
+    runtimeConstraints: vm.runtimeConstraints ?? null,
+    bootEvidence: vm.bootEvidence ?? null,
+    resourceState: vm.resourceState ?? null,
+    terminalTarget,
     canOpenTerminal:
-      vm.terminalPhase === "ready" && hasTerminalEndpoint(vm.terminalTarget),
+      vm.terminalPhase === "ready" && hasTerminalEndpoint(terminalTarget),
     sessionTimeline: vm.sessionTimeline ?? null,
   };
 }

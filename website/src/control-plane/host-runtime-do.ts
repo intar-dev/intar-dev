@@ -5,11 +5,7 @@ import {
   parseBridgeMessageV6,
   serializeBridgeMessageV6,
 } from "@/control-plane/bridge-v6";
-import {
-  agentHosts,
-  hostActualState,
-  scenarioRuns,
-} from "@/db/schema";
+import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import {
   commitHostCpuReservation,
   nextPendingHostCpuReservationExpiry,
@@ -62,6 +58,8 @@ interface SocketAttachment {
 
 export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
+  private desiredDispatchQueue: Promise<void> = Promise.resolve();
+  private readonly runProjectionQueues = new Map<string, Promise<void>>();
 
   constructor(
     ctx: DurableObjectState,
@@ -193,7 +191,30 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       return jsonResponse({ error: "host id is unknown" }, 409);
     }
 
-    await this.ctx.storage.setAlarm(Math.max(0, Date.now() - 1));
+    // Do not make a connected agent wait for a separately scheduled event
+    // before receiving a newly committed desired state. Arm the alarm in the
+    // finally block so it remains the durable fallback even if dispatch fails.
+    try {
+      if (
+        this.ctx
+          .getWebSockets(`host:${hostId}`)
+          .some((socket) => socket.readyState === WebSocket.OPEN)
+      ) {
+        const activeSocket = await this.findActiveSocket(hostId);
+        if (activeSocket?.attachment.bridgeProtocol === "v6") {
+          await this.dispatchBridgeDesiredStateIfNeeded(
+            hostId,
+            activeSocket.socket,
+          );
+        }
+      }
+    } finally {
+      // Direct delivery owns the latency path. Keep a durable lag fallback,
+      // but do not start D1 maintenance concurrently with a VM's first boot.
+      await this.scheduleAlarmNoLaterThan(
+        Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+      );
+    }
     return jsonResponse({ ok: true, hostId }, 202);
   }
 
@@ -231,7 +252,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
     const knownHostId = await this.loadKnownHostId();
     if (knownHostId && knownHostId !== input.hostId) {
-      return jsonResponse({ error: "host id does not match durable object" }, 409);
+      return jsonResponse(
+        { error: "host id does not match durable object" },
+        409,
+      );
     }
     try {
       await this.loadRequiredHost(input.hostId);
@@ -244,16 +268,25 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       const db = drizzle(this.env.DB);
       const now = Date.now();
       if (pathname.endsWith("/reserve")) {
-        if (input.cpuMillis === null) {
-          return jsonResponse({ error: "cpuMillis is required" }, 400);
+        if (input.steadyCpuMillisByVm === null) {
+          return jsonResponse(
+            { error: "steadyCpuMillisByVm is required" },
+            400,
+          );
         }
         const result = await reserveHostCpuInD1(db, {
           hostId: input.hostId,
           runId: input.runId,
-          cpuMillis: input.cpuMillis,
+          steadyCpuMillisByVm: input.steadyCpuMillisByVm,
           nowUnixMs: now,
         });
-        await this.scheduleNextAlarm(input.hostId);
+        if (
+          result.ok &&
+          result.state === "pending" &&
+          result.expiresAt !== null
+        ) {
+          await this.scheduleAlarmNoLaterThan(result.expiresAt);
+        }
         return jsonResponse(result, result.ok ? 201 : 409);
       }
       if (pathname.endsWith("/commit")) {
@@ -262,19 +295,19 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           runId: input.runId,
           nowUnixMs: now,
         });
-        await this.scheduleNextAlarm(input.hostId);
         return jsonResponse({ ok });
       }
       if (pathname.endsWith("/rollback")) {
         const rolledBack = await rollbackPendingHostCpuReservation(db, input);
-        await this.scheduleNextAlarm(input.hostId);
         return jsonResponse({ ok: true, rolledBack });
       }
       return jsonResponse({ error: "not found" }, 404);
     });
   }
 
-  private async withCpuReservationLock<T>(operation: () => Promise<T>): Promise<T> {
+  private async withCpuReservationLock<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
     const previous = this.cpuReservationQueue;
     let release!: () => void;
     this.cpuReservationQueue = new Promise<void>((resolve) => {
@@ -327,12 +360,24 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     if (message.type === "state_report") {
       await this.applyBridgeStateReport(message.host_id, message.report);
+      // State-report projection already reconciles CPU reservations.
+      await this.reconcileHost(message.host_id, {
+        reconcileCpuReservations: false,
+      });
     } else if (message.type === "vm_report") {
       await this.applyBridgeVmReport(message.host_id, message.report);
+      // A VM report only changes run projection and host liveness. Preserve
+      // opportunistic desired delivery without putting global build, lease,
+      // and capacity maintenance in front of the next readiness report.
+      await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws);
     } else if (message.type === "build_report") {
       await this.applyBridgeBuildReport(message.host_id, message.report);
+      await this.reconcileHost(message.host_id);
     } else if (message.type === "sync_request") {
-      await this.sendBridgeDesiredState(ws, attachment, message.host_id);
+      await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws, {
+        force: true,
+      });
+      await this.reconcileHost(message.host_id);
     } else {
       try {
         ws.close(1003, "server message type");
@@ -341,8 +386,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       }
       return;
     }
-
-    await this.reconcileHost(message.host_id);
   }
 
   private async handleBridgeClientHello(
@@ -417,31 +460,24 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       }),
     );
 
-    if (message.last_applied_desired_version !== desiredState.version) {
-      await this.sendBridgeDesiredState(
-        ws,
-        nextAttachment,
-        message.host_id,
-        desiredState,
+    // Deliver the current version through the same serialized path used by
+    // wake/alarm/report events. Maintenance remains durable but no longer sits
+    // in front of the initial desired-state handoff.
+    try {
+      await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws);
+    } finally {
+      await this.scheduleAlarmNoLaterThan(
+        Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
       );
     }
-
-    await this.reconcileHost(message.host_id);
   }
 
-  private async sendBridgeDesiredState(
+  private sendBridgeDesiredState(
     ws: WebSocket,
     attachment: SocketAttachment,
     hostId: string,
-    desiredState?: HostDesiredStateV2,
-  ): Promise<void> {
-    const state =
-      desiredState ??
-      (await loadOrCreateHostDesiredState(
-        drizzle(this.env.DB),
-        hostId,
-        Date.now(),
-      ));
+    state: HostDesiredStateV2,
+  ): void {
     ws.send(
       serializeBridgeMessageV6({
         type: "desired_state",
@@ -505,15 +541,25 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     const runs = await this.listOpenRunsForHost(hostId);
     for (const run of runs) {
-      await this.persistRunState(
-        run.runId,
-        applyHostReportToRunState({
-          runId: run.runId,
-          current: run.state,
-          report,
-        }),
-        { keepDeleteRequestedAt: true },
-      );
+      await this.withRunProjectionLock(run.runId, async () => {
+        // A direct VM report can arrive while an inventory report is awaiting
+        // D1. Reload only after entering the per-run ordering domain so this
+        // projection is always derived from the latest durable evidence.
+        const current = await this.loadRun(run.runId);
+        if (!current || current.hostId !== hostId) {
+          return;
+        }
+        await this.persistRunState(
+          run.runId,
+          (latest) =>
+            applyHostReportToRunState({
+              runId: run.runId,
+              current: latest,
+              report,
+            }),
+          { keepDeleteRequestedAt: true },
+        );
+      });
     }
     await this.withCpuReservationLock(() =>
       reconcileHostCpuReservations(db, hostId, now),
@@ -524,11 +570,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     hostId: string,
     report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"],
   ): Promise<void> {
-    const run = await this.loadRun(report.run_id);
-    if (!run || run.hostId !== hostId) {
-      return;
-    }
-
     const now = Date.now();
     await this.updateHostRow(hostId, {
       connected: true,
@@ -537,15 +578,22 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       updatedAt: now,
     });
 
-    await this.persistRunState(
-      report.run_id,
-      applyVmReportToRunState({
-        runId: report.run_id,
-        current: run.state,
-        report,
-      }),
-      { keepDeleteRequestedAt: true },
-    );
+    await this.withRunProjectionLock(report.run_id, async () => {
+      const run = await this.loadRun(report.run_id);
+      if (!run || run.hostId !== hostId) {
+        return;
+      }
+      await this.persistRunState(
+        report.run_id,
+        (latest) =>
+          applyVmReportToRunState({
+            runId: report.run_id,
+            current: latest,
+            report,
+          }),
+        { keepDeleteRequestedAt: true },
+      );
+    });
   }
 
   private async applyBridgeBuildReport(
@@ -560,7 +608,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       lastHeartbeatAt: now,
       updatedAt: now,
     });
-    const buildUpdates = await recordHostBuildReports(db, hostId, [report], now);
+    const buildUpdates = await recordHostBuildReports(
+      db,
+      hostId,
+      [report],
+      now,
+    );
     await this.removeTerminalBuildsFromDesiredState(
       hostId,
       buildUpdates.terminalBuildIds,
@@ -568,7 +621,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     );
   }
 
-  private async reconcileHost(hostId: string): Promise<void> {
+  private async reconcileHost(
+    hostId: string,
+    options?: { reconcileCpuReservations?: boolean },
+  ): Promise<void> {
     const now = Date.now();
     const db = drizzle(this.env.DB);
     await maintainHostBuildAssignments(db, hostId, now);
@@ -576,9 +632,11 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       db,
       wakeHostRuntime: false,
     });
-    await this.withCpuReservationLock(() =>
-      reconcileHostCpuReservations(db, hostId, now),
-    );
+    if (options?.reconcileCpuReservations !== false) {
+      await this.withCpuReservationLock(() =>
+        reconcileHostCpuReservations(db, hostId, now),
+      );
+    }
 
     const activeSocket = await this.findActiveSocket(hostId);
     if (activeSocket?.attachment.bridgeProtocol === "v6") {
@@ -591,7 +649,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       await this.dispatchBridgeDesiredStateIfNeeded(
         hostId,
         activeSocket.socket,
-        activeSocket.attachment,
         { force: shouldRepushLaggingVersion },
       );
     }
@@ -602,113 +659,191 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private async dispatchBridgeDesiredStateIfNeeded(
     hostId: string,
     ws: WebSocket,
-    attachment: SocketAttachment,
     options?: { force?: boolean },
   ): Promise<void> {
-    if (
-      attachment.bridgeProtocol !== "v6" ||
-      !attachment.sessionId ||
-      attachment.hostId !== hostId
-    ) {
-      return;
-    }
+    await this.withDesiredDispatchLock(async () => {
+      const attachment = this.readSocketAttachment(ws);
+      if (
+        ws.readyState !== WebSocket.OPEN ||
+        attachment?.bridgeProtocol !== "v6" ||
+        !attachment.sessionId ||
+        attachment.hostId !== hostId
+      ) {
+        return;
+      }
 
-    const host = await this.loadRequiredHost(hostId);
-    if (host.activeSessionId !== attachment.sessionId) {
-      return;
-    }
+      const desiredState = await loadOrCreateHostDesiredState(
+        drizzle(this.env.DB),
+        hostId,
+        Date.now(),
+      );
+      // Make the host lookup the final await. Re-read the attachment after it
+      // resolves, then validate and send synchronously so a replacement socket
+      // cannot interleave between the active-session check and delivery.
+      const host = await this.loadRequiredHost(hostId);
+      const latestAttachment = this.readSocketAttachment(ws);
+      if (
+        ws.readyState !== WebSocket.OPEN ||
+        latestAttachment?.bridgeProtocol !== "v6" ||
+        !latestAttachment.sessionId ||
+        latestAttachment.hostId !== hostId ||
+        host.activeSessionId !== latestAttachment.sessionId
+      ) {
+        return;
+      }
 
-    const desiredState = await loadOrCreateHostDesiredState(
-      drizzle(this.env.DB),
-      hostId,
-      Date.now(),
-    );
-    if (!options?.force && attachment.lastDesiredVersionSent === desiredState.version) {
-      return;
-    }
+      const lastSent = latestAttachment.lastDesiredVersionSent;
+      if (lastSent !== null && desiredState.version < lastSent) {
+        console.warn(
+          JSON.stringify({
+            message: "refusing stale desired-state dispatch",
+            hostId,
+            desiredVersion: desiredState.version,
+            lastSent,
+          }),
+        );
+        return;
+      }
+      if (!options?.force && lastSent === desiredState.version) {
+        return;
+      }
 
-    await this.sendBridgeDesiredState(ws, attachment, hostId, desiredState);
+      this.sendBridgeDesiredState(ws, latestAttachment, hostId, desiredState);
+    });
+  }
+
+  private async withDesiredDispatchLock<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.desiredDispatchQueue;
+    let release!: () => void;
+    this.desiredDispatchQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async withRunProjectionLock<T>(
+    runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.runProjectionQueues.get(runId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    this.runProjectionQueues.set(runId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.runProjectionQueues.get(runId) === tail) {
+        this.runProjectionQueues.delete(runId);
+      }
+    }
   }
 
   private async persistRunState(
     runId: string,
-    nextState: RunStateDocument,
+    deriveNextState: (current: RunStateDocument) => RunStateDocument,
     options?: {
       deleteRequestedAt?: number | null;
       keepDeleteRequestedAt?: boolean;
     },
   ): Promise<void> {
     const db = drizzle(this.env.DB);
-    const row = await this.loadRun(runId);
-    if (!row) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const row = await this.loadRun(runId);
+      if (!row) {
+        return;
+      }
+
+      const current = recomputeRunState(row.state);
+      const recomputed = recomputeRunState(deriveNextState(current));
+      const phase = canAdvanceRunPhase(current.phase, recomputed.phase)
+        ? recomputed.phase
+        : current.phase;
+      const merged =
+        phase === recomputed.phase
+          ? recomputed
+          : {
+              ...recomputed,
+              phase,
+            };
+
+      // A strictly increasing value doubles as the optimistic projection
+      // generation, even when two writes occur in the same millisecond.
+      const now = Math.max(Date.now(), row.updatedAt + 1);
+      const deleteRequestedAt = options?.keepDeleteRequestedAt
+        ? row.deleteRequestedAt
+        : (options?.deleteRequestedAt ?? row.deleteRequestedAt);
+      const solvedAt = nextSolvedAt({
+        currentPhase: current.phase,
+        nextPhase: merged.phase,
+        existingSolvedAt: row.solvedAt,
+        now,
+      });
+      const completedAt =
+        merged.phase === "completed" ? (row.completedAt ?? now) : null;
+      const failedAt = merged.phase === "failed" ? (row.failedAt ?? now) : null;
+      const nextActiveKey =
+        merged.phase === "completed" || merged.phase === "failed"
+          ? null
+          : row.activeKey;
+      const currentJson = JSON.stringify(current);
+      const nextJson = JSON.stringify(merged);
+
+      if (
+        currentJson === nextJson &&
+        row.activeKey === nextActiveKey &&
+        row.deleteRequestedAt === deleteRequestedAt &&
+        row.solvedAt === solvedAt &&
+        row.completedAt === completedAt &&
+        row.failedAt === failedAt
+      ) {
+        return;
+      }
+
+      const updated = await db
+        .update(scenarioRuns)
+        .set({
+          state: merged.phase,
+          stateRank: RUN_PHASE_ORDER[merged.phase],
+          stateJson: nextJson,
+          activeKey: nextActiveKey,
+          deleteRequestedAt,
+          solvedAt,
+          completedAt,
+          failedAt,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(scenarioRuns.runId, runId),
+            eq(scenarioRuns.updatedAt, row.updatedAt),
+          ),
+        )
+        .returning({ runId: scenarioRuns.runId });
+      if (!updated.length) {
+        continue;
+      }
+
+      await recordProbeTransitions(db, {
+        runId,
+        current,
+        next: merged,
+        observedAt: now,
+      });
       return;
     }
-
-    const current = recomputeRunState(row.state);
-    const recomputed = recomputeRunState(nextState);
-    const phase = canAdvanceRunPhase(current.phase, recomputed.phase)
-      ? recomputed.phase
-      : current.phase;
-    const merged =
-      phase === recomputed.phase
-        ? recomputed
-        : {
-            ...recomputed,
-            phase,
-          };
-
-    const now = Date.now();
-    const deleteRequestedAt = options?.keepDeleteRequestedAt
-      ? row.deleteRequestedAt
-      : (options?.deleteRequestedAt ?? row.deleteRequestedAt);
-    const solvedAt = nextSolvedAt({
-      currentPhase: current.phase,
-      nextPhase: merged.phase,
-      existingSolvedAt: row.solvedAt,
-      now,
-    });
-    const completedAt =
-      merged.phase === "completed" ? (row.completedAt ?? now) : null;
-    const failedAt = merged.phase === "failed" ? (row.failedAt ?? now) : null;
-    const nextActiveKey =
-      merged.phase === "completed" || merged.phase === "failed"
-        ? null
-        : row.activeKey;
-    const currentJson = JSON.stringify(current);
-    const nextJson = JSON.stringify(merged);
-
-    if (
-      currentJson === nextJson &&
-      row.activeKey === nextActiveKey &&
-      row.deleteRequestedAt === deleteRequestedAt &&
-      row.solvedAt === solvedAt &&
-      row.completedAt === completedAt &&
-      row.failedAt === failedAt
-    ) {
-      return;
-    }
-
-    await db
-      .update(scenarioRuns)
-      .set({
-        state: merged.phase,
-        stateRank: RUN_PHASE_ORDER[merged.phase],
-        stateJson: nextJson,
-        activeKey: nextActiveKey,
-        deleteRequestedAt,
-        solvedAt,
-        completedAt,
-        failedAt,
-        updatedAt: now,
-      })
-      .where(eq(scenarioRuns.runId, runId));
-
-    await recordProbeTransitions(db, {
-      runId,
-      current,
-      next: merged,
-      observedAt: now,
-    });
+    throw new Error(`run projection CAS did not converge for ${runId}`);
   }
 
   private async removeTerminalBuildsFromDesiredState(
@@ -739,6 +874,13 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       return;
     }
     await this.ctx.storage.setAlarm(next);
+  }
+
+  private async scheduleAlarmNoLaterThan(timestamp: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > timestamp) {
+      await this.ctx.storage.setAlarm(timestamp);
+    }
   }
 
   private async computeNextAlarm(hostId: string): Promise<number | null> {
@@ -935,10 +1077,15 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     hostId: string,
     nowUnixMs: number,
     desiredState?: HostDesiredStateV2,
-  ): Promise<{ lagging: boolean; desiredVersion: number; appliedVersion: number | null }> {
+  ): Promise<{
+    lagging: boolean;
+    desiredVersion: number;
+    appliedVersion: number | null;
+  }> {
     const db = drizzle(this.env.DB);
     const desired =
-      desiredState ?? (await loadOrCreateHostDesiredState(db, hostId, nowUnixMs));
+      desiredState ??
+      (await loadOrCreateHostDesiredState(db, hostId, nowUnixMs));
     const rows = await db
       .select({
         appliedDesiredVersion: hostActualState.appliedDesiredVersion,
@@ -1014,6 +1161,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     solvedAt: number | null;
     completedAt: number | null;
     failedAt: number | null;
+    updatedAt: number;
     state: RunStateDocument;
   } | null> {
     const db = drizzle(this.env.DB);
@@ -1026,6 +1174,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         solvedAt: scenarioRuns.solvedAt,
         completedAt: scenarioRuns.completedAt,
         failedAt: scenarioRuns.failedAt,
+        updatedAt: scenarioRuns.updatedAt,
         stateJson: scenarioRuns.stateJson,
       })
       .from(scenarioRuns)
@@ -1043,6 +1192,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       solvedAt: row.solvedAt,
       completedAt: row.completedAt,
       failedAt: row.failedAt,
+      updatedAt: row.updatedAt,
       state: parseRunState(row.stateJson),
     };
   }
@@ -1080,7 +1230,6 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
       deleteRequestedAt: row.deleteRequestedAt,
     }));
   }
-
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -1103,32 +1252,43 @@ function parseRunState(raw: string): RunStateDocument {
 async function parseCpuReservationRequest(request: Request): Promise<{
   hostId: string;
   runId: string;
-  cpuMillis: number | null;
+  steadyCpuMillisByVm: number[] | null;
 } | null> {
   try {
     const value = (await request.json()) as Record<string, unknown>;
     const hostId = typeof value.hostId === "string" ? value.hostId.trim() : "";
     const runId = typeof value.runId === "string" ? value.runId.trim() : "";
-    const cpuMillis = value.cpuMillis;
+    const steadyCpuMillisByVm = value.steadyCpuMillisByVm;
     if (
       !hostId ||
       hostId.length > 128 ||
       !runId ||
       runId.length > 128 ||
-      (cpuMillis !== undefined &&
-        (typeof cpuMillis !== "number" ||
-          !Number.isSafeInteger(cpuMillis) ||
-          cpuMillis <= 0 ||
-          cpuMillis > 4_294_967_295))
+      (steadyCpuMillisByVm !== undefined &&
+        (!Array.isArray(steadyCpuMillisByVm) ||
+          steadyCpuMillisByVm.length === 0 ||
+          steadyCpuMillisByVm.length > 256 ||
+          !steadyCpuMillisByVm.every(isReservationCpuMillis)))
     ) {
       return null;
     }
     return {
       hostId,
       runId,
-      cpuMillis: typeof cpuMillis === "number" ? cpuMillis : null,
+      steadyCpuMillisByVm: Array.isArray(steadyCpuMillisByVm)
+        ? (steadyCpuMillisByVm as number[])
+        : null,
     };
   } catch {
     return null;
   }
+}
+
+function isReservationCpuMillis(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= 4_294_967_295
+  );
 }

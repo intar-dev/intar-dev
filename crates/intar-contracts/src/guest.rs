@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const RUNTIME_DISK_LABEL: [u8; 11] = *b"INTARRUN   ";
 pub const RECORDING_DISK_LABEL: [u8; 11] = *b"INTARREC   ";
 pub const RUNTIME_ENV_FILENAME: &str = "runtime.env";
+pub const RUNTIME_AUTHORIZED_KEYS_FILENAME: &str = "authorized_keys";
 pub const GUEST_USERNAME: &str = "user";
 
 pub const ENV_SSH_AUTHORIZED_KEYS_B64: &str = "INTAR_SSH_AUTHORIZED_KEYS_B64";
@@ -17,6 +18,7 @@ pub const ENV_VM_HOSTNAME: &str = "INTAR_VM_HOSTNAME";
 pub const ENV_GUEST_IP_CIDR: &str = "INTAR_GUEST_IP_CIDR";
 pub const ENV_GATEWAY: &str = "INTAR_GATEWAY";
 pub const ENV_DNS_SERVERS: &str = "INTAR_DNS_SERVERS";
+pub const ENV_ROOT_RESIZE_REQUIRED: &str = "INTAR_ROOT_RESIZE_REQUIRED";
 pub const ENV_PEER_PREFIX: &str = "INTAR_PEER_";
 pub const ENV_PEER_SUFFIX: &str = "_IP";
 pub const ENV_PEER_HOSTS_B64: &str = "INTAR_PEER_HOSTS_B64";
@@ -32,6 +34,10 @@ pub struct RuntimeEnv {
     pub guest_ip_cidr: String,
     pub gateway: String,
     pub dns_servers: Vec<String>,
+    /// Whether the host expanded the root block device beyond the image's
+    /// built filesystem size. Older runtime disks omit this value and guests
+    /// conservatively retain the resize step.
+    pub root_resize_required: bool,
     pub peer_guest_ips: BTreeMap<String, String>,
 }
 
@@ -61,6 +67,10 @@ impl RuntimeEnv {
             render_line(ENV_GUEST_IP_CIDR, &self.guest_ip_cidr),
             render_line(ENV_GATEWAY, &self.gateway),
             render_line(ENV_DNS_SERVERS, &self.dns_servers.join(" ")),
+            render_line(
+                ENV_ROOT_RESIZE_REQUIRED,
+                if self.root_resize_required { "1" } else { "0" },
+            ),
             // The canonical peer map: a base64-encoded /etc/hosts fragment.
             // The per-peer INTAR_PEER_<VM>_IP variables below sanitize VM
             // names into env-var keys, which is lossy (`redis-cache` and
@@ -100,6 +110,10 @@ impl RuntimeEnv {
                 .split_whitespace()
                 .map(ToOwned::to_owned)
                 .collect(),
+            root_resize_required: values
+                .get(ENV_ROOT_RESIZE_REQUIRED)
+                .map(|value| value != "0")
+                .unwrap_or(true),
             peer_guest_ips: parse_peer_guest_ips(&values)?,
         })
     }
@@ -232,6 +246,7 @@ mod tests {
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),
             dns_servers: vec!["1.1.1.1".to_owned(), "8.8.8.8".to_owned()],
+            root_resize_required: false,
             peer_guest_ips: BTreeMap::from([
                 ("db".to_owned(), "10.200.0.3".to_owned()),
                 ("redis-cache".to_owned(), "10.200.0.4".to_owned()),
@@ -269,6 +284,7 @@ mod tests {
             guest_ip_cidr: "10.200.0.2/24".to_owned(),
             gateway: "10.200.0.1".to_owned(),
             dns_servers: vec!["1.1.1.1".to_owned()],
+            root_resize_required: true,
             peer_guest_ips: BTreeMap::new(),
         };
         let rendered = env.render();

@@ -1,11 +1,14 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use intar_contracts::guest::{RUNTIME_DISK_LABEL, RUNTIME_ENV_FILENAME, RuntimeEnv};
+use intar_contracts::guest::{
+    RUNTIME_AUTHORIZED_KEYS_FILENAME, RUNTIME_DISK_LABEL, RUNTIME_ENV_FILENAME, RuntimeEnv,
+};
+use russh::keys::PublicKey;
 
 use super::manager::CreateVmNetwork;
 
@@ -19,6 +22,7 @@ pub struct RuntimeDiskInput<'a> {
     pub kino_host_ready_port: u32,
     pub hostname: &'a str,
     pub network: &'a CreateVmNetwork,
+    pub root_resize_required: bool,
     pub peer_guest_ips: &'a BTreeMap<String, String>,
 }
 
@@ -55,8 +59,28 @@ pub fn write_runtime_disk(input: &RuntimeDiskInput<'_>) -> Result<()> {
     let root = fs.root_dir();
 
     write_file(&root, RUNTIME_ENV_FILENAME, &runtime_env(input).render())?;
+    write_file(
+        &root,
+        RUNTIME_AUTHORIZED_KEYS_FILENAME,
+        &validated_authorized_keys(input.ssh_authorized_keys_openssh)?,
+    )?;
 
     Ok(())
+}
+
+fn validated_authorized_keys(keys: &[String]) -> Result<String> {
+    let mut unique = BTreeSet::new();
+    for raw in keys {
+        let key = raw.trim();
+        anyhow::ensure!(
+            !key.is_empty() && !key.contains(['\n', '\r', '\0']),
+            "authorized SSH key contains invalid whitespace or NUL"
+        );
+        PublicKey::from_openssh(key).context("authorized SSH key is not valid OpenSSH material")?;
+        unique.insert(key.to_owned());
+    }
+    anyhow::ensure!(!unique.is_empty(), "authorized SSH key set is empty");
+    Ok(unique.into_iter().map(|key| format!("{key}\n")).collect())
 }
 
 fn runtime_env(input: &RuntimeDiskInput<'_>) -> RuntimeEnv {
@@ -69,6 +93,7 @@ fn runtime_env(input: &RuntimeDiskInput<'_>) -> RuntimeEnv {
         guest_ip_cidr: input.network.guest_ip_cidr.clone(),
         gateway: input.network.gateway.clone(),
         dns_servers: input.network.dns.clone(),
+        root_resize_required: input.root_resize_required,
         peer_guest_ips: input.peer_guest_ips.clone(),
     }
 }
@@ -108,12 +133,13 @@ mod tests {
 
         write_runtime_disk(&RuntimeDiskInput {
             path: &disk_path,
-            ssh_authorized_keys_openssh: &["ssh-ed25519 AAAATEST stargate-target".to_string()],
+            ssh_authorized_keys_openssh: &["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR stargate-target".to_string()],
             kino_vsock_cid: 10_001,
             kino_vsock_port: 18_080,
             kino_host_ready_port: 18_081,
             hostname: "broken-nginx",
             network: &network,
+            root_resize_required: false,
             peer_guest_ips: &peer_guest_ips,
         })
         .expect("runtime disk should be created");
@@ -140,8 +166,18 @@ mod tests {
         assert!(runtime_env.contains("INTAR_GUEST_IP_CIDR='10.200.0.2/24'"));
         assert!(runtime_env.contains("INTAR_GATEWAY='10.200.0.1'"));
         assert!(runtime_env.contains("INTAR_DNS_SERVERS='1.1.1.1 8.8.8.8'"));
+        assert!(runtime_env.contains("INTAR_ROOT_RESIZE_REQUIRED='0'"));
         assert!(runtime_env.contains("INTAR_PEER_DB_IP='10.200.0.3'"));
         assert!(runtime_env.contains("INTAR_PEER_REDIS_CACHE_IP='10.200.0.4'"));
         assert!(runtime_env.contains("INTAR_PEER_HOSTS_B64='"));
+        let mut authorized_keys = String::new();
+        root.open_file(RUNTIME_AUTHORIZED_KEYS_FILENAME)
+            .expect("authorized_keys should exist")
+            .read_to_string(&mut authorized_keys)
+            .expect("authorized_keys should be readable");
+        assert_eq!(
+            authorized_keys,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBklzf1Qy77LwsjmDlGvCAhBpCkhpti25927fAnOMEIR stargate-target\n"
+        );
     }
 }

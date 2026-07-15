@@ -1,17 +1,20 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
+use intar_jailer_protocol::{
+    ArtifactAccess, ArtifactSource, PREPARED_IMAGE_SOURCE_ROOT, PreparedImageV2Result, Sha256Digest,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
@@ -19,12 +22,45 @@ use crate::config::{
 };
 use crate::db::{Db, ImageCacheAccessRow};
 
-const MAX_CONCURRENT_DOWNLOADS: usize = 2;
-const RAW_CACHE_MARKER_VERSION: u8 = 1;
+const MAX_CONCURRENT_IMAGE_WARMS: usize = 2;
+const MAX_CONCURRENT_CACHE_DOWNLOADS: usize = 4;
+const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const RAW_CACHE_MARKER_VERSION: u8 = 3;
+const LAUNCH_DESCRIPTOR_VERSION: u8 = 1;
+const LAUNCH_DESCRIPTOR_FILENAME: &str = "launch-v2.ready.json";
+
+type CacheEntryLockKey = (PathBuf, String);
+type CacheEntryLocks = Mutex<HashMap<CacheEntryLockKey, Arc<Mutex<()>>>>;
+
+static CACHE_ENTRY_LOCKS: OnceLock<CacheEntryLocks> = OnceLock::new();
+static CACHE_DOWNLOADS: OnceLock<Semaphore> = OnceLock::new();
+
+fn cache_entry_locks() -> &'static CacheEntryLocks {
+    CACHE_ENTRY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_downloads() -> &'static Semaphore {
+    CACHE_DOWNLOADS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_CACHE_DOWNLOADS))
+}
+
+async fn cache_entry_lock(cache_root: &Path, key: String) -> Arc<Mutex<()>> {
+    let mut locks = cache_entry_locks().lock().await;
+    Arc::clone(
+        locks
+            .entry((cache_root.to_path_buf(), key))
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
 
 pub(crate) fn registry_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
+        // Bound an idle response without imposing a total deadline on large
+        // image downloads. Otherwise one stuck warmer can hold a cache key and
+        // block every foreground launch that needs the same boot artifact.
+        .read_timeout(REGISTRY_READ_TIMEOUT)
         .build()
         .context("failed to build registry HTTP client")
 }
@@ -51,6 +87,7 @@ pub struct CachedImage {
     pub image_key: String,
     pub image_sha256: String,
     pub raw_path: PathBuf,
+    pub raw_sha256: String,
     pub kernel_path: PathBuf,
     pub initrd_path: PathBuf,
     pub kernel_sha256: String,
@@ -72,6 +109,39 @@ struct RawCacheMarker {
     image_key: String,
     image_sha256: String,
     image_virtual_size_bytes: u64,
+    raw_sha256: String,
+    kernel_sha256: String,
+    initrd_sha256: String,
+    cmdline: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchDescriptorV1 {
+    schema_version: u8,
+    image_key: String,
+    image_sha256: String,
+    raw_path: PathBuf,
+    raw_sha256: String,
+    image_virtual_size_bytes: u64,
+    kernel_path: PathBuf,
+    kernel_sha256: String,
+    initrd_path: PathBuf,
+    initrd_sha256: String,
+    cmdline: String,
+    prepared_image: PreparedImageV2Result,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ReadyImageLaunch {
+    pub image: CachedImage,
+    pub prepared_image: PreparedImageV2Result,
+}
+
+#[derive(Debug)]
+struct CachedRawImage {
+    path: PathBuf,
+    sha256: String,
 }
 
 pub fn select_evictions(
@@ -135,6 +205,7 @@ pub fn spawn_warm_cache_with_bridge(
     bridge: BridgeConfig,
     cache: ImageCacheConfig,
     db: Db,
+    vm: crate::vm::VmManager,
 ) {
     tokio::spawn(async move {
         let cache_root = match default_cache_root() {
@@ -166,6 +237,7 @@ pub fn spawn_warm_cache_with_bridge(
             Some(&db),
             &cache_root,
             &client,
+            &vm,
         )
         .await;
 
@@ -183,6 +255,7 @@ pub fn spawn_warm_cache_with_bridge(
                 Some(&db),
                 &cache_root,
                 &client,
+                &vm,
             )
             .await;
         }
@@ -281,11 +354,296 @@ pub(crate) fn verified_cached_raw_image_metadata(
         && marker.image_key == image_key
         && marker.image_sha256 == image_sha256
         && marker.image_virtual_size_bytes == metadata.len()
+        && normalize_sha256(&marker.raw_sha256).as_deref() == Some(marker.raw_sha256.as_str())
+        && normalize_sha256(&marker.kernel_sha256).as_deref() == Some(marker.kernel_sha256.as_str())
+        && normalize_sha256(&marker.initrd_sha256).as_deref() == Some(marker.initrd_sha256.as_str())
+        && !marker.cmdline.trim().is_empty()
     {
         Some(metadata)
     } else {
         None
     }
+}
+
+pub(crate) fn verified_cached_image_metadata(
+    cache_root: &Path,
+    image_key: &str,
+    image_sha256: &str,
+    require_template: bool,
+) -> Option<std::fs::Metadata> {
+    let metadata = verified_cached_raw_image_metadata(cache_root, image_key, image_sha256)?;
+    if !require_template {
+        return Some(metadata);
+    }
+    let descriptor_path = launch_descriptor_path_for_key(cache_root, image_key);
+    regular_cached_file(&descriptor_path, "launch descriptor").ok()?;
+    let descriptor: LaunchDescriptorV1 =
+        serde_json::from_slice(&std::fs::read(descriptor_path).ok()?).ok()?;
+    validate_launch_descriptor(cache_root, image_key, Some(image_sha256), descriptor)
+        .ok()
+        .map(|ready| ready.1)
+}
+
+/// Atomically publish the complete, prevalidated foreground launch contract.
+/// The background warmer is the only caller. A launch never updates this file
+/// and never falls back to the registry when it is absent or invalid.
+pub(crate) async fn mark_template_ready(
+    image: &CachedImage,
+    prepared: &PreparedImageV2Result,
+) -> Result<()> {
+    let descriptor_path = launch_descriptor_path_for_raw(&image.raw_path)?;
+    let directory = descriptor_path
+        .parent()
+        .context("launch descriptor parent")?;
+    let descriptor = LaunchDescriptorV1 {
+        schema_version: LAUNCH_DESCRIPTOR_VERSION,
+        image_key: image.image_key.clone(),
+        image_sha256: image.image_sha256.clone(),
+        raw_path: image.raw_path.clone(),
+        raw_sha256: image.raw_sha256.clone(),
+        image_virtual_size_bytes: image.virtual_size_bytes,
+        kernel_path: image.kernel_path.clone(),
+        kernel_sha256: image.kernel_sha256.clone(),
+        initrd_path: image.initrd_path.clone(),
+        initrd_sha256: image.initrd_sha256.clone(),
+        cmdline: image.cmdline.clone(),
+        prepared_image: prepared.clone(),
+    };
+    validate_launch_descriptor(
+        cache_root_from_cached_image(image)?,
+        &image.image_key,
+        Some(&image.image_sha256),
+        descriptor.clone(),
+    )?;
+
+    let (temporary, mut file) = create_tmp_file(directory, LAUNCH_DESCRIPTOR_FILENAME).await?;
+    file.write_all(&serde_json::to_vec(&descriptor)?)
+        .await
+        .context("write launch descriptor")?;
+    file.flush().await.context("flush launch descriptor")?;
+    file.sync_all().await.context("sync launch descriptor")?;
+    drop(file);
+    tokio::fs::rename(&temporary, &descriptor_path)
+        .await
+        .with_context(|| {
+            format!(
+                "publish atomic launch descriptor {}",
+                descriptor_path.display()
+            )
+        })?;
+    Ok(())
+}
+
+/// Resolve a foreground launch exclusively from the descriptor published by a
+/// completed background prewarm. This intentionally accepts no registry or
+/// HTTP client, so a cache miss cannot enter a download or hashing slow path.
+pub(crate) async fn require_ready_image_launch(
+    cache_root: &Path,
+    image_key: &str,
+    expected_image_sha256: Option<&str>,
+) -> Result<ReadyImageLaunch> {
+    if !is_safe_component(image_key) {
+        anyhow::bail!("invalid image key {image_key:?}");
+    }
+    let expected_image_sha256 = expected_image_sha256
+        .map(|value| {
+            normalize_sha256(value)
+                .ok_or_else(|| anyhow::anyhow!("invalid expected image sha256 {value:?}"))
+        })
+        .transpose()?;
+    let descriptor_path = launch_descriptor_path_for_key(cache_root, image_key);
+    regular_cached_file(&descriptor_path, "launch descriptor").context(
+        "prewarmed launch descriptor is unavailable; foreground registry fallback is disabled",
+    )?;
+    let bytes = tokio::fs::read(&descriptor_path).await.with_context(|| {
+        format!(
+            "read prewarmed launch descriptor {}; foreground registry fallback is disabled",
+            descriptor_path.display()
+        )
+    })?;
+    let descriptor: LaunchDescriptorV1 = serde_json::from_slice(&bytes)
+        .with_context(|| format!("decode launch descriptor {}", descriptor_path.display()))?;
+    validate_launch_descriptor(
+        cache_root,
+        image_key,
+        expected_image_sha256.as_deref(),
+        descriptor,
+    )
+    .map(|(ready, _)| ready)
+}
+
+fn cache_root_from_cached_image(image: &CachedImage) -> Result<&Path> {
+    image
+        .raw_path
+        .parent()
+        .and_then(Path::parent)
+        .context("cached raw image is not below an image-key directory")
+}
+
+fn validate_launch_descriptor(
+    cache_root: &Path,
+    image_key: &str,
+    expected_image_sha256: Option<&str>,
+    descriptor: LaunchDescriptorV1,
+) -> Result<(ReadyImageLaunch, std::fs::Metadata)> {
+    anyhow::ensure!(
+        descriptor.schema_version == LAUNCH_DESCRIPTOR_VERSION,
+        "unsupported launch descriptor schema version {}",
+        descriptor.schema_version
+    );
+    anyhow::ensure!(
+        descriptor.image_key == image_key,
+        "launch descriptor image key mismatch"
+    );
+    anyhow::ensure!(
+        normalize_sha256(&descriptor.image_sha256).as_deref()
+            == Some(descriptor.image_sha256.as_str()),
+        "launch descriptor image sha256 is not canonical"
+    );
+    if let Some(expected) = expected_image_sha256 {
+        anyhow::ensure!(
+            descriptor.image_sha256 == expected,
+            "stale launch descriptor: expected image sha256 {expected}, found {}",
+            descriptor.image_sha256
+        );
+    }
+    for (label, sha256) in [
+        ("raw", descriptor.raw_sha256.as_str()),
+        ("kernel", descriptor.kernel_sha256.as_str()),
+        ("initrd", descriptor.initrd_sha256.as_str()),
+    ] {
+        anyhow::ensure!(
+            normalize_sha256(sha256).as_deref() == Some(sha256),
+            "launch descriptor {label} sha256 is not canonical"
+        );
+    }
+    anyhow::ensure!(
+        descriptor.image_virtual_size_bytes > 0,
+        "launch descriptor image virtual size is zero"
+    );
+    anyhow::ensure!(
+        !descriptor.cmdline.trim().is_empty(),
+        "launch descriptor kernel command line is empty"
+    );
+
+    let expected_raw_path =
+        cached_raw_image_path_for_key(cache_root, image_key, &descriptor.image_sha256);
+    let expected_kernel_path = cache_root.join("artifacts").join(&descriptor.kernel_sha256);
+    let expected_initrd_path = cache_root.join("artifacts").join(&descriptor.initrd_sha256);
+    anyhow::ensure!(
+        descriptor.raw_path == expected_raw_path
+            && descriptor.kernel_path == expected_kernel_path
+            && descriptor.initrd_path == expected_initrd_path,
+        "launch descriptor contains an unexpected cache path"
+    );
+
+    let raw_metadata = regular_cached_file(&descriptor.raw_path, "raw image")?;
+    anyhow::ensure!(
+        raw_metadata.len() == descriptor.image_virtual_size_bytes,
+        "launch descriptor raw image size mismatch"
+    );
+    let _ = regular_cached_file(&descriptor.kernel_path, "kernel")?;
+    let _ = regular_cached_file(&descriptor.initrd_path, "initrd")?;
+
+    let raw_marker_path =
+        raw_cache_marker_path_for_key(cache_root, image_key, &descriptor.image_sha256);
+    let _ = regular_cached_file(&raw_marker_path, "raw cache marker")?;
+    let raw_marker = read_raw_cache_marker_sync(&raw_marker_path)
+        .with_context(|| format!("read raw cache marker {}", raw_marker_path.display()))?;
+    anyhow::ensure!(
+        raw_marker.schema_version == RAW_CACHE_MARKER_VERSION
+            && raw_marker.image_key == descriptor.image_key
+            && raw_marker.image_sha256 == descriptor.image_sha256
+            && raw_marker.image_virtual_size_bytes == descriptor.image_virtual_size_bytes
+            && raw_marker.raw_sha256 == descriptor.raw_sha256
+            && raw_marker.kernel_sha256 == descriptor.kernel_sha256
+            && raw_marker.initrd_sha256 == descriptor.initrd_sha256
+            && raw_marker.cmdline == descriptor.cmdline,
+        "launch descriptor does not match the verified raw cache record"
+    );
+
+    validate_prepared_descriptor(&descriptor)?;
+    let image = CachedImage {
+        image_key: descriptor.image_key,
+        image_sha256: descriptor.image_sha256,
+        raw_path: descriptor.raw_path,
+        raw_sha256: descriptor.raw_sha256,
+        kernel_path: descriptor.kernel_path,
+        initrd_path: descriptor.initrd_path,
+        kernel_sha256: descriptor.kernel_sha256,
+        initrd_sha256: descriptor.initrd_sha256,
+        cmdline: descriptor.cmdline,
+        virtual_size_bytes: descriptor.image_virtual_size_bytes,
+    };
+    Ok((
+        ReadyImageLaunch {
+            image,
+            prepared_image: descriptor.prepared_image,
+        },
+        raw_metadata,
+    ))
+}
+
+fn regular_cached_file(path: &Path, label: &str) -> Result<std::fs::Metadata> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("stat cached {label} {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && metadata.len() > 0,
+        "cached {label} is not a non-empty regular file"
+    );
+    Ok(metadata)
+}
+
+fn validate_prepared_descriptor(descriptor: &LaunchDescriptorV1) -> Result<()> {
+    let prepared = &descriptor.prepared_image;
+    anyhow::ensure!(
+        prepared.fast_template_store
+            && prepared.image_sha256.as_str() == descriptor.image_sha256
+            && prepared.virtual_size_bytes == descriptor.image_virtual_size_bytes,
+        "launch descriptor prepared-image identity mismatch"
+    );
+    validate_prepared_source(
+        &prepared.root_disk,
+        &descriptor.image_sha256,
+        "root.raw",
+        &descriptor.raw_sha256,
+        ArtifactAccess::ReadWrite,
+    )?;
+    validate_prepared_source(
+        &prepared.kernel,
+        &descriptor.image_sha256,
+        "kernel",
+        &descriptor.kernel_sha256,
+        ArtifactAccess::ReadOnly,
+    )?;
+    let initrd = prepared
+        .initrd
+        .as_ref()
+        .context("launch descriptor prepared image is missing initrd")?;
+    validate_prepared_source(
+        initrd,
+        &descriptor.image_sha256,
+        "initrd",
+        &descriptor.initrd_sha256,
+        ArtifactAccess::ReadOnly,
+    )
+}
+
+fn validate_prepared_source(
+    source: &ArtifactSource,
+    image_sha256: &str,
+    file_name: &str,
+    expected_sha256: &str,
+    access: ArtifactAccess,
+) -> Result<()> {
+    anyhow::ensure!(
+        source.source_root == PREPARED_IMAGE_SOURCE_ROOT
+            && source.relative_path == PathBuf::from(image_sha256).join(file_name)
+            && source.sha256.as_ref().map(Sha256Digest::as_str) == Some(expected_sha256)
+            && source.access == access,
+        "launch descriptor prepared {file_name} source mismatch"
+    );
+    Ok(())
 }
 
 async fn run_cache_refresh_cycle(
@@ -295,6 +653,7 @@ async fn run_cache_refresh_cycle(
     db: Option<&Db>,
     cache_root: &Path,
     client: &reqwest::Client,
+    vm: &crate::vm::VmManager,
 ) {
     let images = match list_registry_images(registry, bridge, client).await {
         Ok(images) => images,
@@ -322,7 +681,7 @@ async fn run_cache_refresh_cycle(
         "refreshing image cache from registry"
     );
 
-    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_IMAGE_WARMS));
     let mut handles = Vec::with_capacity(images.len());
     for image in images {
         let client = client.clone();
@@ -331,6 +690,7 @@ async fn run_cache_refresh_cycle(
         let bridge = bridge.cloned();
         let db = db.cloned();
         let sem = Arc::clone(&sem);
+        let vm = vm.clone();
         handles.push(tokio::spawn(async move {
             let span = tracing::info_span!(
                 "image_cache",
@@ -344,16 +704,40 @@ async fn run_cache_refresh_cycle(
                 Err(_) => return,
             };
 
-            match ensure_cached_raw_entry(&image, &registry, bridge.as_ref(), &cache_root, &client)
-                .await
+            match ensure_cached_image_entry(
+                &image,
+                &registry,
+                bridge.as_ref(),
+                &cache_root,
+                &client,
+            )
+            .await
             {
-                Ok(path) => {
+                Ok(cached_image) => {
+                    let template_prepared = match vm
+                        .ensure_cached_image_template(&cached_image)
+                        .await
+                    {
+                        Ok(_) => true,
+                        Err(error) => {
+                            error!(
+                                error = %error,
+                                image = %image.image_key,
+                                "failed to prepare root-owned jail image template"
+                            );
+                            return;
+                        }
+                    };
                     if let Some(db) = db.as_ref()
-                        && let Err(error) = touch_cached_image_access(db, &image).await
+                        && let Err(error) = touch_cached_image(db, &cached_image).await
                     {
                         warn!(error = %error, image = %image.image_key, "failed to update image cache access metadata");
                     }
-                    info!(path = %path.display(), "cache ready");
+                    info!(
+                        path = %cached_image.raw_path.display(),
+                        template_prepared,
+                        "image boot bundle cache ready"
+                    );
                 }
                 Err(e) => error!("failed to cache image: {e}"),
             }
@@ -393,10 +777,15 @@ pub async fn ensure_cached_raw(
     client: &reqwest::Client,
 ) -> Result<PathBuf> {
     let image = resolve_registry_image(image_key, registry, bridge, client).await?;
-    ensure_cached_raw_entry(&image, registry, bridge, cache_root, client).await
+    Ok(
+        ensure_cached_raw_entry(&image, registry, bridge, cache_root, client)
+            .await?
+            .path,
+    )
 }
 
-pub async fn ensure_cached_image(
+#[cfg(test)]
+async fn ensure_cached_image(
     image_key: &str,
     registry: &ImageRegistryConfig,
     bridge: Option<&BridgeConfig>,
@@ -404,33 +793,53 @@ pub async fn ensure_cached_image(
     client: &reqwest::Client,
 ) -> Result<CachedImage> {
     let image = resolve_registry_image(image_key, registry, bridge, client).await?;
-    let raw_path = ensure_cached_raw_entry(&image, registry, bridge, cache_root, client).await?;
-    let kernel_path = ensure_cached_artifact(
+    ensure_cached_image_entry(&image, registry, bridge, cache_root, client).await
+}
+
+async fn ensure_cached_image_entry(
+    image: &RegistryImageRecord,
+    registry: &ImageRegistryConfig,
+    bridge: Option<&BridgeConfig>,
+    cache_root: &Path,
+    client: &reqwest::Client,
+) -> Result<CachedImage> {
+    // These paths are independent. Prepare them together so a cold raw-image
+    // decompression overlaps the small direct-boot artifact downloads. `join!`
+    // deliberately lets every branch finish its cleanup if a sibling fails.
+    // Boxing keeps the three sizeable async state machines off the Tokio
+    // worker stack while they are polled together.
+    let raw = Box::pin(ensure_cached_raw_entry(
+        image, registry, bridge, cache_root, client,
+    ));
+    let kernel = Box::pin(ensure_cached_artifact(
         &image.boot.kernel_sha256,
         registry,
         bridge,
         cache_root,
         client,
-    )
-    .await?;
-    let initrd_path = ensure_cached_artifact(
+    ));
+    let initrd = Box::pin(ensure_cached_artifact(
         &image.boot.initrd_sha256,
         registry,
         bridge,
         cache_root,
         client,
-    )
-    .await?;
+    ));
+    let (raw, kernel_path, initrd_path) = tokio::join!(raw, kernel, initrd);
+    let raw = raw?;
+    let kernel_path = kernel_path?;
+    let initrd_path = initrd_path?;
 
     Ok(CachedImage {
-        image_key: image.image_key,
-        image_sha256: image.image_sha256,
-        raw_path,
+        image_key: image.image_key.clone(),
+        image_sha256: image.image_sha256.clone(),
+        raw_path: raw.path,
+        raw_sha256: raw.sha256,
         kernel_path,
         initrd_path,
-        kernel_sha256: image.boot.kernel_sha256,
-        initrd_sha256: image.boot.initrd_sha256,
-        cmdline: image.boot.cmdline,
+        kernel_sha256: image.boot.kernel_sha256.clone(),
+        initrd_sha256: image.boot.initrd_sha256.clone(),
+        cmdline: image.boot.cmdline.clone(),
         virtual_size_bytes: image.image_virtual_size_bytes,
     })
 }
@@ -442,19 +851,6 @@ pub async fn touch_cached_image(db: &Db, image: &CachedImage) -> Result<()> {
         kernel_sha256: image.kernel_sha256.clone(),
         initrd_sha256: image.initrd_sha256.clone(),
         raw_bytes: i64::try_from(image.virtual_size_bytes)
-            .context("cached image virtual size exceeds sqlite INTEGER range")?,
-        last_accessed_at_ms: now_unix_ms(),
-    })
-    .await
-}
-
-async fn touch_cached_image_access(db: &Db, image: &RegistryImageRecord) -> Result<()> {
-    db.touch_image_cache_entry(ImageCacheAccessRow {
-        image_key: image.image_key.clone(),
-        image_sha256: image.image_sha256.clone(),
-        kernel_sha256: image.boot.kernel_sha256.clone(),
-        initrd_sha256: image.boot.initrd_sha256.clone(),
-        raw_bytes: i64::try_from(image.image_virtual_size_bytes)
             .context("cached image virtual size exceeds sqlite INTEGER range")?,
         last_accessed_at_ms: now_unix_ms(),
     })
@@ -503,6 +899,7 @@ async fn evict_cache_if_needed(cache: &ImageCacheConfig, db: &Db, cache_root: &P
             .map(|metadata| file_allocated_bytes(&metadata))
             .unwrap_or(0);
         remove_raw_cache_entry(&raw_path, &marker_path).await?;
+        remove_launch_descriptor_if_matching(cache_root, &row.image_key, sha).await?;
         db.delete_image_cache_access(sha.clone()).await?;
         info!(
             image = %row.image_key,
@@ -711,7 +1108,17 @@ async fn ensure_cached_raw_entry(
     bridge: Option<&BridgeConfig>,
     cache_root: &Path,
     client: &reqwest::Client,
-) -> Result<PathBuf> {
+) -> Result<CachedRawImage> {
+    // A foreground launch can overlap the background warmer, and sibling VMs
+    // often share an image. Serialize the complete compressed + raw pipeline so
+    // one task cannot unlink or replace a path another task just returned.
+    let raw_lock = cache_entry_lock(
+        cache_root,
+        format!("raw:{}:{}", image.image_key, image.image_sha256),
+    )
+    .await;
+    let _raw_guard = raw_lock.lock().await;
+
     let raw_path = cached_raw_image_path(cache_root, image);
     let marker_path = raw_cache_marker_path(cache_root, image);
     match tokio::fs::metadata(&raw_path).await {
@@ -719,7 +1126,10 @@ async fn ensure_cached_raw_entry(
             match read_raw_cache_marker(&marker_path).await {
                 Ok(marker) if raw_cache_marker_matches(&marker, image, metadata.len()) => {
                     info!(path = %raw_path.display(), "raw image cache hit");
-                    return Ok(raw_path);
+                    return Ok(CachedRawImage {
+                        path: raw_path,
+                        sha256: marker.raw_sha256,
+                    });
                 }
                 Ok(marker) => {
                     warn!(
@@ -785,18 +1195,27 @@ async fn ensure_cached_raw_entry(
     })
     .await
     .context("raw zstd decompression task panicked")?;
-    if let Err(error) = decompress_result {
-        let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(error)
-            .with_context(|| format!("failed to decompress cached image {}", image.image_key));
-    }
+    let raw_sha256 = match decompress_result {
+        Ok(raw_sha256) => raw_sha256,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(error)
+                .with_context(|| format!("failed to decompress cached image {}", image.image_key));
+        }
+    };
 
     if tokio::fs::metadata(&raw_path).await.is_ok() {
         let _ = tokio::fs::remove_file(&tmp_path).await;
         if verified_cached_raw_image_metadata(cache_root, &image.image_key, &image.image_sha256)
             .is_some()
         {
-            return Ok(raw_path);
+            let marker = read_raw_cache_marker(&marker_path)
+                .await
+                .context("read concurrently published raw cache marker")?;
+            return Ok(CachedRawImage {
+                path: raw_path,
+                sha256: marker.raw_sha256,
+            });
         }
         remove_raw_cache_entry(&raw_path, &marker_path).await?;
     }
@@ -808,11 +1227,14 @@ async fn ensure_cached_raw_entry(
                 raw_path.display()
             )
         })?;
-    write_raw_cache_marker(cache_root, image)
+    write_raw_cache_marker(cache_root, image, &raw_sha256)
         .await
         .with_context(|| format!("failed to write raw cache marker for {}", image.image_key))?;
     info!(path = %raw_path.display(), "raw image cache ready");
-    Ok(raw_path)
+    Ok(CachedRawImage {
+        path: raw_path,
+        sha256: raw_sha256,
+    })
 }
 
 async fn ensure_cached_entry(
@@ -967,6 +1389,8 @@ async fn ensure_cached_artifact(
             )
         })?;
     let artifact_path = artifact_dir.join(&expected_sha256);
+    let artifact_lock = cache_entry_lock(cache_root, format!("artifact:{expected_sha256}")).await;
+    let _artifact_guard = artifact_lock.lock().await;
 
     if tokio::fs::metadata(&artifact_path).await.is_ok() {
         match sha256_file(&artifact_path).await {
@@ -1090,6 +1514,7 @@ fn registry_images_from_index(index: RegistryIndex) -> Vec<RegistryImageRecord> 
         .collect()
 }
 
+#[cfg(test)]
 async fn resolve_registry_image(
     image_key: &str,
     registry: &ImageRegistryConfig,
@@ -1170,6 +1595,15 @@ fn raw_cache_marker_path_for_key(
         .join(format!("{image_sha256}.raw.verified.json"))
 }
 
+fn launch_descriptor_path_for_key(cache_root: &Path, image_key: &str) -> PathBuf {
+    cache_root.join(image_key).join(LAUNCH_DESCRIPTOR_FILENAME)
+}
+
+fn launch_descriptor_path_for_raw(raw_path: &Path) -> Result<PathBuf> {
+    let parent = raw_path.parent().context("cached raw image parent")?;
+    Ok(parent.join(LAUNCH_DESCRIPTOR_FILENAME))
+}
+
 fn raw_cache_marker_matches(
     marker: &RawCacheMarker,
     image: &RegistryImageRecord,
@@ -1180,6 +1614,10 @@ fn raw_cache_marker_matches(
         && marker.image_sha256 == image.image_sha256
         && marker.image_virtual_size_bytes == image.image_virtual_size_bytes
         && marker.image_virtual_size_bytes == actual_size_bytes
+        && normalize_sha256(&marker.raw_sha256).as_deref() == Some(marker.raw_sha256.as_str())
+        && marker.kernel_sha256 == image.boot.kernel_sha256
+        && marker.initrd_sha256 == image.boot.initrd_sha256
+        && marker.cmdline == image.boot.cmdline
 }
 
 async fn read_raw_cache_marker(path: &Path) -> std::io::Result<RawCacheMarker> {
@@ -1194,7 +1632,11 @@ fn read_raw_cache_marker_sync(path: &Path) -> std::io::Result<RawCacheMarker> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
-async fn write_raw_cache_marker(cache_root: &Path, image: &RegistryImageRecord) -> Result<()> {
+async fn write_raw_cache_marker(
+    cache_root: &Path,
+    image: &RegistryImageRecord,
+    raw_sha256: &str,
+) -> Result<()> {
     let image_dir = cache_root.join(&image.image_key);
     let marker_path = raw_cache_marker_path(cache_root, image);
     let marker = RawCacheMarker {
@@ -1202,6 +1644,10 @@ async fn write_raw_cache_marker(cache_root: &Path, image: &RegistryImageRecord) 
         image_key: image.image_key.clone(),
         image_sha256: image.image_sha256.clone(),
         image_virtual_size_bytes: image.image_virtual_size_bytes,
+        raw_sha256: raw_sha256.to_owned(),
+        kernel_sha256: image.boot.kernel_sha256.clone(),
+        initrd_sha256: image.boot.initrd_sha256.clone(),
+        cmdline: image.boot.cmdline.clone(),
     };
     let body = serde_json::to_vec(&marker).context("serializing raw cache marker")?;
     let (tmp_path, mut tmp_file) = create_tmp_file(
@@ -1248,6 +1694,39 @@ async fn remove_raw_cache_entry(raw_path: &Path, marker_path: &Path) -> Result<(
     Ok(())
 }
 
+async fn remove_launch_descriptor_if_matching(
+    cache_root: &Path,
+    image_key: &str,
+    image_sha256: &str,
+) -> Result<()> {
+    let path = launch_descriptor_path_for_key(cache_root, image_key);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read launch descriptor {}", path.display()));
+        }
+    };
+    let remove = serde_json::from_slice::<LaunchDescriptorV1>(&bytes)
+        .map(|descriptor| descriptor.image_sha256 == image_sha256)
+        // A malformed descriptor cannot make any image Ready and is safe to
+        // discard while the background cache worker already owns this key.
+        .unwrap_or(true);
+    if remove {
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to remove launch descriptor {}", path.display())
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sha_filename(image: &RegistryImageRecord) -> String {
     format!("{}.sha256", image.image_filename)
 }
@@ -1256,7 +1735,7 @@ fn decompress_raw_zstd_sparse(
     compressed_path: &Path,
     raw_path: &Path,
     virtual_size_bytes: u64,
-) -> Result<()> {
+) -> Result<String> {
     let input = std::fs::File::open(compressed_path)
         .with_context(|| format!("failed to open {}", compressed_path.display()))?;
     let mut decoder = zstd::stream::read::Decoder::new(input)
@@ -1268,6 +1747,7 @@ fn decompress_raw_zstd_sparse(
         .with_context(|| format!("failed to open {}", raw_path.display()))?;
 
     let mut written = 0u64;
+    let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let read = decoder
@@ -1287,6 +1767,7 @@ fn decompress_raw_zstd_sparse(
                 virtual_size_bytes
             );
         }
+        hasher.update(&buffer[..read]);
         if buffer[..read].iter().all(|byte| *byte == 0) {
             output
                 .seek(SeekFrom::Current(read as i64))
@@ -1312,7 +1793,7 @@ fn decompress_raw_zstd_sparse(
     output
         .sync_all()
         .with_context(|| format!("failed to sync {}", raw_path.display()))?;
-    Ok(())
+    Ok(to_hex_lower(&hasher.finalize()))
 }
 
 fn registry_base_url(registry: &ImageRegistryConfig) -> Result<reqwest::Url> {
@@ -1475,6 +1956,10 @@ async fn download_to_file(
     image_url_or_path: &str,
     file: &mut tokio::fs::File,
 ) -> Result<DownloadResult> {
+    let _download_permit = cache_downloads()
+        .acquire()
+        .await
+        .context("image cache download semaphore closed")?;
     let url = build_registry_url(registry, image_url_or_path)?;
     let display_url = redact_url_userinfo(url.as_str());
     let response = apply_registry_auth(client.get(url.clone()), &url, registry, bridge, client)
@@ -2001,9 +2486,11 @@ mod tests {
         )?;
         std::fs::File::create(&raw_path)?;
 
-        decompress_raw_zstd_sparse(&compressed_path, &raw_path, virtual_size as u64)?;
+        let raw_sha256 =
+            decompress_raw_zstd_sparse(&compressed_path, &raw_path, virtual_size as u64)?;
 
         assert_eq!(std::fs::read(&raw_path)?, raw_body);
+        assert_eq!(raw_sha256, sha256_bytes(&raw_body));
         let metadata = std::fs::metadata(&raw_path)?;
         assert_eq!(metadata.len(), virtual_size as u64);
 
@@ -2070,6 +2557,9 @@ mod tests {
         let initrd_body = b"initrd";
         let kernel_sha256 = sha256_bytes(kernel_body);
         let initrd_sha256 = sha256_bytes(initrd_body);
+        let image_requests = Arc::new(AtomicUsize::new(0));
+        let kernel_requests = Arc::new(AtomicUsize::new(0));
+        let initrd_requests = Arc::new(AtomicUsize::new(0));
 
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
@@ -2078,6 +2568,9 @@ mod tests {
         let initrd_body_bg = initrd_body.to_vec();
         let kernel_sha256_bg = kernel_sha256.clone();
         let initrd_sha256_bg = initrd_sha256.clone();
+        let image_requests_bg = Arc::clone(&image_requests);
+        let kernel_requests_bg = Arc::clone(&kernel_requests);
+        let initrd_requests_bg = Arc::clone(&initrd_requests);
         let index = registry_index_with_boot(
             &[("ubuntu", &image_sha256, "/agent/registry/images/ubuntu/sha")],
             &kernel_sha256,
@@ -2105,11 +2598,16 @@ mod tests {
 
                 let (status, response_body) = match path {
                     "/images" => ("200 OK", index.clone()),
-                    "/agent/registry/images/ubuntu/sha" => ("200 OK", compressed_body_bg.clone()),
+                    "/agent/registry/images/ubuntu/sha" => {
+                        image_requests_bg.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", compressed_body_bg.clone())
+                    }
                     path if path == format!("/agent/registry/artifacts/{kernel_sha256_bg}") => {
+                        kernel_requests_bg.fetch_add(1, Ordering::SeqCst);
                         ("200 OK", kernel_body_bg.clone())
                     }
                     path if path == format!("/agent/registry/artifacts/{initrd_sha256_bg}") => {
+                        initrd_requests_bg.fetch_add(1, Ordering::SeqCst);
                         ("200 OK", initrd_body_bg.clone())
                     }
                     _ => ("404 Not Found", Vec::new()),
@@ -2129,14 +2627,131 @@ mod tests {
         let client = reqwest::Client::new();
         let registry = registry_config(addr);
 
-        let cached =
-            ensure_cached_image("ubuntu", &registry, None, cache_root.path(), &client).await?;
+        let first = Box::pin(ensure_cached_image(
+            "ubuntu",
+            &registry,
+            None,
+            cache_root.path(),
+            &client,
+        ));
+        let second = Box::pin(ensure_cached_image(
+            "ubuntu",
+            &registry,
+            None,
+            cache_root.path(),
+            &client,
+        ));
+        let (first, second) = tokio::join!(first, second);
+        let cached = first?;
+        let concurrently_cached = second?;
 
         assert_eq!(tokio::fs::read(&cached.raw_path).await?, raw_body);
         assert_eq!(tokio::fs::read(&cached.kernel_path).await?, kernel_body);
         assert_eq!(tokio::fs::read(&cached.initrd_path).await?, initrd_body);
+        assert_eq!(cached.raw_sha256, sha256_bytes(raw_body));
         assert_eq!(cached.cmdline, "root=/dev/vda rw");
         assert_eq!(cached.virtual_size_bytes, raw_body.len() as u64);
+        assert_eq!(concurrently_cached.raw_path, cached.raw_path);
+        assert_eq!(concurrently_cached.kernel_path, cached.kernel_path);
+        assert_eq!(concurrently_cached.initrd_path, cached.initrd_path);
+        assert_eq!(image_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(kernel_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(initrd_requests.load(Ordering::SeqCst), 1);
+
+        assert!(
+            verified_cached_image_metadata(cache_root.path(), "ubuntu", &image_sha256, true,)
+                .is_none(),
+            "template-capable hosts must not report Ready before jailerd preparation"
+        );
+        let missing = require_ready_image_launch(cache_root.path(), "ubuntu", Some(&image_sha256))
+            .await
+            .expect_err("foreground launch must fail when background prewarm is incomplete");
+        assert!(format!("{missing:#}").contains("foreground registry fallback is disabled"));
+        let prepared_source =
+            |name: &str, sha256: &str, access| intar_jailer_protocol::ArtifactSource {
+                source_root: intar_jailer_protocol::PREPARED_IMAGE_SOURCE_ROOT,
+                relative_path: PathBuf::from(&image_sha256).join(name),
+                sha256: Some(
+                    intar_jailer_protocol::Sha256Digest::parse(sha256.to_owned()).expect("digest"),
+                ),
+                access,
+            };
+        let prepared = intar_jailer_protocol::PreparedImageV2Result {
+            image_sha256: intar_jailer_protocol::Sha256Digest::parse(image_sha256.clone())?,
+            virtual_size_bytes: raw_body.len() as u64,
+            root_disk: prepared_source(
+                "root.raw",
+                &cached.raw_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadWrite,
+            ),
+            kernel: prepared_source(
+                "kernel",
+                &kernel_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadOnly,
+            ),
+            initrd: Some(prepared_source(
+                "initrd",
+                &initrd_sha256,
+                intar_jailer_protocol::ArtifactAccess::ReadOnly,
+            )),
+            fast_template_store: true,
+        };
+        mark_template_ready(&cached, &prepared).await?;
+        assert!(
+            verified_cached_image_metadata(cache_root.path(), "ubuntu", &image_sha256, true,)
+                .is_some()
+        );
+        let request_counts_before_launch = (
+            image_requests.load(Ordering::SeqCst),
+            kernel_requests.load(Ordering::SeqCst),
+            initrd_requests.load(Ordering::SeqCst),
+        );
+        let ready =
+            require_ready_image_launch(cache_root.path(), "ubuntu", Some(&image_sha256)).await?;
+        assert_eq!(ready.image, cached);
+        assert_eq!(ready.prepared_image, prepared);
+        assert_eq!(
+            (
+                image_requests.load(Ordering::SeqCst),
+                kernel_requests.load(Ordering::SeqCst),
+                initrd_requests.load(Ordering::SeqCst),
+            ),
+            request_counts_before_launch,
+            "foreground launch descriptor reads must issue no registry requests"
+        );
+
+        let stale = require_ready_image_launch(cache_root.path(), "ubuntu", Some(&"f".repeat(64)))
+            .await
+            .expect_err("desired image digest must fence a stale launch descriptor");
+        assert!(format!("{stale:#}").contains("stale launch descriptor"));
+
+        let descriptor_path = launch_descriptor_path_for_raw(&cached.raw_path)?;
+        let mut tampered: LaunchDescriptorV1 =
+            serde_json::from_slice(&tokio::fs::read(&descriptor_path).await?)?;
+        tampered.cmdline = "console=ttyS0 compromised=1".to_string();
+        tokio::fs::write(&descriptor_path, serde_json::to_vec(&tampered)?).await?;
+        assert!(
+            verified_cached_image_metadata(cache_root.path(), "ubuntu", &image_sha256, true,)
+                .is_none(),
+            "a descriptor that no longer matches the prewarm record must revoke readiness"
+        );
+        assert!(
+            require_ready_image_launch(cache_root.path(), "ubuntu", Some(&image_sha256),)
+                .await
+                .is_err()
+        );
+
+        mark_template_ready(&cached, &prepared).await?;
+        remove_launch_descriptor_if_matching(cache_root.path(), "ubuntu", &"f".repeat(64)).await?;
+        assert!(
+            descriptor_path.is_file(),
+            "another image eviction must not revoke Ready"
+        );
+        remove_launch_descriptor_if_matching(cache_root.path(), "ubuntu", &image_sha256).await?;
+        assert!(
+            !descriptor_path.exists(),
+            "evicting the descriptor's image must revoke Ready"
+        );
 
         Ok(())
     }
@@ -2271,6 +2886,7 @@ mod tests {
         write_raw_cache_marker(
             cache_root.path(),
             &raw_cache_record("ubuntu", &expected, body.len() as u64),
+            &sha256_bytes(body),
         )
         .await?;
         ensure_ring_provider()?;
