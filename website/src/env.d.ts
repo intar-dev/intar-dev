@@ -18,6 +18,11 @@ declare global {
       BETTER_AUTH_SECRET: string;
       GITHUB_CLIENT_ID: string;
       GITHUB_CLIENT_SECRET: string;
+      INTAR_BOOT_BENCH_TOKEN?: string;
+      INTAR_BOOT_BENCH_USER_ID?: string;
+      INTAR_BOOT_BENCH_HOST_ID?: string;
+      INTAR_BOOT_BENCH_NOT_BEFORE_UNIX_MS?: string;
+      INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS?: string;
       STARGATE_ADMIN_BASE_URL?: string;
       STARGATE_ADMIN_AUTH_SECRET: string;
       SCENARIO_RUN_KEY_ENCRYPTION_SECRET: string;

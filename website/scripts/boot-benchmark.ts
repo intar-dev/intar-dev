@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -30,7 +31,12 @@ import {
   type BootSampleV1,
   type PassedBootSampleV1,
 } from "./boot-benchmark-core";
-import { ApiClient, parseManifest } from "./live-e2e";
+import {
+  ApiClient,
+  parseManifest,
+  type ApiClientAuth,
+  type ApiClientRequestPolicy,
+} from "./live-e2e";
 
 const require = createRequire(import.meta.url);
 const PLAYWRIGHT_VERSION = String(
@@ -53,7 +59,8 @@ const REQUIRED_FAST_CAPABILITIES = [
 
 export interface BootBenchmarkOptions {
   baseUrl: string;
-  cookie: string;
+  auth: ApiClientAuth;
+  browserSession: BootBenchmarkBrowserSessionIdentity | null;
   hostId: string;
   variant: BootBenchmarkVariant;
   manifestPath: string;
@@ -221,6 +228,11 @@ const SET_COOKIE_ATTRIBUTE_NAMES = new Set([
 ]);
 const COOKIE_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+export const BOOT_BENCHMARK_BROWSER_CONTEXT_OPTIONS = {
+  viewport: { width: 1_440, height: 900 },
+  serviceWorkers: "block" as const,
+};
+
 export function parseBrowserCookies(
   cookieHeader: string,
   baseUrl: string,
@@ -272,6 +284,239 @@ export function parseBrowserCookies(
   });
 }
 
+const BOOT_BENCHMARK_SESSION_PATH = "/api/auth/get-session";
+const BOOT_BENCHMARK_RUNS_PATH = "/api/scenarios/runs";
+const BOOT_BENCHMARK_MAX_AUTH_TTL_MS = 3 * 60 * 60 * 1_000;
+const BOOT_BENCHMARK_MIN_TOKEN_BYTES = 32;
+
+export interface BootBenchmarkBrowserSessionIdentity {
+  userId: string;
+  expiresAtUnixMs: number;
+}
+
+export type BootBenchmarkApiRequestClass =
+  | "network"
+  | "local_session"
+  | "local_empty_runs"
+  | "denied";
+
+export class BootBenchmarkApiPolicy implements ApiClientRequestPolicy {
+  private readonly origin: string;
+  private readonly hostPath: string;
+  private readonly scenarioPath: string;
+  private readonly startPath: string;
+  private readonly ownedRunIds = new Set<string>();
+
+  constructor(input: { origin: string; hostId: string; scenarioId: string }) {
+    this.origin = new URL(input.origin).origin;
+    this.hostPath = `/api/agent/hosts/${encodeURIComponent(input.hostId)}`;
+    this.scenarioPath = `/api/scenarios/${encodeURIComponent(input.scenarioId)}`;
+    this.startPath = `${this.scenarioPath}/start`;
+  }
+
+  claimOwnedRun(runId: string): void {
+    if (!runId.trim()) {
+      throw new Error("cannot claim an empty benchmark run id");
+    }
+    this.ownedRunIds.add(runId);
+  }
+
+  classify(method: string, url: URL): BootBenchmarkApiRequestClass {
+    const normalizedMethod = method.toUpperCase();
+    if (
+      url.origin !== this.origin ||
+      url.search.length > 0 ||
+      url.hash.length > 0
+    ) {
+      return "denied";
+    }
+    if (
+      normalizedMethod === "GET" &&
+      url.pathname === BOOT_BENCHMARK_SESSION_PATH
+    ) {
+      return "local_session";
+    }
+    if (
+      normalizedMethod === "GET" &&
+      url.pathname === BOOT_BENCHMARK_RUNS_PATH
+    ) {
+      return "local_empty_runs";
+    }
+    if (
+      (normalizedMethod === "GET" &&
+        (url.pathname === this.hostPath ||
+          url.pathname === this.scenarioPath)) ||
+      (normalizedMethod === "POST" && url.pathname === this.startPath)
+    ) {
+      return "network";
+    }
+
+    for (const runId of this.ownedRunIds) {
+      const runPath = `${BOOT_BENCHMARK_RUNS_PATH}/${encodeURIComponent(runId)}`;
+      if (
+        (normalizedMethod === "GET" && url.pathname === runPath) ||
+        (normalizedMethod === "POST" &&
+          (url.pathname === `${runPath}/ssh` ||
+            url.pathname === `${runPath}/destroy`))
+      ) {
+        return "network";
+      }
+    }
+    return "denied";
+  }
+
+  allows(method: string, url: URL): boolean {
+    return this.classify(method, url) === "network";
+  }
+}
+
+interface BrowserBenchmarkContextTarget {
+  addCookies(cookies: BrowserCookie[]): Promise<void>;
+  route(
+    url: string,
+    handler: (route: Route) => Promise<void>,
+  ): Promise<unknown>;
+}
+
+export function isSameOriginApiRequest(
+  requestUrl: string,
+  origin: string,
+): boolean {
+  try {
+    const request = new URL(requestUrl);
+    return (
+      request.origin === new URL(origin).origin &&
+      (request.pathname === "/api" || request.pathname.startsWith("/api/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function browserBenchmarkRequestHeaders(input: {
+  headers: Record<string, string>;
+  requestUrl: string;
+  method: string;
+  auth: ApiClientAuth;
+  policy: BootBenchmarkApiPolicy;
+}): Record<string, string> {
+  const headers = { ...input.headers };
+  if (
+    input.auth.kind === "boot_benchmark" &&
+    input.policy.allows(input.method, new URL(input.requestUrl))
+  ) {
+    if (Object.keys(headers).some((name) => name.toLowerCase() === "cookie")) {
+      throw new Error(
+        "BootBenchmark browser API requests must not include Cookie",
+      );
+    }
+    headers.authorization = `BootBenchmark ${input.auth.token}`;
+  }
+  return headers;
+}
+
+export function bootBenchmarkBrowserSession(
+  identity: BootBenchmarkBrowserSessionIdentity,
+): Record<string, unknown> {
+  const createdAt = new Date(
+    Math.max(0, identity.expiresAtUnixMs - BOOT_BENCHMARK_MAX_AUTH_TTL_MS),
+  ).toISOString();
+  return {
+    session: {
+      id: "boot-benchmark-browser-session",
+      userId: identity.userId,
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt: new Date(identity.expiresAtUnixMs).toISOString(),
+    },
+    user: {
+      id: identity.userId,
+      name: "Boot Benchmark",
+      email: "boot-benchmark@invalid.example",
+      emailVerified: true,
+      createdAt,
+      updatedAt: createdAt,
+      role: "user",
+    },
+  };
+}
+
+export async function configureBrowserBenchmarkContext(
+  context: BrowserBenchmarkContextTarget,
+  input: {
+    baseUrl: string;
+    auth: ApiClientAuth;
+    policy: BootBenchmarkApiPolicy;
+    browserSession: BootBenchmarkBrowserSessionIdentity | null;
+  },
+): Promise<void> {
+  const origin = new URL(input.baseUrl).origin;
+  if (input.auth.kind === "cookie") {
+    await context.addCookies(
+      parseBrowserCookies(input.auth.cookie, input.baseUrl),
+    );
+    return;
+  }
+  if (!input.browserSession) {
+    throw new Error("BootBenchmark browser auth requires a session identity");
+  }
+  const browserSession = input.browserSession;
+
+  await context.route(`${origin}/api/**`, async (route) => {
+    const request = route.request();
+    const requestUrl = request.url();
+    const requestHeaders = await request.allHeaders();
+    if (
+      Object.keys(requestHeaders).some(
+        (name) => name.toLowerCase() === "cookie",
+      )
+    ) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    const url = new URL(requestUrl);
+    const requestClass = input.policy.classify(request.method(), url);
+    if (requestClass === "local_session") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { "cache-control": "no-store" },
+        body: JSON.stringify(bootBenchmarkBrowserSession(browserSession)),
+      });
+      return;
+    }
+    if (requestClass === "local_empty_runs") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: { "cache-control": "no-store" },
+        body: JSON.stringify({ runs: [] }),
+      });
+      return;
+    }
+    if (requestClass !== "network") {
+      await route.abort("blockedbyclient");
+      return;
+    }
+
+    const response = await route.fetch({
+      headers: browserBenchmarkRequestHeaders({
+        headers: requestHeaders,
+        requestUrl,
+        method: request.method(),
+        auth: input.auth,
+        policy: input.policy,
+      }),
+      maxRedirects: 0,
+    });
+    if (response.status() >= 300 && response.status() < 400) {
+      await route.abort("blockedbyresponse");
+      return;
+    }
+    await route.fulfill({ response });
+  });
+}
+
 export function browserMarkerCommand(marker: string): string {
   if (!/^[A-Z0-9_]{2,}$/.test(marker)) {
     throw new Error(
@@ -294,6 +539,8 @@ class BrowserBenchmarkDriver {
   private readonly context: BrowserContext;
   private readonly page: Page;
   private readonly origin: string;
+  private readonly auth: ApiClientAuth;
+  private readonly apiPolicy: BootBenchmarkApiPolicy;
   private readonly hostId: string;
   private readonly scenarioId: string;
 
@@ -302,6 +549,8 @@ class BrowserBenchmarkDriver {
     context: BrowserContext;
     page: Page;
     origin: string;
+    auth: ApiClientAuth;
+    apiPolicy: BootBenchmarkApiPolicy;
     hostId: string;
     scenarioId: string;
   }) {
@@ -309,6 +558,8 @@ class BrowserBenchmarkDriver {
     this.context = input.context;
     this.page = input.page;
     this.origin = input.origin;
+    this.auth = input.auth;
+    this.apiPolicy = input.apiPolicy;
     this.hostId = input.hostId;
     this.scenarioId = input.scenarioId;
     this.chromiumVersion = input.browser.version();
@@ -316,26 +567,33 @@ class BrowserBenchmarkDriver {
 
   static async create(input: {
     baseUrl: string;
-    cookie: string;
+    auth: ApiClientAuth;
+    apiPolicy: BootBenchmarkApiPolicy;
+    browserSession: BootBenchmarkBrowserSessionIdentity | null;
     hostId: string;
     scenarioId: string;
   }): Promise<BrowserBenchmarkDriver> {
     const origin = new URL(input.baseUrl).origin;
     const browser = await chromium.launch({ headless: true });
     try {
-      const context = await browser.newContext({
-        viewport: { width: 1_440, height: 900 },
-      });
+      const context = await browser.newContext(
+        BOOT_BENCHMARK_BROWSER_CONTEXT_OPTIONS,
+      );
       try {
-        await context.addCookies(
-          parseBrowserCookies(input.cookie, input.baseUrl),
-        );
+        await configureBrowserBenchmarkContext(context, {
+          baseUrl: input.baseUrl,
+          auth: input.auth,
+          policy: input.apiPolicy,
+          browserSession: input.browserSession,
+        });
         const page = await context.newPage();
         return new BrowserBenchmarkDriver({
           browser,
           context,
           page,
           origin,
+          auth: input.auth,
+          apiPolicy: input.apiPolicy,
           hostId: input.hostId,
           scenarioId: input.scenarioId,
         });
@@ -401,16 +659,45 @@ class BrowserBenchmarkDriver {
             "browser issued more than one scenario start request",
           );
         }
-        const headers = await request.allHeaders();
+        const headers = browserBenchmarkRequestHeaders({
+          headers: await request.allHeaders(),
+          requestUrl: request.url(),
+          method: request.method(),
+          auth: this.auth,
+          policy: this.apiPolicy,
+        });
         delete headers["content-length"];
         headers["content-type"] = "application/json";
-        await route.continue({
+        const response = await route.fetch({
           headers,
+          maxRedirects: 0,
           postData: JSON.stringify({
             hostId: this.hostId,
             admissionMode: "benchmark",
           }),
         });
+        if (response.status() >= 300 && response.status() < 400) {
+          throw new Error(
+            `refused redirected benchmark start response HTTP ${response.status()}`,
+          );
+        }
+        if (response.ok()) {
+          let value: unknown = null;
+          try {
+            value = JSON.parse(await response.text()) as unknown;
+          } catch {
+            // The browser response contract check will report malformed JSON.
+          }
+          if (
+            isRecord(value) &&
+            value.accepted === true &&
+            typeof value.runId === "string" &&
+            value.runId.trim()
+          ) {
+            this.apiPolicy.claimOwnedRun(value.runId);
+          }
+        }
+        await route.fulfill({ response });
       } catch (error) {
         routeFailure =
           error instanceof Error ? error : new Error(errorMessage(error));
@@ -453,6 +740,7 @@ class BrowserBenchmarkDriver {
           this.scenarioId,
           clock,
         );
+        this.apiPolicy.claimOwnedRun(start.runId);
       } catch (error) {
         // Keep the host-pinning route installed until the browser click has
         // completely settled, even when an accepted response is malformed.
@@ -701,7 +989,12 @@ export async function runBootBenchmark(
     );
   }
 
-  const client = new ApiClient(options.baseUrl, options.cookie);
+  const apiPolicy = new BootBenchmarkApiPolicy({
+    origin: options.baseUrl,
+    hostId: options.hostId,
+    scenarioId: manifest.scenario_id,
+  });
+  const client = new ApiClient(options.baseUrl, options.auth, apiPolicy);
   const artifacts = bootArtifactIdentity(manifest);
   const artifactFingerprint = bootArtifactFingerprint(artifacts);
   const host = await loadHostEvidence({
@@ -738,7 +1031,9 @@ export async function runBootBenchmark(
   const measured: BootSampleV1[] = [];
   const browserDriver = await BrowserBenchmarkDriver.create({
     baseUrl: options.baseUrl,
-    cookie: options.cookie,
+    auth: options.auth,
+    apiPolicy,
+    browserSession: options.browserSession,
     hostId: options.hostId,
     scenarioId: manifest.scenario_id,
   });
@@ -1332,8 +1627,7 @@ function assertAuthoritativeHostSnapshot(
   }
   assertStableHostResponse(host, input.expectedHost);
   const foreignDesired = host.desiredState.vms.filter(
-    (vm) =>
-      vm.desired_phase === "running" && vm.run_id !== input.ownedRunId,
+    (vm) => vm.desired_phase === "running" && vm.run_id !== input.ownedRunId,
   );
   if (foreignDesired.length > 0) {
     throw new FatalIsolationError(
@@ -1666,9 +1960,7 @@ async function loadHostEvidence(input: {
         `host desired state has ${host.desiredState.builds.length} active build assignment(s)`,
       );
     }
-    if (
-      host.actualState.appliedDesiredVersion < host.desiredState.version
-    ) {
+    if (host.actualState.appliedDesiredVersion < host.desiredState.version) {
       problems.push(
         `host has applied desired version ${host.actualState.appliedDesiredVersion}, expected at least ${host.desiredState.version}`,
       );
@@ -1747,6 +2039,7 @@ export function parseBootBenchmarkOptions(
   const allowed = new Set([
     "base-url",
     "cookie",
+    "benchmark-token-file",
     "host",
     "variant",
     "manifest",
@@ -1787,6 +2080,12 @@ export function parseBootBenchmarkOptions(
     env.INTAR_BOOT_BENCH_COOKIE ??
     env.INTAR_LIVE_COOKIE ??
     "";
+  const benchmarkTokenFile =
+    values.get("benchmark-token-file") ?? env.INTAR_BOOT_BENCH_TOKEN_FILE ?? "";
+  const benchmarkToken = readBenchmarkToken(
+    env.INTAR_BOOT_BENCH_TOKEN ?? "",
+    benchmarkTokenFile,
+  );
   const hostId =
     values.get("host") ??
     env.INTAR_BOOT_BENCH_HOST_ID ??
@@ -1797,7 +2096,6 @@ export function parseBootBenchmarkOptions(
     values.get("manifest") ?? env.INTAR_BOOT_BENCH_MANIFEST ?? "";
   if (!baseUrl)
     throw new Error("--base-url or INTAR_LIVE_BASE_URL is required");
-  if (!cookie) throw new Error("--cookie or INTAR_LIVE_COOKIE is required");
   if (!hostId) throw new Error("--host is required for same-host isolation");
   if (!variant) throw new Error("--variant is required");
   if (!BOOT_BENCHMARK_VARIANTS.includes(variant as BootBenchmarkVariant)) {
@@ -1805,6 +2103,13 @@ export function parseBootBenchmarkOptions(
       `--variant must be one of: ${BOOT_BENCHMARK_VARIANTS.join(", ")}`,
     );
   }
+  const { auth, browserSession } = parseBootBenchmarkAuth({
+    cookie,
+    benchmarkToken,
+    benchmarkUserId: env.INTAR_BOOT_BENCH_USER_ID ?? "",
+    benchmarkExpiresAtUnixMs: env.INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS ?? "",
+    variant: variant as BootBenchmarkVariant,
+  });
   if (!manifestPath) throw new Error("--manifest is required");
 
   const implementationSha256 =
@@ -1845,7 +2150,8 @@ export function parseBootBenchmarkOptions(
   );
   return {
     baseUrl,
-    cookie,
+    auth,
+    browserSession,
     hostId,
     variant: variant as BootBenchmarkVariant,
     manifestPath: resolve(manifestPath),
@@ -1866,6 +2172,101 @@ export function parseBootBenchmarkOptions(
       values.get("terminal-probe-timeout-ms"),
       15_000,
     ),
+  };
+}
+
+function readBenchmarkToken(
+  environmentToken: string,
+  tokenFile: string,
+): string {
+  if (environmentToken && tokenFile) {
+    throw new Error(
+      "INTAR_BOOT_BENCH_TOKEN and INTAR_BOOT_BENCH_TOKEN_FILE/--benchmark-token-file are mutually exclusive",
+    );
+  }
+  if (!tokenFile) return environmentToken;
+  try {
+    return readFileSync(resolve(tokenFile), "utf8").trim();
+  } catch (error) {
+    throw new Error(
+      `failed to read BootBenchmark token file: ${errorMessage(error)}`,
+    );
+  }
+}
+
+function parseBootBenchmarkAuth(input: {
+  cookie: string;
+  benchmarkToken: string;
+  benchmarkUserId: string;
+  benchmarkExpiresAtUnixMs: string;
+  variant: BootBenchmarkVariant;
+}): {
+  auth: ApiClientAuth;
+  browserSession: BootBenchmarkBrowserSessionIdentity | null;
+} {
+  if (input.cookie && input.benchmarkToken) {
+    throw new Error(
+      "cookie and BootBenchmark token auth are mutually exclusive",
+    );
+  }
+  if (!input.cookie && !input.benchmarkToken) {
+    throw new Error(
+      "INTAR_BOOT_BENCH_TOKEN, --benchmark-token-file, --cookie, or INTAR_LIVE_COOKIE is required",
+    );
+  }
+  if (
+    input.variant === "fully-optimized-current-path" &&
+    !input.benchmarkToken
+  ) {
+    throw new Error(
+      "fully-optimized-current-path promotion requires BootBenchmark token auth",
+    );
+  }
+  if (input.benchmarkToken) {
+    if (
+      input.benchmarkToken !== input.benchmarkToken.trim() ||
+      /\s/.test(input.benchmarkToken)
+    ) {
+      throw new Error("BootBenchmark token must not contain whitespace");
+    }
+    if (
+      new TextEncoder().encode(input.benchmarkToken).byteLength <
+      BOOT_BENCHMARK_MIN_TOKEN_BYTES
+    ) {
+      throw new Error("BootBenchmark token must be at least 32 bytes");
+    }
+    if (
+      !input.benchmarkUserId ||
+      input.benchmarkUserId !== input.benchmarkUserId.trim() ||
+      /[\u0000-\u001f\u007f]/.test(input.benchmarkUserId)
+    ) {
+      throw new Error(
+        "INTAR_BOOT_BENCH_USER_ID is required for token-mode browser routing",
+      );
+    }
+    const expiresAtUnixMs = Number(input.benchmarkExpiresAtUnixMs);
+    const nowUnixMs = Date.now();
+    if (
+      !Number.isSafeInteger(expiresAtUnixMs) ||
+      expiresAtUnixMs <= nowUnixMs ||
+      expiresAtUnixMs - nowUnixMs > BOOT_BENCHMARK_MAX_AUTH_TTL_MS ||
+      !Number.isFinite(new Date(expiresAtUnixMs).getTime())
+    ) {
+      throw new Error(
+        "INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS must expire within the next three hours",
+      );
+    }
+    return {
+      auth: { kind: "boot_benchmark", token: input.benchmarkToken },
+      browserSession: {
+        userId: input.benchmarkUserId,
+        expiresAtUnixMs,
+      },
+    };
+  }
+  return {
+    auth: { kind: "cookie", cookie: input.cookie },
+    browserSession: null,
   };
 }
 
@@ -1961,7 +2362,8 @@ function assertStableHostResponse(
   }
   const capabilities = normalizeCapabilities(host.actualState.capabilities);
   if (
-    stableRecordFingerprint(capabilities) !== expected.capabilitiesFingerprint ||
+    stableRecordFingerprint(capabilities) !==
+      expected.capabilitiesFingerprint ||
     capabilities.cloud_hypervisor_sha256 !== expected.cloudHypervisorSha256
   ) {
     throw new FatalIsolationError(
@@ -2095,7 +2497,8 @@ function log(message: string): void {
 
 function printHelp(): void {
   console.log(`Usage:
-  bun run bench:boot -- --base-url https://intar.dev --cookie 'session=...' \\
+  bun run bench:boot -- --base-url https://intar.dev \\
+    --benchmark-token-file /secure/path/boot-benchmark.token \\
     --host HOST_ID --variant fully-optimized-current-path \\
     --manifest /path/broken-nginx.manifest.json \\
     --implementation-sha256 DEPLOYED_SHA256 --output optimized.json
@@ -2114,7 +2517,17 @@ Required:
                                     control-plane/agent/jailerd implementation
                                     and rollout configuration.
   --base-url URL                    Defaults to INTAR_LIVE_BASE_URL.
-  --cookie COOKIE                   Defaults to INTAR_LIVE_COOKIE.
+  --benchmark-token-file PATH       Reads the dedicated production credential
+                                    without placing it in argv. Alternatively
+                                    set INTAR_BOOT_BENCH_TOKEN or
+                                    INTAR_BOOT_BENCH_TOKEN_FILE.
+                                    Token mode also requires
+                                    INTAR_BOOT_BENCH_USER_ID and
+                                    INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS.
+  --cookie COOKIE                   Cookie-mode tooling alternative. Defaults
+                                    to INTAR_BOOT_BENCH_COOKIE or
+                                    INTAR_LIVE_COOKIE. It cannot run the
+                                    fully-optimized promotion variant.
 
 Promotion defaults:
   --warmups 5                       Warm boots discarded from percentiles.

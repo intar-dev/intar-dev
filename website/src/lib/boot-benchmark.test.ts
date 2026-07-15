@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BOOT_BENCHMARK_CPU_POLICIES,
   BOOT_BENCHMARK_MEASUREMENT_BOUNDARY,
@@ -24,13 +24,26 @@ import {
   assertLiveRunnerVariant,
   assertNoForeignHostActualVms,
   assertOwnedHostActualVm,
+  BOOT_BENCHMARK_BROWSER_CONTEXT_OPTIONS,
+  BootBenchmarkApiPolicy,
+  bootBenchmarkBrowserSession,
   browserMarkerCommand,
+  browserBenchmarkRequestHeaders,
+  configureBrowserBenchmarkContext,
   hasBootBenchmarkReadyVm,
+  isSameOriginApiRequest,
   parseBrowserCookies,
   parseBootBenchmarkOptions,
 } from "../../scripts/boot-benchmark";
 import type { ScenarioRunRecord } from "./scenario-runs";
-import { runUsableTerminalMarkerProbe } from "../../scripts/live-e2e";
+import {
+  ApiClient,
+  runUsableTerminalMarkerProbe,
+} from "../../scripts/live-e2e";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("boot benchmark statistics", () => {
   it("uses the exact nearest-rank p50 and p95 for thirty samples", () => {
@@ -63,8 +76,7 @@ describe("boot benchmark statistics", () => {
         measured,
         summary,
         performanceReady: true,
-        cpuPolicy:
-          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
+        cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }),
     ).toMatchObject({ passed: true, reasons: [] });
     expect(summary.usable_terminal_ms).toMatchObject({
@@ -177,8 +189,7 @@ describe("boot benchmark statistics", () => {
         measured: completeMeasured,
         summary: completeSummary,
         performanceReady: true,
-        cpuPolicy:
-          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
+        cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }).reasons,
     ).toContain("guest-to-Kino p95 6501ms exceeds 6500ms");
   });
@@ -201,8 +212,7 @@ describe("boot benchmark statistics", () => {
         measured,
         summary,
         performanceReady: true,
-        cpuPolicy:
-          BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
+        cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }).reasons,
     ).toContain("seal/projection/UI-ready p95 501ms exceeds 500ms");
     expect(sealProjectionReadyDurationMs(bootEvidence(), 5_000)).toBe(300);
@@ -216,9 +226,13 @@ describe("boot benchmark statistics", () => {
 });
 
 describe("boot benchmark options", () => {
+  const benchmarkExpiresAtUnixMs = Date.now() + 60 * 60 * 1_000;
+  const benchmarkToken = "benchmark-secret-0123456789abcdef0123456789";
   const environment = {
     INTAR_LIVE_BASE_URL: "https://intar.dev",
-    INTAR_LIVE_COOKIE: "session=test",
+    INTAR_BOOT_BENCH_TOKEN: benchmarkToken,
+    INTAR_BOOT_BENCH_USER_ID: "benchmark-user-1",
+    INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS: String(benchmarkExpiresAtUnixMs),
     INTAR_BOOT_BENCH_IMPLEMENTATION_SHA256: "E".repeat(64),
   };
 
@@ -256,6 +270,92 @@ describe("boot benchmark options", () => {
     expect(options.pollMs).toBe(100);
     expect(options.coldPrewarmStartedAtUnixMs).toBeNull();
     expect(options.implementationSha256).toBe("e".repeat(64));
+    expect(options.auth).toEqual({
+      kind: "boot_benchmark",
+      token: benchmarkToken,
+    });
+    expect(options.browserSession).toEqual({
+      userId: "benchmark-user-1",
+      expiresAtUnixMs: benchmarkExpiresAtUnixMs,
+    });
+  });
+
+  it("accepts only non-argv token input with explicit browser identity", () => {
+    const args = [
+      "--host",
+      "host-1",
+      "--variant",
+      "fully-optimized-current-path",
+      "--manifest",
+      "broken-nginx.manifest.json",
+    ];
+    expect(parseBootBenchmarkOptions(args, environment).auth).toEqual({
+      kind: "boot_benchmark",
+      token: benchmarkToken,
+    });
+    expect(() =>
+      parseBootBenchmarkOptions(
+        [...args, "--benchmark-token", "cli-secret"],
+        environment,
+      ),
+    ).toThrow("unknown option: --benchmark-token");
+    expect(() =>
+      parseBootBenchmarkOptions(args, {
+        ...environment,
+        INTAR_LIVE_COOKIE: "session=test",
+      }),
+    ).toThrow("mutually exclusive");
+    expect(() =>
+      parseBootBenchmarkOptions(args, {
+        ...environment,
+        INTAR_BOOT_BENCH_TOKEN: "bad token",
+      }),
+    ).toThrow("must not contain whitespace");
+    expect(() =>
+      parseBootBenchmarkOptions(args, {
+        ...environment,
+        INTAR_BOOT_BENCH_TOKEN: "too-short",
+      }),
+    ).toThrow("at least 32 bytes");
+    expect(() =>
+      parseBootBenchmarkOptions(args, {
+        ...environment,
+        INTAR_BOOT_BENCH_USER_ID: "",
+      }),
+    ).toThrow("INTAR_BOOT_BENCH_USER_ID");
+    expect(() =>
+      parseBootBenchmarkOptions(args, {
+        ...environment,
+        INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS: "1",
+      }),
+    ).toThrow("expire within the next three hours");
+  });
+
+  it("keeps cookie tooling but forbids it for optimized promotion", () => {
+    const common = [
+      "--host",
+      "host-1",
+      "--manifest",
+      "broken-nginx.manifest.json",
+    ];
+    const cookieEnvironment = {
+      INTAR_LIVE_BASE_URL: environment.INTAR_LIVE_BASE_URL,
+      INTAR_LIVE_COOKIE: "session=test",
+      INTAR_BOOT_BENCH_IMPLEMENTATION_SHA256:
+        environment.INTAR_BOOT_BENCH_IMPLEMENTATION_SHA256,
+    };
+    expect(
+      parseBootBenchmarkOptions(
+        [...common, "--variant", "current-2000m-boot-to-1000m-steady"],
+        cookieEnvironment,
+      ).auth,
+    ).toEqual({ kind: "cookie", cookie: "session=test" });
+    expect(() =>
+      parseBootBenchmarkOptions(
+        [...common, "--variant", "fully-optimized-current-path"],
+        cookieEnvironment,
+      ),
+    ).toThrow("requires BootBenchmark token auth");
   });
 
   it("requires a canonical deployed implementation digest", () => {
@@ -269,8 +369,8 @@ describe("boot benchmark options", () => {
     ];
     expect(() =>
       parseBootBenchmarkOptions(args, {
-        INTAR_LIVE_BASE_URL: environment.INTAR_LIVE_BASE_URL,
-        INTAR_LIVE_COOKIE: environment.INTAR_LIVE_COOKIE,
+        ...environment,
+        INTAR_BOOT_BENCH_IMPLEMENTATION_SHA256: undefined,
       }),
     ).toThrow("--implementation-sha256");
     expect(() =>
@@ -337,6 +437,278 @@ describe("boot benchmark browser cookies", () => {
     expect(() =>
       parseBrowserCookies("session=one", "https://user@intar.dev"),
     ).toThrow("credentials are not allowed");
+  });
+});
+
+describe("boot benchmark token transport", () => {
+  it("sets BootBenchmark authorization on direct API requests", async () => {
+    const fetchMock = vi.fn(
+      async (_url: URL, _init: RequestInit) =>
+        new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const policy = new BootBenchmarkApiPolicy({
+      origin: "https://intar.dev",
+      hostId: "host-1",
+      scenarioId: "broken-nginx",
+    });
+    const client = new ApiClient(
+      "https://intar.dev",
+      {
+        kind: "boot_benchmark",
+        token: "benchmark-secret",
+      },
+      policy,
+    );
+
+    await expect(client.json("/api/agent/hosts/host-1")).resolves.toEqual({
+      ok: true,
+    });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    const headers = new Headers(init.headers);
+    expect(url.toString()).toBe("https://intar.dev/api/agent/hosts/host-1");
+    expect(headers.get("authorization")).toBe("BootBenchmark benchmark-secret");
+    expect(headers.has("cookie")).toBe(false);
+    expect(init.redirect).toBe("manual");
+    await expect(
+      client.json("https://external.example/api/host"),
+    ).rejects.toThrow("refused cross-origin API request");
+    await expect(
+      client.raw("/api/agent/hosts/host-1", {
+        headers: { cookie: "session=forbidden" },
+      }),
+    ).rejects.toThrow("must not include Cookie");
+    await expect(client.json("/api/admin/builds")).rejects.toThrow(
+      "not allowlisted",
+    );
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://external.example/redirect" },
+      }),
+    );
+    await expect(client.raw("/api/scenarios/broken-nginx")).rejects.toThrow(
+      "refused redirect",
+    );
+  });
+
+  it("uses an exact host/scenario/owned-run allowlist", () => {
+    const policy = new BootBenchmarkApiPolicy({
+      origin: "https://intar.dev",
+      hostId: "host-1",
+      scenarioId: "broken-nginx",
+    });
+    const classify = (method: string, path: string) =>
+      policy.classify(method, new URL(path, "https://intar.dev"));
+
+    expect(classify("GET", "/api/agent/hosts/host-1")).toBe("network");
+    expect(classify("GET", "/api/scenarios/broken-nginx")).toBe("network");
+    expect(classify("POST", "/api/scenarios/broken-nginx/start")).toBe(
+      "network",
+    );
+    expect(classify("GET", "/api/auth/get-session")).toBe("local_session");
+    expect(classify("GET", "/api/scenarios/runs")).toBe("local_empty_runs");
+    expect(classify("GET", "/api/scenarios/runs/run-1")).toBe("denied");
+    policy.claimOwnedRun("run-1");
+    expect(classify("GET", "/api/scenarios/runs/run-1")).toBe("network");
+    expect(classify("POST", "/api/scenarios/runs/run-1/ssh")).toBe("network");
+    expect(classify("POST", "/api/scenarios/runs/run-1/destroy")).toBe(
+      "network",
+    );
+
+    for (const [method, path] of [
+      ["GET", "/api/agent/hosts/host-2"],
+      ["GET", "/api/scenarios/other"],
+      ["GET", "/api/scenarios/broken-nginx/start"],
+      ["POST", "/api/scenarios/runs/run-2/ssh"],
+      ["GET", "/api/scenarios/runs/run-1?expand=true"],
+      ["GET", "https://external.example/api/scenarios/broken-nginx"],
+    ]) {
+      expect(classify(method!, path!)).toBe("denied");
+    }
+  });
+
+  it("injects the token only into allowlisted same-origin API requests", () => {
+    const auth = {
+      kind: "boot_benchmark" as const,
+      token: "benchmark-secret",
+    };
+    const policy = new BootBenchmarkApiPolicy({
+      origin: "https://intar.dev",
+      hostId: "host-1",
+      scenarioId: "broken-nginx",
+    });
+    policy.claimOwnedRun("run-1");
+    for (const requestUrl of [
+      "https://intar.dev/api/scenarios/broken-nginx/start",
+      "https://intar.dev/api/scenarios/runs/run-1/ssh",
+    ]) {
+      expect(
+        browserBenchmarkRequestHeaders({
+          headers: { accept: "application/json" },
+          requestUrl,
+          method: "POST",
+          auth,
+          policy,
+        }).authorization,
+      ).toBe("BootBenchmark benchmark-secret");
+      expect(isSameOriginApiRequest(requestUrl, "https://intar.dev")).toBe(
+        true,
+      );
+    }
+
+    for (const requestUrl of [
+      "https://external.example/api/scenarios/run",
+      "https://intar.dev.evil.example/api/scenarios/run",
+      "https://intar.dev/scenarios/broken-nginx",
+    ]) {
+      expect(
+        browserBenchmarkRequestHeaders({
+          headers: { accept: "text/html" },
+          requestUrl,
+          method: "GET",
+          auth,
+          policy,
+        }),
+      ).not.toHaveProperty("authorization");
+      expect(isSameOriginApiRequest(requestUrl, "https://intar.dev")).toBe(
+        false,
+      );
+    }
+    expect(
+      browserBenchmarkRequestHeaders({
+        headers: { accept: "application/json" },
+        requestUrl: "https://intar.dev/api/admin/builds",
+        method: "GET",
+        auth,
+        policy,
+      }),
+    ).not.toHaveProperty("authorization");
+    expect(() =>
+      browserBenchmarkRequestHeaders({
+        headers: { cookie: "session=forbidden" },
+        requestUrl: "https://intar.dev/api/scenarios/broken-nginx",
+        method: "GET",
+        auth,
+        policy,
+      }),
+    ).toThrow("must not include Cookie");
+  });
+
+  it("installs a deny-by-default browser route with local bootstrap responses", async () => {
+    expect(BOOT_BENCHMARK_BROWSER_CONTEXT_OPTIONS.serviceWorkers).toBe("block");
+    const addCookies = vi.fn(async (_cookies: unknown[]) => undefined);
+    const routeRegistration = vi.fn(
+      async (_url: string, _handler: (route: unknown) => Promise<void>) =>
+        undefined,
+    );
+    const context = { addCookies, route: routeRegistration };
+    const policy = new BootBenchmarkApiPolicy({
+      origin: "https://intar.dev",
+      hostId: "host-1",
+      scenarioId: "broken-nginx",
+    });
+    policy.claimOwnedRun("run-1");
+    const browserSession = {
+      userId: "benchmark-user-1",
+      expiresAtUnixMs: 4_102_444_800_000,
+    };
+    await configureBrowserBenchmarkContext(context as never, {
+      baseUrl: "https://intar.dev/scenarios/broken-nginx",
+      auth: { kind: "boot_benchmark", token: "benchmark-secret" },
+      policy,
+      browserSession,
+    });
+
+    expect(addCookies).not.toHaveBeenCalled();
+    expect(routeRegistration).toHaveBeenCalledOnce();
+    expect(routeRegistration.mock.calls[0]![0]).toBe(
+      "https://intar.dev/api/**",
+    );
+
+    const handler = routeRegistration.mock.calls[0]![1] as unknown as (
+      route: unknown,
+    ) => Promise<void>;
+    const fulfill = vi.fn(async (_options: { body: string }) => undefined);
+    const continueRoute = vi.fn(async (_options?: unknown) => undefined);
+    await handler({
+      request: () => ({
+        url: () => "https://intar.dev/api/auth/get-session",
+        method: () => "GET",
+        allHeaders: async () => ({ accept: "application/json" }),
+      }),
+      fulfill,
+      continue: continueRoute,
+      abort: vi.fn(async () => undefined),
+    });
+
+    expect(continueRoute).not.toHaveBeenCalled();
+    expect(fulfill).toHaveBeenCalledOnce();
+    const fulfillOptions = fulfill.mock.calls[0]![0];
+    expect(JSON.parse(fulfillOptions.body)).toEqual(
+      bootBenchmarkBrowserSession(browserSession),
+    );
+    expect(fulfillOptions.body).not.toContain("benchmark-secret");
+    expect(
+      (JSON.parse(fulfillOptions.body) as { user: { role: string } }).user.role,
+    ).toBe("user");
+
+    const emptyRunsFulfill = vi.fn(
+      async (_options: { body: string }) => undefined,
+    );
+    await handler({
+      request: () => ({
+        url: () => "https://intar.dev/api/scenarios/runs",
+        method: () => "GET",
+        allHeaders: async () => ({ accept: "application/json" }),
+      }),
+      fulfill: emptyRunsFulfill,
+      abort: vi.fn(async () => undefined),
+    });
+    expect(JSON.parse(emptyRunsFulfill.mock.calls[0]![0].body)).toEqual({
+      runs: [],
+    });
+
+    const apiResponse = { status: () => 200 };
+    const routeFetch = vi.fn(async (_options: unknown) => apiResponse);
+    const networkFulfill = vi.fn(async (_options: unknown) => undefined);
+    await handler({
+      request: () => ({
+        url: () => "https://intar.dev/api/scenarios/runs/run-1/ssh",
+        method: () => "POST",
+        allHeaders: async () => ({ accept: "application/json" }),
+      }),
+      fetch: routeFetch,
+      fulfill: networkFulfill,
+      abort: vi.fn(async () => undefined),
+    });
+    const fetchOptions = routeFetch.mock.calls[0]![0] as {
+      headers: Record<string, string>;
+      maxRedirects: number;
+    };
+    expect(fetchOptions.headers.authorization).toBe(
+      "BootBenchmark benchmark-secret",
+    );
+    expect(fetchOptions.maxRedirects).toBe(0);
+    expect(networkFulfill).toHaveBeenCalledWith({ response: apiResponse });
+
+    const abort = vi.fn(async (_reason: string) => undefined);
+    const forbiddenFetch = vi.fn(async () => apiResponse);
+    await handler({
+      request: () => ({
+        url: () => "https://intar.dev/api/admin/builds",
+        method: () => "GET",
+        allHeaders: async () => ({ accept: "application/json" }),
+      }),
+      fulfill: vi.fn(async () => undefined),
+      fetch: forbiddenFetch,
+      abort,
+    });
+    expect(abort).toHaveBeenCalledWith("blockedbyclient");
+    expect(forbiddenFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -453,9 +825,7 @@ describe("boot benchmark result schema", () => {
       "1 successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence",
     );
 
-    const overlongBootLease = benchmarkResult(
-      "fully-optimized-current-path",
-    );
+    const overlongBootLease = benchmarkResult("fully-optimized-current-path");
     const overlongBootLeaseSample = overlongBootLease
       .measured[0] as PassedBootSampleV1;
     for (const sample of overlongBootLeaseSample.host_boot_evidence!.cpu_samples.slice(
@@ -507,9 +877,7 @@ describe("boot benchmark result schema", () => {
           ...historical,
           variant: "current-2000m-boot-to-1000m-steady",
           cpu_policy:
-            BOOT_BENCHMARK_CPU_POLICIES[
-              "current-2000m-boot-to-1000m-steady"
-            ],
+            BOOT_BENCHMARK_CPU_POLICIES["current-2000m-boot-to-1000m-steady"],
           host: {
             ...historical.host,
             capabilities: {

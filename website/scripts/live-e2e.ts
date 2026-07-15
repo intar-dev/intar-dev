@@ -1893,13 +1893,35 @@ async function assertArtifactReadable(
   }
 }
 
+export type ApiClientAuth =
+  | { kind: "cookie"; cookie: string }
+  | { kind: "boot_benchmark"; token: string };
+
+export interface ApiClientRequestPolicy {
+  allows(method: string, url: URL): boolean;
+}
+
 export class ApiClient {
   private readonly baseUrl: string;
-  private readonly cookie: string;
+  private readonly origin: string;
+  private readonly auth: ApiClientAuth;
+  private readonly requestPolicy: ApiClientRequestPolicy | null;
 
-  constructor(baseUrl: string, cookie: string) {
+  constructor(
+    baseUrl: string,
+    auth: string | ApiClientAuth,
+    requestPolicy: ApiClientRequestPolicy | null = null,
+  ) {
     this.baseUrl = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-    this.cookie = cookie;
+    this.origin = new URL(this.baseUrl).origin;
+    this.auth =
+      typeof auth === "string" ? { kind: "cookie", cookie: auth } : auth;
+    this.requestPolicy = requestPolicy;
+    if (this.auth.kind === "boot_benchmark" && !this.requestPolicy) {
+      throw new Error(
+        "BootBenchmark API auth requires an explicit request policy",
+      );
+    }
   }
 
   async json<T = unknown>(
@@ -1940,7 +1962,7 @@ export class ApiClient {
     return text;
   }
 
-  raw(
+  async raw(
     path: string,
     init: {
       method?: string;
@@ -1950,12 +1972,19 @@ export class ApiClient {
     } = {},
   ): Promise<Response> {
     const headers = new Headers(init.headers);
-    headers.set("cookie", this.cookie);
+    if (this.auth.kind === "cookie") {
+      headers.set("cookie", this.auth.cookie);
+    } else {
+      if (headers.has("cookie")) {
+        throw new Error("BootBenchmark API requests must not include Cookie");
+      }
+      headers.set("authorization", `BootBenchmark ${this.auth.token}`);
+    }
     headers.set("accept", "application/json");
     // Astro's CSRF protection rejects form-like POSTs without a same-site
     // Origin; bodyless mutations (e.g. run destroy) need it explicitly.
     if ((init.method ?? "GET") !== "GET") {
-      headers.set("origin", new URL(this.baseUrl).origin);
+      headers.set("origin", this.origin);
     }
     let body: BodyInit | undefined;
     if (init.json !== undefined) {
@@ -1965,12 +1994,38 @@ export class ApiClient {
     const requestInit: RequestInit = {
       method: init.method ?? "GET",
       headers,
+      ...(this.auth.kind === "boot_benchmark"
+        ? { redirect: "manual" as const }
+        : {}),
       ...(init.signal ? { signal: init.signal } : {}),
     };
     if (body !== undefined) {
       requestInit.body = body;
     }
-    return fetch(new URL(path, this.baseUrl), requestInit);
+    const url = new URL(path, this.baseUrl);
+    if (url.origin !== this.origin) {
+      throw new Error(`refused cross-origin API request: ${url.origin}`);
+    }
+    const method = (init.method ?? "GET").toUpperCase();
+    if (
+      this.auth.kind === "boot_benchmark" &&
+      !this.requestPolicy!.allows(method, url)
+    ) {
+      throw new Error(
+        `BootBenchmark API request is not allowlisted: ${method} ${url.pathname}`,
+      );
+    }
+    const response = await fetch(url, requestInit);
+    if (
+      this.auth.kind === "boot_benchmark" &&
+      response.status >= 300 &&
+      response.status < 400
+    ) {
+      throw new Error(
+        `BootBenchmark API request refused redirect: ${method} ${url.pathname}`,
+      );
+    }
+    return response;
   }
 }
 
