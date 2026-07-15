@@ -99,6 +99,45 @@ export interface BootArtifactIdentityV1 {
   }>;
 }
 
+/**
+ * Conservative causal evidence used by the final boot phase gate.
+ *
+ * The Worker dispatch-to-report interval causally contains host pre-seal boot,
+ * so subtracting that exact host duration leaves a conservative seal-through-
+ * report bound without comparing Worker and host clocks. Worker receipt-to-D1
+ * acknowledgement and the runner's previous-terminal-projection-nonready-
+ * request-to-UI interval then cover the remaining projection, poll, and render
+ * path. The anchor response proves the terminal projection had not completed,
+ * so its request started no later than the first terminal projection CAS. A
+ * terminal-ready response that is still missing timing evidence cannot advance
+ * this anchor. These components may overlap; their sum intentionally favors
+ * overstatement.
+ */
+export interface SealProjectionEvidenceV2 {
+  method: "complete_causal_upper_bound_v2";
+  generation: string;
+  desired_version: number;
+  worker_terminal_projection_generation: string;
+  worker_terminal_desired_version: number;
+  worker_desired_dispatch_at_unix_ms: number;
+  worker_terminal_report_received_at_unix_ms: number;
+  worker_dispatch_to_report_receipt_ms: number;
+  host_pre_seal_ms: number;
+  causal_seal_to_report_receipt_upper_bound_ms: number;
+  worker_terminal_projection_ack_at_unix_ms: number;
+  worker_receipt_to_projection_ack_ms: number;
+  runner_previous_terminal_projection_nonready_to_ui_ms: number;
+  poll_observation: {
+    previous_terminal_projection_nonready_request_started_ms: number;
+    previous_terminal_projection_nonready_response_observed_ms: number;
+    first_terminal_projection_ready_request_started_ms: number;
+    first_terminal_projection_ready_response_observed_ms: number;
+    evidence_ready_request_started_ms: number;
+    evidence_ready_response_observed_ms: number;
+    configured_cadence_ms: number;
+  };
+}
+
 export interface PassedBootSampleV1 {
   kind: "warmup" | "measured";
   ordinal: number;
@@ -111,13 +150,13 @@ export interface PassedBootSampleV1 {
   ui_terminal_ready_ms: number;
   terminal_websocket_ready_ms: number;
   usable_terminal_ms: number;
-  /// Conservative single-clock upper bound from seal start through the first
-  /// control-plane projection that exposes terminal readiness. It includes
-  /// click-to-agent dispatch delay and therefore cannot understate the phase.
+  /// Conservative causal bound from seal start through the post-CAS Worker
+  /// acknowledgement, including agent publication transit.
   seal_projection_ready_ms: number | null;
-  /// Conservative single-clock upper bound from seal start through the first
-  /// embedded xterm render. This is the promotion boundary.
+  /// Complete conservative seal/projection/poll/UI upper bound. This is the
+  /// promotion boundary.
   seal_projection_ui_ready_ms: number | null;
+  seal_projection_evidence: SealProjectionEvidenceV2 | null;
   phase_evidence: {
     run_created_at_unix_ms: number;
     vm_created_at_unix_ms: number;
@@ -190,6 +229,18 @@ export interface FailedBootSampleV1 {
 
 export type BootSampleV1 = PassedBootSampleV1 | FailedBootSampleV1;
 
+export type HistoricalPassedBootSampleV1 = Omit<
+  PassedBootSampleV1,
+  "seal_projection_evidence"
+>;
+export type HistoricalBootSampleV1 =
+  | HistoricalPassedBootSampleV1
+  | FailedBootSampleV1;
+type ComparableBootSampleV1 = BootSampleV1 | HistoricalBootSampleV1;
+type ComparablePassedBootSampleV1 =
+  | PassedBootSampleV1
+  | HistoricalPassedBootSampleV1;
+
 export interface DurationDistributionV1 {
   count: number;
   min_ms: number;
@@ -212,8 +263,8 @@ export interface BootBenchmarkSummaryV1 {
   image_disk_ms: DurationDistributionV1 | null;
   network_jailer_vmm_ms: DurationDistributionV1 | null;
   guest_to_kino_ms: DurationDistributionV1 | null;
-  /// Diagnostic agent-local duration. Promotion uses the conservative
-  /// projection-and-UI upper bound below.
+  /// Diagnostic agent-local duration. Promotion uses the complete conservative
+  /// causal upper bound below; its same-clock components may overlap.
   seal_ssh_publish_ms: DurationDistributionV1 | null;
   seal_projection_ready_ms: DurationDistributionV1 | null;
   seal_projection_ui_ready_ms: DurationDistributionV1 | null;
@@ -317,7 +368,7 @@ export interface BootBenchmarkResultV1 {
  */
 export type HistoricalBootBenchmarkResultV1 = Omit<
   BootBenchmarkResultV1,
-  "schema_version" | "isolation"
+  "schema_version" | "isolation" | "warmups" | "measured"
 > & {
   schema_version: 1;
   isolation: {
@@ -326,6 +377,8 @@ export type HistoricalBootBenchmarkResultV1 = Omit<
     monitor_poll_max_ms: number;
     atomic_host_lease: false;
   };
+  warmups: HistoricalBootSampleV1[];
+  measured: HistoricalBootSampleV1[];
 };
 
 export type BootBenchmarkComparisonInput =
@@ -390,18 +443,234 @@ export function durationDistribution(
   };
 }
 
+export function buildSealProjectionEvidence(input: {
+  bootEvidence: VmBootEvidenceV1 | null;
+  generation: string;
+  terminalReportReadyMs: number;
+  uiTerminalReadyMs: number;
+  previousTerminalProjectionNonReadyPollRequestStartedMs: number | null;
+  previousTerminalProjectionNonReadyPollResponseObservedMs: number | null;
+  firstTerminalProjectionReadyPollRequestStartedMs: number | null;
+  firstTerminalProjectionReadyPollResponseObservedMs: number | null;
+  evidenceReadyPollRequestStartedMs: number;
+  pollMs: number;
+  workerDesiredDispatchAtUnixMs: number | null | undefined;
+  workerDesiredDispatchVersion: number | null | undefined;
+  workerTerminalReportReceivedAtUnixMs: number | null | undefined;
+  workerTerminalProjectionAckAtUnixMs: number | null | undefined;
+  workerTerminalReceiptToProjectionAckMs: number | null | undefined;
+  workerTerminalProjectionGeneration: string | null | undefined;
+  workerTerminalDesiredVersion: number | null | undefined;
+}): SealProjectionEvidenceV2 | null {
+  const evidence = input.bootEvidence;
+  if (
+    !evidence ||
+    input.generation.length === 0 ||
+    evidence.generation !== input.generation ||
+    !isNonNegativeSafeInteger(evidence.phases.total_ms) ||
+    !isNonNegativeSafeInteger(evidence.phases.seal_ssh_publish_ms) ||
+    evidence.phases.total_ms < evidence.phases.seal_ssh_publish_ms ||
+    !isNonNegativeSafeInteger(input.terminalReportReadyMs) ||
+    !isNonNegativeSafeInteger(input.uiTerminalReadyMs) ||
+    !isNonNegativeSafeInteger(
+      input.previousTerminalProjectionNonReadyPollRequestStartedMs,
+    ) ||
+    !isNonNegativeSafeInteger(
+      input.previousTerminalProjectionNonReadyPollResponseObservedMs,
+    ) ||
+    !isNonNegativeSafeInteger(
+      input.firstTerminalProjectionReadyPollRequestStartedMs,
+    ) ||
+    !isNonNegativeSafeInteger(
+      input.firstTerminalProjectionReadyPollResponseObservedMs,
+    ) ||
+    !isNonNegativeSafeInteger(input.evidenceReadyPollRequestStartedMs) ||
+    input.previousTerminalProjectionNonReadyPollRequestStartedMs >
+      input.previousTerminalProjectionNonReadyPollResponseObservedMs ||
+    input.previousTerminalProjectionNonReadyPollResponseObservedMs >
+      input.firstTerminalProjectionReadyPollRequestStartedMs ||
+    input.firstTerminalProjectionReadyPollRequestStartedMs >
+      input.firstTerminalProjectionReadyPollResponseObservedMs ||
+    input.firstTerminalProjectionReadyPollRequestStartedMs >
+      input.evidenceReadyPollRequestStartedMs ||
+    input.firstTerminalProjectionReadyPollResponseObservedMs >
+      input.terminalReportReadyMs ||
+    input.evidenceReadyPollRequestStartedMs > input.terminalReportReadyMs ||
+    input.previousTerminalProjectionNonReadyPollRequestStartedMs >
+      input.uiTerminalReadyMs ||
+    !isPositiveSafeInteger(input.pollMs) ||
+    !isNonNegativeSafeInteger(input.workerDesiredDispatchAtUnixMs) ||
+    !isNonNegativeSafeInteger(input.workerDesiredDispatchVersion) ||
+    !isNonNegativeSafeInteger(input.workerTerminalReportReceivedAtUnixMs) ||
+    !isNonNegativeSafeInteger(input.workerTerminalProjectionAckAtUnixMs) ||
+    !isNonNegativeFinite(input.workerTerminalReceiptToProjectionAckMs) ||
+    input.workerTerminalProjectionGeneration !== input.generation ||
+    input.workerTerminalDesiredVersion !== input.workerDesiredDispatchVersion ||
+    input.workerDesiredDispatchAtUnixMs >
+      input.workerTerminalReportReceivedAtUnixMs ||
+    input.workerTerminalReportReceivedAtUnixMs >
+      input.workerTerminalProjectionAckAtUnixMs
+  ) {
+    return null;
+  }
+  const hostPreSealMs =
+    evidence.phases.total_ms - evidence.phases.seal_ssh_publish_ms;
+  const workerDispatchToReportReceiptMs =
+    input.workerTerminalReportReceivedAtUnixMs -
+    input.workerDesiredDispatchAtUnixMs;
+  if (workerDispatchToReportReceiptMs < hostPreSealMs) return null;
+  const causalSealToReportReceiptUpperBoundMs =
+    workerDispatchToReportReceiptMs - hostPreSealMs;
+  const runnerPreviousTerminalProjectionNonreadyToUiMs =
+    input.uiTerminalReadyMs -
+    input.previousTerminalProjectionNonReadyPollRequestStartedMs;
+  if (
+    !isNonNegativeFinite(
+      causalSealToReportReceiptUpperBoundMs +
+        input.workerTerminalReceiptToProjectionAckMs +
+        runnerPreviousTerminalProjectionNonreadyToUiMs,
+    )
+  ) {
+    return null;
+  }
+  return {
+    method: "complete_causal_upper_bound_v2",
+    generation: input.generation,
+    desired_version: input.workerDesiredDispatchVersion,
+    worker_terminal_projection_generation:
+      input.workerTerminalProjectionGeneration,
+    worker_terminal_desired_version: input.workerTerminalDesiredVersion,
+    worker_desired_dispatch_at_unix_ms: input.workerDesiredDispatchAtUnixMs,
+    worker_terminal_report_received_at_unix_ms:
+      input.workerTerminalReportReceivedAtUnixMs,
+    worker_dispatch_to_report_receipt_ms: workerDispatchToReportReceiptMs,
+    host_pre_seal_ms: hostPreSealMs,
+    causal_seal_to_report_receipt_upper_bound_ms:
+      causalSealToReportReceiptUpperBoundMs,
+    worker_terminal_projection_ack_at_unix_ms:
+      input.workerTerminalProjectionAckAtUnixMs,
+    worker_receipt_to_projection_ack_ms:
+      input.workerTerminalReceiptToProjectionAckMs,
+    runner_previous_terminal_projection_nonready_to_ui_ms:
+      runnerPreviousTerminalProjectionNonreadyToUiMs,
+    poll_observation: {
+      previous_terminal_projection_nonready_request_started_ms:
+        input.previousTerminalProjectionNonReadyPollRequestStartedMs,
+      previous_terminal_projection_nonready_response_observed_ms:
+        input.previousTerminalProjectionNonReadyPollResponseObservedMs,
+      first_terminal_projection_ready_request_started_ms:
+        input.firstTerminalProjectionReadyPollRequestStartedMs,
+      first_terminal_projection_ready_response_observed_ms:
+        input.firstTerminalProjectionReadyPollResponseObservedMs,
+      evidence_ready_request_started_ms:
+        input.evidenceReadyPollRequestStartedMs,
+      evidence_ready_response_observed_ms: input.terminalReportReadyMs,
+      configured_cadence_ms: input.pollMs,
+    },
+  };
+}
+
 export function sealProjectionReadyDurationMs(
-  evidence: VmBootEvidenceV1 | null,
-  projectionObservedElapsedMs: number,
+  evidence: SealProjectionEvidenceV2 | null,
 ): number | null {
-  return sealObservationUpperBoundMs(evidence, projectionObservedElapsedMs);
+  if (!validSealProjectionEvidence(evidence)) return null;
+  const duration =
+    evidence.causal_seal_to_report_receipt_upper_bound_ms +
+    evidence.worker_receipt_to_projection_ack_ms;
+  return isNonNegativeFinite(duration) ? duration : null;
 }
 
 export function sealProjectionUiReadyDurationMs(
-  evidence: VmBootEvidenceV1 | null,
-  uiTerminalReadyElapsedMs: number,
+  evidence: SealProjectionEvidenceV2 | null,
 ): number | null {
-  return sealObservationUpperBoundMs(evidence, uiTerminalReadyElapsedMs);
+  if (!validSealProjectionEvidence(evidence)) return null;
+  const duration =
+    evidence.causal_seal_to_report_receipt_upper_bound_ms +
+    evidence.worker_receipt_to_projection_ack_ms +
+    evidence.runner_previous_terminal_projection_nonready_to_ui_ms;
+  return isNonNegativeFinite(duration) ? duration : null;
+}
+
+function validSealProjectionEvidence(
+  evidence: SealProjectionEvidenceV2 | null,
+): evidence is SealProjectionEvidenceV2 {
+  return Boolean(
+    evidence &&
+    evidence.method === "complete_causal_upper_bound_v2" &&
+    typeof evidence.generation === "string" &&
+    evidence.generation.length > 0 &&
+    isNonNegativeSafeInteger(evidence.desired_version) &&
+    evidence.worker_terminal_projection_generation === evidence.generation &&
+    evidence.worker_terminal_desired_version === evidence.desired_version &&
+    isNonNegativeSafeInteger(evidence.worker_desired_dispatch_at_unix_ms) &&
+    isNonNegativeSafeInteger(
+      evidence.worker_terminal_report_received_at_unix_ms,
+    ) &&
+    evidence.worker_desired_dispatch_at_unix_ms <=
+      evidence.worker_terminal_report_received_at_unix_ms &&
+    evidence.worker_dispatch_to_report_receipt_ms ===
+      evidence.worker_terminal_report_received_at_unix_ms -
+        evidence.worker_desired_dispatch_at_unix_ms &&
+    isNonNegativeSafeInteger(evidence.host_pre_seal_ms) &&
+    evidence.worker_dispatch_to_report_receipt_ms >=
+      evidence.host_pre_seal_ms &&
+    evidence.causal_seal_to_report_receipt_upper_bound_ms ===
+      evidence.worker_dispatch_to_report_receipt_ms -
+        evidence.host_pre_seal_ms &&
+    isNonNegativeSafeInteger(
+      evidence.worker_terminal_projection_ack_at_unix_ms,
+    ) &&
+    evidence.worker_terminal_report_received_at_unix_ms <=
+      evidence.worker_terminal_projection_ack_at_unix_ms &&
+    isNonNegativeFinite(evidence.worker_receipt_to_projection_ack_ms) &&
+    isNonNegativeSafeInteger(
+      evidence.runner_previous_terminal_projection_nonready_to_ui_ms,
+    ) &&
+    isRecord(evidence.poll_observation) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation
+        .previous_terminal_projection_nonready_request_started_ms,
+    ) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation
+        .previous_terminal_projection_nonready_response_observed_ms,
+    ) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation
+        .first_terminal_projection_ready_request_started_ms,
+    ) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation
+        .first_terminal_projection_ready_response_observed_ms,
+    ) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation.evidence_ready_request_started_ms,
+    ) &&
+    isNonNegativeSafeInteger(
+      evidence.poll_observation.evidence_ready_response_observed_ms,
+    ) &&
+    isPositiveSafeInteger(evidence.poll_observation.configured_cadence_ms) &&
+    evidence.poll_observation
+      .previous_terminal_projection_nonready_request_started_ms <=
+      evidence.poll_observation
+        .previous_terminal_projection_nonready_response_observed_ms &&
+    evidence.poll_observation
+      .previous_terminal_projection_nonready_response_observed_ms <=
+      evidence.poll_observation
+        .first_terminal_projection_ready_request_started_ms &&
+    evidence.poll_observation
+      .first_terminal_projection_ready_request_started_ms <=
+      evidence.poll_observation
+        .first_terminal_projection_ready_response_observed_ms &&
+    evidence.poll_observation
+      .first_terminal_projection_ready_request_started_ms <=
+      evidence.poll_observation.evidence_ready_request_started_ms &&
+    evidence.poll_observation
+      .first_terminal_projection_ready_response_observed_ms <=
+      evidence.poll_observation.evidence_ready_response_observed_ms &&
+    evidence.poll_observation.evidence_ready_request_started_ms <=
+      evidence.poll_observation.evidence_ready_response_observed_ms,
+  );
 }
 
 /**
@@ -435,8 +704,8 @@ function sealObservationUpperBoundMs(
 }
 
 export function summarizeBootSamples(input: {
-  warmups: readonly BootSampleV1[];
-  measured: readonly BootSampleV1[];
+  warmups: readonly ComparableBootSampleV1[];
+  measured: readonly ComparableBootSampleV1[];
 }): BootBenchmarkSummaryV1 {
   const warmupPassed = input.warmups.filter(isPassedSample);
   const measuredPassed = input.measured.filter(isPassedSample);
@@ -506,8 +775,8 @@ export function summarizeBootSamples(input: {
 }
 
 export function evaluatePromotionGate(input: {
-  warmups: readonly BootSampleV1[];
-  measured: readonly BootSampleV1[];
+  warmups: readonly ComparableBootSampleV1[];
+  measured: readonly ComparableBootSampleV1[];
   summary: BootBenchmarkSummaryV1;
   performanceReady: boolean;
   cpuPolicy: BootBenchmarkCpuPolicyV1;
@@ -516,8 +785,8 @@ export function evaluatePromotionGate(input: {
 }
 
 function evaluateHistoricalPromotionGateV1(input: {
-  warmups: readonly BootSampleV1[];
-  measured: readonly BootSampleV1[];
+  warmups: readonly ComparableBootSampleV1[];
+  measured: readonly ComparableBootSampleV1[];
   summary: BootBenchmarkSummaryV1;
   performanceReady: boolean;
   cpuPolicy: BootBenchmarkCpuPolicyV1;
@@ -527,8 +796,8 @@ function evaluateHistoricalPromotionGateV1(input: {
 
 function evaluatePromotionGateInternal(
   input: {
-    warmups: readonly BootSampleV1[];
-    measured: readonly BootSampleV1[];
+    warmups: readonly ComparableBootSampleV1[];
+    measured: readonly ComparableBootSampleV1[];
     summary: BootBenchmarkSummaryV1;
     performanceReady: boolean;
     cpuPolicy: BootBenchmarkCpuPolicyV1;
@@ -576,6 +845,16 @@ function evaluatePromotionGateInternal(
         ? `${missingBootEvidence.length} successful boot(s) lacked exact generation-fenced boot/steady quota, one-vCPU, and lease-isolation evidence`
         : `${missingBootEvidence.length} successful boot(s) lacked complete generation-fenced phase/CPU evidence`,
     );
+  }
+  if (requireV2Evidence) {
+    const missingCausalPhaseEvidence = passedSamples.filter(
+      (sample) => !hasCompleteCausalPhaseEvidence(sample),
+    );
+    if (missingCausalPhaseEvidence.length > 0) {
+      reasons.push(
+        `${missingCausalPhaseEvidence.length} successful boot(s) lacked complete generation-fenced causal seal/projection/UI evidence`,
+      );
+    }
   }
 
   const accepted = input.summary.accepted_ms;
@@ -731,35 +1010,37 @@ export function hasExactSteadyResourceState(
 }
 
 function hasExactCpuContractEvidence(
-  sample: PassedBootSampleV1,
+  sample: ComparablePassedBootSampleV1,
   policy: BootBenchmarkCpuPolicyV1,
 ): boolean {
   const evidence = sample.host_boot_evidence;
   const isolation = sample.isolation_evidence;
   return Boolean(
     hasExactBootCpuSamples(evidence, policy) &&
-      evidence.generation === sample.runtime_evidence.generation &&
-      sample.runtime_evidence.phase === "steady" &&
-      sample.runtime_evidence.steady_cpu_millis ===
-        policy.scenario_steady_cpu_millis &&
-      sample.runtime_evidence.effective_cpu_millis ===
-        policy.scenario_steady_cpu_millis &&
-      sample.runtime_evidence.lease_expires_at_unix_ms === null &&
-      sample.cpu_evidence.status === "available" &&
-      sample.cpu_evidence.generation === sample.runtime_evidence.generation &&
-      sample.cpu_evidence.observed_at_unix_ms !== null &&
-      hasExactSteadyResourceState(sample.cpu_evidence.resource_state, policy) &&
-      isolation &&
-      isolation.lease_run_id === sample.run_id &&
-      isolation.observation_count >= 2 &&
-      isolation.first_owned_observed_at_unix_ms <=
-        isolation.last_owned_observed_at_unix_ms &&
-      isolation.last_owned_observed_at_unix_ms <=
-        isolation.released_observed_at_unix_ms,
+    evidence.generation === sample.runtime_evidence.generation &&
+    sample.runtime_evidence.phase === "steady" &&
+    sample.runtime_evidence.steady_cpu_millis ===
+      policy.scenario_steady_cpu_millis &&
+    sample.runtime_evidence.effective_cpu_millis ===
+      policy.scenario_steady_cpu_millis &&
+    sample.runtime_evidence.lease_expires_at_unix_ms === null &&
+    sample.cpu_evidence.status === "available" &&
+    sample.cpu_evidence.generation === sample.runtime_evidence.generation &&
+    sample.cpu_evidence.observed_at_unix_ms !== null &&
+    hasExactSteadyResourceState(sample.cpu_evidence.resource_state, policy) &&
+    isolation &&
+    isolation.lease_run_id === sample.run_id &&
+    isolation.observation_count >= 2 &&
+    isolation.first_owned_observed_at_unix_ms <=
+      isolation.last_owned_observed_at_unix_ms &&
+    isolation.last_owned_observed_at_unix_ms <=
+      isolation.released_observed_at_unix_ms,
   );
 }
 
-function hasLegacyCompleteBootEvidence(sample: PassedBootSampleV1): boolean {
+function hasLegacyCompleteBootEvidence(
+  sample: ComparablePassedBootSampleV1,
+): boolean {
   const evidence = sample.host_boot_evidence;
   if (!evidence || evidence.generation !== sample.runtime_evidence.generation) {
     return false;
@@ -769,6 +1050,36 @@ function hasLegacyCompleteBootEvidence(sample: PassedBootSampleV1): boolean {
     evidence.cpu_samples.length === 5 &&
     CPU_SAMPLE_POINTS.every((point) => points.has(point)) &&
     evidence.cpu_samples.every((cpu) => cpu.cpu_max_burst === 0)
+  );
+}
+
+function hasCompleteCausalPhaseEvidence(
+  sample: ComparablePassedBootSampleV1,
+): boolean {
+  if (!("seal_projection_evidence" in sample)) return false;
+  const evidence = sample.seal_projection_evidence;
+  const host = sample.host_boot_evidence;
+  if (!evidence || !host || !validSealProjectionEvidence(evidence)) {
+    return false;
+  }
+  return Boolean(
+    evidence.generation === sample.runtime_evidence.generation &&
+    evidence.host_pre_seal_ms ===
+      host.phases.total_ms - host.phases.seal_ssh_publish_ms &&
+    evidence.poll_observation.evidence_ready_response_observed_ms ===
+      sample.terminal_report_ready_ms &&
+    evidence.runner_previous_terminal_projection_nonready_to_ui_ms ===
+      sample.ui_terminal_ready_ms -
+        evidence.poll_observation
+          .previous_terminal_projection_nonready_request_started_ms &&
+    Object.is(
+      sample.seal_projection_ready_ms,
+      sealProjectionReadyDurationMs(evidence),
+    ) &&
+    Object.is(
+      sample.seal_projection_ui_ready_ms,
+      sealProjectionUiReadyDurationMs(evidence),
+    ),
   );
 }
 
@@ -1095,10 +1406,7 @@ function parseBootBenchmarkResultForSchema(
   label: string,
   schemaVersion: 1 | typeof BOOT_BENCHMARK_SCHEMA_VERSION,
 ): BootBenchmarkComparisonInput {
-  if (
-    !isRecord(value) ||
-    value.schema_version !== schemaVersion
-  ) {
+  if (!isRecord(value) || value.schema_version !== schemaVersion) {
     throw new Error(
       `${label} is not a boot benchmark schema_version ${schemaVersion} result`,
     );
@@ -1190,7 +1498,8 @@ function parseBootBenchmarkResultForSchema(
     throw new Error(`${label} does not use its host-attested CPU policy`);
   }
   assertPrewarmEvidence(value.prewarm, `${label}.prewarm`);
-  assertParameters(value.parameters, `${label}.parameters`);
+  const parameters = value.parameters;
+  assertParameters(parameters, `${label}.parameters`);
   if (schemaVersion === 1) {
     assertHistoricalIsolation(value.isolation, `${label}.isolation`);
   } else {
@@ -1206,6 +1515,7 @@ function parseBootBenchmarkResultForSchema(
       index + 1,
       `${label}.warmups[${index}]`,
       schemaVersion,
+      parameters.poll_ms,
     ),
   );
   value.measured.forEach((sample, index) =>
@@ -1215,6 +1525,7 @@ function parseBootBenchmarkResultForSchema(
       index + 1,
       `${label}.measured[${index}]`,
       schemaVersion,
+      parameters.poll_ms,
     ),
   );
   if (
@@ -1250,7 +1561,10 @@ function parseBootBenchmarkResultForSchema(
 }
 
 function recomputeSummary(
-  result: Pick<BootBenchmarkResultV1, "warmups" | "measured">,
+  result: {
+    warmups: readonly ComparableBootSampleV1[];
+    measured: readonly ComparableBootSampleV1[];
+  },
   label: string,
 ): BootBenchmarkSummaryV1 {
   try {
@@ -1453,7 +1767,8 @@ function assertBootSample(
   expectedOrdinal: number,
   label: string,
   schemaVersion: 1 | typeof BOOT_BENCHMARK_SCHEMA_VERSION,
-): asserts value is BootSampleV1 {
+  pollMs: number,
+): asserts value is ComparableBootSampleV1 {
   if (
     !isRecord(value) ||
     value.kind !== expectedKind ||
@@ -1520,20 +1835,46 @@ function assertBootSample(
     );
   }
   const hostBootEvidence = value.host_boot_evidence as VmBootEvidenceV1 | null;
-  const expectedProjectionUpperBound = sealProjectionReadyDurationMs(
-    hostBootEvidence,
-    value.terminal_report_ready_ms as number,
-  );
-  const expectedUiUpperBound = sealProjectionUiReadyDurationMs(
-    hostBootEvidence,
-    value.ui_terminal_ready_ms as number,
-  );
+  let expectedProjectionDuration: number | null;
+  let expectedUiDuration: number | null;
+  if (schemaVersion === 1) {
+    expectedProjectionDuration = sealObservationUpperBoundMs(
+      hostBootEvidence,
+      value.terminal_report_ready_ms as number,
+    );
+    expectedUiDuration = sealObservationUpperBoundMs(
+      hostBootEvidence,
+      value.ui_terminal_ready_ms as number,
+    );
+  } else {
+    assertSealProjectionEvidence(
+      value.seal_projection_evidence,
+      {
+        hostBootEvidence,
+        runtimeGeneration: value.runtime_evidence.generation,
+        terminalReportReadyMs: value.terminal_report_ready_ms as number,
+        uiTerminalReadyMs: value.ui_terminal_ready_ms as number,
+        pollMs,
+      },
+      `${label}.seal_projection_evidence`,
+    );
+    const sealProjectionEvidence =
+      value.seal_projection_evidence as SealProjectionEvidenceV2 | null;
+    expectedProjectionDuration = sealProjectionReadyDurationMs(
+      sealProjectionEvidence,
+    );
+    expectedUiDuration = sealProjectionUiReadyDurationMs(
+      sealProjectionEvidence,
+    );
+  }
   if (
-    !Object.is(value.seal_projection_ready_ms, expectedProjectionUpperBound) ||
-    !Object.is(value.seal_projection_ui_ready_ms, expectedUiUpperBound)
+    !Object.is(value.seal_projection_ready_ms, expectedProjectionDuration) ||
+    !Object.is(value.seal_projection_ui_ready_ms, expectedUiDuration)
   ) {
     throw new Error(
-      `${label} has invalid conservative seal/projection/UI upper bounds`,
+      schemaVersion === 1
+        ? `${label} has invalid historical seal/projection/UI upper bounds`
+        : `${label} has invalid complete causal seal/projection/UI bounds`,
     );
   }
   assertCpuEvidence(value.cpu_evidence, `${label}.cpu_evidence`);
@@ -1543,6 +1884,124 @@ function assertBootSample(
       value.run_id as string,
       `${label}.isolation_evidence`,
     );
+  }
+}
+
+function assertSealProjectionEvidence(
+  value: unknown,
+  expected: {
+    hostBootEvidence: VmBootEvidenceV1 | null;
+    runtimeGeneration: string;
+    terminalReportReadyMs: number;
+    uiTerminalReadyMs: number;
+    pollMs: number;
+  },
+  label: string,
+): asserts value is SealProjectionEvidenceV2 | null {
+  if (value === undefined) {
+    throw new Error(`${label} is required for schema v2`);
+  }
+  if (value === null) return;
+
+  const hostBootEvidence = expected.hostBootEvidence;
+  const hostPreSealMs = hostBootEvidence
+    ? hostBootEvidence.phases.total_ms -
+      hostBootEvidence.phases.seal_ssh_publish_ms
+    : -1;
+  if (
+    !hostBootEvidence ||
+    hostBootEvidence.generation !== expected.runtimeGeneration ||
+    !isNonNegativeSafeInteger(hostBootEvidence.phases.total_ms) ||
+    !isNonNegativeSafeInteger(hostBootEvidence.phases.seal_ssh_publish_ms) ||
+    hostBootEvidence.phases.total_ms <
+      hostBootEvidence.phases.seal_ssh_publish_ms ||
+    !isNonNegativeSafeInteger(expected.terminalReportReadyMs) ||
+    !isNonNegativeSafeInteger(expected.uiTerminalReadyMs) ||
+    !isPositiveSafeInteger(expected.pollMs) ||
+    !isRecord(value) ||
+    value.method !== "complete_causal_upper_bound_v2" ||
+    value.generation !== expected.runtimeGeneration ||
+    !isNonNegativeSafeInteger(value.desired_version) ||
+    value.worker_terminal_projection_generation !==
+      expected.runtimeGeneration ||
+    value.worker_terminal_desired_version !== value.desired_version ||
+    !isNonNegativeSafeInteger(value.worker_desired_dispatch_at_unix_ms) ||
+    !isNonNegativeSafeInteger(
+      value.worker_terminal_report_received_at_unix_ms,
+    ) ||
+    value.worker_desired_dispatch_at_unix_ms >
+      value.worker_terminal_report_received_at_unix_ms ||
+    value.worker_dispatch_to_report_receipt_ms !==
+      value.worker_terminal_report_received_at_unix_ms -
+        value.worker_desired_dispatch_at_unix_ms ||
+    value.host_pre_seal_ms !== hostPreSealMs ||
+    value.worker_dispatch_to_report_receipt_ms < hostPreSealMs ||
+    value.causal_seal_to_report_receipt_upper_bound_ms !==
+      value.worker_dispatch_to_report_receipt_ms - hostPreSealMs ||
+    !isNonNegativeSafeInteger(
+      value.worker_terminal_projection_ack_at_unix_ms,
+    ) ||
+    value.worker_terminal_report_received_at_unix_ms >
+      value.worker_terminal_projection_ack_at_unix_ms ||
+    !isNonNegativeFinite(value.worker_receipt_to_projection_ack_ms) ||
+    !isRecord(value.poll_observation) ||
+    !isNonNegativeSafeInteger(
+      value.poll_observation
+        .previous_terminal_projection_nonready_request_started_ms,
+    ) ||
+    !isNonNegativeSafeInteger(
+      value.poll_observation
+        .previous_terminal_projection_nonready_response_observed_ms,
+    ) ||
+    !isNonNegativeSafeInteger(
+      value.poll_observation
+        .first_terminal_projection_ready_request_started_ms,
+    ) ||
+    !isNonNegativeSafeInteger(
+      value.poll_observation
+        .first_terminal_projection_ready_response_observed_ms,
+    ) ||
+    !isNonNegativeSafeInteger(
+      value.poll_observation.evidence_ready_request_started_ms,
+    ) ||
+    value.poll_observation.evidence_ready_response_observed_ms !==
+      expected.terminalReportReadyMs ||
+    value.poll_observation
+      .previous_terminal_projection_nonready_request_started_ms >
+      value.poll_observation
+        .previous_terminal_projection_nonready_response_observed_ms ||
+    value.poll_observation
+      .previous_terminal_projection_nonready_response_observed_ms >
+      value.poll_observation
+        .first_terminal_projection_ready_request_started_ms ||
+    value.poll_observation
+      .first_terminal_projection_ready_request_started_ms >
+      value.poll_observation
+        .first_terminal_projection_ready_response_observed_ms ||
+    value.poll_observation
+      .first_terminal_projection_ready_request_started_ms >
+      value.poll_observation.evidence_ready_request_started_ms ||
+    value.poll_observation
+      .first_terminal_projection_ready_response_observed_ms >
+      value.poll_observation.evidence_ready_response_observed_ms ||
+    value.poll_observation.evidence_ready_request_started_ms >
+      value.poll_observation.evidence_ready_response_observed_ms ||
+    value.poll_observation
+      .previous_terminal_projection_nonready_request_started_ms >
+      expected.uiTerminalReadyMs ||
+    value.runner_previous_terminal_projection_nonready_to_ui_ms !==
+      expected.uiTerminalReadyMs -
+        value.poll_observation
+          .previous_terminal_projection_nonready_request_started_ms ||
+    value.poll_observation.configured_cadence_ms !== expected.pollMs ||
+    !isPositiveSafeInteger(value.poll_observation.configured_cadence_ms) ||
+    !isNonNegativeFinite(
+        value.causal_seal_to_report_receipt_upper_bound_ms +
+        value.worker_receipt_to_projection_ack_ms +
+        value.runner_previous_terminal_projection_nonready_to_ui_ms,
+    )
+  ) {
+    throw new Error(`${label} is invalid or does not match its sample`);
   }
 }
 
@@ -1901,7 +2360,9 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return false;
 }
 
-function isPassedSample(sample: BootSampleV1): sample is PassedBootSampleV1 {
+function isPassedSample(
+  sample: ComparableBootSampleV1,
+): sample is ComparablePassedBootSampleV1 {
   return sample.status === "passed";
 }
 

@@ -8,7 +8,7 @@ export interface RequiredScenarioImage {
 
 export function hostHasImagesReady(
   report: HostStateReportV2 | null | undefined,
-  required: RequiredScenarioImage[],
+  required: readonly RequiredScenarioImage[],
 ): boolean {
   if (required.length === 0) {
     return true;

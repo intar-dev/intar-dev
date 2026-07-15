@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   parseBridgeMessageV6,
@@ -9,6 +9,7 @@ import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import {
   acquireHostBenchmarkLeaseAndReserveCpuInD1,
   clearDrainedHostBenchmarkLeaseInD1,
+  MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS,
   releaseHostBenchmarkLeaseInD1,
 } from "@/control-plane/host-benchmark-leases";
 import {
@@ -46,7 +47,12 @@ import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
-import type { BridgeMessageV6, HostDesiredStateV2 } from "@/generated/bridge";
+import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
+import type {
+  BridgeMessageV6,
+  HostDesiredStateV2,
+  HostStateReportV2,
+} from "@/generated/bridge";
 
 const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
@@ -61,10 +67,36 @@ interface SocketAttachment {
   lastDesiredDispatchAtMs: number | null;
 }
 
+interface BridgeReceiptTiming {
+  receivedAtUnixMs: number;
+  receivedAtPerformanceMs: number;
+}
+
+interface DesiredDispatchTiming {
+  runId: string;
+  desiredVersion: number;
+  dispatchedAtUnixMs: number;
+}
+
+interface RunProjectionRow {
+  runId: string;
+  hostId: string;
+  activeKey: string | null;
+  deleteRequestedAt: number | null;
+  solvedAt: number | null;
+  completedAt: number | null;
+  failedAt: number | null;
+  updatedAt: number;
+  state: RunStateDocument;
+}
+
+type RunProjectionOutcome = "updated" | "unchanged" | "stale_session";
+
 export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
   private desiredDispatchQueue: Promise<void> = Promise.resolve();
   private readonly runProjectionQueues = new Map<string, Promise<void>>();
+  private knownHostId: string | null | undefined;
 
   constructor(
     ctx: DurableObjectState,
@@ -109,6 +141,13 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
+    // Both values are captured on the Worker before attachment parsing. The
+    // epoch timestamp correlates logs, while the same-isolate Performance API
+    // delta measures receipt through D1 projection without comparing clocks.
+    const receiptTiming: BridgeReceiptTiming = {
+      receivedAtUnixMs: Date.now(),
+      receivedAtPerformanceMs: performance.now(),
+    };
     const attachment = this.readSocketAttachment(ws);
     if (!attachment) {
       try {
@@ -121,7 +160,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
     const bridgeMessage = parseBridgeMessageV6(message);
     if (bridgeMessage) {
-      await this.handleBridgeMessageV6(ws, attachment, bridgeMessage);
+      await this.handleBridgeMessageV6(
+        ws,
+        attachment,
+        bridgeMessage,
+        receiptTiming,
+      );
       return;
     }
 
@@ -241,6 +285,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.knownHostId = null;
     return jsonResponse({ ok: true, hostId });
   }
 
@@ -262,20 +307,34 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         409,
       );
     }
-    try {
-      await this.loadRequiredHost(input.hostId);
-    } catch {
-      return jsonResponse({ error: "host not found" }, 404);
+    const benchmarkAcquire = pathname.endsWith("/benchmark-acquire");
+    const commit = pathname.endsWith("/commit");
+    if (!benchmarkAcquire && !commit) {
+      try {
+        await this.loadRequiredHost(input.hostId);
+      } catch {
+        return jsonResponse({ error: "host not found" }, 404);
+      }
     }
     await this.persistKnownHostId(input.hostId);
 
     return this.withCpuReservationLock(async () => {
       const db = drizzle(this.env.DB);
       const now = Date.now();
-      if (pathname.endsWith("/benchmark-acquire")) {
-        if (input.steadyCpuMillisByVm === null || input.userId === null) {
+      if (benchmarkAcquire) {
+        if (
+          input.steadyCpuMillisByVm === null ||
+          input.guestVcpuCountByVm === null ||
+          input.userId === null ||
+          input.requiredImages === null ||
+          input.credentialNotBeforeUnixMs === null ||
+          input.credentialExpiresAtUnixMs === null
+        ) {
           return jsonResponse(
-            { error: "steadyCpuMillisByVm and userId are required" },
+            {
+              error:
+                "steadyCpuMillisByVm, guestVcpuCountByVm, userId, requiredImages, and the credential window are required",
+            },
             400,
           );
         }
@@ -284,6 +343,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           runId: input.runId,
           userId: input.userId,
           steadyCpuMillisByVm: input.steadyCpuMillisByVm,
+          guestVcpuCountByVm: input.guestVcpuCountByVm,
+          requiredImages: input.requiredImages,
+          credentialNotBeforeUnixMs: input.credentialNotBeforeUnixMs,
+          credentialExpiresAtUnixMs: input.credentialExpiresAtUnixMs,
           nowUnixMs: now,
         });
         if (
@@ -336,6 +399,45 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           runId: input.runId,
           nowUnixMs: now,
         });
+        if (ok) {
+          try {
+            if (
+              this.ctx
+                .getWebSockets(`host:${input.hostId}`)
+                .some((socket) => socket.readyState === WebSocket.OPEN)
+            ) {
+              const activeSocket = await this.findActiveSocket(
+                input.hostId,
+                null,
+              );
+              if (activeSocket?.attachment.bridgeProtocol === "v6") {
+                // The desired VM was committed before its CPU reservation.
+                // Dispatch only after the reservation is durable, and retain
+                // the final active-session fence inside the dispatcher.
+                await this.dispatchBridgeDesiredStateIfNeeded(
+                  input.hostId,
+                  activeSocket.socket,
+                );
+              }
+            }
+          } catch (error) {
+            // CPU commit is authoritative even if the socket disappears.
+            // The alarm below retries desired delivery without making the
+            // caller treat a committed reservation as pending or missing.
+            console.error(
+              JSON.stringify({
+                message: "desired dispatch failed after CPU commit",
+                hostId: input.hostId,
+                runId: input.runId,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            );
+          } finally {
+            await this.scheduleAlarmNoLaterThan(
+              Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+            );
+          }
+        }
         return jsonResponse({ ok });
       }
       if (pathname.endsWith("/rollback")) {
@@ -367,6 +469,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     ws: WebSocket,
     attachment: SocketAttachment,
     message: BridgeMessageV6,
+    receiptTiming: BridgeReceiptTiming,
   ): Promise<void> {
     if (message.type === "client_hello") {
       await this.handleBridgeClientHello(ws, attachment, message);
@@ -401,19 +504,34 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
 
     if (message.type === "state_report") {
-      await this.applyBridgeStateReport(message.host_id, message.report);
+      await this.applyBridgeStateReport(
+        message.host_id,
+        message.report,
+        attachment.sessionId,
+      );
       // State-report projection already reconciles CPU reservations.
       await this.reconcileHost(message.host_id, {
         reconcileCpuReservations: false,
       });
     } else if (message.type === "vm_report") {
-      await this.applyBridgeVmReport(message.host_id, message.report);
-      // A VM report only changes run projection and host liveness. Preserve
-      // opportunistic desired delivery without putting global build, lease,
-      // and capacity maintenance in front of the next readiness report.
-      await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws);
+      await this.applyBridgeVmReport(
+        message.host_id,
+        message.report,
+        receiptTiming,
+        attachment.sessionId,
+      );
+      // VM-report projection owns this latency path. Desired-state commits
+      // explicitly wake the host runtime; this alarm remains the durable
+      // fallback without reloading desired state after every boot report.
+      await this.scheduleAlarmNoLaterThan(
+        Date.now() + DESIRED_VERSION_LAG_REPUSH_AFTER_MS,
+      );
     } else if (message.type === "build_report") {
-      await this.applyBridgeBuildReport(message.host_id, message.report);
+      await this.applyBridgeBuildReport(
+        message.host_id,
+        message.report,
+        attachment.sessionId,
+      );
       await this.reconcileHost(message.host_id);
     } else if (message.type === "sync_request") {
       await this.dispatchBridgeDesiredStateIfNeeded(message.host_id, ws, {
@@ -514,43 +632,116 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  private sendBridgeDesiredState(
+  private async sendBridgeDesiredState(
     ws: WebSocket,
     attachment: SocketAttachment,
     hostId: string,
     state: HostDesiredStateV2,
-  ): void {
-    ws.send(
-      serializeBridgeMessageV6({
-        type: "desired_state",
-        protocol_version: 6,
-        host_id: hostId,
-        desired_state: state,
+  ): Promise<void> {
+    const serialized = serializeBridgeMessageV6({
+      type: "desired_state",
+      protocol_version: 6,
+      host_id: hostId,
+      desired_state: state,
+    });
+    const runningRunIds = new Set(
+      state.vms
+        .filter((vm) => vm.desired_phase === "running")
+        .map((vm) => vm.run_id),
+    );
+    const desiredRunIds = new Set(state.vms.map((vm) => vm.run_id));
+    // Capture a conservative dispatch intent before touching durable storage.
+    // A newly observed run/version must be durable before the desired state can
+    // reach the agent. If persistence fails, the socket send is never attempted.
+    // Forced same-version re-pushes retain the first timestamp.
+    const dispatchedAtUnixMs = Date.now();
+    await Promise.all(
+      [...runningRunIds].map(async (runId) => {
+        const key = desiredDispatchStorageKey(runId);
+        const existing = await this.ctx.storage.get<DesiredDispatchTiming>(key);
+        if (existing) return;
+        await this.ctx.storage.put(key, {
+          runId,
+          desiredVersion: state.version,
+          dispatchedAtUnixMs,
+        } satisfies DesiredDispatchTiming);
       }),
     );
+
+    ws.send(serialized);
     ws.serializeAttachment({
       ...attachment,
       lastDesiredVersionSent: state.version,
-      lastDesiredDispatchAtMs: Date.now(),
+      lastDesiredDispatchAtMs: dispatchedAtUnixMs,
     });
+
+    // Dispatch timing is evidence, not a delivery cache. Retain it across
+    // readiness and same-version re-pushes, and remove it only after explicit
+    // desired-state cleanup has removed the run altogether.
+    // Keep cleanup inside the desired-dispatch lock. A background cleanup for
+    // version N must never race version N+1 and delete N+1's newly persisted
+    // run evidence using the older desired-run set.
+    await this.cleanupRetiredDesiredDispatchTimings(desiredRunIds).catch(
+      (error) => {
+        console.error(
+          JSON.stringify({
+            message: "desired dispatch timing cleanup failed",
+            hostId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      },
+    );
+  }
+
+  private async cleanupRetiredDesiredDispatchTimings(
+    desiredRunIds: ReadonlySet<string>,
+  ): Promise<void> {
+    const entries = await this.ctx.storage.list<DesiredDispatchTiming>({
+      prefix: DESIRED_DISPATCH_STORAGE_PREFIX,
+    });
+    const retiredKeys = [...entries.entries()]
+      .filter(([, timing]) => !desiredRunIds.has(timing.runId))
+      .map(([key]) => key);
+    if (retiredKeys.length > 0) {
+      await this.ctx.storage.delete(retiredKeys);
+    }
   }
 
   private async applyBridgeStateReport(
     hostId: string,
     report: Extract<BridgeMessageV6, { type: "state_report" }>["report"],
+    expectedSessionId: string,
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
-    await db
+    const acceptedActualState = await db
       .insert(hostActualState)
-      .values({
-        hostId,
-        appliedDesiredVersion: report.applied_desired_version,
-        observedAt: report.observed_at_unix_ms,
-        reportJson: report,
-        createdAt: now,
-        updatedAt: now,
-      })
+      .select(
+        db
+          .select({
+            hostId: agentHosts.id,
+            appliedDesiredVersion:
+              sql<number>`${report.applied_desired_version}`.as(
+                "applied_desired_version",
+              ),
+            observedAt: sql<number>`${report.observed_at_unix_ms}`.as(
+              "observed_at",
+            ),
+            reportJson: sql<HostStateReportV2>`${JSON.stringify(report)}`.as(
+              "report_json",
+            ),
+            createdAt: sql<number>`${now}`.as("created_at"),
+            updatedAt: sql<number>`${now}`.as("updated_at"),
+          })
+          .from(agentHosts)
+          .where(
+            and(
+              eq(agentHosts.id, hostId),
+              eq(agentHosts.activeSessionId, expectedSessionId),
+            ),
+          ),
+      )
       .onConflictDoUpdate({
         target: hostActualState.hostId,
         set: {
@@ -559,15 +750,29 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           reportJson: report,
           updatedAt: now,
         },
-      });
+      })
+      .returning({ hostId: hostActualState.hostId });
+    if (!acceptedActualState.length) {
+      return;
+    }
 
-    await this.updateHostRow(hostId, {
-      connected: true,
-      disconnectedAt: null,
-      lastHeartbeatAt: now,
-      lastInventoryAt: now,
-      updatedAt: now,
-    });
+    const heartbeat = await db
+      .update(agentHosts)
+      .set({
+        connected: true,
+        disconnectedAt: null,
+        lastHeartbeatAt: now,
+        lastInventoryAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(agentHosts.id, hostId),
+          eq(agentHosts.activeSessionId, expectedSessionId),
+        ),
+      )
+      .returning({ id: agentHosts.id });
+    if (!heartbeat.length) return;
 
     const buildUpdates = await recordHostBuildReports(
       db,
@@ -599,7 +804,14 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
               current: latest,
               report,
             }),
-          { keepDeleteRequestedAt: true },
+          {
+            keepDeleteRequestedAt: true,
+            initialRow: current,
+            expectedHostSession: {
+              hostId,
+              activeSessionId: expectedSessionId,
+            },
+          },
         );
       });
     }
@@ -612,21 +824,30 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   private async applyBridgeVmReport(
     hostId: string,
     report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"],
+    receiptTiming: BridgeReceiptTiming,
+    expectedSessionId: string,
   ): Promise<void> {
-    const now = Date.now();
-    await this.updateHostRow(hostId, {
-      connected: true,
-      disconnectedAt: null,
-      lastHeartbeatAt: now,
-      updatedAt: now,
-    });
-
+    const desiredVersion = report.desired_version;
+    const dispatchTiming =
+      report.terminal.state === "ready" &&
+      Number.isSafeInteger(desiredVersion) &&
+      desiredVersion !== null &&
+      desiredVersion !== undefined &&
+      desiredVersion >= 0
+        ? await this.ctx.storage.get<DesiredDispatchTiming>(
+            desiredDispatchStorageKey(report.run_id),
+          )
+        : undefined;
+    let projectionOutcome: RunProjectionOutcome | null = null;
+    let timingOutcome: RunProjectionOutcome | null = null;
+    let projectionAckAtUnixMs: number | null = null;
+    let receiptToProjectionAckMs: number | null = null;
     await this.withRunProjectionLock(report.run_id, async () => {
       const run = await this.loadRun(report.run_id);
       if (!run || run.hostId !== hostId) {
         return;
       }
-      await this.persistRunState(
+      projectionOutcome = await this.persistRunState(
         report.run_id,
         (latest) =>
           applyVmReportToRunState({
@@ -634,23 +855,115 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
             current: latest,
             report,
           }),
-        { keepDeleteRequestedAt: true },
+        {
+          keepDeleteRequestedAt: true,
+          initialRow: run,
+          expectedHostSession: { hostId, activeSessionId: expectedSessionId },
+        },
+      );
+      if (projectionOutcome === "stale_session" || !dispatchTiming) {
+        return;
+      }
+
+      projectionAckAtUnixMs = Date.now();
+      receiptToProjectionAckMs =
+        performance.now() - receiptTiming.receivedAtPerformanceMs;
+      if (
+        !Number.isFinite(receiptToProjectionAckMs) ||
+        receiptToProjectionAckMs < 0
+      ) {
+        return;
+      }
+      timingOutcome = await this.persistRunState(
+        report.run_id,
+        (latest) =>
+          attachTerminalProjectionAckTiming({
+            current: latest,
+            report,
+            dispatchTiming,
+            receivedAtUnixMs: receiptTiming.receivedAtUnixMs,
+            projectionAckAtUnixMs: projectionAckAtUnixMs!,
+            receiptToProjectionAckMs: receiptToProjectionAckMs!,
+          }),
+        {
+          keepDeleteRequestedAt: true,
+          expectedHostSession: { hostId, activeSessionId: expectedSessionId },
+        },
       );
     });
+
+    if (
+      projectionOutcome === "stale_session" ||
+      timingOutcome === "stale_session"
+    ) {
+      return;
+    }
+
+    if (projectionOutcome === "updated" || timingOutcome === "updated") {
+      const timingPersistedAtUnixMs = Date.now();
+      console.info(
+        JSON.stringify({
+          message: "bridge vm report projected",
+          hostId,
+          runId: report.run_id,
+          vmName: report.vm_name,
+          generation: report.runtime_constraints?.generation ?? null,
+          desiredVersion: report.desired_version ?? null,
+          observedAtUnixMs: report.observed_at_unix_ms,
+          workerReceivedAtUnixMs: receiptTiming.receivedAtUnixMs,
+          workerProjectionAckAtUnixMs: projectionAckAtUnixMs,
+          receiptToProjectionAckMs,
+          timingPersistedAtUnixMs,
+          fullReceiptToTimingPersistenceMs:
+            performance.now() - receiptTiming.receivedAtPerformanceMs,
+          projectionOutcome,
+          timingOutcome,
+        }),
+      );
+    }
+
+    // Terminal readiness is durable before liveness maintenance. A slow host
+    // heartbeat write can no longer hold the user-visible projection hostage.
+    const heartbeatAt = Date.now();
+    await drizzle(this.env.DB)
+      .update(agentHosts)
+      .set({
+        connected: true,
+        disconnectedAt: null,
+        lastHeartbeatAt: heartbeatAt,
+        updatedAt: heartbeatAt,
+      })
+      .where(
+        and(
+          eq(agentHosts.id, hostId),
+          eq(agentHosts.activeSessionId, expectedSessionId),
+        ),
+      );
   }
 
   private async applyBridgeBuildReport(
     hostId: string,
     report: Extract<BridgeMessageV6, { type: "build_report" }>["report"],
+    expectedSessionId: string,
   ): Promise<void> {
     const db = drizzle(this.env.DB);
     const now = Date.now();
-    await this.updateHostRow(hostId, {
-      connected: true,
-      disconnectedAt: null,
-      lastHeartbeatAt: now,
-      updatedAt: now,
-    });
+    const heartbeat = await db
+      .update(agentHosts)
+      .set({
+        connected: true,
+        disconnectedAt: null,
+        lastHeartbeatAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(agentHosts.id, hostId),
+          eq(agentHosts.activeSessionId, expectedSessionId),
+        ),
+      )
+      .returning({ id: agentHosts.id });
+    if (!heartbeat.length) return;
     const buildUpdates = await recordHostBuildReports(
       db,
       hostId,
@@ -752,7 +1065,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         return;
       }
 
-      this.sendBridgeDesiredState(ws, latestAttachment, hostId, desiredState);
+      await this.sendBridgeDesiredState(
+        ws,
+        latestAttachment,
+        hostId,
+        desiredState,
+      );
     });
   }
 
@@ -800,13 +1118,24 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     options?: {
       deleteRequestedAt?: number | null;
       keepDeleteRequestedAt?: boolean;
+      initialRow?: RunProjectionRow;
+      expectedHostSession?: {
+        hostId: string;
+        activeSessionId: string;
+      };
     },
-  ): Promise<void> {
+  ): Promise<RunProjectionOutcome> {
     const db = drizzle(this.env.DB);
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const row = await this.loadRun(runId);
+      // The direct VM-report path already loaded this row for its ownership
+      // check inside the per-run ordering domain. Reuse it for attempt zero;
+      // a failed CAS still reloads authoritative state before retrying.
+      const row =
+        attempt === 0 && options?.initialRow?.runId === runId
+          ? options.initialRow
+          : await this.loadRun(runId);
       if (!row) {
-        return;
+        return "unchanged";
       }
 
       const current = recomputeRunState(row.state);
@@ -852,9 +1181,10 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         row.completedAt === completedAt &&
         row.failedAt === failedAt
       ) {
-        return;
+        return "unchanged";
       }
 
+      const expectedHostSession = options?.expectedHostSession;
       const updated = await db
         .update(scenarioRuns)
         .set({
@@ -872,10 +1202,34 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
           and(
             eq(scenarioRuns.runId, runId),
             eq(scenarioRuns.updatedAt, row.updatedAt),
+            ...(expectedHostSession
+              ? [
+                  exists(
+                    db
+                      .select({ id: agentHosts.id })
+                      .from(agentHosts)
+                      .where(
+                        and(
+                          eq(agentHosts.id, expectedHostSession.hostId),
+                          eq(
+                            agentHosts.activeSessionId,
+                            expectedHostSession.activeSessionId,
+                          ),
+                        ),
+                      ),
+                  ),
+                ]
+              : []),
           ),
         )
         .returning({ runId: scenarioRuns.runId });
       if (!updated.length) {
+        if (
+          expectedHostSession &&
+          !(await this.isActiveHostSession(expectedHostSession))
+        ) {
+          return "stale_session";
+        }
         continue;
       }
 
@@ -885,7 +1239,7 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
         next: merged,
         observedAt: now,
       });
-      return;
+      return "updated";
     }
     throw new Error(`run projection CAS did not converge for ${runId}`);
   }
@@ -1045,8 +1399,12 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
 
   private async findActiveSocket(
     hostId: string,
+    activeSessionId?: string | null,
   ): Promise<{ socket: WebSocket; attachment: SocketAttachment } | null> {
-    const host = await this.loadRequiredHost(hostId);
+    const expectedActiveSessionId =
+      activeSessionId === undefined
+        ? (await this.loadRequiredHost(hostId)).activeSessionId
+        : activeSessionId;
     const matches = this.ctx
       .getWebSockets(`host:${hostId}`)
       .map((socket) => ({
@@ -1072,12 +1430,32 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
     }
 
     const active =
-      matches.find(
-        (candidate) => candidate.attachment.sessionId === host.activeSessionId,
-      ) ??
+      (expectedActiveSessionId
+        ? matches.find(
+            (candidate) =>
+              candidate.attachment.sessionId === expectedActiveSessionId,
+          )
+        : null) ??
       matches[0] ??
       null;
     return active;
+  }
+
+  private async isActiveHostSession(input: {
+    hostId: string;
+    activeSessionId: string;
+  }): Promise<boolean> {
+    const rows = await drizzle(this.env.DB)
+      .select({ id: agentHosts.id })
+      .from(agentHosts)
+      .where(
+        and(
+          eq(agentHosts.id, input.hostId),
+          eq(agentHosts.activeSessionId, input.activeSessionId),
+        ),
+      )
+      .limit(1);
+    return rows.length === 1;
   }
 
   private readSocketAttachment(ws: WebSocket): SocketAttachment | null {
@@ -1146,12 +1524,21 @@ export class HostRuntimeDO extends DurableObject<Cloudflare.Env> {
   }
 
   private async loadKnownHostId(): Promise<string | null> {
+    if (this.knownHostId !== undefined) {
+      return this.knownHostId;
+    }
     const value = await this.ctx.storage.get<string>("hostId");
-    return typeof value === "string" && value.trim() ? value.trim() : null;
+    this.knownHostId =
+      typeof value === "string" && value.trim() ? value.trim() : null;
+    return this.knownHostId;
   }
 
   private async persistKnownHostId(hostId: string): Promise<void> {
+    if (this.knownHostId === hostId) {
+      return;
+    }
     await this.ctx.storage.put("hostId", hostId);
+    this.knownHostId = hostId;
   }
 
   private async resolveKnownHostId(request: Request): Promise<string | null> {
@@ -1293,11 +1680,85 @@ function parseRunState(raw: string): RunStateDocument {
   }
 }
 
+function desiredDispatchStorageKey(runId: string): string {
+  return `${DESIRED_DISPATCH_STORAGE_PREFIX}${encodeURIComponent(runId)}`;
+}
+
+const DESIRED_DISPATCH_STORAGE_PREFIX = "desired-dispatch:";
+
+function attachTerminalProjectionAckTiming(input: {
+  current: RunStateDocument;
+  report: Extract<BridgeMessageV6, { type: "vm_report" }>["report"];
+  dispatchTiming: DesiredDispatchTiming;
+  receivedAtUnixMs: number;
+  projectionAckAtUnixMs: number;
+  receiptToProjectionAckMs: number;
+}): RunStateDocument {
+  const vmIndex = input.current.vms.findIndex(
+    (vm) => vm.runtimeVmName === input.report.vm_name,
+  );
+  const currentVm = input.current.vms[vmIndex];
+  if (!currentVm || vmIndex < 0) return input.current;
+
+  const reportedGeneration =
+    input.report.runtime_constraints?.generation.trim() || null;
+  const projectedGeneration =
+    currentVm.runtimeConstraints?.generation?.trim() || null;
+  const desiredVersion = input.report.desired_version;
+  const hasPersistedTerminalTiming =
+    currentVm.workerTerminalReportReceivedAt !== undefined ||
+    currentVm.workerTerminalProjectionAckAt !== undefined ||
+    currentVm.workerTerminalReceiptToProjectionAckMs !== undefined ||
+    currentVm.workerTerminalProjectionGeneration !== undefined ||
+    currentVm.workerTerminalDesiredVersion !== undefined;
+  if (
+    hasPersistedTerminalTiming ||
+    input.report.terminal.state !== "ready" ||
+    currentVm.terminalPhase !== "ready" ||
+    currentVm.runtimeObservedAt !== input.report.observed_at_unix_ms ||
+    currentVm.terminalObservedAt !==
+      input.report.terminal.observed_at_unix_ms ||
+    !reportedGeneration ||
+    reportedGeneration !== projectedGeneration ||
+    !Number.isSafeInteger(desiredVersion) ||
+    desiredVersion === null ||
+    desiredVersion === undefined ||
+    desiredVersion < 0 ||
+    input.dispatchTiming.runId !== input.report.run_id ||
+    input.dispatchTiming.desiredVersion !== desiredVersion ||
+    !Number.isSafeInteger(input.dispatchTiming.dispatchedAtUnixMs) ||
+    input.dispatchTiming.dispatchedAtUnixMs < 0 ||
+    input.dispatchTiming.dispatchedAtUnixMs > input.receivedAtUnixMs ||
+    input.receivedAtUnixMs > input.projectionAckAtUnixMs ||
+    !Number.isFinite(input.receiptToProjectionAckMs) ||
+    input.receiptToProjectionAckMs < 0
+  ) {
+    return input.current;
+  }
+
+  const vms = [...input.current.vms];
+  vms[vmIndex] = {
+    ...currentVm,
+    workerDesiredDispatchAt: input.dispatchTiming.dispatchedAtUnixMs,
+    workerDesiredDispatchVersion: input.dispatchTiming.desiredVersion,
+    workerTerminalReportReceivedAt: input.receivedAtUnixMs,
+    workerTerminalProjectionAckAt: input.projectionAckAtUnixMs,
+    workerTerminalReceiptToProjectionAckMs: input.receiptToProjectionAckMs,
+    workerTerminalProjectionGeneration: projectedGeneration,
+    workerTerminalDesiredVersion: desiredVersion,
+  };
+  return { ...input.current, vms };
+}
+
 async function parseCpuReservationRequest(request: Request): Promise<{
   hostId: string;
   runId: string;
   userId: string | null;
   steadyCpuMillisByVm: number[] | null;
+  guestVcpuCountByVm: number[] | null;
+  requiredImages: RequiredScenarioImage[] | null;
+  credentialNotBeforeUnixMs: number | null;
+  credentialExpiresAtUnixMs: number | null;
 } | null> {
   try {
     const value = (await request.json()) as Record<string, unknown>;
@@ -1305,6 +1766,10 @@ async function parseCpuReservationRequest(request: Request): Promise<{
     const runId = typeof value.runId === "string" ? value.runId.trim() : "";
     const userId = typeof value.userId === "string" ? value.userId.trim() : "";
     const steadyCpuMillisByVm = value.steadyCpuMillisByVm;
+    const guestVcpuCountByVm = value.guestVcpuCountByVm;
+    const requiredImages = parseRequiredScenarioImages(value.requiredImages);
+    const credentialNotBeforeUnixMs = value.credentialNotBeforeUnixMs;
+    const credentialExpiresAtUnixMs = value.credentialExpiresAtUnixMs;
     if (
       !hostId ||
       hostId.length > 128 ||
@@ -1315,7 +1780,25 @@ async function parseCpuReservationRequest(request: Request): Promise<{
         (!Array.isArray(steadyCpuMillisByVm) ||
           steadyCpuMillisByVm.length === 0 ||
           steadyCpuMillisByVm.length > 256 ||
-          !steadyCpuMillisByVm.every(isReservationCpuMillis)))
+          !steadyCpuMillisByVm.every(isReservationCpuMillis))) ||
+      (guestVcpuCountByVm !== undefined &&
+        (!Array.isArray(guestVcpuCountByVm) ||
+          guestVcpuCountByVm.length === 0 ||
+          guestVcpuCountByVm.length > 256 ||
+          !guestVcpuCountByVm.every(isReservationVcpuCount))) ||
+      (Array.isArray(steadyCpuMillisByVm) &&
+        Array.isArray(guestVcpuCountByVm) &&
+        steadyCpuMillisByVm.length !== guestVcpuCountByVm.length) ||
+      (value.requiredImages !== undefined && requiredImages === null) ||
+      (credentialNotBeforeUnixMs !== undefined &&
+        !isReservationUnixMs(credentialNotBeforeUnixMs)) ||
+      (credentialExpiresAtUnixMs !== undefined &&
+        !isReservationUnixMs(credentialExpiresAtUnixMs)) ||
+      (isReservationUnixMs(credentialNotBeforeUnixMs) &&
+        isReservationUnixMs(credentialExpiresAtUnixMs) &&
+        (credentialExpiresAtUnixMs <= credentialNotBeforeUnixMs ||
+          credentialExpiresAtUnixMs - credentialNotBeforeUnixMs >
+            MAX_BOOT_BENCHMARK_CREDENTIAL_TTL_MS))
     ) {
       return null;
     }
@@ -1326,10 +1809,71 @@ async function parseCpuReservationRequest(request: Request): Promise<{
       steadyCpuMillisByVm: Array.isArray(steadyCpuMillisByVm)
         ? (steadyCpuMillisByVm as number[])
         : null,
+      guestVcpuCountByVm: Array.isArray(guestVcpuCountByVm)
+        ? (guestVcpuCountByVm as number[])
+        : null,
+      requiredImages,
+      credentialNotBeforeUnixMs: isReservationUnixMs(credentialNotBeforeUnixMs)
+        ? credentialNotBeforeUnixMs
+        : null,
+      credentialExpiresAtUnixMs: isReservationUnixMs(credentialExpiresAtUnixMs)
+        ? credentialExpiresAtUnixMs
+        : null,
     };
   } catch {
     return null;
   }
+}
+
+function parseRequiredScenarioImages(
+  value: unknown,
+): RequiredScenarioImage[] | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (!Array.isArray(value) || value.length === 0 || value.length > 256) {
+    return null;
+  }
+
+  const identities = new Set<string>();
+  const requiredImages: RequiredScenarioImage[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") {
+      return null;
+    }
+    const image = candidate as Record<string, unknown>;
+    const imageKeyValue = image.imageKey;
+    if (!imageKeyValue || typeof imageKeyValue !== "object") {
+      return null;
+    }
+    const imageKey = imageKeyValue as Record<string, unknown>;
+    const scenario =
+      typeof imageKey.scenario === "string" ? imageKey.scenario.trim() : "";
+    const vm = typeof imageKey.vm === "string" ? imageKey.vm.trim() : "";
+    const arch = imageKey.arch;
+    const imageSha256 =
+      typeof image.imageSha256 === "string"
+        ? image.imageSha256.toLowerCase()
+        : "";
+    const identity = `${scenario}:${vm}:${String(arch)}`;
+    if (
+      !scenario ||
+      scenario.length > 128 ||
+      !vm ||
+      vm.length > 128 ||
+      (arch !== "x86_64" && arch !== "aarch64") ||
+      !/^[a-f0-9]{64}$/.test(imageSha256) ||
+      identities.has(identity)
+    ) {
+      return null;
+    }
+    identities.add(identity);
+    requiredImages.push({
+      imageKey: { scenario, vm, arch },
+      imageSha256,
+    });
+  }
+  return requiredImages;
 }
 
 function isReservationCpuMillis(value: unknown): value is number {
@@ -1339,4 +1883,17 @@ function isReservationCpuMillis(value: unknown): value is number {
     value > 0 &&
     value <= 4_294_967_295
   );
+}
+
+function isReservationVcpuCount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= 256
+  );
+}
+
+function isReservationUnixMs(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }

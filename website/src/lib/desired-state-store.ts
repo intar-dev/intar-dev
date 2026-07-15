@@ -50,13 +50,17 @@ export async function mutateStoredHostDesiredState(
   hostId: string,
   nowUnixMs: number,
   mutator: DesiredStateMutator,
+  initialState?: HostDesiredStateV2,
 ): Promise<HostDesiredStateV2> {
   // Optimistic concurrency: the doc is mutated by worker routes and the host
   // runtime DO alarm concurrently, and an unconditional write would silently
   // drop one side's version bump. The update only lands when the version we
   // read is still current; otherwise reload and re-apply the mutator.
   for (let attempt = 0; attempt < MUTATE_DESIRED_STATE_MAX_ATTEMPTS; attempt++) {
-    const current = await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
+    const current =
+      attempt === 0 && initialState?.host_id === hostId
+        ? initialState
+        : await loadOrCreateHostDesiredState(db, hostId, nowUnixMs);
     const next = mutateDesiredState(current, mutator, { nowUnixMs });
     if (next === current) {
       return current;

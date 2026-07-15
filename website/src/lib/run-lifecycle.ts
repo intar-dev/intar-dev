@@ -378,7 +378,7 @@ function resetVmForRuntimeGeneration(
       error: null,
       value: null,
     }));
-  return {
+  const reset: RunVmStateDocument = {
     ...current,
     retiredRuntimeGenerations: [
       ...(current.retiredRuntimeGenerations ?? []),
@@ -406,6 +406,14 @@ function resetVmForRuntimeGeneration(
     bootProbes: resetProbes(current.bootProbes),
     scenarioProbes: resetProbes(current.scenarioProbes),
   };
+  delete reset.workerTerminalReportReceivedAt;
+  delete reset.workerTerminalProjectionAckAt;
+  delete reset.workerTerminalReceiptToProjectionAckMs;
+  delete reset.workerTerminalProjectionGeneration;
+  delete reset.workerTerminalDesiredVersion;
+  delete reset.workerDesiredDispatchAt;
+  delete reset.workerDesiredDispatchVersion;
+  return reset;
 }
 
 function projectTerminalReadiness(

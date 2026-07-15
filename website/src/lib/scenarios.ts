@@ -76,17 +76,12 @@ export async function loadScenario(
   scenarioId: string,
 ): Promise<ScenarioDetailRecord | null> {
   const db = drizzle(env.DB);
-  const rows = await db
-    .select()
-    .from(vmScenarios)
-    .where(eq(vmScenarios.scenarioId, scenarioId))
-    .limit(1);
-  const scenario = rows[0];
-  if (!scenario) {
-    return null;
-  }
-
-  const [vms, probes] = await Promise.all([
+  const [rows, vms, probes] = await db.batch([
+    db
+      .select()
+      .from(vmScenarios)
+      .where(eq(vmScenarios.scenarioId, scenarioId))
+      .limit(1),
     db
       .select()
       .from(vmScenarioVms)
@@ -98,6 +93,10 @@ export async function loadScenario(
       .where(eq(vmScenarioProbes.scenarioId, scenarioId))
       .orderBy(asc(vmScenarioProbes.ordinal)),
   ]);
+  const scenario = rows[0];
+  if (!scenario) {
+    return null;
+  }
 
   if (!vms.length) {
     return null;

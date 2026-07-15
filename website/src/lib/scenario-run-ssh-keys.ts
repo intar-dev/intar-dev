@@ -8,6 +8,9 @@ import { generateSshEd25519KeyPair } from "@/lib/ssh-ed25519";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+let cachedEncryptionKey:
+  | { secret: string; promise: Promise<CryptoKey> }
+  | undefined;
 
 export interface ScenarioRunSshKeyDraft {
   id: string;
@@ -49,11 +52,19 @@ export async function insertScenarioRunSshKeyDrafts(
   drafts: ScenarioRunSshKeyDraft[],
   createdAt: number,
 ): Promise<void> {
-  if (drafts.length === 0) {
+  const rows = await prepareScenarioRunSshKeyRows(drafts, createdAt);
+  if (rows.length === 0) {
     return;
   }
 
-  const rows = await Promise.all(
+  await drizzle(env.DB).insert(scenarioRunSshKeys).values(rows);
+}
+
+export async function prepareScenarioRunSshKeyRows(
+  drafts: ScenarioRunSshKeyDraft[],
+  createdAt: number,
+): Promise<Array<typeof scenarioRunSshKeys.$inferInsert>> {
+  return Promise.all(
     drafts.map(async (draft) => {
       const encrypted = await encryptPrivateKey(draft);
       return {
@@ -68,8 +79,6 @@ export async function insertScenarioRunSshKeyDrafts(
       };
     }),
   );
-
-  await drizzle(env.DB).insert(scenarioRunSshKeys).values(rows);
 }
 
 export async function loadScenarioRunSshKey(input: {
@@ -161,14 +170,26 @@ async function encryptionKey(): Promise<CryptoKey> {
       "scenario SSH key encryption is not configured",
     );
   }
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    textEncoder.encode(secret),
-  );
-  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, [
-    "encrypt",
-    "decrypt",
-  ]);
+  if (cachedEncryptionKey?.secret === secret) {
+    return cachedEncryptionKey.promise;
+  }
+  const promise = crypto.subtle
+    .digest("SHA-256", textEncoder.encode(secret))
+    .then((digest) =>
+      crypto.subtle.importKey("raw", digest, "AES-GCM", false, [
+        "encrypt",
+        "decrypt",
+      ]),
+    );
+  cachedEncryptionKey = { secret, promise };
+  try {
+    return await promise;
+  } catch (error) {
+    if (cachedEncryptionKey?.promise === promise) {
+      cachedEncryptionKey = undefined;
+    }
+    throw error;
+  }
 }
 
 function encryptionContext(input: {

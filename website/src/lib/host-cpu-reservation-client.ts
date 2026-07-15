@@ -4,6 +4,7 @@ import type {
   ReleaseHostBenchmarkLeaseResult,
 } from "@/control-plane/host-benchmark-leases";
 import type { HostCpuReservationCapacity } from "@/control-plane/host-cpu-reservations";
+import type { RequiredScenarioImage } from "@/lib/scenario-host-readiness";
 
 const HOST_CPU_RESERVATION_TIMEOUT_MS = 10_000;
 
@@ -33,6 +34,10 @@ export async function acquireBenchmarkHostLeaseAndReserveCpu(input: {
   runId: string;
   userId: string;
   steadyCpuMillisByVm: readonly number[];
+  guestVcpuCountByVm: readonly number[];
+  requiredImages: readonly RequiredScenarioImage[];
+  credentialNotBeforeUnixMs: number;
+  credentialExpiresAtUnixMs: number;
 }): Promise<BenchmarkHostLeaseAcquisitionResult> {
   return reservationRequest<BenchmarkHostLeaseAcquisitionResult>(
     input.hostId,
@@ -97,7 +102,7 @@ async function reservationRequest<T>(
   body: Record<string, unknown>,
 ): Promise<T> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
-  const response = await withTimeout(
+  const request = () =>
     stub.fetch(
       new Request(
         `https://host-runtime.internal/_internal/cpu-reservations/${operation}`,
@@ -107,10 +112,20 @@ async function reservationRequest<T>(
           body: JSON.stringify(body),
         },
       ),
-    ),
-    HOST_CPU_RESERVATION_TIMEOUT_MS,
-    `host CPU reservation ${operation} timed out for ${hostId}`,
-  );
+    );
+  const timeoutMessage = `host CPU reservation ${operation} timed out for ${hostId}`;
+  const response =
+    operation === "benchmark-acquire"
+      ? await withSingleTimeoutRetry(
+          request,
+          HOST_CPU_RESERVATION_TIMEOUT_MS,
+          timeoutMessage,
+        )
+      : await withTimeout(
+          request(),
+          HOST_CPU_RESERVATION_TIMEOUT_MS,
+          timeoutMessage,
+        );
   const parsed = (await response.json()) as T;
   if (!response.ok && response.status !== 409) {
     throw new Error(
@@ -118,6 +133,29 @@ async function reservationRequest<T>(
     );
   }
   return parsed;
+}
+
+/**
+ * A benchmark acquisition may have committed in the Durable Object just as
+ * the caller's 10-second response deadline elapsed. Reissuing the exact same
+ * request once exercises the lease's generation-safe idempotency contract.
+ * Transport failures other than this local deadline are never retried.
+ */
+export async function withSingleTimeoutRetry<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  try {
+    return await withTimeout(operation(), timeoutMs, message);
+  } catch (error) {
+    if (!(error instanceof HostCpuReservationTimeoutError)) throw error;
+  }
+  return withTimeout(operation(), timeoutMs, message);
+}
+
+class HostCpuReservationTimeoutError extends Error {
+  override readonly name = "HostCpuReservationTimeoutError";
 }
 
 async function withTimeout<T>(
@@ -130,7 +168,10 @@ async function withTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = setTimeout(
+          () => reject(new HostCpuReservationTimeoutError(message)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {

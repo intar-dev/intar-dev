@@ -115,6 +115,14 @@ export const POST: APIRoute = async ({ request, params }) => {
       userId: authz.context.userId,
       ...(hostId ? { hostId } : {}),
       ...(admissionMode ? { admissionMode } : {}),
+      ...(benchmarkAuthentication
+        ? {
+            benchmarkCredentialWindow: {
+              notBeforeUnixMs: benchmarkAuthentication.notBeforeUnixMs,
+              expiresAtUnixMs: benchmarkAuthentication.expiresAtUnixMs,
+            },
+          }
+        : {}),
     });
     return jsonResponse(result, { status: 202 });
   } catch (error) {

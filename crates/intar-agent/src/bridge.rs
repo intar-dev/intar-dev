@@ -50,9 +50,10 @@ const RETRY_MAX_MS: u64 = 30_000;
 const SERVER_HELLO_TIMEOUT_SECS: u64 = 10;
 const STATE_REPORT_INTERVAL_SECS: u64 = 20;
 const INVENTORY_REPORT_JAILER_BUDGET_MS: u64 = 50;
-const OUTBOUND_SEND_BUDGET_MS: u64 = 75;
+const OUTBOUND_SEND_BUDGET_MS: u64 = 25;
 #[cfg(test)]
 const INVENTORY_DELIVERY_TARGET_MS: u64 = 250;
+const URGENT_OUTBOUND_CAPACITY: usize = 8;
 const INVENTORY_OUTBOUND_CAPACITY: usize = 1;
 const NORMAL_OUTBOUND_CAPACITY: usize = 64;
 const DEFAULT_KINO_VSOCK_PORT: u32 = 18_080;
@@ -82,6 +83,7 @@ impl BridgeReportCache {
 
 #[derive(Clone)]
 struct BridgeOutbound {
+    urgent: mpsc::Sender<BridgeMessageV6>,
     inventory: mpsc::Sender<BridgeMessageV6>,
     normal: mpsc::Sender<BridgeMessageV6>,
 }
@@ -237,6 +239,10 @@ async fn connect_once(
     .await?;
     // Subscribe before either report builder starts so a mutation that races
     // the initial full snapshot remains pending for the independent fast path.
+    // Terminal transitions no longer advance inventory until their targeted
+    // report is queued, so this subscription must also precede the snapshot.
+    let mut probe_updates = vm.subscribe_probe_updates();
+    let mut terminal_updates = vm.subscribe_terminal_updates();
     let inventory_updates = vm.subscribe_inventory_updates();
     let (desired_state_tx, desired_state_rx) = watch::channel(current_desired_state.clone());
     let report_cache = BridgeReportCache::new(
@@ -251,17 +257,22 @@ async fn connect_once(
         disk_probe_path: disk_probe_path.to_path_buf(),
         cache: report_cache,
     };
+    let (urgent_tx, urgent_rx) = mpsc::channel(URGENT_OUTBOUND_CAPACITY);
     let (inventory_tx, inventory_rx) = mpsc::channel(INVENTORY_OUTBOUND_CAPACITY);
     let (normal_tx, normal_rx) = mpsc::channel(NORMAL_OUTBOUND_CAPACITY);
     let outbound = BridgeOutbound {
+        urgent: urgent_tx,
         inventory: inventory_tx,
         normal: normal_tx,
     };
 
-    // One task owns the websocket sink. Inventory reports have a dedicated
-    // queue and strict priority, while every individual socket send is bounded
-    // so a blocked ordinary report cannot consume the 250 ms freshness budget.
-    let mut writer_task = tokio::spawn(run_bridge_writer(write, inventory_rx, normal_rx));
+    // One task owns the websocket sink. Generation-fenced terminal transitions
+    // have the highest-priority queue, inventory snapshots remain ahead of
+    // ordinary traffic, and every individual socket send is bounded. A sealed
+    // terminal-ready report therefore cannot remain queued behind the inventory
+    // snapshot emitted by the same atomic ready publication.
+    let mut writer_task =
+        tokio::spawn(run_bridge_writer(write, urgent_rx, inventory_rx, normal_rx));
     let mut inventory_task = tokio::spawn(run_inventory_reporter(
         report_sources.clone(),
         inventory_updates,
@@ -280,9 +291,6 @@ async fn connect_once(
         let mut state_report_interval = interval(Duration::from_secs(STATE_REPORT_INTERVAL_SECS));
         state_report_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         state_report_interval.tick().await;
-        let mut probe_updates = vm.subscribe_probe_updates();
-        let mut terminal_updates = vm.subscribe_terminal_updates();
-
         loop {
             tokio::select! {
                 inbound = read.next() => {
@@ -360,11 +368,28 @@ async fn connect_once(
                                     None,
                                     Some(&update),
                                 );
-                                send_vm_report(&outbound.normal, &cfg.host_id, report).await?;
+                                send_vm_report(&outbound.urgent, &cfg.host_id, report).await?;
+                                // Queue the targeted generation-fenced report
+                                // before waking the independent inventory
+                                // builder. Writer priority can now guarantee
+                                // that a queued boot snapshot cannot overtake
+                                // this terminal transition.
+                                vm.request_inventory_update();
                             }
                         }
-                        Err(error) => {
-                            debug!(error = %error, "terminal update channel lagged");
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                skipped,
+                                "terminal update channel lagged; requesting authoritative inventory resync"
+                            );
+                            // Drop the retained stale tail. Otherwise strict
+                            // urgent priority could replay it ahead of the
+                            // authoritative cached inventory requested below.
+                            terminal_updates = vm.subscribe_terminal_updates();
+                            vm.request_inventory_update();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            anyhow::bail!("terminal update channel closed");
                         }
                     }
                 }
@@ -674,6 +699,7 @@ async fn delete_vm_if_present(vm: &VmManager, vm_name: &str) {
 
 async fn run_bridge_writer<W>(
     mut write: W,
+    mut urgent: mpsc::Receiver<BridgeMessageV6>,
     mut inventory: mpsc::Receiver<BridgeMessageV6>,
     mut normal: mpsc::Receiver<BridgeMessageV6>,
 ) -> Result<()>
@@ -681,7 +707,8 @@ where
     W: Sink<Message> + Unpin,
     W::Error: std::error::Error + Send + Sync + 'static,
 {
-    while let Some(message) = next_outbound_message(&mut inventory, &mut normal).await {
+    while let Some(message) = next_outbound_message(&mut urgent, &mut inventory, &mut normal).await
+    {
         timeout(
             Duration::from_millis(OUTBOUND_SEND_BUDGET_MS),
             send_bridge_message(&mut write, &message),
@@ -693,11 +720,13 @@ where
 }
 
 async fn next_outbound_message(
+    urgent: &mut mpsc::Receiver<BridgeMessageV6>,
     inventory: &mut mpsc::Receiver<BridgeMessageV6>,
     normal: &mut mpsc::Receiver<BridgeMessageV6>,
 ) -> Option<BridgeMessageV6> {
     tokio::select! {
         biased;
+        message = urgent.recv() => message,
         message = inventory.recv() => message,
         message = normal.recv() => message,
     }
@@ -1988,7 +2017,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_subscription_retains_transition_during_initial_snapshot() {
+        let (terminal_tx, _) = tokio::sync::broadcast::channel(1);
+        // connect_once establishes this receiver before it starts building the
+        // initial state report. The send below models readiness becoming
+        // durable while that report still contains the preceding Pending view.
+        let mut terminal_updates = terminal_tx.subscribe();
+        let state = VmTerminalState {
+            run_id: "run-1".to_string(),
+            vm_name: "web".to_string(),
+            state: VmTerminalStateKind::Ready,
+            terminal_target: Some(VmTerminalTarget {
+                host: Some("203.0.113.7".to_string()),
+                port: 22_001,
+                username: "ubuntu".to_string(),
+                checked_at: 2_000,
+            }),
+            reason: None,
+            observed_at: 2_000,
+            runtime_constraints: Some(VmRuntimeConstraintsV1 {
+                generation: "generation-1".to_string(),
+                phase: VmRuntimeConstraintPhaseV1::Steady,
+                steady_cpu_millis: 1_000,
+                effective_cpu_millis: 1_000,
+                quota_verified_at_unix_ms: Some(1_999),
+                lease_expires_at_unix_ms: None,
+            }),
+        };
+
+        terminal_tx
+            .send(state.clone())
+            .expect("pre-snapshot subscription retains readiness transition");
+
+        assert_eq!(
+            timeout(
+                Duration::from_millis(INVENTORY_DELIVERY_TARGET_MS),
+                terminal_updates.recv(),
+            )
+            .await
+            .expect("readiness transition stays inside delivery target")
+            .expect("terminal channel stays open"),
+            state
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_terminal_subscription_drops_lagged_retained_tail() {
+        let state = |observed_at| VmTerminalState {
+            run_id: "run-1".to_string(),
+            vm_name: "web".to_string(),
+            state: VmTerminalStateKind::Pending,
+            terminal_target: None,
+            reason: Some(format!("revision-{observed_at}")),
+            observed_at,
+            runtime_constraints: None,
+        };
+        let (terminal_tx, _) = tokio::sync::broadcast::channel(1);
+        let mut lagged = terminal_tx.subscribe();
+        terminal_tx.send(state(1)).expect("first transition");
+        terminal_tx.send(state(2)).expect("second transition");
+        assert!(matches!(
+            lagged.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(1))
+        ));
+
+        // The bridge replaces a lagged receiver and uses cached inventory as
+        // authority, so the retained revision 2 must not enter the urgent FIFO.
+        let mut fresh = terminal_tx.subscribe();
+        terminal_tx.send(state(3)).expect("future transition");
+        assert_eq!(fresh.recv().await.expect("fresh transition"), state(3));
+    }
+
+    #[tokio::test]
+    async fn outbound_writer_prioritizes_urgent_terminal_reports() {
+        let (urgent_tx, mut urgent_rx) = mpsc::channel(1);
+        let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
+        let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        normal_tx
+            .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+                protocol_version: BRIDGE_PROTOCOL_VERSION,
+                host_id: "normal".to_string(),
+                reason: SyncRequestReason::Connect,
+            }))
+            .await
+            .expect("queue normal message");
+        inventory_tx
+            .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+                protocol_version: BRIDGE_PROTOCOL_VERSION,
+                host_id: "inventory".to_string(),
+                reason: SyncRequestReason::Reconnect,
+            }))
+            .await
+            .expect("queue inventory message");
+        urgent_tx
+            .send(BridgeMessageV6::SyncRequest(SyncRequestV6 {
+                protocol_version: BRIDGE_PROTOCOL_VERSION,
+                host_id: "terminal".to_string(),
+                reason: SyncRequestReason::Reconnect,
+            }))
+            .await
+            .expect("queue urgent terminal message");
+
+        let next = timeout(
+            Duration::from_millis(INVENTORY_DELIVERY_TARGET_MS),
+            next_outbound_message(&mut urgent_rx, &mut inventory_rx, &mut normal_rx),
+        )
+        .await
+        .expect("priority dequeue stays inside terminal budget")
+        .expect("queued message");
+
+        assert_eq!(bridge_message_host_id(&next), "terminal");
+    }
+
+    #[tokio::test]
     async fn outbound_writer_prioritizes_inventory_reports() {
+        let (_urgent_tx, mut urgent_rx) = mpsc::channel(1);
         let (inventory_tx, mut inventory_rx) = mpsc::channel(1);
         let (normal_tx, mut normal_rx) = mpsc::channel(1);
         normal_tx
@@ -2010,7 +2153,7 @@ mod tests {
 
         let next = timeout(
             Duration::from_millis(INVENTORY_DELIVERY_TARGET_MS),
-            next_outbound_message(&mut inventory_rx, &mut normal_rx),
+            next_outbound_message(&mut urgent_rx, &mut inventory_rx, &mut normal_rx),
         )
         .await
         .expect("priority dequeue stays inside inventory budget")
@@ -2024,6 +2167,16 @@ mod tests {
         let worst_case_ms = INVENTORY_REPORT_JAILER_BUDGET_MS
             .saturating_add(OUTBOUND_SEND_BUDGET_MS)
             .saturating_add(OUTBOUND_SEND_BUDGET_MS);
+        assert!(worst_case_ms < INVENTORY_DELIVERY_TARGET_MS);
+    }
+
+    #[test]
+    fn bounded_urgent_path_fits_delivery_target() {
+        // Eight VM creates may finalize together. Include one send already in
+        // flight plus the entire bounded urgent FIFO; a blocked ninth enqueue
+        // cannot extend the last admitted transition past this bound.
+        let worst_case_ms = OUTBOUND_SEND_BUDGET_MS
+            .saturating_mul((URGENT_OUTBOUND_CAPACITY as u64).saturating_add(1));
         assert!(worst_case_ms < INVENTORY_DELIVERY_TARGET_MS);
     }
 

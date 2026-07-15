@@ -4,6 +4,7 @@ import {
   BOOT_BENCHMARK_MEASUREMENT_BOUNDARY,
   BOOT_BENCHMARK_VARIANTS,
   bootArtifactFingerprint,
+  buildSealProjectionEvidence,
   compareBootBenchmarkResults,
   durationDistribution,
   evaluatePromotionGate,
@@ -31,7 +32,9 @@ import {
   browserBenchmarkRequestHeaders,
   configureBrowserBenchmarkContext,
   hasBootBenchmarkReadyVm,
+  hasBootBenchmarkTerminalProjectionReady,
   isSameOriginApiRequest,
+  observeBootBenchmarkReadinessPoll,
   parseBrowserCookies,
   parseBootBenchmarkOptions,
 } from "../../scripts/boot-benchmark";
@@ -152,6 +155,7 @@ describe("boot benchmark statistics", () => {
     measured[0]!.host_boot_evidence = null;
     measured[0]!.seal_projection_ready_ms = null;
     measured[0]!.seal_projection_ui_ready_ms = null;
+    measured[0]!.seal_projection_evidence = null;
     const summary = summarizeBootSamples({ warmups, measured });
     const gate = evaluatePromotionGate({
       warmups,
@@ -170,6 +174,9 @@ describe("boot benchmark statistics", () => {
     );
     expect(gate.reasons).toContain(
       "seal/projection/UI-ready evidence covered 29 measured boot(s), expected 30",
+    );
+    expect(gate.reasons).toContain(
+      "1 successful boot(s) lacked complete generation-fenced causal seal/projection/UI evidence",
     );
 
     const completeMeasured = Array.from({ length: 30 }, (_, index) =>
@@ -215,13 +222,131 @@ describe("boot benchmark statistics", () => {
         cpuPolicy: BOOT_BENCHMARK_CPU_POLICIES["fully-optimized-current-path"],
       }).reasons,
     ).toContain("seal/projection/UI-ready p95 501ms exceeds 500ms");
-    expect(sealProjectionReadyDurationMs(bootEvidence(), 5_000)).toBe(300);
-    expect(sealProjectionUiReadyDurationMs(bootEvidence(), 5_100)).toBe(400);
-    expect(sealProjectionUiReadyDurationMs(bootEvidence(), 4_699)).toBeNull();
+    const phaseEvidence = buildSealProjectionEvidence({
+      bootEvidence: bootEvidence(),
+      generation: "generation-1",
+      terminalReportReadyMs: 5_000,
+      uiTerminalReadyMs: 5_100,
+      previousTerminalProjectionNonReadyPollRequestStartedMs: 4_750,
+      previousTerminalProjectionNonReadyPollResponseObservedMs: 4_800,
+      firstTerminalProjectionReadyPollRequestStartedMs: 4_900,
+      firstTerminalProjectionReadyPollResponseObservedMs: 5_000,
+      evidenceReadyPollRequestStartedMs: 4_900,
+      pollMs: 100,
+      workerDesiredDispatchAtUnixMs: 1_000,
+      workerDesiredDispatchVersion: 7,
+      workerTerminalReportReceivedAtUnixMs: 5_750,
+      workerTerminalProjectionAckAtUnixMs: 5_760,
+      workerTerminalReceiptToProjectionAckMs: 10.25,
+      workerTerminalProjectionGeneration: "generation-1",
+      workerTerminalDesiredVersion: 7,
+    });
+    expect(phaseEvidence).toMatchObject({
+      worker_dispatch_to_report_receipt_ms: 4_750,
+      host_pre_seal_ms: 4_700,
+      causal_seal_to_report_receipt_upper_bound_ms: 50,
+      runner_previous_terminal_projection_nonready_to_ui_ms: 350,
+    });
+    expect(sealProjectionReadyDurationMs(phaseEvidence)).toBe(60.25);
+    expect(sealProjectionUiReadyDurationMs(phaseEvidence)).toBe(410.25);
+    expect(
+      buildSealProjectionEvidence({
+        bootEvidence: bootEvidence(),
+        generation: "generation-1",
+        terminalReportReadyMs: 5_000,
+        uiTerminalReadyMs: 4_749,
+        previousTerminalProjectionNonReadyPollRequestStartedMs: 4_750,
+        previousTerminalProjectionNonReadyPollResponseObservedMs: 4_800,
+        firstTerminalProjectionReadyPollRequestStartedMs: 4_900,
+        firstTerminalProjectionReadyPollResponseObservedMs: 5_000,
+        evidenceReadyPollRequestStartedMs: 4_900,
+        pollMs: 100,
+        workerDesiredDispatchAtUnixMs: 1_000,
+        workerDesiredDispatchVersion: 7,
+        workerTerminalReportReceivedAtUnixMs: 5_750,
+        workerTerminalProjectionAckAtUnixMs: 5_760,
+        workerTerminalReceiptToProjectionAckMs: 10,
+        workerTerminalProjectionGeneration: "generation-1",
+        workerTerminalDesiredVersion: 7,
+      }),
+    ).toBeNull();
 
     const invalidEvidence = bootEvidence();
     invalidEvidence.phases.total_ms = 299;
-    expect(sealProjectionUiReadyDurationMs(invalidEvidence, 5_100)).toBeNull();
+    expect(
+      buildSealProjectionEvidence({
+        bootEvidence: invalidEvidence,
+        generation: "generation-1",
+        terminalReportReadyMs: 5_000,
+        uiTerminalReadyMs: 5_100,
+        previousTerminalProjectionNonReadyPollRequestStartedMs: 4_750,
+        previousTerminalProjectionNonReadyPollResponseObservedMs: 4_800,
+        firstTerminalProjectionReadyPollRequestStartedMs: 4_900,
+        firstTerminalProjectionReadyPollResponseObservedMs: 5_000,
+        evidenceReadyPollRequestStartedMs: 4_900,
+        pollMs: 100,
+        workerDesiredDispatchAtUnixMs: 1_000,
+        workerDesiredDispatchVersion: 7,
+        workerTerminalReportReceivedAtUnixMs: 5_750,
+        workerTerminalProjectionAckAtUnixMs: 5_760,
+        workerTerminalReceiptToProjectionAckMs: 10,
+        workerTerminalProjectionGeneration: "generation-1",
+        workerTerminalDesiredVersion: 7,
+      }),
+    ).toBeNull();
+  });
+
+  it("covers dispatch, publish transit, D1 acknowledgement, polling, and UI", () => {
+    const observed = bootEvidence();
+    observed.phases.total_ms = 2_471;
+    observed.phases.seal_ssh_publish_ms = 54;
+    const observedDispatchMs = 664;
+    const publishToWorkerTransitMs = 20;
+    const evidence = buildSealProjectionEvidence({
+      bootEvidence: observed,
+      generation: "generation-1",
+      terminalReportReadyMs: 3_486,
+      uiTerminalReadyMs: 4_008,
+      previousTerminalProjectionNonReadyPollRequestStartedMs: 3_400,
+      previousTerminalProjectionNonReadyPollResponseObservedMs: 3_450,
+      firstTerminalProjectionReadyPollRequestStartedMs: 3_480,
+      firstTerminalProjectionReadyPollResponseObservedMs: 3_486,
+      evidenceReadyPollRequestStartedMs: 3_480,
+      pollMs: 100,
+      workerDesiredDispatchAtUnixMs: 5_000,
+      workerDesiredDispatchVersion: 9,
+      workerTerminalReportReceivedAtUnixMs: 8_155,
+      workerTerminalProjectionAckAtUnixMs: 8_172,
+      workerTerminalReceiptToProjectionAckMs: 17,
+      workerTerminalProjectionGeneration: "generation-1",
+      workerTerminalDesiredVersion: 9,
+    });
+
+    expect(evidence).toMatchObject({
+      method: "complete_causal_upper_bound_v2",
+      desired_version: 9,
+      worker_terminal_projection_generation: "generation-1",
+      worker_terminal_desired_version: 9,
+      worker_dispatch_to_report_receipt_ms: 3_155,
+      host_pre_seal_ms: 2_417,
+      causal_seal_to_report_receipt_upper_bound_ms: 738,
+      worker_receipt_to_projection_ack_ms: 17,
+      runner_previous_terminal_projection_nonready_to_ui_ms: 608,
+      poll_observation: {
+        previous_terminal_projection_nonready_request_started_ms: 3_400,
+        previous_terminal_projection_nonready_response_observed_ms: 3_450,
+        first_terminal_projection_ready_request_started_ms: 3_480,
+        first_terminal_projection_ready_response_observed_ms: 3_486,
+        evidence_ready_request_started_ms: 3_480,
+        evidence_ready_response_observed_ms: 3_486,
+        configured_cadence_ms: 100,
+      },
+    });
+    expect(evidence!.causal_seal_to_report_receipt_upper_bound_ms).toBe(
+      observedDispatchMs + 54 + publishToWorkerTransitMs,
+    );
+    expect(sealProjectionReadyDurationMs(evidence)).toBe(755);
+    expect(sealProjectionUiReadyDurationMs(evidence)).toBe(1_363);
   });
 });
 
@@ -750,6 +875,61 @@ describe("boot benchmark result schema", () => {
     expect(() => parseBootBenchmarkResult(stale, "stale")).toThrow(
       "ui_terminal_ready_ms",
     );
+
+    const missingComponents = structuredClone(result) as unknown as {
+      measured: Array<Record<string, unknown>>;
+    };
+    delete missingComponents.measured[0]!.seal_projection_evidence;
+    expect(() =>
+      parseBootBenchmarkResult(missingComponents, "missing-components"),
+    ).toThrow("seal_projection_evidence");
+
+    const staleGeneration = structuredClone(result);
+    const staleGenerationSample = staleGeneration
+      .measured[0] as PassedBootSampleV1;
+    staleGenerationSample.seal_projection_evidence!.worker_terminal_projection_generation =
+      "stale-generation";
+    expect(() =>
+      parseBootBenchmarkResult(staleGeneration, "stale-generation"),
+    ).toThrow("seal_projection_evidence");
+
+    const forgedComponent = structuredClone(result);
+    const forgedComponentSample = forgedComponent
+      .measured[0] as PassedBootSampleV1;
+    forgedComponentSample.seal_projection_evidence!.runner_previous_terminal_projection_nonready_to_ui_ms =
+      99;
+    expect(() =>
+      parseBootBenchmarkResult(forgedComponent, "forged-component"),
+    ).toThrow("seal_projection_evidence");
+
+    const impossibleCausalInterval = structuredClone(result);
+    const impossibleCausalSample = impossibleCausalInterval
+      .measured[0] as PassedBootSampleV1;
+    impossibleCausalSample.seal_projection_evidence!.worker_terminal_report_received_at_unix_ms = 5_600;
+    impossibleCausalSample.seal_projection_evidence!.worker_dispatch_to_report_receipt_ms = 4_600;
+    impossibleCausalSample.seal_projection_evidence!.causal_seal_to_report_receipt_upper_bound_ms =
+      -100;
+    expect(() =>
+      parseBootBenchmarkResult(
+        impossibleCausalInterval,
+        "impossible-causal-interval",
+      ),
+    ).toThrow("seal_projection_evidence");
+
+    const forgedWorkerDuration = structuredClone(result);
+    const forgedWorkerDurationSample = forgedWorkerDuration
+      .measured[0] as PassedBootSampleV1;
+    forgedWorkerDurationSample.seal_projection_evidence!.worker_receipt_to_projection_ack_ms = 21;
+    expect(() =>
+      parseBootBenchmarkResult(forgedWorkerDuration, "forged-worker-duration"),
+    ).toThrow("complete causal seal/projection/UI bounds");
+
+    const forgedScore = structuredClone(result);
+    const forgedScoreSample = forgedScore.measured[0] as PassedBootSampleV1;
+    forgedScoreSample.seal_projection_ui_ready_ms = 411;
+    expect(() => parseBootBenchmarkResult(forgedScore, "forged-score")).toThrow(
+      "complete causal seal/projection/UI bounds",
+    );
   });
 
   it("rejects noncanonical hashes and the wrong browser contract", () => {
@@ -1002,6 +1182,123 @@ describe("boot benchmark readiness and isolation", () => {
     expect(hasBootBenchmarkReadyVm(readyScenarioRun(""), 1_000)).toBe(false);
   });
 
+  it("keeps the terminal-projection-nonready anchor across the two-CAS window", () => {
+    const timingPending = readyScenarioRun("generation-1");
+    delete timingPending.vms[0]!.workerTerminalProjectionAckAt;
+    delete timingPending.vms[0]!.workerTerminalReceiptToProjectionAckMs;
+    expect(
+      hasBootBenchmarkTerminalProjectionReady(timingPending, 1_000),
+    ).toBe(true);
+    expect(hasBootBenchmarkReadyVm(timingPending, 1_000)).toBe(false);
+
+    let pollState = observeBootBenchmarkReadinessPoll(
+      {
+        previousTerminalProjectionNonReadyPollRequestStartedMs: null,
+        previousTerminalProjectionNonReadyPollResponseObservedMs: null,
+        firstTerminalProjectionReadyPollRequestStartedMs: null,
+        firstTerminalProjectionReadyPollResponseObservedMs: null,
+      },
+      {
+        terminalProjectionReady: false,
+        requestStartedMs: 100,
+        responseObservedMs: 110,
+      },
+    );
+    pollState = observeBootBenchmarkReadinessPoll(pollState, {
+      terminalProjectionReady: true,
+      requestStartedMs: 200,
+      responseObservedMs: 210,
+    });
+    pollState = observeBootBenchmarkReadinessPoll(pollState, {
+      terminalProjectionReady: true,
+      requestStartedMs: 300,
+      responseObservedMs: 310,
+    });
+    expect(pollState).toEqual({
+      previousTerminalProjectionNonReadyPollRequestStartedMs: 100,
+      previousTerminalProjectionNonReadyPollResponseObservedMs: 110,
+      firstTerminalProjectionReadyPollRequestStartedMs: 200,
+      firstTerminalProjectionReadyPollResponseObservedMs: 210,
+    });
+
+    const evidence = buildSealProjectionEvidence({
+      bootEvidence: bootEvidence(),
+      generation: "generation-1",
+      terminalReportReadyMs: 310,
+      uiTerminalReadyMs: 400,
+      ...pollState,
+      evidenceReadyPollRequestStartedMs: 300,
+      pollMs: 100,
+      workerDesiredDispatchAtUnixMs: 1_000,
+      workerDesiredDispatchVersion: 7,
+      workerTerminalReportReceivedAtUnixMs: 5_750,
+      workerTerminalProjectionAckAtUnixMs: 5_760,
+      workerTerminalReceiptToProjectionAckMs: 10,
+      workerTerminalProjectionGeneration: "generation-1",
+      workerTerminalDesiredVersion: 7,
+    });
+    expect(
+      evidence?.runner_previous_terminal_projection_nonready_to_ui_ms,
+    ).toBe(300);
+    expect(
+      evidence?.poll_observation
+        .first_terminal_projection_ready_request_started_ms,
+    ).toBe(200);
+  });
+
+  it("fails closed for missing anchors, stale timing evidence, and projection regression", () => {
+    const staleTiming = readyScenarioRun("generation-1");
+    staleTiming.vms[0]!.workerTerminalProjectionGeneration =
+      "stale-generation";
+    expect(
+      hasBootBenchmarkTerminalProjectionReady(staleTiming, 1_000),
+    ).toBe(true);
+    expect(hasBootBenchmarkReadyVm(staleTiming, 1_000)).toBe(false);
+
+    expect(
+      buildSealProjectionEvidence({
+        bootEvidence: bootEvidence(),
+        generation: "generation-1",
+        terminalReportReadyMs: 310,
+        uiTerminalReadyMs: 400,
+        previousTerminalProjectionNonReadyPollRequestStartedMs: null,
+        previousTerminalProjectionNonReadyPollResponseObservedMs: null,
+        firstTerminalProjectionReadyPollRequestStartedMs: 200,
+        firstTerminalProjectionReadyPollResponseObservedMs: 210,
+        evidenceReadyPollRequestStartedMs: 300,
+        pollMs: 100,
+        workerDesiredDispatchAtUnixMs: 1_000,
+        workerDesiredDispatchVersion: 7,
+        workerTerminalReportReceivedAtUnixMs: 5_750,
+        workerTerminalProjectionAckAtUnixMs: 5_760,
+        workerTerminalReceiptToProjectionAckMs: 10,
+        workerTerminalProjectionGeneration: "generation-1",
+        workerTerminalDesiredVersion: 7,
+      }),
+    ).toBeNull();
+
+    const observedReady = observeBootBenchmarkReadinessPoll(
+      {
+        previousTerminalProjectionNonReadyPollRequestStartedMs: 100,
+        previousTerminalProjectionNonReadyPollResponseObservedMs: 110,
+        firstTerminalProjectionReadyPollRequestStartedMs: null,
+        firstTerminalProjectionReadyPollResponseObservedMs: null,
+      },
+      {
+        terminalProjectionReady: true,
+        requestStartedMs: 200,
+        responseObservedMs: 210,
+      },
+    );
+    expect(() =>
+      observeBootBenchmarkReadinessPoll(observedReady, {
+        terminalProjectionReady: false,
+        requestStartedMs: 300,
+        responseObservedMs: 310,
+      }),
+    ).toThrow("terminal projection regressed");
+  });
+
   it("rejects attributed and unattributed foreign VMs", () => {
     expect(() =>
       assertNoForeignHostActualVms(
@@ -1056,8 +1353,32 @@ function passedSample(
     ui_terminal_ready_ms: 5_100,
     terminal_websocket_ready_ms: 5_150,
     usable_terminal_ms: usableTerminalMs,
-    seal_projection_ready_ms: 300,
-    seal_projection_ui_ready_ms: 400,
+    seal_projection_ready_ms: 60,
+    seal_projection_ui_ready_ms: 410,
+    seal_projection_evidence: {
+      method: "complete_causal_upper_bound_v2",
+      generation: "generation-1",
+      desired_version: 7,
+      worker_terminal_projection_generation: "generation-1",
+      worker_terminal_desired_version: 7,
+      worker_desired_dispatch_at_unix_ms: 1_000,
+      worker_terminal_report_received_at_unix_ms: 5_750,
+      worker_dispatch_to_report_receipt_ms: 4_750,
+      host_pre_seal_ms: 4_700,
+      causal_seal_to_report_receipt_upper_bound_ms: 50,
+      worker_terminal_projection_ack_at_unix_ms: 5_760,
+      worker_receipt_to_projection_ack_ms: 10,
+      runner_previous_terminal_projection_nonready_to_ui_ms: 350,
+      poll_observation: {
+        previous_terminal_projection_nonready_request_started_ms: 4_750,
+        previous_terminal_projection_nonready_response_observed_ms: 4_800,
+        first_terminal_projection_ready_request_started_ms: 4_900,
+        first_terminal_projection_ready_response_observed_ms: 5_000,
+        evidence_ready_request_started_ms: 4_900,
+        evidence_ready_response_observed_ms: 5_000,
+        configured_cadence_ms: 100,
+      },
+    },
     phase_evidence: {
       run_created_at_unix_ms: 101,
       vm_created_at_unix_ms: 201,
@@ -1277,11 +1598,34 @@ function historicalBenchmarkResult(
   variant: HistoricalBootBenchmarkVariant,
 ): HistoricalBootBenchmarkResultV1 {
   const current = benchmarkResult("fully-optimized-current-path");
-  const withoutLeaseEvidence = (samples: BootSampleV1[]): BootSampleV1[] =>
+  const withoutLeaseEvidence = (
+    samples: BootSampleV1[],
+  ): HistoricalBootBenchmarkResultV1["warmups"] =>
     samples.map((sample) => {
       if (sample.status === "failed") return sample;
-      const { isolation_evidence: _isolationEvidence, ...historical } = sample;
-      return historical;
+      const {
+        isolation_evidence: _isolationEvidence,
+        seal_projection_evidence: _sealProjectionEvidence,
+        ...historical
+      } = sample;
+      const hostBootEvidence = sample.host_boot_evidence;
+      if (!hostBootEvidence) {
+        return {
+          ...historical,
+          seal_projection_ready_ms: null,
+          seal_projection_ui_ready_ms: null,
+        };
+      }
+      const bootStartToSealStartMs =
+        hostBootEvidence.phases.total_ms -
+        hostBootEvidence.phases.seal_ssh_publish_ms;
+      return {
+        ...historical,
+        seal_projection_ready_ms:
+          sample.terminal_report_ready_ms - bootStartToSealStartMs,
+        seal_projection_ui_ready_ms:
+          sample.ui_terminal_ready_ms - bootStartToSealStartMs,
+      };
     });
   const warmups = withoutLeaseEvidence(current.warmups);
   const measured = withoutLeaseEvidence(current.measured);
@@ -1360,6 +1704,13 @@ function readyScenarioRun(generation: string): ScenarioRunRecord {
         terminalObservedAt: 8,
         vmCreatedAt: 2,
         runtimeObservedAt: 8,
+        workerDesiredDispatchAt: 1,
+        workerDesiredDispatchVersion: 7,
+        workerTerminalReportReceivedAt: 8,
+        workerTerminalProjectionAckAt: 9,
+        workerTerminalReceiptToProjectionAckMs: 1,
+        workerTerminalProjectionGeneration: generation,
+        workerTerminalDesiredVersion: 7,
         terminalTarget: {
           host: "127.0.0.1",
           port: 22,

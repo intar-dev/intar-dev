@@ -199,60 +199,99 @@ export async function requireBootBenchmarkUserContext(
   if (!route) return unauthorizedResponse();
 
   const db = drizzle(bindings.DB);
-  const users = await db
-    .select({
-      id: user.id,
-      role: user.role,
-      banned: user.banned,
-    })
-    .from(user)
-    .innerJoin(
-      accessAllowlist,
-      eq(accessAllowlist.githubUsername, user.username),
-    )
-    .where(eq(user.id, config.userId))
-    .limit(1);
-  const operator = users[0];
+  let operator: {
+    id: string;
+    role: string | null;
+    banned: boolean | null;
+  } | null = null;
+  let inWindowRunCount = 0;
+
+  if (route.kind === "run") {
+    const rows = await db
+      .select({
+        id: user.id,
+        role: user.role,
+        banned: user.banned,
+      })
+      .from(user)
+      .innerJoin(
+        accessAllowlist,
+        eq(accessAllowlist.githubUsername, user.username),
+      )
+      .innerJoin(
+        scenarioRuns,
+        and(
+          eq(scenarioRuns.runId, route.runId),
+          eq(scenarioRuns.userId, user.id),
+          eq(scenarioRuns.hostId, config.hostId),
+          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
+          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
+          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
+        ),
+      )
+      .where(eq(user.id, config.userId))
+      .limit(1);
+    operator = rows[0] ?? null;
+  } else if (route.kind === "start") {
+    // A left join preserves the operator row when the credential has not
+    // started a run yet. Limiting to 35 matching rows is sufficient to decide
+    // admission and avoids a second count query or an unbounded result set.
+    const rows = await db
+      .select({
+        id: user.id,
+        role: user.role,
+        banned: user.banned,
+        runId: scenarioRuns.runId,
+      })
+      .from(user)
+      .innerJoin(
+        accessAllowlist,
+        eq(accessAllowlist.githubUsername, user.username),
+      )
+      .leftJoin(
+        scenarioRuns,
+        and(
+          eq(scenarioRuns.userId, user.id),
+          eq(scenarioRuns.hostId, config.hostId),
+          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
+          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
+          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
+        ),
+      )
+      .where(eq(user.id, config.userId))
+      .limit(MAX_BOOT_BENCHMARK_RUNS);
+    const first = rows[0];
+    operator = first
+      ? { id: first.id, role: first.role, banned: first.banned }
+      : null;
+    inWindowRunCount = rows.reduce(
+      (total, row) => total + (row.runId === null ? 0 : 1),
+      0,
+    );
+  } else {
+    const rows = await db
+      .select({
+        id: user.id,
+        role: user.role,
+        banned: user.banned,
+      })
+      .from(user)
+      .innerJoin(
+        accessAllowlist,
+        eq(accessAllowlist.githubUsername, user.username),
+      )
+      .where(eq(user.id, config.userId))
+      .limit(1);
+    operator = rows[0] ?? null;
+  }
+
   const role = getUserRole(operator);
   if (!operator || Boolean(operator.banned) || !isAdminRole(role)) {
     return unauthorizedResponse();
   }
 
-  if (route.kind === "run") {
-    const runs = await db
-      .select({ runId: scenarioRuns.runId })
-      .from(scenarioRuns)
-      .where(
-        and(
-          eq(scenarioRuns.runId, route.runId),
-          eq(scenarioRuns.userId, config.userId),
-          eq(scenarioRuns.hostId, config.hostId),
-          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
-          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
-          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
-        ),
-      )
-      .limit(1);
-    if (runs.length !== 1) return unauthorizedResponse();
-  }
-
-  if (route.kind === "start") {
-    const runs = await db
-      .select({ runId: scenarioRuns.runId })
-      .from(scenarioRuns)
-      .where(
-        and(
-          eq(scenarioRuns.userId, config.userId),
-          eq(scenarioRuns.hostId, config.hostId),
-          eq(scenarioRuns.scenarioId, BOOT_BENCHMARK_SCENARIO_ID),
-          gte(scenarioRuns.createdAt, config.notBeforeUnixMs),
-          lt(scenarioRuns.createdAt, config.expiresAtUnixMs),
-        ),
-      )
-      .limit(MAX_BOOT_BENCHMARK_RUNS);
-    if (runs.length >= MAX_BOOT_BENCHMARK_RUNS) {
-      return unauthorizedResponse();
-    }
+  if (route.kind === "start" && inWindowRunCount >= MAX_BOOT_BENCHMARK_RUNS) {
+    return unauthorizedResponse();
   }
 
   return {

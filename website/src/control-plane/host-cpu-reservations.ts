@@ -27,6 +27,13 @@ export interface HostCpuReservationCapacity {
   availableCpuMillis: number;
 }
 
+export interface HostCpuReservationCapacityRow {
+  runId: string;
+  cpuMillis: number;
+  quotaPhase: "boot" | "steady";
+  state: "pending" | "committed";
+}
+
 export type ReserveHostCpuResult =
   | {
       ok: true;
@@ -804,11 +811,6 @@ export async function loadHostCpuReservationCapacity(
     .from(hostActualState)
     .where(eq(hostActualState.hostId, hostId))
     .limit(1);
-  const reported = strictCpuCapacity(actual?.reportJson);
-  if (!reported) {
-    return null;
-  }
-
   const reservations = await db
     .select({
       runId: hostCpuReservations.runId,
@@ -818,6 +820,20 @@ export async function loadHostCpuReservationCapacity(
     })
     .from(hostCpuReservations)
     .where(eq(hostCpuReservations.hostId, hostId));
+  return hostCpuReservationCapacityFromSnapshot(
+    actual?.reportJson,
+    reservations,
+  );
+}
+
+export function hostCpuReservationCapacityFromSnapshot(
+  report: unknown,
+  reservations: readonly HostCpuReservationCapacityRow[],
+): HostCpuReservationCapacity | null {
+  const reported = strictCpuCapacity(report);
+  if (!reported) {
+    return null;
+  }
   const controlPlanePendingCpuMillis = sumCpuMillis(
     reservations.filter((reservation) => reservation.state === "pending"),
   );
@@ -834,7 +850,7 @@ export async function loadHostCpuReservationCapacity(
     reservations.map((reservation) => reservation.runId),
   );
   const reportedCpuByReservedRun = reportedCpuMillisByRun(
-    actual?.reportJson,
+    report,
     reservedRunIds,
   );
   const reportedReservedCpuMillis = [
@@ -967,7 +983,7 @@ export function strictCpuCapacity(
   return { schedulableCpuMillis, reportedCommittedCpuMillis };
 }
 
-function sumCpuMillis(rows: Array<{ cpuMillis: number }>): number {
+function sumCpuMillis(rows: readonly { cpuMillis: number }[]): number {
   return rows.reduce((sum, row) => sum + row.cpuMillis, 0);
 }
 

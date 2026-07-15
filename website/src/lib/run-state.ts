@@ -141,6 +141,17 @@ export interface RunVmStateDocument {
   launchSummary: ScenarioLaunchSummary;
   runtimeState: string | null;
   runtimeObservedAt: number | null;
+  /// Worker timestamp captured immediately before the first successful bridge
+  /// dispatch of this desired-state version. Optional for older stored runs.
+  workerDesiredDispatchAt?: number | null;
+  workerDesiredDispatchVersion?: number | null;
+  /// Worker receipt and post-D1-CAS acknowledgement evidence for the accepted
+  /// terminal-ready report. The duration uses one Worker monotonic clock.
+  workerTerminalReportReceivedAt?: number | null;
+  workerTerminalProjectionAckAt?: number | null;
+  workerTerminalReceiptToProjectionAckMs?: number | null;
+  workerTerminalProjectionGeneration?: string | null;
+  workerTerminalDesiredVersion?: number | null;
   vmCreatedAt: number | null;
   provisioning: RunVmProvisioningSpec;
 }

@@ -20,6 +20,7 @@ import {
   PROMOTION_WARMUP_COUNT,
   bootArtifactFingerprint,
   bootArtifactIdentity,
+  buildSealProjectionEvidence,
   evaluatePromotionGate,
   hasExactBootCpuSamples,
   hasExactSteadyResourceState,
@@ -1215,11 +1216,8 @@ async function measureBoot(input: {
       input.options,
       input.manifest.vms[0]!,
       measurementAbort.signal,
-    ).then((run) => ({
-      run,
-      projectionObservedAtUnixMs: Date.now(),
-      terminalReportReadyMs: elapsedMs(startedAt),
-    }));
+      startedAt,
+    );
     const [readyObservation, browserTerminal] = await Promise.all([
       withIsolationGuard(readyObservationPromise, isolationMonitor),
       withIsolationGuard(browserStart.terminal, isolationMonitor),
@@ -1228,6 +1226,11 @@ async function measureBoot(input: {
       run: ready,
       projectionObservedAtUnixMs,
       terminalReportReadyMs,
+      evidenceReadyPollRequestStartedMs,
+      previousTerminalProjectionNonReadyPollRequestStartedMs,
+      previousTerminalProjectionNonReadyPollResponseObservedMs,
+      firstTerminalProjectionReadyPollRequestStartedMs,
+      firstTerminalProjectionReadyPollResponseObservedMs,
     } = readyObservation;
     const vm = ready.vms[0]!;
     const hostActualVms = await withIsolationGuard(
@@ -1254,6 +1257,26 @@ async function measureBoot(input: {
     );
     const { bootEvidence, ...runtimeCpuEvidence } = cpuEvidence;
     const constraints = vm.runtimeConstraints!;
+    const sealProjectionEvidence = buildSealProjectionEvidence({
+      bootEvidence,
+      generation: constraints.generation,
+      terminalReportReadyMs,
+      uiTerminalReadyMs: browserTerminal.uiTerminalReadyMs,
+      evidenceReadyPollRequestStartedMs,
+      previousTerminalProjectionNonReadyPollRequestStartedMs,
+      previousTerminalProjectionNonReadyPollResponseObservedMs,
+      firstTerminalProjectionReadyPollRequestStartedMs,
+      firstTerminalProjectionReadyPollResponseObservedMs,
+      pollMs: input.options.pollMs,
+      workerDesiredDispatchAtUnixMs: vm.workerDesiredDispatchAt,
+      workerDesiredDispatchVersion: vm.workerDesiredDispatchVersion,
+      workerTerminalReportReceivedAtUnixMs: vm.workerTerminalReportReceivedAt,
+      workerTerminalProjectionAckAtUnixMs: vm.workerTerminalProjectionAckAt,
+      workerTerminalReceiptToProjectionAckMs:
+        vm.workerTerminalReceiptToProjectionAckMs,
+      workerTerminalProjectionGeneration: vm.workerTerminalProjectionGeneration,
+      workerTerminalDesiredVersion: vm.workerTerminalDesiredVersion,
+    });
     const phaseEvidence = buildPhaseEvidence({
       run: ready,
       vm,
@@ -1276,13 +1299,12 @@ async function measureBoot(input: {
       terminal_websocket_ready_ms: browserTerminal.terminalWebsocketReadyMs,
       usable_terminal_ms: browserTerminal.usableTerminalMs,
       seal_projection_ready_ms: sealProjectionReadyDurationMs(
-        bootEvidence,
-        terminalReportReadyMs,
+        sealProjectionEvidence,
       ),
       seal_projection_ui_ready_ms: sealProjectionUiReadyDurationMs(
-        bootEvidence,
-        browserTerminal.uiTerminalReadyMs,
+        sealProjectionEvidence,
       ),
+      seal_projection_evidence: sealProjectionEvidence,
       phase_evidence: phaseEvidence,
       runtime_evidence: {
         generation: constraints.generation,
@@ -1391,14 +1413,32 @@ async function waitForRunReady(
   options: BootBenchmarkOptions,
   expectedVm: ReturnType<typeof parseManifest>["vms"][number],
   signal: AbortSignal,
-): Promise<ScenarioRunRecord> {
+  measurementStartedAt: number,
+): Promise<{
+  run: ScenarioRunRecord;
+  projectionObservedAtUnixMs: number;
+  terminalReportReadyMs: number;
+  evidenceReadyPollRequestStartedMs: number;
+  previousTerminalProjectionNonReadyPollRequestStartedMs: number | null;
+  previousTerminalProjectionNonReadyPollResponseObservedMs: number | null;
+  firstTerminalProjectionReadyPollRequestStartedMs: number | null;
+  firstTerminalProjectionReadyPollResponseObservedMs: number | null;
+}> {
   const deadline = Date.now() + options.waitReadyMs;
   let lastDetail = "run not observed";
+  let pollState: BootBenchmarkReadinessPollState = {
+    previousTerminalProjectionNonReadyPollRequestStartedMs: null,
+    previousTerminalProjectionNonReadyPollResponseObservedMs: null,
+    firstTerminalProjectionReadyPollRequestStartedMs: null,
+    firstTerminalProjectionReadyPollResponseObservedMs: null,
+  };
   while (Date.now() <= deadline) {
+    const pollRequestStartedMs = elapsedMs(measurementStartedAt);
     const { run } = await client.json<RunResponse>(
       `/api/scenarios/runs/${encodeURIComponent(runId)}`,
       { signal },
     );
+    const responseObservedMs = elapsedMs(measurementStartedAt);
     if (run.phase === "failed") {
       throw new Error(
         `run failed before terminal readiness: ${run.phaseDetail}`,
@@ -1409,14 +1449,78 @@ async function waitForRunReady(
     }
     const vm = run.vms[0]!;
     const constraints = vm.runtimeConstraints;
-    if (hasBootBenchmarkReadyVm(run, expectedVm.cpu_millis)) return run;
+    const terminalProjectionReady =
+      hasBootBenchmarkTerminalProjectionReady(run, expectedVm.cpu_millis);
+    pollState = observeBootBenchmarkReadinessPoll(pollState, {
+      terminalProjectionReady,
+      requestStartedMs: pollRequestStartedMs,
+      responseObservedMs,
+    });
+    if (hasBootBenchmarkReadyVm(run, expectedVm.cpu_millis)) {
+      return {
+        run,
+        projectionObservedAtUnixMs: Date.now(),
+        terminalReportReadyMs: responseObservedMs,
+        evidenceReadyPollRequestStartedMs: pollRequestStartedMs,
+        ...pollState,
+      };
+    }
     lastDetail = `${run.phase}/${vm.phase}: terminal=${vm.terminalPhase} cpu=${constraints?.phase ?? "missing"}`;
     await abortableSleep(options.pollMs, signal);
   }
   throw new Error(`timed out waiting for terminal readiness: ${lastDetail}`);
 }
 
-export function hasBootBenchmarkReadyVm(
+export interface BootBenchmarkReadinessPollState {
+  previousTerminalProjectionNonReadyPollRequestStartedMs: number | null;
+  previousTerminalProjectionNonReadyPollResponseObservedMs: number | null;
+  firstTerminalProjectionReadyPollRequestStartedMs: number | null;
+  firstTerminalProjectionReadyPollResponseObservedMs: number | null;
+}
+
+export function observeBootBenchmarkReadinessPoll(
+  state: BootBenchmarkReadinessPollState,
+  observation: {
+    terminalProjectionReady: boolean;
+    requestStartedMs: number;
+    responseObservedMs: number;
+  },
+): BootBenchmarkReadinessPollState {
+  if (
+    !Number.isSafeInteger(observation.requestStartedMs) ||
+    observation.requestStartedMs < 0 ||
+    !Number.isSafeInteger(observation.responseObservedMs) ||
+    observation.responseObservedMs < observation.requestStartedMs
+  ) {
+    throw new Error("invalid boot benchmark readiness poll timing");
+  }
+  if (!observation.terminalProjectionReady) {
+    if (state.firstTerminalProjectionReadyPollRequestStartedMs !== null) {
+      throw new Error(
+        "terminal projection regressed after a ready observation; causal anchor is invalid",
+      );
+    }
+    return {
+      ...state,
+      previousTerminalProjectionNonReadyPollRequestStartedMs:
+        observation.requestStartedMs,
+      previousTerminalProjectionNonReadyPollResponseObservedMs:
+        observation.responseObservedMs,
+    };
+  }
+  if (state.firstTerminalProjectionReadyPollRequestStartedMs !== null) {
+    return state;
+  }
+  return {
+    ...state,
+    firstTerminalProjectionReadyPollRequestStartedMs:
+      observation.requestStartedMs,
+    firstTerminalProjectionReadyPollResponseObservedMs:
+      observation.responseObservedMs,
+  };
+}
+
+export function hasBootBenchmarkTerminalProjectionReady(
   run: ScenarioRunRecord,
   expectedCpuMillis: number,
 ): boolean {
@@ -1440,6 +1544,34 @@ export function hasBootBenchmarkReadyVm(
     constraints.effectiveCpuMillis === expectedCpuMillis &&
     typeof constraints.quotaVerifiedAt === "number" &&
     constraints.quotaVerifiedAt > 0,
+  );
+}
+
+export function hasBootBenchmarkReadyVm(
+  run: ScenarioRunRecord,
+  expectedCpuMillis: number,
+): boolean {
+  if (!hasBootBenchmarkTerminalProjectionReady(run, expectedCpuMillis)) {
+    return false;
+  }
+  const vm = run.vms[0]!;
+  const constraints = vm.runtimeConstraints!;
+  return Boolean(
+    Number.isSafeInteger(vm.workerDesiredDispatchAt) &&
+    vm.workerDesiredDispatchAt! >= 0 &&
+    Number.isSafeInteger(vm.workerDesiredDispatchVersion) &&
+    vm.workerDesiredDispatchVersion! >= 0 &&
+    Number.isSafeInteger(vm.workerTerminalReportReceivedAt) &&
+    vm.workerTerminalReportReceivedAt! >= 0 &&
+    Number.isSafeInteger(vm.workerTerminalProjectionAckAt) &&
+    vm.workerTerminalProjectionAckAt! >= 0 &&
+    typeof vm.workerTerminalReceiptToProjectionAckMs === "number" &&
+    Number.isFinite(vm.workerTerminalReceiptToProjectionAckMs) &&
+    vm.workerTerminalReceiptToProjectionAckMs >= 0 &&
+    vm.workerTerminalProjectionGeneration === constraints.generation &&
+    vm.workerTerminalDesiredVersion === vm.workerDesiredDispatchVersion &&
+    vm.workerDesiredDispatchAt! <= vm.workerTerminalReportReceivedAt! &&
+    vm.workerTerminalReportReceivedAt! <= vm.workerTerminalProjectionAckAt!,
   );
 }
 

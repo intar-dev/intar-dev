@@ -681,6 +681,10 @@ impl VmManager {
         self.inner.inventory_updates_tx.subscribe()
     }
 
+    pub fn request_inventory_update(&self) {
+        publish_inventory_update(&self.inner);
+    }
+
     /// Project terminal state from the generation-fenced inventory without a
     /// fresh guest TCP probe.
     ///
@@ -2181,7 +2185,10 @@ async fn commit_ready_vm_and_probe(
         .context("atomically persist running VM and Kino snapshot")?;
     *current = committed;
     drop(states);
-    publish_inventory_update(inner);
+    // Running remains internal until the generation-fenced terminal state is
+    // cached. Publishing from this intermediate commit would create an
+    // externally observable Ready/Pending snapshot and let its expensive
+    // inventory projection race ahead of the composite terminal-ready event.
     Ok(())
 }
 
@@ -2254,7 +2261,10 @@ async fn persist_cpu_runtime(
         .upsert_vm(persisted.to_db_row())
         .await
         .context("persist finalized VM CPU runtime")?;
-    publish_inventory_update(inner);
+    // The steady quota is durable for crash recovery, but remains private
+    // until SSH authentication and the atomic Running/Kino commit succeed.
+    // A later failure publishes through mark_vm_failed; a successful boot
+    // publishes one composite terminal-ready inventory revision.
     Ok(())
 }
 
@@ -5312,13 +5322,30 @@ async fn publish_terminal_state_update(inner: &Inner, vm_name: &str, force: bool
 }
 
 async fn emit_terminal_state_update(inner: &Inner, state: VmTerminalState, force: bool) {
+    emit_terminal_state_update_to_channels(
+        &inner.terminal_states,
+        &inner.terminal_state_fingerprints,
+        &inner.terminal_updates_tx,
+        state,
+        force,
+    )
+    .await;
+}
+
+async fn emit_terminal_state_update_to_channels(
+    terminal_states: &RwLock<BTreeMap<String, VmTerminalState>>,
+    terminal_state_fingerprints: &Mutex<BTreeMap<String, String>>,
+    terminal_updates: &broadcast::Sender<VmTerminalState>,
+    state: VmTerminalState,
+    force: bool,
+) {
     let fingerprint = state.fingerprint();
     {
-        let mut terminal_states = inner.terminal_states.write().await;
+        let mut terminal_states = terminal_states.write().await;
         terminal_states.insert(state.vm_name.clone(), state.clone());
     }
     let should_send = {
-        let mut fingerprints = inner.terminal_state_fingerprints.lock().await;
+        let mut fingerprints = terminal_state_fingerprints.lock().await;
         let changed = fingerprints
             .get(&state.vm_name)
             .map(|current| current != &fingerprint)
@@ -5332,8 +5359,10 @@ async fn emit_terminal_state_update(inner: &Inner, state: VmTerminalState, force
     };
 
     if should_send {
-        let _ = inner.terminal_updates_tx.send(state);
-        publish_inventory_update(inner);
+        // Cache first, then publish the targeted transition. The bridge wakes
+        // inventory only after this report has entered its priority queue, so
+        // the independent inventory builder cannot overtake it.
+        let _ = terminal_updates.send(state);
     }
 }
 
@@ -8059,6 +8088,74 @@ mod tests {
             .expect("a mutation after the observed snapshot must remain pending")
             .expect("inventory update channel stays open");
         assert_eq!(*receiver.borrow(), 3);
+    }
+
+    #[tokio::test]
+    async fn terminal_ready_cache_precedes_targeted_publication() {
+        let terminal_states = RwLock::new(BTreeMap::new());
+        let terminal_state_fingerprints = Mutex::new(BTreeMap::new());
+        let (terminal_updates, mut terminal_receiver) = broadcast::channel(4);
+        let state = VmTerminalState {
+            run_id: "run-1".to_string(),
+            vm_name: "vm-1".to_string(),
+            state: VmTerminalStateKind::Ready,
+            terminal_target: Some(VmTerminalTarget {
+                host: Some("bridge.example.test".to_string()),
+                port: 2_200,
+                username: "ubuntu".to_string(),
+                checked_at: 2_000,
+            }),
+            reason: None,
+            observed_at: 2_000,
+            runtime_constraints: Some(VmRuntimeConstraintsV1 {
+                generation: "generation-1".to_string(),
+                phase: VmRuntimeConstraintPhaseV1::Steady,
+                steady_cpu_millis: 1_000,
+                effective_cpu_millis: 1_000,
+                quota_verified_at_unix_ms: Some(1_999),
+                lease_expires_at_unix_ms: None,
+            }),
+        };
+
+        let observe_terminal = async {
+            let targeted = timeout(Duration::from_millis(250), terminal_receiver.recv())
+                .await
+                .expect("targeted terminal transition must be prompt")
+                .expect("terminal channel stays open");
+            let cached = terminal_states
+                .read()
+                .await
+                .get("vm-1")
+                .cloned()
+                .expect("ready state is cached before targeted publication");
+            (targeted, cached)
+        };
+        let ((), (targeted, cached)) = tokio::join!(
+            emit_terminal_state_update_to_channels(
+                &terminal_states,
+                &terminal_state_fingerprints,
+                &terminal_updates,
+                state.clone(),
+                false,
+            ),
+            observe_terminal,
+        );
+
+        assert_eq!(targeted, state);
+        assert_eq!(cached, state);
+
+        emit_terminal_state_update_to_channels(
+            &terminal_states,
+            &terminal_state_fingerprints,
+            &terminal_updates,
+            state,
+            false,
+        )
+        .await;
+        assert!(matches!(
+            terminal_receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

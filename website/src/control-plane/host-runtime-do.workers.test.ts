@@ -1,10 +1,10 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agentHosts,
   hostActualState,
@@ -18,6 +18,8 @@ import {
 } from "@/db/schema";
 import type {
   BridgeMessageV6,
+  DesiredVmV2,
+  HostDesiredStateV2,
   HostStateReportV2,
   VmActualStateV2,
   VmPhase,
@@ -171,6 +173,146 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("does not dispatch a desired VM until its first timing record is durable", async () => {
+    const hostId = "host-durable-dispatch-timing";
+    const runId = "run-durable-dispatch-timing";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const desired = await mutateStoredHostDesiredState(
+      db,
+      hostId,
+      now + 1,
+      (draft) => {
+        upsertDesiredVm(draft, desiredRunningVm(runId, "runtime-web", now));
+      },
+    );
+    await runInDurableObject(stub, async (instance, state) => {
+      vi.spyOn(state.storage, "put").mockRejectedValueOnce(
+        new Error("injected dispatch timing persistence failure"),
+      );
+      const send = vi.fn();
+      const socket = {
+        send,
+        serializeAttachment: vi.fn(),
+      } as unknown as WebSocket;
+      const runtime = instance as unknown as {
+        sendBridgeDesiredState: (
+          ws: WebSocket,
+          attachment: {
+            hostId: string;
+            sessionId: string;
+            connectedAt: number;
+            helloReceived: true;
+            bridgeProtocol: "v6";
+            lastDesiredVersionSent: number;
+            lastDesiredDispatchAtMs: number;
+          },
+          hostId: string,
+          state: HostDesiredStateV2,
+        ) => Promise<void>;
+      };
+      await expect(
+        runtime.sendBridgeDesiredState(
+          socket,
+          {
+            hostId,
+            sessionId: "v6:test-session",
+            connectedAt: now,
+            helloReceived: true,
+            bridgeProtocol: "v6",
+            lastDesiredVersionSent: 0,
+            lastDesiredDispatchAtMs: now,
+          },
+          hostId,
+          desired,
+        ),
+      ).rejects.toThrow("injected dispatch timing persistence failure");
+      expect(send).not.toHaveBeenCalled();
+    });
+    await sleep(50);
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    const retry = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+    });
+    expect(retry.status).toBe(202);
+    await expect(
+      waitForBridgeMessage(
+        messages,
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).resolves.toMatchObject({ type: "desired_state" });
+
+    await mutateStoredHostDesiredState(db, hostId, now + 2, (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "5".repeat(64),
+      });
+    });
+    const versionTwoWake = await stub.fetch(
+      "http://host-runtime/_internal/wake",
+      { method: "POST" },
+    );
+    expect(versionTwoWake.status).toBe(202);
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 2,
+    );
+    await runInDurableObject(stub, async (_instance, state) => {
+      await expect(
+        state.storage.get<{ desiredVersion: number }>(
+          `desired-dispatch:${encodeURIComponent(runId)}`,
+        ),
+      ).resolves.toMatchObject({ desiredVersion: 1 });
+    });
+
+    const laterVersionReady = vmReport(
+      hostId,
+      runId,
+      "runtime-web",
+      "ready",
+      now + 100,
+      22_001,
+      "10.77.0.2",
+    );
+    if (laterVersionReady.type !== "vm_report") {
+      throw new Error("expected VM report");
+    }
+    laterVersionReady.report.desired_version = 2;
+    sendBridge(ws, laterVersionReady);
+    const state = await waitForRunState(
+      db,
+      runId,
+      (candidate) => candidate.vms[0]?.runtimeObservedAt === now + 100,
+    );
+    expect(state.vms[0]?.terminalPhase).toBe("ready");
+    expect(state.vms[0]?.workerDesiredDispatchAt).toBeUndefined();
+    expect(state.vms[0]?.workerTerminalProjectionAckAt).toBeUndefined();
+    ws.close();
+  });
+
   it("never dispatches a desired version older than the socket has seen", async () => {
     const hostId = "host-monotonic-dispatch";
     await seedHost(hostId);
@@ -228,10 +370,12 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
-  it("keeps desired delivery on the lightweight VM-report path", async () => {
+  it("keeps VM-report projection free of desired reloads with a durable alarm fallback", async () => {
     const hostId = "host-vm-report-dispatch";
+    const runId = "run-vm-report-dispatch";
+    const observedAt = Date.now() + 10;
     await seedHost(hostId);
-    const { messages, ws } = await connectHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
     await waitForBridgeMessage(
       messages,
       (message) => message.type === "server_hello",
@@ -242,17 +386,14 @@ describe("HostRuntimeDO workers integration", () => {
         message.type === "desired_state" && message.desired_state.version === 0,
     );
 
-    await mutateStoredHostDesiredState(
-      drizzle(env.DB),
-      hostId,
-      Date.now(),
-      (draft) => {
-        upsertDesiredCachedImage(draft, {
-          image_key: testImageKey,
-          image_sha256: "1".repeat(64),
-        });
-      },
-    );
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now: Date.now() });
+    await mutateStoredHostDesiredState(db, hostId, Date.now(), (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "1".repeat(64),
+      });
+    });
     expect(
       messages.some(
         (message) =>
@@ -265,15 +406,30 @@ describe("HostRuntimeDO workers integration", () => {
       ws,
       vmReport(
         hostId,
-        "missing-run",
+        runId,
         "runtime-web",
         "booting",
-        Date.now(),
+        observedAt,
         22_001,
         "10.77.0.2",
       ),
     );
 
+    await waitForRunState(
+      db,
+      runId,
+      (state) => state.vms[0]?.runtimeObservedAt === observedAt,
+    );
+    await sleep(20);
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    await runNextScheduledAlarm(stub);
     await expect(
       waitForBridgeMessage(
         messages,
@@ -283,6 +439,668 @@ describe("HostRuntimeDO workers integration", () => {
       ),
     ).resolves.toMatchObject({ type: "desired_state" });
     ws.close();
+  });
+
+  it("projects a VM report before heartbeat maintenance and records Worker-local timing", async () => {
+    const hostId = "host-vm-report-order";
+    const runId = "run-vm-report-order";
+    const now = Date.now();
+    const observedAt = now + 100;
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    await seedHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
+      upsertDesiredVm(draft, desiredRunningVm(runId, "runtime-web", now));
+    });
+    const wake = await stub.fetch("http://host-runtime/_internal/wake", {
+      method: "POST",
+    });
+    expect(wake.status).toBe(202);
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 1,
+    );
+    const firstDispatchLatest = Date.now();
+    await sleep(20);
+    sendBridge(ws, {
+      type: "sync_request",
+      protocol_version: 6,
+      host_id: hostId,
+      reason: "operator_requested",
+    });
+    await expect(
+      waitForMessageCount(
+        messages,
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+        2,
+      ),
+    ).resolves.toBe(2);
+
+    await env.DB.prepare(
+      `CREATE TABLE vm_report_projection_order (
+        host_id TEXT NOT NULL,
+        runtime_observed_at INTEGER
+      )`,
+    ).run();
+    await env.DB.prepare(
+      `CREATE TRIGGER vm_report_projection_before_heartbeat
+       AFTER UPDATE OF last_heartbeat_at ON agent_hosts
+       WHEN NEW.id = '${hostId}'
+       BEGIN
+         INSERT INTO vm_report_projection_order (host_id, runtime_observed_at)
+         SELECT NEW.id, json_extract(state_json, '$.vms[0].runtimeObservedAt')
+         FROM scenario_runs
+         WHERE run_id = '${runId}';
+       END`,
+    ).run();
+
+    try {
+      sendBridge(
+        ws,
+        vmReport(
+          hostId,
+          runId,
+          "runtime-web",
+          "ready",
+          observedAt,
+          22_001,
+          "10.77.0.2",
+        ),
+      );
+      let state = await waitForRunState(
+        db,
+        runId,
+        (state) =>
+          state.vms[0]?.runtimeObservedAt === observedAt &&
+          state.vms[0]?.workerTerminalProjectionGeneration ===
+            "generation-runtime-web" &&
+          typeof state.vms[0]?.workerTerminalProjectionAckAt === "number",
+      );
+      const firstTiming = {
+        workerDesiredDispatchAt: state.vms[0]?.workerDesiredDispatchAt,
+        workerDesiredDispatchVersion:
+          state.vms[0]?.workerDesiredDispatchVersion,
+        workerTerminalReportReceivedAt:
+          state.vms[0]?.workerTerminalReportReceivedAt,
+        workerTerminalProjectionAckAt:
+          state.vms[0]?.workerTerminalProjectionAckAt,
+        workerTerminalReceiptToProjectionAckMs:
+          state.vms[0]?.workerTerminalReceiptToProjectionAckMs,
+        workerTerminalProjectionGeneration:
+          state.vms[0]?.workerTerminalProjectionGeneration,
+        workerTerminalDesiredVersion:
+          state.vms[0]?.workerTerminalDesiredVersion,
+      };
+      expect(firstTiming).toMatchObject({
+        workerDesiredDispatchAt: expect.any(Number),
+        workerDesiredDispatchVersion: 1,
+        workerTerminalReportReceivedAt: expect.any(Number),
+        workerTerminalProjectionAckAt: expect.any(Number),
+        workerTerminalReceiptToProjectionAckMs: expect.any(Number),
+        workerTerminalProjectionGeneration: "generation-runtime-web",
+        workerTerminalDesiredVersion: 1,
+      });
+      expect(
+        Number(firstTiming.workerTerminalReportReceivedAt),
+      ).toBeGreaterThanOrEqual(Number(firstTiming.workerDesiredDispatchAt));
+      expect(Number(firstTiming.workerDesiredDispatchAt)).toBeLessThanOrEqual(
+        firstDispatchLatest,
+      );
+      expect(
+        Number(firstTiming.workerTerminalProjectionAckAt),
+      ).toBeGreaterThanOrEqual(
+        Number(firstTiming.workerTerminalReportReceivedAt),
+      );
+      expect(
+        Number(firstTiming.workerTerminalReceiptToProjectionAckMs),
+      ).toBeGreaterThanOrEqual(0);
+
+      const deadline = Date.now() + 1_000;
+      let orderRow: { runtime_observed_at: number | null } | null = null;
+      while (Date.now() <= deadline) {
+        orderRow = await env.DB.prepare(
+          `SELECT runtime_observed_at
+           FROM vm_report_projection_order
+           WHERE host_id = ?
+           ORDER BY rowid DESC
+           LIMIT 1`,
+        )
+          .bind(hostId)
+          .first<{ runtime_observed_at: number | null }>();
+        if (orderRow) {
+          break;
+        }
+        await sleep(10);
+      }
+      expect(orderRow?.runtime_observed_at).toBe(observedAt);
+
+      const timing = info.mock.calls
+        .map(([value]) => {
+          if (typeof value !== "string") {
+            return null;
+          }
+          try {
+            return JSON.parse(value) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .find(
+          (value) =>
+            value?.message === "bridge vm report projected" &&
+            value.runId === runId,
+        );
+      expect(timing).toMatchObject({
+        hostId,
+        runId,
+        vmName: "runtime-web",
+        generation: "generation-runtime-web",
+        observedAtUnixMs: observedAt,
+        projectionOutcome: "updated",
+      });
+      expect(timing?.workerReceivedAtUnixMs).toEqual(expect.any(Number));
+      expect(timing?.workerProjectionAckAtUnixMs).toEqual(expect.any(Number));
+      expect(timing?.receiptToProjectionAckMs).toEqual(expect.any(Number));
+      expect(
+        Number(timing?.workerProjectionAckAtUnixMs),
+      ).toBeGreaterThanOrEqual(Number(timing?.workerReceivedAtUnixMs));
+      expect(Number(timing?.receiptToProjectionAckMs)).toBeGreaterThanOrEqual(
+        0,
+      );
+
+      await sleep(20);
+      sendBridge(ws, {
+        type: "sync_request",
+        protocol_version: 6,
+        host_id: hostId,
+        reason: "operator_requested",
+      });
+      await expect(
+        waitForMessageCount(
+          messages,
+          (message) =>
+            message.type === "desired_state" &&
+            message.desired_state.version === 1,
+          3,
+        ),
+      ).resolves.toBe(3);
+      const repeatedObservedAt = observedAt + 1;
+      sendBridge(
+        ws,
+        vmReport(
+          hostId,
+          runId,
+          "runtime-web",
+          "ready",
+          repeatedObservedAt,
+          22_001,
+          "10.77.0.2",
+        ),
+      );
+      state = await waitForRunState(
+        db,
+        runId,
+        (candidate) =>
+          candidate.vms[0]?.runtimeObservedAt === repeatedObservedAt,
+      );
+      expect({
+        workerDesiredDispatchAt: state.vms[0]?.workerDesiredDispatchAt,
+        workerDesiredDispatchVersion:
+          state.vms[0]?.workerDesiredDispatchVersion,
+        workerTerminalReportReceivedAt:
+          state.vms[0]?.workerTerminalReportReceivedAt,
+        workerTerminalProjectionAckAt:
+          state.vms[0]?.workerTerminalProjectionAckAt,
+        workerTerminalReceiptToProjectionAckMs:
+          state.vms[0]?.workerTerminalReceiptToProjectionAckMs,
+        workerTerminalProjectionGeneration:
+          state.vms[0]?.workerTerminalProjectionGeneration,
+        workerTerminalDesiredVersion:
+          state.vms[0]?.workerTerminalDesiredVersion,
+      }).toEqual(firstTiming);
+
+      const nextGeneration = vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "booting",
+        observedAt + 10,
+        22_001,
+        "10.77.0.2",
+      );
+      if (
+        nextGeneration.type !== "vm_report" ||
+        !nextGeneration.report.runtime_constraints
+      ) {
+        throw new Error("expected generation-aware VM report");
+      }
+      nextGeneration.report.runtime_constraints.generation =
+        "generation-runtime-web-2";
+      sendBridge(ws, nextGeneration);
+      state = await waitForRunState(
+        db,
+        runId,
+        (candidate) => candidate.vms[0]?.runtimeObservedAt === observedAt + 10,
+      );
+      expect(state.vms[0]?.workerDesiredDispatchAt).toBeUndefined();
+      expect(state.vms[0]?.workerDesiredDispatchVersion).toBeUndefined();
+      expect(state.vms[0]?.workerTerminalProjectionGeneration).toBeUndefined();
+
+      sendBridge(
+        ws,
+        vmReport(
+          hostId,
+          runId,
+          "runtime-web",
+          "ready",
+          observedAt + 20,
+          22_001,
+          "10.77.0.2",
+        ),
+      );
+      await sleep(50);
+      const [afterRetiredGeneration] = await db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, runId));
+      state = JSON.parse(
+        afterRetiredGeneration?.stateJson ?? "{}",
+      ) as RunStateDocument;
+      expect(state.vms[0]?.runtimeObservedAt).toBe(observedAt + 10);
+      expect(state.vms[0]?.workerTerminalProjectionGeneration).toBeUndefined();
+    } finally {
+      ws.close();
+      info.mockRestore();
+      await env.DB.prepare(
+        "DROP TRIGGER IF EXISTS vm_report_projection_before_heartbeat",
+      ).run();
+      await env.DB.prepare(
+        "DROP TABLE IF EXISTS vm_report_projection_order",
+      ).run();
+    }
+  });
+
+  it("rejects VM reports from a replaced bridge session before projection", async () => {
+    const hostId = "host-replaced-vm-report";
+    const runId = "run-replaced-vm-report";
+    const now = Date.now();
+    const fencedHeartbeat = now + 5_000;
+    await seedHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    await db
+      .update(agentHosts)
+      .set({
+        activeSessionId: "v6:replacement-session",
+        lastHeartbeatAt: fencedHeartbeat,
+        updatedAt: fencedHeartbeat,
+      })
+      .where(eq(agentHosts.id, hostId));
+
+    sendBridge(
+      ws,
+      vmReport(
+        hostId,
+        runId,
+        "runtime-web",
+        "ready",
+        now + 100,
+        22_001,
+        "10.77.0.2",
+      ),
+    );
+    await sleep(50);
+
+    const [run] = await db
+      .select({ stateJson: scenarioRuns.stateJson })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, runId));
+    const state = JSON.parse(run?.stateJson ?? "{}") as RunStateDocument;
+    expect(state.vms[0]?.runtimeObservedAt).toBeNull();
+    const [host] = await db
+      .select({ lastHeartbeatAt: agentHosts.lastHeartbeatAt })
+      .from(agentHosts)
+      .where(eq(agentHosts.id, hostId));
+    expect(host?.lastHeartbeatAt).toBe(fencedHeartbeat);
+    ws.close();
+  });
+
+  it("rejects a VM report when its bridge session is replaced during the projection CAS", async () => {
+    const hostId = "host-replaced-during-vm-projection";
+    const runId = "run-replaced-during-vm-projection";
+    const replacementSessionId = "v6:replacement-during-vm-projection";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+    const [hostBefore] = await db
+      .select({ lastHeartbeatAt: agentHosts.lastHeartbeatAt })
+      .from(agentHosts)
+      .where(eq(agentHosts.id, hostId));
+
+    await env.DB.prepare(
+      `CREATE TRIGGER replace_vm_report_session_before_projection
+       BEFORE UPDATE ON scenario_runs
+       WHEN OLD.run_id = '${runId}'
+       BEGIN
+         UPDATE agent_hosts
+         SET active_session_id = '${replacementSessionId}'
+         WHERE id = '${hostId}';
+         SELECT RAISE(IGNORE);
+       END`,
+    ).run();
+
+    try {
+      sendBridge(
+        ws,
+        vmReport(
+          hostId,
+          runId,
+          "runtime-web",
+          "ready",
+          now + 100,
+          22_001,
+          "10.77.0.2",
+        ),
+      );
+
+      const deadline = Date.now() + 1_000;
+      let activeSessionId: string | null | undefined;
+      while (Date.now() <= deadline) {
+        const [host] = await db
+          .select({ activeSessionId: agentHosts.activeSessionId })
+          .from(agentHosts)
+          .where(eq(agentHosts.id, hostId));
+        activeSessionId = host?.activeSessionId;
+        if (activeSessionId === replacementSessionId) break;
+        await sleep(10);
+      }
+      expect(activeSessionId).toBe(replacementSessionId);
+      await sleep(20);
+
+      const [run] = await db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, runId));
+      const state = JSON.parse(run?.stateJson ?? "{}") as RunStateDocument;
+      expect(state.vms[0]?.runtimeObservedAt).toBeNull();
+      expect(state.vms[0]?.workerTerminalProjectionGeneration).toBeUndefined();
+
+      const [hostAfter] = await db
+        .select({ lastHeartbeatAt: agentHosts.lastHeartbeatAt })
+        .from(agentHosts)
+        .where(eq(agentHosts.id, hostId));
+      expect(hostAfter?.lastHeartbeatAt).toBe(hostBefore?.lastHeartbeatAt);
+    } finally {
+      ws.close();
+      await env.DB.prepare(
+        "DROP TRIGGER IF EXISTS replace_vm_report_session_before_projection",
+      ).run();
+    }
+  });
+
+  it("rejects a state-report projection when its bridge session is replaced during the run CAS", async () => {
+    const hostId = "host-replaced-during-state-projection";
+    const runId = "run-replaced-during-state-projection";
+    const replacementSessionId = "v6:replacement-during-state-projection";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    const db = drizzle(env.DB);
+    await seedRun({ db, hostId, runId, now });
+
+    await env.DB.prepare(
+      `CREATE TRIGGER replace_state_report_session_before_projection
+       BEFORE UPDATE ON scenario_runs
+       WHEN OLD.run_id = '${runId}'
+       BEGIN
+         UPDATE agent_hosts
+         SET active_session_id = '${replacementSessionId}'
+         WHERE id = '${hostId}';
+         SELECT RAISE(IGNORE);
+       END`,
+    ).run();
+
+    try {
+      sendBridge(
+        ws,
+        stateReport(hostId, {
+          observedAt: now + 100,
+          appliedDesiredVersion: 0,
+          vms: [actualVm(runId, "runtime-web", now + 100)],
+        }),
+      );
+
+      const deadline = Date.now() + 1_000;
+      let activeSessionId: string | null | undefined;
+      while (Date.now() <= deadline) {
+        const [host] = await db
+          .select({ activeSessionId: agentHosts.activeSessionId })
+          .from(agentHosts)
+          .where(eq(agentHosts.id, hostId));
+        activeSessionId = host?.activeSessionId;
+        if (activeSessionId === replacementSessionId) break;
+        await sleep(10);
+      }
+      expect(activeSessionId).toBe(replacementSessionId);
+      await sleep(20);
+
+      const [run] = await db
+        .select({ stateJson: scenarioRuns.stateJson })
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, runId));
+      const state = JSON.parse(run?.stateJson ?? "{}") as RunStateDocument;
+      expect(state.vms[0]?.runtimeObservedAt).toBeNull();
+      expect(state.vms[0]?.runtimeConstraints).toBeNull();
+    } finally {
+      ws.close();
+      await env.DB.prepare(
+        "DROP TRIGGER IF EXISTS replace_state_report_session_before_projection",
+      ).run();
+    }
+  });
+
+  it("dispatches desired state only after the CPU reservation commit succeeds", async () => {
+    const hostId = "host-commit-dispatch";
+    const runId = "run-commit-dispatch";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { messages, stub, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 4_000,
+      }),
+    );
+    const db = drizzle(env.DB);
+    await waitForHostActualState(db, hostId, (row) => row.observedAt === now);
+
+    const reserved = await stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/reserve",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostId,
+          runId,
+          steadyCpuMillisByVm: [1_000],
+        }),
+      },
+    );
+    expect(reserved.status).toBe(201);
+    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "1".repeat(64),
+      });
+    });
+
+    const committed = await stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/commit",
+      {
+        method: "POST",
+        body: JSON.stringify({ hostId, runId }),
+      },
+    );
+    expect(committed.status).toBe(200);
+    await expect(committed.json()).resolves.toEqual({ ok: true });
+    await expect(
+      waitForBridgeMessage(
+        messages,
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).resolves.toMatchObject({ type: "desired_state" });
+    await expect(
+      db
+        .select({ state: hostCpuReservations.state })
+        .from(hostCpuReservations)
+        .where(eq(hostCpuReservations.runId, runId)),
+    ).resolves.toEqual([{ state: "committed" }]);
+
+    await mutateStoredHostDesiredState(db, hostId, now + 2, (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "3".repeat(64),
+      });
+    });
+    const missingCommit = await stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/commit",
+      {
+        method: "POST",
+        body: JSON.stringify({ hostId, runId: "missing-reservation" }),
+      },
+    );
+    await expect(missingCommit.json()).resolves.toEqual({ ok: false });
+    await sleep(20);
+    expect(
+      messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 2,
+      ),
+    ).toBe(false);
+    ws.close();
+  });
+
+  it("dispatches a committed reservation only through the newest bridge session", async () => {
+    const hostId = "host-commit-replacement-dispatch";
+    const runId = "run-commit-replacement-dispatch";
+    const now = Date.now();
+    await seedHost(hostId);
+    const first = await connectHost(hostId);
+    await waitForBridgeMessage(
+      first.messages,
+      (message) => message.type === "server_hello",
+    );
+    await sleep(2);
+    const replacement = await connectHost(hostId);
+    await waitForBridgeMessage(
+      replacement.messages,
+      (message) => message.type === "server_hello",
+    );
+    await waitForBridgeMessage(
+      replacement.messages,
+      (message) =>
+        message.type === "desired_state" && message.desired_state.version === 0,
+    );
+
+    sendBridge(
+      replacement.ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 4_000,
+      }),
+    );
+    const db = drizzle(env.DB);
+    await waitForHostActualState(db, hostId, (row) => row.observedAt === now);
+    const reserved = await replacement.stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/reserve",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostId,
+          runId,
+          steadyCpuMillisByVm: [1_000],
+        }),
+      },
+    );
+    expect(reserved.status).toBe(201);
+    await mutateStoredHostDesiredState(db, hostId, now + 1, (draft) => {
+      upsertDesiredCachedImage(draft, {
+        image_key: testImageKey,
+        image_sha256: "1".repeat(64),
+      });
+    });
+    expect(
+      replacement.messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    const committed = await replacement.stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/commit",
+      {
+        method: "POST",
+        body: JSON.stringify({ hostId, runId }),
+      },
+    );
+    await expect(committed.json()).resolves.toEqual({ ok: true });
+    await expect(
+      waitForBridgeMessage(
+        replacement.messages,
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).resolves.toMatchObject({ type: "desired_state" });
+    expect(
+      first.messages.some(
+        (message) =>
+          message.type === "desired_state" &&
+          message.desired_state.version === 1,
+      ),
+    ).toBe(false);
+
+    first.ws.close();
+    replacement.ws.close();
   });
 
   it("expires overdue run leases from a durable-object alarm", async () => {
@@ -718,6 +1536,61 @@ describe("HostRuntimeDO workers integration", () => {
     ws.close();
   });
 
+  it("requires benchmark image evidence and lets atomic admission reject an unknown host", async () => {
+    const hostId = "host-benchmark-contract";
+    const now = Date.now();
+    await seedHost(hostId);
+    const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+    const missingImages = await stub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/benchmark-acquire",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostId,
+          runId: "run-benchmark-contract",
+          userId: "user-1",
+          steadyCpuMillisByVm: [1_000],
+        }),
+      },
+    );
+    expect(missingImages.status).toBe(400);
+    await expect(missingImages.json()).resolves.toEqual({
+      error:
+        "steadyCpuMillisByVm, guestVcpuCountByVm, userId, requiredImages, and the credential window are required",
+    });
+
+    const unknownHostId = "host-benchmark-unknown";
+    const unknownStub = env.HOST_RUNTIME.get(
+      env.HOST_RUNTIME.idFromName(unknownHostId),
+    );
+    const unknown = await unknownStub.fetch(
+      "http://host-runtime/_internal/cpu-reservations/benchmark-acquire",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostId: unknownHostId,
+          runId: "run-benchmark-unknown",
+          userId: "user-1",
+          steadyCpuMillisByVm: [1_000],
+          guestVcpuCountByVm: [1],
+          requiredImages: [
+            {
+              imageKey: testImageKey,
+              imageSha256: "2".repeat(64),
+            },
+          ],
+          credentialNotBeforeUnixMs: now - 60_000,
+          credentialExpiresAtUnixMs: now + 60_000,
+        }),
+      },
+    );
+    expect(unknown.status).toBe(409);
+    await expect(unknown.json()).resolves.toMatchObject({
+      ok: false,
+      reason: "host_not_ready",
+    });
+  });
+
   it("admits a pinned benchmark only on a scheduling-disabled, actual-state-drained host", async () => {
     const hostId = "host-isolated-benchmark";
     const now = Date.now();
@@ -753,6 +1626,10 @@ describe("HostRuntimeDO workers integration", () => {
         userId: "user-1",
         hostId,
         admissionMode: "benchmark",
+        benchmarkCredentialWindow: {
+          notBeforeUnixMs: now - 60_000,
+          expiresAtUnixMs: now + 60_000,
+        },
       }),
     ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
 
@@ -807,6 +1684,10 @@ describe("HostRuntimeDO workers integration", () => {
         userId: "user-1",
         hostId,
         admissionMode: "benchmark",
+        benchmarkCredentialWindow: {
+          notBeforeUnixMs: now - 60_000,
+          expiresAtUnixMs: now + 60_000,
+        },
       }),
     ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
 
@@ -828,6 +1709,10 @@ describe("HostRuntimeDO workers integration", () => {
       userId: "user-1",
       hostId,
       admissionMode: "benchmark",
+      benchmarkCredentialWindow: {
+        notBeforeUnixMs: now - 60_000,
+        expiresAtUnixMs: now + 60_000,
+      },
     });
     const [run] = await drizzle(env.DB)
       .select({ hostId: scenarioRuns.hostId })
@@ -866,6 +1751,10 @@ describe("HostRuntimeDO workers integration", () => {
         userId: "user-1",
         hostId,
         admissionMode: "benchmark",
+        benchmarkCredentialWindow: {
+          notBeforeUnixMs: now - 60_000,
+          expiresAtUnixMs: now + 60_000,
+        },
       }),
     ).rejects.toMatchObject({ code: "benchmark_host_not_drained" });
     ws.close();
@@ -1066,6 +1955,30 @@ const testImageKey = {
   vm: "webserver",
   arch: "x86_64",
 } satisfies ImageKey;
+
+function desiredRunningVm(
+  runId: string,
+  vmName: string,
+  now: number,
+): DesiredVmV2 {
+  return {
+    run_id: runId,
+    vm_name: vmName,
+    desired_phase: "running",
+    image_key: testImageKey,
+    image_sha256: "2".repeat(64),
+    resources: {
+      cpu_millis: 1_000,
+      vcpu_count: 1,
+      memory_mib: 512,
+      disk_mib: 4_096,
+    },
+    ssh_authorized_keys_openssh: [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIrunkey user@example",
+    ],
+    lease_expires_at_unix_ms: now + 60_000,
+  };
+}
 
 async function seedHost(hostId: string): Promise<void> {
   const db = drizzle(env.DB);

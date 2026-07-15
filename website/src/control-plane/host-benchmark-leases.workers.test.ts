@@ -1,11 +1,13 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import { applyD1Migrations, reset } from "cloudflare:test";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   acquireHostBenchmarkLeaseAndReserveCpuInD1,
+  benchmarkAdmissionContractSha256,
   clearDrainedHostBenchmarkLeaseInD1,
   loadHostBenchmarkLease,
   releaseHostBenchmarkLeaseInD1,
@@ -31,13 +33,81 @@ import {
   buildInitialRunState,
   recomputeRunState,
 } from "@/lib/run-state";
-import { resetD1Database } from "@/test/d1-migrations";
+import { d1Migrations, resetD1Database } from "@/test/d1-migrations";
+import { classifyHostBenchmarkLeaseSchema } from "../../scripts/benchmark-contract-migration-core";
 
 const USER_ID = "benchmark-user";
+const REQUIRED_BENCHMARK_IMAGE = {
+  imageKey: {
+    scenario: "broken-nginx",
+    vm: "webserver",
+    arch: "x86_64" as const,
+  },
+  imageSha256: "2".repeat(64),
+};
+
+function benchmarkAdmissionInput(
+  nowUnixMs: number,
+  requiredImages = [REQUIRED_BENCHMARK_IMAGE],
+) {
+  return {
+    steadyCpuMillisByVm: [1_000],
+    guestVcpuCountByVm: [1],
+    requiredImages,
+    credentialNotBeforeUnixMs: nowUnixMs - 60_000,
+    credentialExpiresAtUnixMs: nowUnixMs + 60_000,
+    nowUnixMs,
+  } as const;
+}
 
 describe("exclusive benchmark host leases", () => {
   beforeEach(async () => {
     await resetD1Database();
+  });
+
+  it("matches the production wrapper's exact post-migration attestation", async () => {
+    const [columns, triggers] = await Promise.all([
+      env.DB.prepare("PRAGMA table_info('host_benchmark_leases')").all(),
+      env.DB.prepare(
+        `SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name`,
+      ).all(),
+    ]);
+    expect(
+      classifyHostBenchmarkLeaseSchema({
+        columns: columns.results,
+        triggers: triggers.results,
+      }),
+    ).toBe("contract");
+  });
+
+  it("fails the 0005 cutover before ALTER when a legacy lease is live", async () => {
+    const hostId = "benchmark-host-legacy-cutover";
+    await reset();
+    const legacyMigrations = d1Migrations.filter(
+      (migration) => migration.name < "0005_",
+    );
+    await applyD1Migrations(env.DB, legacyMigrations);
+    const now = Date.now();
+    await seedBenchmarkHost(hostId, now);
+    await env.DB.prepare(
+      "INSERT INTO host_benchmark_leases (host_id, run_id, user_id, acquired_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    )
+      .bind(
+        hostId,
+        "benchmark-run-legacy-cutover",
+        USER_ID,
+        now,
+        now,
+      )
+      .run();
+
+    await expect(applyD1Migrations(env.DB, d1Migrations)).rejects.toThrow();
+    const columns = await env.DB.prepare(
+      "PRAGMA table_info('host_benchmark_leases')",
+    ).all();
+    expect(columns.results.map((row) => row.name)).not.toContain(
+      "contract_sha256",
+    );
   });
 
   it("atomically acquires one disabled drained host and is idempotent after a timeout", async () => {
@@ -45,13 +115,13 @@ describe("exclusive benchmark host leases", () => {
     const hostId = "benchmark-host-idempotent";
     const runId = "benchmark-run-idempotent";
     await seedBenchmarkHost(hostId, now);
-    const db = drizzle(env.DB);
+    const counter = countedBatches(drizzle(env.DB));
+    const db = counter.database;
     const input = {
       hostId,
       runId,
       userId: USER_ID,
-      steadyCpuMillisByVm: [1_000],
-      nowUnixMs: now,
+      ...benchmarkAdmissionInput(now),
     } as const;
 
     await expect(
@@ -62,6 +132,7 @@ describe("exclusive benchmark host leases", () => {
       state: "pending",
       capacity: { availableCpuMillis: 2_000 },
     });
+    expect(counter.batches()).toBe(2);
 
     // A caller that timed out after the transaction committed can safely retry.
     await expect(
@@ -74,6 +145,7 @@ describe("exclusive benchmark host leases", () => {
       lease: { hostId, runId, userId: USER_ID, acquiredAt: now },
       state: "pending",
     });
+    expect(counter.batches()).toBe(3);
 
     await expect(
       db
@@ -98,6 +170,166 @@ describe("exclusive benchmark host leases", () => {
     ]);
   });
 
+  it("rejects an empty authoritative image proof before touching D1", async () => {
+    const now = Date.now();
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(drizzle(env.DB), {
+        hostId: "benchmark-host-empty-images",
+        runId: "benchmark-run-empty-images",
+        userId: USER_ID,
+        ...benchmarkAdmissionInput(now, []),
+      }),
+    ).rejects.toThrow("invalid host benchmark lease contract");
+    await expect(
+      drizzle(env.DB).select().from(hostBenchmarkLeases),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("generation-fences idempotency with the canonical CPU, vCPU, and image contract", async () => {
+    const now = Date.now();
+    const hostId = "benchmark-host-contract-fence";
+    const runId = "benchmark-run-contract-fence";
+    await seedBenchmarkHost(hostId, now);
+    const db = drizzle(env.DB);
+    const contract = {
+      ...benchmarkAdmissionInput(now),
+      steadyCpuMillisByVm: [750, 1_250],
+      guestVcpuCountByVm: [1, 2],
+    } as const;
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+        hostId,
+        runId,
+        userId: USER_ID,
+        ...contract,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    for (const changed of [
+      { ...contract, steadyCpuMillisByVm: [1_250, 750] },
+      { ...contract, guestVcpuCountByVm: [2, 1] },
+      {
+        ...contract,
+        requiredImages: [
+          {
+            ...REQUIRED_BENCHMARK_IMAGE,
+            imageSha256: "3".repeat(64),
+          },
+        ],
+      },
+    ]) {
+      await expect(
+        acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+          hostId,
+          runId,
+          userId: USER_ID,
+          ...changed,
+          nowUnixMs: now + 1,
+        }),
+      ).resolves.toEqual({ ok: false, reason: "conflict", capacity: null });
+    }
+
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+        hostId,
+        runId,
+        userId: USER_ID,
+        ...contract,
+        credentialExpiresAtUnixMs: contract.credentialExpiresAtUnixMs + 1,
+        nowUnixMs: now + 1,
+      }),
+    ).resolves.toEqual({ ok: false, reason: "conflict", capacity: null });
+  });
+
+  it("normalizes exact image proof order and casing in the canonical hash", async () => {
+    const secondImage = {
+      imageKey: {
+        scenario: "broken-nginx",
+        vm: "client",
+        arch: "x86_64" as const,
+      },
+      imageSha256: "a".repeat(64),
+    };
+    const first = await benchmarkAdmissionContractSha256({
+      steadyCpuMillisByVm: [750, 1_250],
+      guestVcpuCountByVm: [1, 2],
+      requiredImages: [REQUIRED_BENCHMARK_IMAGE, secondImage],
+    });
+    const normalizedEquivalent = await benchmarkAdmissionContractSha256({
+      steadyCpuMillisByVm: [750, 1_250],
+      guestVcpuCountByVm: [1, 2],
+      requiredImages: [
+        { ...secondImage, imageSha256: "A".repeat(64) },
+        {
+          imageKey: {
+            ...REQUIRED_BENCHMARK_IMAGE.imageKey,
+            scenario: " broken-nginx ",
+          },
+          imageSha256: REQUIRED_BENCHMARK_IMAGE.imageSha256.toUpperCase(),
+        },
+      ],
+    });
+    expect(normalizedEquivalent).toBe(first);
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("allows the 35th credential-window run and atomically rejects the 36th", async () => {
+    const now = Date.now();
+    const hostId = "benchmark-host-window-cap";
+    const runId = "benchmark-run-window-35";
+    await seedBenchmarkHost(hostId, now);
+    const input = benchmarkAdmissionInput(now);
+    for (let ordinal = 0; ordinal < 34; ordinal += 1) {
+      await seedCompletedBenchmarkRun(
+        hostId,
+        `benchmark-window-run-${ordinal}`,
+        input.credentialNotBeforeUnixMs + ordinal + 1,
+      );
+    }
+    const db = drizzle(env.DB);
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+        hostId,
+        runId,
+        userId: USER_ID,
+        ...input,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await db
+      .delete(hostCpuReservations)
+      .where(eq(hostCpuReservations.runId, runId));
+    await expect(
+      releaseHostBenchmarkLeaseInD1(db, {
+        hostId,
+        runId,
+        userId: USER_ID,
+        nowUnixMs: now + 1,
+      }),
+    ).resolves.toEqual({ ok: true, released: true });
+    await seedCompletedBenchmarkRun(hostId, runId, now);
+
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+        hostId,
+        runId: "benchmark-window-run-36",
+        userId: USER_ID,
+        ...input,
+        nowUnixMs: now + 2,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: "benchmark_run_limit_reached",
+      capacity: null,
+    });
+    await expect(
+      db
+        .select()
+        .from(hostCpuReservations)
+        .where(eq(hostCpuReservations.hostId, hostId)),
+    ).resolves.toHaveLength(0);
+  });
+
   it("rejects acquisition when same-timestamp inventory contents change before the atomic insert", async () => {
     const now = Date.now();
     const hostId = "benchmark-host-acquire-content-race";
@@ -105,17 +337,20 @@ describe("exclusive benchmark host leases", () => {
     await seedBenchmarkHost(hostId, now);
     const report = strictEmptyReport(hostId, 4_000, 0, now);
     report.vms = [foreignActualVm(now)];
-    const db = withBeforeNextBatchHook(drizzle(env.DB), async () => {
-      await overwriteActualReportWithoutAdvancingFences(hostId, report);
-    });
+    const db = withBeforeBatchHook(
+      drizzle(env.DB),
+      2,
+      async () => {
+        await overwriteActualReportWithoutAdvancingFences(hostId, report);
+      },
+    );
 
     await expect(
       acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
         hostId,
         runId,
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now,
+        ...benchmarkAdmissionInput(now),
       }),
     ).resolves.toEqual({ ok: false, reason: "conflict", capacity: null });
     await expect(
@@ -142,8 +377,7 @@ describe("exclusive benchmark host leases", () => {
       hostId,
       runId,
       userId: USER_ID,
-      steadyCpuMillisByVm: [1_000],
-      nowUnixMs: now,
+      ...benchmarkAdmissionInput(now),
     });
     await db
       .delete(hostCpuReservations)
@@ -151,7 +385,7 @@ describe("exclusive benchmark host leases", () => {
 
     const report = strictEmptyReport(hostId, 4_000, 0, now);
     report.vms = [foreignActualVm(now)];
-    const racedDb = withBeforeNextBatchHook(db, async () => {
+    const racedDb = withBeforeBatchHook(db, 2, async () => {
       await overwriteActualReportWithoutAdvancingFences(hostId, report);
     });
     await expect(
@@ -177,6 +411,7 @@ describe("exclusive benchmark host leases", () => {
     const hostId = "benchmark-host-runtime";
     const runId = "benchmark-run-runtime";
     await seedBenchmarkHost(hostId, now);
+    await seedReadyBenchmarkImage(hostId, now + 1);
     const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
     const request = () =>
       stub.fetch(
@@ -188,7 +423,7 @@ describe("exclusive benchmark host leases", () => {
             hostId,
             runId,
             userId: USER_ID,
-            steadyCpuMillisByVm: [1_000],
+            ...benchmarkAdmissionInput(now),
           }),
         },
       );
@@ -221,8 +456,7 @@ describe("exclusive benchmark host leases", () => {
       hostId,
       runId,
       userId: USER_ID,
-      steadyCpuMillisByVm: [1_000],
-      nowUnixMs: now,
+      ...benchmarkAdmissionInput(now),
     });
 
     await expect(
@@ -242,8 +476,7 @@ describe("exclusive benchmark host leases", () => {
         hostId,
         runId: "foreign-benchmark-run",
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now + 1,
+        ...benchmarkAdmissionInput(now + 1),
       }),
     ).resolves.toEqual({
       ok: false,
@@ -284,10 +517,12 @@ describe("exclusive benchmark host leases", () => {
         hostId: enabledHostId,
         runId: "run-enabled",
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now,
+        ...benchmarkAdmissionInput(now),
       }),
-    ).resolves.toMatchObject({ ok: false, reason: "host_not_ready" });
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "benchmark_host_not_drained",
+    });
 
     const undersizedHostId = "benchmark-host-undersized";
     await seedBenchmarkHost(undersizedHostId, now, {
@@ -298,8 +533,7 @@ describe("exclusive benchmark host leases", () => {
         hostId: undersizedHostId,
         runId: "run-undersized",
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now,
+        ...benchmarkAdmissionInput(now),
       }),
     ).resolves.toMatchObject({
       ok: false,
@@ -314,9 +548,18 @@ describe("exclusive benchmark host leases", () => {
     );
     await expect(
       env.DB.prepare(
-        "INSERT INTO host_benchmark_leases (host_id, run_id, user_id, acquired_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO host_benchmark_leases (host_id, run_id, user_id, contract_sha256, credential_not_before_unix_ms, credential_expires_at_unix_ms, acquired_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-        .bind(enabledHostId, "database-bypass", USER_ID, now, now)
+        .bind(
+          enabledHostId,
+          "database-bypass",
+          USER_ID,
+          "a".repeat(64),
+          now - 1,
+          now + 1,
+          now,
+          now,
+        )
         .run(),
     ).rejects.toThrow(/requires scenario scheduling to remain disabled/);
 
@@ -333,8 +576,7 @@ describe("exclusive benchmark host leases", () => {
         hostId: reservedHostId,
         runId: "benchmark-after-reservation",
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now + 1,
+        ...benchmarkAdmissionInput(now + 1),
       }),
     ).resolves.toMatchObject({
       ok: false,
@@ -342,9 +584,18 @@ describe("exclusive benchmark host leases", () => {
     });
     await expect(
       env.DB.prepare(
-        "INSERT INTO host_benchmark_leases (host_id, run_id, user_id, acquired_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO host_benchmark_leases (host_id, run_id, user_id, contract_sha256, credential_not_before_unix_ms, credential_expires_at_unix_ms, acquired_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-        .bind(reservedHostId, "database-reservation-bypass", USER_ID, now, now)
+        .bind(
+          reservedHostId,
+          "database-reservation-bypass",
+          USER_ID,
+          "a".repeat(64),
+          now - 1,
+          now + 1,
+          now,
+          now,
+        )
         .run(),
     ).rejects.toThrow(/requires a host with zero CPU reservations/);
   });
@@ -359,8 +610,7 @@ describe("exclusive benchmark host leases", () => {
       hostId,
       runId,
       userId: USER_ID,
-      steadyCpuMillisByVm: [1_000],
-      nowUnixMs: now,
+      ...benchmarkAdmissionInput(now),
     });
 
     await expect(
@@ -384,6 +634,12 @@ describe("exclusive benchmark host leases", () => {
       nowUnixMs: recoveryNow,
     });
     desired.version = 1;
+    desired.cached_images = [
+      {
+        image_key: REQUIRED_BENCHMARK_IMAGE.imageKey,
+        image_sha256: REQUIRED_BENCHMARK_IMAGE.imageSha256,
+      },
+    ];
     await db
       .update(hostDesiredState)
       .set({ version: 1, docJson: desired, updatedAt: recoveryNow })
@@ -424,8 +680,7 @@ describe("exclusive benchmark host leases", () => {
       hostId,
       runId,
       userId: USER_ID,
-      steadyCpuMillisByVm: [1_000],
-      nowUnixMs: now,
+      ...benchmarkAdmissionInput(now),
     });
     await seedPersistedRunBeforeDesiredState(db, hostId, runId, now);
 
@@ -557,12 +812,16 @@ describe("exclusive benchmark host leases", () => {
         hostId,
         runId,
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now + 1,
+        ...benchmarkAdmissionInput(now + 1, [
+          {
+            imageKey: image.image_key,
+            imageSha256: image.image_sha256,
+          },
+        ]),
       }),
     ).resolves.toMatchObject({
       ok: false,
-      reason: "benchmark_host_not_drained",
+      reason: "image_not_ready",
     });
 
     await db
@@ -589,8 +848,25 @@ describe("exclusive benchmark host leases", () => {
         hostId,
         runId,
         userId: USER_ID,
-        steadyCpuMillisByVm: [1_000],
-        nowUnixMs: now + 2,
+        ...benchmarkAdmissionInput(now + 2, [
+          {
+            imageKey: image.image_key,
+            imageSha256: "3".repeat(64),
+          },
+        ]),
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: "image_not_ready" });
+    await expect(
+      acquireHostBenchmarkLeaseAndReserveCpuInD1(db, {
+        hostId,
+        runId,
+        userId: USER_ID,
+        ...benchmarkAdmissionInput(now + 2, [
+          {
+            imageKey: image.image_key,
+            imageSha256: image.image_sha256,
+          },
+        ]),
       }),
     ).resolves.toMatchObject({ ok: true });
 
@@ -626,6 +902,36 @@ describe("exclusive benchmark host leases", () => {
     ).resolves.toEqual([{ version: 1 }]);
   });
 });
+
+async function seedCompletedBenchmarkRun(
+  hostId: string,
+  runId: string,
+  createdAt: number,
+): Promise<void> {
+  await drizzle(env.DB).insert(scenarioRuns).values({
+    runId,
+    userId: USER_ID,
+    hostId,
+    scenarioId: "broken-nginx",
+    scenarioName: "broken-nginx",
+    title: "Broken Nginx",
+    tagline: "",
+    briefingMarkdown: "",
+    objectivesJson: "[]",
+    difficulty: "easy",
+    estimatedMinutes: 1,
+    tagsJson: [],
+    hintsJson: [],
+    solutionMarkdown: "",
+    vmCount: 1,
+    state: "completed",
+    stateRank: RUN_PHASE_ORDER.completed,
+    stateJson: JSON.stringify(buildInitialRunState({ vms: [] })),
+    completedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt,
+  });
+}
 
 async function seedPersistedRunBeforeDesiredState(
   db: ReturnType<typeof drizzle>,
@@ -761,6 +1067,24 @@ async function seedBenchmarkHost(
     hostId,
     nowUnixMs: now,
   });
+  const image = {
+    image_key: REQUIRED_BENCHMARK_IMAGE.imageKey,
+    image_sha256: REQUIRED_BENCHMARK_IMAGE.imageSha256,
+  };
+  desired.cached_images = [image];
+  const report = strictEmptyReport(
+    hostId,
+    options.schedulableCpuMillis ?? 4_000,
+    desired.version,
+    now,
+  );
+  report.cached_images = [
+    {
+      ...image,
+      phase: "ready",
+      updated_at_unix_ms: now,
+    },
+  ];
   await db.insert(hostDesiredState).values({
     hostId,
     version: desired.version,
@@ -772,15 +1096,68 @@ async function seedBenchmarkHost(
     hostId,
     appliedDesiredVersion: desired.version,
     observedAt: now,
-    reportJson: strictEmptyReport(
-      hostId,
-      options.schedulableCpuMillis ?? 4_000,
-      desired.version,
-      now,
-    ),
+    reportJson: report,
     createdAt: now,
     updatedAt: now,
   });
+}
+
+async function seedReadyBenchmarkImage(
+  hostId: string,
+  now: number,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const [[desired], [actual]] = await Promise.all([
+    db
+      .select()
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, hostId)),
+    db
+      .select()
+      .from(hostActualState)
+      .where(eq(hostActualState.hostId, hostId)),
+  ]);
+  if (!desired || !actual) {
+    throw new Error("benchmark host state is missing");
+  }
+  const image = {
+    image_key: REQUIRED_BENCHMARK_IMAGE.imageKey,
+    image_sha256: REQUIRED_BENCHMARK_IMAGE.imageSha256,
+  };
+  await db.batch([
+    db
+      .update(hostDesiredState)
+      .set({
+        version: desired.version + 1,
+        docJson: {
+          ...desired.docJson,
+          version: desired.version + 1,
+          cached_images: [image],
+        },
+        updatedAt: now,
+      })
+      .where(eq(hostDesiredState.hostId, hostId)),
+    db
+      .update(hostActualState)
+      .set({
+        appliedDesiredVersion: desired.version + 1,
+        observedAt: now,
+        reportJson: {
+          ...actual.reportJson,
+          observed_at_unix_ms: now,
+          applied_desired_version: desired.version + 1,
+          cached_images: [
+            {
+              ...image,
+              phase: "ready",
+              updated_at_unix_ms: now,
+            },
+          ],
+        },
+        updatedAt: now,
+      })
+      .where(eq(hostActualState.hostId, hostId)),
+  ]);
 }
 
 async function refreshHostEvidence(
@@ -896,20 +1273,21 @@ async function overwriteActualReportWithoutAdvancingFences(
     .run();
 }
 
-function withBeforeNextBatchHook<TDatabase extends ReturnType<typeof drizzle>>(
+function withBeforeBatchHook<TDatabase extends ReturnType<typeof drizzle>>(
   db: TDatabase,
+  beforeBatchNumber: number,
   hook: () => Promise<void>,
 ): TDatabase {
   const originalBatch = db.batch.bind(db) as unknown as (
     queries: readonly unknown[],
   ) => Promise<readonly unknown[]>;
-  let pending = true;
+  let batchNumber = 0;
   return new Proxy(db, {
     get(target, property, receiver) {
       if (property === "batch") {
         return async (queries: readonly unknown[]) => {
-          if (pending) {
-            pending = false;
+          batchNumber += 1;
+          if (batchNumber === beforeBatchNumber) {
             await hook();
           }
           return originalBatch(queries);
@@ -919,4 +1297,28 @@ function withBeforeNextBatchHook<TDatabase extends ReturnType<typeof drizzle>>(
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+function countedBatches<TDatabase extends ReturnType<typeof drizzle>>(
+  db: TDatabase,
+): { database: TDatabase; batches: () => number } {
+  const originalBatch = db.batch.bind(db) as unknown as (
+    queries: readonly unknown[],
+  ) => Promise<readonly unknown[]>;
+  let batches = 0;
+  return {
+    database: new Proxy(db, {
+      get(target, property, receiver) {
+        if (property === "batch") {
+          return (queries: readonly unknown[]) => {
+            batches += 1;
+            return originalBatch(queries);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+    batches: () => batches,
+  };
 }

@@ -205,6 +205,33 @@ describe("boot benchmark operator authentication", () => {
     }
   });
 
+  it("authorizes scoped start and run routes with one D1 statement each", async () => {
+    const window = benchmarkWindow();
+    await seedBenchmarkOperator();
+    await seedHost(BENCHMARK_HOST_ID, BENCHMARK_USER_ID);
+    await seedRun({
+      runId: "run-single-query",
+      userId: BENCHMARK_USER_ID,
+      hostId: BENCHMARK_HOST_ID,
+      scenarioId: "broken-nginx",
+      createdAt: window.notBeforeUnixMs + 1,
+    });
+
+    for (const [method, path] of [
+      ["POST", "/api/scenarios/broken-nginx/start"],
+      ["GET", "/api/scenarios/runs/run-single-query"],
+    ] as const) {
+      const counter = countedDatabase(env.DB);
+      const result = await requireBootBenchmarkUserContext(
+        benchmarkRequest(method, path),
+        benchmarkBindings({ DB: counter.database }),
+      );
+
+      expect(result.ok).toBe(true);
+      expect(counter.preparedStatements()).toBe(1);
+    }
+  });
+
   it("rejects path, method, host, query, and run-scope escapes", async () => {
     const window = benchmarkWindow();
     await seedBenchmarkOperator();
@@ -258,6 +285,28 @@ describe("boot benchmark operator authentication", () => {
     const window = benchmarkWindow();
     await seedBenchmarkOperator();
     await seedHost(BENCHMARK_HOST_ID, BENCHMARK_USER_ID);
+    await seedHost("other-agent", BENCHMARK_USER_ID);
+    await seedRun({
+      runId: "wrong-scenario-does-not-count",
+      userId: BENCHMARK_USER_ID,
+      hostId: BENCHMARK_HOST_ID,
+      scenarioId: "pair-ping",
+      createdAt: window.notBeforeUnixMs + 1,
+    });
+    await seedRun({
+      runId: "wrong-host-does-not-count",
+      userId: BENCHMARK_USER_ID,
+      hostId: "other-agent",
+      scenarioId: "broken-nginx",
+      createdAt: window.notBeforeUnixMs + 1,
+    });
+    await seedRun({
+      runId: "expired-window-does-not-count",
+      userId: BENCHMARK_USER_ID,
+      hostId: BENCHMARK_HOST_ID,
+      scenarioId: "broken-nginx",
+      createdAt: window.notBeforeUnixMs - 1,
+    });
     for (let index = 0; index < 34; index += 1) {
       await seedRun({
         runId: `run-${index}`,
@@ -312,6 +361,29 @@ function benchmarkBindings(
     INTAR_BOOT_BENCH_NOT_BEFORE_UNIX_MS: notBefore,
     INTAR_BOOT_BENCH_EXPIRES_AT_UNIX_MS: expiresAt,
     ...overrides,
+  };
+}
+
+function countedDatabase(database: D1Database): {
+  database: D1Database;
+  preparedStatements: () => number;
+} {
+  let preparedStatements = 0;
+  const counted = new Proxy(database, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => {
+          preparedStatements += 1;
+          return target.prepare(query);
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    database: counted,
+    preparedStatements: () => preparedStatements,
   };
 }
 

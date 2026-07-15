@@ -316,6 +316,13 @@ export const hostBenchmarkLeases = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
+    contractSha256: text("contract_sha256").default("").notNull(),
+    credentialNotBeforeUnixMs: integer("credential_not_before_unix_ms")
+      .default(0)
+      .notNull(),
+    credentialExpiresAtUnixMs: integer("credential_expires_at_unix_ms")
+      .default(0)
+      .notNull(),
     acquiredAt: integer("acquired_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },

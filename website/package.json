@@ -30,7 +30,8 @@
     "astro": "astro",
     "db:bootstrap:local": "bun scripts/apply-d1-sql.ts",
     "db:migrate:remote": "bun scripts/apply-d1-sql.ts --remote",
-    "db:migrate:boot-cpu:production": "bun scripts/apply-boot-cpu-migration.ts"
+    "db:migrate:boot-cpu:production": "bun scripts/apply-boot-cpu-migration.ts",
+    "db:migrate:benchmark-contract:production": "bun scripts/apply-benchmark-contract-migration.ts"
   },
   "overrides": {
     "@better-auth/core": "1.7.0-beta.10",

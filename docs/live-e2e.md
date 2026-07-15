@@ -399,11 +399,19 @@ request-acceptance p95 at most 500 ms, usable-terminal p50 at most 7000 ms,
 usable-terminal p95 strictly below 10000 ms, and seal-to-projection-to-UI-ready
 (`seal_projection_ui_ready_ms`) p95 at most 500 ms. An overridden sample count
 remains useful diagnostically but cannot pass the promotion gate.
-The final phase metric is a conservative cross-host-clock-safe upper bound: it
-subtracts the agent's monotonic boot-start-to-seal-start duration from the
-browser's monotonic click-to-render duration. It therefore includes any
-click-to-agent dispatch delay and cannot understate the real seal-to-UI time;
-wall-clock timestamps remain diagnostic only.
+The final phase metric uses `complete_causal_upper_bound_v2`. Before desired
+state can reach the agent, HostRuntime durably records one immutable first
+running-dispatch timestamp per run; same-version re-pushes cannot replace it,
+and a later desired version fails evidence closed. The Worker-clock interval
+from that dispatch through terminal-report receipt causally contains host boot,
+so subtracting the agent's monotonic boot-start-to-seal-start duration leaves a
+conservative seal-through-report bound without comparing host and Worker
+clocks. The score then adds the Worker's monotonic receipt-to-post-first-CAS
+acknowledgement and the runner's monotonic interval from the preserved last
+terminal-projection-nonready poll request through xterm rendering. That poll
+anchor is not advanced while the timing-evidence second CAS completes;
+projection regression, missing anchors, generation drift, and dispatch/report
+desired-version mismatch all fail promotion closed.
 
 For the five-way same-host comparison, deploy each implementation to the same
 drained host in turn and reuse the exact manifest and Cloud Hypervisor hash.

@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
+import type { HostDesiredStateV2 } from "@/generated/bridge";
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
@@ -11,6 +12,7 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
+  scenarioRunSshKeys,
   type ScenarioRunHintSnapshot,
 } from "@/db/schema";
 import {
@@ -94,8 +96,8 @@ import {
 } from "@/lib/stargate";
 import {
   generateScenarioRunSshKeyDraft,
-  insertScenarioRunSshKeyDrafts,
   loadScenarioRunSshKey,
+  prepareScenarioRunSshKeyRows,
 } from "@/lib/scenario-run-ssh-keys";
 import { listUserAuthorizedSshKeysForNativeRoutes } from "@/lib/user-ssh-keys";
 
@@ -278,7 +280,16 @@ export async function getScenarioRunForUser(params: {
   if (!row) {
     throw appError(404, "scenario_run_not_found", "scenario run not found");
   }
-  return hydrateScenarioRunReplayArtifacts(toScenarioRunRecord(row));
+  const run = toScenarioRunRecord(row);
+  // Recording artifacts are produced only after teardown starts. Keep the
+  // 100 ms boot/readiness poll to one run-row query without hiding artifact
+  // upload progress from teardown and archive views.
+  if (
+    RUN_PHASE_ORDER[run.phase] < RUN_PHASE_ORDER.teardown_requested
+  ) {
+    return run;
+  }
+  return hydrateScenarioRunReplayArtifacts(run);
 }
 
 export interface ScenarioRunListEntry {
@@ -464,6 +475,10 @@ export async function startScenarioRunForUser(params: {
   userId: string;
   hostId?: string;
   admissionMode?: "benchmark";
+  benchmarkCredentialWindow?: {
+    notBeforeUnixMs: number;
+    expiresAtUnixMs: number;
+  };
 }): Promise<{
   accepted: true;
   runId: string;
@@ -798,6 +813,10 @@ async function startScenarioRunInternal(params: {
   userId: string;
   hostId?: string;
   admissionMode?: "benchmark";
+  benchmarkCredentialWindow?: {
+    notBeforeUnixMs: number;
+    expiresAtUnixMs: number;
+  };
 }): Promise<{
   accepted: true;
   runId: string;
@@ -812,12 +831,30 @@ async function startScenarioRunInternal(params: {
       "benchmark admission requires an explicit host",
     );
   }
-  const [scenario] = await loadEnabledScenarioRows(params.scenarioId);
+  if (
+    params.admissionMode === "benchmark" &&
+    (!params.benchmarkCredentialWindow ||
+      !Number.isSafeInteger(
+        params.benchmarkCredentialWindow.notBeforeUnixMs,
+      ) ||
+      !Number.isSafeInteger(params.benchmarkCredentialWindow.expiresAtUnixMs) ||
+      params.benchmarkCredentialWindow.notBeforeUnixMs <= 0 ||
+      params.benchmarkCredentialWindow.expiresAtUnixMs <=
+        params.benchmarkCredentialWindow.notBeforeUnixMs)
+  ) {
+    throw appError(
+      400,
+      "benchmark_credential_window_required",
+      "benchmark admission requires an authenticated credential window",
+    );
+  }
+  const [[scenario], active] = await Promise.all([
+    loadEnabledScenarioRows(params.scenarioId),
+    loadActiveRunRow(params.userId),
+  ]);
   if (!scenario) {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
-
-  const active = await loadActiveRunRow(params.userId);
   if (active) {
     if (params.admissionMode === "benchmark") {
       throw appError(
@@ -850,6 +887,9 @@ async function startScenarioRunInternal(params: {
   const requiredImages = requiredImagesForScenarioLaunch(scenario.launchSpecs);
   const steadyCpuMillisByVm = scenario.launchSpecs.map(
     (spec) => spec.resources.cpuMillis,
+  );
+  const guestVcpuCountByVm = scenario.launchSpecs.map(
+    (spec) => spec.resources.vcpuCount,
   );
   const steadyCpuMillis = steadyCpuMillisByVm.reduce(
     (total, cpuMillis) => total + cpuMillis,
@@ -901,6 +941,13 @@ async function startScenarioRunInternal(params: {
   const sshAuthorizedKeysByVmId = new Map(
     sshKeyDrafts.map((draft) => [draft.vmId, [draft.publicKeyOpenssh]]),
   );
+  const sshKeyRowsPromise = prepareScenarioRunSshKeyRows(
+    sshKeyDrafts,
+    createdAt,
+  ).then(
+    (rows) => ({ ok: true as const, rows }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
 
   const initial = buildInitialRunState({
     vms: runVmStates.map((vm) => ({
@@ -937,23 +984,45 @@ async function startScenarioRunInternal(params: {
   });
 
   let hostId: string;
+  let benchmarkDesiredState: HostDesiredStateV2 | undefined;
   if (params.hostId) {
-    await assertScenarioLaunchHostForUser(
-      params.hostId,
-      params.userId,
-      requiredImages,
-      params.admissionMode,
-    );
     if (params.admissionMode === "benchmark") {
       const reservation = await acquireBenchmarkBootCpuWithJitter({
         hostId: params.hostId,
         runId,
         userId: params.userId,
         steadyCpuMillisByVm,
+        guestVcpuCountByVm,
+        requiredImages,
+        credentialNotBeforeUnixMs:
+          params.benchmarkCredentialWindow!.notBeforeUnixMs,
+        credentialExpiresAtUnixMs:
+          params.benchmarkCredentialWindow!.expiresAtUnixMs,
       });
       if (!reservation.ok) {
+        if (reservation.reason === "image_not_ready") {
+          throw appError(
+            409,
+            "image_not_ready",
+            "scenario images are not ready on this host",
+          );
+        }
         if (reservation.reason === "boot_capacity_pending") {
           throw bootCapacityPendingError();
+        }
+        if (reservation.reason === "benchmark_credential_window_invalid") {
+          throw appError(
+            403,
+            "benchmark_credential_window_invalid",
+            "benchmark credential window is not valid for this admission",
+          );
+        }
+        if (reservation.reason === "benchmark_run_limit_reached") {
+          throw appError(
+            409,
+            "benchmark_run_limit_reached",
+            "benchmark credential has already admitted its maximum run count",
+          );
         }
         if (
           reservation.reason === "benchmark_host_not_drained" ||
@@ -972,7 +1041,13 @@ async function startScenarioRunInternal(params: {
         );
       }
       hostId = params.hostId;
+      benchmarkDesiredState = reservation.desiredState;
     } else {
+      await assertScenarioLaunchHostForUser(
+        params.hostId,
+        params.userId,
+        requiredImages,
+      );
       const reservation = await reserveScenarioBootCpuWithJitter({
         hostIds: [params.hostId],
         runId,
@@ -1025,44 +1100,57 @@ async function startScenarioRunInternal(params: {
 
   const db = drizzle(env.DB);
   try {
-    await db.insert(scenarioRuns).values({
-      runId,
-      userId: params.userId,
-      hostId,
-      scenarioId: scenario.scenarioId,
-      scenarioName: scenario.scenarioId,
-      title: scenario.briefing.title,
-      tagline: scenario.briefing.tagline,
-      briefingMarkdown: scenario.briefing.briefingMarkdown,
-      objectivesJson: JSON.stringify(scenario.briefing.objectives),
-      difficulty: scenario.briefing.difficulty,
-      estimatedMinutes: scenario.briefing.estimatedMinutes,
-      tagsJson: scenario.content.tags,
-      hintsJson: scenario.content.hints,
-      solutionMarkdown: scenario.content.solutionMarkdown,
-      revealedHintsJson: [],
-      solutionRevealedAt: null,
-      solutionAssisted: false,
-      vmCount: provisionedState.vms.length,
-      state: provisionedState.phase,
-      stateRank: RUN_PHASE_ORDER[provisionedState.phase],
-      activeKey: activeKeyFor(params.userId),
-      stateJson: JSON.stringify(provisionedState),
-      deleteRequestedAt: null,
-      completedAt: null,
-      solvedAt: null,
-      failedAt: null,
-      hiddenAt: null,
-      createdAt,
-      updatedAt: createdAt,
-    });
-    await insertScenarioRunSshKeyDrafts(sshKeyDrafts, createdAt);
+    const preparedSshKeys = await sshKeyRowsPromise;
+    if (!preparedSshKeys.ok) {
+      throw preparedSshKeys.error;
+    }
+    const sshKeyRows = preparedSshKeys.rows;
+    if (sshKeyRows.length === 0) {
+      throw new Error("scenario run has no SSH key rows");
+    }
+    await db.batch([
+      db.insert(scenarioRuns).values({
+        runId,
+        userId: params.userId,
+        hostId,
+        scenarioId: scenario.scenarioId,
+        scenarioName: scenario.scenarioId,
+        title: scenario.briefing.title,
+        tagline: scenario.briefing.tagline,
+        briefingMarkdown: scenario.briefing.briefingMarkdown,
+        objectivesJson: JSON.stringify(scenario.briefing.objectives),
+        difficulty: scenario.briefing.difficulty,
+        estimatedMinutes: scenario.briefing.estimatedMinutes,
+        tagsJson: scenario.content.tags,
+        hintsJson: scenario.content.hints,
+        solutionMarkdown: scenario.content.solutionMarkdown,
+        revealedHintsJson: [],
+        solutionRevealedAt: null,
+        solutionAssisted: false,
+        vmCount: provisionedState.vms.length,
+        state: provisionedState.phase,
+        stateRank: RUN_PHASE_ORDER[provisionedState.phase],
+        activeKey: activeKeyFor(params.userId),
+        stateJson: JSON.stringify(provisionedState),
+        deleteRequestedAt: null,
+        completedAt: null,
+        solvedAt: null,
+        failedAt: null,
+        hiddenAt: null,
+        createdAt,
+        updatedAt: createdAt,
+      }),
+      db.insert(scenarioRunSshKeys).values(sshKeyRows),
+    ]);
     await upsertRunVmsIntoDesiredState({
       hostId,
       runId,
       vms: provisionedState.vms,
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
+      ...(benchmarkDesiredState
+        ? { initialDesiredState: benchmarkDesiredState }
+        : {}),
     });
     await commitHostCpu({ hostId, runId });
   } catch (error) {
@@ -1091,8 +1179,6 @@ async function startScenarioRunInternal(params: {
     }
     throw error;
   }
-
-  await tryWakeHostRuntime(hostId);
 
   return {
     accepted: true,
@@ -1491,14 +1577,21 @@ async function acquireBenchmarkBootCpuWithJitter(input: {
   runId: string;
   userId: string;
   steadyCpuMillisByVm: readonly number[];
+  guestVcpuCountByVm: readonly number[];
+  requiredImages: readonly RequiredScenarioImage[];
+  credentialNotBeforeUnixMs: number;
+  credentialExpiresAtUnixMs: number;
 }): Promise<
-  | { ok: true }
+  | { ok: true; desiredState: HostDesiredStateV2 }
   | {
       ok: false;
       reason:
         | "host_not_ready"
+        | "image_not_ready"
         | "benchmark_host_not_drained"
         | "host_benchmark_leased"
+        | "benchmark_credential_window_invalid"
+        | "benchmark_run_limit_reached"
         | "boot_capacity_pending"
         | "conflict";
     }
@@ -1509,7 +1602,7 @@ async function acquireBenchmarkBootCpuWithJitter(input: {
     attempt += 1
   ) {
     const result = await acquireBenchmarkHostLeaseAndReserveCpu(input);
-    if (result.ok) return { ok: true };
+    if (result.ok) return { ok: true, desiredState: result.desiredState };
     if (
       result.reason !== "boot_capacity_pending" ||
       attempt === BOOT_CAPACITY_RESERVATION_ATTEMPTS - 1
@@ -1608,6 +1701,7 @@ async function upsertRunVmsIntoDesiredState(input: {
   vms: RunVmStateDocument[];
   nowUnixMs: number;
   sshAuthorizedKeysByVmId: Map<string, string[]>;
+  initialDesiredState?: HostDesiredStateV2;
 }): Promise<void> {
   const desiredVms = input.vms.map((vm) => {
     const desiredVm = desiredVmFromRunVm({
@@ -1639,6 +1733,7 @@ async function upsertRunVmsIntoDesiredState(input: {
         upsertDesiredVm(draft, desiredVm);
       }
     },
+    input.initialDesiredState,
   );
 }
 

@@ -86,6 +86,25 @@ describe("scenario run artifact ledger", () => {
     expect(runs[0]?.hasReplay).toBe(false);
   });
 
+  it("skips replay-ledger hydration while a run is active", async () => {
+    await seedIdentity();
+    await insertActiveRun();
+    await drizzle(env.DB)
+      .insert(scenarioRunArtifacts)
+      .values(
+        artifact("unexpected-active-segment", 0, "uploaded", "ssh_recording_segment"),
+      );
+
+    const run = await getScenarioRunForUser({
+      runId: "run-1",
+      userId: "user-1",
+    });
+
+    expect(run.phase).toBe("provisioning");
+    expect(run.replayArtifacts).toEqual([]);
+    expect(run.vms[0]?.replayArtifacts).toEqual([]);
+  });
+
   it("removes stale state document replays when the ledger has none", async () => {
     await seedIdentity();
     await insertCompletedRun({ staleReplay: true });
@@ -278,6 +297,59 @@ async function insertCompletedRun({
     activeKey: null,
     stateJson: JSON.stringify(state),
     completedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt,
+  });
+}
+
+async function insertActiveRun(): Promise<void> {
+  const db = drizzle(env.DB);
+  const createdAt = Date.now();
+  const initial = buildInitialRunState({
+    vms: [
+      {
+        id: "vm-1",
+        ordinal: 0,
+        scenarioVmId: "scenario-vm-1",
+        scenarioVmName: "server-0",
+        runtimeVmName: "vm-1-run-1",
+        hostname: "server-0",
+        launchSummary: {
+          scenarioVmName: "server-0",
+          hostname: "server-0",
+          probePhaseMap: {},
+          probeDescriptors: [],
+        },
+      },
+    ],
+  });
+  const active = recomputeRunState({
+    ...initial,
+    phase: "provisioning",
+    vms: initial.vms.map((vm) => ({ ...vm, phase: "booting" })),
+  });
+  await db.insert(scenarioRuns).values({
+    runId: "run-1",
+    userId: "user-1",
+    hostId: "host-1",
+    scenarioId: "broken-nginx",
+    scenarioName: "broken-nginx",
+    title: "Broken nginx",
+    tagline: "Fix it",
+    briefingMarkdown: "Repair nginx.",
+    objectivesJson: "[]",
+    difficulty: "easy",
+    estimatedMinutes: 15,
+    tagsJson: [],
+    hintsJson: [],
+    solutionMarkdown: "",
+    revealedHintsJson: [],
+    solutionAssisted: false,
+    vmCount: 1,
+    state: active.phase,
+    stateRank: RUN_PHASE_ORDER[active.phase],
+    activeKey: "user-1",
+    stateJson: JSON.stringify(active),
     createdAt,
     updatedAt: createdAt,
   });

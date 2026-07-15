@@ -218,6 +218,10 @@ describe("scenario start route", () => {
       userId: "benchmark-admin",
       hostId: "benchmark-agent",
       admissionMode: "benchmark",
+      benchmarkCredentialWindow: {
+        notBeforeUnixMs: 4_102_434_000_000,
+        expiresAtUnixMs: 4_102_444_800_000,
+      },
     });
   });
 
