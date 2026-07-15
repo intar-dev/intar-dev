@@ -1577,15 +1577,22 @@ base_image "trixie" {
     #[test]
     fn host_poweroff_fails_closed_when_qmp_never_acknowledges() {
         let directory = tempdir().unwrap();
-        let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
+        let rendered = render_test_direct_build(
+            &directory,
+            QemuBuildConfig {
+                qemu_exit_timeout_seconds: 3,
+                ..QemuBuildConfig::default()
+            },
+        );
         let listener = UnixListener::bind(&rendered.paths.qmp_socket_path).unwrap();
+        let (release_qmp_tx, release_qmp_rx) = std::sync::mpsc::channel();
         let qmp_server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let reader_stream = stream.try_clone().unwrap();
             let mut reader = BufReader::new(reader_stream);
             write_qmp_greeting(&mut stream);
             let command = read_qmp_command(&mut reader, "qmp_capabilities");
-            thread::sleep(QMP_IO_TIMEOUT + Duration::from_millis(100));
+            release_qmp_rx.recv().unwrap();
             command
         });
         let mut qemu = Command::new("sh")
@@ -1599,6 +1606,7 @@ base_image "trixie" {
 
         let error = wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap_err();
         let error = format!("{error:#}");
+        release_qmp_tx.send(()).unwrap();
 
         assert_eq!(
             qmp_server.join().unwrap(),
@@ -1606,8 +1614,11 @@ base_image "trixie" {
         );
         assert!(started_at.elapsed() >= QMP_IO_TIMEOUT);
         assert!(started_at.elapsed() < Duration::from_secs(4));
-        assert!(error.contains("QMP deadline expired while waiting for qmp_capabilities"));
-        assert!(error.contains("was terminated and reaped"));
+        assert!(
+            error.contains("QMP deadline expired while waiting for qmp_capabilities"),
+            "{error}"
+        );
+        assert!(error.contains("was terminated and reaped"), "{error}");
         assert!(qemu.try_wait().unwrap().is_some());
     }
 
