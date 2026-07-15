@@ -84,7 +84,10 @@ async function readProductionSchema(): Promise<unknown[]> {
 }
 
 async function runWrangler(arguments_: string[]): Promise<string> {
-  const child = spawn(process.execPath, [wranglerBin, ...arguments_], {
+  // Wrangler is a Node CLI. Running it through Bun can exit successfully
+  // without flushing JSON-mode stdout on Linux CI, which defeats the schema
+  // attestation. The deployment runner installs Node explicitly.
+  const child = spawn("node", [wranglerBin, ...arguments_], {
     cwd: websiteRoot,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
