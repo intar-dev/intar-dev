@@ -1060,10 +1060,18 @@ fn mac_conflicts_with_bridge(bridge_mac: &str, guest_mac: &str, tap_mac: &str) -
 
 fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
     let host_transit = cidr_address(&state.result.host_transit_cidr)?;
+    // A destination owned by the host is routed through the input hook, not
+    // the forward hook, so the forward-chain `fib daddr type local` guard
+    // cannot protect host services by itself. Drop every packet entering from
+    // this run's veth at input while leaving all other host interfaces and the
+    // run's forwarded traffic untouched.
     let mut rules = format!(
-        "table inet {} {{\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{}\" ct state established,related accept\n    iifname \"{}\" meta nfproto ipv6 drop\n    iifname \"{}\" fib daddr type local drop\n",
+        "table inet {} {{\n  chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" counter drop\n  }}\n  chain forward {{\n    type filter hook forward priority filter; policy accept;\n    iifname \"{}\" meta nfproto ipv6 drop\n    iifname \"{}\" ip saddr != {} drop\n    iifname \"{}\" ct state established,related accept\n    iifname \"{}\" fib daddr type local drop\n",
         state.nft_table,
         state.result.host_veth_name,
+        state.result.host_veth_name,
+        state.result.host_veth_name,
+        state.request.guest_cidr,
         state.result.host_veth_name,
         state.result.host_veth_name
     );
@@ -1104,7 +1112,7 @@ fn render_nft_rules(state: &RunState, run_cidrs: &[&str]) -> Result<String> {
         if let Some(port) = attachment.ssh_public_port {
             let guest = cidr_address(&attachment.guest_ip_cidr)?;
             rules.push_str(&format!(
-                "    iifname != \"{}\" tcp dport {port} dnat ip to {guest}:22\n",
+                "    iifname != \"{}\" fib daddr type local tcp dport {port} dnat ip to {guest}:22\n",
                 state.result.host_veth_name
             ));
         }
@@ -1798,7 +1806,44 @@ mod tests {
 
         let rules = render_nft_rules(&state, &["10.77.0.0/29", "10.78.0.0/29"]).unwrap();
 
+        let input_chain = format!(
+            "chain input {{\n    type filter hook input priority filter; policy accept;\n    iifname \"{}\" counter drop\n  }}",
+            state.result.host_veth_name
+        );
+        assert!(
+            rules.contains(&input_chain),
+            "host-local traffic must be dropped in the input hook, scoped to the run veth"
+        );
+        let input_position = rules.find("chain input {").unwrap();
+        let forward_position = rules.find("chain forward {").unwrap();
+        assert!(
+            input_position < forward_position,
+            "the independent input guard must be installed before the forward policy"
+        );
+        let source_guard = format!(
+            "iifname \"{}\" ip saddr != 10.77.0.0/29 drop",
+            state.result.host_veth_name
+        );
+        let established_accept = format!(
+            "iifname \"{}\" ct state established,related accept",
+            state.result.host_veth_name
+        );
+        assert!(
+            rules.find(&source_guard).unwrap() < rules.find(&established_accept).unwrap(),
+            "source anti-spoofing must run before the established-flow fast path"
+        );
+        let forward_accept = format!("iifname \"{}\" accept", state.result.host_veth_name);
+        let ssh_dnat = format!(
+            "iifname != \"{}\" fib daddr type local tcp dport 22001 dnat ip to 10.77.0.2:22",
+            state.result.host_veth_name
+        );
+        let egress_masquerade = format!(
+            "ip saddr 10.77.0.0/29 oifname != \"{}\" masquerade",
+            state.result.host_veth_name
+        );
+
         for required in [
+            "type filter hook forward priority filter; policy accept",
             "meta nfproto ipv6 drop",
             "fib daddr type local drop",
             "ip daddr 10.0.0.0/8 drop",
@@ -1808,11 +1853,15 @@ mod tests {
             "ip daddr 172.16.0.0/12 drop",
             "ip daddr 192.168.0.0/16 drop",
             "ip daddr 10.78.0.0/29 drop",
-            "tcp dport 22001 dnat ip to 10.77.0.2:22",
-            "ip saddr 10.77.0.0/29",
-            "masquerade",
         ] {
             assert!(rules.contains(required), "missing nft rule: {required}");
+        }
+        for (rule, purpose) in [
+            (&forward_accept, "run forwarding"),
+            (&ssh_dnat, "external SSH DNAT"),
+            (&egress_masquerade, "internet egress"),
+        ] {
+            assert!(rules.contains(rule), "missing {purpose} rule: {rule}");
         }
         assert!(
             !rules.contains("ip daddr 10.77.0.0/29 drop"),
