@@ -1725,9 +1725,12 @@ mod linux {
             guest_cidr: "10.77.255.240/28".to_owned(),
             gateway: "10.77.255.241".to_owned(),
         };
-        expect_run_network(core.handle(Request::EnsureRunNetwork(network_request.clone())))?;
         let prepared_image = prepare_smoke_image(&mut core, &smoke_config, artifacts)
             .context("prepare the package-smoke image in the root-owned v2 template store")?;
+        // Fast-template readiness is a host-level prerequisite. Prove it
+        // before creating a run namespace so a fail-closed readiness error
+        // cannot leave network authority behind.
+        expect_run_network(core.handle(Request::EnsureRunNetwork(network_request.clone())))?;
 
         // Boot eight independent v2 template-backed VMMs in the same run
         // network. Their 125m

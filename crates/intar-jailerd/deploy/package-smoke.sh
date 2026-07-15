@@ -21,7 +21,7 @@ case "${archive}" in
 esac
 [ -f "${archive}" ] || die "archive does not exist: ${archive}"
 
-for command in awk env file find getfacl install ip nft nsenter python3 readelf readlink runuser seq setfacl setpriv sha256sum sleep stat sysctl systemctl systemd-run tar; do
+for command in awk cp env file find getfacl install ip mkfs.xfs mount nft nsenter python3 readelf readlink runuser seq setfacl setpriv sha256sum sleep stat sysctl systemctl systemd-run tar truncate umount; do
   command -v "${command}" >/dev/null 2>&1 || die "required command is missing: ${command}"
 done
 id intar-agent >/dev/null 2>&1 || die "the intar-agent system user does not exist"
@@ -77,6 +77,11 @@ cleanup_failed=0
 installer_probe_pid=
 vm_slice_cgroup=
 cgroup_probe_unit=
+fast_storage_image=${work_root}/fast-storage.xfs
+fast_storage_root=${work_root}/fast-storage
+fast_storage_mounted=0
+fast_cache_bound=0
+fast_jails_bound=0
 
 valid_vm_slice_cgroup() {
   candidate=$1
@@ -201,16 +206,47 @@ cleanup() {
     fi
   done
 
+  if [ "${fast_cache_bound}" -eq 1 ]; then
+    if umount /var/cache/intar-agent; then
+      fast_cache_bound=0
+    else
+      echo "intar package smoke: fast cache bind mount leaked" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "${fast_jails_bound}" -eq 1 ]; then
+    if umount /var/lib/intar/jails; then
+      fast_jails_bound=0
+    else
+      echo "intar package smoke: fast jail bind mount leaked" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "${fast_storage_mounted}" -eq 1 ]; then
+    if umount "${fast_storage_root}"; then
+      fast_storage_mounted=0
+    else
+      echo "intar package smoke: fast XFS test filesystem leaked" >&2
+      cleanup_failed=1
+    fi
+  fi
+
   rm -rf -- \
     "${agent_probe_dropin_dir}" \
-    "${work_root}" \
     /etc/intar-agent \
     /etc/intar-jailerd \
-    /var/cache/intar-agent \
-    /var/lib/intar \
     /run/intar-jailerd \
     /usr/share/doc/intar-jailerd \
     /usr/lib/intar
+  if [ "${fast_cache_bound}" -eq 0 ]; then
+    rm -rf -- /var/cache/intar-agent
+  fi
+  if [ "${fast_jails_bound}" -eq 0 ]; then
+    rm -rf -- /var/lib/intar
+  fi
+  if [ "${fast_storage_mounted}" -eq 0 ]; then
+    rm -rf -- "${work_root}"
+  fi
 
   if ! systemctl daemon-reload; then
     echo "intar package smoke: systemd daemon-reload failed during cleanup" >&2
@@ -238,6 +274,38 @@ cleanup() {
 }
 trap cleanup 0
 trap 'exit 130' HUP INT TERM
+
+# The v2 package deliberately has no copy fallback: the root-owned template
+# store and jail-generation store must share a filesystem that accepts an
+# exact FICLONE. Docker's overlay filesystem does not provide that invariant,
+# so the disposable privileged smoke provisions the same XFS reflink topology
+# that production hosts attest before they become schedulable.
+truncate --size 8G "${fast_storage_image}"
+mkfs.xfs -q -f -m reflink=1 "${fast_storage_image}"
+install -d -o root -g root -m 0755 "${fast_storage_root}"
+mount -t xfs -o loop,nouuid "${fast_storage_image}" "${fast_storage_root}"
+fast_storage_mounted=1
+install -d -o root -g root -m 0755 \
+  "${fast_storage_root}/cache" \
+  "${fast_storage_root}/jails" \
+  /var/cache/intar-agent \
+  /var/lib/intar/jails
+mount --bind "${fast_storage_root}/cache" /var/cache/intar-agent
+fast_cache_bound=1
+mount --bind "${fast_storage_root}/jails" /var/lib/intar/jails
+fast_jails_bound=1
+[ "$(stat -f -c %T /var/cache/intar-agent)" = xfs ] || \
+  die "fast package-smoke store is not XFS"
+[ "$(stat -c %d /var/cache/intar-agent)" = "$(stat -c %d /var/lib/intar/jails)" ] || \
+  die "fast cache and jail stores do not share one filesystem"
+printf 'intar exact reflink package smoke\n' > /var/cache/intar-agent/.reflink-source
+cp --reflink=always \
+  /var/cache/intar-agent/.reflink-source \
+  /var/lib/intar/jails/.reflink-target || \
+  die "fast package-smoke filesystem does not support exact reflinks"
+rm -f -- \
+  /var/cache/intar-agent/.reflink-source \
+  /var/lib/intar/jails/.reflink-target
 
 mkdir -p "${package_root}"
 chmod 0700 "${work_root}" "${package_root}"

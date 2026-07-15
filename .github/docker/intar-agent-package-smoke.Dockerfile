@@ -25,6 +25,7 @@ RUN apt-get update \
         systemd \
         systemd-sysv \
         util-linux \
+        xfsprogs \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
