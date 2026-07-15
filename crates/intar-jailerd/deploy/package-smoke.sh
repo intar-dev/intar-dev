@@ -82,6 +82,7 @@ fast_storage_root=${work_root}/fast-storage
 fast_storage_mounted=0
 fast_cache_bound=0
 fast_jails_bound=0
+fast_self_test_bound=0
 
 valid_vm_slice_cgroup() {
   candidate=$1
@@ -206,11 +207,11 @@ cleanup() {
     fi
   done
 
-  if [ "${fast_cache_bound}" -eq 1 ]; then
-    if umount /var/cache/intar-agent; then
-      fast_cache_bound=0
+  if [ "${fast_self_test_bound}" -eq 1 ]; then
+    if umount /var/lib/intar/self-test-assets; then
+      fast_self_test_bound=0
     else
-      echo "intar package smoke: fast cache bind mount leaked" >&2
+      echo "intar package smoke: fast self-test bind mount leaked" >&2
       cleanup_failed=1
     fi
   fi
@@ -219,6 +220,14 @@ cleanup() {
       fast_jails_bound=0
     else
       echo "intar package smoke: fast jail bind mount leaked" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "${fast_cache_bound}" -eq 1 ]; then
+    if umount /var/cache/intar-agent; then
+      fast_cache_bound=0
+    else
+      echo "intar package smoke: fast cache bind mount leaked" >&2
       cleanup_failed=1
     fi
   fi
@@ -241,7 +250,7 @@ cleanup() {
   if [ "${fast_cache_bound}" -eq 0 ]; then
     rm -rf -- /var/cache/intar-agent
   fi
-  if [ "${fast_jails_bound}" -eq 0 ]; then
+  if [ "${fast_jails_bound}" -eq 0 ] && [ "${fast_self_test_bound}" -eq 0 ]; then
     rm -rf -- /var/lib/intar
   fi
   if [ "${fast_storage_mounted}" -eq 0 ]; then
@@ -288,16 +297,22 @@ fast_storage_mounted=1
 install -d -o root -g root -m 0755 \
   "${fast_storage_root}/cache" \
   "${fast_storage_root}/jails" \
+  "${fast_storage_root}/self-test-assets" \
   /var/cache/intar-agent \
-  /var/lib/intar/jails
+  /var/lib/intar/jails \
+  /var/lib/intar/self-test-assets
 mount --bind "${fast_storage_root}/cache" /var/cache/intar-agent
 fast_cache_bound=1
 mount --bind "${fast_storage_root}/jails" /var/lib/intar/jails
 fast_jails_bound=1
+mount --bind "${fast_storage_root}/self-test-assets" /var/lib/intar/self-test-assets
+fast_self_test_bound=1
 [ "$(stat -f -c %T /var/cache/intar-agent)" = xfs ] || \
   die "fast package-smoke store is not XFS"
 [ "$(stat -c %d /var/cache/intar-agent)" = "$(stat -c %d /var/lib/intar/jails)" ] || \
   die "fast cache and jail stores do not share one filesystem"
+[ "$(stat -c %d /var/lib/intar/self-test-assets)" = "$(stat -c %d /var/lib/intar/jails)" ] || \
+  die "fast self-test and jail stores do not share one filesystem"
 printf 'intar exact reflink package smoke\n' > /var/cache/intar-agent/.reflink-source
 cp --reflink=always \
   /var/cache/intar-agent/.reflink-source \

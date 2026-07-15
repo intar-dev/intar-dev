@@ -221,7 +221,7 @@ systemd-run \
   --property=PrivateTmp=true \
   --property=ProtectHome=true \
   --property=ProtectSystem=strict \
-  --property="ReadWritePaths=/var/lib/intar/jails /run/intar-jailerd ${run_root}" \
+  --property="ReadWritePaths=/var/lib/intar/jails /var/cache/intar-agent /run/intar-jailerd ${run_root}" \
   --property=ProtectClock=true \
   --property=ProtectControlGroups=true \
   --property=ProtectHostname=true \
