@@ -95,7 +95,10 @@ async function runWrangler(arguments_: string[]): Promise<string> {
   child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 1));
+    // `exit` can fire before the stdio pipes have delivered their final data.
+    // Wait for `close` so the post-migration schema attestation never parses a
+    // truncated (or empty) Wrangler JSON result.
+    child.once("close", (code) => resolve(code ?? 1));
   });
   const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
   const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
