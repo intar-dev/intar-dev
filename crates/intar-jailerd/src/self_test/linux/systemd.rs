@@ -71,8 +71,8 @@ pub(super) fn path_utf8(path: &Path) -> Result<String> {
 
 #[derive(Clone, Debug)]
 pub(super) struct UnitState {
-    main_pid: u32,
-    control_group: String,
+    pub(super) main_pid: u32,
+    pub(super) control_group: String,
 }
 
 pub(super) fn start_worker_unit(
@@ -334,7 +334,7 @@ pub(super) fn ensure_unit_tasks_accounted(unit: &UnitState, cgroup: &Path) -> Re
 
 #[derive(Clone, Debug)]
 pub(super) struct TaskSnapshot {
-    ids: BTreeSet<u32>,
+    pub(super) ids: BTreeSet<u32>,
 }
 
 pub(super) fn snapshot_tasks() -> Result<TaskSnapshot> {

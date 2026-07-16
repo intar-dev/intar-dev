@@ -982,5 +982,6 @@ fn validate_iproute2_netns_root(root: &Path) -> Result<()> {
 
 mod topology;
 use topology::*;
+pub(crate) use topology::{initial_mount_namespace_entry, validate_initial_network_namespace};
 #[cfg(test)]
 mod tests;

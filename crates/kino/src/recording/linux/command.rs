@@ -7,12 +7,12 @@ pub(super) enum CommandOutputStream {
 }
 
 pub(super) struct CommandIoCapture {
-    rx: mpsc::Receiver<CommandOutputChunk>,
-    stdout_handle: thread::JoinHandle<()>,
-    stderr_handle: thread::JoinHandle<()>,
-    input_error: Arc<Mutex<Option<String>>>,
-    stdout_error: Arc<Mutex<Option<String>>>,
-    stderr_error: Arc<Mutex<Option<String>>>,
+    pub(super) rx: mpsc::Receiver<CommandOutputChunk>,
+    pub(super) stdout_handle: thread::JoinHandle<()>,
+    pub(super) stderr_handle: thread::JoinHandle<()>,
+    pub(super) input_error: Arc<Mutex<Option<String>>>,
+    pub(super) stdout_error: Arc<Mutex<Option<String>>>,
+    pub(super) stderr_error: Arc<Mutex<Option<String>>>,
 }
 
 pub(super) struct CommandOutputChunk {
@@ -297,7 +297,7 @@ pub(super) fn create_session_file(
 pub(super) struct RawModeGuard;
 
 impl RawModeGuard {
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         terminal::enable_raw_mode()
             .map_err(io::Error::other)
             .context("failed to enable raw terminal mode")?;

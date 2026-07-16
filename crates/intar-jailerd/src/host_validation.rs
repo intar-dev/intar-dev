@@ -551,9 +551,9 @@ pub(super) fn reader_digest_matches(mut reader: File, expected: &Sha256Digest) -
 #[cfg(target_os = "linux")]
 #[derive(Default)]
 pub(super) struct ProcessSecurity {
-    seccomp_enabled: bool,
-    no_new_privs: bool,
-    capabilities_empty: bool,
+    pub(super) seccomp_enabled: bool,
+    pub(super) no_new_privs: bool,
+    pub(super) capabilities_empty: bool,
 }
 
 #[cfg(target_os = "linux")]

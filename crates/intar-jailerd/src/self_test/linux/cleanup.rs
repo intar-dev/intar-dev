@@ -34,10 +34,10 @@ pub(super) fn validate_attestation(attestation: &SelfTestAttestationV2) -> Resul
         attestation.version == ATTESTATION_VERSION,
         "unsupported self-test attestation version"
     );
-    super::validate_sha256(&attestation.config_runtime_fingerprint_sha256)?;
-    super::validate_sha256(&attestation.cloud_hypervisor_sha256)?;
-    super::validate_sha256(&attestation.intar_jailerd_sha256)?;
-    super::validate_sha256(&attestation.intar_jailer_sha256)?;
+    super::super::validate_sha256(&attestation.config_runtime_fingerprint_sha256)?;
+    super::super::validate_sha256(&attestation.cloud_hypervisor_sha256)?;
+    super::super::validate_sha256(&attestation.intar_jailerd_sha256)?;
+    super::super::validate_sha256(&attestation.intar_jailer_sha256)?;
     ensure!(
         !attestation.boot_id.is_empty(),
         "attestation boot ID is empty"
@@ -269,18 +269,18 @@ pub(super) enum CleanupOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CleanupDevice {
-    major: u32,
-    minor: u32,
-    mode: u32,
+    pub(super) major: u32,
+    pub(super) minor: u32,
+    pub(super) mode: u32,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct CleanupPolicy {
-    vm_owners: BTreeMap<String, (u32, u32)>,
+    pub(super) vm_owners: BTreeMap<String, (u32, u32)>,
 }
 
 impl CleanupPolicy {
-    fn expected_vm_owner(&self, relative: &[Vec<u8>]) -> Option<(u32, u32)> {
+    pub(super) fn expected_vm_owner(&self, relative: &[Vec<u8>]) -> Option<(u32, u32)> {
         if relative.len() < 6
             || relative[0] != b"cloud-hypervisor-lifecycle"
             || relative[1] != b"jails"

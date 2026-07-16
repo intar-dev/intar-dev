@@ -2,9 +2,9 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) struct IpNetnsTools<'a> {
-    nsenter: &'a Path,
-    ip: &'a Path,
-    netns_root: &'a Path,
+    pub(super) nsenter: &'a Path,
+    pub(super) ip: &'a Path,
+    pub(super) netns_root: &'a Path,
 }
 
 pub(super) fn create_test_network(

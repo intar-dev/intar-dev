@@ -630,8 +630,8 @@ pub(super) fn wait_for_guest_ready(serial_log: &Path, timeout: Duration) -> Resu
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct BusyGuestCpuSample {
-    usage_usec: u64,
-    nr_throttled: u64,
+    pub(super) usage_usec: u64,
+    pub(super) nr_throttled: u64,
 }
 
 pub(super) fn read_busy_guest_cpu_sample(cgroup: &Path) -> Result<BusyGuestCpuSample> {

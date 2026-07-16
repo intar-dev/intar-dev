@@ -157,10 +157,6 @@ impl HostBackend for UnavailableHostBackend {
     }
 }
 
-/// systemd transient-unit backend. Networking remains a separate fail-closed
-/// boundary until the netlink/nftables implementation is available.
-#[cfg(target_os = "linux")]
-#[derive(Clone)]
 #[cfg(target_os = "linux")]
 impl SystemdHostBackend {
     pub fn connect(config: &JailerdConfig) -> Result<Self> {
@@ -191,7 +187,7 @@ impl SystemdHostBackend {
         })
     }
 
-    fn manager<'a>(
+    pub(super) fn manager<'a>(
         connection: &'a zbus::blocking::Connection,
     ) -> Result<zbus::blocking::Proxy<'a>> {
         zbus::blocking::Proxy::new(
@@ -203,7 +199,7 @@ impl SystemdHostBackend {
         .context("create systemd manager proxy")
     }
 
-    fn get_unit_path(
+    pub(super) fn get_unit_path(
         manager: &zbus::blocking::Proxy<'_>,
         unit_name: &str,
     ) -> Result<Option<zbus::zvariant::OwnedObjectPath>> {

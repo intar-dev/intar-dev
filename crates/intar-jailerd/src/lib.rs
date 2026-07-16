@@ -263,6 +263,8 @@ pub struct SystemdHostBackend {
 }
 
 mod host_validation;
+#[cfg(target_os = "linux")]
+pub use host_validation::run_boot_cpu_guardian;
 #[cfg(any(target_os = "linux", test))]
 use host_validation::*;
 #[derive(Clone, Debug)]
