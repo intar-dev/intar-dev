@@ -11,6 +11,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
+      - "build-tools.hcl"
       - "crates/intar-image-scenario/**"
       - "crates/intar-image-scenario-wasm/**"
       - "website/**"
