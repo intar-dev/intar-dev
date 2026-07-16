@@ -515,6 +515,26 @@ case "$(stat -c '%u:%g:%a' /etc/intar-jailerd/config.toml)" in
   *) die "smoke config lost trusted ownership or mode" ;;
 esac
 
+# The packaged agent example is intentionally inert until an operator supplies
+# bridge credentials. This disposable host still needs a deployment-shaped
+# bridge configuration so doctor proves the installed package is ready to run.
+agent_config=/etc/intar-agent/config.toml
+sed -i \
+  -e '/^\[bridge\]$/,/^\[/s/^enabled = false$/enabled = true/' \
+  -e '/^\[bridge\]$/,/^\[/s/^bootstrap_token = ""$/bootstrap_token = "package-smoke-token"/' \
+  "${agent_config}"
+bridge_fixture=$(awk '
+  /^\[bridge\]$/ { in_bridge = 1; next }
+  /^\[/ { in_bridge = 0 }
+  in_bridge && ($1 == "enabled" || $1 == "bootstrap_token") { print }
+' "${agent_config}")
+[ "${bridge_fixture}" = 'enabled = true
+bootstrap_token = "package-smoke-token"' ] || die "smoke agent bridge fixture is invalid"
+case "$(stat -c '%u:%g:%a' "${agent_config}")" in
+  "0:${agent_gid}:640") ;;
+  *) die "smoke agent config lost trusted ownership or mode" ;;
+esac
+
 self_test=/usr/lib/intar/intar-jailerd-self-test
 [ -x "${self_test}" ] || die "installed self-test wrapper is missing"
 help_output=$("${self_test}" --help 2>&1 || true)
