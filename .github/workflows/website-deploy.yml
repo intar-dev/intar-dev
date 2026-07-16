@@ -2,6 +2,7 @@ name: Website production
 run-name: "Website deploy ${{ github.ref_name }} @ ${{ github.sha }}"
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
