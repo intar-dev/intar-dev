@@ -6,6 +6,8 @@ export type {
   ScenarioRunRecord,
   ScenarioTerminalSessionResult,
   ScenarioRunListEntry,
+  ScenarioRunActivity,
+  ScenarioRunReplayState,
 } from "./scenario-runs/types";
 export {
   listEnabledScenariosForUser,

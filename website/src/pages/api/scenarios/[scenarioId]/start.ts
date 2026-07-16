@@ -65,9 +65,20 @@ export const POST: APIRoute = async ({ request, params }) => {
       userId: authz.context.userId,
       ...(hostId ? { hostId } : {}),
     });
-    return jsonResponse(result, { status: 202 });
+    return jsonResponse(result, {
+      status: 202,
+      headers: {
+        Location: `/api/scenarios/runs/${result.runId}`,
+        "Retry-After": "1",
+      },
+    });
   } catch (error) {
     const { status, body } = toErrorResponse(error, "failed to start scenario");
-    return jsonResponse(body, { status });
+    return jsonResponse(body, {
+      status,
+      ...(body.code === "boot_capacity_pending"
+        ? { headers: { "Retry-After": "2" } }
+        : {}),
+    });
   }
 };

@@ -105,6 +105,23 @@ test.describe("focused state accessibility", () => {
     );
     await expectNoAxeViolations(page, testInfo);
   });
+
+  test("startup milestones expose one current ordered step", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+
+    const currentStep = page.locator('ol li[aria-current="step"]');
+    await expect(currentStep).toHaveCount(1);
+    await expect(currentStep).toContainText("Starting the VM");
+    await expect(page.getByRole("progressbar")).toHaveCount(0);
+    await expectNoAxeViolations(page, testInfo);
+  });
 });
 
 test.describe("focused mobile state accessibility", () => {
@@ -125,6 +142,24 @@ test.describe("focused mobile state accessibility", () => {
     const sheet = page.getByRole("dialog");
     await expect(
       sheet.getByRole("heading", { name: "Run checks and assistance" }),
+    ).toBeVisible();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("startup work order sheet", async ({ page, ui }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+    const trigger = page.getByRole("button", {
+      name: /Work order and briefing/i,
+    });
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+
+    await expect(
+      page.getByRole("heading", { name: "Work order and briefing" }),
     ).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });

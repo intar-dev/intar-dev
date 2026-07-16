@@ -419,6 +419,40 @@ describe("host CPU reservations", () => {
     ).resolves.toHaveLength(0);
   });
 
+  it("does not release the active slot when pending admission expires after teardown intent", async () => {
+    const hostId = "host-expire-during-destroy";
+    const runId = "run-expire-during-destroy";
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await seedStrictCpuHost(hostId, 2_000, now);
+    await reserveHostCpuInD1(db, {
+      hostId,
+      runId,
+      steadyCpuMillisByVm: [500],
+      nowUnixMs: now,
+    });
+    await seedRun(hostId, runId, now);
+    await db
+      .update(scenarioRuns)
+      .set({ deleteRequestedAt: now + 1, updatedAt: now + 1 })
+      .where(eq(scenarioRuns.runId, runId));
+
+    await reconcileHostCpuReservations(
+      db,
+      hostId,
+      now + HOST_CPU_RESERVATION_TTL_MS,
+    );
+
+    const [run] = await db
+      .select({
+        activeKey: scenarioRuns.activeKey,
+        state: scenarioRuns.state,
+      })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, runId));
+    expect(run).toMatchObject({ activeKey: "user-1", state: "failed" });
+  });
+
   it("releases committed CPU only after desired state is absent and applied actual state is gone", async () => {
     const hostId = "host-release";
     const runId = "run-release";

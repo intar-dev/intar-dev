@@ -29,6 +29,18 @@ test.describe("focused visual states", () => {
     });
   }
 
+  test("runs · finishing in background", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("runs"),
+      theme: "light",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Finishing in background" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "runs-finishing-light-desktop");
+  });
+
   for (const variant of ["empty", "loading", "error", "long"] as const) {
     test(`catalog · ${variant}`, async ({ page, ui }) => {
       await ui.open({
@@ -152,5 +164,20 @@ test.describe("focused mobile workspace", () => {
     await expect(statusAction.first()).toBeVisible();
     await statusAction.first().click();
     await expectRouteScreenshot(page, "run-status-dock-dark-mobile");
+  });
+
+  test("startup work order dock", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "booting",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Preparing your workspace" }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: /Work order and briefing/i })
+      .click();
+    await expectRouteScreenshot(page, "run-startup-work-order-dark-mobile");
   });
 });

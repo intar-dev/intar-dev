@@ -1,5 +1,6 @@
 import { Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +16,8 @@ export function ScenarioCancelDialog(props: {
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
   pending: boolean;
+  error?: string | null;
+  retry?: boolean;
   /** Render the inline trigger button; false when the app bar opens it. */
   trigger?: boolean;
 }) {
@@ -32,14 +35,30 @@ export function ScenarioCancelDialog(props: {
       ) : null}
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>End this run?</DialogTitle>
+          <DialogTitle>
+            {props.retry ? "Retry ending this run?" : "End this run?"}
+          </DialogTitle>
           <DialogDescription>
-            The sandbox will shut down and the terminal session will close.
-            Run history and replay data are kept after cleanup finishes.
+            {props.retry
+              ? "The earlier request did not release this run. Retry route revocation and cleanup acceptance now."
+              : "The sandbox will shut down and the terminal session will close. Run history and replay data are kept after cleanup finishes."}
           </DialogDescription>
         </DialogHeader>
+        {props.error ? (
+          <Alert variant="destructive">
+            <AlertTitle>Run could not be ended</AlertTitle>
+            <AlertDescription>
+              {props.error} This run still owns your active slot; retry when
+              ready.
+            </AlertDescription>
+          </Alert>
+        ) : null}
         <DialogFooter>
-          <Button variant="outline" onClick={() => props.onOpenChange(false)}>
+          <Button
+            variant="outline"
+            onClick={() => props.onOpenChange(false)}
+            disabled={props.pending}
+          >
             Keep going
           </Button>
           <Button
@@ -48,7 +67,11 @@ export function ScenarioCancelDialog(props: {
             disabled={props.pending}
           >
             <Trash2 className="size-4" />
-            {props.pending ? "Ending run…" : "End run"}
+            {props.pending
+              ? "Ending run…"
+              : props.retry
+                ? "Retry end"
+                : "End run"}
           </Button>
         </DialogFooter>
       </DialogContent>

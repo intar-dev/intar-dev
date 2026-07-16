@@ -44,6 +44,35 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
     setRunState(runState) {
       server.state.runState = runState;
       server.state.run = makeRun(runState);
+      const listedRun = server.state.runs.find(
+        (run) => run.runId === "run-active",
+      );
+      if (listedRun) {
+        const projected = server.state.run;
+        listedRun.phase = projected.phase;
+        listedRun.outcome = projected.outcome;
+        listedRun.active = projected.active;
+        listedRun.activity = projected.activity;
+        listedRun.deleteRequestedAt = projected.deleteRequestedAt;
+        listedRun.replayState = projected.replayState;
+        listedRun.hasReplay = projected.hasReplay;
+        listedRun.finishedAt =
+          projected.activity === "settled" ? FIXED_NOW : null;
+      }
+      const foreground = server.state.run.activity === "foreground";
+      const catalogEntry = server.state.scenarios.find(
+        (scenario) => scenario.scenarioId === "repair-nginx",
+      );
+      if (catalogEntry?.progress && typeof catalogEntry.progress === "object") {
+        const progress = catalogEntry.progress as Record<string, unknown>;
+        progress.activeRunId = foreground ? "run-active" : null;
+        progress.status = foreground ? "in_progress" : "attempted";
+      }
+      server.state.scenarioDetail.hasActiveRun = foreground;
+      server.state.scenarioDetail.activeRunId = foreground ? "run-active" : null;
+      server.state.scenarioDetail.activeRun = foreground
+        ? server.state.scenarioDetail.activeRun
+        : null;
       server.state.terminalMode =
         runState === "disconnected"
           ? "disconnected"
@@ -148,13 +177,18 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/scenarios\/[^/]+\/start$/.test(pathname) &&
         method === "POST"
       ) {
-        await json(route, {
-          accepted: true,
-          runId: "run-active",
-          scenarioId: "repair-nginx",
-          acceptedAt: FIXED_NOW,
-          reused: false,
-        });
+        await json(
+          route,
+          {
+            accepted: true,
+            runId: "run-active",
+            scenarioId: "repair-nginx",
+            acceptedAt: FIXED_NOW,
+            reused: false,
+            run: server.state.run,
+          },
+          202,
+        );
         return;
       }
       const learnerScenarioId = segment(pathname, /^\/api\/scenarios\/([^/]+)$/);
@@ -180,11 +214,17 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         method === "POST"
       ) {
         server.setRunState("ending");
-        await json(route, {
-          accepted: true,
-          runId: "run-active",
-          acceptedAt: FIXED_NOW,
-        });
+        await json(
+          route,
+          {
+            accepted: true,
+            runId: "run-active",
+            acceptedAt: FIXED_NOW,
+            activeSlotReleased: true,
+            run: server.state.run,
+          },
+          202,
+        );
         return;
       }
       if (

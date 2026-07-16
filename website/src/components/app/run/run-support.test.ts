@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { hasPendingInfrastructureTeardown } from "./run-support";
+import {
+  buildScenarioBootSteps,
+  buildScenarioShutdownSteps,
+  hasPendingInfrastructureTeardown,
+} from "./run-support";
+import type { ScenarioRunRecord, ScenarioRunVmRecord } from "./run-types";
 
 describe("hasPendingInfrastructureTeardown", () => {
   it("keeps every unfinished VM destroyable", () => {
@@ -23,3 +28,120 @@ describe("hasPendingInfrastructureTeardown", () => {
     ).toBe(false);
   });
 });
+
+describe("scenario startup milestones", () => {
+  it("uses truthful named milestones without numeric progress", () => {
+    const vm = runVm({ phase: "booting" });
+    const steps = buildScenarioBootSteps(run([vm]), vm);
+
+    expect(steps.map((step) => step.label)).toEqual([
+      "Request accepted",
+      "Starting the VM",
+      "Checking the workspace",
+      "Opening the shell",
+    ]);
+    expect(steps.map((step) => step.state)).toEqual([
+      "done",
+      "active",
+      "pending",
+      "pending",
+    ]);
+  });
+
+  it("tracks the selected machine independently in a multi-VM run", () => {
+    const ready = runVm({ id: "vm-ready", phase: "running", ready: true });
+    const booting = runVm({ id: "vm-booting", phase: "booting" });
+
+    const readySteps = buildScenarioBootSteps(run([ready, booting]), ready);
+    const bootingSteps = buildScenarioBootSteps(
+      run([ready, booting]),
+      booting,
+    );
+
+    expect(readySteps.at(-1)?.state).toBe("done");
+    expect(bootingSteps.at(-1)?.state).toBe("pending");
+  });
+});
+
+describe("scenario shutdown milestones", () => {
+  it("shows shutdown, save, and replay preparation as separate work", () => {
+    const attempt = run([runVm({ phase: "archiving", hasRecording: true })], {
+      phase: "archiving",
+      activity: "background",
+      replayState: "preparing",
+    });
+
+    expect(buildScenarioShutdownSteps(attempt)).toEqual([
+      expect.objectContaining({ label: "Shutting down workspace", state: "done" }),
+      expect.objectContaining({ label: "Saving run", state: "active" }),
+      expect.objectContaining({ label: "Preparing replay", state: "active" }),
+    ]);
+  });
+});
+
+function run(
+  vms: ScenarioRunVmRecord[],
+  overrides: Partial<ScenarioRunRecord> = {},
+): ScenarioRunRecord {
+  return {
+    id: "run-1",
+    phase: "booting",
+    canOpenTerminal: vms.some((vm) => vm.canOpenTerminal),
+    bootProbes: vms.flatMap((vm) => vm.bootProbes),
+    scenarioProbes: [],
+    vms,
+    replayState: "not_started",
+    activity: "foreground",
+    ...overrides,
+  } as ScenarioRunRecord;
+}
+
+function runVm(
+  input: {
+    id?: string;
+    phase: ScenarioRunVmRecord["phase"];
+    ready?: boolean;
+    hasRecording?: boolean;
+  },
+): ScenarioRunVmRecord {
+  return {
+    id: input.id ?? "vm-1",
+    ordinal: 0,
+    scenarioVmId: "scenario-vm-1",
+    scenarioVmName: "web",
+    runtimeVmName: "runtime-web",
+    hostname: "web",
+    phase: input.phase,
+    phaseTitle: input.phase,
+    phaseDetail: "Fixture machine state",
+    progressPercent: 0,
+    canOpenTerminal: input.ready ?? false,
+    terminalPhase: input.ready ? "ready" : "pending",
+    terminalTarget: {
+      host: input.ready ? "203.0.113.1" : null,
+      port: input.ready ? 22 : 0,
+      username: "root",
+      hostKeyOpenssh: null,
+      checkedAt: null,
+    },
+    bootProbes: [],
+    scenarioProbes: [],
+    replayArtifacts: [],
+    sessionTimeline: null,
+    ...(input.hasRecording === undefined
+      ? {}
+      : { hasRecording: input.hasRecording }),
+    provisioning: {
+      image: null,
+      imageKey: null,
+      imageSha256: null,
+      resources: null,
+      leaseDurationSeconds: null,
+      groupName: null,
+      groupId: null,
+      setupKeyId: null,
+      status: "pending",
+      error: null,
+    },
+  };
+}

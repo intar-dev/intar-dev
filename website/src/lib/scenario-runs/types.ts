@@ -13,6 +13,10 @@ import {
   type BrowserTerminalSessionResult,
   type NativeTerminalSessionResult,
 } from "@/lib/stargate";
+import type {
+  ScenarioRunActivity,
+  ScenarioRunReplayState,
+} from "./activity";
 
 export interface ScenarioCatalogEntry {
   scenarioId: string;
@@ -74,6 +78,7 @@ export interface ScenarioDetail {
     solvedAt: number | null;
     solveDurationMs: number | null;
     solutionAssisted: boolean;
+    replayState: ScenarioRunReplayState;
     hasReplay: boolean;
   }>;
 }
@@ -94,6 +99,11 @@ export interface ScenarioRunRecord extends RunStateDocument {
   solvedAt: number | null;
   solveDurationMs: number | null;
   outcome: ScenarioRunOutcome;
+  active: boolean;
+  activity: ScenarioRunActivity;
+  deleteRequestedAt: number | null;
+  replayState: ScenarioRunReplayState;
+  hasReplay: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -111,6 +121,9 @@ export interface ScenarioRunListEntry {
   phase: RunPhase;
   outcome: ScenarioRunOutcome;
   active: boolean;
+  activity: ScenarioRunActivity;
+  deleteRequestedAt: number | null;
+  replayState: ScenarioRunReplayState;
   createdAt: number;
   finishedAt: number | null;
   solvedAt: number | null;
@@ -118,3 +131,5 @@ export interface ScenarioRunListEntry {
   solutionAssisted: boolean;
   hasReplay: boolean;
 }
+
+export type { ScenarioRunActivity, ScenarioRunReplayState } from "./activity";

@@ -14,6 +14,7 @@ vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
 
 import { POST } from "@/pages/api/scenarios/[scenarioId]/start";
+import { appError } from "@/lib/app-error";
 
 describe("scenario start route", () => {
   beforeEach(() => {
@@ -31,6 +32,7 @@ describe("scenario start route", () => {
       scenarioId: "pair-ping",
       acceptedAt: 1,
       reused: false,
+      run: { id: "run-1" },
     });
   });
 
@@ -38,6 +40,13 @@ describe("scenario start route", () => {
     const response = await startRequest();
 
     expect(response.status).toBe(202);
+    expect(response.headers.get("location")).toBe(
+      "/api/scenarios/runs/run-1",
+    );
+    expect(response.headers.get("retry-after")).toBe("1");
+    await expect(response.json()).resolves.toMatchObject({
+      run: { id: "run-1" },
+    });
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
@@ -96,6 +105,24 @@ describe("scenario start route", () => {
       error: "json body must be an object",
     });
     expect(scenarioRunsMock.startScenarioRunForUser).not.toHaveBeenCalled();
+  });
+
+  it("tells capacity waiters when to retry", async () => {
+    scenarioRunsMock.startScenarioRunForUser.mockRejectedValueOnce(
+      appError(
+        409,
+        "boot_capacity_pending",
+        "scenario boot CPU capacity is pending; retry shortly",
+      ),
+    );
+
+    const response = await startRequest();
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("retry-after")).toBe("2");
+    await expect(response.json()).resolves.toMatchObject({
+      code: "boot_capacity_pending",
+    });
   });
 
 });

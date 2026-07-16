@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
@@ -28,8 +28,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { presentScenarioDetail } from "@/lib/run-phase";
+import { presentScenarioDetail, presentScenarioRun } from "@/lib/run-phase";
 import type { ScenarioDetail } from "@/lib/scenario-runs";
+import {
+  requestScenarioStartWithCapacityWait,
+  ScenarioStartCancelledError,
+} from "@/components/app/lib/scenario-start";
 import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
@@ -57,19 +61,20 @@ interface ScenarioDetailResponse {
   scenario: PresentedScenarioDetail;
 }
 
-interface ScenarioStartAcceptedResponse {
-  accepted: true;
-  runId: string;
-  scenarioId: string;
-  acceptedAt: number;
-  reused: boolean;
-}
-
 export function ScenarioBriefing() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { scenarioId } = useParams({ from: "/app/scenarios/$scenarioId" });
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [waitingForCapacity, setWaitingForCapacity] = useState(false);
+  const startAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      startAbortRef.current?.abort();
+    },
+    [],
+  );
 
   const scenarioQuery = useQuery({
     queryKey: ["scenarios", "detail", scenarioId],
@@ -84,13 +89,31 @@ export function ScenarioBriefing() {
   });
 
   const startScenario = useMutation({
-    mutationFn: () => requestScenarioStart(scenarioId),
-    onSuccess: (runId) => {
+    mutationFn: async () => {
+      const controller = new AbortController();
+      startAbortRef.current = controller;
+      setWaitingForCapacity(false);
+      return requestScenarioStartWithCapacityWait(scenarioId, {
+        signal: controller.signal,
+        onCapacityWait: () => setWaitingForCapacity(true),
+      });
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData(["scenarios", "run", result.runId], {
+        run: presentScenarioRun(result.run),
+      });
+      void queryClient.invalidateQueries({ queryKey: ["scenario-runs", "list"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenarios", "detail", scenarioId],
+      });
       void navigate({
         to: "/runs/$runId",
-        params: { runId },
-        search: { pending: "1" },
+        params: { runId: result.runId },
       });
+    },
+    onSettled: () => {
+      startAbortRef.current = null;
+      setWaitingForCapacity(false);
     },
   });
 
@@ -164,6 +187,11 @@ export function ScenarioBriefing() {
     }
 
     startScenario.mutate();
+  };
+
+  const stopWaitingForCapacity = () => {
+    startAbortRef.current?.abort();
+    setWaitingForCapacity(false);
   };
 
   return (
@@ -321,7 +349,7 @@ export function ScenarioBriefing() {
                   }
                 >
                   {startScenario.isPending
-                    ? "Starting sandbox…"
+                    ? "Starting scenario…"
                     : scenarioData.hasActiveRun
                       ? "Resume run"
                       : "Start scenario"}
@@ -351,16 +379,31 @@ export function ScenarioBriefing() {
                     </Button>
                   </div>
                 ) : null}
-                {startScenario.error ? (
+                {startScenario.error &&
+                !(startScenario.error instanceof ScenarioStartCancelledError) ? (
                   <InlineFeedback tone="error">
                     {startScenario.error instanceof Error
                       ? startScenario.error.message
                       : "The scenario could not be started."}
                   </InlineFeedback>
                 ) : startScenario.isPending ? (
-                  <InlineFeedback tone="pending">
-                    Allocating the scenario run…
-                  </InlineFeedback>
+                  <div className="space-y-2">
+                    <InlineFeedback tone="pending">
+                      {waitingForCapacity
+                        ? "VM capacity is temporarily busy. Retrying automatically for up to 60 seconds."
+                        : "Requesting VM capacity…"}
+                    </InlineFeedback>
+                    {waitingForCapacity ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="min-h-11 w-full"
+                        onClick={stopWaitingForCapacity}
+                      >
+                        Stop waiting
+                      </Button>
+                    ) : null}
+                  </div>
                 ) : null}
               </section>
 
@@ -528,37 +571,6 @@ async function fetchScenarioDetail(scenarioId: string) {
   return {
     scenario: presentScenarioDetail(body.scenario),
   } satisfies ScenarioDetailResponse;
-}
-
-async function requestScenarioStart(scenarioId: string) {
-  const response = await fetch(
-    `/api/scenarios/${encodeURIComponent(scenarioId)}/start`,
-    {
-      method: "POST",
-      credentials: "include",
-    },
-  );
-
-  const body = (await response.json().catch(() => null)) as
-    | ScenarioStartAcceptedResponse
-    | { error?: string }
-    | null;
-
-  if (
-    !response.ok ||
-    !body ||
-    !("accepted" in body) ||
-    body.accepted !== true ||
-    typeof body.runId !== "string"
-  ) {
-    throw new Error(
-      body && "error" in body && typeof body.error === "string"
-        ? body.error
-        : "Failed to start scenario",
-    );
-  }
-
-  return body.runId;
 }
 
 function TechnicalDetail({

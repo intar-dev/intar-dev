@@ -57,17 +57,50 @@ export async function startScenarioRunForUser(params: {
   scenarioId: string;
   acceptedAt: number;
   reused: boolean;
+  run: ScenarioRunRecord;
 }> {
-  return startScenarioRunInternal(params);
+  const result = await startScenarioRunInternal(params);
+  const row = await loadRunRow(result.runId, params.userId);
+  if (!row) {
+    throw appError(
+      500,
+      "scenario_run_snapshot_missing",
+      "scenario run was accepted but its snapshot could not be loaded",
+    );
+  }
+  return {
+    ...result,
+    run: toScenarioRunRecord(row),
+  };
 }
 
 export async function destroyScenarioRunForUser(params: {
   runId: string;
   userId: string;
-}): Promise<{
+}) {
+  return destroyScenarioRunForUserWithDependencies(params, {
+    markVmsAbsent: markRunVmsAbsentInDesiredState,
+    revokeRoutes: revokeScenarioRunRoutes,
+    wakeHostRuntime: tryWakeHostRuntime,
+  });
+}
+
+export async function destroyScenarioRunForUserWithDependencies(
+  params: {
+    runId: string;
+    userId: string;
+  },
+  dependencies: {
+    markVmsAbsent: typeof markRunVmsAbsentInDesiredState;
+    revokeRoutes: typeof revokeScenarioRunRoutes;
+    wakeHostRuntime: typeof tryWakeHostRuntime;
+  },
+): Promise<{
   accepted: true;
   runId: string;
   acceptedAt: number;
+  activeSlotReleased: true;
+  run: ScenarioRunRecord;
 }> {
   const db = drizzle(env.DB);
   const row = await loadRunRow(params.runId, params.userId);
@@ -76,6 +109,7 @@ export async function destroyScenarioRunForUser(params: {
   }
 
   const acceptedAt = Date.now();
+  const deleteRequestedAt = row.deleteRequestedAt ?? acceptedAt;
   const teardownVms = runVmsRequiringDesiredAbsence(row.state);
   if (!["completed", "failed"].includes(row.state.phase)) {
     const teardownVmIds = new Set(teardownVms.map((vm) => vm.id));
@@ -95,15 +129,15 @@ export async function destroyScenarioRunForUser(params: {
               : vm,
           ),
         }),
-      deleteRequestedAt: acceptedAt,
+      deleteRequestedAt,
     });
-  } else if (teardownVms.length > 0) {
-    // A failed outcome is terminal for scoring, not for infrastructure. Keep
-    // the original failure state while recording that teardown was requested.
+  } else {
+    // Terminal outcomes keep their original scoring state while recording
+    // that teardown was explicitly requested.
     await db
       .update(scenarioRuns)
       .set({
-        deleteRequestedAt: row.deleteRequestedAt ?? acceptedAt,
+        deleteRequestedAt,
         updatedAt: acceptedAt,
       })
       .where(
@@ -115,28 +149,106 @@ export async function destroyScenarioRunForUser(params: {
   }
 
   if (teardownVms.length > 0) {
-    await markRunVmsAbsentInDesiredState({
-      hostId: row.hostId,
-      runId: row.runId,
-      vms: teardownVms,
-      nowUnixMs: acceptedAt,
-      db,
-    });
+    try {
+      await dependencies.markVmsAbsent({
+        hostId: row.hostId,
+        runId: row.runId,
+        vms: teardownVms,
+        nowUnixMs: acceptedAt,
+        db,
+      });
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: "scenario_run_teardown_acceptance_failed",
+          stage: "desired_state",
+          runId: row.runId,
+          hostId: row.hostId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      throw appError(
+        503,
+        "scenario_teardown_desired_state_failed",
+        "Workspace shutdown could not be requested. Retry ending the run.",
+      );
+    }
   }
 
-  const routeRevocationFailure = await revokeScenarioRunRoutes(row).then(
+  const routeRevocationFailure = await dependencies.revokeRoutes(row).then(
     () => null,
     (error: unknown) => ({ error }),
   );
-  await tryWakeHostRuntime(row.hostId);
+  await dependencies.wakeHostRuntime(row.hostId);
   if (routeRevocationFailure) {
-    throw routeRevocationFailure.error;
+    console.warn(
+      JSON.stringify({
+        event: "scenario_run_teardown_acceptance_failed",
+        stage: "route_revocation",
+        runId: row.runId,
+        hostId: row.hostId,
+        error:
+          routeRevocationFailure.error instanceof Error
+            ? routeRevocationFailure.error.message
+            : String(routeRevocationFailure.error),
+      }),
+    );
+    throw appError(
+      503,
+      "scenario_teardown_route_revocation_failed",
+      "Shell access could not be revoked. Retry ending the run.",
+    );
   }
+
+  try {
+    await updateRunState(row.runId, {
+      mutate: (current) => current,
+      deleteRequestedAt,
+      releaseActiveSlot: true,
+    });
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "scenario_run_teardown_acceptance_failed",
+        stage: "active_slot_release",
+        runId: row.runId,
+        hostId: row.hostId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    throw appError(
+      503,
+      "scenario_teardown_slot_release_failed",
+      "Cleanup was accepted, but the active run slot could not be released. Retry ending the run.",
+    );
+  }
+
+  const acceptedRow = await loadRunRow(row.runId, params.userId);
+  if (!acceptedRow) {
+    throw appError(
+      500,
+      "scenario_run_snapshot_missing",
+      "scenario teardown was accepted but its snapshot could not be loaded",
+    );
+  }
+  const run = toScenarioRunRecord(acceptedRow);
+  console.log(
+    JSON.stringify({
+      event: "scenario_run_teardown_accepted",
+      runId: row.runId,
+      hostId: row.hostId,
+      acceptedAt,
+      deleteRequestedAt,
+      vmCount: teardownVms.length,
+    }),
+  );
 
   return {
     accepted: true,
     runId: row.runId,
     acceptedAt,
+    activeSlotReleased: true,
+    run,
   };
 }
 

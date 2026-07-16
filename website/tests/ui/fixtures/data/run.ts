@@ -12,6 +12,7 @@ import {
 export function makeRun(state: RunFixtureState): Record<string, unknown> {
   const lifecycle = runLifecycle(state);
   const complete = state === "archived" || state === "replay";
+  const background = state === "ending";
   const solved = state === "solved" || complete;
   const ready = lifecycle.terminal === "ready";
   const bootProbe = {
@@ -109,6 +110,23 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
     solvedAt: solved ? FIXED_NOW - 12 * minute : null,
     solveDurationMs: solved ? 23 * minute : null,
     outcome: lifecycle.outcome,
+    active: !background && !complete && state !== "failed",
+    activity: background
+      ? "background"
+      : complete || state === "failed"
+        ? "settled"
+        : "foreground",
+    deleteRequestedAt:
+      background || complete ? FIXED_NOW - 2 * minute : null,
+    replayState:
+      state === "replay"
+        ? "ready"
+        : state === "ending"
+          ? "preparing"
+          : complete || state === "failed"
+            ? "none"
+            : "not_started",
+    hasReplay: state === "replay",
     createdAt: FIXED_NOW - 35 * minute,
     updatedAt: FIXED_NOW - minute,
     phase: lifecycle.runPhase,

@@ -62,151 +62,137 @@ export function scenarioRunOutcomeMeta(outcome: ScenarioRunRecord["outcome"]) {
 
 export function buildScenarioBootSteps(
   attempt: ScenarioRunRecord | null,
+  selectedVm?: ScenarioRunVmRecord | null,
 ): ScenarioStatusStep[] {
   if (!attempt) {
     return [];
   }
 
-  const hasAnyReportedProbes = hasReportedProbeResults([
-    ...attempt.bootProbes,
-    ...attempt.scenarioProbes,
-  ]);
-  const bootChecksComplete = attempt.bootProbes.length
-    ? attempt.bootProbes.every((probe) => probe.status === "pass")
-    : attempt.canOpenTerminal;
+  const vm = selectedVm ?? attempt.vms[0] ?? null;
+  const shellReady = Boolean(vm && hasUsableTerminalTarget(vm));
+  const vmFailed = vm?.phase === "failed";
+  const vmStarting =
+    !vm || vm.phase === "launching" || vm.phase === "booting";
+  const bootChecksComplete = Boolean(
+    vm &&
+      (vm.bootProbes.length > 0
+        ? vm.bootProbes.every((probe) => probe.status === "pass")
+        : vm.canOpenTerminal),
+  );
+  const workspaceCheckStarted = Boolean(
+    vm && vm.phase !== "launching" && vm.phase !== "booting",
+  );
 
-  const steps: ScenarioStatusStep[] = [
+  return [
     {
-      id: "queue",
-      label: "Start your scenario",
-      detail:
-        attempt.phase === "launching"
-          ? "Lining up everything your run needs."
-          : "Your scenario is underway.",
-      state: attempt.phase === "launching" ? "active" : "done",
+      id: "accepted",
+      label: "Request accepted",
+      detail: "The run is registered and its work order is available.",
+      state: "done",
     },
     {
-      id: "environment",
-      label: "Prepare your workspace",
-      detail:
-        bootChecksComplete || attempt.canOpenTerminal
-          ? "Your workspace is ready."
-          : attempt.phase === "failed"
-            ? "We could not finish setting things up."
-            : "Setting up a fresh place for you to work.",
-      state:
-        attempt.phase === "failed" &&
-        !bootChecksComplete &&
-        !attempt.canOpenTerminal
+      id: "starting-vm",
+      label: "Starting the VM",
+      detail: vmStarting
+        ? "The host is creating and booting this machine."
+        : "The machine has started.",
+      state: vmFailed ? "failed" : vmStarting ? "active" : "done",
+    },
+    {
+      id: "checking-workspace",
+      label: "Checking the workspace",
+      detail: bootChecksComplete
+        ? "Startup checks are passing."
+        : vmFailed
+          ? "The workspace did not pass its startup checks."
+          : "Checking services and shell prerequisites.",
+      state: vmFailed
+        ? "failed"
+        : bootChecksComplete || shellReady
+          ? "done"
+          : workspaceCheckStarted
+            ? "active"
+            : "pending",
+    },
+    {
+      id: "opening-shell",
+      label: "Opening the shell",
+      detail: shellReady
+        ? "Shell access is ready."
+        : vmFailed
+          ? "Shell access could not be opened."
+          : bootChecksComplete || vm?.canOpenTerminal
+            ? "Connecting the browser terminal."
+            : "Waiting for startup checks to finish.",
+      state: shellReady
+        ? "done"
+        : vmFailed
           ? "failed"
-          : bootChecksComplete || attempt.canOpenTerminal
-            ? "done"
-            : attempt.phase === "launching"
-              ? "pending"
-              : "active",
+          : bootChecksComplete || vm?.canOpenTerminal
+            ? "active"
+            : "pending",
     },
   ];
-
-  steps.push({
-    id: "startup-checks",
-    label: "Finish the last checks",
-    detail:
-      bootChecksComplete
-        ? "Everything looks good so far."
-        : attempt.canOpenTerminal && !hasAnyReportedProbes
-          ? "Almost there. We are waiting for the first results to come in."
-          : attempt.phase === "failed"
-            ? "We could not confirm that everything was ready."
-            : "Running the last setup checks before opening the terminal.",
-    state:
-      bootChecksComplete
-        ? "done"
-        : attempt.phase === "failed"
-          ? "failed"
-          : attempt.phase === "launching"
-            ? "pending"
-            : "active",
-  });
-
-  steps.push({
-    id: "shell-access",
-    label: "Open your terminal",
-    detail:
-      attempt.canOpenTerminal && hasAnyReportedProbes
-        ? "Your terminal is ready."
-        : attempt.canOpenTerminal
-          ? "We are waiting for the last check to come through."
-          : bootChecksComplete
-            ? "Connecting the last part of your workspace."
-            : "Waiting for the earlier steps to finish.",
-    state:
-      attempt.canOpenTerminal && hasAnyReportedProbes
-        ? "done"
-        : attempt.phase === "failed"
-          ? "failed"
-          : bootChecksComplete && !hasAnyReportedProbes
-            ? "pending"
-            : bootChecksComplete
-              ? "active"
-              : "pending",
-  });
-
-  return steps;
 }
 
 export function buildScenarioShutdownSteps(
   attempt: ScenarioRunRecord | null,
-  shutdownRequested: boolean,
 ): ScenarioStatusStep[] {
   if (!attempt) {
     return [];
   }
 
-  const phase =
-    attempt.phase === "completed"
-      ? "done"
-      : attempt.phase === "failed"
-        ? "failed"
-        : attempt.phase === "archiving"
-          ? "uploading"
-          : attempt.phase === "deleting" || shutdownRequested
-            ? "destroying"
-            : "destroying";
+  const workspaceStopped =
+    attempt.phase === "archiving" || attempt.phase === "completed";
+  const recordingUploaded = attempt.vms.some(
+    (vm) => vm.hasRecording === true,
+  );
+  const runSaved = attempt.phase === "completed";
 
   return [
     {
-      id: "destroying",
-      label: "Destroying",
-      detail:
-        phase === "destroying"
-          ? "Removing the VM before the run is archived."
-          : phase === "failed"
-            ? "The shutdown did not finish cleanly."
-          : "The VM has been removed.",
-      state:
-        phase === "destroying"
-          ? "active"
-          : phase === "failed"
-            ? "failed"
-            : "done",
+      id: "shutdown-workspace",
+      label: "Shutting down workspace",
+      detail: workspaceStopped
+        ? "The VM is no longer running."
+        : "Revoking shell access and removing the VM.",
+      state: workspaceStopped ? "done" : "active",
     },
     {
-      id: "uploading",
-      label: "Uploading",
-      detail:
-        phase === "uploading"
-          ? "Saving recordings and logs from this run."
-          : phase === "failed"
-            ? "Recordings or logs did not finish uploading."
-          : "Uploads start once the VM is fully removed.",
-      state:
-        phase === "uploading"
+      id: "saving-run",
+      label: "Saving run",
+      detail: runSaved
+        ? "Run history and artifacts are saved."
+        : workspaceStopped
+          ? "Saving checks, logs, and terminal recordings."
+          : "Saving starts after the VM is gone.",
+      state: runSaved
+        ? "done"
+        : workspaceStopped
           ? "active"
-          : phase === "destroying"
-            ? "pending"
-            : phase === "failed"
-              ? "failed"
-              : "done",
+          : "pending",
+    },
+    {
+      id: "preparing-replay",
+      label: "Preparing replay",
+      detail:
+        attempt.replayState === "ready"
+          ? "The terminal replay is ready."
+          : attempt.replayState === "none"
+            ? "No terminal session was recorded."
+            : attempt.replayState === "failed"
+              ? "The replay could not be prepared."
+              : recordingUploaded
+                ? "Building the terminal session timeline."
+                : "Replay preparation follows the run save.",
+      state:
+        attempt.replayState === "ready" || attempt.replayState === "none"
+          ? "done"
+          : attempt.replayState === "failed"
+            ? "failed"
+            : recordingUploaded
+              ? "active"
+              : "pending",
     },
   ];
 }
@@ -225,71 +211,21 @@ export function formatScenarioStepState(state: ScenarioStatusStep["state"]) {
 }
 
 export function getScenarioBootScreenCopy(attempt: ScenarioRunRecord | null) {
-  if (!attempt) {
-    return {
-      title: "Queued",
-      description: "Hang tight while we get everything ready for you.",
-    };
-  }
-
-  if (attempt.canOpenTerminal && !hasReportedProbeResults([...attempt.bootProbes, ...attempt.scenarioProbes])) {
-    return {
-      title: "Almost ready",
-      description:
-        "Your workspace is up. We are finishing the last checks before opening the terminal.",
-    };
-  }
-
-  switch (attempt.phase) {
-    case "launching":
-      return {
-        title: "Queued",
-        description: "Waiting for the selected host to accept the launch.",
-      };
-    case "booting":
-      return {
-        title: "Preparing workspace",
-        description: "Running the last setup checks before opening the terminal.",
-      };
-    case "waiting_for_target":
-      return {
-        title: "Waiting for shell",
-        description:
-          "Your workspace is ready. Waiting for shell access to become ready.",
-      };
-    default:
-      return {
-        title: "Getting your scenario ready",
-        description:
-          "We are preparing your workspace and checking that everything is ready.",
-      };
-  }
+  void attempt;
+  return {
+    title: "Preparing your workspace",
+    description: "Review the work order while the VM starts.",
+  };
 }
 
 export function getScenarioShutdownScreenCopy(
   attempt: ScenarioRunRecord | null,
-  shutdownRequested: boolean,
 ) {
-  if (!attempt) {
-    return {
-      title: "Destroying",
-      description: "We are closing your run and cleaning up the workspace.",
-    };
-  }
-
-  if (attempt.phase === "archiving") {
-    return {
-      title: "Uploading",
-      description: "Saving recordings and logs from this run.",
-    };
-  }
-
+  void attempt;
   return {
-    title: "Destroying",
+    title: "Finishing in the background",
     description:
-      shutdownRequested || attempt.phase === "deleting"
-        ? "Removing the VM before the run is archived."
-        : "We are closing your run and cleaning up the workspace.",
+      "This run no longer blocks another lab. You can return to scenarios while cleanup continues.",
   };
 }
 

@@ -24,9 +24,13 @@ import {
   loadRunRow,
   toScenarioRunRecord,
   hydrateScenarioRunReplayArtifacts,
-  loadRunIdsWithUploadedReplayArtifacts,
+  parseRunState,
   scenarioRunDifficulty,
 } from "./storage";
+import {
+  deriveScenarioRunActivity,
+  deriveScenarioRunReplayState,
+} from "./activity";
 
 export async function listEnabledScenariosForUser(): Promise<
   ScenarioCatalogEntry[]
@@ -107,7 +111,7 @@ export async function getScenarioRunForUser(params: {
   }
   const run = toScenarioRunRecord(row);
   // Recording artifacts are produced only after teardown starts. Keep the
-  // 100 ms boot/readiness poll to one run-row query without hiding artifact
+  // startup/readiness poll to one run-row query without hiding artifact
   // upload progress from teardown and archive views.
   if (RUN_PHASE_ORDER[run.phase] < RUN_PHASE_ORDER.teardown_requested) {
     return run;
@@ -127,6 +131,7 @@ export async function listScenarioRunsForUser(params: {
       title: scenarioRuns.title,
       difficulty: scenarioRuns.difficulty,
       state: scenarioRuns.state,
+      stateJson: scenarioRuns.stateJson,
       activeKey: scenarioRuns.activeKey,
       createdAt: scenarioRuns.createdAt,
       completedAt: scenarioRuns.completedAt,
@@ -140,34 +145,42 @@ export async function listScenarioRunsForUser(params: {
     .orderBy(desc(scenarioRuns.createdAt))
     .limit(100);
 
-  const replayRunIds = await loadRunIdsWithUploadedReplayArtifacts(
-    db,
-    rows.map((row) => row.runId),
-  );
-  return rows.map((row) => ({
-    runId: row.runId,
-    scenarioId: row.scenarioId,
-    scenarioName: row.scenarioName,
-    title: row.title,
-    difficulty: scenarioRunDifficulty(row.runId, row.difficulty),
-    phase: row.state as RunPhase,
-    outcome: deriveScenarioRunOutcome({
-      phase: row.state as RunPhase,
-      solvedAt: row.solvedAt,
+  return rows.map((row) => {
+    const phase = row.state as RunPhase;
+    const replayState = deriveScenarioRunReplayState(
+      parseRunState(row.stateJson),
+    );
+    return {
+      runId: row.runId,
+      scenarioId: row.scenarioId,
+      scenarioName: row.scenarioName,
+      title: row.title,
+      difficulty: scenarioRunDifficulty(row.runId, row.difficulty),
+      phase,
+      outcome: deriveScenarioRunOutcome({
+        phase,
+        solvedAt: row.solvedAt,
+        deleteRequestedAt: row.deleteRequestedAt,
+        failedAt: row.failedAt,
+      }),
+      active: row.activeKey !== null,
+      activity: deriveScenarioRunActivity({
+        activeKey: row.activeKey,
+        phase,
+      }),
       deleteRequestedAt: row.deleteRequestedAt,
-      failedAt: row.failedAt,
-    }),
-    active: row.activeKey !== null,
-    createdAt: row.createdAt,
-    finishedAt: row.completedAt ?? row.failedAt ?? null,
-    solvedAt: row.solvedAt,
-    solveDurationMs: deriveScenarioRunSolveDurationMs({
+      replayState,
       createdAt: row.createdAt,
+      finishedAt: row.completedAt ?? row.failedAt ?? null,
       solvedAt: row.solvedAt,
-    }),
-    solutionAssisted: row.solutionAssisted,
-    hasReplay: replayRunIds.has(row.runId),
-  }));
+      solveDurationMs: deriveScenarioRunSolveDurationMs({
+        createdAt: row.createdAt,
+        solvedAt: row.solvedAt,
+      }),
+      solutionAssisted: row.solutionAssisted,
+      hasReplay: replayState === "ready",
+    };
+  });
 }
 
 export async function getScenarioProgressByScenario(

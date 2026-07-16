@@ -2,6 +2,11 @@
 // record shape produced by lib/run-phase's presentScenarioRun.
 
 import type { RunVmProvisioningSpec } from "@/lib/run-state";
+import type {
+  ScenarioRunActivity,
+  ScenarioRunRecord as ScenarioRunWireRecord,
+  ScenarioRunReplayState,
+} from "@/lib/scenario-runs";
 
 export interface ScenarioProbeStatus {
   id: string;
@@ -61,11 +66,10 @@ export interface ScenarioRunVmRecord {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  /// Session metadata in chronological order; null while the agent is
-  /// still rendering the session media.
+  /// Session metadata in chronological order; null until the agent submits
+  /// the final replay timeline.
   sessionTimeline: SessionTimelineEntry[] | null;
-  /// True once a raw recording uploaded; with no timeline yet it means
-  /// the session media is still rendering.
+  /// True once a raw recording uploaded.
   hasRecording?: boolean;
   provisioning: RunVmProvisioningSpec;
   terminalTarget: {
@@ -105,6 +109,11 @@ export interface ScenarioRunRecord {
   solvedAt: number | null;
   solveDurationMs: number | null;
   outcome: "in_progress" | "succeeded" | "cancelled" | "failed";
+  active: boolean;
+  activity: ScenarioRunActivity;
+  deleteRequestedAt: number | null;
+  replayState: ScenarioRunReplayState;
+  hasReplay: boolean;
   progressPercent: number;
   terminalPhase: "pending" | "ready" | "failed";
   canOpenTerminal: boolean;
@@ -156,6 +165,8 @@ export interface ScenarioDestroyAcceptedResponse {
   accepted: true;
   runId: string;
   acceptedAt: number;
+  activeSlotReleased: true;
+  run: ScenarioRunWireRecord;
 }
 
 export interface ScenarioStatusStep {
@@ -165,14 +176,17 @@ export interface ScenarioStatusStep {
   state: "done" | "active" | "pending" | "failed";
 }
 
-export const POLL_INTERVALS: Record<ScenarioRunRecord["phase"], number> = {
-  launching: 100,
-  booting: 100,
-  waiting_for_target: 100,
+export const POLL_INTERVALS: Record<
+  ScenarioRunRecord["phase"],
+  number | false
+> = {
+  launching: 750,
+  booting: 750,
+  waiting_for_target: 750,
   running: 1_500,
   solved: 1_500,
   deleting: 1_500,
   archiving: 1_500,
-  completed: 20_000,
-  failed: 20_000,
+  completed: false,
+  failed: false,
 };

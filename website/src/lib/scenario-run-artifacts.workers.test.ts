@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -18,6 +19,10 @@ import {
   getScenarioRunForUser,
   listScenarioRunsForUser,
 } from "@/lib/scenario-runs";
+import {
+  loadStoredRunLifecycle,
+  persistStoredRunLifecycle,
+} from "@/control-plane/agent-run-artifacts/storage";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("scenario run artifact ledger", () => {
@@ -25,7 +30,7 @@ describe("scenario run artifact ledger", () => {
     await resetD1Database();
   });
 
-  it("hydrates only uploaded replay segments from the authoritative ledger", async () => {
+  it("hydrates uploaded segments without advertising an artifact-only replay", async () => {
     await seedCompletedRun();
     const db = drizzle(env.DB);
     await db.insert(scenarioRunArtifacts).values([
@@ -47,7 +52,21 @@ describe("scenario run artifact ledger", () => {
       "segment-uploaded",
     ]);
     expect(runs).toHaveLength(1);
-    expect(runs[0]?.hasReplay).toBe(true);
+    expect(runs[0]?.hasReplay).toBe(false);
+    expect(runs[0]?.replayState).toBe("none");
+  });
+
+  it("advertises replay only when a usable session timeline exists", async () => {
+    await seedIdentity();
+    await insertCompletedRun({ sessionTimeline: true, hasRecording: true });
+
+    const runs = await listScenarioRunsForUser({ userId: "user-1" });
+
+    expect(runs[0]).toMatchObject({
+      activity: "settled",
+      replayState: "ready",
+      hasReplay: true,
+    });
   });
 
   it("does not advertise console-only archives as replays", async () => {
@@ -103,6 +122,40 @@ describe("scenario run artifact ledger", () => {
     expect(run.phase).toBe("provisioning");
     expect(run.replayArtifacts).toEqual([]);
     expect(run.vms[0]?.replayArtifacts).toEqual([]);
+  });
+
+  it("does not let stale artifact completion bypass teardown acceptance", async () => {
+    await seedIdentity();
+    await insertActiveRun();
+    const db = drizzle(env.DB);
+    const stale = await loadStoredRunLifecycle(db, "run-1");
+    expect(stale).not.toBeNull();
+    if (!stale) return;
+
+    const deleteRequestedAt = Date.now() + 1;
+    await db
+      .update(scenarioRuns)
+      .set({ deleteRequestedAt, updatedAt: deleteRequestedAt })
+      .where(eq(scenarioRuns.runId, "run-1"));
+    const completed = recomputeRunState({
+      ...stale.state,
+      phase: "completed",
+      vms: stale.state.vms.map((vm) => ({ ...vm, phase: "completed" })),
+    });
+
+    await persistStoredRunLifecycle(
+      db,
+      "run-1",
+      stale,
+      completed,
+      deleteRequestedAt + 1,
+    );
+
+    const [row] = await db
+      .select({ activeKey: scenarioRuns.activeKey })
+      .from(scenarioRuns)
+      .where(eq(scenarioRuns.runId, "run-1"));
+    expect(row?.activeKey).toBe("user-1");
   });
 
   it("removes stale state document replays when the ledger has none", async () => {
@@ -173,13 +226,15 @@ describe("scenario run artifact ledger", () => {
     ]);
   });
 
-  it("loads replay flags for a full 100-run page within D1 bind limits", async () => {
+  it("derives replay state for a full 100-run page", async () => {
     await seedIdentity();
     const now = Date.now();
     for (let index = 0; index < 100; index += 1) {
       await insertCompletedRun({
         runId: `run-${index}`,
         createdAt: now + index,
+        sessionTimeline: index === 0,
+        hasRecording: index === 0,
       });
     }
     await drizzle(env.DB)
@@ -227,11 +282,15 @@ async function insertCompletedRun({
   vmIds = ["vm-1"],
   createdAt = Date.now(),
   staleReplay = false,
+  sessionTimeline = false,
+  hasRecording = false,
 }: {
   runId?: string;
   vmIds?: string[];
   createdAt?: number;
   staleReplay?: boolean;
+  sessionTimeline?: boolean;
+  hasRecording?: boolean;
 } = {}): Promise<void> {
   const db = drizzle(env.DB);
 
@@ -256,6 +315,27 @@ async function insertCompletedRun({
     phase: "completed",
     vms: initial.vms.map((vm) => ({ ...vm, phase: "completed" })),
   });
+  const withRecordingState = {
+    ...completed,
+    vms: completed.vms.map((vm, index) => ({
+      ...vm,
+      hasRecording: index === 0 ? hasRecording : false,
+      sessionTimeline:
+        index === 0 && sessionTimeline
+          ? [
+              {
+                index: 0,
+                startTimestampMs: createdAt,
+                durationMs: 1_000,
+                exitCode: 0,
+                castFilename: "session.cast",
+                castArtifactId: "segment-uploaded",
+                transcriptTruncated: false,
+              },
+            ]
+          : null,
+    })),
+  };
   const staleArtifact = {
     id: "stale-segment",
     hostId: "host-1",
@@ -268,14 +348,14 @@ async function insertCompletedRun({
   };
   const state = staleReplay
     ? {
-        ...completed,
+        ...withRecordingState,
         replayArtifacts: [staleArtifact],
-        vms: completed.vms.map((vm, index) => ({
+        vms: withRecordingState.vms.map((vm, index) => ({
           ...vm,
           replayArtifacts: index === 0 ? [staleArtifact] : [],
         })),
       }
-    : completed;
+    : withRecordingState;
   await db.insert(scenarioRuns).values({
     runId,
     userId: "user-1",

@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/button";
 import { formatDurationMs } from "../lib/format";
 import { RelativeTime } from "./RelativeTime";
 import { StatusToken } from "./StatusToken";
+import type { ScenarioRunActivity } from "@/lib/scenario-runs";
 
 export interface RunListItemData {
   runId: string;
   title: string;
   outcome: "in_progress" | "succeeded" | "cancelled" | "failed";
   active: boolean;
+  activity?: ScenarioRunActivity;
   createdAt: number;
   solveDurationMs: number | null;
   solutionAssisted?: boolean;
@@ -21,10 +23,14 @@ export interface RunListItemData {
 export function RunOutcomeToken({
   run,
 }: {
-  run: Pick<RunListItemData, "active" | "outcome">;
+  run: Pick<RunListItemData, "active" | "activity" | "outcome">;
 }) {
-  if (run.active) {
+  const activity = run.activity ?? (run.active ? "foreground" : "settled");
+  if (activity === "foreground") {
     return <StatusToken tone="live" word="In progress" />;
+  }
+  if (activity === "background") {
+    return <StatusToken tone="pending" word="Finishing" pulse />;
   }
   switch (run.outcome) {
     case "succeeded":
@@ -47,57 +53,63 @@ export function RunListItem({
   /** Extra trailing controls (e.g. a delete icon button). */
   trailing?: ReactNode;
 }) {
+  const activity = run.activity ?? (run.active ? "foreground" : "settled");
   return (
     <article className="flex flex-col gap-3 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-2">
-        <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <Link
-              to="/runs/$runId"
-              params={{ runId: run.runId }}
-              className="inline-flex min-h-11 items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline"
-            >
-              {run.title}
-            </Link>
-            <RunOutcomeToken run={run} />
-            {run.solutionAssisted ? (
-              <Badge variant="outline">Solution used</Badge>
-            ) : null}
-          </div>
-          <p className="flex flex-wrap items-center gap-x-3 font-mono text-xs text-muted-foreground">
-            <span>
-              Started <RelativeTime at={run.createdAt} />
-            </span>
-            {run.solveDurationMs !== null ? (
-              <span>Solved in {formatDurationMs(run.solveDurationMs)}</span>
-            ) : null}
-          </p>
-        </div>
-        <div className="flex items-center gap-2 self-stretch sm:self-auto">
-          <Button
-            variant={run.active ? "default" : "outline"}
-            size="sm"
-            className="flex-1 sm:flex-none"
-            render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            to="/runs/$runId"
+            params={{ runId: run.runId }}
+            className="inline-flex min-h-11 items-center text-sm font-semibold text-balance underline-offset-4 hover:text-brand-text hover:underline"
           >
-            {run.active ? (
-              <>
-                Resume
-                <ArrowRight className="size-3.5" />
-              </>
-            ) : run.hasReplay ? (
-              <>
-                <PlayCircle className="size-3.5" />
-                Watch replay
-              </>
-            ) : (
-              <>
-                View
-                <ArrowRight className="size-3.5" />
-              </>
-            )}
-          </Button>
-          {trailing}
+            {run.title}
+          </Link>
+          <RunOutcomeToken run={run} />
+          {run.solutionAssisted ? (
+            <Badge variant="outline">Solution used</Badge>
+          ) : null}
         </div>
+        <p className="flex flex-wrap items-center gap-x-3 font-mono text-xs text-muted-foreground">
+          <span>
+            Started <RelativeTime at={run.createdAt} />
+          </span>
+          {run.solveDurationMs !== null ? (
+            <span>Solved in {formatDurationMs(run.solveDurationMs)}</span>
+          ) : null}
+        </p>
+      </div>
+      <div className="flex items-center gap-2 self-stretch sm:self-auto">
+        <Button
+          variant={activity === "foreground" ? "default" : "outline"}
+          size="sm"
+          className="min-h-11 flex-1 sm:flex-none"
+          render={<Link to="/runs/$runId" params={{ runId: run.runId }} />}
+        >
+          {activity === "foreground" ? (
+            <>
+              Resume
+              <ArrowRight className="size-3.5" />
+            </>
+          ) : activity === "background" ? (
+            <>
+              View progress
+              <ArrowRight className="size-3.5" />
+            </>
+          ) : run.hasReplay ? (
+            <>
+              <PlayCircle className="size-3.5" />
+              Watch replay
+            </>
+          ) : (
+            <>
+              View
+              <ArrowRight className="size-3.5" />
+            </>
+          )}
+        </Button>
+        {trailing}
+      </div>
     </article>
   );
 }

@@ -46,16 +46,12 @@ export function SessionTimeline({
 }) {
   const sessions = vm?.sessionTimeline ?? null;
 
-  if (vm?.hasRecording && !sessions) {
+  if (vm?.hasRecording && !sessions?.length) {
     return (
-      <div className="flex w-full flex-col items-center justify-center gap-3 rounded-md border bg-muted/20 px-6 py-8 text-center">
-        <div className="h-2 w-44 overflow-hidden rounded-full bg-secondary">
-          <div className="h-full w-1/3 rounded-full bg-primary motion-safe:animate-pulse" />
-        </div>
-        <p className="text-sm font-medium">Rendering session timeline</p>
+      <div className="flex w-full flex-col items-center justify-center gap-2 rounded-md border border-destructive/25 bg-destructive/5 px-6 py-8 text-center">
+        <p className="text-sm font-medium">Replay unavailable</p>
         <p className="max-w-md text-sm leading-6 text-muted-foreground">
-          The recorded sessions are being rendered on the host. They appear
-          here automatically once they are ready.
+          Run saved, but the replay could not be prepared.
         </p>
       </div>
     );

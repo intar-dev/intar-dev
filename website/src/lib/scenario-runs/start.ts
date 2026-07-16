@@ -213,7 +213,10 @@ export async function startScenarioRunInternal(params: {
     });
     if (!reservation.ok) {
       throw reservation.reason === "boot_capacity_pending"
-        ? bootCapacityPendingError()
+        ? bootCapacityPendingError({
+            scenarioId: scenario.scenarioId,
+            hostId: params.hostId,
+          })
         : appError(
             409,
             "scenario_host_unavailable",
@@ -245,7 +248,7 @@ export async function startScenarioRunInternal(params: {
     });
     if (!reservation.ok) {
       throw reservation.reason === "boot_capacity_pending"
-        ? bootCapacityPendingError()
+        ? bootCapacityPendingError({ scenarioId: scenario.scenarioId })
         : appError(
             409,
             "scenario_host_unavailable",
@@ -469,7 +472,17 @@ export async function bootCapacityRetryJitter(): Promise<void> {
   });
 }
 
-export function bootCapacityPendingError() {
+export function bootCapacityPendingError(context?: {
+  scenarioId: string;
+  hostId?: string;
+}) {
+  console.log(
+    JSON.stringify({
+      event: "scenario_boot_capacity_pending",
+      scenarioId: context?.scenarioId ?? null,
+      hostId: context?.hostId ?? null,
+    }),
+  );
   return appError(
     409,
     "boot_capacity_pending",

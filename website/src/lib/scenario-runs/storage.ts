@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
-import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
+import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import {
   hostActualState,
@@ -39,6 +39,10 @@ import {
   type ScenarioDetailRecord,
 } from "@/lib/scenarios";
 import { type ScenarioRunRecord } from "./types";
+import {
+  deriveScenarioRunActivity,
+  deriveScenarioRunReplayState,
+} from "./activity";
 
 export interface ScenarioRunContentSnapshot {
   tags: string[];
@@ -107,6 +111,7 @@ export async function loadFinishedRuns(userId: string, scenarioId: string) {
     .select({
       runId: scenarioRuns.runId,
       state: scenarioRuns.state,
+      stateJson: scenarioRuns.stateJson,
       createdAt: scenarioRuns.createdAt,
       completedAt: scenarioRuns.completedAt,
       solvedAt: scenarioRuns.solvedAt,
@@ -125,31 +130,33 @@ export async function loadFinishedRuns(userId: string, scenarioId: string) {
     )
     .orderBy(desc(scenarioRuns.createdAt));
 
-  const replayRunIds = await loadRunIdsWithUploadedReplayArtifacts(
-    db,
-    rows.map((row) => row.runId),
-  );
-  return rows.map((row) => ({
-    runId: row.runId,
-    phase: row.state as "completed" | "failed",
-    outcome: toFinishedRunOutcome(
-      deriveScenarioRunOutcome({
-        phase: row.state as RunPhase,
-        solvedAt: row.solvedAt,
-        deleteRequestedAt: row.deleteRequestedAt,
-        failedAt: row.failedAt,
-      }),
-    ),
-    createdAt: row.createdAt,
-    finishedAt: row.completedAt ?? row.failedAt ?? row.createdAt,
-    solvedAt: row.solvedAt,
-    solveDurationMs: deriveScenarioRunSolveDurationMs({
+  return rows.map((row) => {
+    const replayState = deriveScenarioRunReplayState(
+      parseRunState(row.stateJson),
+    );
+    return {
+      runId: row.runId,
+      phase: row.state as "completed" | "failed",
+      outcome: toFinishedRunOutcome(
+        deriveScenarioRunOutcome({
+          phase: row.state as RunPhase,
+          solvedAt: row.solvedAt,
+          deleteRequestedAt: row.deleteRequestedAt,
+          failedAt: row.failedAt,
+        }),
+      ),
       createdAt: row.createdAt,
+      finishedAt: row.completedAt ?? row.failedAt ?? row.createdAt,
       solvedAt: row.solvedAt,
-    }),
-    solutionAssisted: row.solutionAssisted,
-    hasReplay: replayRunIds.has(row.runId),
-  }));
+      solveDurationMs: deriveScenarioRunSolveDurationMs({
+        createdAt: row.createdAt,
+        solvedAt: row.solvedAt,
+      }),
+      solutionAssisted: row.solutionAssisted,
+      replayState,
+      hasReplay: replayState === "ready",
+    };
+  });
 }
 
 export async function loadRunRow(runId: string, userId?: string) {
@@ -171,6 +178,7 @@ export async function updateRunState(
   input: {
     mutate: (current: RunStateDocument) => RunStateDocument;
     deleteRequestedAt?: number | null;
+    releaseActiveSlot?: boolean;
   },
 ): Promise<void> {
   const db = drizzle(env.DB);
@@ -183,6 +191,10 @@ export async function updateRunState(
     const nextState = recomputeRunState(input.mutate(current));
     const terminal =
       nextState.phase === "completed" || nextState.phase === "failed";
+    const deleteRequestedAt =
+      input.deleteRequestedAt === undefined
+        ? row.deleteRequestedAt
+        : input.deleteRequestedAt;
     const now = Math.max(Date.now(), row.updatedAt + 1);
     const updated = await db
       .update(scenarioRuns)
@@ -190,11 +202,12 @@ export async function updateRunState(
         state: nextState.phase,
         stateRank: RUN_PHASE_ORDER[nextState.phase],
         stateJson: JSON.stringify(nextState),
-        activeKey: terminal ? null : row.activeKey,
-        deleteRequestedAt:
-          input.deleteRequestedAt === undefined
-            ? row.deleteRequestedAt
-            : input.deleteRequestedAt,
+        activeKey:
+          input.releaseActiveSlot === true ||
+          (terminal && deleteRequestedAt === null)
+            ? null
+            : row.activeKey,
+        deleteRequestedAt,
         solvedAt: nextSolvedAt({
           currentPhase: current.phase,
           nextPhase: nextState.phase,
@@ -259,6 +272,11 @@ export function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
 export function toScenarioRunRecord(
   row: ReturnType<typeof fromDbRow>,
 ): ScenarioRunRecord {
+  const activity = deriveScenarioRunActivity({
+    activeKey: row.activeKey,
+    phase: row.state.phase,
+  });
+  const replayState = deriveScenarioRunReplayState(row.state);
   return {
     id: row.runId,
     scenarioId: row.scenarioId,
@@ -283,6 +301,11 @@ export function toScenarioRunRecord(
       deleteRequestedAt: row.deleteRequestedAt,
       failedAt: row.failedAt,
     }),
+    active: row.activeKey !== null,
+    activity,
+    deleteRequestedAt: row.deleteRequestedAt,
+    replayState,
+    hasReplay: replayState === "ready",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...row.state,
@@ -303,8 +326,9 @@ export function parseRunState(raw: string): RunStateDocument {
   }
 }
 
-// The unique index on active_key allows one active run per user across all
-// scenarios; the key is the user id while a run is active, null once finished.
+// The unique index on active_key allows one foreground run per user across all
+// scenarios. Teardown acceptance clears it explicitly; terminal failures with
+// no pending teardown intent still release it automatically.
 export function activeKeyFor(userId: string) {
   return userId;
 }
@@ -431,30 +455,6 @@ export async function hydrateScenarioRunReplayArtifacts(
     vms,
     replayArtifacts: vms.flatMap((vm) => vm.replayArtifacts),
   };
-}
-
-export async function loadRunIdsWithUploadedReplayArtifacts(
-  db: DrizzleD1Database,
-  runIds: string[],
-): Promise<Set<string>> {
-  const replayRunIds = new Set<string>();
-  // D1 permits at most 100 bound parameters. The two constant filters below
-  // leave room for 98 run IDs per query.
-  for (let index = 0; index < runIds.length; index += 98) {
-    const batch = runIds.slice(index, index + 98);
-    const rows = await db
-      .selectDistinct({ runId: scenarioRunArtifacts.runId })
-      .from(scenarioRunArtifacts)
-      .where(
-        and(
-          inArray(scenarioRunArtifacts.runId, batch),
-          eq(scenarioRunArtifacts.uploadStatus, "uploaded"),
-          eq(scenarioRunArtifacts.kind, "ssh_recording_segment"),
-        ),
-      );
-    for (const row of rows) replayRunIds.add(row.runId);
-  }
-  return replayRunIds;
 }
 
 export async function loadHostTerminalAddress(

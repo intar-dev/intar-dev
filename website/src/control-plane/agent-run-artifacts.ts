@@ -562,8 +562,8 @@ async function handleRunComplete(
  * Receives the rendered session timeline (metadata + transcripts) after the
  * cast uploads pass. Transcripts land in their own table; the metadata is
  * projected into the run state document as `vm.sessionTimeline`, which is
- * what flips the run page from "rendering" to the timeline. Idempotent:
- * retries upsert the same rows and overwrite the same state field.
+ * the authority for replay readiness. Idempotent: retries upsert the same
+ * rows and overwrite the same state field.
  */
 async function handleRunTimeline(
   request: Request,

@@ -533,6 +533,7 @@ async function failExpiredUndispatchedRun(
         runId: scenarioRuns.runId,
         hostId: scenarioRuns.hostId,
         activeKey: scenarioRuns.activeKey,
+        deleteRequestedAt: scenarioRuns.deleteRequestedAt,
         completedAt: scenarioRuns.completedAt,
         failedAt: scenarioRuns.failedAt,
         vmCount: scenarioRuns.vmCount,
@@ -596,7 +597,8 @@ async function failExpiredUndispatchedRun(
         state: "failed",
         stateRank: RUN_PHASE_ORDER.failed,
         stateJson: failedStateJson,
-        activeKey: null,
+        activeKey:
+          run.deleteRequestedAt === null ? null : run.activeKey,
         failedAt: updatedAt,
         updatedAt,
       })

@@ -8,19 +8,19 @@ const PHASE_DOT: Partial<Record<ScenarioRunVmRecord["phase"], string>> = {
   completed: "bg-muted-foreground",
 };
 
-// Segmented machine tabs, sitting flush above the terminal. Only rendered
-// when the scenario has more than one machine.
+// Segmented machine tabs, sitting flush above the terminal. The single-machine
+// form still makes the selected VM and its current state explicit.
 export function ScenarioVmSelector(props: {
   vms: ScenarioRunVmRecord[];
   selectedVmId: string | null;
   onSelect: (vmId: string) => void;
 }) {
-  if (props.vms.length <= 1) {
-    return null;
-  }
-
   return (
-    <div className="flex w-fit flex-wrap gap-1 rounded-xl bg-muted p-1">
+    <div
+      className="flex w-fit flex-wrap gap-1 rounded-xl bg-muted p-1"
+      role="group"
+      aria-label="Machines"
+    >
       {props.vms.map((vm) => {
         const active = vm.id === props.selectedVmId;
         return (

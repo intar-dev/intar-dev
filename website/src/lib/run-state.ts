@@ -116,9 +116,8 @@ export interface RunVmStateDocument {
   bootProbes: ScenarioProbeStatus[];
   scenarioProbes: ScenarioProbeStatus[];
   replayArtifacts: ScenarioReplayArtifact[];
-  /// Session metadata submitted by the agent after the render batch
-  /// uploads. Null until then, so `hasRecording && !sessionTimeline` means
-  /// "session timeline still rendering".
+  /// Session metadata submitted by the agent after the render batch uploads.
+  /// Null until then; once a run is completed that absence is final.
   sessionTimeline: SessionTimelineEntry[] | null;
   /// True once a raw SSH recording uploaded — the session media renders
   /// asynchronously afterwards. Optional: older stored docs lack it.

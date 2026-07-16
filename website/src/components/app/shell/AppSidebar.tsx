@@ -26,8 +26,8 @@ export function AppSidebar() {
   const isAdmin = isAdminUser(data?.user ?? null);
   const activeId = findActiveNavItem(pathname)?.id ?? null;
   const runs = useMyRuns();
-  const activeRunCount =
-    runs.data?.runs.filter((run) => run.active).length ?? 0;
+  const ongoingRunCount =
+    runs.data?.runs.filter((run) => run.activity !== "settled").length ?? 0;
 
   const sections = NAV_SECTIONS.filter(
     (section) => section.requires !== "admin" || isAdmin,
@@ -59,7 +59,7 @@ export function AppSidebar() {
                 {items.map((item) => {
                   const Icon = item.icon;
                   const badgeCount =
-                    item.id === "runs" ? activeRunCount : 0;
+                    item.id === "runs" ? ongoingRunCount : 0;
                   return (
                     <SidebarMenuItem key={item.id}>
                       <SidebarMenuButton
@@ -71,12 +71,12 @@ export function AppSidebar() {
                         <span>{item.label}</span>
                         {badgeCount > 0 ? (
                           <span className="sr-only">
-                            , {badgeCount} active
+                            , {badgeCount} ongoing {badgeCount === 1 ? "run" : "runs"}
                           </span>
                         ) : null}
                       </SidebarMenuButton>
                       {badgeCount > 0 ? (
-                        <SidebarMenuBadge className="text-primary">
+                        <SidebarMenuBadge className="text-primary" aria-hidden="true">
                           {badgeCount}
                         </SidebarMenuBadge>
                       ) : null}

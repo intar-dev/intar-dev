@@ -1,10 +1,20 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, BookOpen, CircleDot, History } from "lucide-react";
+import {
+  ArrowRight,
+  BookOpen,
+  CircleDot,
+  History,
+  LoaderCircle,
+} from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
 import { RunListItem } from "../patterns/RunListItem";
 import { ListSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
-import { useMyRuns, type MyRunEntry } from "../hooks/useMyRuns";
+import {
+  groupMyRunsByActivity,
+  useMyRuns,
+  type MyRunEntry,
+} from "../hooks/useMyRuns";
 import { formatRelativeTime } from "../lib/format";
 import { Button } from "@/components/ui/button";
 
@@ -21,8 +31,10 @@ export function RunsList() {
   const runs = useMyRuns();
 
   const entries = runs.data?.runs ?? [];
-  const activeRuns = entries.filter((run) => run.active);
-  const pastRuns = entries.filter((run) => !run.active);
+  const groupedRuns = groupMyRunsByActivity(entries);
+  const activeRuns = groupedRuns.foreground;
+  const backgroundRuns = groupedRuns.background;
+  const pastRuns = groupedRuns.settled;
 
   const now = Date.now();
   const groups: Array<{ label: string; runs: MyRunEntry[] }> = [];
@@ -80,14 +92,42 @@ export function RunsList() {
             </section>
           ) : null}
 
+          {backgroundRuns.length ? (
+            <section
+              className="space-y-4"
+              aria-labelledby="background-runs-heading"
+            >
+              <div className="flex items-center gap-3 border-b pb-4">
+                <LoaderCircle
+                  className="size-4 text-primary motion-safe:animate-spin"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="text-eyebrow">Cleanup continues</p>
+                  <h2
+                    id="background-runs-heading"
+                    className="mt-1 text-section-title"
+                  >
+                    Finishing in background
+                  </h2>
+                </div>
+              </div>
+              <div className="divide-y border-y">
+                {backgroundRuns.map((run) => (
+                  <RunListItem key={run.runId} run={run} />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           {pastRuns.length ? (
             <section className="space-y-6" aria-labelledby="run-archive-heading">
               <div className="flex items-center gap-3 border-b pb-4">
                 <History className="size-4 text-muted-foreground" />
                 <div>
-                  <p className="text-eyebrow">History</p>
+                  <p className="text-eyebrow">Past runs</p>
                   <h2 id="run-archive-heading" className="mt-1 text-section-title">
-                    Run archive
+                    History
                   </h2>
                 </div>
               </div>

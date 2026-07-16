@@ -157,6 +157,7 @@ pub(super) async fn process_archive_job(inner: &Inner, job: ArchiveJobRow) -> Re
                 .await
                 .context("failed to update archive job retry state")?;
             warn!(
+                event = "scenario_run_archive_retry",
                 error = %message,
                 vm = job.vm_name,
                 run_id = job.run_id,
@@ -412,6 +413,8 @@ pub(super) async fn upload_vm_run_artifacts(
             if let Err(error) = submit_run_timeline(inner, prepared, &timeline, &access_token).await
             {
                 warn!(
+                    event = "scenario_run_replay_failed",
+                    stage = "timeline_submission",
                     error = %error,
                     vm = vm_name,
                     run_id = prepared.run_id,
@@ -422,6 +425,8 @@ pub(super) async fn upload_vm_run_artifacts(
         Ok(None) => {}
         Err(error) => {
             warn!(
+                event = "scenario_run_replay_failed",
+                stage = "session_render",
                 error = %error,
                 vm = vm_name,
                 run_id = prepared.run_id,

@@ -1,4 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import type {
+  ScenarioRunActivity,
+  ScenarioRunReplayState,
+} from "@/lib/scenario-runs";
+import type { RunPhase } from "@/lib/run-state";
 
 export interface MyRunEntry {
   runId: string;
@@ -6,9 +11,12 @@ export interface MyRunEntry {
   scenarioName: string;
   title: string;
   difficulty: "easy" | "medium" | "hard";
-  phase: string;
+  phase: RunPhase;
   outcome: "in_progress" | "succeeded" | "cancelled" | "failed";
   active: boolean;
+  activity: ScenarioRunActivity;
+  deleteRequestedAt: number | null;
+  replayState: ScenarioRunReplayState;
   createdAt: number;
   finishedAt: number | null;
   solvedAt: number | null;
@@ -19,6 +27,14 @@ export interface MyRunEntry {
 
 interface MyRunsResponse {
   runs: MyRunEntry[];
+}
+
+export function groupMyRunsByActivity(runs: MyRunEntry[]) {
+  return {
+    foreground: runs.filter((run) => run.activity === "foreground"),
+    background: runs.filter((run) => run.activity === "background"),
+    settled: runs.filter((run) => run.activity === "settled"),
+  };
 }
 
 // The signed-in user's runs — shared by the runs list and the catalog's
@@ -43,7 +59,13 @@ export function useMyRuns(options?: { enabled?: boolean }) {
 
       return (await response.json()) as MyRunsResponse;
     },
-    staleTime: 5_000,
+    refetchInterval: (query) =>
+      query.state.data?.runs.some((run) => run.activity !== "settled")
+        ? 2_000
+        : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: "always",
+    staleTime: 1_000,
     enabled: options?.enabled ?? true,
   });
 }

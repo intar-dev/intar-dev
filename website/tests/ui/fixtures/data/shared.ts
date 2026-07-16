@@ -192,7 +192,9 @@ export function runListEntry(input: {
   createdAt: number;
   solvedAt?: number | null;
   hasReplay?: boolean;
+  activity?: "foreground" | "background" | "settled";
 }) {
+  const activity = input.activity ?? (input.active ? "foreground" : "settled");
   return {
     runId: input.runId,
     scenarioId: "repair-nginx",
@@ -202,6 +204,15 @@ export function runListEntry(input: {
     phase: input.phase,
     outcome: input.outcome,
     active: input.active,
+    activity,
+    deleteRequestedAt: activity === "foreground" ? null : input.createdAt + minute,
+    replayState: input.hasReplay
+      ? "ready"
+      : activity === "background"
+        ? "preparing"
+        : activity === "settled"
+          ? "none"
+          : "not_started",
     createdAt: input.createdAt,
     finishedAt: input.active ? null : input.createdAt + 31 * minute,
     solvedAt: input.solvedAt ?? null,

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
@@ -97,8 +97,8 @@ export async function markArtifactUploaded(input: {
 
   const state = parseRunState(run.stateJson);
 
-  // A raw recording landing means session media is on its way — the run
-  // page shows a "rendering" state until the timeline arrives.
+  // A raw recording landing means session media is on its way. The durable
+  // replay state remains preparing until the timeline arrives.
   if (input.artifact.kind === "ssh_recording_raw") {
     const nextState = recomputeRunState({
       ...state,
@@ -368,6 +368,21 @@ export async function transitionRunVmToCompleted(
     },
     now,
   );
+  if (nextPhase === "completed" && run.state.phase !== "completed") {
+    const vmAbsentAt = latestVmAbsenceAt(nextState);
+    if (vmAbsentAt !== null) {
+      console.log(
+        JSON.stringify({
+          event: "scenario_run_lifecycle_timing",
+          metric: "vm_absent_to_archive_complete",
+          runId,
+          startedAt: vmAbsentAt,
+          completedAt: now,
+          durationMs: Math.max(0, now - vmAbsentAt),
+        }),
+      );
+    }
+  }
 }
 
 export async function loadStoredRunLifecycle(
@@ -375,6 +390,7 @@ export async function loadStoredRunLifecycle(
   runId: string,
 ): Promise<{
   activeKey: string | null;
+  deleteRequestedAt: number | null;
   solvedAt: number | null;
   completedAt: number | null;
   failedAt: number | null;
@@ -383,6 +399,7 @@ export async function loadStoredRunLifecycle(
   const rows = await db
     .select({
       activeKey: scenarioRuns.activeKey,
+      deleteRequestedAt: scenarioRuns.deleteRequestedAt,
       solvedAt: scenarioRuns.solvedAt,
       completedAt: scenarioRuns.completedAt,
       failedAt: scenarioRuns.failedAt,
@@ -398,6 +415,7 @@ export async function loadStoredRunLifecycle(
 
   return {
     activeKey: row.activeKey,
+    deleteRequestedAt: row.deleteRequestedAt,
     solvedAt: row.solvedAt,
     completedAt: row.completedAt,
     failedAt: row.failedAt,
@@ -410,6 +428,7 @@ export async function persistStoredRunLifecycle(
   runId: string,
   run: {
     activeKey: string | null;
+    deleteRequestedAt: number | null;
     solvedAt: number | null;
     completedAt: number | null;
     failedAt: number | null;
@@ -420,6 +439,7 @@ export async function persistStoredRunLifecycle(
 ): Promise<void> {
   const nextState = recomputeRunState(state);
   const nextPhase = nextState.phase;
+  const terminal = nextPhase === "completed" || nextPhase === "failed";
   const solvedAt = nextSolvedAt({
     currentPhase: run.state.phase,
     nextPhase,
@@ -432,10 +452,15 @@ export async function persistStoredRunLifecycle(
       state: nextPhase,
       stateRank: RUN_PHASE_ORDER[nextPhase],
       stateJson: JSON.stringify(nextState),
-      activeKey:
-        nextPhase === "completed" || nextPhase === "failed"
-          ? null
-          : run.activeKey,
+      // Artifact callbacks can race teardown acceptance. Never restore a
+      // stale active key, and only auto-release a terminal run when the
+      // authoritative row still has no explicit teardown intent.
+      activeKey: terminal
+        ? sql<string | null>`CASE
+            WHEN ${scenarioRuns.deleteRequestedAt} IS NULL THEN NULL
+            ELSE ${scenarioRuns.activeKey}
+          END`
+        : sql<string | null>`${scenarioRuns.activeKey}`,
       solvedAt,
       completedAt: nextPhase === "completed" ? (run.completedAt ?? now) : null,
       failedAt: nextPhase === "failed" ? (run.failedAt ?? now) : null,
@@ -460,6 +485,14 @@ export function deriveArchiveRunPhase(
     return "archiving";
   }
   return "tearing_down";
+}
+
+function latestVmAbsenceAt(state: RunStateDocument): number | null {
+  const observed = state.vms
+    .filter((vm) => vm.runtimeState === "absent")
+    .map((vm) => vm.runtimeObservedAt)
+    .filter((value): value is number => value !== null);
+  return observed.length ? Math.max(...observed) : null;
 }
 
 export function artifactMetadataMatches(

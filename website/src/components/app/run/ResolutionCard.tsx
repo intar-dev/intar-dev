@@ -97,7 +97,7 @@ export function ResolutionCard(props: {
         )}
         <p className="text-sm leading-6 text-muted-foreground">
           You fixed {props.scenarioName}. The shell stays open if you want to
-          look around — end the run to save your replay.
+          look around — finish the run to save your replay.
         </p>
         <Button
           className="w-full bg-success text-success-foreground hover:bg-success/90 focus-visible:ring-success"
@@ -105,7 +105,7 @@ export function ResolutionCard(props: {
           disabled={props.pending}
         >
           <CheckCircle2 className="size-4" />
-          {props.pending ? "Ending run…" : "End run"}
+          {props.pending ? "Finishing run…" : "Finish run"}
         </Button>
       </CardContent>
     </Card>

@@ -211,6 +211,8 @@ export function createMockApiState(input?: {
   const empty = variant === "empty";
   const long = variant === "long";
   const run = makeRun(runState);
+  const runActivity = run.activity as "foreground" | "background" | "settled";
+  const runIsForeground = runActivity === "foreground";
   const scenarios = [
     catalogScenario({
       scenarioId: "repair-nginx",
@@ -221,8 +223,8 @@ export function createMockApiState(input?: {
       difficulty: "medium",
       category: briefing.category,
       tags: briefing.tags,
-      status: "in_progress",
-      activeRunId: "run-active",
+      status: runIsForeground ? "in_progress" : "attempted",
+      activeRunId: runIsForeground ? "run-active" : null,
     }),
     catalogScenario({
       scenarioId: "repair-dns",
@@ -247,9 +249,10 @@ export function createMockApiState(input?: {
     runListEntry({
       runId: "run-active",
       title: briefing.title,
-      phase: "active_full",
-      outcome: "in_progress",
-      active: true,
+      phase: String(run.phase),
+      outcome: String(run.outcome),
+      active: Boolean(run.active),
+      activity: runActivity,
       createdAt: FIXED_NOW - 35 * minute,
     }),
     runListEntry({
@@ -341,9 +344,9 @@ export function createMockApiState(input?: {
       scenarioName: "repair-nginx",
       briefing,
       vmCount: 1,
-      hasActiveRun: !empty,
-      activeRunId: empty ? null : "run-active",
-      activeRun: empty
+      hasActiveRun: !empty && runIsForeground,
+      activeRunId: !empty && runIsForeground ? "run-active" : null,
+      activeRun: empty || !runIsForeground
         ? null
         : {
             runId: "run-active",
@@ -367,6 +370,7 @@ export function createMockApiState(input?: {
               solvedAt: FIXED_NOW - 2 * day + 26 * minute,
               solveDurationMs: 26 * minute,
               solutionAssisted: false,
+              replayState: "ready",
               hasReplay: true,
             },
           ],

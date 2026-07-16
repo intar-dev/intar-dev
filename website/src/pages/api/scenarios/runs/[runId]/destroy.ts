@@ -19,7 +19,13 @@ export const POST: APIRoute = async ({ request, params }) => {
       runId,
       userId: authz.context.userId,
     });
-    return jsonResponse(result, { status: 202 });
+    return jsonResponse(result, {
+      status: 202,
+      headers: {
+        Location: `/api/scenarios/runs/${result.runId}`,
+        "Retry-After": "1",
+      },
+    });
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,

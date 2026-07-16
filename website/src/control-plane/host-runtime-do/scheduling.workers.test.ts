@@ -17,12 +17,15 @@ import {
   eq,
   drizzle,
   hostActualState,
+  hostCpuReservations,
   scenarioRuns,
   upsertDesiredCachedImage,
   mutateStoredHostDesiredState,
   startScenarioRunForUser,
   resetHostRuntimeTestDatabase,
 } from "./test-fixtures";
+import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
+import { markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
 
 describe("HostRuntimeDO scheduling and capacity", () => {
   beforeEach(resetHostRuntimeTestDatabase);
@@ -122,6 +125,65 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     ws.close();
   });
 
+  it("starts a new foreground run while an accepted teardown remains in background", async () => {
+    const hostId = "host-overlap-capable";
+    const now = Date.now();
+    await seedHost(hostId);
+    const { ws } = await connectHost(hostId);
+    await seedEnabledScenario(drizzle(env.DB), now);
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: now,
+        appliedDesiredVersion: 0,
+        schedulableCpuMillis: 6_000,
+        cachedImages: [
+          {
+            image_key: testImageKey,
+            image_sha256: "2".repeat(64),
+            phase: "ready",
+            updated_at_unix_ms: now,
+          },
+        ],
+      }),
+    );
+    await waitForHostActualState(
+      drizzle(env.DB),
+      hostId,
+      (row) => row.observedAt === now,
+    );
+
+    const first = await startScenarioRunForUser({
+      scenarioId: "broken-nginx",
+      userId: "user-1",
+      hostId,
+    });
+    const ending = await destroyScenarioRunForUserWithDependencies(
+      { runId: first.runId, userId: "user-1" },
+      {
+        markVmsAbsent: markRunVmsAbsentInDesiredState,
+        revokeRoutes: async () => {},
+        wakeHostRuntime: async () => {},
+      },
+    );
+    const second = await startScenarioRunForUser({
+      scenarioId: "broken-nginx",
+      userId: "user-1",
+      hostId,
+    });
+
+    expect(ending.run).toMatchObject({
+      id: first.runId,
+      activity: "background",
+    });
+    expect(second.run).toMatchObject({
+      id: second.runId,
+      activity: "foreground",
+    });
+    expect(second.runId).not.toBe(first.runId);
+    ws.close();
+  });
+
   it("retries the next ranked host when the first CPU reservation is exhausted", async () => {
     const now = Date.now();
     const firstHostId = "host-ranked-first";
@@ -194,11 +256,36 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       scenarioId: "broken-nginx",
       userId: "user-1",
     });
+    expect(started.run).toMatchObject({
+      id: started.runId,
+      active: true,
+      activity: "foreground",
+      replayState: "not_started",
+    });
     const [run] = await drizzle(env.DB)
       .select({ hostId: scenarioRuns.hostId })
       .from(scenarioRuns)
       .where(eq(scenarioRuns.runId, started.runId));
     expect(run?.hostId).toBe(secondHostId);
+    await destroyScenarioRunForUserWithDependencies(
+      { runId: started.runId, userId: "user-1" },
+      {
+        markVmsAbsent: markRunVmsAbsentInDesiredState,
+        revokeRoutes: async () => {},
+        wakeHostRuntime: async () => {},
+      },
+    );
+    const [reservationAfterAcceptance] = await drizzle(env.DB)
+      .select({ state: hostCpuReservations.state })
+      .from(hostCpuReservations)
+      .where(eq(hostCpuReservations.runId, started.runId));
+    expect(reservationAfterAcceptance?.state).toBe("committed");
+    await expect(
+      startScenarioRunForUser({
+        scenarioId: "broken-nginx",
+        userId: "user-1",
+      }),
+    ).rejects.toMatchObject({ code: "boot_capacity_pending" });
 
     first.ws.close();
     second.ws.close();

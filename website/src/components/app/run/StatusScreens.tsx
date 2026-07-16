@@ -14,17 +14,22 @@ import type { ScenarioRunRecord, ScenarioStatusStep } from "./run-types";
 export function ScenarioStepScreen(props: {
   title: string;
   description: string;
-  progressLabel?: string;
-  progressPercent?: number;
   steps: ScenarioStatusStep[];
   topRight?: ReactNode;
+  statusAnnouncement?: string;
 }) {
+  const currentStep = props.steps.find(
+    (step) => step.state === "active" || step.state === "failed",
+  );
   return (
     <Card>
       <CardHeader className="space-y-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-2">
-            <CardTitle className="font-heading text-lg font-semibold tracking-tight">
+            <CardTitle
+              as="h2"
+              className="font-heading text-lg font-semibold tracking-tight"
+            >
               {props.title}
             </CardTitle>
             <CardDescription className="leading-6">
@@ -36,30 +41,18 @@ export function ScenarioStepScreen(props: {
           ) : null}
         </div>
       </CardHeader>
-      <CardContent className="space-y-6" aria-live="polite">
-        {typeof props.progressPercent === "number" ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3 text-sm">
-              <span className="text-muted-foreground">
-                {props.progressLabel ?? "In progress"}
-              </span>
-              <span className="font-medium text-foreground">
-                {props.progressPercent}%
-              </span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-secondary">
-              <div
-                className="h-full rounded-full bg-primary motion-safe:transition-[width] duration-300"
-                style={{ width: `${props.progressPercent}%` }}
-              />
-            </div>
-          </div>
-        ) : null}
-
-        <ul className="space-y-3">
+      <CardContent className="space-y-6">
+        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {props.statusAnnouncement ??
+            (currentStep
+              ? `${props.title}: ${currentStep.label}`
+              : props.title)}
+        </p>
+        <ol className="space-y-3">
           {props.steps.map((step) => (
             <li
               key={step.id}
+              aria-current={currentStep?.id === step.id ? "step" : undefined}
               className={cn(
                 "flex items-start gap-3 rounded-lg px-3 py-2 text-sm",
                 step.state === "done"
@@ -124,7 +117,7 @@ export function ScenarioStepScreen(props: {
               </div>
             </li>
           ))}
-        </ul>
+        </ol>
       </CardContent>
     </Card>
   );
@@ -147,10 +140,10 @@ export function ScenarioShellStatusCard(props: {
         <CardTitle className="text-base">Shell</CardTitle>
         <CardDescription>{props.title}</CardDescription>
       </CardHeader>
-      <CardContent
-        className="flex min-h-[20rem] flex-col items-center justify-center gap-4 text-center"
-        aria-live="polite"
-      >
+      <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-4 text-center">
+        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {props.title}
+        </p>
         {isTransient ? (
           <LoaderCircle className="size-8 text-primary motion-safe:animate-spin" />
         ) : null}

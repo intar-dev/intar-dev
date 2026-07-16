@@ -40,6 +40,7 @@ interface RunProjectionRow {
   solvedAt: number | null;
   completedAt: number | null;
   failedAt: number | null;
+  createdAt: number;
   updatedAt: number;
   state: RunStateDocument;
 }
@@ -134,7 +135,8 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         merged.phase === "completed" ? (row.completedAt ?? now) : null;
       const failedAt = merged.phase === "failed" ? (row.failedAt ?? now) : null;
       const nextActiveKey =
-        merged.phase === "completed" || merged.phase === "failed"
+        (merged.phase === "completed" || merged.phase === "failed") &&
+        deleteRequestedAt === null
           ? null
           : row.activeKey;
       const currentJson = JSON.stringify(current);
@@ -206,6 +208,26 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         next: merged,
         observedAt: now,
       });
+      if (!current.canOpenTerminal && merged.canOpenTerminal) {
+        logLifecycleTiming({
+          metric: "accepted_to_terminal_ready",
+          runId,
+          startedAt: row.createdAt,
+          completedAt: now,
+        });
+      }
+      if (
+        row.deleteRequestedAt !== null &&
+        !allVmsReportedAbsent(current) &&
+        allVmsReportedAbsent(merged)
+      ) {
+        logLifecycleTiming({
+          metric: "teardown_requested_to_vm_absent",
+          runId,
+          startedAt: row.deleteRequestedAt,
+          completedAt: latestVmAbsenceAt(merged) ?? now,
+        });
+      }
       return "updated";
     }
     throw new Error(`run projection CAS did not converge for ${runId}`);
@@ -559,6 +581,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
     solvedAt: number | null;
     completedAt: number | null;
     failedAt: number | null;
+    createdAt: number;
     updatedAt: number;
     state: RunStateDocument;
   } | null> {
@@ -572,6 +595,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         solvedAt: scenarioRuns.solvedAt,
         completedAt: scenarioRuns.completedAt,
         failedAt: scenarioRuns.failedAt,
+        createdAt: scenarioRuns.createdAt,
         updatedAt: scenarioRuns.updatedAt,
         stateJson: scenarioRuns.stateJson,
       })
@@ -590,6 +614,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       solvedAt: row.solvedAt,
       completedAt: row.completedAt,
       failedAt: row.failedAt,
+      createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       state: parseRunState(row.stateJson),
     };
@@ -628,6 +653,41 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       deleteRequestedAt: row.deleteRequestedAt,
     }));
   }
+}
+
+function allVmsReportedAbsent(state: RunStateDocument): boolean {
+  return (
+    state.vms.length > 0 &&
+    state.vms.every((vm) => vm.runtimeState === "absent")
+  );
+}
+
+function latestVmAbsenceAt(state: RunStateDocument): number | null {
+  const observed = state.vms
+    .filter((vm) => vm.runtimeState === "absent")
+    .map((vm) => vm.runtimeObservedAt)
+    .filter((value): value is number => value !== null);
+  return observed.length ? Math.max(...observed) : null;
+}
+
+function logLifecycleTiming(input: {
+  metric:
+    | "accepted_to_terminal_ready"
+    | "teardown_requested_to_vm_absent";
+  runId: string;
+  startedAt: number;
+  completedAt: number;
+}) {
+  console.log(
+    JSON.stringify({
+      event: "scenario_run_lifecycle_timing",
+      metric: input.metric,
+      runId: input.runId,
+      startedAt: input.startedAt,
+      completedAt: input.completedAt,
+      durationMs: Math.max(0, input.completedAt - input.startedAt),
+    }),
+  );
 }
 
 function parseRunState(raw: string): RunStateDocument {
