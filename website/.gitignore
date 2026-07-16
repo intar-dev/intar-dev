@@ -2,6 +2,7 @@
 dist/
 # generated types
 .astro/
+src/generated/scenario-wasm/
 public/vendor/netbird/
 public/vendor/tree-sitter/
 

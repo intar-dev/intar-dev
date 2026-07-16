@@ -1,18 +1,25 @@
 name: Website
-run-name: "Website validate PR #${{ github.event.pull_request.number }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website validate {0}', github.ref_name) }}"
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "crates/intar-image-scenario/**"
+      - "crates/intar-image-scenario-wasm/**"
       - "website/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: website-pr-${{ github.event.pull_request.number }}
+  group: "website-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}"
   cancel-in-progress: true
 
 defaults:
@@ -20,13 +27,57 @@ defaults:
     working-directory: website
 
 jobs:
-  validate:
-    name: Test and build
+  scenario-wasm:
+    name: Build scenario Wasm
     runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup target add wasm32-unknown-unknown
+          rustup show active-toolchain
+
+      - name: Set up Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - name: Install pinned Wasm tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,wasm-pack@0.15.0
+          fallback: none
+
+      - name: Build browser scenario validator
+        working-directory: ${{ github.workspace }}
+        run: just generate-scenario-wasm
+
+      - name: Upload browser scenario validator
+        uses: actions/upload-artifact@v7
+        with:
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          path: website/src/generated/scenario-wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  validate:
+    name: Test and build
+    runs-on: namespace-profile-intar-dev
+    needs: scenario-wasm
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Download browser scenario validator
+        uses: actions/download-artifact@v8
+        with:
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          path: website/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -55,6 +106,7 @@ jobs:
   ui:
     name: UI visual, accessibility, and smoke
     runs-on: namespace-profile-intar-dev
+    needs: scenario-wasm
     container:
       image: mcr.microsoft.com/playwright:v1.61.1-noble
       options: --ipc=host
@@ -62,6 +114,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Download browser scenario validator
+        uses: actions/download-artifact@v8
+        with:
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          path: website/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@v6

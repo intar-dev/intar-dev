@@ -46,7 +46,7 @@ jobs:
         run: |
           rustup toolchain install --profile minimal
           rustup component add rustfmt clippy
-          rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown
+          rustup target add x86_64-unknown-linux-musl
           rustup show active-toolchain
 
       - name: Set up Namespace caches
@@ -57,28 +57,13 @@ jobs:
       - name: Install just and cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: just,cargo-nextest,wasm-pack
+          tool: just,cargo-nextest
 
       - name: Run workspace checks
         run: just verify
 
       - name: Check generated contracts
         run: just check-generated-contracts
-
-      - name: Regenerate browser scenario validator
-        run: just generate-scenario-wasm
-
-      - name: Upload browser scenario validator
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: scenario-wasm
-          path: website/src/generated/scenario-wasm
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Check generated browser scenario validator
-        run: git diff --exit-code -- website/src/generated/scenario-wasm
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
