@@ -1,38 +1,42 @@
-export type TeamDetailTab =
+export type OrganizationDetailTab =
   | "overview"
+  | "scenarios"
   | "people"
   | "assignments"
   | "progress"
+  | "runners"
   | "settings";
 
-export type AdminPeopleTab = "requests" | "users" | "teams";
+export type AdminPeopleTab = "requests" | "users" | "organizations";
 
-export interface TeamDetailSearch {
-  tab?: TeamDetailTab;
+export interface OrganizationDetailSearch {
+  tab?: OrganizationDetailTab;
 }
 
 export interface AdminPeopleSearch {
   tab?: AdminPeopleTab;
 }
 
-export const TEAM_DETAIL_TABS: readonly TeamDetailTab[] = [
+export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
   "overview",
+  "scenarios",
   "people",
   "assignments",
   "progress",
+  "runners",
   "settings",
 ];
 
 export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
   "requests",
   "users",
-  "teams",
+  "organizations",
 ];
 
-export function validateTeamDetailSearch(
+export function validateOrganizationDetailSearch(
   search: Record<string, unknown>,
-): TeamDetailSearch {
-  return isTeamDetailTab(search.tab) && search.tab !== "overview"
+): OrganizationDetailSearch {
+  return isOrganizationDetailTab(search.tab) && search.tab !== "overview"
     ? { tab: search.tab }
     : {};
 }
@@ -45,11 +49,22 @@ export function validateAdminPeopleSearch(
     : {};
 }
 
-export function isTeamDetailTab(value: unknown): value is TeamDetailTab {
+export function isOrganizationDetailTab(
+  value: unknown,
+): value is OrganizationDetailTab {
   return (
     typeof value === "string" &&
-    TEAM_DETAIL_TABS.includes(value as TeamDetailTab)
+    ORGANIZATION_DETAIL_TABS.includes(value as OrganizationDetailTab)
   );
+}
+
+export function validateScenarioBriefingSearch(
+  search: Record<string, unknown>,
+): { organizationId?: string } {
+  return typeof search.organizationId === "string" &&
+    search.organizationId.trim()
+    ? { organizationId: search.organizationId.trim() }
+    : {};
 }
 
 export function isAdminPeopleTab(value: unknown): value is AdminPeopleTab {

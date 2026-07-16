@@ -2,14 +2,18 @@ import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Activity, Archive, CircleAlert, Server, Shapes } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
-import { EmptyState } from "@/components/app/patterns/StateCard";
 import { type RunArtifactViewerState } from "@/components/app/RunArtifactViewer";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -19,11 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import {
-  SCENARIO_RUNS_PAGE_SIZE,
-  buildVisiblePages,
-  parseTimestamp,
-} from "@/components/app/admin/hosts/format";
+import { parseTimestamp } from "@/components/app/admin/hosts/format";
 import { LiveScenarioRunCard } from "@/components/app/admin/hosts/LiveScenarioRunCard";
 import { ScenarioRunArchiveCard } from "@/components/app/admin/hosts/ScenarioRunArchiveCard";
 import { useAdminScenarios } from "@/components/app/admin/hosts/useAdminScenarios";
@@ -48,7 +48,6 @@ export function Dashboard() {
     Record<string, RunArtifactViewerState>
   >({});
   const artifactStreamRef = useRef<Record<string, AbortController>>({});
-  const [runsPage, setRunsPage] = useState(1);
   const [activeWebSsh, setActiveWebSsh] = useState<{
     hostId: string;
     runId: string;
@@ -342,31 +341,6 @@ export function Dashboard() {
         }),
     [hostRecords],
   );
-  const totalRunPages = Math.max(
-    1,
-    Math.ceil(archivedScenarioRuns.length / SCENARIO_RUNS_PAGE_SIZE),
-  );
-  const archiveStart =
-    archivedScenarioRuns.length > 0
-      ? (runsPage - 1) * SCENARIO_RUNS_PAGE_SIZE + 1
-      : 0;
-  const archiveEnd =
-    archivedScenarioRuns.length > 0
-      ? Math.min(runsPage * SCENARIO_RUNS_PAGE_SIZE, archivedScenarioRuns.length)
-      : 0;
-  const pageNumbers = useMemo(
-    () => buildVisiblePages(runsPage, totalRunPages),
-    [runsPage, totalRunPages],
-  );
-  const pagedArchivedScenarioRuns = useMemo(() => {
-    const start = (runsPage - 1) * SCENARIO_RUNS_PAGE_SIZE;
-    return archivedScenarioRuns.slice(start, start + SCENARIO_RUNS_PAGE_SIZE);
-  }, [archivedScenarioRuns, runsPage]);
-
-  useEffect(() => {
-    setRunsPage((current) => Math.min(Math.max(current, 1), totalRunPages));
-  }, [totalRunPages]);
-
   return (
     <PageShell width="workspace" density="compact">
       <Section
@@ -374,15 +348,29 @@ export function Dashboard() {
         description="Current fleet posture from the latest host reports."
         variant="flat"
         density="compact"
-        bodyClassName="divide-y border-y"
+        className="rounded-none border-0 bg-transparent py-2"
+        bodyClassName="divide-y divide-border/50 px-0"
       >
         <LedgerRow
           icon={<CircleAlert />}
           label="Needs attention"
           value={String(attentionHostCount)}
-          detail={attentionHostCount ? "Offline, degraded, or disabled hosts" : "No host exceptions"}
+          detail={
+            attentionHostCount
+              ? "Offline, degraded, or disabled hosts"
+              : "No host exceptions"
+          }
           tone={attentionHostCount ? "warning" : "success"}
-          action={<Button size="sm" variant="outline" render={<Link to="/admin/hosts" />}>Review hosts</Button>}
+          action={
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              render={<Link to="/admin/hosts" />}
+            >
+              Review hosts
+            </Button>
+          }
         />
         <LedgerRow
           icon={<Server />}
@@ -395,7 +383,16 @@ export function Dashboard() {
           label="Live work"
           value={String(activeVmCount)}
           detail="Active scenario VMs"
-          action={<Button size="sm" variant="ghost" render={<a href="#live-runs" />}>Inspect live work</Button>}
+          action={
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              render={<a href="#live-runs" />}
+            >
+              Inspect live work
+            </Button>
+          }
         />
         <LedgerRow
           icon={<Archive />}
@@ -409,7 +406,16 @@ export function Dashboard() {
           value={`${enabledScenarioCount}/${launchableScenarios.length}`}
           detail="Enabled for learners"
           tone={enabledScenarioCount ? "default" : "warning"}
-          action={<Button size="sm" variant="ghost" render={<Link to="/admin/scenarios" />}>Open registry</Button>}
+          action={
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-auto p-0 text-xs font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+              render={<Link to="/admin/scenarios" />}
+            >
+              Open registry
+            </Button>
+          }
         />
       </Section>
 
@@ -453,58 +459,66 @@ export function Dashboard() {
           density="compact"
           title="Live scenario runs"
           description="Everything currently running across the fleet."
-          actions={<Badge variant="outline">{liveScenarioRuns.length} active</Badge>}
+          actions={
+            <Badge variant="outline">{liveScenarioRuns.length} active</Badge>
+          }
         >
-        {hosts.isPending ? (
-          <TableSkeleton rows={2} />
-        ) : liveScenarioRuns.length ? (
-          <div className="space-y-4">
-            {liveScenarioRuns.map(({ host, vm }) => {
-              const vmKey = `${host.id}:${vm.name}`;
-              return (
-                <LiveScenarioRunCard
-                  key={vmKey}
-                  host={host}
-                  vmItem={vm}
-                  isExpanded={Boolean(expandedActiveVms[vmKey])}
-                  onToggle={() => {
-                    setExpandedActiveVms((current) => ({
-                      ...current,
-                      [vmKey]: !current[vmKey],
-                    }));
-                  }}
-                  onOpenWebSsh={() => {
-                    if (!vm.run_id) return;
-                    setActiveWebSsh({
-                      hostId: host.id,
-                      runId: vm.run_id,
-                      vmId: vm.id,
-                      vmName: vm.name,
-                    });
-                  }}
-                  onDelete={() => {
-                    if (!vm.run_id) return;
-                    setEndTarget({
-                      hostId: host.id,
-                      runId: vm.run_id,
-                      vmName: vm.name,
-                    });
-                  }}
-                  isDeleting={
-                    vmBusyKey === `${host.id}:destroy-run:${vm.run_id}`
-                  }
-                />
-              );
-            })}
-          </div>
-        ) : (
-          <EmptyState
-            title="No active scenario runs"
-            description="Runs launched by learners or from the Hosts page show up here in real time."
-            className="border-0 bg-transparent shadow-none"
-            contentClassName="min-h-[10rem]"
-          />
-        )}
+          {hosts.isPending ? (
+            <TableSkeleton rows={2} />
+          ) : liveScenarioRuns.length ? (
+            <PaginatedCollection
+              items={liveScenarioRuns}
+              pageSize={COLLECTION_PAGE_SIZE.cards}
+              itemLabel="live runs"
+            >
+              {(visibleRuns) => (
+                <div className="space-y-4">
+                  {visibleRuns.map(({ host, vm }) => {
+                    const vmKey = `${host.id}:${vm.name}`;
+                    return (
+                      <LiveScenarioRunCard
+                        key={vmKey}
+                        host={host}
+                        vmItem={vm}
+                        isExpanded={Boolean(expandedActiveVms[vmKey])}
+                        onToggle={() => {
+                          setExpandedActiveVms((current) => ({
+                            ...current,
+                            [vmKey]: !current[vmKey],
+                          }));
+                        }}
+                        onOpenWebSsh={() => {
+                          if (!vm.run_id) return;
+                          setActiveWebSsh({
+                            hostId: host.id,
+                            runId: vm.run_id,
+                            vmId: vm.id,
+                            vmName: vm.name,
+                          });
+                        }}
+                        onDelete={() => {
+                          if (!vm.run_id) return;
+                          setEndTarget({
+                            hostId: host.id,
+                            runId: vm.run_id,
+                            vmName: vm.name,
+                          });
+                        }}
+                        isDeleting={
+                          vmBusyKey === `${host.id}:destroy-run:${vm.run_id}`
+                        }
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </PaginatedCollection>
+          ) : (
+            <OperationalEmptyState
+              title="No active scenario runs"
+              description="Runs launched by learners or from the Hosts page show up here in real time."
+            />
+          )}
         </Section>
       </div>
 
@@ -513,97 +527,58 @@ export function Dashboard() {
         title="Run archive"
         description="Finished runs with their captured artifacts."
         actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">
-              {archivedScenarioRuns.length
-                ? `${archiveStart}-${archiveEnd} of ${archivedScenarioRuns.length}`
-                : "0 runs"}
-            </Badge>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => setRunsPage((current) => Math.max(1, current - 1))}
-              disabled={runsPage === 1 || !archivedScenarioRuns.length}
-            >
-              Previous
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                setRunsPage((current) => Math.min(totalRunPages, current + 1))
-              }
-              disabled={
-                runsPage === totalRunPages || !archivedScenarioRuns.length
-              }
-            >
-              Next
-            </Button>
-          </div>
+          <Badge variant="outline">
+            {archivedScenarioRuns.length} retained
+          </Badge>
         }
       >
         {hosts.isPending ? (
           <TableSkeleton rows={2} />
-        ) : pagedArchivedScenarioRuns.length ? (
-          <div className="space-y-4">
-            {pagedArchivedScenarioRuns.map(({ host, run }) => {
-              const viewerKey = `${host.id}:${run.id}`;
-              return (
-                <ScenarioRunArchiveCard
-                  key={viewerKey}
-                  host={host}
-                  run={run}
-                  viewer={artifactViewerByRun[viewerKey] ?? null}
-                  isExpanded={Boolean(expandedRuns[viewerKey])}
-                  onToggle={() => {
-                    setExpandedRuns((current) => ({
-                      ...current,
-                      [viewerKey]: !current[viewerKey],
-                    }));
-                  }}
-                  onDelete={() => {
-                    setDeleteConfirm("");
-                    setDeleteTarget({ hostId: host.id, runId: run.id });
-                  }}
-                  onStreamArtifact={(artifact) => {
-                    void streamArtifactContent(host.id, run.id, artifact);
-                  }}
-                  isDeleting={vmBusyKey === `${host.id}:delete-run:${run.id}`}
-                />
-              );
-            })}
-          </div>
+        ) : archivedScenarioRuns.length ? (
+          <PaginatedCollection
+            items={archivedScenarioRuns}
+            pageSize={COLLECTION_PAGE_SIZE.cards}
+            itemLabel="archived runs"
+          >
+            {(visibleRuns) => (
+              <div className="space-y-4">
+                {visibleRuns.map(({ host, run }) => {
+                  const viewerKey = `${host.id}:${run.id}`;
+                  return (
+                    <ScenarioRunArchiveCard
+                      key={viewerKey}
+                      host={host}
+                      run={run}
+                      viewer={artifactViewerByRun[viewerKey] ?? null}
+                      isExpanded={Boolean(expandedRuns[viewerKey])}
+                      onToggle={() => {
+                        setExpandedRuns((current) => ({
+                          ...current,
+                          [viewerKey]: !current[viewerKey],
+                        }));
+                      }}
+                      onDelete={() => {
+                        setDeleteConfirm("");
+                        setDeleteTarget({ hostId: host.id, runId: run.id });
+                      }}
+                      onStreamArtifact={(artifact) => {
+                        void streamArtifactContent(host.id, run.id, artifact);
+                      }}
+                      isDeleting={
+                        vmBusyKey === `${host.id}:delete-run:${run.id}`
+                      }
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </PaginatedCollection>
         ) : (
-          <EmptyState
+          <OperationalEmptyState
             title="No archived scenario runs yet"
             description="Finished runs land here once their recordings upload."
-            className="border-0 bg-transparent shadow-none"
-            contentClassName="min-h-[10rem]"
           />
         )}
-
-        {archivedScenarioRuns.length > SCENARIO_RUNS_PAGE_SIZE ? (
-          <div className="mt-6 flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-caption">
-              Page {runsPage} of {totalRunPages}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {pageNumbers.map((pageNumber) => (
-                <Button
-                  key={pageNumber}
-                  type="button"
-                  size="sm"
-                  variant={pageNumber === runsPage ? "secondary" : "outline"}
-                  onClick={() => setRunsPage(pageNumber)}
-                >
-                  {pageNumber}
-                </Button>
-              ))}
-            </div>
-          </div>
-        ) : null}
       </Section>
 
       {activeWebSsh ? (
@@ -617,22 +592,36 @@ export function Dashboard() {
         />
       ) : null}
 
-      <Dialog open={endTarget !== null} onOpenChange={(open) => !open && setEndTarget(null)}>
+      <Dialog
+        open={endTarget !== null}
+        onOpenChange={(open) => !open && setEndTarget(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>End this run?</DialogTitle>
             <DialogDescription>
-              This stops active work on {endTarget?.vmName}. Captured history remains available after archival.
+              This stops active work on {endTarget?.vmName}. Captured history
+              remains available after archival.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEndTarget(null)} disabled={vmBusyKey !== null}>Keep running</Button>
+            <Button
+              variant="outline"
+              onClick={() => setEndTarget(null)}
+              disabled={vmBusyKey !== null}
+            >
+              Keep running
+            </Button>
             <Button
               variant="destructive"
               disabled={!endTarget || vmBusyKey !== null}
               onClick={() => {
                 if (endTarget) {
-                  void handleDestroyRun(endTarget.hostId, endTarget.runId, endTarget.vmName);
+                  void handleDestroyRun(
+                    endTarget.hostId,
+                    endTarget.runId,
+                    endTarget.vmName,
+                  );
                 }
               }}
             >
@@ -655,20 +644,39 @@ export function Dashboard() {
           <DialogHeader>
             <DialogTitle>Delete this run?</DialogTitle>
             <DialogDescription>
-              This permanently removes the archived history and captured artifacts. Type the run ID to confirm.
+              This permanently removes the archived history and captured
+              artifacts. Type the run ID to confirm.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label htmlFor="delete-run-confirm" className="font-mono text-sm">{deleteTarget?.runId}</label>
-            <Input id="delete-run-confirm" value={deleteConfirm} onChange={(event) => setDeleteConfirm(event.target.value)} autoComplete="off" />
+            <label htmlFor="delete-run-confirm" className="font-mono text-sm">
+              {deleteTarget?.runId}
+            </label>
+            <Input
+              id="delete-run-confirm"
+              value={deleteConfirm}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              autoComplete="off"
+            />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={vmBusyKey !== null}>Keep history</Button>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={vmBusyKey !== null}
+            >
+              Keep history
+            </Button>
             <Button
               variant="destructive"
-              disabled={!deleteTarget || deleteConfirm !== deleteTarget.runId || vmBusyKey !== null}
+              disabled={
+                !deleteTarget ||
+                deleteConfirm !== deleteTarget.runId ||
+                vmBusyKey !== null
+              }
               onClick={() => {
-                if (deleteTarget) void handleDeleteRun(deleteTarget.hostId, deleteTarget.runId);
+                if (deleteTarget)
+                  void handleDeleteRun(deleteTarget.hostId, deleteTarget.runId);
               }}
             >
               {vmBusyKey ? "Deleting…" : "Delete run"}
@@ -677,6 +685,21 @@ export function Dashboard() {
         </DialogContent>
       </Dialog>
     </PageShell>
+  );
+}
+
+function OperationalEmptyState({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="rounded-lg bg-muted/30 px-4 py-3">
+      <h3 className="text-sm font-medium">{title}</h3>
+      <p className="mt-1 max-w-2xl text-metadata">{description}</p>
+    </div>
   );
 }
 
@@ -696,14 +719,30 @@ function LedgerRow({
   action?: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-3 py-3 first:pt-0 last:pb-0 sm:grid-cols-[1.4rem_minmax(10rem,0.8fr)_minmax(0,1fr)_auto] sm:items-center">
-      <span className={tone === "warning" ? "text-warning" : tone === "success" ? "text-success" : "text-muted-foreground"}>{icon}</span>
-      <div>
+    <div className="grid grid-cols-[1.4rem_minmax(0,1fr)_auto] items-center gap-x-3 px-4 py-3 sm:grid-cols-[1.4rem_minmax(12rem,1fr)_auto_minmax(7.5rem,auto)] sm:gap-x-4">
+      <span
+        className={cn(
+          tone === "warning"
+            ? "text-warning"
+            : tone === "success"
+              ? "text-success"
+              : "text-muted-foreground",
+        )}
+      >
+        {icon}
+      </span>
+      <div className="min-w-0 space-y-0.5">
         <p className="text-sm font-medium">{label}</p>
         <p className="text-metadata">{detail}</p>
       </div>
-      <p className="text-section-title tabular-nums sm:text-right">{value}</p>
-      <div>{action}</div>
+      <div className="flex min-w-20 flex-col items-end gap-0.5 text-right sm:contents">
+        <p className="text-sm font-semibold tabular-nums sm:col-start-3 sm:justify-self-end">
+          {value}
+        </p>
+        {action ? (
+          <div className="sm:col-start-4 sm:justify-self-end">{action}</div>
+        ) : null}
+      </div>
     </div>
   );
 }

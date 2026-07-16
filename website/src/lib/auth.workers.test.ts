@@ -18,6 +18,8 @@ describe("auth policy", () => {
       signInResponse,
       selfDeleteResponse,
       adminDeleteResponse,
+      stockOrganizationCreateResponse,
+      stockSsoRegisterResponse,
     ] = await Promise.all([
       auth.handler(
         authRequest("/api/auth/sign-up/email", {
@@ -37,16 +39,33 @@ describe("auth policy", () => {
       auth.handler(
         authRequest("/api/auth/admin/remove-user", { userId: "victim" }),
       ),
+      auth.handler(
+        authRequest("/api/auth/organization/create", {
+          name: "Bypass",
+          slug: "bypass",
+        }),
+      ),
+      auth.handler(
+        authRequest("/api/auth/sso/register", {
+          issuer: "https://attacker.example",
+          domain: "example.com",
+          providerId: "bypass",
+        }),
+      ),
     ]);
 
     expect(auth.options).toMatchObject({
-      disabledPaths: [
+      disabledPaths: expect.arrayContaining([
         "/sign-up/email",
         "/sign-in/email",
         "/delete-user",
         "/delete-user/callback",
         "/admin/remove-user",
-      ],
+        "/organization/create",
+        "/organization/update-member-role",
+        "/sso/register",
+        "/sso/verify-domain",
+      ]),
       emailAndPassword: {
         enabled: false,
         disableSignUp: true,
@@ -60,6 +79,12 @@ describe("auth policy", () => {
     await expect(selfDeleteResponse.text()).resolves.toBe("Not Found");
     expect(adminDeleteResponse.status).toBe(404);
     await expect(adminDeleteResponse.text()).resolves.toBe("Not Found");
+    expect(stockOrganizationCreateResponse.status).toBe(404);
+    await expect(stockOrganizationCreateResponse.text()).resolves.toBe(
+      "Not Found",
+    );
+    expect(stockSsoRegisterResponse.status).toBe(404);
+    await expect(stockSsoRegisterResponse.text()).resolves.toBe("Not Found");
   });
 
   it("maps GitHub identities to usernames and keeps the allowlist creation gate", async () => {
@@ -76,7 +101,9 @@ describe("auth policy", () => {
 
     const beforeCreate = auth.options.databaseHooks?.user?.create?.before;
     expect(beforeCreate).toBeTypeOf("function");
-    await expect(beforeCreate?.(mappedUser as never)).resolves.toBe(false);
+    await expect(
+      beforeCreate?.(mappedUser as never, {} as never),
+    ).resolves.toBe(false);
 
     await drizzle(env.DB).insert(accessAllowlist).values({
       githubUsername: "allowed-github-user",
@@ -84,7 +111,7 @@ describe("auth policy", () => {
       approvedAt: Date.now(),
     });
     await expect(
-      beforeCreate?.(mappedUser as never),
+      beforeCreate?.(mappedUser as never, {} as never),
     ).resolves.toBeUndefined();
   });
 
@@ -97,7 +124,9 @@ describe("auth policy", () => {
       approvedAt: Date.now(),
     });
 
-    const created = await (await auth.$context).internalAdapter.createUser(
+    const created = await (
+      await auth.$context
+    ).internalAdapter.createUser(
       {
         name: "Long GitHub User",
         email: "long-github-user@example.com",

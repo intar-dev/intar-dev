@@ -13,7 +13,7 @@ import type {
   HostStateReportV2,
 } from "@/generated/bridge";
 import type { ImageArchitecture } from "@/generated/catalog";
-import { user } from "./core";
+import { organization, user } from "./core";
 import {
   type AgentHostRole,
   type HostCpuReservationQuotaPhase,
@@ -32,6 +32,9 @@ export const agentHosts = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
     name: text("name").notNull(),
     role: text("role").$type<AgentHostRole>().default("agent").notNull(),
     scenarioEnabled: integer("scenario_enabled", { mode: "boolean" })
@@ -55,24 +58,44 @@ export const agentHosts = sqliteTable(
   },
   (table) => [
     index("agent_hosts_user_idx").on(table.userId),
+    index("agent_hosts_organization_idx").on(
+      table.organizationId,
+      table.role,
+      table.connected,
+    ),
     index("agent_hosts_role_idx").on(table.role, table.connected),
     index("agent_hosts_connected_idx").on(table.connected, table.updatedAt),
   ],
 );
 
-export const imageBuildBundles = sqliteTable("image_build_bundles", {
-  rev: text("rev").primaryKey(),
-  r2Key: text("r2_key").notNull(),
-  kinoVersion: text("kino_version").notNull(),
-  metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
-  createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
-});
+export const imageBuildBundles = sqliteTable(
+  "image_build_bundles",
+  {
+    rev: text("rev").primaryKey(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
+    r2Key: text("r2_key").notNull(),
+    kinoVersion: text("kino_version").notNull(),
+    metaJson: jsonText<ImageBuildBundleMeta>("meta_json").notNull(),
+    createdAt: integer("created_at").default(nowMsDefault).notNull(),
+    updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
+  },
+  (table) => [
+    index("image_build_bundles_organization_idx").on(
+      table.organizationId,
+      table.updatedAt,
+    ),
+  ],
+);
 
 export const imageBuilds = sqliteTable(
   "image_builds",
   {
     id: text("id").primaryKey(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
     scenarioId: text("scenario_id").notNull(),
     arch: text("arch").$type<ImageArchitecture>().notNull(),
     rev: text("rev")
@@ -104,6 +127,11 @@ export const imageBuilds = sqliteTable(
       table.contentHash,
     ),
     index("image_builds_status_idx").on(table.status, table.updatedAt),
+    index("image_builds_organization_idx").on(
+      table.organizationId,
+      table.status,
+      table.updatedAt,
+    ),
     index("image_builds_host_idx").on(table.hostId, table.status),
     index("image_builds_rev_idx").on(table.rev),
   ],
@@ -114,7 +142,7 @@ export const imageBuildCoordinationLocks = sqliteTable(
   {
     key: text("key").primaryKey(),
     ownerToken: text("owner_token").notNull(),
-    expiresAt: integer("expires_at").notNull(),
+    expiresAt: integer("expires_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
@@ -209,7 +237,7 @@ export const agentBootstrapTokens = sqliteTable(
       .notNull()
       .references(() => agentHosts.id, { onDelete: "cascade" }),
     tokenHash: text("token_hash").notNull(),
-    expiresAt: integer("expires_at").notNull(),
+    expiresAt: integer("expires_at"),
     revokedAt: integer("revoked_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
   },

@@ -51,15 +51,21 @@ test("transactional access request submits deterministically", async ({
   await ui.open({ ...routeCase("request-access"), theme: "light" });
   await page.getByLabel("GitHub username").fill("newoperator");
   await page.getByRole("button", { name: "Request access" }).click();
-  await expect(page.getByRole("heading", { name: /Request received/i })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /Request received/i }),
+  ).toBeVisible();
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
   const search = page.getByLabel(/Search scenarios/i);
   await search.fill("DNS");
-  await expect(page.getByRole("heading", { name: /Trace an intermittent DNS failure/i })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /Repair a broken nginx service/i })).toBeHidden();
+  await expect(
+    page.getByRole("heading", { name: /Trace an intermittent DNS failure/i }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /Repair a broken nginx service/i }),
+  ).toBeHidden();
 });
 
 test("run workspace opens a deterministic terminal transport", async ({
@@ -79,14 +85,22 @@ test("run workspace opens a deterministic terminal transport", async ({
   ).toHaveText(/Terminal status:\s*connected/i);
 });
 
-test("team workspace keeps the active tab in the URL", async ({ page, ui }) => {
-  await ui.open({ ...routeCase("team-detail"), theme: "light" });
+test("organization workspace keeps the active tab in the URL", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
   await page.getByRole("tab", { name: "Assignments" }).click();
   await expect(page).toHaveURL(/tab=assignments/);
-  await expect(page.getByRole("heading", { name: "Assignments" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Assignments" }),
+  ).toBeVisible();
 });
 
-test("admin operations expose URL-backed people views", async ({ page, ui }) => {
+test("admin operations expose URL-backed people views", async ({
+  page,
+  ui,
+}) => {
   await ui.open({ ...routeCase("admin-people"), theme: "dark" });
   await page.getByRole("tab", { name: "Users" }).click();
   await expect(page).toHaveURL(/tab=users/);

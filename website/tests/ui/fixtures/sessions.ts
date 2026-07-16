@@ -1,7 +1,7 @@
 export type SessionRole =
   | "anonymous"
   | "learner"
-  | "team-member"
+  | "organization-member"
   | "instructor"
   | "owner"
   | "global-admin";
@@ -74,15 +74,10 @@ export const SESSION_FIXTURES: Record<
   MockSession
 > = {
   learner: session("learner", "Mina Learner", "minalearns"),
-  "team-member": session("member", "Sam Operator", "samops"),
+  "organization-member": session("member", "Sam Operator", "samops"),
   instructor: session("instructor", "Inez Instructor", "inezinfra"),
   owner: session("owner", "Owen Owner", "owenowns"),
-  "global-admin": session(
-    "admin",
-    "Ada Administrator",
-    "adaadmin",
-    "admin",
-  ),
+  "global-admin": session("admin", "Ada Administrator", "adaadmin", "admin"),
 };
 
 export function sessionFor(role: SessionRole): MockSession | null {

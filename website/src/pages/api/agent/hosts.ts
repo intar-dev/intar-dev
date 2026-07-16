@@ -19,12 +19,9 @@ import {
   type AgentHostRow,
 } from "@/lib/agent-bridge";
 import { createAppId, createShortAppId } from "@/lib/id";
-import {
-  resolveRequestedHostRole,
-} from "@/lib/scenario-hosts";
+import { resolveRequestedHostRole } from "@/lib/scenario-hosts";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 
-const BOOTSTRAP_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 
 interface CreateHostBody {
@@ -74,7 +71,12 @@ export const GET: APIRoute = async ({ request }) => {
       updated_at: agentHosts.updatedAt,
     })
     .from(agentHosts)
-    .where(eq(agentHosts.userId, authz.context.userId))
+    .where(
+      and(
+        eq(agentHosts.userId, authz.context.userId),
+        isNull(agentHosts.organizationId),
+      ),
+    )
     .orderBy(desc(agentHosts.createdAt));
 
   const output = await Promise.all(
@@ -131,6 +133,7 @@ export const POST: APIRoute = async ({ request, url }) => {
       .where(
         and(
           eq(agentHosts.userId, authz.context.userId),
+          isNull(agentHosts.organizationId),
           eq(agentHosts.name, hostName),
         ),
       )
@@ -142,6 +145,7 @@ export const POST: APIRoute = async ({ request, url }) => {
       await db.insert(agentHosts).values({
         id: hostId,
         userId: authz.context.userId,
+        organizationId: null,
         name: hostName,
         role: requestedRole,
         scenarioEnabled: requestedRole === "agent",
@@ -158,7 +162,8 @@ export const POST: APIRoute = async ({ request, url }) => {
   if (host && host.role !== requestedRole) {
     return jsonResponse(
       {
-        error: "host roles are immutable; create a new host for the requested role",
+        error:
+          "host roles are immutable; create a new host for the requested role",
         code: "host_role_immutable",
         hostId: host.id,
         currentRole: host.role,
@@ -175,26 +180,26 @@ export const POST: APIRoute = async ({ request, url }) => {
   const token = createBootstrapToken();
   const tokenHash = await sha256Hex(token);
   const now = Date.now();
-  const expiresAt = now + BOOTSTRAP_TOKEN_TTL_MS;
 
-  await db
-    .update(agentBootstrapTokens)
-    .set({ revokedAt: now })
-    .where(
-      and(
-        eq(agentBootstrapTokens.hostId, host.id),
-        isNull(agentBootstrapTokens.revokedAt),
+  await db.batch([
+    db
+      .update(agentBootstrapTokens)
+      .set({ revokedAt: now })
+      .where(
+        and(
+          eq(agentBootstrapTokens.hostId, host.id),
+          isNull(agentBootstrapTokens.revokedAt),
+        ),
       ),
-    );
-
-  await db.insert(agentBootstrapTokens).values({
-    id: createAppId(),
-    hostId: host.id,
-    tokenHash,
-    expiresAt,
-    revokedAt: null,
-    createdAt: now,
-  });
+    db.insert(agentBootstrapTokens).values({
+      id: createAppId(),
+      hostId: host.id,
+      tokenHash,
+      expiresAt: null,
+      revokedAt: null,
+      createdAt: now,
+    }),
+  ]);
 
   const bridgeConfigToml = buildBridgeConfigToml({
     baseUrl: url.origin || resolveRequestOrigin(request),
@@ -211,7 +216,7 @@ export const POST: APIRoute = async ({ request, url }) => {
       scenarioEnabled: Boolean(host.scenario_enabled),
       createdAt: host.created_at,
     },
-    bootstrapTokenExpiresAt: new Date(expiresAt).toISOString(),
+    bootstrapTokenExpiresAt: null,
     bridgeConfigToml,
   });
 };

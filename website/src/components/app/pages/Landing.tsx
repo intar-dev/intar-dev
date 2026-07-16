@@ -102,7 +102,7 @@ export function Landing() {
               </p>
             </div>
 
-            <div className="w-full sm:w-auto">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
               {signedIn ? (
                 <Button
                   size="lg"
@@ -125,15 +125,29 @@ export function Landing() {
                   {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                 </Button>
               ) : (
-                <Button
-                  size="lg"
-                  className="w-full sm:w-auto"
-                  onClick={() => signIn.mutate()}
-                  disabled={signIn.isPending}
-                >
-                  {signIn.isPending ? "Opening GitHub…" : "Sign in with GitHub"}
-                  {!signIn.isPending ? <ArrowRight className="size-4" /> : null}
-                </Button>
+                <>
+                  <Button
+                    size="lg"
+                    className="w-full sm:w-auto"
+                    onClick={() => signIn.mutate()}
+                    disabled={signIn.isPending}
+                  >
+                    {signIn.isPending
+                      ? "Opening GitHub…"
+                      : "Sign in with GitHub"}
+                    {!signIn.isPending ? (
+                      <ArrowRight className="size-4" />
+                    ) : null}
+                  </Button>
+                  <Button
+                    size="lg"
+                    variant="outline"
+                    className="w-full sm:w-auto"
+                    render={<Link to="/organization-sign-in" />}
+                  >
+                    Organization sign-in
+                  </Button>
+                </>
               )}
             </div>
 
@@ -281,7 +295,7 @@ function WorkOrderStep({
   detail: string;
 }) {
   return (
-    <li className="grid grid-cols-[1.25rem_2rem_minmax(0,1fr)_auto] items-center gap-2 py-2 text-sm">
+    <li className="grid grid-cols-[1.25rem_2rem_minmax(0,1fr)_auto] items-center gap-2 py-3 text-sm">
       {icon}
       <span className="font-mono text-xs text-terminal-muted">{number}</span>
       <span className="font-semibold">{label}</span>

@@ -29,10 +29,10 @@ export function Section({
       as="section"
       variant={variant}
       size={density === "compact" ? "sm" : "default"}
-      className={cn("block", className)}
+      className={cn("block", density === "compact" && "gap-3", className)}
     >
       {title || actions || description ? (
-        <div className={cn("flex flex-col gap-2 px-(--card-spacing) sm:flex-row sm:items-start sm:justify-between", density === "comfortable" ? "mb-6" : "mb-4")}>
+        <div className="flex flex-col gap-2 px-(--card-spacing) sm:flex-row sm:items-start sm:justify-between">
           <div className="space-y-1">
             {title ? <h2 className="text-section-title">{title}</h2> : null}
             {description ? (

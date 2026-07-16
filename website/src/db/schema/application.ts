@@ -8,35 +8,6 @@ import {
 import { organization, user } from "./core";
 import { nowMsDefault } from "./shared";
 
-export const teamInvites = sqliteTable(
-  "team_invites",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organization.id, { onDelete: "cascade" }),
-    // Normalized (lowercased) GitHub username.
-    githubUsername: text("github_username").notNull(),
-    invitedBy: text("invited_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    status: text("status", {
-      enum: ["pending", "accepted", "revoked", "declined"],
-    })
-      .default("pending")
-      .notNull(),
-    acceptedAt: integer("accepted_at"),
-    createdAt: integer("created_at").default(nowMsDefault).notNull(),
-  },
-  (table) => [
-    uniqueIndex("team_invites_org_username_uidx").on(
-      table.organizationId,
-      table.githubUsername,
-    ),
-    index("team_invites_username_idx").on(table.githubUsername, table.status),
-  ],
-);
-
 export const scenarioAssignments = sqliteTable(
   "scenario_assignments",
   {
@@ -105,6 +76,9 @@ export const scenarioSources = sqliteTable(
   {
     id: text("id").primaryKey(),
     scenarioId: text("scenario_id").notNull(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
     hcl: text("hcl").notNull(),
     status: text("status", {
       enum: ["draft", "published"],
@@ -119,6 +93,10 @@ export const scenarioSources = sqliteTable(
   },
   (table) => [
     uniqueIndex("scenario_sources_scenario_uidx").on(table.scenarioId),
+    index("scenario_sources_organization_idx").on(
+      table.organizationId,
+      table.updatedAt,
+    ),
   ],
 );
 

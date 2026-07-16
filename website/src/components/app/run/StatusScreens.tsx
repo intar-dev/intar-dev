@@ -42,7 +42,12 @@ export function ScenarioStepScreen(props: {
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        <p
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
           {props.statusAnnouncement ??
             (currentStep
               ? `${props.title}: ${currentStep.label}`
@@ -54,7 +59,7 @@ export function ScenarioStepScreen(props: {
               key={step.id}
               aria-current={currentStep?.id === step.id ? "step" : undefined}
               className={cn(
-                "flex items-start gap-3 rounded-lg px-3 py-2 text-sm",
+                "flex items-start gap-3 rounded-lg px-4 py-3 text-sm",
                 step.state === "done"
                   ? "bg-success/8"
                   : step.state === "active"
@@ -141,7 +146,12 @@ export function ScenarioShellStatusCard(props: {
         <CardDescription>{props.title}</CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-[20rem] flex-col items-center justify-center gap-4 text-center">
-        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        <p
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
           {props.title}
         </p>
         {isTransient ? (

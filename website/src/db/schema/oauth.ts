@@ -237,5 +237,3 @@ export const oauthClientAssertion = sqliteTable("oauth_client_assertion", {
   id: text("id").primaryKey(),
   expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
 });
-
-// App-owned team invites keyed by GitHub username (the product identity).

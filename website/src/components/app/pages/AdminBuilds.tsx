@@ -8,13 +8,14 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
-import {
-  EmptyState,
-  ErrorState,
-} from "@/components/app/patterns/StateCard";
+import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import {
   formatRelativeTime,
   formatTimestamp,
@@ -143,7 +144,11 @@ export function AdminBuilds() {
         <BuildCount label="Total" value={records.length} />
         <BuildCount label="Active" value={activeCount} tone="brand" />
         <BuildCount label="Succeeded" value={succeededCount} tone="success" />
-        <BuildCount label="Failed" value={failedCount} tone={failedCount ? "error" : "default"} />
+        <BuildCount
+          label="Failed"
+          value={failedCount}
+          tone={failedCount ? "error" : "default"}
+        />
       </Section>
 
       {retryBuild.error ? (
@@ -177,34 +182,45 @@ export function AdminBuilds() {
           density="compact"
           title="Build queue"
           description="Content-addressed scenario image builds reported by builder hosts."
-          bodyClassName="divide-y"
         >
-          {records.map((build) => (
-            <BuildRow
-              key={build.id}
-              build={build}
-              retryPending={
-                retryBuild.isPending && retryBuild.variables === build.id
-              }
-              retryDisabled={retryBuild.isPending || !build.canRetry}
-              detail={
-                selectedBuildId === build.id ? buildDetail.data?.build : null
-              }
-              detailLoading={
-                selectedBuildId === build.id && buildDetail.isLoading
-              }
-              detailError={
-                selectedBuildId === build.id ? buildDetail.error : null
-              }
-              detailOpen={selectedBuildId === build.id}
-              onToggleDetails={() =>
-                setSelectedBuildId((current) =>
-                  current === build.id ? null : build.id,
-                )
-              }
-              onRetry={() => retryBuild.mutate(build.id)}
-            />
-          ))}
+          <PaginatedCollection
+            items={records}
+            pageSize={COLLECTION_PAGE_SIZE.dense}
+            itemLabel="builds"
+          >
+            {(visibleBuilds) => (
+              <div className="divide-y">
+                {visibleBuilds.map((build) => (
+                  <BuildRow
+                    key={build.id}
+                    build={build}
+                    retryPending={
+                      retryBuild.isPending && retryBuild.variables === build.id
+                    }
+                    retryDisabled={retryBuild.isPending || !build.canRetry}
+                    detail={
+                      selectedBuildId === build.id
+                        ? buildDetail.data?.build
+                        : null
+                    }
+                    detailLoading={
+                      selectedBuildId === build.id && buildDetail.isLoading
+                    }
+                    detailError={
+                      selectedBuildId === build.id ? buildDetail.error : null
+                    }
+                    detailOpen={selectedBuildId === build.id}
+                    onToggleDetails={() =>
+                      setSelectedBuildId((current) =>
+                        current === build.id ? null : build.id,
+                      )
+                    }
+                    onRetry={() => retryBuild.mutate(build.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </PaginatedCollection>
         </Section>
       )}
     </PageShell>
@@ -229,9 +245,15 @@ function BuildRow(props: {
       <div className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <StatusBadge status={build.status} />
-          <span className="text-metadata"><span className="text-eyebrow">Phase</span> {build.phase}</span>
-          <span className="font-mono text-xs text-muted-foreground">{build.arch}</span>
-          <span className="font-mono text-xs text-muted-foreground">kino {build.kinoVersion}</span>
+          <span className="text-metadata">
+            <span className="text-eyebrow">Phase</span> {build.phase}
+          </span>
+          <span className="font-mono text-xs text-muted-foreground">
+            {build.arch}
+          </span>
+          <span className="font-mono text-xs text-muted-foreground">
+            kino {build.kinoVersion}
+          </span>
         </div>
 
         <div className="min-w-0">
@@ -344,7 +366,9 @@ async function fetchBuilds(): Promise<ImageBuildListResponse> {
     const body = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(body?.error ?? `Failed to load builds (${response.status})`);
+    throw new Error(
+      body?.error ?? `Failed to load builds (${response.status})`,
+    );
   }
   return (await response.json()) as ImageBuildListResponse;
 }
@@ -376,7 +400,10 @@ function BuildDetails(props: {
 }) {
   if (props.loading) {
     return (
-      <div id={props.id} className="border-t pt-3 text-sm text-muted-foreground">
+      <div
+        id={props.id}
+        className="border-t pt-3 text-sm text-muted-foreground"
+      >
         Loading build details…
       </div>
     );

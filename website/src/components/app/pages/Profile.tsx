@@ -2,6 +2,10 @@ import { useState } from "react";
 import { KeyRound, LoaderCircle } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { useSession } from "@/components/app/hooks/useSession";
@@ -85,9 +89,10 @@ export function Profile() {
         }),
       });
 
-      const body = (await response.json().catch(() => null)) as
-        | { key?: UserSshKeyRecord; error?: string }
-        | null;
+      const body = (await response.json().catch(() => null)) as {
+        key?: UserSshKeyRecord;
+        error?: string;
+      } | null;
 
       if (!response.ok || !body?.key) {
         throw new Error(
@@ -101,8 +106,12 @@ export function Profile() {
       setLabel("");
       setPublicKey("");
       setFormError(null);
-      setFormNotice("Key saved. New scenario runs will trust it automatically.");
-      await queryClient.invalidateQueries({ queryKey: ["profile", "ssh-keys"] });
+      setFormNotice(
+        "Key saved. New scenario runs will trust it automatically.",
+      );
+      await queryClient.invalidateQueries({
+        queryKey: ["profile", "ssh-keys"],
+      });
     },
     onError: (error) => {
       setFormNotice(null);
@@ -120,9 +129,10 @@ export function Profile() {
         },
       );
 
-      const body = (await response.json().catch(() => null)) as
-        | { deleted?: true; error?: string }
-        | null;
+      const body = (await response.json().catch(() => null)) as {
+        deleted?: true;
+        error?: string;
+      } | null;
 
       if (!response.ok || body?.deleted !== true) {
         throw new Error(
@@ -133,7 +143,9 @@ export function Profile() {
     onSuccess: async () => {
       setFormNotice("SSH key removed. Existing VMs are unchanged.");
       setFormError(null);
-      await queryClient.invalidateQueries({ queryKey: ["profile", "ssh-keys"] });
+      await queryClient.invalidateQueries({
+        queryKey: ["profile", "ssh-keys"],
+      });
     },
   });
 
@@ -183,7 +195,9 @@ export function Profile() {
           </div>
           <div>
             <dt className="text-eyebrow">2. Public key</dt>
-            <dd className="mt-1 text-sm">Add only the public half of your SSH key.</dd>
+            <dd className="mt-1 text-sm">
+              Add only the public half of your SSH key.
+            </dd>
           </div>
           <div>
             <dt className="text-eyebrow">3. Future runs</dt>
@@ -212,52 +226,60 @@ export function Profile() {
               </AlertDescription>
             </Alert>
           ) : sshKeys.data?.keys.length ? (
-            <ul className="divide-y">
-              {sshKeys.data.keys.map((key) => {
-                const deleting =
-                  deleteKey.isPending && deleteKey.variables === key.id;
+            <PaginatedCollection
+              items={sshKeys.data.keys}
+              pageSize={COLLECTION_PAGE_SIZE.list}
+              itemLabel="SSH keys"
+            >
+              {(visibleKeys) => (
+                <ul className="divide-y overflow-hidden rounded-lg border">
+                  {visibleKeys.map((key) => {
+                    const deleting =
+                      deleteKey.isPending && deleteKey.variables === key.id;
 
-                return (
-                  <li
-                    key={key.id}
-                    className="flex flex-wrap items-start gap-3 py-3 first:pt-0 last:pb-0"
-                  >
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-medium">
-                          {key.label || key.comment || "Unnamed key"}
-                        </p>
-                        <Badge variant="outline">{key.keyType}</Badge>
-                      </div>
-                      <p className="font-mono text-xs break-all text-muted-foreground">
-                        {key.fingerprintSha256}
-                      </p>
-                      <p className="text-caption">
-                        Added {formatTimestamp(key.createdAt)}
-                      </p>
-                      <details>
-                        <summary className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground">
-                          Show public key
-                        </summary>
-                        <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-3 font-mono text-xs break-all whitespace-pre-wrap">
-                          {key.publicKeyOpenssh}
-                        </pre>
-                      </details>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="text-muted-foreground hover:text-destructive"
-                      disabled={deleting}
-                      onClick={() => deleteKey.mutate(key.id)}
-                    >
-                      {deleting ? "Removing…" : "Remove"}
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
+                    return (
+                      <li
+                        key={key.id}
+                        className="flex flex-wrap items-start gap-4 p-4 sm:p-6"
+                      >
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-medium">
+                              {key.label || key.comment || "Unnamed key"}
+                            </p>
+                            <Badge variant="outline">{key.keyType}</Badge>
+                          </div>
+                          <p className="font-mono text-xs break-all text-muted-foreground">
+                            {key.fingerprintSha256}
+                          </p>
+                          <p className="text-caption">
+                            Added {formatTimestamp(key.createdAt)}
+                          </p>
+                          <details>
+                            <summary className="cursor-pointer text-xs text-muted-foreground transition-colors hover:text-foreground">
+                              Show public key
+                            </summary>
+                            <pre className="mt-2 overflow-x-auto rounded-lg bg-muted/50 p-3 font-mono text-xs break-all whitespace-pre-wrap">
+                              {key.publicKeyOpenssh}
+                            </pre>
+                          </details>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted-foreground hover:text-destructive"
+                          disabled={deleting}
+                          onClick={() => deleteKey.mutate(key.id)}
+                        >
+                          {deleting ? "Removing…" : "Remove"}
+                        </Button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </PaginatedCollection>
           ) : (
             <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-8 text-center">
               <KeyRound className="size-6 text-muted-foreground" />

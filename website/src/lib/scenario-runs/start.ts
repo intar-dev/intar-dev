@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
-import { appError } from "@/lib/app-error";
+import { appError, errorChainMatches } from "@/lib/app-error";
 import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
@@ -66,6 +66,7 @@ export type ScenarioRouteType = "browser" | "native_profile_keys";
 export async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
+  organizationId?: string | null;
   hostId?: string;
 }): Promise<{
   accepted: true;
@@ -74,15 +75,19 @@ export async function startScenarioRunInternal(params: {
   acceptedAt: number;
   reused: boolean;
 }> {
+  const organizationId = params.organizationId ?? null;
   const [[scenario], active] = await Promise.all([
-    loadEnabledScenarioRows(params.scenarioId),
+    loadEnabledScenarioRows(params.scenarioId, organizationId),
     loadActiveRunRow(params.userId),
   ]);
   if (!scenario) {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
   if (active) {
-    if (active.scenarioId === scenario.scenarioId) {
+    if (
+      active.scenarioId === scenario.scenarioId &&
+      active.organizationId === organizationId
+    ) {
       if (params.hostId && active.hostId !== params.hostId) {
         throw appError(
           409,
@@ -205,6 +210,7 @@ export async function startScenarioRunInternal(params: {
       params.hostId,
       params.userId,
       requiredImages,
+      organizationId,
     );
     const reservation = await reserveScenarioBootCpuWithJitter({
       hostIds: [params.hostId],
@@ -225,7 +231,7 @@ export async function startScenarioRunInternal(params: {
     }
     hostId = reservation.hostId;
   } else {
-    const selection = await selectScenarioHosts(requiredImages);
+    const selection = await selectScenarioHosts(requiredImages, organizationId);
     if (!selection.ok) {
       if (selection.reason === "image_not_ready") {
         throw appError(
@@ -272,6 +278,7 @@ export async function startScenarioRunInternal(params: {
       db.insert(scenarioRuns).values({
         runId,
         userId: params.userId,
+        organizationId,
         hostId,
         scenarioId: scenario.scenarioId,
         scenarioName: scenario.scenarioId,
@@ -343,6 +350,7 @@ export async function assertScenarioLaunchHostForUser(
   hostId: string,
   userId: string,
   requiredImages: RequiredScenarioImage[],
+  organizationId: string | null = null,
 ): Promise<void> {
   const now = Date.now();
   const db = drizzle(env.DB);
@@ -355,10 +363,21 @@ export async function assertScenarioLaunchHostForUser(
       lastHeartbeatAt: agentHosts.lastHeartbeatAt,
       actualReportedAt: hostActualState.updatedAt,
       actualReport: hostActualState.reportJson,
+      organizationId: agentHosts.organizationId,
     })
     .from(agentHosts)
     .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
-    .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
+    .where(
+      and(
+        eq(agentHosts.id, hostId),
+        organizationId
+          ? eq(agentHosts.organizationId, organizationId)
+          : and(
+              eq(agentHosts.userId, userId),
+              isNull(agentHosts.organizationId),
+            ),
+      ),
+    )
     .limit(1);
   const host = rows[0];
   if (!host) {
@@ -491,11 +510,9 @@ export function bootCapacityPendingError(context?: {
 }
 
 export function isActiveKeyUniqueViolation(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx/.test(
-      error.message,
-    )
+  return errorChainMatches(
+    error,
+    /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx/,
   );
 }
 
@@ -701,6 +718,7 @@ export async function revokeScenarioNativeProfileRoutesForUser(
 
 export async function selectScenarioHosts(
   requiredImages: RequiredScenarioImage[],
+  organizationId: string | null = null,
 ): Promise<HostSelectionResult> {
   const db = drizzle(env.DB);
   const now = Date.now();
@@ -722,6 +740,9 @@ export async function selectScenarioHosts(
         eq(agentHosts.role, "agent"),
         eq(agentHosts.scenarioEnabled, true),
         eq(agentHosts.connected, true),
+        organizationId
+          ? eq(agentHosts.organizationId, organizationId)
+          : isNull(agentHosts.organizationId),
       ),
     )
     .orderBy(desc(agentHosts.updatedAt));

@@ -12,7 +12,7 @@ bundle.
   - `routes.visual.spec.ts`: 17 routes × 2 themes × desktop/mobile = 68.
   - `dense.visual.spec.ts`: 7 dense routes × 2 themes × tablet = 14.
   - The primary baseline count is therefore exactly 82, with additional
-    focused run, team, build, people, and authoring snapshots.
+    focused run, organization, build, people, and authoring snapshots.
 - `bun run test:ui:a11y` runs axe on all 17 routes in both themes, exercises
   high-risk empty, error, permission, dialog, operational-detail,
   remote-access, validation, and mobile-sheet states, and runs the keyboard,

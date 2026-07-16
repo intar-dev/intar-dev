@@ -82,9 +82,9 @@ export function ObjectiveTimeline({ runId }: { runId: string }) {
   }
 
   return (
-    <ol className="space-y-3">
+    <ol className="divide-y">
       {events.map((event) => (
-        <li key={event.id} className="space-y-1 text-xs">
+        <li key={event.id} className="space-y-2 py-3 text-xs">
           <p className="text-muted-foreground">
             <span className="tabular-nums">
               {formatTimestamp(event.observedAt)}

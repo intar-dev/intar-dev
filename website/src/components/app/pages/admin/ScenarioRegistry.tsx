@@ -9,6 +9,10 @@ import {
   Search,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { Section } from "@/components/app/patterns/Section";
 import {
   MetaDifficulty,
@@ -17,10 +21,7 @@ import {
 } from "@/components/app/patterns/MetaLine";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import { TableSkeleton } from "@/components/app/patterns/Skeletons";
-import {
-  EmptyState,
-  ErrorState,
-} from "@/components/app/patterns/StateCard";
+import { EmptyState, ErrorState } from "@/components/app/patterns/StateCard";
 import { formatRelativeTime } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
 import type {
@@ -170,7 +171,9 @@ export function ScenarioRegistry() {
       })
       .sort((left, right) => left.title.localeCompare(right.title));
   }, [category, difficulty, scenarioList, search, stateFilter]);
-  const filtersActive = Boolean(search.trim() || stateFilter || difficulty || category);
+  const filtersActive = Boolean(
+    search.trim() || stateFilter || difficulty || category,
+  );
 
   const clearFilters = () => {
     setSearch("");
@@ -204,15 +207,21 @@ export function ScenarioRegistry() {
           <dl className="grid gap-4 border-y py-4 sm:grid-cols-3">
             <div>
               <dt className="text-eyebrow">Registry</dt>
-              <dd className="mt-1 text-section-title tabular-nums">{scenarioList.length}</dd>
+              <dd className="mt-1 text-section-title tabular-nums">
+                {scenarioList.length}
+              </dd>
             </div>
             <div>
               <dt className="text-eyebrow">Enabled for learners</dt>
-              <dd className="mt-1 text-section-title text-success tabular-nums">{enabledCount}</dd>
+              <dd className="mt-1 text-section-title text-success tabular-nums">
+                {enabledCount}
+              </dd>
             </div>
             <div>
               <dt className="text-eyebrow">Unavailable</dt>
-              <dd className="mt-1 text-section-title tabular-nums">{scenarioList.length - enabledCount}</dd>
+              <dd className="mt-1 text-section-title tabular-nums">
+                {scenarioList.length - enabledCount}
+              </dd>
             </div>
           </dl>
           <FilterBar
@@ -282,7 +291,8 @@ export function ScenarioRegistry() {
 
           {filtersActive && filteredScenarios.length ? (
             <p className="text-caption">
-              Showing {filteredScenarios.length} of {scenarioList.length} scenarios.
+              Showing {filteredScenarios.length} of {scenarioList.length}{" "}
+              scenarios.
             </p>
           ) : null}
 
@@ -302,7 +312,6 @@ export function ScenarioRegistry() {
               density="compact"
               title="Registry"
               description="Each scenario is keyed by its stable scenario ID; new uploads replace the stored scenario for that ID."
-              bodyClassName="divide-y"
             >
               {setEnabled.error ? (
                 <p className="pb-3 text-sm text-destructive">
@@ -311,31 +320,48 @@ export function ScenarioRegistry() {
                     : "Failed to update scenario"}
                 </p>
               ) : null}
-              {filteredScenarios.map((scenario) => (
-                <ScenarioRegistryRow
-                  key={scenario.scenarioId}
-                  scenario={scenario}
-                  source={sourceByScenarioId.get(scenario.scenarioId) ?? null}
-                  sourceLoading={sources.isLoading}
-                  sourceUnavailable={Boolean(sources.error && !sources.data)}
-                  latestBuild={
-                    latestBuildByScenarioId.get(scenario.scenarioId) ?? null
-                  }
-                  buildLoading={builds.isLoading}
-                  buildUnavailable={Boolean(builds.error && !builds.data)}
-                  pending={
-                    setEnabled.isPending &&
-                    setEnabled.variables?.scenarioId === scenario.scenarioId
-                  }
-                  disabled={setEnabled.isPending}
-                  onToggle={() =>
-                    setEnabled.mutate({
-                      scenarioId: scenario.scenarioId,
-                      enabled: !scenario.enabled,
-                    })
-                  }
-                />
-              ))}
+              <PaginatedCollection
+                items={filteredScenarios}
+                pageSize={COLLECTION_PAGE_SIZE.dense}
+                itemLabel="scenarios"
+                resetKey={`${search}|${stateFilter ?? ""}|${difficulty ?? ""}|${category ?? ""}`}
+              >
+                {(visibleScenarios) => (
+                  <div className="divide-y">
+                    {visibleScenarios.map((scenario) => (
+                      <ScenarioRegistryRow
+                        key={scenario.scenarioId}
+                        scenario={scenario}
+                        source={
+                          sourceByScenarioId.get(scenario.scenarioId) ?? null
+                        }
+                        sourceLoading={sources.isLoading}
+                        sourceUnavailable={Boolean(
+                          sources.error && !sources.data,
+                        )}
+                        latestBuild={
+                          latestBuildByScenarioId.get(scenario.scenarioId) ??
+                          null
+                        }
+                        buildLoading={builds.isLoading}
+                        buildUnavailable={Boolean(builds.error && !builds.data)}
+                        pending={
+                          setEnabled.isPending &&
+                          setEnabled.variables?.scenarioId ===
+                            scenario.scenarioId
+                        }
+                        disabled={setEnabled.isPending}
+                        onToggle={() =>
+                          setEnabled.mutate({
+                            scenarioId: scenario.scenarioId,
+                            enabled: !scenario.enabled,
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+              </PaginatedCollection>
             </Section>
           )}
         </div>
@@ -434,14 +460,33 @@ function ScenarioRegistryRow({
         <StatusDefinition
           label="Latest build"
           value={buildValue}
-          tone={buildTone(latestBuild?.status, buildLoading || buildUnavailable)}
+          tone={buildTone(
+            latestBuild?.status,
+            buildLoading || buildUnavailable,
+          )}
         />
       </dl>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-        <div><dt className="text-eyebrow">Inventory</dt><dd className="mt-0.5 tabular-nums">{scenario.vmCount} VM · {scenario.probeCount} probes</dd></div>
-        <div><dt className="text-eyebrow">Guidance</dt><dd className="mt-0.5 tabular-nums">{scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes} min</dd></div>
-        <div className="col-span-2"><dt className="text-eyebrow">Updated</dt><dd className="mt-0.5 text-metadata">{formatRelativeTime(scenario.updatedAt)}</dd></div>
+        <div>
+          <dt className="text-eyebrow">Inventory</dt>
+          <dd className="mt-0.5 tabular-nums">
+            {scenario.vmCount} VM · {scenario.probeCount} probes
+          </dd>
+        </div>
+        <div>
+          <dt className="text-eyebrow">Guidance</dt>
+          <dd className="mt-0.5 tabular-nums">
+            {scenario.scenarioHintCount} hints · ~{scenario.estimatedMinutes}{" "}
+            min
+          </dd>
+        </div>
+        <div className="col-span-2">
+          <dt className="text-eyebrow">Updated</dt>
+          <dd className="mt-0.5 text-metadata">
+            {formatRelativeTime(scenario.updatedAt)}
+          </dd>
+        </div>
       </dl>
 
       <div className="flex shrink-0 flex-wrap items-center gap-2 xl:flex-col xl:items-stretch">

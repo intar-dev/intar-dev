@@ -29,6 +29,18 @@ export function appError(
   return new AppError({ status, code, message });
 }
 
+export function errorChainMatches(error: unknown, pattern: RegExp): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error && pattern.test(current.message)) return true;
+    current =
+      typeof current === "object" && "cause" in current ? current.cause : null;
+  }
+  return false;
+}
+
 export function toErrorResponse(
   error: unknown,
   fallbackMessage: string,

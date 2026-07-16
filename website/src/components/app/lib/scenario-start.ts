@@ -36,6 +36,7 @@ export async function requestScenarioStartWithCapacityWait(
   options: {
     signal: AbortSignal;
     onCapacityWait: () => void;
+    organizationId?: string | null;
   },
 ): Promise<ScenarioStartAcceptedResponse> {
   const startedAt = Date.now();
@@ -44,7 +45,11 @@ export async function requestScenarioStartWithCapacityWait(
       throw new ScenarioStartCancelledError();
     }
     try {
-      return await requestScenarioStart(scenarioId, options.signal);
+      return await requestScenarioStart(
+        scenarioId,
+        options.signal,
+        options.organizationId ?? null,
+      );
     } catch (error) {
       if (options.signal.aborted) {
         throw new ScenarioStartCancelledError();
@@ -75,6 +80,7 @@ export async function requestScenarioStartWithCapacityWait(
 async function requestScenarioStart(
   scenarioId: string,
   signal: AbortSignal,
+  organizationId: string | null,
 ): Promise<ScenarioStartAcceptedResponse> {
   let response: Response;
   try {
@@ -84,6 +90,12 @@ async function requestScenarioStart(
         method: "POST",
         credentials: "include",
         signal,
+        ...(organizationId
+          ? {
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ organizationId }),
+            }
+          : {}),
       },
     );
   } catch (error) {

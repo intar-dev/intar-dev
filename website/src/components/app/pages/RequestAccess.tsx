@@ -53,18 +53,17 @@ export function RequestAccess() {
       }
     >
       {submit.isSuccess ? (
-        <div
-          ref={successRef}
-          tabIndex={-1}
-          className="space-y-8 rounded-lg"
-        >
+        <div ref={successRef} tabIndex={-1} className="space-y-8 rounded-lg">
           <div
             role="status"
             aria-live="polite"
             aria-atomic="true"
             className="flex items-start gap-3 rounded-lg border border-success-border bg-success-subtle p-4 text-success"
           >
-            <CheckCircle2 className="mt-0.5 size-5 shrink-0" aria-hidden="true" />
+            <CheckCircle2
+              className="mt-0.5 size-5 shrink-0"
+              aria-hidden="true"
+            />
             <div className="space-y-1">
               <p className="font-semibold">Review can begin</p>
               <p className="text-sm leading-6">
@@ -121,7 +120,7 @@ export function RequestAccess() {
               id="gh-note"
               value={note}
               onChange={(event) => setNote(event.target.value)}
-              placeholder="Practising incident response with my team…"
+              placeholder="Practising incident response with colleagues…"
               rows={4}
             />
           </div>

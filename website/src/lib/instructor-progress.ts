@@ -9,7 +9,7 @@ import {
   type RunFacts,
 } from "@/lib/progress-status";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
-import { requireTeamRole } from "@/lib/teams";
+import { requireOrganizationRole } from "@/lib/organizations";
 
 export type { ProgressStatus };
 
@@ -29,16 +29,16 @@ export interface ProgressRow {
   cells: ProgressCell[];
 }
 
-export interface TeamProgress {
+export interface OrganizationProgress {
   scenarios: Array<{ scenarioId: string; title: string | null }>;
   rows: ProgressRow[];
 }
 
-export async function getTeamProgress(params: {
+export async function getOrganizationProgress(params: {
   organizationId: string;
   userId: string;
-}): Promise<TeamProgress> {
-  await requireTeamRole({ ...params, instructor: true });
+}): Promise<OrganizationProgress> {
+  await requireOrganizationRole({ ...params, admin: true });
 
   const db = drizzle(env.DB);
 
@@ -61,10 +61,12 @@ export async function getTeamProgress(params: {
       .innerJoin(user, eq(member.userId, user.id))
       .where(eq(member.organizationId, params.organizationId))
       .orderBy(member.createdAt),
-    listEnabledScenariosForUser(),
+    listEnabledScenariosForUser({ organizationId: params.organizationId }),
   ]);
 
-  const titles = new Map(enabled.map((entry) => [entry.scenarioId, entry.title]));
+  const titles = new Map(
+    enabled.map((entry) => [entry.scenarioId, entry.title]),
+  );
   const scenarios = assignments.map((assignment) => ({
     scenarioId: assignment.scenarioId,
     title: titles.get(assignment.scenarioId) ?? null,
@@ -95,6 +97,7 @@ export async function getTeamProgress(params: {
           scenarioRuns.scenarioId,
           scenarios.map((row) => row.scenarioId),
         ),
+        eq(scenarioRuns.organizationId, params.organizationId),
       ),
     )
     .orderBy(desc(scenarioRuns.createdAt));
@@ -120,7 +123,8 @@ export async function getTeamProgress(params: {
     name: entry.name,
     githubUsername: entry.githubUsername,
     cells: scenarios.map((scenario) => {
-      const facts = factsByCell.get(`${entry.userId}:${scenario.scenarioId}`) ?? [];
+      const facts =
+        factsByCell.get(`${entry.userId}:${scenario.scenarioId}`) ?? [];
       const solvedRuns = facts.filter((run) => run.solvedAt !== null);
       const best = solvedRuns
         .filter((run) => run.solveDurationMs !== null)

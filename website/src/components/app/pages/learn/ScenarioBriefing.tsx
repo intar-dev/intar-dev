@@ -1,33 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "@tanstack/react-router";
-import {
-  ArrowRight,
-  ChevronDown,
-  History,
-  Trash2,
-  Trophy,
-} from "lucide-react";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { ArrowRight, ChevronDown, History, Trash2, Trophy } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { ContentHeader } from "@/components/app/patterns/ContentHeader";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { MetaDifficulty, MetaLine } from "@/components/app/patterns/MetaLine";
 import { RunListItem } from "@/components/app/patterns/RunListItem";
 import { ErrorState } from "@/components/app/patterns/StateCard";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import {
-  formatDurationMs,
-  formatTimestamp,
-} from "@/components/app/lib/format";
+import { formatDurationMs, formatTimestamp } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { presentScenarioDetail, presentScenarioRun } from "@/lib/run-phase";
 import type { ScenarioDetail } from "@/lib/scenario-runs";
 import {
@@ -65,6 +55,9 @@ export function ScenarioBriefing() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { scenarioId } = useParams({ from: "/app/scenarios/$scenarioId" });
+  const { organizationId } = useSearch({
+    from: "/app/scenarios/$scenarioId",
+  });
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [waitingForCapacity, setWaitingForCapacity] = useState(false);
   const startAbortRef = useRef<AbortController | null>(null);
@@ -77,8 +70,8 @@ export function ScenarioBriefing() {
   );
 
   const scenarioQuery = useQuery({
-    queryKey: ["scenarios", "detail", scenarioId],
-    queryFn: () => fetchScenarioDetail(scenarioId),
+    queryKey: ["scenarios", "detail", scenarioId, organizationId ?? null],
+    queryFn: () => fetchScenarioDetail(scenarioId, organizationId ?? null),
     staleTime: 10_000,
     refetchInterval: (query) =>
       query.state.data?.scenario.hasActiveRun
@@ -96,13 +89,16 @@ export function ScenarioBriefing() {
       return requestScenarioStartWithCapacityWait(scenarioId, {
         signal: controller.signal,
         onCapacityWait: () => setWaitingForCapacity(true),
+        organizationId: organizationId ?? null,
       });
     },
     onSuccess: (result) => {
       queryClient.setQueryData(["scenarios", "run", result.runId], {
         run: presentScenarioRun(result.run),
       });
-      void queryClient.invalidateQueries({ queryKey: ["scenario-runs", "list"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenario-runs", "list"],
+      });
       void queryClient.invalidateQueries({
         queryKey: ["scenarios", "detail", scenarioId],
       });
@@ -169,13 +165,9 @@ export function ScenarioBriefing() {
 
   const bestSolveMs = succeededRuns
     .filter((run) => run.solveDurationMs !== null)
-    .reduce<number | null>(
-      (best, run) =>
-        best === null
-          ? run.solveDurationMs
-          : Math.min(best, run.solveDurationMs ?? best),
-      null,
-    );
+    .reduce<
+      number | null
+    >((best, run) => (best === null ? run.solveDurationMs : Math.min(best, run.solveDurationMs ?? best)), null);
 
   const handlePrimaryAction = () => {
     if (scenarioData?.hasActiveRun && scenarioData.activeRunId) {
@@ -248,7 +240,11 @@ export function ScenarioBriefing() {
                 <Card as="section" aria-labelledby="objectives-heading">
                   <CardHeader className="gap-2 border-b">
                     <p className="text-eyebrow">Work order</p>
-                    <CardTitle as="h2" id="objectives-heading" className="text-section-title">
+                    <CardTitle
+                      as="h2"
+                      id="objectives-heading"
+                      className="text-section-title"
+                    >
                       Repair objectives
                     </CardTitle>
                   </CardHeader>
@@ -310,10 +306,14 @@ export function ScenarioBriefing() {
                 <div className="border-t px-4 py-2">
                   <dl className="divide-y text-sm">
                     <TechnicalDetail label="Scenario ID">
-                      <code className="break-all">{scenarioData.scenarioId}</code>
+                      <code className="break-all">
+                        {scenarioData.scenarioId}
+                      </code>
                     </TechnicalDetail>
                     <TechnicalDetail label="Definition">
-                      <code className="break-all">{scenarioData.scenarioName}</code>
+                      <code className="break-all">
+                        {scenarioData.scenarioName}
+                      </code>
                     </TechnicalDetail>
                     <TechnicalDetail label="Published">
                       {formatTimestamp(scenarioData.enabledAt)}
@@ -370,7 +370,9 @@ export function ScenarioBriefing() {
                       onClick={() =>
                         void navigate({
                           to: "/runs/$runId",
-                          params: { runId: scenarioData.blockingRun?.runId ?? "" },
+                          params: {
+                            runId: scenarioData.blockingRun?.runId ?? "",
+                          },
                         })
                       }
                     >
@@ -380,7 +382,9 @@ export function ScenarioBriefing() {
                   </div>
                 ) : null}
                 {startScenario.error &&
-                !(startScenario.error instanceof ScenarioStartCancelledError) ? (
+                !(
+                  startScenario.error instanceof ScenarioStartCancelledError
+                ) ? (
                   <InlineFeedback tone="error">
                     {startScenario.error instanceof Error
                       ? startScenario.error.message
@@ -410,8 +414,12 @@ export function ScenarioBriefing() {
               {scenarioData.activeRun ? (
                 <section className="space-y-2 border-y py-4">
                   <p className="text-eyebrow">Live status</p>
-                  <p className="font-semibold">{scenarioData.activeRun.phaseTitle}</p>
-                  <p className="text-metadata">{scenarioData.activeRun.phaseDetail}</p>
+                  <p className="font-semibold">
+                    {scenarioData.activeRun.phaseTitle}
+                  </p>
+                  <p className="text-metadata">
+                    {scenarioData.activeRun.phaseDetail}
+                  </p>
                   <p className="text-caption">
                     Updated {formatTimestamp(scenarioData.activeRun.updatedAt)}
                   </p>
@@ -457,17 +465,23 @@ export function ScenarioBriefing() {
           </div>
 
           {finishedRuns.length ? (
-            <section className="space-y-4" aria-labelledby="previous-runs-heading">
+            <section
+              className="space-y-4"
+              aria-labelledby="previous-runs-heading"
+            >
               <div className="flex items-center gap-3 border-b pb-4">
                 <History className="size-4 text-muted-foreground" />
                 <div>
                   <p className="text-eyebrow">History</p>
-                  <h2 id="previous-runs-heading" className="mt-1 text-section-title">
+                  <h2
+                    id="previous-runs-heading"
+                    className="mt-1 text-section-title"
+                  >
                     Previous runs
                   </h2>
                 </div>
               </div>
-              <div className="divide-y border-y">
+              <div className="divide-y overflow-hidden rounded-xl border bg-card">
                 {recentRuns.map(({ run, attemptNumber }) => (
                   <PreviousRunRow
                     key={run.runId}
@@ -480,20 +494,34 @@ export function ScenarioBriefing() {
               {olderRuns.length ? (
                 <Collapsible>
                   <CollapsibleTrigger
-                    render={<Button type="button" variant="outline" size="sm" />}
+                    render={
+                      <Button type="button" variant="outline" size="sm" />
+                    }
                   >
                     Show all {finishedRuns.length} runs
                     <ChevronDown className="size-3.5" />
                   </CollapsibleTrigger>
-                  <CollapsibleContent className="mt-3 divide-y border-y">
-                    {olderRuns.map(({ run, attemptNumber }) => (
-                      <PreviousRunRow
-                        key={run.runId}
-                        run={run}
-                        attemptNumber={attemptNumber}
-                        onDelete={() => setDeleteTarget({ run, attemptNumber })}
-                      />
-                    ))}
+                  <CollapsibleContent className="mt-3">
+                    <PaginatedCollection
+                      items={olderRuns}
+                      pageSize={COLLECTION_PAGE_SIZE.list}
+                      itemLabel="older runs"
+                    >
+                      {(visibleRuns) => (
+                        <div className="divide-y overflow-hidden rounded-xl border bg-card">
+                          {visibleRuns.map(({ run, attemptNumber }) => (
+                            <PreviousRunRow
+                              key={run.runId}
+                              run={run}
+                              attemptNumber={attemptNumber}
+                              onDelete={() =>
+                                setDeleteTarget({ run, attemptNumber })
+                              }
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </PaginatedCollection>
                   </CollapsibleContent>
                 </Collapsible>
               ) : null}
@@ -547,9 +575,15 @@ export function ScenarioBriefing() {
   );
 }
 
-async function fetchScenarioDetail(scenarioId: string) {
+async function fetchScenarioDetail(
+  scenarioId: string,
+  organizationId: string | null,
+) {
+  const query = organizationId
+    ? `?organizationId=${encodeURIComponent(organizationId)}`
+    : "";
   const response = await fetch(
-    `/api/scenarios/${encodeURIComponent(scenarioId)}`,
+    `/api/scenarios/${encodeURIComponent(scenarioId)}${query}`,
     {
       method: "GET",
       credentials: "include",
@@ -581,7 +615,7 @@ function TechnicalDetail({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid gap-1 py-3 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-4">
+    <div className="grid gap-1 px-4 py-4 sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-4 sm:px-6">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="min-w-0 font-medium sm:text-right">{children}</dd>
     </div>

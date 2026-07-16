@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import { scenarioRuns } from "@/db/schema";
@@ -32,12 +32,16 @@ import {
   deriveScenarioRunReplayState,
 } from "./activity";
 
-export async function listEnabledScenariosForUser(): Promise<
-  ScenarioCatalogEntry[]
-> {
-  const scenarios = await loadEnabledScenarioRows();
+export async function listEnabledScenariosForUser(options?: {
+  organizationId?: string | null;
+}): Promise<ScenarioCatalogEntry[]> {
+  const scenarios = await loadEnabledScenarioRows(
+    undefined,
+    options?.organizationId ?? null,
+  );
   return scenarios.map((scenario) => ({
     scenarioId: scenario.scenarioId,
+    organizationId: scenario.organizationId,
     slug: slugify(scenario.scenarioId),
     title: scenario.briefing.title,
     tagline: scenario.briefing.tagline,
@@ -54,8 +58,12 @@ export async function listEnabledScenariosForUser(): Promise<
 export async function loadEnabledScenarioForUser(params: {
   scenarioId: string;
   userId: string;
+  organizationId?: string | null;
 }): Promise<ScenarioDetail | null> {
-  const rows = await loadEnabledScenarioRows(params.scenarioId);
+  const rows = await loadEnabledScenarioRows(
+    params.scenarioId,
+    params.organizationId ?? null,
+  );
   const enabled = rows[0];
   if (!enabled) {
     return null;
@@ -63,13 +71,19 @@ export async function loadEnabledScenarioForUser(params: {
 
   const active = await loadActiveRunRow(params.userId);
   const activeHere =
-    active && active.scenarioId === enabled.scenarioId ? active : null;
+    active &&
+    active.scenarioId === enabled.scenarioId &&
+    active.organizationId === (params.organizationId ?? null)
+      ? active
+      : null;
   const finishedRuns = await loadFinishedRuns(
     params.userId,
     enabled.scenarioId,
+    params.organizationId ?? null,
   );
   return {
     scenarioId: enabled.scenarioId,
+    organizationId: enabled.organizationId,
     slug: slugify(enabled.scenarioId),
     enabledAt: enabled.enabledAt,
     scenarioName: enabled.scenarioId,
@@ -127,6 +141,7 @@ export async function listScenarioRunsForUser(params: {
     .select({
       runId: scenarioRuns.runId,
       scenarioId: scenarioRuns.scenarioId,
+      organizationId: scenarioRuns.organizationId,
       scenarioName: scenarioRuns.scenarioName,
       title: scenarioRuns.title,
       difficulty: scenarioRuns.difficulty,
@@ -153,6 +168,7 @@ export async function listScenarioRunsForUser(params: {
     return {
       runId: row.runId,
       scenarioId: row.scenarioId,
+      organizationId: row.organizationId,
       scenarioName: row.scenarioName,
       title: row.title,
       difficulty: scenarioRunDifficulty(row.runId, row.difficulty),
@@ -185,6 +201,7 @@ export async function listScenarioRunsForUser(params: {
 
 export async function getScenarioProgressByScenario(
   userId: string,
+  organizationId: string | null = null,
 ): Promise<Map<string, ScenarioProgress>> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -201,7 +218,14 @@ export async function getScenarioProgressByScenario(
       deleteRequestedAt: scenarioRuns.deleteRequestedAt,
     })
     .from(scenarioRuns)
-    .where(eq(scenarioRuns.userId, userId));
+    .where(
+      and(
+        eq(scenarioRuns.userId, userId),
+        organizationId
+          ? eq(scenarioRuns.organizationId, organizationId)
+          : isNull(scenarioRuns.organizationId),
+      ),
+    );
 
   const progressByScenario = new Map<string, ScenarioProgress>();
   for (const row of rows) {
@@ -277,10 +301,11 @@ export function newScenarioProgress(): ScenarioProgress {
 
 export async function listScenarioCatalogForUser(
   userId: string,
+  organizationId: string | null = null,
 ): Promise<ScenarioCatalogWireEntry[]> {
   const [scenarios, progressByScenario] = await Promise.all([
-    listEnabledScenariosForUser(),
-    getScenarioProgressByScenario(userId),
+    listEnabledScenariosForUser({ organizationId }),
+    getScenarioProgressByScenario(userId, organizationId),
   ]);
   return scenarios.map((scenario) => ({
     ...scenario,

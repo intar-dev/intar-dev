@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
-type HostRole = "agent" | "builder";
+export type HostRole = "agent" | "builder";
 
 export interface AgentOnboardingResponse {
   host: {
@@ -18,23 +18,31 @@ export interface AgentOnboardingResponse {
     scenarioEnabled: boolean;
     createdAt: number;
   };
-  bootstrapTokenExpiresAt: string;
+  bootstrapTokenExpiresAt: string | null;
   bridgeConfigToml: string;
 }
 
 interface HostOnboardingPanelProps {
   eyebrow?: string;
   title?: string;
+  endpoint?: string;
+  allowedRoles?: readonly HostRole[];
+  defaultHostName?: string;
   onGenerated?: (result: AgentOnboardingResponse) => void;
 }
 
 export function HostOnboardingPanel({
   eyebrow = "Host onboarding",
   title = "Bridge config",
+  endpoint = "/api/agent/hosts",
+  allowedRoles = ["agent", "builder"],
+  defaultHostName = "dedicated-host",
   onGenerated,
 }: HostOnboardingPanelProps) {
-  const [hostName, setHostName] = useState("dedicated-host");
-  const [hostRole, setHostRole] = useState<HostRole>("agent");
+  const [hostName, setHostName] = useState(defaultHostName);
+  const [hostRole, setHostRole] = useState<HostRole>(
+    allowedRoles[0] ?? "agent",
+  );
   const [generated, setGenerated] = useState<AgentOnboardingResponse | null>(
     null,
   );
@@ -42,7 +50,7 @@ export function HostOnboardingPanel({
 
   const onboard = useMutation({
     mutationFn: async () => {
-      const response = await fetch("/api/agent/hosts", {
+      const response = await fetch(endpoint, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -91,40 +99,44 @@ export function HostOnboardingPanel({
     <section className="grid gap-6 xl:grid-cols-[minmax(0,0.88fr)_minmax(0,1.12fr)]">
       <div className="space-y-4 rounded-2xl border bg-card p-6 shadow-xs">
         <div className="space-y-2">
-          <p className="text-eyebrow">
-            {eyebrow}
-          </p>
+          <p className="text-eyebrow">{eyebrow}</p>
           <h2 className="text-section-title">{title}</h2>
         </div>
 
-        <div
-          role="group"
-          aria-label="Host role"
-          className="grid gap-2 sm:grid-cols-2"
-        >
-          <Button
-            type="button"
-            aria-pressed={hostRole === "agent"}
-            variant={hostRole === "agent" ? "default" : "outline"}
-            onClick={() => setHostRole("agent")}
-            disabled={onboard.isPending}
-            className="justify-start"
+        {allowedRoles.length > 1 ? (
+          <div
+            role="group"
+            aria-label="Host role"
+            className="grid gap-2 sm:grid-cols-2"
           >
-            <Server className="size-4" />
-            Agent
-          </Button>
-          <Button
-            type="button"
-            aria-pressed={hostRole === "builder"}
-            variant={hostRole === "builder" ? "default" : "outline"}
-            onClick={() => setHostRole("builder")}
-            disabled={onboard.isPending}
-            className="justify-start"
-          >
-            <Hammer className="size-4" />
-            Builder
-          </Button>
-        </div>
+            {allowedRoles.includes("agent") ? (
+              <Button
+                type="button"
+                aria-pressed={hostRole === "agent"}
+                variant={hostRole === "agent" ? "default" : "outline"}
+                onClick={() => setHostRole("agent")}
+                disabled={onboard.isPending}
+                className="justify-start"
+              >
+                <Server className="size-4" />
+                Agent
+              </Button>
+            ) : null}
+            {allowedRoles.includes("builder") ? (
+              <Button
+                type="button"
+                aria-pressed={hostRole === "builder"}
+                variant={hostRole === "builder" ? "default" : "outline"}
+                onClick={() => setHostRole("builder")}
+                disabled={onboard.isPending}
+                className="justify-start"
+              >
+                <Hammer className="size-4" />
+                Builder
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
 
         <form
           className="flex flex-col gap-3 sm:flex-row"
@@ -165,7 +177,7 @@ export function HostOnboardingPanel({
           <div className="rounded-xl bg-muted/40 px-4 py-3">
             Host name
             <div className="mt-1 font-medium text-foreground">
-              {hostName.trim() || "dedicated-host"}
+              {hostName.trim() || defaultHostName}
             </div>
           </div>
           <div className="rounded-xl bg-muted/40 px-4 py-3">
@@ -183,7 +195,9 @@ export function HostOnboardingPanel({
           <div className="rounded-xl bg-muted/40 px-4 py-3">
             Install
             <div className="mt-1 font-medium text-foreground">
-              <code>{hostRole === "builder" ? "intar-builder" : "intar-agent"}</code>
+              <code>
+                {hostRole === "builder" ? "intar-builder" : "intar-agent"}
+              </code>
             </div>
           </div>
         </div>
@@ -207,13 +221,19 @@ export function HostOnboardingPanel({
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-eyebrow">Bootstrap expires</dt>
+                  <dt className="text-eyebrow">Bootstrap access</dt>
                   <dd className="mt-1 font-medium">
-                    {new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}
+                    {generated.bootstrapTokenExpiresAt
+                      ? `Until ${new Date(generated.bootstrapTokenExpiresAt).toLocaleString()}`
+                      : "Until rotated or revoked"}
                   </dd>
                 </div>
               </dl>
-              <Button type="button" variant="outline" onClick={copyGeneratedConfig}>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={copyGeneratedConfig}
+              >
                 Copy config
               </Button>
             </div>
@@ -252,7 +272,7 @@ export function HostOnboardingPanel({
                 </code>
               </li>
               <li className="rounded-xl bg-muted/40 px-4 py-3">
-                Confirm the heartbeat in the Hosts tab.
+                Confirm the heartbeat in the runner list.
               </li>
             </ol>
           </div>

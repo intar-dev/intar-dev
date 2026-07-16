@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/test";
+import { paginatedScenarioFixtures } from "./fixtures/data";
 import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
@@ -10,7 +11,10 @@ import {
   REPLAY_TERMINAL_ROWS,
 } from "../../src/lib/replay/config";
 
-test("keyboard-only landing navigation keeps focus visible", async ({ page, ui }) => {
+test("keyboard-only landing navigation keeps focus visible", async ({
+  page,
+  ui,
+}) => {
   await ui.open({ ...routeCase("landing"), theme: "light" });
 
   for (let index = 0; index < 6; index += 1) {
@@ -53,28 +57,72 @@ test("keyboard-only landing navigation keeps focus visible", async ({ page, ui }
   }
 });
 
-test("team tabs support keyboard navigation and update the URL", async ({
+test("organization tabs support keyboard navigation and update the URL", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("team-detail"), theme: "light" });
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
   const overview = page.getByRole("tab", { name: "Overview" });
-  const people = page.getByRole("tab", { name: "People" });
+  const scenarios = page.getByRole("tab", { name: "Scenarios" });
 
   await overview.focus();
   await expect(overview).toBeFocused();
   await page.keyboard.press("ArrowRight");
 
-  await expect(people).toBeFocused();
+  await expect(scenarios).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(people).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/tab=people/);
+  await expect(scenarios).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/tab=scenarios/);
+});
+
+test("large card collections paginate without repeating items", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  ui.server.state.scenarios = paginatedScenarioFixtures();
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const pagination = page.getByRole("navigation", {
+    name: "scenarios pagination",
+  });
+  const scenarioLinks = page.locator('a[href^="/scenarios/paging-scenario-"]');
+  await expect(pagination).toContainText("1–6 of 13 scenarios");
+  await expect(scenarioLinks).toHaveCount(6);
+  const firstPageHrefs = await scenarioLinks.evaluateAll((links) =>
+    links.map((link) => link.getAttribute("href")),
+  );
+
+  await pagination.getByRole("button", { name: /^Next/ }).click();
+  await expect(pagination).toContainText("7–12 of 13 scenarios");
+  await expect(scenarioLinks).toHaveCount(6);
+  const secondPageHrefs = await scenarioLinks.evaluateAll((links) =>
+    links.map((link) => link.getAttribute("href")),
+  );
+  expect(secondPageHrefs).not.toEqual(firstPageHrefs);
+  expect(secondPageHrefs.some((href) => firstPageHrefs.includes(href))).toBe(
+    false,
+  );
+
+  await pagination.getByRole("button", { name: "Page 3" }).click();
+  await expect(pagination).toContainText("13–13 of 13 scenarios");
+  await expect(scenarioLinks).toHaveCount(1);
+  await expect(
+    pagination.getByRole("button", { name: "Page 3" }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await page.getByRole("textbox", { name: "Search scenarios" }).fill("Paging");
+  await expect(pagination).toContainText("1–6 of 13 scenarios");
+  await expect(scenarioLinks).toHaveCount(6);
 });
 
 test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
-  await ui.open({ ...routeCase("team-detail"), theme: "light" });
+  await ui.open({ ...routeCase("organization-detail"), theme: "light" });
   await page.getByRole("tab", { name: "Settings" }).click();
-  const trigger = page.getByRole("button", { name: "Delete team" }).first();
+  const trigger = page
+    .getByRole("button", { name: "Delete organization" })
+    .first();
   await trigger.focus();
   await trigger.click();
 
@@ -83,7 +131,9 @@ test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
   await expect
     .poll(() =>
       dialog.evaluate((element) =>
-        Boolean(document.activeElement && element.contains(document.activeElement)),
+        Boolean(
+          document.activeElement && element.contains(document.activeElement),
+        ),
       ),
     )
     .toBe(true);
@@ -96,9 +146,7 @@ test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
         "a[href], button, input, select, textarea, [role='button'], [role='tab']",
       );
       const inside = Boolean(active && element.contains(active));
-      const guard = Boolean(
-        active?.hasAttribute("data-base-ui-focus-guard"),
-      );
+      const guard = Boolean(active?.hasAttribute("data-base-ui-focus-guard"));
       return {
         safe: inside || guard || !backgroundControl,
         active: active?.outerHTML.slice(0, 240) ?? "none",
@@ -122,7 +170,9 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
     runState: "running",
   });
   expect(
-    await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
+    await page.evaluate(
+      () => matchMedia("(prefers-reduced-motion: reduce)").matches,
+    ),
   ).toBe(true);
 
   const offenders = await page.evaluate(() =>
@@ -141,6 +191,40 @@ test("reduced motion disables authored animation", async ({ page, ui }) => {
       })),
   );
   expect(offenders, "animations active under reduced motion").toEqual([]);
+});
+
+test.describe("wide operational density", () => {
+  test.use({ viewport: { width: 2048, height: 944 } });
+
+  test("empty dashboard sections stay compact and evenly spaced", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("admin-overview"),
+      theme: "dark",
+      variant: "empty",
+    });
+
+    const liveSection = page
+      .getByRole("heading", { name: "Live scenario runs" })
+      .locator("xpath=ancestor::section");
+    const archiveSection = page
+      .getByRole("heading", { name: "Run archive" })
+      .locator("xpath=ancestor::section");
+    const [liveBox, archiveBox] = await Promise.all([
+      liveSection.boundingBox(),
+      archiveSection.boundingBox(),
+    ]);
+
+    expect(liveBox).not.toBeNull();
+    expect(archiveBox).not.toBeNull();
+    expect(liveBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
+    expect(
+      (archiveBox?.y ?? 0) -
+        ((liveBox?.y ?? 0) + (liveBox?.height ?? Number.POSITIVE_INFINITY)),
+    ).toBe(16);
+  });
 });
 
 test.describe("coarse pointer and mobile overflow", () => {
@@ -163,9 +247,12 @@ test.describe("coarse pointer and mobile overflow", () => {
     });
   }
 
-  test("long labels do not force horizontal page scroll", async ({ page, ui }) => {
+  test("long labels do not force horizontal page scroll", async ({
+    page,
+    ui,
+  }) => {
     await ui.open({
-      ...routeCase("team-detail"),
+      ...routeCase("organization-detail"),
       theme: "light",
       variant: "long",
     });
@@ -173,7 +260,10 @@ test.describe("coarse pointer and mobile overflow", () => {
   });
 });
 
-test("200% text remains operable without page overflow", async ({ page, ui }) => {
+test("200% text remains operable without page overflow", async ({
+  page,
+  ui,
+}) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
@@ -200,7 +290,10 @@ test("unknown route has a designed recovery path", async ({ page, ui }) => {
   ).toBeVisible();
 });
 
-test("Recursive Mono keeps terminal cell geometry stable", async ({ page, ui }) => {
+test("Recursive Mono keeps terminal cell geometry stable", async ({
+  page,
+  ui,
+}) => {
   await ui.open({ ...routeCase("landing"), theme: "light" });
 
   await expect

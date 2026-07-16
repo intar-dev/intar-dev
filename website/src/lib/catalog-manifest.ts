@@ -6,6 +6,7 @@ import type {
   ImageKey,
   ScenarioManifestV3,
 } from "@/generated/catalog";
+import { appError } from "@/lib/app-error";
 
 export interface CatalogScenarioRows {
   scenario: typeof vmScenarios.$inferInsert;
@@ -15,7 +16,11 @@ export interface CatalogScenarioRows {
 
 export function catalogRowsFromScenarioManifest(
   manifest: ScenarioManifestV3,
-  options: { nowUnixMs: number; enabled?: boolean } = { nowUnixMs: Date.now() },
+  options: {
+    nowUnixMs: number;
+    enabled?: boolean;
+    organizationId?: string | null;
+  } = { nowUnixMs: Date.now() },
 ): CatalogScenarioRows {
   const enabled = options.enabled ?? true;
   const scenarioId = manifest.scenario_id.trim();
@@ -44,6 +49,7 @@ export function catalogRowsFromScenarioManifest(
   return {
     scenario: {
       scenarioId,
+      organizationId: options.organizationId ?? null,
       title: manifest.title,
       category: manifest.category,
       description: manifest.description,
@@ -84,15 +90,40 @@ export function catalogRowsFromScenarioManifest(
 export async function seedScenarioManifest(
   db: DrizzleD1Database,
   manifest: ScenarioManifestV3,
-  options: { nowUnixMs?: number; enabled?: boolean } = {},
+  options: {
+    nowUnixMs?: number;
+    enabled?: boolean;
+    organizationId?: string | null;
+  } = {},
 ): Promise<CatalogScenarioRows> {
-  const rowOptions: { nowUnixMs: number; enabled?: boolean } = {
+  const rowOptions: {
+    nowUnixMs: number;
+    enabled?: boolean;
+    organizationId?: string | null;
+  } = {
     nowUnixMs: options.nowUnixMs ?? Date.now(),
+    organizationId: options.organizationId ?? null,
   };
   if (options.enabled !== undefined) {
     rowOptions.enabled = options.enabled;
   }
   const rows = catalogRowsFromScenarioManifest(manifest, rowOptions);
+
+  const existing = await db
+    .select({ organizationId: vmScenarios.organizationId })
+    .from(vmScenarios)
+    .where(eq(vmScenarios.scenarioId, rows.scenario.scenarioId))
+    .limit(1);
+  if (
+    existing[0] &&
+    existing[0].organizationId !== rows.scenario.organizationId
+  ) {
+    throw appError(
+      409,
+      "scenario_catalog_ownership_conflict",
+      "scenario id belongs to another catalog",
+    );
+  }
 
   await db
     .insert(vmScenarios)

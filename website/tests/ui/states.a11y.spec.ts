@@ -17,35 +17,48 @@ test.describe("focused state accessibility", () => {
     });
   }
 
-  test("request access success announcement", async ({ page, ui }, testInfo) => {
+  test("request access success announcement", async ({
+    page,
+    ui,
+  }, testInfo) => {
     await ui.open({ ...routeCase("request-access"), theme: "light" });
     await page.getByLabel("GitHub username").fill("newoperator");
     await page.getByRole("button", { name: "Request access" }).click();
 
     const status = page.getByRole("status");
-    await expect(page.getByRole("heading", { name: "Request received" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Request received" }),
+    ).toBeVisible();
     await expect(status).toContainText(/Review can begin/i);
     await expect(status.locator("..")).toBeFocused();
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("team delete confirmation", async ({ page, ui }, testInfo) => {
-    await ui.open({ ...routeCase("team-detail"), theme: "dark" });
+  test("organization delete confirmation", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
     await page.getByRole("tab", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Delete team" }).first().click();
+    await page
+      .getByRole("button", { name: "Delete organization" })
+      .first()
+      .click();
 
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("heading", { name: "Delete this team?" })).toBeVisible();
+    await expect(
+      dialog.getByRole("heading", { name: /Delete Platform Repair Crew/ }),
+    ).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
 
-  test("team member permission fallback", async ({ page, ui }, testInfo) => {
-    const route = routeCase("team-detail");
+  test("organization member permission fallback", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    const route = routeCase("organization-detail");
     await ui.open({
       ...route,
       path: `${route.path}?tab=progress`,
-      sessionRole: "team-member",
+      sessionRole: "organization-member",
       theme: "light",
     });
 
@@ -61,7 +74,9 @@ test.describe("focused state accessibility", () => {
     await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
     await page.getByRole("button", { name: "Add host" }).first().click();
 
-    await expect(page.getByRole("heading", { name: "Bridge config" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Bridge config" }),
+    ).toBeVisible();
     await expect(page.getByRole("group", { name: "Host role" })).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });

@@ -7,6 +7,10 @@ import {
   LoaderCircle,
 } from "lucide-react";
 import { PageShell } from "../patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "../patterns/CollectionPagination";
 import { RunListItem } from "../patterns/RunListItem";
 import { ListSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
@@ -37,17 +41,6 @@ export function RunsList() {
   const pastRuns = groupedRuns.settled;
 
   const now = Date.now();
-  const groups: Array<{ label: string; runs: MyRunEntry[] }> = [];
-  for (const run of pastRuns) {
-    const label = groupLabel(run, now);
-    const group = groups.find((entry) => entry.label === label);
-    if (group) {
-      group.runs.push(run);
-    } else {
-      groups.push({ label, runs: [run] });
-    }
-  }
-
   return (
     <PageShell width="content" density="comfortable">
       {runs.error ? (
@@ -77,10 +70,16 @@ export function RunsList() {
       ) : (
         <div className="space-y-12">
           {activeRuns.length ? (
-            <section className="space-y-4" aria-labelledby="active-runs-heading">
+            <section
+              className="space-y-4"
+              aria-labelledby="active-runs-heading"
+            >
               <div>
                 <p className="text-eyebrow">Continue</p>
-                <h2 id="active-runs-heading" className="mt-2 text-section-title">
+                <h2
+                  id="active-runs-heading"
+                  className="mt-2 text-section-title"
+                >
                   Active work
                 </h2>
               </div>
@@ -112,43 +111,78 @@ export function RunsList() {
                   </h2>
                 </div>
               </div>
-              <div className="divide-y border-y">
-                {backgroundRuns.map((run) => (
-                  <RunListItem key={run.runId} run={run} />
-                ))}
-              </div>
+              <PaginatedCollection
+                items={backgroundRuns}
+                pageSize={COLLECTION_PAGE_SIZE.list}
+                itemLabel="finishing runs"
+              >
+                {(visibleRuns) => (
+                  <div className="divide-y overflow-hidden rounded-xl border bg-card">
+                    {visibleRuns.map((run) => (
+                      <RunListItem key={run.runId} run={run} />
+                    ))}
+                  </div>
+                )}
+              </PaginatedCollection>
             </section>
           ) : null}
 
           {pastRuns.length ? (
-            <section className="space-y-6" aria-labelledby="run-archive-heading">
+            <section
+              className="space-y-6"
+              aria-labelledby="run-archive-heading"
+            >
               <div className="flex items-center gap-3 border-b pb-4">
                 <History className="size-4 text-muted-foreground" />
                 <div>
                   <p className="text-eyebrow">Past runs</p>
-                  <h2 id="run-archive-heading" className="mt-1 text-section-title">
+                  <h2
+                    id="run-archive-heading"
+                    className="mt-1 text-section-title"
+                  >
                     History
                   </h2>
                 </div>
               </div>
-              <div className="space-y-8">
-                {groups.map((group) => (
-                  <div key={group.label} className="space-y-3">
-                    <h3 className="text-metadata font-semibold">{group.label}</h3>
-                    <div className="divide-y border-y">
-                      {group.runs.map((run) => (
-                        <RunListItem key={run.runId} run={run} />
-                      ))}
-                    </div>
+              <PaginatedCollection
+                items={pastRuns}
+                pageSize={COLLECTION_PAGE_SIZE.list}
+                itemLabel="past runs"
+              >
+                {(visibleRuns) => (
+                  <div className="space-y-8">
+                    {groupPastRuns(visibleRuns, now).map((group) => (
+                      <div key={group.label} className="space-y-3">
+                        <h3 className="text-metadata font-semibold">
+                          {group.label}
+                        </h3>
+                        <div className="divide-y overflow-hidden rounded-xl border bg-card">
+                          {group.runs.map((run) => (
+                            <RunListItem key={run.runId} run={run} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+              </PaginatedCollection>
             </section>
           ) : null}
         </div>
       )}
     </PageShell>
   );
+}
+
+function groupPastRuns(runs: MyRunEntry[], now: number) {
+  const groups: Array<{ label: string; runs: MyRunEntry[] }> = [];
+  for (const run of runs) {
+    const label = groupLabel(run, now);
+    const group = groups.find((entry) => entry.label === label);
+    if (group) group.runs.push(run);
+    else groups.push({ label, runs: [run] });
+  }
+  return groups;
 }
 
 // Active runs are the most important objects the user owns — full-width

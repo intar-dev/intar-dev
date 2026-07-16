@@ -23,6 +23,7 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
   },
   "routes": [
     {
@@ -48,6 +49,13 @@
       "binding": "VM_RUN_ARTIFACTS_BUCKET",
       "bucket_name": "intar-dev-vm-run-artifacts-20260709",
       "jurisdiction": "eu",
+    },
+  ],
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "12f35c20-55f4-47ee-8b31-b3ad202d1f04",
+      "remote": true,
     },
   ],
   "ratelimits": [

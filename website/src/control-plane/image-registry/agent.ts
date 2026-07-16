@@ -1,7 +1,14 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { drizzle } from "drizzle-orm/d1";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
-import { imageBuilds, imageBuildBundles, vmScenarioVms } from "@/db/schema";
+import {
+  imageBuilds,
+  imageBuildBundles,
+  vmScenarios,
+  vmScenarioVms,
+} from "@/db/schema";
+import type { VerifiedAgentHost } from "@/control-plane/auth";
 import {
   jsonResponse,
   isSafeBundleRev,
@@ -34,8 +41,18 @@ export async function handleAgentBundleDownload(
 
   const rows = await drizzle(env.DB)
     .select({ r2Key: imageBuildBundles.r2Key })
-    .from(imageBuildBundles)
-    .where(eq(imageBuildBundles.rev, rev))
+    .from(imageBuilds)
+    .innerJoin(imageBuildBundles, eq(imageBuildBundles.rev, imageBuilds.rev))
+    .where(
+      and(
+        eq(imageBuilds.rev, rev),
+        eq(imageBuilds.hostId, verified.agent.hostId),
+        or(
+          eq(imageBuilds.status, "assigned"),
+          eq(imageBuilds.status, "building"),
+        ),
+      ),
+    )
     .limit(1);
   const objectKey = rows[0]?.r2Key;
   if (!objectKey) {
@@ -148,7 +165,12 @@ export async function handleAgentImageIndex(
       initrdSha256: vmScenarioVms.initrdSha256,
       bootCmdline: vmScenarioVms.bootCmdline,
     })
-    .from(vmScenarioVms);
+    .from(vmScenarioVms)
+    .innerJoin(
+      vmScenarios,
+      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
+    )
+    .where(visibleScenarioScope(verified.agent.organizationId));
 
   const byKey = new Map<
     string,
@@ -277,6 +299,11 @@ export async function handleAgentImageDownload(
     return jsonResponse({ error: "invalid image key or sha256" }, 400);
   }
 
+  const db = drizzle(env.DB);
+  if (!(await agentCanAccessImage(db, verified.agent, imageKey, sha256))) {
+    return jsonResponse({ error: "image not found" }, 404);
+  }
+
   const objectKey = imageObjectKey(imageKey, sha256);
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(objectKey);
   if (!imageObjectMatchesSha(object, imageKey, sha256)) {
@@ -312,6 +339,11 @@ export async function handleAgentArtifactDownload(
     return jsonResponse({ error: "invalid artifact sha256" }, 400);
   }
 
+  const db = drizzle(env.DB);
+  if (!(await agentCanAccessArtifact(db, verified.agent, sha256))) {
+    return jsonResponse({ error: "artifact not found" }, 404);
+  }
+
   const object = await env.VM_IMAGE_REGISTRY_BUCKET.get(
     artifactObjectKey(sha256),
   );
@@ -343,5 +375,74 @@ export async function requireBuilderAgentRequest(
       response: jsonResponse({ error: "builder role required" }, 403),
     };
   }
+  if (verified.agent.organizationId) {
+    return {
+      ok: false as const,
+      response: jsonResponse(
+        { error: "organization runners cannot build images" },
+        403,
+      ),
+    };
+  }
   return verified;
+}
+
+function visibleScenarioScope(organizationId: string | null) {
+  return organizationId
+    ? or(
+        isNull(vmScenarios.organizationId),
+        eq(vmScenarios.organizationId, organizationId),
+      )
+    : isNull(vmScenarios.organizationId);
+}
+
+async function agentCanAccessImage(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+  requestedImageKey: string,
+  sha256: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ imageKey: vmScenarioVms.imageKeyJson })
+    .from(vmScenarioVms)
+    .innerJoin(
+      vmScenarios,
+      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
+    )
+    .where(
+      and(
+        eq(vmScenarioVms.imageSha256, sha256),
+        visibleScenarioScope(agent.organizationId),
+      ),
+    );
+  return rows.some(
+    (row) =>
+      isImageKey(row.imageKey) &&
+      registryImageKey(row.imageKey) === requestedImageKey,
+  );
+}
+
+async function agentCanAccessArtifact(
+  db: DrizzleD1Database,
+  agent: VerifiedAgentHost,
+  sha256: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: vmScenarioVms.id })
+    .from(vmScenarioVms)
+    .innerJoin(
+      vmScenarios,
+      eq(vmScenarios.scenarioId, vmScenarioVms.scenarioId),
+    )
+    .where(
+      and(
+        or(
+          eq(vmScenarioVms.kernelSha256, sha256),
+          eq(vmScenarioVms.initrdSha256, sha256),
+        ),
+        visibleScenarioScope(agent.organizationId),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
 }

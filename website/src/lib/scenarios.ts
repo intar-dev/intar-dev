@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import type {
@@ -16,6 +16,7 @@ import { vmScenarioProbes, vmScenarioVms, vmScenarios } from "@/db/schema";
 
 export interface ScenarioListRecord {
   scenarioId: string;
+  organizationId: string | null;
   title: string;
   category: string;
   description: string;
@@ -43,6 +44,7 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
   const scenarios = await db
     .select()
     .from(vmScenarios)
+    .where(isNull(vmScenarios.organizationId))
     .orderBy(vmScenarios.scenarioId);
 
   const output: ScenarioListRecord[] = [];
@@ -51,6 +53,7 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
     if (!detail) continue;
     output.push({
       scenarioId: detail.scenarioId,
+      organizationId: detail.organizationId,
       title: detail.title,
       category: detail.category,
       description: detail.description,
@@ -74,13 +77,25 @@ export async function listScenarios(): Promise<ScenarioListRecord[]> {
 
 export async function loadScenario(
   scenarioId: string,
+  options?: { organizationId?: string | null },
 ): Promise<ScenarioDetailRecord | null> {
   const db = drizzle(env.DB);
+  const organizationId = options?.organizationId ?? null;
   const [rows, vms, probes] = await db.batch([
     db
       .select()
       .from(vmScenarios)
-      .where(eq(vmScenarios.scenarioId, scenarioId))
+      .where(
+        and(
+          eq(vmScenarios.scenarioId, scenarioId),
+          organizationId
+            ? or(
+                isNull(vmScenarios.organizationId),
+                eq(vmScenarios.organizationId, organizationId),
+              )
+            : isNull(vmScenarios.organizationId),
+        ),
+      )
       .limit(1),
     db
       .select()
@@ -104,6 +119,7 @@ export async function loadScenario(
 
   return {
     scenarioId: scenario.scenarioId,
+    organizationId: scenario.organizationId,
     title: scenario.title,
     category: scenario.category,
     description: scenario.description,
@@ -180,7 +196,9 @@ function scenarioDifficulty(
   );
 }
 
-function invalidDirectBootMetadata(vm: typeof vmScenarioVms.$inferSelect): never {
+function invalidDirectBootMetadata(
+  vm: typeof vmScenarioVms.$inferSelect,
+): never {
   throw appError(
     500,
     "scenario_catalog_invalid",
@@ -188,17 +206,30 @@ function invalidDirectBootMetadata(vm: typeof vmScenarioVms.$inferSelect): never
   );
 }
 
-export async function listEnabledScenarios(): Promise<ScenarioDetailRecord[]> {
+export async function listEnabledScenarios(options?: {
+  organizationId?: string | null;
+}): Promise<ScenarioDetailRecord[]> {
   const db = drizzle(env.DB);
+  const organizationId = options?.organizationId ?? null;
   const rows = await db
     .select()
     .from(vmScenarios)
-    .where(eq(vmScenarios.enabled, true))
+    .where(
+      and(
+        eq(vmScenarios.enabled, true),
+        organizationId
+          ? or(
+              isNull(vmScenarios.organizationId),
+              eq(vmScenarios.organizationId, organizationId),
+            )
+          : isNull(vmScenarios.organizationId),
+      ),
+    )
     .orderBy(vmScenarios.scenarioId);
 
   const output: ScenarioDetailRecord[] = [];
   for (const row of rows) {
-    const detail = await loadScenario(row.scenarioId);
+    const detail = await loadScenario(row.scenarioId, { organizationId });
     if (detail && detail.enabledAt !== null) {
       output.push(detail);
     }
@@ -209,9 +240,17 @@ export async function listEnabledScenarios(): Promise<ScenarioDetailRecord[]> {
 
 export async function loadEnabledScenario(
   scenarioId: string,
+  options?: { organizationId?: string | null },
 ): Promise<ScenarioDetailRecord | null> {
-  const scenario = await loadScenario(scenarioId);
+  const organizationId = options?.organizationId ?? null;
+  const scenario = await loadScenario(scenarioId, { organizationId });
   if (!scenario || !scenario.enabled || scenario.enabledAt === null) {
+    return null;
+  }
+  if (
+    scenario.organizationId !== null &&
+    scenario.organizationId !== organizationId
+  ) {
     return null;
   }
   return scenario;

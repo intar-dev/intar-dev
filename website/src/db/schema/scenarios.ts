@@ -6,12 +6,16 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import type { ImageKey, ScenarioHintManifestV3 } from "@/generated/catalog";
+import { organization } from "./core";
 import { jsonText, nowMsDefault } from "./shared";
 
 export const vmScenarios = sqliteTable(
   "vm_scenarios",
   {
     scenarioId: text("scenario_id").primaryKey(),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
     title: text("title").notNull(),
     category: text("category").default("").notNull(),
     description: text("description").notNull(),
@@ -28,6 +32,11 @@ export const vmScenarios = sqliteTable(
   },
   (table) => [
     index("vm_scenarios_enabled_idx").on(table.enabled, table.enabledAt),
+    index("vm_scenarios_organization_enabled_idx").on(
+      table.organizationId,
+      table.enabled,
+      table.enabledAt,
+    ),
   ],
 );
 

@@ -1,8 +1,25 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appError, toErrorResponse } from "./app-error";
+import { appError, errorChainMatches, toErrorResponse } from "./app-error";
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("errorChainMatches", () => {
+  it("matches wrapped database errors without looping through cyclic causes", () => {
+    expect(
+      errorChainMatches(
+        new Error("query failed", {
+          cause: new Error("member owner limit reached"),
+        }),
+        /owner limit reached/,
+      ),
+    ).toBe(true);
+
+    const cyclic = new Error("outer") as Error & { cause?: unknown };
+    cyclic.cause = cyclic;
+    expect(errorChainMatches(cyclic, /not present/)).toBe(false);
+  });
 });
 
 describe("toErrorResponse", () => {

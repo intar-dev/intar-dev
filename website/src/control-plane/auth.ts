@@ -26,6 +26,7 @@ interface JwtPayload {
 export interface VerifiedAgentHost {
   hostId: string;
   userId: string;
+  organizationId: string | null;
   role: "agent" | "builder";
 }
 
@@ -87,7 +88,10 @@ export async function handleAgentBootstrap(
   }
 
   const nowMs = Date.now();
-  if (match.revokedAt !== null || match.expiresAt <= nowMs) {
+  if (
+    match.revokedAt !== null ||
+    (match.expiresAt !== null && match.expiresAt <= nowMs)
+  ) {
     return jsonResponse(
       { error: "bootstrap token is expired or revoked" },
       401,
@@ -212,6 +216,7 @@ export async function requireVerifiedAgentRequest(
     .select({
       id: agentHosts.id,
       userId: agentHosts.userId,
+      organizationId: agentHosts.organizationId,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
     })
@@ -238,6 +243,7 @@ export async function requireVerifiedAgentRequest(
     agent: {
       hostId: host.id,
       userId: host.userId,
+      organizationId: host.organizationId,
       role: host.role,
     },
   };

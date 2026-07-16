@@ -10,6 +10,10 @@ import {
   Users,
 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
 import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
@@ -49,8 +53,8 @@ interface MyAssignmentsResponse {
     assignmentId: string;
     scenarioId: string;
     scenarioTitle: string | null;
-    teamId: string;
-    teamName: string;
+    organizationId: string;
+    organizationName: string;
     assignedAt: number;
   }>;
 }
@@ -87,9 +91,9 @@ export function ScenarioCatalog() {
   });
 
   const myAssignments = useQuery({
-    queryKey: ["teams", "my-assignments"],
+    queryKey: ["organizations", "my-assignments"],
     queryFn: async () => {
-      const response = await fetch("/api/teams/my-assignments", {
+      const response = await fetch("/api/organizations/my-assignments", {
         method: "GET",
         credentials: "include",
       });
@@ -145,7 +149,10 @@ export function ScenarioCatalog() {
   const filtered = useMemo(() => {
     const needle = searchState.q.toLowerCase();
     const filteredEntries = allEntries.filter((scenario) => {
-      if (searchState.difficulty && scenario.difficulty !== searchState.difficulty) {
+      if (
+        searchState.difficulty &&
+        scenario.difficulty !== searchState.difficulty
+      ) {
         return false;
       }
       if (searchState.category && scenario.category !== searchState.category) {
@@ -178,9 +185,9 @@ export function ScenarioCatalog() {
 
   const filtersActive = Boolean(
     searchState.q ||
-      searchState.difficulty ||
-      searchState.category ||
-      searchState.tags.length,
+    searchState.difficulty ||
+    searchState.category ||
+    searchState.tags.length,
   );
 
   const clearFilters = () => {
@@ -318,7 +325,7 @@ export function ScenarioCatalog() {
                 key={run.runId}
                 to="/runs/$runId"
                 params={{ runId: run.runId }}
-                className="group flex min-h-20 items-center gap-4 px-4 py-3 transition-colors hover:bg-brand-subtle sm:px-6"
+                className="group flex min-h-20 items-center gap-4 px-4 py-4 transition-colors hover:bg-brand-subtle sm:px-6"
               >
                 <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-subtle text-brand-text">
                   <CircleDot className="size-4 motion-safe:animate-pulse" />
@@ -344,34 +351,43 @@ export function ScenarioCatalog() {
       {assignments.length ? (
         <section className="space-y-4" aria-labelledby="assignments-heading">
           <div>
-            <p className="text-eyebrow">From your teams</p>
+            <p className="text-eyebrow">From your organizations</p>
             <h2 id="assignments-heading" className="mt-2 text-section-title">
               Assignments
             </h2>
           </div>
-          <div className="divide-y border-y">
-            {assignments.map((assignment) => (
-              <Link
-                key={assignment.assignmentId}
-                to="/scenarios/$scenarioId"
-                params={{ scenarioId: assignment.scenarioId }}
-                className="group flex min-h-16 items-center gap-4 px-1 py-3 transition-colors hover:bg-muted/60 sm:px-3"
-              >
-                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
-                  <Users className="size-4" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold text-balance">
-                    {assignment.scenarioTitle ?? assignment.scenarioId}
-                  </span>
-                  <span className="text-metadata">
-                    Assigned by {assignment.teamName}
-                  </span>
-                </span>
-                <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-              </Link>
-            ))}
-          </div>
+          <PaginatedCollection
+            items={assignments}
+            pageSize={COLLECTION_PAGE_SIZE.list}
+            itemLabel="assignments"
+          >
+            {(visibleAssignments) => (
+              <div className="divide-y overflow-hidden rounded-xl border bg-card">
+                {visibleAssignments.map((assignment) => (
+                  <Link
+                    key={assignment.assignmentId}
+                    to="/scenarios/$scenarioId"
+                    params={{ scenarioId: assignment.scenarioId }}
+                    search={{ organizationId: assignment.organizationId }}
+                    className="group flex min-h-16 items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/60 sm:px-6"
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+                      <Users className="size-4" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-semibold text-balance">
+                        {assignment.scenarioTitle ?? assignment.scenarioId}
+                      </span>
+                      <span className="text-metadata">
+                        Assigned by {assignment.organizationName}
+                      </span>
+                    </span>
+                    <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+                  </Link>
+                ))}
+              </div>
+            )}
+          </PaginatedCollection>
         </section>
       ) : null}
 
@@ -450,11 +466,20 @@ export function ScenarioCatalog() {
           }
         />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {filtered.map((scenario) => (
-            <ScenarioCard key={scenario.scenarioId} scenario={scenario} />
-          ))}
-        </div>
+        <PaginatedCollection
+          items={filtered}
+          pageSize={COLLECTION_PAGE_SIZE.cards}
+          itemLabel="scenarios"
+          resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
+        >
+          {(visibleScenarios) => (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {visibleScenarios.map((scenario) => (
+                <ScenarioCard key={scenario.scenarioId} scenario={scenario} />
+              ))}
+            </div>
+          )}
+        </PaginatedCollection>
       )}
     </PageShell>
   );
@@ -468,9 +493,13 @@ function SortSelect({
   onChange: (value: CatalogSort) => void;
 }) {
   return (
-    <Select value={value} onValueChange={(next) => onChange(next as CatalogSort)}>
+    <Select
+      value={value}
+      onValueChange={(next) => onChange(next as CatalogSort)}
+    >
       <SelectTrigger size="sm" aria-label="Sort scenarios">
-        Sort: {CATALOG_SORT_OPTIONS.find((option) => option.value === value)?.label}
+        Sort:{" "}
+        {CATALOG_SORT_OPTIONS.find((option) => option.value === value)?.label}
       </SelectTrigger>
       <SelectContent align="end">
         {CATALOG_SORT_OPTIONS.map((option) => (

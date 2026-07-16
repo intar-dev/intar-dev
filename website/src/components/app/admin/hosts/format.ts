@@ -155,23 +155,3 @@ export const parseTimestamp = (value: string | null | undefined) => {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
 };
-
-export const SCENARIO_RUNS_PAGE_SIZE = 6;
-export const SCENARIO_RUN_PAGE_LINKS = 5;
-
-export function buildVisiblePages(currentPage: number, totalPages: number) {
-  if (totalPages <= SCENARIO_RUN_PAGE_LINKS) {
-    return Array.from({ length: totalPages }, (_, index) => index + 1);
-  }
-
-  const half = Math.floor(SCENARIO_RUN_PAGE_LINKS / 2);
-  const start = Math.max(
-    1,
-    Math.min(currentPage - half, totalPages - SCENARIO_RUN_PAGE_LINKS + 1),
-  );
-
-  return Array.from(
-    { length: SCENARIO_RUN_PAGE_LINKS },
-    (_, index) => start + index,
-  );
-}

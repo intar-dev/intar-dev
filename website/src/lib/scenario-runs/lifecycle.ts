@@ -50,6 +50,7 @@ import {
 export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
+  organizationId?: string | null;
   hostId?: string;
 }): Promise<{
   accepted: true;

@@ -1,8 +1,9 @@
-import { eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   agentHosts,
   imageBuilds,
+  scenarioSources,
   vmScenarioVms,
   type AgentHostRole,
   type ImageBuildStatus,
@@ -104,12 +105,14 @@ export async function handlePublish(
   ): Promise<
     | {
         ok: true;
+        organizationId: string | null;
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         preparedImages: PreparedVmImage[];
       }
     | { ok: false; response: Response }
   > => {
+    let organizationId: string | null = null;
     if (buildFence) {
       const assignment = await loadPublishBuildAssignment(
         db,
@@ -118,6 +121,7 @@ export async function handlePublish(
       if (!isActivePublishBuildAssignment(assignment, buildFence)) {
         return { ok: false, response: inactivePublishBuildResponse() };
       }
+      organizationId = assignment?.organizationId ?? null;
     }
 
     const artifacts = await prepareBootArtifacts(env, form, manifest.value);
@@ -141,15 +145,29 @@ export async function handlePublish(
       if (!isActivePublishBuildAssignment(assignment, buildFence)) {
         return { ok: false, response: inactivePublishBuildResponse() };
       }
+      organizationId = assignment?.organizationId ?? null;
       await lease?.assertHeld();
     }
 
     await seedScenarioManifest(db, normalizedManifest, {
       enabled: true,
+      ...(organizationId ? { organizationId } : {}),
       nowUnixMs: Date.now(),
     });
+    if (organizationId) {
+      await db
+        .update(scenarioSources)
+        .set({ status: "published", updatedAt: Date.now() })
+        .where(
+          and(
+            eq(scenarioSources.organizationId, organizationId),
+            eq(scenarioSources.scenarioId, normalizedManifest.scenario_id),
+          ),
+        );
+    }
     return {
       ok: true,
+      organizationId,
       uploaded,
       artifacts: artifacts.uploaded,
       preparedImages: images.prepared,
@@ -159,6 +177,7 @@ export async function handlePublish(
   let published:
     | {
         ok: true;
+        organizationId: string | null;
         uploaded: PublishedVmImage[];
         artifacts: PublishedBootArtifact[];
         preparedImages: PreparedVmImage[];
@@ -192,7 +211,7 @@ export async function handlePublish(
   }
   if (!published.ok) return published.response;
 
-  await bumpHostCachedImages(db, normalizedManifest);
+  await bumpHostCachedImages(db, normalizedManifest, published.organizationId);
 
   let pruned: PrunedImages[] = [];
   try {
@@ -348,6 +367,7 @@ export async function pruneStaleVmImages(
 export async function bumpHostCachedImages(
   db: DrizzleD1Database,
   manifest: ScenarioManifestV3,
+  organizationId: string | null = null,
 ): Promise<void> {
   const nowUnixMs = Date.now();
   const images = manifest.vms.map((vm) => ({
@@ -362,7 +382,14 @@ export async function bumpHostCachedImages(
       scenarioEnabled: agentHosts.scenarioEnabled,
     })
     .from(agentHosts)
-    .where(eq(agentHosts.disabled, false));
+    .where(
+      organizationId
+        ? and(
+            eq(agentHosts.disabled, false),
+            eq(agentHosts.organizationId, organizationId),
+          )
+        : eq(agentHosts.disabled, false),
+    );
 
   for (const host of hosts) {
     if (!isRuntimeImageCacheHost(host)) {
@@ -402,6 +429,7 @@ export type PublishBuildIdentity = {
 
 export type PublishBuildAssignment = {
   id: string;
+  organizationId: string | null;
   hostId: string | null;
   status: ImageBuildStatus;
   scenarioId: string;
@@ -473,6 +501,7 @@ export async function loadPublishBuildAssignment(
   const rows = await db
     .select({
       id: imageBuilds.id,
+      organizationId: imageBuilds.organizationId,
       hostId: imageBuilds.hostId,
       status: imageBuilds.status,
       scenarioId: imageBuilds.scenarioId,

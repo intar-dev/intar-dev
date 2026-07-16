@@ -37,13 +37,16 @@ export async function queueImageBuildsFromBundle(
     r2Key: string;
     kinoVersion: string;
     meta: ImageBuildBundleMeta;
+    organizationId?: string | null;
     nowUnixMs: number;
   },
 ): Promise<{ queued: number }> {
+  const organizationId = input.organizationId ?? null;
   await db
     .insert(imageBuildBundles)
     .values({
       rev: input.rev,
+      organizationId,
       r2Key: input.r2Key,
       kinoVersion: input.kinoVersion,
       metaJson: input.meta,
@@ -54,6 +57,7 @@ export async function queueImageBuildsFromBundle(
       target: imageBuildBundles.rev,
       set: {
         r2Key: input.r2Key,
+        organizationId,
         kinoVersion: input.kinoVersion,
         metaJson: input.meta,
         updatedAt: input.nowUnixMs,
@@ -72,6 +76,7 @@ export async function queueImageBuildsFromBundle(
           contentHash: scenario.contentHash,
           rev: input.rev,
           kinoVersion: input.kinoVersion,
+          organizationId,
           nowUnixMs: input.nowUnixMs,
         }),
     );
@@ -92,6 +97,7 @@ async function queueImageBuildScenario(
     contentHash: string;
     rev: string;
     kinoVersion: string;
+    organizationId: string | null;
     nowUnixMs: number;
   },
 ): Promise<{ queued: number; cleanedHostIds: string[] }> {
@@ -149,6 +155,9 @@ async function queueImageBuildScenario(
       .where(
         and(
           eq(imageBuilds.scenarioId, input.scenarioId),
+          input.organizationId
+            ? eq(imageBuilds.organizationId, input.organizationId)
+            : isNull(imageBuilds.organizationId),
           eq(imageBuilds.arch, input.arch),
           ne(imageBuilds.contentHash, input.contentHash),
           inArray(imageBuilds.status, ["queued", "assigned", "building"]),
@@ -158,6 +167,7 @@ async function queueImageBuildScenario(
       .insert(imageBuilds)
       .values({
         id: createAppId(),
+        organizationId: input.organizationId,
         scenarioId: input.scenarioId,
         arch: input.arch,
         rev: input.rev,
@@ -182,6 +192,7 @@ async function queueImageBuildScenario(
         set: {
           rev: input.rev,
           kinoVersion: input.kinoVersion,
+          organizationId: input.organizationId,
           hostId: null,
           status: "queued",
           phase: "queued",
@@ -206,10 +217,14 @@ function supersessionCleanupBuildIds(input: {
   scenarioId: string;
   arch: ImageBuildBundleMeta["scenarios"][number]["arch"];
   contentHash: string;
+  organizationId: string | null;
 }) {
   return dbBuildIds(
     and(
       eq(imageBuilds.scenarioId, input.scenarioId),
+      input.organizationId
+        ? eq(imageBuilds.organizationId, input.organizationId)
+        : isNull(imageBuilds.organizationId),
       eq(imageBuilds.arch, input.arch),
       or(
         and(
@@ -378,16 +393,16 @@ export async function recordImageBuildReport(
 
   return withImageBuildCoordinationLock(db, identity, async (lease) => {
     const rows = await db
-    .select({
-      hostId: imageBuilds.hostId,
-      status: imageBuilds.status,
-      scenarioId: imageBuilds.scenarioId,
-      contentHash: imageBuilds.contentHash,
-      timingsJson: imageBuilds.timingsJson,
-    })
-    .from(imageBuilds)
-    .where(eq(imageBuilds.id, report.build_id))
-    .limit(1);
+      .select({
+        hostId: imageBuilds.hostId,
+        status: imageBuilds.status,
+        scenarioId: imageBuilds.scenarioId,
+        contentHash: imageBuilds.contentHash,
+        timingsJson: imageBuilds.timingsJson,
+      })
+      .from(imageBuilds)
+      .where(eq(imageBuilds.id, report.build_id))
+      .limit(1);
     const existing = rows[0];
     if (
       !existing ||
@@ -554,13 +569,9 @@ async function requeueAssignedBuildsForDisconnectedHost(
         )
         .returning({ id: imageBuilds.id });
       const updatedIds = updated.map((row) => row.id);
-      await removeDesiredBuildsFromHost(
-        db,
-        hostId,
-        updatedIds,
-        nowUnixMs,
-        { wake: false },
-      );
+      await removeDesiredBuildsFromHost(db, hostId, updatedIds, nowUnixMs, {
+        wake: false,
+      });
       return updatedIds;
     },
   );
@@ -637,13 +648,9 @@ async function markSilentBuildingBuildsStale(
         )
         .returning({ id: imageBuilds.id });
       const updatedIds = updated.map((row) => row.id);
-      await removeDesiredBuildsFromHost(
-        db,
-        hostId,
-        updatedIds,
-        nowUnixMs,
-        { wake: false },
-      );
+      await removeDesiredBuildsFromHost(db, hostId, updatedIds, nowUnixMs, {
+        wake: false,
+      });
       return updatedIds;
     },
   );
@@ -687,7 +694,9 @@ async function loadBuilderCandidates(
       })
       .from(agentHosts)
       .leftJoin(hostActualState, eq(hostActualState.hostId, agentHosts.id))
-      .where(eq(agentHosts.role, "builder")),
+      .where(
+        and(eq(agentHosts.role, "builder"), isNull(agentHosts.organizationId)),
+      ),
     db
       .select({
         hostId: imageBuilds.hostId,

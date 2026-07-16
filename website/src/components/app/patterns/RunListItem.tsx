@@ -55,7 +55,7 @@ export function RunListItem({
 }) {
   const activity = run.activity ?? (run.active ? "foreground" : "settled");
   return (
-    <article className="flex flex-col gap-3 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-2">
+    <article className="flex flex-col gap-3 px-4 py-4 transition-colors sm:flex-row sm:items-center sm:gap-4 sm:px-6">
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <Link

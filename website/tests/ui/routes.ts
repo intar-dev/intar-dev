@@ -17,6 +17,11 @@ const oauthQuery = new URLSearchParams({
 export const ROUTE_CASES = [
   { id: "landing", path: "/", sessionRole: "anonymous" },
   {
+    id: "organization-sign-in",
+    path: "/organization-sign-in",
+    sessionRole: "anonymous",
+  },
+  {
     id: "request-access",
     path: "/request-access",
     sessionRole: "anonymous",
@@ -34,10 +39,14 @@ export const ROUTE_CASES = [
   },
   { id: "runs", path: "/runs", sessionRole: "learner" },
   { id: "run-workspace", path: "/runs/run-active", sessionRole: "learner" },
-  { id: "teams", path: "/teams", sessionRole: "team-member" },
   {
-    id: "team-detail",
-    path: "/teams/team-platform",
+    id: "organizations",
+    path: "/organizations",
+    sessionRole: "organization-member",
+  },
+  {
+    id: "organization-detail",
+    path: "/organizations/org-platform",
     sessionRole: "owner",
   },
   { id: "profile", path: "/profile", sessionRole: "learner" },
@@ -80,7 +89,7 @@ const byId = new Map<string, RouteCase>(
 
 export const DENSE_ROUTE_CASES = [
   "run-workspace",
-  "team-detail",
+  "organization-detail",
   "admin-overview",
   "admin-hosts",
   "admin-builds",

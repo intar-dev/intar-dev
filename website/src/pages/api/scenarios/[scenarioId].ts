@@ -17,9 +17,19 @@ export const GET: APIRoute = async ({ request, params }) => {
     return jsonResponse({ error: "invalid scenarioId" }, { status: 400 });
   }
 
+  const organizationId =
+    new URL(request.url).searchParams.get("organizationId")?.trim() || null;
+  if (
+    organizationId &&
+    !authz.context.organizationIds.includes(organizationId)
+  ) {
+    return jsonResponse({ error: "scenario not found" }, { status: 404 });
+  }
+
   const scenario = await loadEnabledScenarioForUser({
     scenarioId,
     userId: authz.context.userId,
+    organizationId,
   });
   if (!scenario) {
     return jsonResponse({ error: "scenario not found" }, { status: 404 });

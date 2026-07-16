@@ -1,8 +1,10 @@
 export {
   account,
+  invitation,
   member,
   organization,
   session,
+  ssoProvider,
   user,
   userSshKeys,
   verification,
@@ -45,7 +47,6 @@ export {
   jwks,
   scenarioAssignments,
   scenarioSources,
-  teamInvites,
 } from "./schema/application";
 export type {
   AgentHostRole,

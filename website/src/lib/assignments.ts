@@ -5,9 +5,9 @@ import { member, organization, scenarioAssignments } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { listEnabledScenariosForUser } from "@/lib/scenario-runs";
-import { requireTeamRole } from "@/lib/teams";
+import { requireOrganizationRole } from "@/lib/organizations";
 
-export interface TeamAssignmentRecord {
+export interface OrganizationAssignmentRecord {
   id: string;
   scenarioId: string;
   scenarioTitle: string | null;
@@ -18,21 +18,23 @@ export interface MyAssignment {
   assignmentId: string;
   scenarioId: string;
   scenarioTitle: string | null;
-  teamId: string;
-  teamName: string;
+  organizationId: string;
+  organizationName: string;
   assignedAt: number;
 }
 
-async function scenarioTitleMap(): Promise<Map<string, string>> {
-  const scenarios = await listEnabledScenariosForUser();
+async function scenarioTitleMap(
+  organizationId: string,
+): Promise<Map<string, string>> {
+  const scenarios = await listEnabledScenariosForUser({ organizationId });
   return new Map(scenarios.map((entry) => [entry.scenarioId, entry.title]));
 }
 
-export async function listTeamAssignments(params: {
+export async function listOrganizationAssignments(params: {
   organizationId: string;
   userId: string;
-}): Promise<TeamAssignmentRecord[]> {
-  await requireTeamRole(params);
+}): Promise<OrganizationAssignmentRecord[]> {
+  await requireOrganizationRole(params);
   const db = drizzle(env.DB);
   const rows = await db
     .select()
@@ -40,7 +42,7 @@ export async function listTeamAssignments(params: {
     .where(eq(scenarioAssignments.organizationId, params.organizationId))
     .orderBy(desc(scenarioAssignments.createdAt));
 
-  const titles = await scenarioTitleMap();
+  const titles = await scenarioTitleMap(params.organizationId);
   return rows.map((row) => ({
     id: row.id,
     scenarioId: row.scenarioId,
@@ -49,18 +51,18 @@ export async function listTeamAssignments(params: {
   }));
 }
 
-export async function assignScenarioToTeam(params: {
+export async function assignScenarioToOrganization(params: {
   organizationId: string;
   scenarioId: string;
   actorUserId: string;
-}): Promise<TeamAssignmentRecord> {
-  await requireTeamRole({
+}): Promise<OrganizationAssignmentRecord> {
+  await requireOrganizationRole({
     organizationId: params.organizationId,
     userId: params.actorUserId,
-    instructor: true,
+    admin: true,
   });
 
-  const titles = await scenarioTitleMap();
+  const titles = await scenarioTitleMap(params.organizationId);
   const scenarioTitle = titles.get(params.scenarioId);
   if (!scenarioTitle) {
     throw appError(404, "scenario_not_found", "scenario is not enabled");
@@ -68,7 +70,7 @@ export async function assignScenarioToTeam(params: {
 
   const db = drizzle(env.DB);
   const id = createAppId();
-  await db
+  const inserted = await db
     .insert(scenarioAssignments)
     .values({
       id,
@@ -76,25 +78,53 @@ export async function assignScenarioToTeam(params: {
       scenarioId: params.scenarioId,
       assignedBy: params.actorUserId,
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({
+      id: scenarioAssignments.id,
+      createdAt: scenarioAssignments.createdAt,
+    });
+  const assignment =
+    inserted[0] ??
+    (
+      await db
+        .select({
+          id: scenarioAssignments.id,
+          createdAt: scenarioAssignments.createdAt,
+        })
+        .from(scenarioAssignments)
+        .where(
+          and(
+            eq(scenarioAssignments.organizationId, params.organizationId),
+            eq(scenarioAssignments.scenarioId, params.scenarioId),
+          ),
+        )
+        .limit(1)
+    )[0];
+  if (!assignment) {
+    throw appError(
+      500,
+      "assignment_create_failed",
+      "failed to create assignment",
+    );
+  }
 
   return {
-    id,
+    id: assignment.id,
     scenarioId: params.scenarioId,
     scenarioTitle,
-    createdAt: Date.now(),
+    createdAt: assignment.createdAt,
   };
 }
 
-export async function unassignScenarioFromTeam(params: {
+export async function unassignScenarioFromOrganization(params: {
   organizationId: string;
   assignmentId: string;
   actorUserId: string;
 }): Promise<void> {
-  await requireTeamRole({
+  await requireOrganizationRole({
     organizationId: params.organizationId,
     userId: params.actorUserId,
-    instructor: true,
+    admin: true,
   });
 
   const db = drizzle(env.DB);
@@ -108,7 +138,7 @@ export async function unassignScenarioFromTeam(params: {
     );
 }
 
-// Learner view: assignments across every team the user belongs to.
+// Learner view: assignments across every organization the user belongs to.
 export async function listMyAssignments(params: {
   userId: string;
 }): Promise<MyAssignment[]> {
@@ -123,8 +153,8 @@ export async function listMyAssignments(params: {
     .select({
       assignmentId: scenarioAssignments.id,
       scenarioId: scenarioAssignments.scenarioId,
-      teamId: scenarioAssignments.organizationId,
-      teamName: organization.name,
+      organizationId: scenarioAssignments.organizationId,
+      organizationName: organization.name,
       assignedAt: scenarioAssignments.createdAt,
     })
     .from(scenarioAssignments)
@@ -140,9 +170,16 @@ export async function listMyAssignments(params: {
     )
     .orderBy(desc(scenarioAssignments.createdAt));
 
-  const titles = await scenarioTitleMap();
+  const titleMaps = await Promise.all(
+    memberships.map(
+      async ({ organizationId }) =>
+        [organizationId, await scenarioTitleMap(organizationId)] as const,
+    ),
+  );
+  const titlesByOrganization = new Map(titleMaps);
   return rows.map((row) => ({
     ...row,
-    scenarioTitle: titles.get(row.scenarioId) ?? null,
+    scenarioTitle:
+      titlesByOrganization.get(row.organizationId)?.get(row.scenarioId) ?? null,
   }));
 }

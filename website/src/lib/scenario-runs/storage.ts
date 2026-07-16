@@ -50,15 +50,19 @@ export interface ScenarioRunContentSnapshot {
   solutionMarkdown: string;
 }
 
-export async function loadEnabledScenarioRows(scenarioId?: string) {
+export async function loadEnabledScenarioRows(
+  scenarioId?: string,
+  organizationId: string | null = null,
+) {
   const scenarios = scenarioId
-    ? [await loadEnabledScenario(scenarioId)].filter(
+    ? [await loadEnabledScenario(scenarioId, { organizationId })].filter(
         (scenario): scenario is ScenarioDetailRecord => Boolean(scenario),
       )
-    : await listEnabledScenarios();
+    : await listEnabledScenarios({ organizationId });
 
   return scenarios.map((scenario) => ({
     scenarioId: scenario.scenarioId,
+    organizationId: scenario.organizationId,
     enabledAt: scenario.enabledAt ?? Date.now(),
     briefing: deriveScenarioBriefing(scenario),
     content: scenarioRunContentSnapshot(scenario),
@@ -105,7 +109,11 @@ export async function loadActiveRunRow(userId: string) {
   return rows[0] ? fromDbRow(rows[0]) : null;
 }
 
-export async function loadFinishedRuns(userId: string, scenarioId: string) {
+export async function loadFinishedRuns(
+  userId: string,
+  scenarioId: string,
+  organizationId: string | null = null,
+) {
   const db = drizzle(env.DB);
   const rows = await db
     .select({
@@ -124,6 +132,9 @@ export async function loadFinishedRuns(userId: string, scenarioId: string) {
       and(
         eq(scenarioRuns.userId, userId),
         eq(scenarioRuns.scenarioId, scenarioId),
+        organizationId
+          ? eq(scenarioRuns.organizationId, organizationId)
+          : isNull(scenarioRuns.organizationId),
         isNull(scenarioRuns.activeKey),
         inArray(scenarioRuns.state, ["completed", "failed"]),
       ),
@@ -237,6 +248,7 @@ export function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
   return {
     runId: row.runId,
     userId: row.userId,
+    organizationId: row.organizationId,
     hostId: row.hostId,
     scenarioId: row.scenarioId,
     scenarioName: row.scenarioName,
@@ -280,6 +292,7 @@ export function toScenarioRunRecord(
   return {
     id: row.runId,
     scenarioId: row.scenarioId,
+    organizationId: row.organizationId,
     scenarioName: row.scenarioName,
     title: row.title,
     tagline: row.tagline,

@@ -24,12 +24,11 @@ export function PageShell({
       data-page-width={width}
       className={cn(
         "mx-auto flex w-full flex-1 flex-col",
-        density === "comfortable" ? "gap-6 sm:gap-8" : "gap-4 sm:gap-6",
+        density === "comfortable" ? "gap-6 sm:gap-8" : "gap-4",
         width === "narrow" && "max-w-2xl px-[var(--page-inset)] py-4 sm:py-6",
         width === "content" && "max-w-5xl px-[var(--page-inset)] py-4 sm:py-6",
         width === "default" && "max-w-7xl px-[var(--page-inset)] py-4 sm:py-6",
-        width === "workspace" &&
-          "px-[var(--workspace-inset)] py-3 sm:py-4",
+        width === "workspace" && "px-[var(--workspace-inset)] py-3 sm:py-4",
       )}
     >
       {children}

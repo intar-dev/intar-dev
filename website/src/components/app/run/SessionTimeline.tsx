@@ -5,6 +5,10 @@ import {
   ReadOnlyTextSurface,
 } from "@/components/app/RunArtifactViewer";
 import { EmptyState } from "@/components/app/patterns/StateCard";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { MetaLine } from "@/components/app/patterns/MetaLine";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -68,24 +72,41 @@ export function SessionTimeline({
   }
 
   return (
-    <div className="space-y-1">
-      {sessions.map((session, index) => {
-        const previous = index > 0 ? sessions[index - 1] : undefined;
+    <PaginatedCollection
+      items={sessions}
+      pageSize={COLLECTION_PAGE_SIZE.cards}
+      itemLabel="terminal sessions"
+    >
+      {(visibleSessions) => {
+        const firstVisibleIndex = visibleSessions.length
+          ? sessions.findIndex(
+              (session) => session.index === visibleSessions[0]?.index,
+            )
+          : 0;
         return (
-          <div key={session.index} className="space-y-1">
-            {previous ? (
-              <ReconnectDivider previous={previous} next={session} />
-            ) : null}
-            <SessionRow
-              runId={runId}
-              vmId={vm?.id ?? ""}
-              session={session}
-              sessionCount={sessions.length}
-            />
+          <div className="space-y-3">
+            {visibleSessions.map((session, index) => {
+              const absoluteIndex = firstVisibleIndex + index;
+              const previous =
+                absoluteIndex > 0 ? sessions[absoluteIndex - 1] : undefined;
+              return (
+                <div key={session.index} className="space-y-3">
+                  {previous ? (
+                    <ReconnectDivider previous={previous} next={session} />
+                  ) : null}
+                  <SessionRow
+                    runId={runId}
+                    vmId={vm?.id ?? ""}
+                    session={session}
+                    sessionCount={sessions.length}
+                  />
+                </div>
+              );
+            })}
           </div>
         );
-      })}
-    </div>
+      }}
+    </PaginatedCollection>
   );
 }
 
@@ -134,10 +155,12 @@ function SessionRow({
 
   return (
     <section className="rounded-lg border">
-      <header className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/20 px-3 py-1.5">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium">
-            {sessionCount === 1 ? "Terminal session" : `Session ${session.index}`}
+            {sessionCount === 1
+              ? "Terminal session"
+              : `Session ${session.index}`}
           </span>
           <MetaLine
             items={[
@@ -163,7 +186,7 @@ function SessionRow({
           }
         />
       </header>
-      <div className="p-2">
+      <div className="p-4 sm:p-6">
         {transcript.error ? (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {transcript.error}
@@ -285,21 +308,30 @@ function ReplayDialogBody({
             />
           </button>
           {logOpen ? (
-            <ol className="max-h-60 space-y-1.5 overflow-y-auto border-t p-3">
-              {commands.map((entry, index) => (
-                <li
-                  key={`${entry.atSeconds}-${index}`}
-                  className="flex items-start gap-3 rounded-md bg-muted/30 px-3 py-1.5"
-                >
-                  <span className="mt-0.5 font-mono text-[0.7rem] text-muted-foreground tabular-nums">
-                    {formatReplayTimestamp(entry.atSeconds)}
-                  </span>
-                  <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap">
-                    {entry.text}
-                  </pre>
-                </li>
-              ))}
-            </ol>
+            <PaginatedCollection
+              items={commands}
+              pageSize={COLLECTION_PAGE_SIZE.dense}
+              itemLabel="commands"
+              paginationClassName="mx-4 mb-4"
+            >
+              {(visibleCommands) => (
+                <ol className="space-y-2 border-t p-4">
+                  {visibleCommands.map((entry, index) => (
+                    <li
+                      key={`${entry.atSeconds}-${index}`}
+                      className="flex min-h-11 items-start gap-3 rounded-md bg-muted/30 px-4 py-3"
+                    >
+                      <span className="mt-0.5 font-mono text-[0.7rem] text-muted-foreground tabular-nums">
+                        {formatReplayTimestamp(entry.atSeconds)}
+                      </span>
+                      <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap">
+                        {entry.text}
+                      </pre>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </PaginatedCollection>
           ) : null}
         </div>
       ) : null}

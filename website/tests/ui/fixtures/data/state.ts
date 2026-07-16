@@ -282,19 +282,20 @@ export function createMockApiState(input?: {
     makeBuild("failed", "build-2"),
     makeBuild("succeeded", "build-3"),
   ];
-  const teamDetail = {
-    id: "team-platform",
+  const organizationDetail = {
+    id: "org-platform",
     name: long
       ? "Production Reliability Learning Guild for Distributed Platform Operations"
       : "Platform Repair Crew",
     slug: "platform-repair-crew",
     createdAt: FIXED_NOW - 30 * day,
-    role: sessionRole === "team-member" ? "member" : "owner",
+    role: sessionRole === "organization-member" ? "member" : "owner",
     members: [
       {
         memberId: "member-owner",
         userId: "user-owner",
         name: "Owen Owner",
+        email: "owen@platform.example",
         githubUsername: "owenowns",
         role: "owner",
         joinedAt: FIXED_NOW - 30 * day,
@@ -303,6 +304,7 @@ export function createMockApiState(input?: {
         memberId: "member-learner",
         userId: "user-learner",
         name: "Mina Learner",
+        email: "mina@platform.example",
         githubUsername: "minalearns",
         role: "member",
         joinedAt: FIXED_NOW - 12 * day,
@@ -311,17 +313,10 @@ export function createMockApiState(input?: {
         memberId: "member-instructor",
         userId: "user-instructor",
         name: "Inez Instructor",
+        email: "inez@platform.example",
         githubUsername: "inezinfra",
         role: "admin",
         joinedAt: FIXED_NOW - 20 * day,
-      },
-    ],
-    invites: [
-      {
-        id: "invite-pending",
-        githubUsername: "futureoperator",
-        status: "pending",
-        createdAt: FIXED_NOW - day,
       },
     ],
   };
@@ -339,6 +334,7 @@ export function createMockApiState(input?: {
     scenarios: empty ? [] : scenarios,
     scenarioDetail: {
       scenarioId: "repair-nginx",
+      organizationId: null,
       slug: "repair-nginx",
       enabledAt: FIXED_NOW - 45 * day,
       scenarioName: "repair-nginx",
@@ -346,17 +342,18 @@ export function createMockApiState(input?: {
       vmCount: 1,
       hasActiveRun: !empty && runIsForeground,
       activeRunId: !empty && runIsForeground ? "run-active" : null,
-      activeRun: empty || !runIsForeground
-        ? null
-        : {
-            runId: "run-active",
-            phase: "active_full",
-            phaseTitle: "Running",
-            phaseDetail: "Shell ready",
-            canOpenTerminal: true,
-            terminalPhase: "ready",
-            updatedAt: FIXED_NOW - minute,
-          },
+      activeRun:
+        empty || !runIsForeground
+          ? null
+          : {
+              runId: "run-active",
+              phase: "active_full",
+              phaseTitle: "Running",
+              phaseDetail: "Shell ready",
+              canOpenTerminal: true,
+              terminalPhase: "ready",
+              updatedAt: FIXED_NOW - minute,
+            },
       blockingRun: null,
       finishedRuns: empty
         ? []
@@ -377,29 +374,23 @@ export function createMockApiState(input?: {
     },
     runs: empty ? [] : runs,
     run,
-    teams: empty
+    organizations: empty
       ? []
       : [
           {
-            id: "team-platform",
-            name: teamDetail.name,
-            slug: teamDetail.slug,
-            role: teamDetail.role,
-            memberCount: teamDetail.members.length,
-            createdAt: teamDetail.createdAt,
+            id: "org-platform",
+            name: organizationDetail.name,
+            slug: organizationDetail.slug,
+            role: organizationDetail.role,
+            memberCount: organizationDetail.members.length,
+            createdAt: organizationDetail.createdAt,
           },
         ],
-    invites: empty
-      ? []
-      : [
-          {
-            id: "invite-team-2",
-            organizationId: "team-kernel",
-            teamName: "Kernel Study Group",
-            createdAt: FIXED_NOW - 3 * hour,
-          },
-        ],
-    teamDetail,
+    organizationCreation: {
+      enabled: false,
+      reason: sessionRole === "owner" ? "owner_limit_reached" : "not_selected",
+    },
+    organizationDetail,
     assignments: empty
       ? []
       : [
@@ -408,8 +399,8 @@ export function createMockApiState(input?: {
             assignmentId: "assignment-nginx",
             scenarioId: "repair-nginx",
             scenarioTitle: briefing.title,
-            teamId: "team-platform",
-            teamName: teamDetail.name,
+            organizationId: "org-platform",
+            organizationName: organizationDetail.name,
             assignedAt: FIXED_NOW - 7 * day,
             createdAt: FIXED_NOW - 7 * day,
           },
@@ -420,7 +411,7 @@ export function createMockApiState(input?: {
         : [{ scenarioId: "repair-nginx", title: briefing.title }],
       rows: empty
         ? []
-        : teamDetail.members.map((member, index) => ({
+        : organizationDetail.members.map((member, index) => ({
             userId: member.userId,
             name: member.name,
             githubUsername: member.githubUsername,
@@ -502,19 +493,50 @@ export function createMockApiState(input?: {
             updatedAt: new Date(FIXED_NOW - day).toISOString(),
           },
         ],
-    adminTeams: empty
+    adminOrganizations: empty
       ? []
       : [
           {
-            id: "team-platform",
-            name: teamDetail.name,
-            slug: teamDetail.slug,
-            createdAt: teamDetail.createdAt,
-            memberCount: teamDetail.members.length,
+            id: "org-platform",
+            name: organizationDetail.name,
+            slug: organizationDetail.slug,
+            createdAt: organizationDetail.createdAt,
+            memberCount: organizationDetail.members.length,
             assignmentCount: 1,
             owner: { name: "Owen Owner", username: "owenowns" },
           },
         ],
+    organizationRunners: empty
+      ? []
+      : [
+          {
+            id: "platform-runner-a1b2",
+            name: "platform-runner",
+            role: "agent",
+            disabled: false,
+            scenarioEnabled: true,
+            createdAt: FIXED_NOW - 10 * day,
+            updatedAt: FIXED_NOW - minute,
+            status: {
+              connected: true,
+              lastHeartbeatAt: new Date(FIXED_NOW - minute).toISOString(),
+              agentVersion: "0.1.0",
+              inventoryVmCount: 2,
+            },
+            recentRuns: [],
+          },
+        ],
+    organizationOidc: {
+      providerId: "org-provider-1",
+      issuer: "https://id.platform.example",
+      domain: "platform.example",
+      domainVerified: true,
+      callbackUrl: "https://intar.dev/api/auth/sso/callback/org-provider-1",
+      clientIdLastFour: "****demo",
+      pkce: true,
+      scopes: ["openid", "email", "profile", "offline_access"],
+      verification: null,
+    },
     hosts: empty ? [] : [host],
     hostRuns: empty ? { liveVms: [], archivedRuns: [] } : hostRuns,
     adminScenarios: empty

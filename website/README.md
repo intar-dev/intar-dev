@@ -68,9 +68,10 @@ bun run db:migrate:production
 
 Create future migrations with `wrangler d1 migrations create DB <name>`. Do not
 apply schema files with `wrangler d1 execute` or edit the migration ledger by
-hand. The production workflow deploys the new Worker before applying pending
-migrations, so schema-removal migrations must remain safe during the brief
-new-code/old-schema interval.
+hand. The production workflow builds the exact commit, applies pending
+migrations, and then deploys the new Worker. Migrations and Worker changes are
+therefore a single forward-only cutover: a migration must leave the currently
+deployed Worker functional enough for the short interval before replacement.
 
 Pull requests run the test/build and UI quality gates. A merge to `main` that
 changes the website automatically builds that exact commit and deploys it
@@ -78,6 +79,36 @@ through the `Website production` workflow; do not deploy an ignored local
 `dist/` artifact directly. The production workflow creates the deployable Astro
 artifact but does not repeat the pull request quality gates. Treat `main` as
 deploy-only: a direct website push bypasses those gates and deploys immediately.
+
+## Organizations
+
+Organizations are visible to every signed-in user, but organization creation is
+controlled by the generic Cloudflare Flagship binding named `FLAGS`. The
+`organization-creation` boolean flag defaults to `off`; targeting rules should
+serve `on` only when the `targetingKey` context field matches a selected Better
+Auth user ID. The toggle controls creation only—it is not an authentication or
+authorization boundary.
+
+An organization admin can configure one verified OIDC provider and email domain.
+The callback URI shown in the organization settings must be registered at the
+identity provider. After the admin publishes the requested DNS TXT record,
+users can sign in at `/organization-sign-in` or at the organization-specific
+`/organizations/<slug>/sign-in` URL. Better Auth creates the Intar account and
+organization membership on the first successful sign-in.
+
+For Rawkode Academy, use issuer `https://id.rawkode.academy`. Discovery maps
+that issuer to `/auth/oauth2/authorize`, `/auth/oauth2/token`,
+`/auth/oauth2/userinfo`, and `/auth/jwks`. Register Intar at the Rawkode
+identity service as a confidential client using the callback URI shown by
+Intar and either `client_secret_basic` or `client_secret_post`; PKCE remains
+enabled. Rawkode's existing public-client entries use token authentication
+`none`, which the Better Auth SSO client does not support.
+
+Private scenarios use the `<organization-slug>-<local-scenario-id>` namespace.
+They are built by platform builders and can run only on agent runners owned by
+the same organization. Organization runner bootstrap credentials remain valid
+until rotation, revocation, host disablement, or deletion; the access JWTs they
+mint remain short-lived.
 
 ## Worker configuration
 

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentHosts } from "@/db/schema";
+import { agentHosts, member } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { isAllowlisted } from "@/lib/allowlist";
@@ -47,6 +47,8 @@ export interface UserContext {
   userId: string;
   role: string | null;
   isAdmin: boolean;
+  organizationIds: string[];
+  activeOrganizationId: string | null;
 }
 
 type AuthzResult =
@@ -109,6 +111,10 @@ export async function requireUserContext(
     role?: string | null;
     username?: string | null;
   } | null;
+  const authSession = session?.session as
+    | { activeOrganizationId?: string | null }
+    | null
+    | undefined;
   if (!session?.session || !sessionUser?.id) {
     return {
       ok: false,
@@ -116,7 +122,13 @@ export async function requireUserContext(
     };
   }
 
-  if (!(await isAllowlisted(sessionUser.username))) {
+  const memberships = await drizzle(env.DB)
+    .select({ organizationId: member.organizationId })
+    .from(member)
+    .where(eq(member.userId, sessionUser.id));
+  const organizationIds = memberships.map((row) => row.organizationId);
+  const hasGithubAccess = await isAllowlisted(sessionUser.username);
+  if (!hasGithubAccess && organizationIds.length === 0) {
     return {
       ok: false,
       response: jsonResponse({ error: "access revoked" }, { status: 403 }),
@@ -124,6 +136,11 @@ export async function requireUserContext(
   }
 
   const role = getUserRole(sessionUser);
+  const activeOrganizationId =
+    authSession?.activeOrganizationId &&
+    organizationIds.includes(authSession.activeOrganizationId)
+      ? authSession.activeOrganizationId
+      : null;
 
   return {
     ok: true,
@@ -131,6 +148,8 @@ export async function requireUserContext(
       userId: sessionUser.id,
       role,
       isAdmin: isAdminRole(role),
+      organizationIds,
+      activeOrganizationId,
     },
   };
 }
@@ -154,6 +173,7 @@ export async function requireAdminUserContext(
 export async function loadHostForUser(
   hostId: string,
   userId: string,
+  organizationId: string | null = null,
 ): Promise<AgentHostRow | null> {
   const db = drizzle(env.DB);
   const rows = await db
@@ -176,7 +196,15 @@ export async function loadHostForUser(
       updated_at: agentHosts.updatedAt,
     })
     .from(agentHosts)
-    .where(and(eq(agentHosts.id, hostId), eq(agentHosts.userId, userId)))
+    .where(
+      and(
+        eq(agentHosts.id, hostId),
+        eq(agentHosts.userId, userId),
+        organizationId
+          ? eq(agentHosts.organizationId, organizationId)
+          : isNull(agentHosts.organizationId),
+      ),
+    )
     .limit(1);
 
   return rows[0] ?? null;

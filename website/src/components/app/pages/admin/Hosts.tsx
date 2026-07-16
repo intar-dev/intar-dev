@@ -9,6 +9,10 @@ import {
 } from "lucide-react";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { CardGridSkeleton } from "@/components/app/patterns/Skeletons";
 import { EmptyState } from "@/components/app/patterns/StateCard";
@@ -31,7 +35,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { formatLoad, formatTimestamp } from "@/components/app/admin/hosts/format";
+import {
+  formatLoad,
+  formatTimestamp,
+} from "@/components/app/admin/hosts/format";
 import { useHostFleet } from "@/components/app/admin/hosts/useHostFleet";
 import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 
@@ -142,126 +149,143 @@ export function AdminHosts() {
       {hosts.isPending ? (
         <CardGridSkeleton cards={4} cardClassName="h-40" />
       ) : hostRecords.length ? (
-        <div className="divide-y overflow-hidden rounded-xl border bg-card">
-          {hostRecords.map(({ host, hostVms, hostRuns, capacity }) => {
-            const isDeletingThisHost =
-              deleteHost.isPending && deleteHost.variables === host.id;
-            const isRefreshing = busyKey === `${host.id}:refresh`;
-            const memorySummary = capacity
-              ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
-              : "—";
-            const diskSummary = capacity
-              ? `${capacity.disk_available_mib} / ${capacity.disk_total_mib} MiB`
-              : "—";
+        <PaginatedCollection
+          items={hostRecords}
+          pageSize={COLLECTION_PAGE_SIZE.cards}
+          itemLabel="hosts"
+        >
+          {(visibleHosts) => (
+            <div className="divide-y overflow-hidden rounded-xl border bg-card">
+              {visibleHosts.map(({ host, hostVms, hostRuns, capacity }) => {
+                const isDeletingThisHost =
+                  deleteHost.isPending && deleteHost.variables === host.id;
+                const isRefreshing = busyKey === `${host.id}:refresh`;
+                const memorySummary = capacity
+                  ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
+                  : "—";
+                const diskSummary = capacity
+                  ? `${capacity.disk_available_mib} / ${capacity.disk_total_mib} MiB`
+                  : "—";
 
-            return (
-              <article
-                key={host.id}
-                className="space-y-4 p-4 sm:p-6"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 space-y-1.5">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span
-                        className={
-                          host.status?.connected
-                            ? "size-2 rounded-full bg-success"
-                            : "size-2 rounded-full bg-muted-foreground/40"
-                        }
-                        aria-hidden="true"
-                      />
-                      <h2 className="truncate font-heading text-lg font-semibold tracking-tight">
-                        {host.name}
-                      </h2>
-                      <Badge
-                        variant={host.status?.connected ? "success" : "outline"}
-                      >
-                        {host.status?.connected ? "Online" : "Offline"}
-                      </Badge>
-                      {host.actualState?.health === "degraded" ? (
-                        <Badge variant="destructive">Degraded</Badge>
-                      ) : host.actualState?.health === "unknown" ? (
-                        <Badge variant="outline">Unknown health</Badge>
-                      ) : null}
-                      {host.disabled ? (
-                        <Badge variant="destructive">Disabled</Badge>
-                      ) : null}
-                    </div>
-                    <p className="text-caption">
-                      {host.role === "builder" ? "Builder" : "Agent"} ·{" "}
-                      <span className="font-mono">{host.id}</span> ·{" "}
-                      {hostVms.length} live · {hostRuns.length} archived
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <Button
-                            size="icon-sm"
-                            variant="ghost"
-                            aria-label="Host actions"
+                return (
+                  <article key={host.id} className="space-y-4 p-4 sm:p-6">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={
+                              host.status?.connected
+                                ? "size-2 rounded-full bg-success"
+                                : "size-2 rounded-full bg-muted-foreground/40"
+                            }
+                            aria-hidden="true"
                           />
-                        }
-                      >
-                        <EllipsisVertical className="size-4" />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          disabled={isRefreshing}
-                          onClick={() => handleRefreshHost(host.id)}
-                        >
-                          <RefreshCw className="size-4" />
-                          {isRefreshing ? "Refreshing…" : "Refresh"}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={isDeletingThisHost}
-                          onClick={() => setDeleteTarget(host)}
-                        >
-                          <Trash2 className="size-4" />
-                          Delete host
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </div>
+                          <h2 className="truncate font-heading text-lg font-semibold tracking-tight">
+                            {host.name}
+                          </h2>
+                          <Badge
+                            variant={
+                              host.status?.connected ? "success" : "outline"
+                            }
+                          >
+                            {host.status?.connected ? "Online" : "Offline"}
+                          </Badge>
+                          {host.actualState?.health === "degraded" ? (
+                            <Badge variant="destructive">Degraded</Badge>
+                          ) : host.actualState?.health === "unknown" ? (
+                            <Badge variant="outline">Unknown health</Badge>
+                          ) : null}
+                          {host.disabled ? (
+                            <Badge variant="destructive">Disabled</Badge>
+                          ) : null}
+                        </div>
+                        <p className="text-caption">
+                          {host.role === "builder" ? "Builder" : "Agent"} ·{" "}
+                          <span className="font-mono">{host.id}</span> ·{" "}
+                          {hostVms.length} live · {hostRuns.length} archived
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            render={
+                              <Button
+                                size="icon-sm"
+                                variant="ghost"
+                                aria-label="Host actions"
+                              />
+                            }
+                          >
+                            <EllipsisVertical className="size-4" />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              disabled={isRefreshing}
+                              onClick={() => handleRefreshHost(host.id)}
+                            >
+                              <RefreshCw className="size-4" />
+                              {isRefreshing ? "Refreshing…" : "Refresh"}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={isDeletingThisHost}
+                              onClick={() => setDeleteTarget(host)}
+                            >
+                              <Trash2 className="size-4" />
+                              Delete host
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </div>
 
-                <dl className="grid gap-x-6 gap-y-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-5">
-                  <HostMetric
-                    label="Heartbeat"
-                    value={formatTimestamp(host.status?.lastHeartbeatAt)}
-                    detail={
-                      host.actualState?.health === "degraded"
-                        ? "State report overdue"
-                        : host.status?.connected
-                          ? "Bridge connected"
-                          : "No fresh heartbeat"
-                    }
-                  />
-                  <HostMetric
-                    label="CPU / load"
-                    value={capacity ? `${capacity.committed_cpu_millis} / ${capacity.schedulable_cpu_millis}m` : "Unknown"}
-                    detail={capacity
-                      ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
-                      : "No CPU capacity reported"}
-                  />
-                  <HostMetric label="Memory" value={memorySummary} detail="Available / total" />
-                  <HostMetric
-                    label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
-                    value={diskSummary}
-                    detail="Available / total"
-                  />
-                  <HostMetric
-                    label="Network"
-                    value={capacity?.primary_ipv4 ?? "—"}
-                    detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
-                  />
-                </dl>
-              </article>
-            );
-          })}
-        </div>
+                    <dl className="grid gap-x-6 gap-y-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-5">
+                      <HostMetric
+                        label="Heartbeat"
+                        value={formatTimestamp(host.status?.lastHeartbeatAt)}
+                        detail={
+                          host.actualState?.health === "degraded"
+                            ? "State report overdue"
+                            : host.status?.connected
+                              ? "Bridge connected"
+                              : "No fresh heartbeat"
+                        }
+                      />
+                      <HostMetric
+                        label="CPU / load"
+                        value={
+                          capacity
+                            ? `${capacity.committed_cpu_millis} / ${capacity.schedulable_cpu_millis}m`
+                            : "Unknown"
+                        }
+                        detail={
+                          capacity
+                            ? `${capacity.reserved_cpu_millis}m host reserve · load ${formatLoad(capacity.load_avg_1m)} / ${formatLoad(capacity.load_avg_5m)} / ${formatLoad(capacity.load_avg_15m)}`
+                            : "No CPU capacity reported"
+                        }
+                      />
+                      <HostMetric
+                        label="Memory"
+                        value={memorySummary}
+                        detail="Available / total"
+                      />
+                      <HostMetric
+                        label={`Disk ${capacity?.disk_probe_path ?? "/"}`}
+                        value={diskSummary}
+                        detail="Available / total"
+                      />
+                      <HostMetric
+                        label="Network"
+                        value={capacity?.primary_ipv4 ?? "—"}
+                        detail={capacity?.primary_ipv6 ?? "No IPv6 reported"}
+                      />
+                    </dl>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </PaginatedCollection>
       ) : (
         <EmptyState
           icon={<Server />}
@@ -295,8 +319,12 @@ export function AdminHosts() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label htmlFor="delete-host-confirm" className="text-sm font-medium">
-              Type <span className="font-semibold">{deleteTarget?.name}</span> to confirm
+            <label
+              htmlFor="delete-host-confirm"
+              className="text-sm font-medium"
+            >
+              Type <span className="font-semibold">{deleteTarget?.name}</span>{" "}
+              to confirm
             </label>
             <Input
               id="delete-host-confirm"
@@ -355,7 +383,9 @@ function HostMetric({
   return (
     <div className="min-w-0">
       <dt className="text-eyebrow">{label}</dt>
-      <dd className="mt-1 truncate text-sm font-medium tabular-nums">{value}</dd>
+      <dd className="mt-1 truncate text-sm font-medium tabular-nums">
+        {value}
+      </dd>
       <dd className="mt-0.5 truncate text-metadata">{detail}</dd>
     </div>
   );

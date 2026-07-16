@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-// The modest in-flow header for content pages (scenario briefing, team
+// The modest in-flow header for content pages (scenario briefing, organization
 // detail). Deliberately NOT a heading — the same string is already the
 // route's h1 in the app bar; this renders it in full where the content
 // starts. ~70px, scrolls away; the sticky crumb keeps identity on scroll.

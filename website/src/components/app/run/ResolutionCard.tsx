@@ -1,12 +1,7 @@
 import { CheckCircle2, Clock3 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { firstPassTimes, useProbeSnapshots } from "./probe-pass-times";
 import { formatScenarioDurationMs } from "./run-support";
 import type { ScenarioObjective, ScenarioRunHint } from "./run-types";
@@ -62,7 +57,7 @@ export function ResolutionCard(props: {
       </CardHeader>
       <CardContent className="space-y-4">
         {props.objectives.length ? (
-          <ol className="space-y-1.5">
+          <ol className="divide-y border-y">
             {props.objectives.map((objective) => {
               const passedAt = passTimes.get(objective.probeName) ?? null;
               const sinceStartMs =
@@ -70,7 +65,7 @@ export function ResolutionCard(props: {
               return (
                 <li
                   key={objective.probeName}
-                  className="flex items-baseline justify-between gap-3 text-sm"
+                  className="flex items-baseline justify-between gap-3 py-3 text-sm"
                 >
                   <span className="inline-flex min-w-0 items-baseline gap-2">
                     <CheckCircle2

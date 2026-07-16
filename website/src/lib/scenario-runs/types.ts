@@ -13,13 +13,11 @@ import {
   type BrowserTerminalSessionResult,
   type NativeTerminalSessionResult,
 } from "@/lib/stargate";
-import type {
-  ScenarioRunActivity,
-  ScenarioRunReplayState,
-} from "./activity";
+import type { ScenarioRunActivity, ScenarioRunReplayState } from "./activity";
 
 export interface ScenarioCatalogEntry {
   scenarioId: string;
+  organizationId: string | null;
   slug: string;
   title: string;
   tagline: string;
@@ -47,6 +45,7 @@ export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
 
 export interface ScenarioDetail {
   scenarioId: string;
+  organizationId: string | null;
   slug: string;
   enabledAt: number;
   scenarioName: string;
@@ -86,6 +85,7 @@ export interface ScenarioDetail {
 export interface ScenarioRunRecord extends RunStateDocument {
   id: string;
   scenarioId: string;
+  organizationId: string | null;
   scenarioName: string;
   title: string;
   tagline: string;
@@ -115,6 +115,7 @@ export type ScenarioTerminalSessionResult =
 export interface ScenarioRunListEntry {
   runId: string;
   scenarioId: string;
+  organizationId: string | null;
   scenarioName: string;
   title: string;
   difficulty: ScenarioDifficulty;

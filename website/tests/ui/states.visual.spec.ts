@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/test";
+import { paginatedScenarioFixtures } from "./fixtures/data";
 import { routeCase } from "./routes";
 import { expectRouteScreenshot } from "./support/screenshot";
 
@@ -52,6 +53,20 @@ test.describe("focused visual states", () => {
     });
   }
 
+  test("catalog · paginated", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+    ui.server.state.scenarios = paginatedScenarioFixtures();
+    ui.server.state.assignments = [];
+    ui.server.state.runs = [];
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await ui.settle();
+
+    await expect(
+      page.getByRole("navigation", { name: "scenarios pagination" }),
+    ).toContainText("1–6 of 13 scenarios");
+    await expectRouteScreenshot(page, "catalog-paginated-light-desktop");
+  });
+
   test("request access success", async ({ page, ui }) => {
     await ui.open({ ...routeCase("request-access"), theme: "light" });
     await page.getByLabel("GitHub username").fill("newoperator");
@@ -59,7 +74,9 @@ test.describe("focused visual states", () => {
       .getByLabel(/How will you use the workshop/i)
       .fill("Preparing for an on-call rotation.");
     await page.getByRole("button", { name: "Request access" }).click();
-    await expect(page.getByRole("heading", { name: /Request received/i })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: /Request received/i }),
+    ).toBeVisible();
     await expectRouteScreenshot(page, "request-access-success-light-desktop");
   });
 
@@ -76,38 +93,56 @@ test.describe("focused visual states", () => {
         .or(page.getByRole("button", { name: /Resume lab/i }))
         .first(),
     ).toBeVisible();
-    await expectRouteScreenshot(page, "landing-returning-learner-light-desktop");
+    await expectRouteScreenshot(
+      page,
+      "landing-returning-learner-light-desktop",
+    );
   });
 
-  test("team instructor people tab", async ({ page, ui }) => {
+  test("organization admin members tab", async ({ page, ui }) => {
     await ui.open({
-      ...routeCase("team-detail"),
+      ...routeCase("organization-detail"),
       sessionRole: "instructor",
       theme: "light",
     });
-    await page.getByRole("tab", { name: "People" }).click();
+    await page.getByRole("tab", { name: "Members" }).click();
     await expect(page).toHaveURL(/tab=people/);
-    await expectRouteScreenshot(page, "team-instructor-people-light-desktop");
+    await expectRouteScreenshot(
+      page,
+      "organization-admin-members-light-desktop",
+    );
   });
 
-  test("team owner destructive confirmation", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("team-detail"), theme: "dark" });
+  test("organization owner destructive confirmation", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
     await page.getByRole("tab", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Delete team" }).first().click();
+    await page
+      .getByRole("button", { name: "Delete organization" })
+      .first()
+      .click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expectRouteScreenshot(page, "team-delete-dialog-dark-desktop");
+    await expectRouteScreenshot(
+      page,
+      "organization-delete-dialog-dark-desktop",
+    );
   });
 
-  test("team member cannot force progress tab", async ({ page, ui }) => {
-    const route = routeCase("team-detail");
+  test("organization member cannot force progress tab", async ({
+    page,
+    ui,
+  }) => {
+    const route = routeCase("organization-detail");
     await ui.open({
       ...route,
       path: `${route.path}?tab=progress`,
-      sessionRole: "team-member",
+      sessionRole: "organization-member",
       theme: "light",
     });
     await expect(page).not.toHaveURL(/tab=progress/);
-    await expectRouteScreenshot(page, "team-member-tab-fallback-light-desktop");
+    await expectRouteScreenshot(
+      page,
+      "organization-member-tab-fallback-light-desktop",
+    );
   });
 
   test("build master detail", async ({ page, ui }) => {
@@ -117,7 +152,7 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "build-detail-dark-desktop");
   });
 
-  for (const tab of ["Users", "Teams"] as const) {
+  for (const tab of ["Users", "Organizations"] as const) {
     test(`people · ${tab.toLowerCase()} tab`, async ({ page, ui }) => {
       await ui.open({ ...routeCase("admin-people"), theme: "light" });
       await page.getByRole("tab", { name: tab }).click();
@@ -132,7 +167,9 @@ test.describe("focused visual states", () => {
   test("people access mutation", async ({ page, ui }) => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
     await page.getByRole("button", { name: "Approve" }).first().click();
-    await expect(page.getByText("No pending requests right now.")).toBeVisible();
+    await expect(
+      page.getByText("No pending requests right now."),
+    ).toBeVisible();
     await expectRouteScreenshot(page, "people-access-approved-light-desktop");
   });
 
@@ -179,5 +216,21 @@ test.describe("focused mobile workspace", () => {
       .getByRole("button", { name: /Work order and briefing/i })
       .click();
     await expectRouteScreenshot(page, "run-startup-work-order-dark-mobile");
+  });
+});
+
+test.describe("wide operational states", () => {
+  test.use({ viewport: { width: 2048, height: 944 } });
+
+  test("admin overview · empty", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("admin-overview"),
+      theme: "dark",
+      variant: "empty",
+    });
+    await expect(
+      page.getByRole("heading", { name: "No active scenario runs" }),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "admin-overview-empty-dark-wide");
   });
 });

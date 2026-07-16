@@ -26,15 +26,17 @@ export interface MockApiState {
   scenarioDetail: Record<string, unknown>;
   runs: Array<Record<string, unknown>>;
   run: Record<string, unknown>;
-  teams: Array<Record<string, unknown>>;
-  invites: Array<Record<string, unknown>>;
-  teamDetail: Record<string, unknown>;
+  organizations: Array<Record<string, unknown>>;
+  organizationCreation: Record<string, unknown>;
+  organizationDetail: Record<string, unknown>;
   assignments: Array<Record<string, unknown>>;
   progress: Record<string, unknown>;
   sshKeys: Array<Record<string, unknown>>;
   accessRequests: Array<Record<string, unknown>>;
   users: Array<Record<string, unknown>>;
-  adminTeams: Array<Record<string, unknown>>;
+  adminOrganizations: Array<Record<string, unknown>>;
+  organizationRunners: Array<Record<string, unknown>>;
+  organizationOidc: Record<string, unknown> | null;
   hosts: Array<Record<string, unknown>>;
   hostRuns: Record<string, unknown>;
   adminScenarios: Array<Record<string, unknown>>;
@@ -183,6 +185,21 @@ export function catalogScenario(input: {
   };
 }
 
+export function paginatedScenarioFixtures(count = 13) {
+  return Array.from({ length: count }, (_, index) => {
+    const number = index + 1;
+    return catalogScenario({
+      scenarioId: `paging-scenario-${number}`,
+      title: `Paging scenario ${String(number).padStart(2, "0")}`,
+      tagline: "A catalog fixture that verifies collection paging behavior.",
+      difficulty: "medium",
+      category: "Pagination lab",
+      tags: ["paging", "catalog"],
+      status: "new",
+    });
+  });
+}
+
 export function runListEntry(input: {
   runId: string;
   title: string;
@@ -205,7 +222,8 @@ export function runListEntry(input: {
     outcome: input.outcome,
     active: input.active,
     activity,
-    deleteRequestedAt: activity === "foreground" ? null : input.createdAt + minute,
+    deleteRequestedAt:
+      activity === "foreground" ? null : input.createdAt + minute,
     replayState: input.hasReplay
       ? "ready"
       : activity === "background"

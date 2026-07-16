@@ -7,6 +7,7 @@ import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
+import { createAppId } from "@/lib/id";
 import { getScenarioSource } from "@/lib/scenario-sources";
 import { buildTar, gzipBytes } from "@/lib/tar";
 import baseImagesHcl from "../../../base-images.hcl?raw";
@@ -26,7 +27,11 @@ const IMAGE_ARCHES = new Set(["x86_64", "aarch64"]);
 function embeddedKinoVersion(): string {
   const match = buildToolsHcl.match(/version\s*=\s*"([^"]+)"/);
   if (!match?.[1]) {
-    throw appError(500, "build_tools_unreadable", "embedded build-tools.hcl has no kino version");
+    throw appError(
+      500,
+      "build_tools_unreadable",
+      "embedded build-tools.hcl has no kino version",
+    );
   }
   return match[1];
 }
@@ -43,15 +48,21 @@ export async function queueDraftBuild(params: {
   contentHash: string;
   kinoVersion: string;
   imageArch: string;
+  organizationId?: string | null;
 }): Promise<DraftBuildResult> {
-  const source = await getScenarioSource(params.scenarioId);
+  const organizationId = params.organizationId ?? null;
+  const source = await getScenarioSource(params.scenarioId, organizationId);
   if (!source) {
     throw appError(404, "draft_not_found", "no draft for that scenario id");
   }
 
   const contentHash = params.contentHash.trim().toLowerCase();
   if (!CONTENT_HASH_PATTERN.test(contentHash)) {
-    throw appError(400, "invalid_content_hash", "content hash must be 64 hex chars");
+    throw appError(
+      400,
+      "invalid_content_hash",
+      "content hash must be 64 hex chars",
+    );
   }
   if (!IMAGE_ARCHES.has(params.imageArch)) {
     throw appError(400, "invalid_arch", "unsupported image architecture");
@@ -77,14 +88,18 @@ export async function queueDraftBuild(params: {
   const archive = await gzipBytes(tar);
 
   const now = Date.now();
-  const rev = `draft-${params.scenarioId}-${now.toString(36)}`;
+  const rev = `draft-${createAppId()}`;
   const r2Key = `builds/bundles/${rev}.tar.gz`;
   await env.VM_IMAGE_REGISTRY_BUCKET.put(
     r2Key,
     archive as unknown as ArrayBuffer,
     {
       httpMetadata: { contentType: "application/gzip" },
-      customMetadata: { rev, kino_version: kinoVersion },
+      customMetadata: {
+        rev,
+        kino_version: kinoVersion,
+        ...(organizationId ? { organization_id: organizationId } : {}),
+      },
     },
   );
 
@@ -108,6 +123,7 @@ export async function queueDraftBuild(params: {
     r2Key,
     kinoVersion,
     meta,
+    organizationId,
     nowUnixMs: now,
   });
   const assigned = await assignQueuedImageBuilds(db, now);

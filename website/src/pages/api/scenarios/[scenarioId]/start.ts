@@ -8,6 +8,7 @@ export const prerender = false;
 
 interface StartScenarioBody {
   hostId?: unknown;
+  organizationId?: unknown;
 }
 
 export const POST: APIRoute = async ({ request, params }) => {
@@ -23,6 +24,7 @@ export const POST: APIRoute = async ({ request, params }) => {
   }
 
   let hostId: string | undefined;
+  let organizationId: string | null = null;
   if (request.headers.get("content-type")?.includes("application/json")) {
     let parsedBody: unknown;
     try {
@@ -47,6 +49,26 @@ export const POST: APIRoute = async ({ request, params }) => {
         { status: 400 },
       );
     }
+    if (
+      body.organizationId !== undefined &&
+      body.organizationId !== null &&
+      typeof body.organizationId !== "string"
+    ) {
+      return jsonResponse(
+        { error: "organizationId must be a string" },
+        { status: 400 },
+      );
+    }
+    organizationId =
+      typeof body.organizationId === "string"
+        ? body.organizationId.trim() || null
+        : null;
+    if (
+      organizationId &&
+      !authz.context.organizationIds.includes(organizationId)
+    ) {
+      return jsonResponse({ error: "scenario not found" }, { status: 404 });
+    }
     hostId = typeof body.hostId === "string" ? body.hostId.trim() : undefined;
     if (body.hostId !== undefined && !hostId) {
       return jsonResponse(
@@ -63,6 +85,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     const result = await startScenarioRunForUser({
       scenarioId,
       userId: authz.context.userId,
+      ...(organizationId ? { organizationId } : {}),
       ...(hostId ? { hostId } : {}),
     });
     return jsonResponse(result, {

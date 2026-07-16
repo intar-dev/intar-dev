@@ -5,7 +5,7 @@ import {
   text,
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
-import { user } from "./core";
+import { organization, user } from "./core";
 import { agentHosts } from "./platform";
 import { type ScenarioRunHintSnapshot, jsonText, nowMsDefault } from "./shared";
 
@@ -16,6 +16,9 @@ export const scenarioRuns = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, {
+      onDelete: "restrict",
+    }),
     hostId: text("host_id")
       .notNull()
       .references(() => agentHosts.id, { onDelete: "restrict" }),
@@ -60,6 +63,10 @@ export const scenarioRuns = sqliteTable(
       table.createdAt,
     ),
     index("scenario_runs_host_idx").on(table.hostId, table.createdAt),
+    index("scenario_runs_organization_idx").on(
+      table.organizationId,
+      table.createdAt,
+    ),
   ],
 );
 

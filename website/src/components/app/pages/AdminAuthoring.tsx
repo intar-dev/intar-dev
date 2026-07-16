@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  FileCode2,
-  Hammer,
-  Save,
-  Trash2,
-} from "lucide-react";
+import { FileCode2, Hammer, Save, Trash2 } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
+import {
+  COLLECTION_PAGE_SIZE,
+  PaginatedCollection,
+} from "@/components/app/patterns/CollectionPagination";
 import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { ScenarioSourceEditor } from "@/components/app/admin/authoring/ScenarioSourceEditor";
 import { EmptyState } from "../patterns/StateCard";
@@ -68,7 +67,9 @@ export function AdminAuthoring() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Failed to load drafts (${response.status})`);
+        throw new Error(
+          body?.error ?? `Failed to load drafts (${response.status})`,
+        );
       }
       return (await response.json()) as { sources: SourceSummary[] };
     },
@@ -108,7 +109,9 @@ export function AdminAuthoring() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Failed to save draft (${response.status})`);
+        throw new Error(
+          body?.error ?? `Failed to save draft (${response.status})`,
+        );
       }
     },
     onSuccess: async () => {
@@ -147,7 +150,9 @@ export function AdminAuthoring() {
         error?: string;
       } | null;
       if (!response.ok || !result?.rev) {
-        throw new Error(result?.error ?? `Failed to queue build (${response.status})`);
+        throw new Error(
+          result?.error ?? `Failed to queue build (${response.status})`,
+        );
       }
       return result;
     },
@@ -195,7 +200,9 @@ export function AdminAuthoring() {
         <div className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle as="h2" className="text-base">Scenario HCL</CardTitle>
+              <CardTitle as="h2" className="text-base">
+                Scenario HCL
+              </CardTitle>
               <CardDescription>
                 Paste a scenario.hcl — validation runs the same Rust code the
                 image builder uses, compiled to WebAssembly.
@@ -204,17 +211,26 @@ export function AdminAuthoring() {
             <CardContent className="space-y-4">
               <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(17rem,0.38fr)]">
                 <ScenarioSourceEditor value={hcl} onChange={setHcl} />
-                <aside className="space-y-3 rounded-lg border bg-muted/30 p-4" aria-label="Validation results">
+                <aside
+                  className="space-y-3 rounded-lg border bg-muted/30 p-4"
+                  aria-label="Validation results"
+                >
                   <div>
                     <p className="text-eyebrow">WASM validation</p>
                     <h3 className="mt-1 text-card-title">Pipeline result</h3>
                   </div>
                   {validating ? (
-                    <InlineFeedback tone="pending">Validating scenario source…</InlineFeedback>
+                    <InlineFeedback tone="pending">
+                      Validating scenario source…
+                    </InlineFeedback>
                   ) : validationFailure ? (
-                    <InlineFeedback tone="error">{validationFailure}</InlineFeedback>
+                    <InlineFeedback tone="error">
+                      {validationFailure}
+                    </InlineFeedback>
                   ) : currentResult?.ok ? (
-                    <InlineFeedback tone="success">Scenario is valid.</InlineFeedback>
+                    <InlineFeedback tone="success">
+                      Scenario is valid.
+                    </InlineFeedback>
                   ) : currentResult ? (
                     <div className="space-y-2">
                       <InlineFeedback tone="error">
@@ -228,9 +244,14 @@ export function AdminAuthoring() {
                       </ul>
                     </div>
                   ) : validatedHcl && validatedHcl !== hcl ? (
-                    <p className="text-metadata">Source changed. Validate again before saving or building.</p>
+                    <p className="text-metadata">
+                      Source changed. Validate again before saving or building.
+                    </p>
                   ) : (
-                    <p className="text-metadata">Run validation to inspect this source with the same Rust rules used by builders.</p>
+                    <p className="text-metadata">
+                      Run validation to inspect this source with the same Rust
+                      rules used by builders.
+                    </p>
                   )}
                 </aside>
               </div>
@@ -245,7 +266,9 @@ export function AdminAuthoring() {
                 <Button
                   variant="outline"
                   onClick={() => saveDraft.mutate()}
-                  disabled={!currentResult?.ok || !scenarioId || saveDraft.isPending}
+                  disabled={
+                    !currentResult?.ok || !scenarioId || saveDraft.isPending
+                  }
                 >
                   <Save className="size-4" />
                   {saveDraft.isPending ? "Saving…" : "Save draft"}
@@ -303,7 +326,9 @@ export function AdminAuthoring() {
         <div className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle as="h2" className="text-base">Drafts</CardTitle>
+              <CardTitle as="h2" className="text-base">
+                Drafts
+              </CardTitle>
               <CardDescription>Saved scenario sources.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -314,52 +339,62 @@ export function AdminAuthoring() {
                     : "Failed to load drafts"}
                 </p>
               ) : sources.data?.sources.length ? (
-                <div className="space-y-2">
-                  {sources.data.sources.map((source) => (
-                    <div
-                      key={source.id}
-                      className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="font-mono text-xs font-medium">
-                          {source.scenarioId}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Updated {formatRelativeTime(source.updatedAt)}
-                        </p>
-                      </div>
-                      <Badge
-                        variant={
-                          source.status === "published" ? "success" : "outline"
-                        }
-                      >
-                        {source.status}
-                      </Badge>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={loadDraft.isPending}
-                        onClick={() => loadDraft.mutate(source.scenarioId)}
-                      >
-                        Open
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        className="text-muted-foreground hover:text-destructive"
-                        disabled={deleteDraft.isPending}
-                        onClick={() => {
-                          deleteDraft.reset();
-                          setDeleteConfirm("");
-                          setDeleteTarget(source);
-                        }}
-                        aria-label={`Delete ${source.scenarioId} draft`}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </Button>
+                <PaginatedCollection
+                  items={sources.data.sources}
+                  pageSize={COLLECTION_PAGE_SIZE.list}
+                  itemLabel="drafts"
+                >
+                  {(visibleSources) => (
+                    <div className="divide-y overflow-hidden rounded-lg border">
+                      {visibleSources.map((source) => (
+                        <div
+                          key={source.id}
+                          className="flex flex-wrap items-center gap-3 p-4"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="font-mono text-xs font-medium">
+                              {source.scenarioId}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Updated {formatRelativeTime(source.updatedAt)}
+                            </p>
+                          </div>
+                          <Badge
+                            variant={
+                              source.status === "published"
+                                ? "success"
+                                : "outline"
+                            }
+                          >
+                            {source.status}
+                          </Badge>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={loadDraft.isPending}
+                            onClick={() => loadDraft.mutate(source.scenarioId)}
+                          >
+                            Open
+                          </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={deleteDraft.isPending}
+                            onClick={() => {
+                              deleteDraft.reset();
+                              setDeleteConfirm("");
+                              setDeleteTarget(source);
+                            }}
+                            aria-label={`Delete ${source.scenarioId} draft`}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+                </PaginatedCollection>
               ) : (
                 <EmptyState
                   icon={<FileCode2 className="size-6" />}
@@ -381,9 +416,9 @@ export function AdminAuthoring() {
             <CardContent className="py-4 text-xs leading-5 text-muted-foreground">
               Build images bundles the validated draft (with the pinned base
               images and kino version) and queues it exactly like a CI upload.
-              The builder re-verifies the content hash before building;
-              progress shows on the Builds page, and a published scenario
-              lands in the registry.
+              The builder re-verifies the content hash before building; progress
+              shows on the Builds page, and a published scenario lands in the
+              registry.
             </CardContent>
           </Card>
         </div>
@@ -402,7 +437,9 @@ export function AdminAuthoring() {
           <DialogHeader>
             <DialogTitle>Delete this draft?</DialogTitle>
             <DialogDescription>
-              This permanently removes the saved source. Published scenario records and existing builds are unchanged. Type the scenario ID to confirm.
+              This permanently removes the saved source. Published scenario
+              records and existing builds are unchanged. Type the scenario ID to
+              confirm.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -424,12 +461,20 @@ export function AdminAuthoring() {
             </InlineFeedback>
           ) : null}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteDraft.isPending}>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleteDraft.isPending}
+            >
               Keep draft
             </Button>
             <Button
               variant="destructive"
-              disabled={!deleteTarget || deleteConfirm !== deleteTarget.scenarioId || deleteDraft.isPending}
+              disabled={
+                !deleteTarget ||
+                deleteConfirm !== deleteTarget.scenarioId ||
+                deleteDraft.isPending
+              }
               onClick={() => {
                 if (deleteTarget) deleteDraft.mutate(deleteTarget.scenarioId);
               }}
@@ -454,8 +499,12 @@ function ScenarioPreviewCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle as="h2" className="text-base">Preview</CardTitle>
-        <CardDescription>How the scenario will read to learners.</CardDescription>
+        <CardTitle as="h2" className="text-base">
+          Preview
+        </CardTitle>
+        <CardDescription>
+          How the scenario will read to learners.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4 text-sm">
         <dl className="grid gap-x-6 gap-y-3 border-y py-3 sm:grid-cols-2">
@@ -499,8 +548,8 @@ function ScenarioPreviewCard({
                   <code>{vm.name}</code>
                   <span className="text-muted-foreground">
                     {" "}
-                    · {vm.image} · {vm.cpu_millis / 1000} CPU ·{" "}
-                    {vm.vcpu_count} vCPU · {vm.memory} MiB
+                    · {vm.image} · {vm.cpu_millis / 1000} CPU · {vm.vcpu_count}{" "}
+                    vCPU · {vm.memory} MiB
                   </span>
                 </li>
               ))}
@@ -515,7 +564,10 @@ function ScenarioPreviewCard({
                 <li key={probe.name}>
                   <code>{probe.name}</code>
                   {probe.phase ? (
-                    <span className="text-muted-foreground"> · {probe.phase}</span>
+                    <span className="text-muted-foreground">
+                      {" "}
+                      · {probe.phase}
+                    </span>
                   ) : null}
                 </li>
               ))}

@@ -66,7 +66,8 @@ vi.mock("cloudflare:workers", () => ({ env: {} }));
 
 export function resetImageRegistryMocks(): void {
   authMock.requireVerifiedAgentRequest.mockReset();
-  dbMock.drizzle.mockClear();
+  dbMock.drizzle.mockReset();
+  dbMock.drizzle.mockImplementation(() => defaultAgentVisibilityDb());
   schedulerMock.assignQueuedImageBuilds.mockReset();
   schedulerMock.queueImageBuildsFromBundle.mockReset();
   imageBuildLockMock.assertHeld.mockReset();
@@ -109,6 +110,7 @@ export function buildLogDb(input: {
 
 export type PublishBuildAssignmentFixture = {
   id: string;
+  organizationId: string | null;
   hostId: string | null;
   status: "queued" | "assigned" | "building" | "succeeded" | "failed" | "stale";
   scenarioId: string;
@@ -122,6 +124,7 @@ export function publishBuildAssignment(
 ): PublishBuildAssignmentFixture {
   return {
     id: "build-1",
+    organizationId: null,
     hostId: "builder-1",
     status: "building",
     scenarioId: "broken-nginx",
@@ -227,7 +230,9 @@ export function pruneCompanionObject(sha256: string, uploadedMs: number) {
 }
 
 export function imageIndexDb(rows: ImageIndexRow[]) {
-  const selectFrom = vi.fn().mockResolvedValue(rows);
+  const selectWhere = vi.fn().mockResolvedValue(rows);
+  const selectInnerJoin = vi.fn(() => ({ where: selectWhere }));
+  const selectFrom = vi.fn(() => ({ innerJoin: selectInnerJoin }));
   const select = vi.fn(() => ({ from: selectFrom }));
 
   return {
@@ -239,13 +244,34 @@ export function imageIndexDb(rows: ImageIndexRow[]) {
 export function bundleDownloadDb(rows: Array<{ r2Key: string }>) {
   const selectLimit = vi.fn().mockResolvedValue(rows);
   const selectWhere = vi.fn(() => ({ limit: selectLimit }));
-  const selectFrom = vi.fn(() => ({ where: selectWhere }));
+  const selectInnerJoin = vi.fn(() => ({ where: selectWhere }));
+  const selectFrom = vi.fn(() => ({ innerJoin: selectInnerJoin }));
   const select = vi.fn(() => ({ from: selectFrom }));
 
   return {
     kind: "test-db",
     select,
   };
+}
+
+function defaultAgentVisibilityDb() {
+  const select = vi.fn((selection: Record<string, unknown>) => {
+    const imageKey = {
+      scenario: "broken-nginx",
+      vm: "web",
+      arch: "x86_64" as const,
+    };
+    const where = vi.fn(() => {
+      if ("id" in selection && !("imageKey" in selection)) {
+        return { limit: vi.fn().mockResolvedValue([{ id: "vm-1" }]) };
+      }
+      return Promise.resolve([{ imageKey }]);
+    });
+    const innerJoin = vi.fn(() => ({ where }));
+    const from = vi.fn(() => ({ innerJoin }));
+    return { from };
+  });
+  return Object.assign(dbMock.db, { select });
 }
 
 export function sourceBundleFixture(scenarioIds: string[]): ArrayBuffer {

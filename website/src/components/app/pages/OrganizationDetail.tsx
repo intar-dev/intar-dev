@@ -1,0 +1,175 @@
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Building2 } from "lucide-react";
+import { ContentHeader } from "../patterns/ContentHeader";
+import { MetaLine } from "../patterns/MetaLine";
+import { PageShell } from "../patterns/PageShell";
+import { RelativeTime } from "../patterns/RelativeTime";
+import { ErrorState } from "../patterns/StateCard";
+import { usePageChrome } from "../shell/page-chrome";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { authClient } from "@/lib/auth-client";
+import {
+  AssignmentsSection,
+  MembersSection,
+  OrganizationOverview,
+  ProgressSection,
+} from "./organization-detail/people";
+import { OrganizationRunnersSection } from "./organization-detail/runners";
+import { OrganizationScenariosSection } from "./organization-detail/scenarios";
+import { OrganizationSettingsSection } from "./organization-detail/settings";
+import {
+  type OrganizationDetailResponse,
+  fetchJson,
+} from "./organization-detail/types";
+import type { OrganizationDetailTab } from "./tab-search";
+
+export function OrganizationDetail() {
+  const { orgId } = useParams({ from: "/app/organizations/$orgId" });
+  const routeSearch = useSearch({ from: "/app/organizations/$orgId" });
+  const navigate = useNavigate();
+  const organization = useQuery({
+    queryKey: ["organizations", orgId, "detail"],
+    queryFn: () =>
+      fetchJson<OrganizationDetailResponse>(
+        `/api/organizations/${encodeURIComponent(orgId)}`,
+      ),
+    staleTime: 5_000,
+  });
+  const detail = organization.data?.organization;
+  usePageChrome({ title: detail?.name });
+
+  useEffect(() => {
+    if (!detail?.id) return;
+    void authClient.organization.setActive({ organizationId: detail.id });
+  }, [detail?.id]);
+
+  const requestedTab = routeSearch.tab ?? "overview";
+  const admin = detail?.role !== "member";
+  const activeTab: OrganizationDetailTab =
+    (requestedTab === "progress" || requestedTab === "settings") && !admin
+      ? requestedTab === "settings"
+        ? "settings"
+        : "overview"
+      : requestedTab;
+  useEffect(() => {
+    if (requestedTab !== activeTab) {
+      void navigate({ to: ".", replace: true, search: {} });
+    }
+  }, [activeTab, navigate, requestedTab]);
+  const setTab = (tab: OrganizationDetailTab) => {
+    void navigate({
+      to: ".",
+      replace: true,
+      search: tab === "overview" ? {} : { tab },
+    });
+  };
+
+  if (organization.error) {
+    return (
+      <PageShell width="content">
+        <ErrorState
+          title="Could not load organization"
+          description={
+            organization.error instanceof Error
+              ? organization.error.message
+              : "Failed to load organization"
+          }
+          onRetry={() => void organization.refetch()}
+        />
+      </PageShell>
+    );
+  }
+  if (!detail) {
+    return (
+      <PageShell width="content">
+        <div role="status" className="space-y-6">
+          <span className="sr-only">Loading organization…</span>
+          <Skeleton className="h-8 w-72 max-w-full" />
+          <Skeleton className="h-11 w-full" />
+          <Skeleton className="h-48 w-full rounded-xl" />
+        </div>
+      </PageShell>
+    );
+  }
+
+  const roleLabel =
+    detail.role === "owner"
+      ? "Owner"
+      : detail.role === "admin"
+        ? "Admin"
+        : "Member";
+
+  return (
+    <PageShell width="workspace">
+      <ContentHeader
+        title={detail.name}
+        badge={
+          <Badge variant={admin ? "secondary" : "outline"}>{roleLabel}</Badge>
+        }
+        summary={`Private workspace · ${detail.slug}`}
+        meta={
+          <MetaLine
+            items={[
+              <span key="members" className="inline-flex items-center gap-1.5">
+                <Building2 className="size-3.5" />
+                {detail.members.length} member
+                {detail.members.length === 1 ? "" : "s"}
+              </span>,
+              <span key="created">
+                created <RelativeTime at={detail.createdAt} />
+              </span>,
+            ]}
+          />
+        }
+      />
+
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setTab(value as OrganizationDetailTab)}
+        className="gap-6"
+      >
+        <div className="overflow-x-auto border-b">
+          <TabsList variant="line" className="min-w-max pb-1">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="scenarios">Scenarios</TabsTrigger>
+            <TabsTrigger value="people">Members</TabsTrigger>
+            <TabsTrigger value="assignments">Assignments</TabsTrigger>
+            {admin ? (
+              <TabsTrigger value="progress">Progress</TabsTrigger>
+            ) : null}
+            <TabsTrigger value="runners">Runners</TabsTrigger>
+            <TabsTrigger value="settings">Settings</TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="overview">
+          <OrganizationOverview detail={detail} setTab={setTab} />
+        </TabsContent>
+        <TabsContent value="scenarios">
+          <OrganizationScenariosSection detail={detail} />
+        </TabsContent>
+        <TabsContent value="people">
+          <MembersSection detail={detail} />
+        </TabsContent>
+        <TabsContent value="assignments">
+          <AssignmentsSection detail={detail} />
+        </TabsContent>
+        {admin ? (
+          <TabsContent value="progress">
+            <ProgressSection detail={detail} />
+          </TabsContent>
+        ) : null}
+        <TabsContent value="runners">
+          <OrganizationRunnersSection detail={detail} />
+        </TabsContent>
+        <TabsContent value="settings">
+          <OrganizationSettingsSection detail={detail} />
+        </TabsContent>
+      </Tabs>
+    </PageShell>
+  );
+}

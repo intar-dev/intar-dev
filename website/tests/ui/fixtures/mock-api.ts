@@ -69,7 +69,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         progress.status = foreground ? "in_progress" : "attempted";
       }
       server.state.scenarioDetail.hasActiveRun = foreground;
-      server.state.scenarioDetail.activeRunId = foreground ? "run-active" : null;
+      server.state.scenarioDetail.activeRunId = foreground
+        ? "run-active"
+        : null;
       server.state.scenarioDetail.activeRun = foreground
         ? server.state.scenarioDetail.activeRun
         : null;
@@ -98,6 +100,13 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
       if (pathname === "/api/auth/sign-out" && method === "POST") {
         await json(route, { success: true });
+        return;
+      }
+      if (
+        pathname === "/api/auth/organization/set-active" &&
+        method === "POST"
+      ) {
+        await json(route, { session: sessionFor(server.state.sessionRole) });
         return;
       }
       if (pathname === "/api/auth/admin/list-users" && method === "GET") {
@@ -165,7 +174,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { scenarios: server.state.scenarios });
         return;
       }
-      if (pathname === "/api/teams/my-assignments" && method === "GET") {
+      if (
+        pathname === "/api/organizations/my-assignments" &&
+        method === "GET"
+      ) {
         await json(route, { assignments: server.state.assignments });
         return;
       }
@@ -191,7 +203,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         );
         return;
       }
-      const learnerScenarioId = segment(pathname, /^\/api\/scenarios\/([^/]+)$/);
+      const learnerScenarioId = segment(
+        pathname,
+        /^\/api\/scenarios\/([^/]+)$/,
+      );
       if (learnerScenarioId && method === "GET") {
         await json(route, { scenario: server.state.scenarioDetail });
         return;
@@ -274,8 +289,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
               host: "stargate.example.test",
               port: 2222,
               username: "route-test-only",
-              command:
-                "ssh -p 2222 route-test-only@stargate.example.test",
+              command: "ssh -p 2222 route-test-only@stargate.example.test",
               publicHostKeyOpenssh: `ssh-ed25519 ${"A".repeat(68)}`,
               publicHostKeyFingerprintSha256: "SHA256:test-only-host-key",
               knownHostsLine:
@@ -287,7 +301,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, {
           routeUsername: "route-test-only",
           expiresAt: FIXED_NOW + 15 * 60_000,
-          browser: { websocketUrl: "ws://terminal.example.test/terminal/run-active" },
+          browser: {
+            websocketUrl: "ws://terminal.example.test/terminal/run-active",
+          },
         });
         return;
       }
@@ -357,103 +373,121 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
-      if (pathname === "/api/teams" && method === "GET") {
+      if (pathname === "/api/organizations" && method === "GET") {
         await json(route, {
-          teams: server.state.teams,
-          invites: server.state.invites,
+          organizations: server.state.organizations,
+          creation: server.state.organizationCreation,
         });
         return;
       }
-      if (pathname === "/api/teams" && method === "POST") {
+      if (pathname === "/api/organizations" && method === "POST") {
         const body = await requestBody(route);
-        const team = {
-          id: "team-new",
-          name: String(body.name ?? "New team"),
-          slug: "new-team",
+        const organization = {
+          id: "org-new",
+          name: String(body.name ?? "New organization"),
+          slug: "new-organization-ab12cd",
           role: "owner",
           memberCount: 1,
           createdAt: FIXED_NOW,
         };
-        server.state.teams.push(team);
-        await json(route, { team }, 201);
+        server.state.organizations.push(organization);
+        await json(route, { organization }, 201);
         return;
       }
-      if (
-        /^\/api\/teams\/invites\/[^/]+\/(accept|decline)$/.test(pathname) &&
-        method === "POST"
-      ) {
-        await noContent(route);
+      const organizationId = segment(
+        pathname,
+        /^\/api\/organizations\/([^/]+)$/,
+      );
+      if (organizationId && method === "GET") {
+        await json(route, { organization: server.state.organizationDetail });
         return;
       }
-      const teamId = segment(pathname, /^\/api\/teams\/([^/]+)$/);
-      if (teamId && method === "GET") {
-        await json(route, { team: server.state.teamDetail });
-        return;
-      }
-      if (teamId && method === "PATCH") {
+      if (organizationId && method === "PATCH") {
         const body = await requestBody(route);
-        if (typeof body.name === "string") server.state.teamDetail.name = body.name;
-        await json(route, { team: server.state.teamDetail });
+        if (typeof body.name === "string") {
+          server.state.organizationDetail.name = body.name;
+        }
+        await json(route, { organization: server.state.organizationDetail });
         return;
       }
-      if (teamId && method === "DELETE") {
+      if (organizationId && method === "DELETE") {
         await noContent(route);
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/invites$/.test(pathname) &&
-        method === "POST"
-      ) {
-        await json(route, { invitation: { id: "invite-new" } }, 201);
-        return;
-      }
-      if (
-        /^\/api\/teams\/[^/]+\/invites\/[^/]+$/.test(pathname) &&
-        method === "DELETE"
-      ) {
-        await noContent(route);
-        return;
-      }
-      if (
-        /^\/api\/teams\/[^/]+\/members\/[^/]+$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/members\/[^/]+$/.test(pathname) &&
         (method === "DELETE" || method === "PATCH")
       ) {
         await noContent(route);
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/assignments$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/assignments$/.test(pathname) &&
         method === "GET"
       ) {
         await json(route, { assignments: server.state.assignments });
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/assignments$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/assignments$/.test(pathname) &&
         method === "POST"
       ) {
-        await json(route, { assignment: server.state.assignments[0] ?? null }, 201);
+        await json(
+          route,
+          { assignment: server.state.assignments[0] ?? null },
+          201,
+        );
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/assignments\/[^/]+$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/assignments\/[^/]+$/.test(pathname) &&
         method === "DELETE"
       ) {
         await noContent(route);
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/progress$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/progress$/.test(pathname) &&
         method === "GET"
       ) {
         await json(route, { progress: server.state.progress });
         return;
       }
       if (
-        /^\/api\/teams\/[^/]+\/(transfer-ownership|leave)$/.test(pathname) &&
+        /^\/api\/organizations\/[^/]+\/(transfer-ownership|leave)$/.test(
+          pathname,
+        ) &&
         method === "POST"
       ) {
         await noContent(route);
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/scenarios$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { scenarios: server.state.scenarios });
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/scenarios\/sources$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { sources: server.state.sources });
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/runners$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { runners: server.state.organizationRunners });
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/sso$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { provider: server.state.organizationOidc });
         return;
       }
 
@@ -586,15 +620,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { request: accessRequest ?? null });
         return;
       }
-      if (pathname === "/api/admin/teams" && method === "GET") {
-        await json(route, { teams: server.state.adminTeams });
-        return;
-      }
-      if (
-        /^\/api\/admin\/teams\/[^/]+$/.test(pathname) &&
-        method === "DELETE"
-      ) {
-        await noContent(route);
+      if (pathname === "/api/admin/organizations" && method === "GET") {
+        await json(route, {
+          organizations: server.state.adminOrganizations,
+        });
         return;
       }
 

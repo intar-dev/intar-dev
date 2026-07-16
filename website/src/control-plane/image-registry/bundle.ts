@@ -402,6 +402,12 @@ export function inspectTarArchive(bytes: Uint8Array): TarInspectionResult {
 
     const typeflag = String.fromCharCode(header[156] ?? 0);
     if (typeflag === "\0" || typeflag === "0") {
+      if (files.has(path)) {
+        return {
+          ok: false,
+          error: `bundle archive contains duplicate file ${path}`,
+        };
+      }
       files.add(path);
     } else if (typeflag === "5") {
       // Directory entry.

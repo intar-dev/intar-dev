@@ -17,7 +17,8 @@ import { AppShell } from "./shell/AppShell";
 import { validateSearch as validateCatalogSearch } from "./pages/learn/catalog-search";
 import {
   validateAdminPeopleSearch,
-  validateTeamDetailSearch,
+  validateOrganizationDetailSearch,
+  validateScenarioBriefingSearch,
 } from "./pages/tab-search";
 import { getClientSession } from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
@@ -78,6 +79,34 @@ const oauthConsentRoute = createRoute({
   ),
 });
 
+const organizationSignInRoute = createRoute({
+  getParentRoute: () => marketingLayoutRoute,
+  path: "organization-sign-in",
+  head: () =>
+    routeHead(
+      "Organization sign-in",
+      "Sign in through your organization identity provider.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationSignIn"),
+    "OrganizationSignIn",
+  ),
+});
+
+const organizationDirectSignInRoute = createRoute({
+  getParentRoute: () => marketingLayoutRoute,
+  path: "organizations/$organizationSlug/sign-in",
+  head: () =>
+    routeHead(
+      "Organization sign-in",
+      "Continue to your organization identity provider.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationSignIn"),
+    "OrganizationSignIn",
+  ),
+});
+
 /* -------------------------------------------------------------------------- */
 /* App surface (signed-in, dark). Guard lives here, once.                     */
 /* -------------------------------------------------------------------------- */
@@ -111,6 +140,7 @@ const scenarioCatalogRoute = createRoute({
 const scenarioBriefingRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
   path: "scenarios/$scenarioId",
+  validateSearch: validateScenarioBriefingSearch,
   head: () =>
     routeHead(
       "Scenario briefing",
@@ -144,29 +174,32 @@ const runsListRoute = createRoute({
   component: lazyRouteComponent(() => import("./pages/RunsList"), "RunsList"),
 });
 
-const teamsRoute = createRoute({
+const organizationsRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "teams",
+  path: "organizations",
   head: () =>
     routeHead(
-      "Teams",
-      "Review invitations and collaborate on systems learning assignments.",
-    ),
-  component: lazyRouteComponent(() => import("./pages/Teams"), "Teams"),
-});
-
-const teamDetailRoute = createRoute({
-  getParentRoute: () => appLayoutRoute,
-  path: "teams/$orgId",
-  validateSearch: validateTeamDetailSearch,
-  head: () =>
-    routeHead(
-      "Team workspace",
-      "Manage people, assignments, progress, and team settings.",
+      "Organizations",
+      "Open your organization workspace and private scenario catalog.",
     ),
   component: lazyRouteComponent(
-    () => import("./pages/TeamDetail"),
-    "TeamDetail",
+    () => import("./pages/Organizations"),
+    "Organizations",
+  ),
+});
+
+const organizationDetailRoute = createRoute({
+  getParentRoute: () => appLayoutRoute,
+  path: "organizations/$orgId",
+  validateSearch: validateOrganizationDetailSearch,
+  head: () =>
+    routeHead(
+      "Organization workspace",
+      "Manage identity, private scenarios, runners, people, and progress.",
+    ),
+  component: lazyRouteComponent(
+    () => import("./pages/OrganizationDetail"),
+    "OrganizationDetail",
   ),
 });
 
@@ -192,10 +225,7 @@ const adminOverviewRoute = createRoute({
       "Monitor platform exceptions, live work, and scenario availability.",
     ),
   beforeLoad: requireAdminRoute,
-  component: lazyRouteComponent(
-    () => import("./pages/Dashboard"),
-    "Dashboard",
-  ),
+  component: lazyRouteComponent(() => import("./pages/Dashboard"), "Dashboard"),
 });
 
 const adminHostsRoute = createRoute({
@@ -259,7 +289,7 @@ const adminPeopleRoute = createRoute({
   head: () =>
     routeHead(
       "People and access",
-      "Review access requests, users, and platform teams.",
+      "Review access requests, users, and platform organizations.",
     ),
   beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(
@@ -288,14 +318,16 @@ const routeTree = rootRoute.addChildren([
     indexRoute,
     requestAccessRoute,
     oauthConsentRoute,
+    organizationSignInRoute,
+    organizationDirectSignInRoute,
   ]),
   appLayoutRoute.addChildren([
     scenarioCatalogRoute,
     scenarioBriefingRoute,
     scenarioRunRoute,
     runsListRoute,
-    teamsRoute,
-    teamDetailRoute,
+    organizationsRoute,
+    organizationDetailRoute,
     profileRoute,
     adminOverviewRoute,
     adminHostsRoute,
@@ -394,8 +426,8 @@ function AppRouteNotFound() {
           <p className="text-eyebrow">Unknown work order</p>
           <p className="text-page-title">That route is not in the manual</p>
           <p className="text-sm leading-6 text-muted-foreground">
-            Check the address, or return to the scenario catalog to choose
-            your next repair.
+            Check the address, or return to the scenario catalog to choose your
+            next repair.
           </p>
         </div>
         <Button render={<Link to="/scenarios" />}>Browse scenarios</Button>
