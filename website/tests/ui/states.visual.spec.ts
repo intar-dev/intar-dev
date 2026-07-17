@@ -12,7 +12,9 @@ const runStates = [
   "solved",
   "failed",
   "ending",
+  "rendering",
   "archived",
+  "replay-failed",
   "replay",
 ] as const;
 
@@ -29,6 +31,26 @@ test.describe("focused visual states", () => {
       await expectRouteScreenshot(page, `run-${runState}-dark-desktop`);
     });
   }
+
+  test("run · ending · light", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "light",
+      runState: "ending",
+    });
+    await expectRouteScreenshot(page, "run-ending-light-desktop");
+  });
+
+  test("run · inline replay", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
+    await expectRouteScreenshot(page, "run-replay-inline-dark-desktop");
+  });
 
   test("runs · finishing in background", async ({ page, ui }) => {
     await ui.open({
@@ -216,6 +238,26 @@ test.describe("focused mobile workspace", () => {
       .getByRole("button", { name: /Work order and briefing/i })
       .click();
     await expectRouteScreenshot(page, "run-startup-work-order-dark-mobile");
+  });
+
+  test("run ending timeline", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+    await expectRouteScreenshot(page, "run-ending-dark-mobile");
+  });
+
+  test("run inline replay", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await expect(page.locator(".run-artifact-player .ap-player")).toBeVisible();
+    await expectRouteScreenshot(page, "run-replay-inline-dark-mobile");
   });
 });
 

@@ -18,9 +18,13 @@ export interface ProbeSnapshotsResponse {
   snapshots: ProbeSnapshotRow[];
 }
 
-// Shared probe-snapshots fetch (ObjectiveTimeline + ResolutionCard). Only
-// mounted components fetch, keeping it off the run page's hot polling path.
-export function useProbeSnapshots(runId: string) {
+// Shared probe-snapshots fetch (ObjectiveTimeline, ResolutionCard, and the
+// archived run timeline). Only mounted components fetch, keeping it off the
+// active run page's hot polling path.
+export function useProbeSnapshots(
+  runId: string,
+  options?: { refetchOnMount?: boolean | "always" },
+) {
   return useQuery({
     queryKey: ["scenario-run", runId, "probe-snapshots"],
     queryFn: async () => {
@@ -39,6 +43,9 @@ export function useProbeSnapshots(runId: string) {
       return (await response.json()) as ProbeSnapshotsResponse;
     },
     staleTime: 15_000,
+    ...(options?.refetchOnMount === undefined
+      ? {}
+      : { refetchOnMount: options.refetchOnMount }),
   });
 }
 

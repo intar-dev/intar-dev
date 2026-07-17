@@ -12,7 +12,9 @@ export type RunFixtureState =
   | "solved"
   | "failed"
   | "ending"
+  | "rendering"
   | "archived"
+  | "replay-failed"
   | "replay";
 
 export type TerminalMode = "connected" | "disconnected" | "error";
@@ -209,6 +211,7 @@ export function runListEntry(input: {
   createdAt: number;
   solvedAt?: number | null;
   hasReplay?: boolean;
+  replayState?: "not_started" | "preparing" | "ready" | "none" | "failed";
   activity?: "foreground" | "background" | "settled";
 }) {
   const activity = input.activity ?? (input.active ? "foreground" : "settled");
@@ -224,13 +227,15 @@ export function runListEntry(input: {
     activity,
     deleteRequestedAt:
       activity === "foreground" ? null : input.createdAt + minute,
-    replayState: input.hasReplay
-      ? "ready"
-      : activity === "background"
-        ? "preparing"
-        : activity === "settled"
-          ? "none"
-          : "not_started",
+    replayState:
+      input.replayState ??
+      (input.hasReplay
+        ? "ready"
+        : activity === "background"
+          ? "preparing"
+          : activity === "settled"
+            ? "none"
+            : "not_started"),
     createdAt: input.createdAt,
     finishedAt: input.active ? null : input.createdAt + 31 * minute,
     solvedAt: input.solvedAt ?? null,
@@ -295,6 +300,16 @@ export function runLifecycle(state: RunFixtureState) {
       };
     case "ending":
       return {
+        runPhase: "teardown_requested",
+        vmPhase: "destroying",
+        progress: 88,
+        terminal: "pending",
+        canOpenTerminal: false,
+        canDestroy: false,
+        outcome: "in_progress",
+      };
+    case "rendering":
+      return {
         runPhase: "archiving",
         vmPhase: "archived",
         progress: 96,
@@ -304,6 +319,7 @@ export function runLifecycle(state: RunFixtureState) {
         outcome: "in_progress",
       };
     case "archived":
+    case "replay-failed":
     case "replay":
       return {
         runPhase: "completed",

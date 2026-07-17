@@ -30,20 +30,18 @@ describe("scenario run replay state", () => {
     expect(deriveScenarioRunReplayState(state("active_full"))).toBe(
       "not_started",
     );
-    expect(deriveScenarioRunReplayState(state("archiving"))).toBe(
-      "preparing",
-    );
+    expect(deriveScenarioRunReplayState(state("archiving"))).toBe("preparing");
     expect(
       deriveScenarioRunReplayState(
         state("completed", {
           hasRecording: true,
           sessionTimeline: [
             {
-              index: 0,
+              index: 1,
               startTimestampMs: 10,
               durationMs: 20,
               exitCode: 0,
-              castFilename: "session.cast",
+              castFilename: "session-01.cast",
               castArtifactId: "artifact-1",
               transcriptTruncated: false,
             },
@@ -62,7 +60,9 @@ describe("scenario run replay state", () => {
 
 function state(
   phase: RunPhase,
-  vmOverrides: Partial<ReturnType<typeof buildInitialRunState>["vms"][number]> = {},
+  vmOverrides: Partial<
+    ReturnType<typeof buildInitialRunState>["vms"][number]
+  > = {},
 ) {
   const initial = buildInitialRunState({
     vms: [

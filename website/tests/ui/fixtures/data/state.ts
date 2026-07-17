@@ -253,6 +253,13 @@ export function createMockApiState(input?: {
       outcome: String(run.outcome),
       active: Boolean(run.active),
       activity: runActivity,
+      replayState: run.replayState as
+        | "not_started"
+        | "preparing"
+        | "ready"
+        | "none"
+        | "failed",
+      hasReplay: Boolean(run.hasReplay),
       createdAt: FIXED_NOW - 35 * minute,
     }),
     runListEntry({

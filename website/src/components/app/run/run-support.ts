@@ -1,5 +1,5 @@
-// Pure helpers for the scenario run page: formatters, boot/shutdown step
-// derivation, screen copy, and probe-value summaries.
+// Pure helpers for the scenario run page: formatters, boot-step derivation,
+// screen copy, and probe-value summaries.
 
 import { summarizeProbeValue } from "@/lib/probe-values";
 import type {
@@ -71,13 +71,12 @@ export function buildScenarioBootSteps(
   const vm = selectedVm ?? attempt.vms[0] ?? null;
   const shellReady = Boolean(vm && hasUsableTerminalTarget(vm));
   const vmFailed = vm?.phase === "failed";
-  const vmStarting =
-    !vm || vm.phase === "launching" || vm.phase === "booting";
+  const vmStarting = !vm || vm.phase === "launching" || vm.phase === "booting";
   const bootChecksComplete = Boolean(
     vm &&
-      (vm.bootProbes.length > 0
-        ? vm.bootProbes.every((probe) => probe.status === "pass")
-        : vm.canOpenTerminal),
+    (vm.bootProbes.length > 0
+      ? vm.bootProbes.every((probe) => probe.status === "pass")
+      : vm.canOpenTerminal),
   );
   const workspaceCheckStarted = Boolean(
     vm && vm.phase !== "launching" && vm.phase !== "booting",
@@ -135,68 +134,6 @@ export function buildScenarioBootSteps(
   ];
 }
 
-export function buildScenarioShutdownSteps(
-  attempt: ScenarioRunRecord | null,
-): ScenarioStatusStep[] {
-  if (!attempt) {
-    return [];
-  }
-
-  const workspaceStopped =
-    attempt.phase === "archiving" || attempt.phase === "completed";
-  const recordingUploaded = attempt.vms.some(
-    (vm) => vm.hasRecording === true,
-  );
-  const runSaved = attempt.phase === "completed";
-
-  return [
-    {
-      id: "shutdown-workspace",
-      label: "Shutting down workspace",
-      detail: workspaceStopped
-        ? "The VM is no longer running."
-        : "Revoking shell access and removing the VM.",
-      state: workspaceStopped ? "done" : "active",
-    },
-    {
-      id: "saving-run",
-      label: "Saving run",
-      detail: runSaved
-        ? "Run history and artifacts are saved."
-        : workspaceStopped
-          ? "Saving checks, logs, and terminal recordings."
-          : "Saving starts after the VM is gone.",
-      state: runSaved
-        ? "done"
-        : workspaceStopped
-          ? "active"
-          : "pending",
-    },
-    {
-      id: "preparing-replay",
-      label: "Preparing replay",
-      detail:
-        attempt.replayState === "ready"
-          ? "The terminal replay is ready."
-          : attempt.replayState === "none"
-            ? "No terminal session was recorded."
-            : attempt.replayState === "failed"
-              ? "The replay could not be prepared."
-              : recordingUploaded
-                ? "Building the terminal session timeline."
-                : "Replay preparation follows the run save.",
-      state:
-        attempt.replayState === "ready" || attempt.replayState === "none"
-          ? "done"
-          : attempt.replayState === "failed"
-            ? "failed"
-            : recordingUploaded
-              ? "active"
-              : "pending",
-    },
-  ];
-}
-
 export function formatScenarioStepState(state: ScenarioStatusStep["state"]) {
   switch (state) {
     case "done":
@@ -215,17 +152,6 @@ export function getScenarioBootScreenCopy(attempt: ScenarioRunRecord | null) {
   return {
     title: "Preparing your workspace",
     description: "Review the work order while the VM starts.",
-  };
-}
-
-export function getScenarioShutdownScreenCopy(
-  attempt: ScenarioRunRecord | null,
-) {
-  void attempt;
-  return {
-    title: "Finishing in the background",
-    description:
-      "This run no longer blocks another lab. You can return to scenarios while cleanup continues.",
   };
 }
 

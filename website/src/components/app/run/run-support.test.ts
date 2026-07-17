@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildScenarioBootSteps,
-  buildScenarioShutdownSteps,
   hasPendingInfrastructureTeardown,
 } from "./run-support";
 import type { ScenarioRunRecord, ScenarioRunVmRecord } from "./run-types";
@@ -17,15 +16,13 @@ describe("hasPendingInfrastructureTeardown", () => {
   });
 
   it("does not treat a failed VM as teardown-complete", () => {
-    expect(
-      hasPendingInfrastructureTeardown([{ phase: "failed" }]),
-    ).toBe(true);
+    expect(hasPendingInfrastructureTeardown([{ phase: "failed" }])).toBe(true);
   });
 
   it("allows archival deletion only after every VM is completed", () => {
-    expect(
-      hasPendingInfrastructureTeardown([{ phase: "completed" }]),
-    ).toBe(false);
+    expect(hasPendingInfrastructureTeardown([{ phase: "completed" }])).toBe(
+      false,
+    );
   });
 });
 
@@ -53,29 +50,10 @@ describe("scenario startup milestones", () => {
     const booting = runVm({ id: "vm-booting", phase: "booting" });
 
     const readySteps = buildScenarioBootSteps(run([ready, booting]), ready);
-    const bootingSteps = buildScenarioBootSteps(
-      run([ready, booting]),
-      booting,
-    );
+    const bootingSteps = buildScenarioBootSteps(run([ready, booting]), booting);
 
     expect(readySteps.at(-1)?.state).toBe("done");
     expect(bootingSteps.at(-1)?.state).toBe("pending");
-  });
-});
-
-describe("scenario shutdown milestones", () => {
-  it("shows shutdown, save, and replay preparation as separate work", () => {
-    const attempt = run([runVm({ phase: "archiving", hasRecording: true })], {
-      phase: "archiving",
-      activity: "background",
-      replayState: "preparing",
-    });
-
-    expect(buildScenarioShutdownSteps(attempt)).toEqual([
-      expect.objectContaining({ label: "Shutting down workspace", state: "done" }),
-      expect.objectContaining({ label: "Saving run", state: "active" }),
-      expect.objectContaining({ label: "Preparing replay", state: "active" }),
-    ]);
   });
 });
 
@@ -96,14 +74,11 @@ function run(
   } as ScenarioRunRecord;
 }
 
-function runVm(
-  input: {
-    id?: string;
-    phase: ScenarioRunVmRecord["phase"];
-    ready?: boolean;
-    hasRecording?: boolean;
-  },
-): ScenarioRunVmRecord {
+function runVm(input: {
+  id?: string;
+  phase: ScenarioRunVmRecord["phase"];
+  ready?: boolean;
+}): ScenarioRunVmRecord {
   return {
     id: input.id ?? "vm-1",
     ordinal: 0,
@@ -128,9 +103,6 @@ function runVm(
     scenarioProbes: [],
     replayArtifacts: [],
     sessionTimeline: null,
-    ...(input.hasRecording === undefined
-      ? {}
-      : { hasRecording: input.hasRecording }),
     provisioning: {
       image: null,
       imageKey: null,

@@ -137,6 +137,30 @@ test.describe("focused state accessibility", () => {
     await expect(page.getByRole("progressbar")).toHaveCount(0);
     await expectNoAxeViolations(page, testInfo);
   });
+
+  for (const runState of [
+    "ending",
+    "rendering",
+    "replay-failed",
+    "replay",
+  ] as const) {
+    test(`run timeline · ${runState}`, async ({ page, ui }, testInfo) => {
+      await ui.open({
+        ...routeCase("run-workspace"),
+        theme: "dark",
+        runState,
+      });
+
+      await expect(
+        page.getByRole("heading", { name: "Run timeline" }),
+      ).toBeVisible();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await expect(
+        page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
+      ).toHaveCount(runState === "ending" || runState === "rendering" ? 1 : 0);
+      await expectNoAxeViolations(page, testInfo);
+    });
+  }
 });
 
 test.describe("focused mobile state accessibility", () => {
@@ -176,6 +200,22 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       page.getByRole("heading", { name: "Work order and briefing" }),
     ).toBeVisible();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("run ending timeline", async ({ page, ui }, testInfo) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "ending",
+    });
+
+    await expect(
+      page.getByRole("heading", { name: "Run timeline" }),
+    ).toBeVisible();
+    await expect(
+      page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
+    ).toHaveCount(1);
     await expectNoAxeViolations(page, testInfo);
   });
 });
