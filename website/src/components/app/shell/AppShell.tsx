@@ -4,7 +4,6 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./AppSidebar";
 import { AppBar } from "./AppBar";
 import { PageChromeProvider } from "./page-chrome";
-import { RunActivityProvider } from "./RunActivityProvider";
 
 // The authenticated app surface. Theme follows the user's choice (or system
 // preference) via the `.dark` class on <html> — no per-surface mood forcing.
@@ -27,27 +26,25 @@ export function AppShell() {
 
   return (
     <PageChromeProvider>
-      <RunActivityProvider>
-        <SidebarProvider>
-          <a
-            href="#main-content"
-            className="fixed top-3 left-3 z-[100] inline-flex min-h-11 -translate-y-24 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-md transition-transform focus:translate-y-0 motion-reduce:transition-none"
+      <SidebarProvider>
+        <a
+          href="#main-content"
+          className="fixed top-3 left-3 z-[100] inline-flex min-h-11 -translate-y-24 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-md transition-transform focus:translate-y-0 motion-reduce:transition-none"
+        >
+          Skip to main content
+        </a>
+        <AppSidebar />
+        <SidebarInset>
+          <AppBar />
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className="flex flex-1 flex-col focus:outline-none"
           >
-            Skip to main content
-          </a>
-          <AppSidebar />
-          <SidebarInset>
-            <AppBar />
-            <main
-              id="main-content"
-              tabIndex={-1}
-              className="flex flex-1 flex-col focus:outline-none"
-            >
-              <Outlet />
-            </main>
-          </SidebarInset>
-        </SidebarProvider>
-      </RunActivityProvider>
+            <Outlet />
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
     </PageChromeProvider>
   );
 }

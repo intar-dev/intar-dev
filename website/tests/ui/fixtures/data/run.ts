@@ -11,8 +11,9 @@ import {
 
 export function makeRun(state: RunFixtureState): Record<string, unknown> {
   const lifecycle = runLifecycle(state);
-  const complete = state === "archived" || state === "replay";
-  const background = state === "ending";
+  const complete =
+    state === "archived" || state === "replay-failed" || state === "replay";
+  const background = state === "ending" || state === "rendering";
   const solved = state === "solved" || complete;
   const ready = lifecycle.terminal === "ready";
   const bootProbe = {
@@ -57,8 +58,8 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
             hostId: "host-eu-1",
             runId: "run-active",
             vmId: "run-vm-web",
-            kind: "asciicast",
-            filename: "session.cast",
+            kind: "ssh_recording_segment",
+            filename: "session-01.cast",
             contentType: "application/x-asciicast",
             sizeBytes: 512,
           },
@@ -116,16 +117,17 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
       : complete || state === "failed"
         ? "settled"
         : "foreground",
-    deleteRequestedAt:
-      background || complete ? FIXED_NOW - 2 * minute : null,
+    deleteRequestedAt: background || complete ? FIXED_NOW - 2 * minute : null,
     replayState:
       state === "replay"
         ? "ready"
-        : state === "ending"
-          ? "preparing"
-          : complete || state === "failed"
-            ? "none"
-            : "not_started",
+        : state === "replay-failed"
+          ? "failed"
+          : background
+            ? "preparing"
+            : complete || state === "failed"
+              ? "none"
+              : "not_started",
     hasReplay: state === "replay",
     createdAt: FIXED_NOW - 35 * minute,
     updatedAt: FIXED_NOW - minute,
@@ -166,17 +168,20 @@ export function makeRun(state: RunFixtureState): Record<string, unknown> {
           state === "replay"
             ? [
                 {
-                  index: 0,
+                  index: 1,
                   startTimestampMs: FIXED_NOW - 30 * minute,
                   durationMs: 18 * minute,
                   exitCode: 0,
-                  castFilename: "session.cast",
+                  castFilename: "session-01.cast",
                   castArtifactId: "artifact-cast-1",
                   transcriptTruncated: false,
                 },
               ]
             : null,
-        hasRecording: state === "replay",
+        hasRecording:
+          state === "rendering" ||
+          state === "replay-failed" ||
+          state === "replay",
         terminalTarget,
         guestIp: ready ? "10.40.0.18" : null,
         launchSummary: {

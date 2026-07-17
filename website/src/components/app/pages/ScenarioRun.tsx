@@ -1,36 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Maximize2, Minimize2, Trash2 } from "lucide-react";
+import { Maximize2, Minimize2, Trash2 } from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import { StatusToken } from "@/components/app/patterns/StatusToken";
 import { RunStatusDock } from "@/components/app/patterns/RunStatusDock";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
-import { useRunActivity } from "@/components/app/shell/RunActivityProvider";
 import { WebSshTerminal } from "@/components/remote-access/WebSshTerminal";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { presentScenarioRun } from "@/lib/run-phase";
-import { SessionTimeline } from "@/components/app/run/SessionTimeline";
 import { RunDetailsSection } from "@/components/app/run/RunDetailsSection";
-import { ObjectiveTimeline } from "@/components/app/run/ObjectiveTimeline";
+import { RunTimeline } from "@/components/app/run/RunTimeline";
 import { computeLeaseDeadline } from "@/lib/run-lease";
 import { LeaseCountdown } from "@/components/app/run/LeaseCountdown";
 import { ChecksSection, RunConsole } from "@/components/app/run/RunConsole";
 import { AssistDrawer } from "@/components/app/run/AssistDrawer";
-import {
-  ProbePassToasts,
-  useProbePassEvents,
-} from "@/components/app/run/ProbePassToasts";
 import { ResolutionCard } from "@/components/app/run/ResolutionCard";
 import {
   DeleteRunDialog,
@@ -43,10 +30,8 @@ import {
 } from "@/components/app/run/StatusScreens";
 import {
   buildScenarioBootSteps,
-  buildScenarioShutdownSteps,
   formatScenarioDurationMs,
   getScenarioBootScreenCopy,
-  getScenarioShutdownScreenCopy,
   hasPendingInfrastructureTeardown,
   hasUsableTerminalTarget,
 } from "@/components/app/run/run-support";
@@ -61,7 +46,6 @@ import { cn } from "@/lib/utils";
 export function ScenarioRun() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { notify } = useRunActivity();
   const { runId } = useParams({ from: "/app/runs/$runId" });
   const [selectedVmId, setSelectedVmId] = useState<string | null>(null);
   const [terminalVisible, setTerminalVisible] = useState(false);
@@ -69,6 +53,8 @@ export function ScenarioRun() {
   const [deleteRunDialogOpen, setDeleteRunDialogOpen] = useState(false);
   const [sshDialogOpen, setSshDialogOpen] = useState(false);
   const [maximized, setMaximized] = useState(false);
+  const timelineHeadingRef = useRef<HTMLHeadingElement>(null);
+  const focusTimelineAfterShutdownRef = useRef(false);
   const desktopRunRail = useDesktopRunRail();
 
   const attempt = useQuery({
@@ -148,24 +134,17 @@ export function ScenarioRun() {
 
       return body;
     },
-    onSuccess: async (body) => {
+    onSuccess: (body) => {
+      focusTimelineAfterShutdownRef.current = true;
       queryClient.setQueryData(["scenarios", "run", runId], {
         run: presentScenarioRun(body.run),
       });
       setCancelDialogOpen(false);
       setTerminalVisible(false);
-      notify({
-        id: `ending:${runId}:${body.acceptedAt}`,
-        title: "Run is ending in the background.",
-        description: "You can choose another lab now.",
-        tone: "info",
-        runId,
-        actionLabel: "View progress",
-      });
-      void queryClient.invalidateQueries({ queryKey: ["scenarios", "run", runId] });
       void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["scenario-runs", "list"] });
-      await navigate({ to: "/scenarios" });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenario-runs", "list"],
+      });
     },
   });
 
@@ -191,7 +170,9 @@ export function ScenarioRun() {
     onSuccess: async () => {
       setDeleteRunDialogOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["scenarios", "list"] });
-      void queryClient.invalidateQueries({ queryKey: ["scenario-runs", "list"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["scenario-runs", "list"],
+      });
       if (attemptData?.scenarioId) {
         await navigate({
           to: "/scenarios/$scenarioId",
@@ -215,9 +196,10 @@ export function ScenarioRun() {
           body: JSON.stringify({ hintKey }),
         },
       );
-      const body = (await response.json().catch(() => null)) as
-        | { run?: Parameters<typeof presentScenarioRun>[0]; error?: string }
-        | null;
+      const body = (await response.json().catch(() => null)) as {
+        run?: Parameters<typeof presentScenarioRun>[0];
+        error?: string;
+      } | null;
       if (!response.ok || !body?.run) {
         throw new Error(body?.error ?? "Failed to reveal hint");
       }
@@ -237,9 +219,10 @@ export function ScenarioRun() {
           credentials: "include",
         },
       );
-      const body = (await response.json().catch(() => null)) as
-        | { run?: Parameters<typeof presentScenarioRun>[0]; error?: string }
-        | null;
+      const body = (await response.json().catch(() => null)) as {
+        run?: Parameters<typeof presentScenarioRun>[0];
+        error?: string;
+      } | null;
       if (!response.ok || !body?.run) {
         throw new Error(body?.error ?? "Failed to reveal solution");
       }
@@ -267,16 +250,16 @@ export function ScenarioRun() {
   );
   const showSelectedVmPreparation = Boolean(
     attemptData &&
-      !selectedVmShellReady &&
-      (!selectedVm ||
-        selectedVm.phase === "launching" ||
-        selectedVm.phase === "booting" ||
-        selectedVm.phase === "waiting_for_target"),
+    !selectedVmShellReady &&
+    (!selectedVm ||
+      selectedVm.phase === "launching" ||
+      selectedVm.phase === "booting" ||
+      selectedVm.phase === "waiting_for_target"),
   );
   const showBackgroundStatus = attemptData?.activity === "background";
   const acceptanceRetryNeeded = Boolean(
     attemptData?.activity === "foreground" &&
-      attemptData.deleteRequestedAt !== null,
+    attemptData.deleteRequestedAt !== null,
   );
   const showCancelAction =
     attemptData !== null &&
@@ -301,9 +284,9 @@ export function ScenarioRun() {
   const currentProbe =
     selectedProbes.find((probe) => probe.status !== "pass") ?? null;
   const currentObjective = currentProbe
-    ? attemptData?.objectives.find(
+    ? (attemptData?.objectives.find(
         (objective) => objective.probeName === currentProbe.id,
-      ) ?? null
+      ) ?? null)
     : null;
   const currentCheckLabel =
     selectedProbes.length > 0 && passedCheckCount === selectedProbes.length
@@ -315,11 +298,6 @@ export function ScenarioRun() {
   const infrastructureTeardownPending = Boolean(
     attemptData && hasPendingInfrastructureTeardown(attemptData.vms),
   );
-  const probePassToasts = useProbePassEvents(
-    attemptData?.vms,
-    attemptData?.objectives,
-    attemptData?.phase === "running",
-  );
   const canDeleteRun =
     attemptData !== null &&
     (attemptData.phase === "completed" || attemptData.phase === "failed") &&
@@ -329,16 +307,8 @@ export function ScenarioRun() {
     () => buildScenarioBootSteps(attemptData, selectedVm),
     [attemptData, selectedVm],
   );
-  const shutdownSteps = useMemo(
-    () => buildScenarioShutdownSteps(attemptData),
-    [attemptData],
-  );
   const bootScreenCopy = useMemo(
     () => getScenarioBootScreenCopy(attemptData),
-    [attemptData],
-  );
-  const shutdownScreenCopy = useMemo(
-    () => getScenarioShutdownScreenCopy(attemptData),
     [attemptData],
   );
   const selectedVmSessionRequest = useMemo(
@@ -357,6 +327,22 @@ export function ScenarioRun() {
       setTerminalVisible(true);
     }
   }, [selectedVmShellReady]);
+
+  useEffect(() => {
+    if (
+      !focusTimelineAfterShutdownRef.current ||
+      !attemptData ||
+      attemptData.activity === "foreground"
+    ) {
+      return;
+    }
+
+    focusTimelineAfterShutdownRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      timelineHeadingRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [attemptData?.activity]);
 
   useEffect(() => {
     if (!attemptData?.vms.length) {
@@ -393,9 +379,9 @@ export function ScenarioRun() {
     !showBackgroundStatus;
   const showSshMenuItem = Boolean(
     selectedVm &&
-      selectedVmSessionRequest &&
-      attemptData?.outcome === "in_progress" &&
-      attemptData.activity === "foreground",
+    selectedVmSessionRequest &&
+    attemptData?.outcome === "in_progress" &&
+    attemptData.activity === "foreground",
   );
 
   usePageChrome({
@@ -665,7 +651,7 @@ export function ScenarioRun() {
               solution={attemptData.solution}
               onRevealHint={(hintKey) => revealHint.mutate(hintKey)}
               pendingHintKey={
-                revealHint.isPending ? revealHint.variables ?? null : null
+                revealHint.isPending ? (revealHint.variables ?? null) : null
               }
               hintError={
                 revealHint.error instanceof Error
@@ -719,84 +705,12 @@ export function ScenarioRun() {
     </>
   );
 
-  if (attemptData && showBackgroundStatus) {
-    return (
-      <PageShell width="content">
-        {errorAlerts}
-        <div>
-          <Button
-            type="button"
-            variant="outline"
-            className="min-h-11"
-            onClick={() => void navigate({ to: "/scenarios" })}
-          >
-            <ArrowLeft className="size-4" />
-            Back to scenarios
-          </Button>
-        </div>
-        <ScenarioStepScreen
-          title={shutdownScreenCopy.title}
-          description={shutdownScreenCopy.description}
-          steps={shutdownSteps}
-          topRight={
-            <StatusToken
-              tone="pending"
-              word={attemptData.phaseTitle}
-              pulse
-              clock={{
-                startedAt:
-                  attemptData.deleteRequestedAt ?? attemptData.updatedAt,
-              }}
-            />
-          }
-        />
-      </PageShell>
-    );
-  }
-
-  // Completed runs are a reading surface — replay transcripts want the page
-  // scroll back, not a fixed frame.
-  if (attemptData?.phase === "completed") {
+  if (attemptData && attemptData.activity !== "foreground") {
     return (
       <PageShell width="content">
         {runDialogs}
         {errorAlerts}
-        <div className="flex flex-wrap items-center gap-3">
-          {attemptData.outcome === "succeeded" ? (
-            <StatusToken
-              tone="success"
-              word="Solved"
-              elapsed={
-                attemptData.solveDurationMs !== null
-                  ? formatScenarioDurationMs(attemptData.solveDurationMs)
-                  : null
-              }
-            />
-          ) : attemptData.outcome === "failed" ? (
-            <StatusToken tone="danger" word="Failed" />
-          ) : (
-            <StatusToken tone="muted" word="Ended early" />
-          )}
-        </div>
-        {attemptData.vms.length > 1 ? (
-          <ScenarioVmSelector
-            vms={attemptData.vms}
-            selectedVmId={selectedVmId}
-            onSelect={setSelectedVmId}
-          />
-        ) : null}
-        <SessionTimeline runId={runId} vm={selectedVm} />
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle className="font-heading text-base">Timeline</CardTitle>
-            <CardDescription>
-              When each check flipped during this run.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ObjectiveTimeline runId={runId} />
-          </CardContent>
-        </Card>
+        <RunTimeline run={attemptData} headingRef={timelineHeadingRef} />
       </PageShell>
     );
   }
@@ -843,7 +757,6 @@ export function ScenarioRun() {
                     </>
                   }
                 />
-                <ProbePassToasts toasts={probePassToasts} />
               </div>
             ) : (
               <div className="relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
@@ -885,7 +798,6 @@ export function ScenarioRun() {
                     />
                   </>
                 )}
-                <ProbePassToasts toasts={probePassToasts} />
               </div>
             )}
 
@@ -919,7 +831,7 @@ export function ScenarioRun() {
               }
               status={
                 showSelectedVmPreparation
-                  ? selectedVm?.phaseDetail ?? attemptData.phaseDetail
+                  ? (selectedVm?.phaseDetail ?? attemptData.phaseDetail)
                   : selectedProbes.length
                     ? `${passedCheckCount}/${selectedProbes.length} checks · ${currentCheckLabel}`
                     : attemptData.phaseDetail

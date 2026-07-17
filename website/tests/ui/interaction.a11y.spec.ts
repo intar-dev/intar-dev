@@ -258,6 +258,22 @@ test.describe("coarse pointer and mobile overflow", () => {
     });
     await expectNoHorizontalOverflow(page);
   });
+
+  test("inline replay stays inside the mobile timeline", async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      runState: "replay",
+    });
+
+    await page.getByRole("button", { name: "Replay", exact: true }).click();
+    await expect(page.locator(".run-artifact-player")).toBeVisible();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+  });
 });
 
 test("200% text remains operable without page overflow", async ({

@@ -368,7 +368,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await route.fulfill({
           status: 200,
           contentType: "text/plain; charset=utf-8",
-          body: '{"version":2,"width":120,"height":30,"timestamp":1783670400,"env":{"TERM":"xterm-256color"}}\n[0.1,"o","$ systemctl status nginx\\r\\n"]\n',
+          body: '{"version":2,"width":120,"height":30,"timestamp":1783670400,"env":{"TERM":"xterm-256color"}}\n[0.05,"o","$ "]\n[0.1,"i","systemctl status nginx\\r"]\n[0.2,"o","systemctl status nginx\\r\\n"]\n',
         });
         return;
       }
