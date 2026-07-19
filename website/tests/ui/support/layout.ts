@@ -206,3 +206,46 @@ export async function expectTimelineMarkerTitleAlignment(
     }
   }
 }
+
+export async function expectTimelineSurfaceWidths(
+  page: Page,
+  toleranceCssPixels = 2,
+) {
+  const measurements = await page
+    .locator("[data-timeline-surface]")
+    .evaluateAll((surfaces) =>
+      surfaces.map((surface, index) => {
+        const rect = surface.getBoundingClientRect();
+        return {
+          index,
+          label:
+            surface.getAttribute("data-timeline-surface") ??
+            surface.textContent?.trim().replace(/\s+/g, " ").slice(0, 80) ??
+            surface.tagName,
+          left: rect.left,
+          right: rect.right,
+          width: rect.width,
+        };
+      }),
+    );
+
+  expect(
+    measurements.length,
+    "timeline must contain at least two structured-content surfaces",
+  ).toBeGreaterThanOrEqual(2);
+
+  const [reference, ...remaining] = measurements;
+  if (!reference) {
+    throw new Error("timeline has no structured-content surfaces");
+  }
+
+  for (const measurement of remaining) {
+    for (const edge of ["left", "right", "width"] as const) {
+      const delta = Math.abs(measurement[edge] - reference[edge]);
+      expect(
+        delta,
+        `timeline surface ${measurement.index + 1} (${measurement.label}) ${edge} differs from ${reference.label} by ${delta.toFixed(2)} CSS pixels`,
+      ).toBeLessThanOrEqual(toleranceCssPixels);
+    }
+  }
+}
