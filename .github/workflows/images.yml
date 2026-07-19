@@ -91,11 +91,16 @@ jobs:
       - name: Build kino guest
         run: just build-kino-guest
 
+      - name: Verify public scenario allowlist
+        run: |
+          test "$(find scenarios -mindepth 2 -maxdepth 2 -type f -name scenario.hcl -print | LC_ALL=C sort)" = \
+            "scenarios/broken-nginx/scenario.hcl"
+
       - name: Validate scenario definitions
         run: just validate-images
 
-      - name: Render image build inputs
-        run: just render-images "" builder.sample.amd64.hcl
+      - name: Render public image build input
+        run: just render-images broken-nginx builder.sample.amd64.hcl
 
       - name: Verify bundle upload token
         if: github.event_name == 'workflow_run'
@@ -113,4 +118,4 @@ jobs:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
           revision="${SOURCE_SHA:0:12}"
-          just bundle-images "" builder.sample.amd64.hcl "${revision}" false "https://intar.dev/registry/v1/bundles"
+          just bundle-images broken-nginx builder.sample.amd64.hcl "${revision}" false "https://intar.dev/registry/v1/bundles"

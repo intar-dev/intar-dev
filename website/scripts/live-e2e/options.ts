@@ -50,7 +50,7 @@ export function parseOptions(
   const baseUrl = last(values, "base-url") ?? env.INTAR_LIVE_BASE_URL ?? "";
   const cookie = last(values, "cookie") ?? env.INTAR_LIVE_COOKIE ?? "";
   const scenarioId =
-    last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "pair-ping";
+    last(values, "scenario") ?? env.INTAR_LIVE_SCENARIO_ID ?? "broken-nginx";
   const hostId = last(values, "host") ?? env.INTAR_LIVE_HOST_ID ?? null;
   const buildRev =
     last(values, "build-rev") ?? env.INTAR_LIVE_BUILD_REV ?? null;
@@ -207,7 +207,7 @@ Required unless skipped:
   --manifest PATH                Builder manifest JSON. Repeat for multi-VM scenarios.
 
 Useful options:
-  --scenario ID                  Scenario to start. Defaults to pair-ping.
+  --scenario ID                  Scenario to start. Defaults to broken-nginx.
   --host HOST_ID                 Pin the run to a specific host.
   --build-rev REV                Wait for admin image build rows for this bundle revision.
   --image VM=PATH                Override inferred raw.zst path for a VM manifest.
