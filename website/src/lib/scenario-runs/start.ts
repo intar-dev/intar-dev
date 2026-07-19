@@ -54,6 +54,9 @@ import {
   activeKeyFor,
   parseRunState,
 } from "./storage";
+import { deterministicRuntimeVmName } from "./runtime-vm-name";
+
+export { deterministicRuntimeVmName } from "./runtime-vm-name";
 
 export const HOST_HEARTBEAT_TTL_MS = 90_000;
 
@@ -514,14 +517,6 @@ export function isActiveKeyUniqueViolation(error: unknown): boolean {
     error,
     /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx/,
   );
-}
-
-export function deterministicRuntimeVmName(
-  prefix: string,
-  runId: string,
-  index: number,
-) {
-  return `${prefix}-${runId.slice(0, 6)}-${index + 1}`.slice(0, 63);
 }
 
 export async function upsertRunVmsIntoDesiredState(input: {
