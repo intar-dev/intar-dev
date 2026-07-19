@@ -8,14 +8,12 @@ pub(super) fn load_build_config(path: Option<&Path>) -> Result<BuildConfig> {
     }
 }
 
-pub(super) fn load_base_image_catalog() -> Result<BaseImageCatalog> {
-    let path = Path::new(BASE_IMAGES_PATH);
+pub(super) fn load_base_image_catalog(path: &Path) -> Result<BaseImageCatalog> {
     BaseImageCatalog::from_file(path)
         .with_context(|| format!("failed to load base image catalog from {}", path.display()))
 }
 
-pub(super) fn load_build_tools() -> Result<BuildTools> {
-    let path = Path::new(BUILD_TOOLS_PATH);
+pub(super) fn load_build_tools(path: &Path) -> Result<BuildTools> {
     BuildTools::from_file(path)
         .with_context(|| format!("failed to load build tools config from {}", path.display()))
 }
@@ -106,14 +104,16 @@ pub(super) fn default_bundle_output_path(rev: &str) -> PathBuf {
 
 pub(super) fn collect_bundle_source_files(
     scenarios: &[PreparedBundleScenario],
+    base_images_path: &Path,
+    build_tools_path: &Path,
 ) -> Result<Vec<BundleSourceFile>> {
     if scenarios.is_empty() {
         bail!("bundle requires at least one scenario");
     }
 
     let mut files = Vec::new();
-    add_bundle_file(Path::new(BASE_IMAGES_PATH), BASE_IMAGES_PATH, &mut files)?;
-    add_bundle_file(Path::new(BUILD_TOOLS_PATH), BUILD_TOOLS_PATH, &mut files)?;
+    add_bundle_file(base_images_path, BASE_IMAGES_PATH, &mut files)?;
+    add_bundle_file(build_tools_path, BUILD_TOOLS_PATH, &mut files)?;
 
     for scenario in scenarios {
         collect_bundle_dir(
@@ -132,7 +132,15 @@ pub(super) fn collect_bundle_dir(
     archive_root: &str,
     files: &mut Vec<BundleSourceFile>,
 ) -> Result<()> {
-    if !source_dir.is_dir() {
+    let metadata = fs::symlink_metadata(source_dir)
+        .with_context(|| format!("failed to stat '{}'", source_dir.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "symlink is not allowed in bundle sources: {}",
+            source_dir.display()
+        );
+    }
+    if !metadata.is_dir() {
         bail!(
             "bundle source directory '{}' does not exist",
             source_dir.display()
@@ -147,7 +155,12 @@ pub(super) fn collect_bundle_dir(
         let file_type = entry
             .file_type()
             .with_context(|| format!("failed to stat '{}'", path.display()))?;
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            bail!(
+                "symlink is not allowed in bundle sources: {}",
+                path.display()
+            );
+        } else if file_type.is_dir() {
             collect_bundle_dir(
                 &path,
                 &format!("{archive_root}/{}", archive_name(entry.file_name())?),
@@ -156,6 +169,8 @@ pub(super) fn collect_bundle_dir(
         } else if file_type.is_file() {
             let archive_path = format!("{archive_root}/{}", archive_name(entry.file_name())?);
             add_bundle_file(&path, &archive_path, files)?;
+        } else {
+            bail!("bundle source '{}' is not a regular file", path.display());
         }
     }
     Ok(())
@@ -166,7 +181,15 @@ pub(super) fn add_bundle_file(
     archive_path: &str,
     files: &mut Vec<BundleSourceFile>,
 ) -> Result<()> {
-    if !source_path.is_file() {
+    let metadata = fs::symlink_metadata(source_path)
+        .with_context(|| format!("failed to stat {}", source_path.display()))?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "symlink is not allowed in bundle sources: {}",
+            source_path.display()
+        );
+    }
+    if !metadata.is_file() {
         bail!(
             "bundle source file '{}' does not exist",
             source_path.display()
@@ -352,7 +375,7 @@ pub(super) fn upload_bundle(
     archive_path: &Path,
     rev: &str,
     meta: &serde_json::Value,
-) -> Result<()> {
+) -> Result<BundleUploadReceipt> {
     let part = reqwest::blocking::multipart::Part::file(archive_path)
         .with_context(|| format!("failed to read bundle {}", archive_path.display()))?
         .file_name(format!("{rev}.tar.gz"))
@@ -369,8 +392,48 @@ pub(super) fn upload_bundle(
         .with_context(|| format!("failed to upload bundle to {}", target.url))?;
     let status = response.status();
     let body = response.text().context("failed to read bundle response")?;
-    if !status.is_success() {
+    parse_bundle_upload_response(status, &body, rev)
+}
+
+pub(super) fn parse_bundle_upload_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    requested_rev: &str,
+) -> Result<BundleUploadReceipt> {
+    if status != reqwest::StatusCode::ACCEPTED {
         bail!("bundle upload failed with status {status}: {body}");
     }
-    Ok(())
+
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("bundle upload response is not valid JSON")?;
+    let object = value
+        .as_object()
+        .context("bundle upload response must be a JSON object")?;
+    if object.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        bail!("bundle upload response field 'ok' must be true");
+    }
+    let response_rev = object
+        .get("rev")
+        .and_then(serde_json::Value::as_str)
+        .context("bundle upload response field 'rev' must be a string")?;
+    if response_rev != requested_rev {
+        bail!(
+            "bundle upload response rev '{}' does not match requested rev '{}'",
+            response_rev,
+            requested_rev
+        );
+    }
+    let queued = object
+        .get("queued")
+        .and_then(serde_json::Value::as_u64)
+        .context("bundle upload response field 'queued' must be a nonnegative integer")?;
+    let assigned = object
+        .get("assigned")
+        .and_then(serde_json::Value::as_array)
+        .context("bundle upload response field 'assigned' must be an array")?;
+
+    Ok(BundleUploadReceipt {
+        queued,
+        assigned: assigned.len(),
+    })
 }
