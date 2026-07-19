@@ -21,6 +21,7 @@ const INTAR_SCENARIO_SUPERVISOR_PATH: &str = "/usr/local/bin/intar-scenario-supe
 const INTAR_BOOTSTRAP_SCRIPT_PATH: &str = "/usr/local/bin/intar-bootstrap.sh";
 const EPHEMERAL_APT_CONFIG_PATH: &str = "/etc/apt/apt.conf.d/99intar-ephemeral";
 const KINO_RUNTIME_CONFIG_PATH: &str = "/run/intar/kino.hcl";
+const FAILED_STEP_LOG_TAIL_BYTES: usize = 64 * 1024;
 // The virtio-net device and its final udev name are not guaranteed to exist
 // when the scenario supervisor first runs. Bound discovery and configuration
 // by monotonic wall time so fractional CPU quotas cannot turn a transient boot
@@ -359,13 +360,58 @@ fn append_step_scripts(script: &mut String, step_scripts: &[GeneratedStepScript]
             shell_quote(&generated.phase_name)
         )
         .context("format error")?;
-        writeln!(script, "bash {}", shell_quote(&generated.path)).context("format error")?;
-        writeln!(
-            script,
-            "log_phase {} end",
-            shell_quote(&generated.phase_name)
-        )
-        .context("format error")?;
+        if generated.hidden {
+            writeln!(script, "bash {}", shell_quote(&generated.path)).context("format error")?;
+            writeln!(
+                script,
+                "log_phase {} end",
+                shell_quote(&generated.phase_name)
+            )
+            .context("format error")?;
+        } else {
+            let log_path = generated
+                .log_path
+                .as_deref()
+                .context("visible scenario step is missing its log path")?;
+            writeln!(script, "if bash {}; then", shell_quote(&generated.path))
+                .context("format error")?;
+            writeln!(
+                script,
+                "  log_phase {} end",
+                shell_quote(&generated.phase_name)
+            )
+            .context("format error")?;
+            writeln!(script, "else").context("format error")?;
+            writeln!(script, "  step_status=$?").context("format error")?;
+            writeln!(script, "  step_log={}", shell_quote(log_path)).context("format error")?;
+            writeln!(
+                script,
+                "  printf '[intar-build] scenario step failed: phase=%s status=%s log=%s; showing last {FAILED_STEP_LOG_TAIL_BYTES} bytes\\n' {} \"$step_status\" \"$step_log\" >&2",
+                shell_quote(&generated.phase_name)
+            )
+            .context("format error")?;
+            writeln!(script, "  if [ -f \"$step_log\" ]; then").context("format error")?;
+            writeln!(
+                script,
+                "    tail -c {FAILED_STEP_LOG_TAIL_BYTES} -- \"$step_log\" >&2 || true"
+            )
+            .context("format error")?;
+            writeln!(script, "  else").context("format error")?;
+            writeln!(
+                script,
+                "    printf '[intar-build] scenario step log unavailable: %s\\n' \"$step_log\" >&2"
+            )
+            .context("format error")?;
+            writeln!(script, "  fi").context("format error")?;
+            writeln!(
+                script,
+                "  printf '\\n[intar-build] end scenario step failure log: phase=%s\\n' {} >&2",
+                shell_quote(&generated.phase_name)
+            )
+            .context("format error")?;
+            writeln!(script, "  exit \"$step_status\"").context("format error")?;
+            writeln!(script, "fi").context("format error")?;
+        }
         if generated.hidden {
             writeln!(script, "rm -f {}", shell_quote(&generated.path)).context("format error")?;
         }

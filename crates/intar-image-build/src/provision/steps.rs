@@ -36,6 +36,7 @@ pub(super) fn render_scenario_motd(
 pub(super) struct GeneratedStepScript {
     pub(super) content: String,
     pub(super) hidden: bool,
+    pub(super) log_path: Option<String>,
     pub(super) marker: String,
     pub(super) path: String,
     pub(super) phase_name: String,
@@ -53,11 +54,13 @@ pub(super) fn render_vm_step_scripts(vm: &VmDefinition) -> Result<Vec<GeneratedS
         } else {
             format!("/usr/local/bin/intar-step-{vm_slug}-{step_slug}.sh")
         };
+        let log_path = (!hidden).then(|| format!("/var/log/intar/step-{vm_slug}-{step_slug}.log"));
         let marker = format!("INTAR_STEP_SCRIPT_{index}");
-        let content = render_step_script(&vm_slug, &step_slug, step, hidden)?;
+        let content = render_step_script(&vm_slug, &step_slug, step, hidden, log_path.as_deref())?;
         scripts.push(GeneratedStepScript {
             content,
             hidden,
+            log_path,
             marker,
             path,
             phase_name: format!("step_{vm_slug}_{step_slug}"),
@@ -72,6 +75,7 @@ pub(super) fn render_step_script(
     step_slug: &str,
     step: &VmStep,
     hidden: bool,
+    log_path: Option<&str>,
 ) -> Result<String> {
     let mut script = String::new();
     writeln!(script, "#!/usr/bin/env bash").context("format error")?;
@@ -81,13 +85,10 @@ pub(super) fn render_step_script(
         writeln!(script, "trap 'rm -f -- \"$0\"' EXIT").context("format error")?;
         writeln!(script, "exec >/dev/null 2>&1").context("format error")?;
     } else {
+        let log_path = log_path.context("visible scenario step is missing its log path")?;
         writeln!(script, "LOG_DIR=/var/log/intar").context("format error")?;
         writeln!(script, "mkdir -p \"$LOG_DIR\"").context("format error")?;
-        writeln!(
-            script,
-            "exec >\"$LOG_DIR/step-{vm_slug}-{step_slug}.log\" 2>&1"
-        )
-        .context("format error")?;
+        writeln!(script, "exec >{} 2>&1", shell_quote(log_path)).context("format error")?;
         writeln!(
             script,
             "echo \"[intar] step {vm_slug}/{step_slug} starting\""
