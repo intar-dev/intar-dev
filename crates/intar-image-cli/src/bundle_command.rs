@@ -1,4 +1,24 @@
 use super::*;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
+
+const COURSE_CATALOG_VERSION: u8 = 1;
+const COURSE_CATALOG_MODE: &str = "replace";
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub(super) struct BundleCourseCatalog {
+    version: u8,
+    mode: &'static str,
+    courses: Vec<BundleCourse>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+pub(super) struct BundleCourse {
+    course_id: String,
+    title: String,
+    description: String,
+    scenario_ids: Vec<String>,
+}
 
 pub(super) fn load_build_config(path: Option<&Path>) -> Result<BuildConfig> {
     match path {
@@ -16,6 +36,232 @@ pub(super) fn load_base_image_catalog(path: &Path) -> Result<BaseImageCatalog> {
 pub(super) fn load_build_tools(path: &Path) -> Result<BuildTools> {
     BuildTools::from_file(path)
         .with_context(|| format!("failed to load build tools config from {}", path.display()))
+}
+
+pub(super) fn course_manifest_path(courses_root: Option<&Path>) -> Result<PathBuf> {
+    match courses_root {
+        Some(courses_root) => courses_root
+            .parent()
+            .map(|source_root| source_root.join(COURSES_PATH))
+            .with_context(|| {
+                format!(
+                    "courses root '{}' has no source-root parent for {COURSES_PATH}",
+                    courses_root.display()
+                )
+            }),
+        None => Ok(PathBuf::from(COURSES_PATH)),
+    }
+}
+
+pub(super) fn load_bundle_course_catalog(
+    path: &Path,
+    complete_scenario_paths: &[PathBuf],
+) -> Result<Option<BundleCourseCatalog>> {
+    if !course_manifest_is_present(path)? {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read course catalog from {}", path.display()))?;
+
+    let mut scenario_ids = HashSet::new();
+    for scenario_path in complete_scenario_paths {
+        let scenario = load_scenario(scenario_path).with_context(|| {
+            format!(
+                "failed to inspect complete scenario source tree for {}",
+                path.display()
+            )
+        })?;
+        validate_safe_cli_slug("scenario id", &scenario.name)?;
+        if !scenario_ids.insert(scenario.name.clone()) {
+            bail!(
+                "complete scenario source tree contains duplicate scenario id '{}'",
+                scenario.name
+            );
+        }
+    }
+
+    parse_bundle_course_catalog(&content, &scenario_ids)
+        .with_context(|| format!("failed to load course catalog from {}", path.display()))
+        .map(Some)
+}
+
+pub(super) fn course_manifest_is_present(path: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to stat course catalog at {}", path.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "symlink is not allowed for course catalog source: {}",
+            path.display()
+        );
+    }
+    if !metadata.is_file() {
+        bail!(
+            "course catalog source is not a regular file: {}",
+            path.display()
+        );
+    }
+    Ok(true)
+}
+
+pub(super) fn parse_bundle_course_catalog(
+    content: &str,
+    known_scenario_ids: &HashSet<String>,
+) -> Result<BundleCourseCatalog> {
+    let body: hcl::Body = hcl::from_str(content).context("failed to parse course catalog HCL")?;
+    if let Some(attribute) = body.attributes().next() {
+        bail!(
+            "course catalog root does not support attribute '{}'",
+            attribute.key
+        );
+    }
+
+    let mut courses = Vec::new();
+    let mut course_ids = HashSet::new();
+    let mut memberships: HashMap<String, String> = HashMap::new();
+
+    for block in body.blocks() {
+        if block.identifier.as_str() != "course" {
+            bail!(
+                "course catalog root does not support block '{}'",
+                block.identifier
+            );
+        }
+        let course = parse_course_block(block)?;
+        if !course_ids.insert(course.course_id.clone()) {
+            bail!("duplicate course '{}'", course.course_id);
+        }
+
+        for scenario_id in &course.scenario_ids {
+            if !known_scenario_ids.contains(scenario_id) {
+                bail!(
+                    "course '{}' references unknown scenario '{}'",
+                    course.course_id,
+                    scenario_id
+                );
+            }
+            if let Some(existing_course_id) = memberships.get(scenario_id) {
+                if existing_course_id == &course.course_id {
+                    bail!(
+                        "course '{}' lists scenario '{}' more than once",
+                        course.course_id,
+                        scenario_id
+                    );
+                }
+                bail!(
+                    "scenario '{}' belongs to multiple courses ('{}' and '{}')",
+                    scenario_id,
+                    existing_course_id,
+                    course.course_id
+                );
+            }
+            memberships.insert(scenario_id.clone(), course.course_id.clone());
+        }
+        courses.push(course);
+    }
+
+    Ok(BundleCourseCatalog {
+        version: COURSE_CATALOG_VERSION,
+        mode: COURSE_CATALOG_MODE,
+        courses,
+    })
+}
+
+fn parse_course_block(block: &hcl::Block) -> Result<BundleCourse> {
+    let course_id = match block.labels.as_slice() {
+        [label] => label.as_str().to_owned(),
+        [] => bail!("course block is missing its course id label"),
+        _ => bail!("course block expects exactly one course id label"),
+    };
+    validate_safe_cli_slug("course id", &course_id)?;
+
+    if let Some(inner_block) = block.body.blocks().next() {
+        bail!(
+            "course '{}' does not support nested block '{}'",
+            course_id,
+            inner_block.identifier
+        );
+    }
+
+    let mut title = None;
+    let mut description = None;
+    let mut scenario_ids = None;
+    for attribute in block.body.attributes() {
+        match attribute.key.as_str() {
+            "title" => {
+                if title.is_some() {
+                    bail!("course '{}' has duplicate title attribute", course_id);
+                }
+                title = Some(extract_course_string(&attribute.expr, "title")?);
+            }
+            "description" => {
+                if description.is_some() {
+                    bail!("course '{}' has duplicate description attribute", course_id);
+                }
+                description = Some(extract_course_string(&attribute.expr, "description")?);
+            }
+            "scenarios" => {
+                if scenario_ids.is_some() {
+                    bail!("course '{}' has duplicate scenarios attribute", course_id);
+                }
+                scenario_ids = Some(extract_course_scenario_ids(&attribute.expr)?);
+            }
+            other => bail!(
+                "course '{}' does not support attribute '{other}'",
+                course_id
+            ),
+        }
+    }
+
+    let title = required_course_text(&course_id, "title", title)?;
+    let description = required_course_text(&course_id, "description", description)?;
+    let scenario_ids = scenario_ids
+        .ok_or_else(|| anyhow!("course '{}' is missing required scenarios", course_id))?;
+    if scenario_ids.is_empty() {
+        bail!("course '{}' must include at least one scenario", course_id);
+    }
+    for scenario_id in &scenario_ids {
+        validate_safe_cli_slug("course scenario id", scenario_id)?;
+    }
+
+    Ok(BundleCourse {
+        course_id,
+        title,
+        description,
+        scenario_ids,
+    })
+}
+
+fn required_course_text(course_id: &str, field: &str, value: Option<String>) -> Result<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("course '{}' requires a non-empty {field}", course_id))
+}
+
+fn extract_course_string(expression: &hcl::Expression, field: &str) -> Result<String> {
+    match expression {
+        hcl::Expression::String(value) => Ok(value.clone()),
+        _ => bail!("course {field} must be a string literal"),
+    }
+}
+
+fn extract_course_scenario_ids(expression: &hcl::Expression) -> Result<Vec<String>> {
+    let hcl::Expression::Array(values) = expression else {
+        bail!("course scenarios must be an array of string literals");
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            hcl::Expression::String(value) => Ok(value.clone()),
+            _ => bail!("course scenarios must be an array of string literals"),
+        })
+        .collect()
 }
 
 pub(super) fn scenario_base_definition_identity(
@@ -106,6 +352,7 @@ pub(super) fn collect_bundle_source_files(
     scenarios: &[PreparedBundleScenario],
     base_images_path: &Path,
     build_tools_path: &Path,
+    course_manifest_path: Option<&Path>,
 ) -> Result<Vec<BundleSourceFile>> {
     if scenarios.is_empty() {
         bail!("bundle requires at least one scenario");
@@ -114,6 +361,9 @@ pub(super) fn collect_bundle_source_files(
     let mut files = Vec::new();
     add_bundle_file(base_images_path, BASE_IMAGES_PATH, &mut files)?;
     add_bundle_file(build_tools_path, BUILD_TOOLS_PATH, &mut files)?;
+    if let Some(course_manifest_path) = course_manifest_path {
+        add_bundle_file(course_manifest_path, COURSES_PATH, &mut files)?;
+    }
 
     for scenario in scenarios {
         collect_bundle_dir(

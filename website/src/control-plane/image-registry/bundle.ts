@@ -1,10 +1,17 @@
 import { drizzle } from "drizzle-orm/d1";
-import { type ImageBuildBundleMeta } from "@/db/schema";
+import {
+  type ImageBuildBundleMeta,
+  type ScenarioCourseCatalogSnapshotV1,
+} from "@/db/schema";
 import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import {
+  syncScenarioCourseCatalogSnapshot,
+  validateScenarioCourseCatalogReferences,
+} from "@/lib/scenario-course-catalogs";
 import {
   jsonResponse,
   bundleObjectKey,
@@ -59,6 +66,30 @@ export async function handleBundleUpload(
   );
   if (archiveError) return archiveError;
 
+  const db = drizzle(env.DB);
+  const courseCatalog = meta.value.bundleMeta.courseCatalog;
+  if (courseCatalog) {
+    const referenceValidation = await validateScenarioCourseCatalogReferences(
+      db,
+      {
+        snapshot: courseCatalog,
+        bundleScenarioIds: meta.value.bundleMeta.scenarios.map(
+          (scenario) => scenario.scenarioId,
+        ),
+        organizationId: null,
+      },
+    );
+    if (!referenceValidation.ok) {
+      return jsonResponse(
+        {
+          error: "course catalog references unavailable scenarios",
+          scenario_ids: referenceValidation.invalidScenarioIds,
+        },
+        400,
+      );
+    }
+  }
+
   const objectKey = bundleObjectKey(meta.value.rev);
   await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
     httpMetadata: { contentType: "application/gzip" },
@@ -68,7 +99,6 @@ export async function handleBundleUpload(
     },
   });
 
-  const db = drizzle(env.DB);
   const now = Date.now();
   const queued = await queueImageBuildsFromBundle(db, {
     rev: meta.value.rev,
@@ -77,6 +107,14 @@ export async function handleBundleUpload(
     meta: meta.value.bundleMeta,
     nowUnixMs: now,
   });
+  if (courseCatalog) {
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: courseCatalog,
+      sourceRevision: meta.value.rev,
+      organizationId: null,
+      nowUnixMs: now,
+    });
+  }
   const assigned = await assignQueuedImageBuilds(db, now);
 
   return jsonResponse(
@@ -208,18 +246,115 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
     scenarioKeys.add(key);
   }
 
+  let courseCatalog: ScenarioCourseCatalogSnapshotV1 | undefined;
+  if (Object.hasOwn(parsed, "course_catalog")) {
+    const normalized = normalizeCourseCatalogSnapshot(parsed.course_catalog);
+    if (!normalized) {
+      return {
+        ok: false,
+        response: jsonResponse(
+          { error: "meta.course_catalog is invalid" },
+          400,
+        ),
+      };
+    }
+    courseCatalog = normalized;
+  }
+
+  const bundleMeta: ImageBuildBundleMeta = {
+    ...parsed,
+    buildFormatVersion,
+    scenarios,
+  };
+  delete bundleMeta.courseCatalog;
+  if (courseCatalog) bundleMeta.courseCatalog = courseCatalog;
+
   return {
     ok: true,
     value: {
       rev,
       kinoVersion,
-      bundleMeta: {
-        ...parsed,
-        buildFormatVersion,
-        scenarios,
-      },
+      bundleMeta,
     },
   };
+}
+
+export function normalizeCourseCatalogSnapshot(
+  value: unknown,
+): ScenarioCourseCatalogSnapshotV1 | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["version", "mode", "courses"])) {
+    return null;
+  }
+  if (value.version !== 1 || value.mode !== "replace") {
+    return null;
+  }
+  if (!Array.isArray(value.courses)) {
+    return null;
+  }
+
+  const courseIds = new Set<string>();
+  const memberIds = new Set<string>();
+  const courses: ScenarioCourseCatalogSnapshotV1["courses"] = [];
+  for (const valueCourse of value.courses) {
+    if (
+      !isRecord(valueCourse) ||
+      !hasExactKeys(valueCourse, [
+        "course_id",
+        "title",
+        "description",
+        "scenario_ids",
+      ])
+    ) {
+      return null;
+    }
+    const courseId = readUntrimmedString(valueCourse.course_id);
+    const title = readString(valueCourse.title);
+    const description = readString(valueCourse.description);
+    if (
+      !courseId ||
+      !isSafeBundleRev(courseId) ||
+      !title ||
+      !description ||
+      !Array.isArray(valueCourse.scenario_ids) ||
+      valueCourse.scenario_ids.length === 0 ||
+      courseIds.has(courseId)
+    ) {
+      return null;
+    }
+
+    const scenarioIds: string[] = [];
+    for (const valueScenarioId of valueCourse.scenario_ids) {
+      const scenarioId = readUntrimmedString(valueScenarioId);
+      if (
+        !scenarioId ||
+        !isSafeBundleRev(scenarioId) ||
+        memberIds.has(scenarioId)
+      ) {
+        return null;
+      }
+      memberIds.add(scenarioId);
+      scenarioIds.push(scenarioId);
+    }
+    courseIds.add(courseId);
+    courses.push({ courseId, title, description, scenarioIds });
+  }
+
+  return { version: 1, mode: "replace", courses };
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: string[],
+): boolean {
+  const keys = Object.keys(value).sort();
+  return (
+    keys.length === expected.length &&
+    expected.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function readUntrimmedString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 export function normalizeBundleScenario(
@@ -486,6 +621,7 @@ export function requiredBundlePaths(meta: ImageBuildBundleMeta): string[] {
   return [
     "base-images.hcl",
     "build-tools.hcl",
+    ...(meta.courseCatalog ? ["courses.hcl"] : []),
     ...meta.scenarios.map(
       (scenario) => `scenarios/${scenario.scenarioId}/scenario.hcl`,
     ),

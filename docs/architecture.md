@@ -10,7 +10,8 @@ content, and the desired-state runtime that connects those components.
 - `crates/` is the Rust workspace for `intar-agent`, `kino`, `stargate-*`,
   image tooling, Cloud Hypervisor client code, and shared contract crates.
 - `website/` is the Astro and Cloudflare Worker control plane.
-- `scenarios/` contains scenario HCL content and base image catalog data.
+- `scenarios/` contains scenario HCL content and base image catalog data;
+  optional root `courses.hcl` groups catalog entries without changing images.
 - `.github/workflows/` contains the consolidated Rust, website, image, and release
   workflows.
 
@@ -62,7 +63,10 @@ boot and steady quota phases so concurrent starts cannot overcommit a host.
 
 Scenario pushes upload source bundles instead of building on GitHub Actions. The
 bundle endpoint stores a deterministic tar.gz in R2, records content hashes in D1,
-and assigns changed scenarios to connected builder hosts.
+replaces an optional scope-specific course catalog snapshot in D1, and assigns
+changed scenarios to connected builder hosts. Course snapshots synchronize when
+the authenticated bundle is accepted, independently of asynchronous image
+publication.
 
 Builder hosts publish raw zstd artifacts and `ScenarioManifestV3` manifest JSON.
 The publish endpoint verifies manifests and image hashes, stores immutable images

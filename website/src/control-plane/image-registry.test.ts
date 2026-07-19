@@ -2,14 +2,17 @@ import { gzipSync } from "node:zlib";
 import {
   imageRegistryMocks,
   sourceBundleFixture,
+  sourceBundleFixtureWithCourses,
   sourceBundleFixtureWithInvalidTarHeader,
   sourceBundleFixtureWithMetadataEntry,
   resetImageRegistryMocks,
 } from "./image-registry/test-fixtures";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
+import { readBundleMeta } from "@/control-plane/image-registry/bundle";
 
-const { authMock, dbMock, schedulerMock } = imageRegistryMocks();
+const { authMock, dbMock, schedulerMock, scenarioCourseCatalogMock } =
+  imageRegistryMocks();
 
 describe("image registry source bundles", () => {
   beforeEach(resetImageRegistryMocks);
@@ -724,3 +727,366 @@ describe("image registry source bundles", () => {
     expect(schedulerMock.assignQueuedImageBuilds).not.toHaveBeenCalled();
   });
 });
+
+describe("course catalog bundle metadata", () => {
+  beforeEach(resetImageRegistryMocks);
+
+  it("normalizes ordered version-one replacement snapshots", async () => {
+    const result = await readBundleMeta(
+      JSON.stringify(
+        sourceMeta({
+          course_catalog: {
+            version: 1,
+            mode: "replace",
+            courses: [
+              {
+                course_id: "linux-operations",
+                title: " Linux operations ",
+                description: " Diagnose common Linux failures. ",
+                scenario_ids: ["broken-nginx", "pair-ping"],
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.bundleMeta.courseCatalog).toEqual({
+      version: 1,
+      mode: "replace",
+      courses: [
+        {
+          courseId: "linux-operations",
+          title: "Linux operations",
+          description: "Diagnose common Linux failures.",
+          scenarioIds: ["broken-nginx", "pair-ping"],
+        },
+      ],
+    });
+  });
+
+  it("accepts an explicit empty replacement snapshot", async () => {
+    const result = await readBundleMeta(
+      JSON.stringify(
+        sourceMeta({
+          course_catalog: { version: 1, mode: "replace", courses: [] },
+        }),
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.bundleMeta.courseCatalog?.courses).toEqual([]);
+  });
+
+  it("does not treat unvalidated camel-case metadata as a course snapshot", async () => {
+    const result = await readBundleMeta(
+      JSON.stringify(
+        sourceMeta({
+          courseCatalog: {
+            version: 99,
+            mode: "merge",
+            courses: "not-an-array",
+          },
+        }),
+      ),
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.bundleMeta.courseCatalog).toBeUndefined();
+  });
+
+  it("rejects invalid versions, shapes, IDs, and duplicate membership", async () => {
+    const invalidSnapshots: unknown[] = [
+      { version: 2, mode: "replace", courses: [] },
+      { version: 1, mode: "merge", courses: [] },
+      { version: 1, mode: "replace", courses: [], extra: true },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ course_id: "../unsafe" })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ course_id: " linux-operations " })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ title: " " })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ description: " " })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ scenario_ids: [] })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ scenario_ids: ["../unsafe"] })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ scenario_ids: [" broken-nginx "] })],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta(), courseMeta()],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [
+          courseMeta(),
+          courseMeta({ course_id: "second-course" }),
+        ],
+      },
+      {
+        version: 1,
+        mode: "replace",
+        courses: [courseMeta({ extra: true })],
+      },
+    ];
+
+    for (const courseCatalog of invalidSnapshots) {
+      const result = await readBundleMeta(
+        JSON.stringify(sourceMeta({ course_catalog: courseCatalog })),
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      await expect(result.response.json()).resolves.toEqual({
+        error: "meta.course_catalog is invalid",
+      });
+    }
+  });
+
+  it("requires provenance and synchronizes a valid public snapshot", async () => {
+    const now = 1_762_041_660_000;
+    const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    const bucketPut = vi.fn();
+    schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
+    schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
+    const snapshot = {
+      version: 1 as const,
+      mode: "replace" as const,
+      courses: [
+        {
+          course_id: "linux-operations",
+          title: "Linux operations",
+          description: "Diagnose common Linux failures.",
+          scenario_ids: ["broken-nginx"],
+        },
+      ],
+    };
+    const form = sourceBundleForm(
+      snapshot,
+      sourceBundleFixtureWithCourses(
+        ["broken-nginx"],
+        'course "linux-operations" {}\n',
+      ),
+    );
+
+    try {
+      const response = await handleImageRegistryRequest(
+        new Request("https://intar.test/registry/v1/bundles", {
+          method: "POST",
+          headers: { authorization: "Bearer publish-secret" },
+          body: form,
+        }),
+        {
+          DB: "db-binding",
+          REGISTRY_PUBLISH_TOKEN: "publish-secret",
+          VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
+        } as unknown as Cloudflare.Env,
+      );
+
+      expect(response?.status).toBe(202);
+      const normalizedSnapshot = {
+        version: 1,
+        mode: "replace",
+        courses: [
+          {
+            courseId: "linux-operations",
+            title: "Linux operations",
+            description: "Diagnose common Linux failures.",
+            scenarioIds: ["broken-nginx"],
+          },
+        ],
+      };
+      expect(
+        scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences,
+      ).toHaveBeenCalledWith(dbMock.db, {
+        snapshot: normalizedSnapshot,
+        bundleScenarioIds: ["broken-nginx"],
+        organizationId: null,
+      });
+      expect(
+        scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+      ).toHaveBeenCalledWith(dbMock.db, {
+        snapshot: normalizedSnapshot,
+        sourceRevision: "abc123",
+        organizationId: null,
+        nowUnixMs: now,
+      });
+      expect(bucketPut).toHaveBeenCalledOnce();
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it("synchronizes an explicit empty snapshot but preserves an omitted one", async () => {
+    schedulerMock.queueImageBuildsFromBundle.mockResolvedValue({ queued: 0 });
+    schedulerMock.assignQueuedImageBuilds.mockResolvedValue([]);
+    const bucketPut = vi.fn();
+    const env = {
+      DB: "db-binding",
+      REGISTRY_PUBLISH_TOKEN: "publish-secret",
+      VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
+    } as unknown as Cloudflare.Env;
+
+    const emptyResponse = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(
+          { version: 1, mode: "replace", courses: [] },
+          sourceBundleFixtureWithCourses(["broken-nginx"], ""),
+        ),
+      }),
+      env,
+    );
+    expect(emptyResponse?.status).toBe(202);
+    expect(
+      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+    ).toHaveBeenCalledOnce();
+    expect(
+      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+    ).toHaveBeenCalledWith(
+      dbMock.db,
+      expect.objectContaining({ snapshot: { version: 1, mode: "replace", courses: [] } }),
+    );
+
+    scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockClear();
+    const omittedResponse = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(undefined, sourceBundleFixture(["broken-nginx"])),
+      }),
+      env,
+    );
+    expect(omittedResponse?.status).toBe(202);
+    expect(
+      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing provenance and unavailable references before storage", async () => {
+    const bucketPut = vi.fn();
+    const env = {
+      DB: "db-binding",
+      REGISTRY_PUBLISH_TOKEN: "publish-secret",
+      VM_IMAGE_REGISTRY_BUCKET: { put: bucketPut },
+    } as unknown as Cloudflare.Env;
+    const snapshot = {
+      version: 1 as const,
+      mode: "replace" as const,
+      courses: [courseMeta()],
+    };
+
+    const missingProvenance = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(snapshot, sourceBundleFixture(["broken-nginx"])),
+      }),
+      env,
+    );
+    expect(missingProvenance?.status).toBe(400);
+    await expect(missingProvenance?.json()).resolves.toEqual({
+      error: "bundle archive is missing courses.hcl",
+    });
+
+    scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValueOnce(
+      { ok: false, invalidScenarioIds: ["broken-nginx"] },
+    );
+    const invalidReference = await handleImageRegistryRequest(
+      new Request("https://intar.test/registry/v1/bundles", {
+        method: "POST",
+        headers: { authorization: "Bearer publish-secret" },
+        body: sourceBundleForm(
+          snapshot,
+          sourceBundleFixtureWithCourses(["broken-nginx"], "course {}\n"),
+        ),
+      }),
+      env,
+    );
+    expect(invalidReference?.status).toBe(400);
+    await expect(invalidReference?.json()).resolves.toEqual({
+      error: "course catalog references unavailable scenarios",
+      scenario_ids: ["broken-nginx"],
+    });
+    expect(bucketPut).not.toHaveBeenCalled();
+    expect(schedulerMock.queueImageBuildsFromBundle).not.toHaveBeenCalled();
+    expect(
+      scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
+    ).not.toHaveBeenCalled();
+  });
+});
+
+function sourceMeta(extra: Record<string, unknown> = {}) {
+  return {
+    rev: "abc123",
+    kino_version: "0.4.0",
+    build_format_version: "intar-image-build-v8",
+    scenarios: [
+      {
+        scenario_id: "broken-nginx",
+        arch: "x86_64",
+        content_hash: "d".repeat(64),
+      },
+    ],
+    ...extra,
+  };
+}
+
+function courseMeta(extra: Record<string, unknown> = {}) {
+  return {
+    course_id: "linux-operations",
+    title: "Linux operations",
+    description: "Diagnose common Linux failures.",
+    scenario_ids: ["broken-nginx"],
+    ...extra,
+  };
+}
+
+function sourceBundleForm(
+  courseCatalog: unknown | undefined,
+  bundle: ArrayBuffer,
+): FormData {
+  const form = new FormData();
+  form.set(
+    "meta",
+    JSON.stringify(
+      sourceMeta(
+        courseCatalog === undefined ? {} : { course_catalog: courseCatalog },
+      ),
+    ),
+  );
+  form.set(
+    "bundle",
+    new File([bundle], "abc123.tar.gz", { type: "application/gzip" }),
+  );
+  return form;
+}

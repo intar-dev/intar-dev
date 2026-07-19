@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
@@ -15,6 +15,7 @@ import { InlineFeedback } from "../../patterns/InlineFeedback";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
+  PaginatedWeightedCollection,
 } from "../../patterns/CollectionPagination";
 import { MetaDifficulty } from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
@@ -28,7 +29,12 @@ import {
   validateScenarioHcl,
   type ScenarioValidationResult,
 } from "@/lib/authoring-wasm";
-import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
+import type {
+  ScenarioCatalogWireEntry,
+  ScenarioCourseWireEntry,
+} from "@/lib/scenario-runs";
+import { CourseCatalogSections } from "../learn/CourseCatalogSections";
+import { buildCourseCatalogView } from "../learn/course-catalog";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -66,9 +72,10 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
   const catalog = useQuery({
     queryKey: ["organizations", detail.id, "scenarios"],
     queryFn: () =>
-      fetchJson<{ scenarios: ScenarioCatalogWireEntry[] }>(
-        `/api/organizations/${encodeURIComponent(detail.id)}/scenarios`,
-      ),
+      fetchJson<{
+        scenarios: ScenarioCatalogWireEntry[];
+        courses: ScenarioCourseWireEntry[];
+      }>(`/api/organizations/${encodeURIComponent(detail.id)}/scenarios`),
   });
   const sources = useQuery({
     queryKey: ["organizations", detail.id, "scenario-sources"],
@@ -232,6 +239,24 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
   });
 
   const entries = catalog.data?.scenarios ?? [];
+  const courses = catalog.data?.courses ?? [];
+  const catalogView = useMemo(
+    () =>
+      buildCourseCatalogView(entries, courses, {
+        q: "",
+        tags: [],
+        sort: null,
+      }),
+    [courses, entries],
+  );
+  const paginationUnits = useMemo(
+    () =>
+      catalogView.units.map((unit) => ({
+        item: unit,
+        weight: unit.weight,
+      })),
+    [catalogView.units],
+  );
   const privateEntries = entries.filter(
     (scenario) => scenario.organizationId === detail.id,
   );
@@ -250,53 +275,24 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
               : "Failed to load scenarios"}
           </InlineFeedback>
         ) : entries.length ? (
-          <PaginatedCollection
-            items={entries}
+          <PaginatedWeightedCollection
+            units={paginationUnits}
             pageSize={COLLECTION_PAGE_SIZE.cards}
             itemLabel="scenarios"
           >
-            {(visibleScenarios) => (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {visibleScenarios.map((scenario) => (
-                  <Link
-                    key={scenario.scenarioId}
-                    to="/scenarios/$scenarioId"
-                    params={{ scenarioId: scenario.scenarioId }}
-                    search={{ organizationId: detail.id }}
-                    className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
-                  >
-                    <Card
-                      variant="interactive"
-                      className="h-full gap-4 px-(--card-spacing)"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <h3 className="text-card-title group-hover:text-primary">
-                            {scenario.title}
-                          </h3>
-                          <p className="mt-1 text-metadata">
-                            {scenario.category || "Systems"} · ~
-                            {scenario.estimatedMinutes} min
-                          </p>
-                        </div>
-                        <Badge
-                          variant={
-                            scenario.organizationId ? "secondary" : "outline"
-                          }
-                        >
-                          {scenario.organizationId ? "Private" : "Public"}
-                        </Badge>
-                      </div>
-                      <div className="flex items-center justify-between gap-3">
-                        <MetaDifficulty difficulty={scenario.difficulty} />
-                        <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-                      </div>
-                    </Card>
-                  </Link>
-                ))}
-              </div>
+            {(visibleUnits) => (
+              <CourseCatalogSections
+                units={visibleUnits}
+                gridClassName="sm:grid-cols-2"
+                renderScenario={(scenario) => (
+                  <OrganizationScenarioCard
+                    scenario={scenario}
+                    organizationId={detail.id}
+                  />
+                )}
+              />
             )}
-          </PaginatedCollection>
+          </PaginatedWeightedCollection>
         ) : (
           <p className="text-sm text-muted-foreground">
             No published scenarios are available yet.
@@ -514,5 +510,43 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
         </Section>
       ) : null}
     </div>
+  );
+}
+
+function OrganizationScenarioCard({
+  scenario,
+  organizationId,
+}: {
+  scenario: ScenarioCatalogWireEntry;
+  organizationId: string;
+}) {
+  return (
+    <Link
+      to="/scenarios/$scenarioId"
+      params={{ scenarioId: scenario.scenarioId }}
+      search={{ organizationId }}
+      className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+    >
+      <Card variant="interactive" className="h-full gap-4 px-(--card-spacing)">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h4 className="text-card-title group-hover:text-primary">
+              {scenario.title}
+            </h4>
+            <p className="mt-1 text-metadata">
+              {scenario.category || "Systems"} · ~{scenario.estimatedMinutes}{" "}
+              min
+            </p>
+          </div>
+          <Badge variant={scenario.organizationId ? "secondary" : "outline"}>
+            {scenario.organizationId ? "Private" : "Public"}
+          </Badge>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <MetaDifficulty difficulty={scenario.difficulty} />
+          <ArrowRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </div>
+      </Card>
+    </Link>
   );
 }

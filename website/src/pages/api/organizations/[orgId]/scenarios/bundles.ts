@@ -14,6 +14,10 @@ import {
 } from "@/lib/build-scheduler";
 import { createAppId } from "@/lib/id";
 import { getOrganizationDetail } from "@/lib/organizations";
+import {
+  syncScenarioCourseCatalogSnapshot,
+  validateScenarioCourseCatalogReferences,
+} from "@/lib/scenario-course-catalogs";
 
 export const prerender = false;
 
@@ -73,6 +77,28 @@ export const POST: APIRoute = async ({ request, params }) => {
     const archiveError = await validateBundleArchivePayload(payload, meta);
     if (archiveError) return archiveError;
 
+    const db = drizzle(env.DB);
+    const courseCatalog = parsed.value.bundleMeta.courseCatalog;
+    if (courseCatalog) {
+      const referenceValidation =
+        await validateScenarioCourseCatalogReferences(db, {
+          snapshot: courseCatalog,
+          bundleScenarioIds: parsed.value.bundleMeta.scenarios.map(
+            (scenario) => scenario.scenarioId,
+          ),
+          organizationId: organization.id,
+        });
+      if (!referenceValidation.ok) {
+        return jsonResponse(
+          {
+            error: "course catalog references unavailable scenarios",
+            scenario_ids: referenceValidation.invalidScenarioIds,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     const objectKey = bundleObjectKey(rev);
     await env.VM_IMAGE_REGISTRY_BUCKET.put(objectKey, payload, {
       httpMetadata: { contentType: "application/gzip" },
@@ -82,7 +108,6 @@ export const POST: APIRoute = async ({ request, params }) => {
         organization_id: organization.id,
       },
     });
-    const db = drizzle(env.DB);
     const now = Date.now();
     const queued = await queueImageBuildsFromBundle(db, {
       rev,
@@ -92,6 +117,14 @@ export const POST: APIRoute = async ({ request, params }) => {
       organizationId: organization.id,
       nowUnixMs: now,
     });
+    if (courseCatalog) {
+      await syncScenarioCourseCatalogSnapshot(db, {
+        snapshot: courseCatalog,
+        sourceRevision: parsed.value.rev,
+        organizationId: organization.id,
+        nowUnixMs: now,
+      });
+    }
     const assigned = await assignQueuedImageBuilds(db, now);
     return jsonResponse(
       {

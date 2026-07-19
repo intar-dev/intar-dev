@@ -28,6 +28,7 @@ export {
   scenarioRunSshKeys,
 } from "./schema/runs";
 export {
+  scenarioCourseCatalogs,
   vmScenarioProbes,
   vmScenarios,
   vmScenarioVms,
@@ -55,5 +56,7 @@ export type {
   ImageBuildBundleMeta,
   ImageBuildStatus,
   ImageBuildTimings,
+  ScenarioCourseCatalogCourse,
+  ScenarioCourseCatalogSnapshotV1,
   ScenarioRunHintSnapshot,
 } from "./schema/shared";

@@ -94,6 +94,7 @@ test.describe("focused visual states", () => {
   test("catalog · paginated", async ({ page, ui }) => {
     await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
     ui.server.state.scenarios = paginatedScenarioFixtures();
+    ui.server.state.courses = [];
     ui.server.state.assignments = [];
     ui.server.state.runs = [];
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -101,7 +102,7 @@ test.describe("focused visual states", () => {
 
     await expect(
       page.getByRole("navigation", { name: "scenarios pagination" }),
-    ).toContainText("1–6 of 13 scenarios");
+    ).toContainText("1–9 of 19 scenarios");
     await expectRouteScreenshot(page, "catalog-paginated-light-desktop");
   });
 
@@ -292,6 +293,29 @@ test.describe("focused mobile workspace", () => {
     await expectRouteScreenshot(page, "run-replay-inline-dark-mobile");
   });
 });
+
+for (const viewport of [
+  { id: "desktop", width: 1440, height: 900 },
+  { id: "mobile", width: 390, height: 844 },
+] as const) {
+  test.describe(`organization courses · ${viewport.id}`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height } });
+
+    for (const theme of ["light", "dark"] as const) {
+      test(`${theme}`, async ({ page, ui }) => {
+        await ui.open({ ...routeCase("organization-detail"), theme });
+        await page.getByRole("tab", { name: "Scenarios" }).click();
+        await expect(
+          page.getByRole("heading", { name: "Platform repair sequence" }),
+        ).toBeVisible();
+        await expectRouteScreenshot(
+          page,
+          `organization-scenarios-${theme}-${viewport.id}`,
+        );
+      });
+    }
+  });
+}
 
 test.describe("wide operational states", () => {
   test.use({ viewport: { width: 2048, height: 944 } });

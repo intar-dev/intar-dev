@@ -43,6 +43,19 @@ export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
   progress: ScenarioProgress;
 }
 
+export interface ScenarioCourseWireEntry {
+  courseId: string;
+  organizationId: string | null;
+  title: string;
+  description: string;
+  scenarioIds: string[];
+}
+
+export interface ScenarioCatalogWireResponse {
+  scenarios: ScenarioCatalogWireEntry[];
+  courses: ScenarioCourseWireEntry[];
+}
+
 export interface ScenarioDetail {
   scenarioId: string;
   organizationId: string | null;

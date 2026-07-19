@@ -10,11 +10,13 @@ rust-version.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 flate2.workspace = true
+hcl-rs.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-build = { path = "../intar-image-build" }
 intar-image-scenario = { path = "../intar-image-scenario" }
 intar-image-upload = { path = "../intar-image-upload" }
 reqwest = { workspace = true, features = ["blocking", "multipart", "rustls"] }
+serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true
 

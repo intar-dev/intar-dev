@@ -4,11 +4,7 @@ import { CircleCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { formatDurationMs } from "@/components/app/lib/format";
 import { cn } from "@/lib/utils";
-import {
-  MetaDifficulty,
-  MetaLine,
-  type ScenarioDifficulty,
-} from "./MetaLine";
+import { MetaDifficulty, MetaLine, type ScenarioDifficulty } from "./MetaLine";
 import { StatusToken } from "./StatusToken";
 import type { ScenarioProgress } from "@/lib/scenario-runs";
 
@@ -30,11 +26,14 @@ export function ScenarioCard({
   scenario,
   footer,
   className,
+  headingLevel = 3,
 }: {
   scenario: ScenarioCardData;
   footer?: ReactNode;
   className?: string;
+  headingLevel?: 3 | 4;
 }) {
+  const Heading = headingLevel === 4 ? "h4" : "h3";
   return (
     <Link
       to="/scenarios/$scenarioId"
@@ -52,9 +51,9 @@ export function ScenarioCard({
         <ScenarioStatusBadge progress={scenario.progress} />
       </div>
       <div className="space-y-2">
-        <h3 className="min-w-0 font-heading text-lg font-bold tracking-[-0.02em] [overflow-wrap:anywhere] [text-wrap:wrap] transition-colors group-hover:text-brand-text">
+        <Heading className="min-w-0 font-heading text-lg font-bold tracking-[-0.02em] [overflow-wrap:anywhere] [text-wrap:wrap] transition-colors group-hover:text-brand-text">
           {scenario.title}
-        </h3>
+        </Heading>
         <p className="line-clamp-3 text-body text-muted-foreground">
           {scenario.tagline}
         </p>

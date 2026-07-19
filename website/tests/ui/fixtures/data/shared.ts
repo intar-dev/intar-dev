@@ -25,6 +25,9 @@ export interface MockApiState {
   runState: RunFixtureState;
   terminalMode: TerminalMode;
   scenarios: Array<Record<string, unknown>>;
+  courses: Array<Record<string, unknown>>;
+  organizationScenarios: Array<Record<string, unknown>>;
+  organizationCourses: Array<Record<string, unknown>>;
   scenarioDetail: Record<string, unknown>;
   runs: Array<Record<string, unknown>>;
   run: Record<string, unknown>;
@@ -163,9 +166,11 @@ export function catalogScenario(input: {
   tags: string[];
   status: "new" | "in_progress" | "attempted" | "completed";
   activeRunId?: string | null;
+  organizationId?: string | null;
 }) {
   return {
     scenarioId: input.scenarioId,
+    organizationId: input.organizationId ?? null,
     slug: input.scenarioId,
     title: input.title,
     tagline: input.tagline,
@@ -187,7 +192,7 @@ export function catalogScenario(input: {
   };
 }
 
-export function paginatedScenarioFixtures(count = 13) {
+export function paginatedScenarioFixtures(count = 19) {
   return Array.from({ length: count }, (_, index) => {
     const number = index + 1;
     return catalogScenario({

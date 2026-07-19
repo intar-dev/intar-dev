@@ -83,6 +83,7 @@ test("large card collections paginate without repeating items", async ({
 }) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
   ui.server.state.scenarios = paginatedScenarioFixtures();
+  ui.server.state.courses = [];
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
@@ -90,15 +91,15 @@ test("large card collections paginate without repeating items", async ({
     name: "scenarios pagination",
   });
   const scenarioLinks = page.locator('a[href^="/scenarios/paging-scenario-"]');
-  await expect(pagination).toContainText("1–6 of 13 scenarios");
-  await expect(scenarioLinks).toHaveCount(6);
+  await expect(pagination).toContainText("1–9 of 19 scenarios");
+  await expect(scenarioLinks).toHaveCount(9);
   const firstPageHrefs = await scenarioLinks.evaluateAll((links) =>
     links.map((link) => link.getAttribute("href")),
   );
 
   await pagination.getByRole("button", { name: /^Next/ }).click();
-  await expect(pagination).toContainText("7–12 of 13 scenarios");
-  await expect(scenarioLinks).toHaveCount(6);
+  await expect(pagination).toContainText("10–18 of 19 scenarios");
+  await expect(scenarioLinks).toHaveCount(9);
   const secondPageHrefs = await scenarioLinks.evaluateAll((links) =>
     links.map((link) => link.getAttribute("href")),
   );
@@ -108,15 +109,96 @@ test("large card collections paginate without repeating items", async ({
   );
 
   await pagination.getByRole("button", { name: "Page 3" }).click();
-  await expect(pagination).toContainText("13–13 of 13 scenarios");
+  await expect(pagination).toContainText("19–19 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(1);
   await expect(
     pagination.getByRole("button", { name: "Page 3" }),
   ).toHaveAttribute("aria-current", "page");
 
   await page.getByRole("textbox", { name: "Search scenarios" }).fill("Paging");
-  await expect(pagination).toContainText("1–6 of 13 scenarios");
-  await expect(scenarioLinks).toHaveCount(6);
+  await expect(pagination).toContainText("1–9 of 19 scenarios");
+  await expect(scenarioLinks).toHaveCount(9);
+});
+
+test("public courses preserve curriculum order and leave standalone work after them", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+
+  const course = page.locator(
+    'section[data-course-id="operations"][data-course-scope="public"]',
+  );
+  await expect(
+    course.getByRole("heading", { name: "Linux operations" }),
+  ).toBeVisible();
+  await expect(course).toContainText("2 scenarios");
+  await expect(course).toContainText("~95 min total");
+  const courseLinks = course.locator('a[href^="/scenarios/"]');
+  await expect(courseLinks).toHaveCount(2);
+  await expect(courseLinks.nth(0)).toHaveAttribute(
+    "href",
+    "/scenarios/repair-nginx",
+  );
+  await expect(courseLinks.nth(1)).toHaveAttribute(
+    "href",
+    "/scenarios/repair-dns",
+  );
+
+  const individual = page
+    .getByRole("heading", { name: "Individual scenarios" })
+    .locator("xpath=ancestor::section");
+  await expect(
+    individual.locator('a[href="/scenarios/recover-postgres"]'),
+  ).toBeVisible();
+});
+
+test("partially available courses remain visible", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  ui.server.state.scenarios = ui.server.state.scenarios.filter(
+    (scenario) => scenario.scenarioId !== "repair-dns",
+  );
+  const publicCourse = ui.server.state.courses[0];
+  if (publicCourse) publicCourse.scenarioIds = ["repair-nginx"];
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const course = page.locator(
+    'section[data-course-id="operations"][data-course-scope="public"]',
+  );
+  await expect(course).toContainText("1 scenario");
+  await expect(
+    course.locator('a[href="/scenarios/repair-nginx"]'),
+  ).toBeVisible();
+  await expect(course.locator('a[href="/scenarios/repair-dns"]')).toHaveCount(
+    0,
+  );
+});
+
+test("organization catalogs render public courses before scoped courses", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
+  await page.getByRole("tab", { name: "Scenarios" }).click();
+
+  const courses = page.locator('section[data-course-id="operations"]');
+  await expect(courses).toHaveCount(2);
+  await expect(courses.nth(0)).toHaveAttribute("data-course-scope", "public");
+  await expect(courses.nth(1)).toHaveAttribute(
+    "data-course-scope",
+    "org-platform",
+  );
+  await expect(courses.nth(0).locator('a[href*="repair-dns"]')).toHaveCount(1);
+  await expect(courses.nth(0).locator('a[href*="repair-nginx"]')).toHaveCount(
+    0,
+  );
+  await expect(courses.nth(1).locator('a[href*="repair-nginx"]')).toHaveCount(
+    1,
+  );
+  await expect(
+    courses.nth(1).locator('a[href*="platform-logrotate"]'),
+  ).toHaveCount(1);
 });
 
 test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
@@ -342,6 +424,24 @@ test("200% text remains operable without page overflow", async ({
   });
   await page.waitForTimeout(100);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});
+
+test("organization courses remain operable at 200% text", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
+  await page.getByRole("tab", { name: "Scenarios" }).click();
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  await page.waitForTimeout(100);
+  const courseHeading = page.getByRole("heading", {
+    name: "Platform repair sequence",
+  });
+  await courseHeading.scrollIntoViewIfNeeded();
+  await expect(courseHeading).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

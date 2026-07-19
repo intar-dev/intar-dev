@@ -3,6 +3,7 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
 import { scenarioRuns } from "@/db/schema";
+import { listVisibleScenarioCourses } from "@/lib/scenario-course-catalogs";
 import { RUN_PHASE_ORDER, type RunPhase } from "@/lib/run-state";
 import {
   deriveScenarioRunOutcome,
@@ -14,6 +15,7 @@ import {
   type ScenarioRunRecord,
   type ScenarioRunListEntry,
   type ScenarioProgress,
+  type ScenarioCatalogWireResponse,
   type ScenarioCatalogWireEntry,
 } from "./types";
 import {
@@ -302,14 +304,19 @@ export function newScenarioProgress(): ScenarioProgress {
 export async function listScenarioCatalogForUser(
   userId: string,
   organizationId: string | null = null,
-): Promise<ScenarioCatalogWireEntry[]> {
+): Promise<ScenarioCatalogWireResponse> {
   const [scenarios, progressByScenario] = await Promise.all([
     listEnabledScenariosForUser({ organizationId }),
     getScenarioProgressByScenario(userId, organizationId),
   ]);
-  return scenarios.map((scenario) => ({
+  const wireScenarios: ScenarioCatalogWireEntry[] = scenarios.map((scenario) => ({
     ...scenario,
     progress:
       progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
   }));
+  const courses = await listVisibleScenarioCourses(drizzle(env.DB), {
+    organizationId,
+    scenarios: wireScenarios,
+  });
+  return { scenarios: wireScenarios, courses };
 }

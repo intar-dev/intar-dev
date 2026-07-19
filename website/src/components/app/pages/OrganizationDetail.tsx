@@ -130,9 +130,9 @@ export function OrganizationDetail() {
       <Tabs
         value={activeTab}
         onValueChange={(value) => setTab(value as OrganizationDetailTab)}
-        className="gap-6"
+        className="min-w-0 gap-6"
       >
-        <div className="overflow-x-auto border-b">
+        <div className="min-w-0 max-w-full overflow-x-auto border-b px-1 pt-1">
           <TabsList variant="line" className="min-w-max pb-1">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="scenarios">Scenarios</TabsTrigger>
@@ -146,27 +146,27 @@ export function OrganizationDetail() {
           </TabsList>
         </div>
 
-        <TabsContent value="overview">
+        <TabsContent value="overview" className="min-w-0">
           <OrganizationOverview detail={detail} setTab={setTab} />
         </TabsContent>
-        <TabsContent value="scenarios">
+        <TabsContent value="scenarios" className="min-w-0">
           <OrganizationScenariosSection detail={detail} />
         </TabsContent>
-        <TabsContent value="people">
+        <TabsContent value="people" className="min-w-0">
           <MembersSection detail={detail} />
         </TabsContent>
-        <TabsContent value="assignments">
+        <TabsContent value="assignments" className="min-w-0">
           <AssignmentsSection detail={detail} />
         </TabsContent>
         {admin ? (
-          <TabsContent value="progress">
+          <TabsContent value="progress" className="min-w-0">
             <ProgressSection detail={detail} />
           </TabsContent>
         ) : null}
-        <TabsContent value="runners">
+        <TabsContent value="runners" className="min-w-0">
           <OrganizationRunnersSection detail={detail} />
         </TabsContent>
-        <TabsContent value="settings">
+        <TabsContent value="settings" className="min-w-0">
           <OrganizationSettingsSection detail={detail} />
         </TabsContent>
       </Tabs>

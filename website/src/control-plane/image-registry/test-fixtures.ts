@@ -19,6 +19,11 @@ const schedulerMock = vi.hoisted(() => ({
   queueImageBuildsFromBundle: vi.fn(),
 }));
 
+const scenarioCourseCatalogMock = vi.hoisted(() => ({
+  syncScenarioCourseCatalogSnapshot: vi.fn(),
+  validateScenarioCourseCatalogReferences: vi.fn(),
+}));
+
 const imageBuildLockMock = vi.hoisted(() => ({
   withImageBuildCoordinationLock: vi.fn(),
   assertHeld: vi.fn(),
@@ -41,6 +46,7 @@ export function imageRegistryMocks() {
     authMock,
     dbMock,
     schedulerMock,
+    scenarioCourseCatalogMock,
     imageBuildLockMock,
     catalogManifestMock,
     desiredStateStoreMock,
@@ -53,6 +59,8 @@ vi.mock("@/control-plane/auth", () => authMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 
 vi.mock("@/lib/build-scheduler", () => schedulerMock);
+
+vi.mock("@/lib/scenario-course-catalogs", () => scenarioCourseCatalogMock);
 
 vi.mock("@/lib/image-build-lock", () => imageBuildLockMock);
 
@@ -70,6 +78,11 @@ export function resetImageRegistryMocks(): void {
   dbMock.drizzle.mockImplementation(() => defaultAgentVisibilityDb());
   schedulerMock.assignQueuedImageBuilds.mockReset();
   schedulerMock.queueImageBuildsFromBundle.mockReset();
+  scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockReset();
+  scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockReset();
+  scenarioCourseCatalogMock.validateScenarioCourseCatalogReferences.mockResolvedValue(
+    { ok: true, invalidScenarioIds: [] },
+  );
   imageBuildLockMock.assertHeld.mockReset();
   imageBuildLockMock.assertHeld.mockResolvedValue(undefined);
   imageBuildLockMock.withImageBuildCoordinationLock.mockReset();
@@ -277,6 +290,20 @@ function defaultAgentVisibilityDb() {
 export function sourceBundleFixture(scenarioIds: string[]): ArrayBuffer {
   return toArrayBuffer(
     gzipSync(tarArchiveFixture(bundleFixtureFiles(scenarioIds))),
+  );
+}
+
+export function sourceBundleFixtureWithCourses(
+  scenarioIds: string[],
+  coursesHcl: string,
+): ArrayBuffer {
+  return toArrayBuffer(
+    gzipSync(
+      tarArchiveFixture([
+        ...bundleFixtureFiles(scenarioIds),
+        ["courses.hcl", coursesHcl],
+      ]),
+    ),
   );
 }
 

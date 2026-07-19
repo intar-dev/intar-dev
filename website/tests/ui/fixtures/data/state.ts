@@ -245,6 +245,46 @@ export function createMockApiState(input?: {
       status: "completed",
     }),
   ];
+  const courses = [
+    {
+      courseId: "operations",
+      organizationId: null,
+      title: long
+        ? "Linux operations for distributed service recovery and deliberate production handover"
+        : "Linux operations",
+      description: long
+        ? "Practice tracing service failures from the network edge through resolver policy, host networking, process supervision, persistent storage, and the final production handover without skipping verification evidence."
+        : "Practice tracing service failures from the network edge to the process boundary.",
+      scenarioIds: ["repair-nginx", "repair-dns"],
+    },
+  ];
+  const organizationScenarios = [
+    ...scenarios,
+    catalogScenario({
+      scenarioId: "platform-logrotate",
+      organizationId: "org-platform",
+      title: "Recover the platform log rotation job",
+      tagline: "A private fleet policy filled the service volume overnight.",
+      difficulty: "medium",
+      category: "Platform operations",
+      tags: ["linux", "storage", "organization"],
+      status: "new",
+    }),
+  ];
+  const organizationCourses = [
+    {
+      ...courses[0],
+      scenarioIds: ["repair-dns"],
+    },
+    {
+      courseId: "operations",
+      organizationId: "org-platform",
+      title: "Platform repair sequence",
+      description:
+        "Work through the public service repair before applying the crew's private fleet policy.",
+      scenarioIds: ["repair-nginx", "platform-logrotate"],
+    },
+  ];
   const runs = [
     runListEntry({
       runId: "run-active",
@@ -339,6 +379,9 @@ export function createMockApiState(input?: {
           ? "error"
           : "connected",
     scenarios: empty ? [] : scenarios,
+    courses: empty ? [] : courses,
+    organizationScenarios: empty ? [] : organizationScenarios,
+    organizationCourses: empty ? [] : organizationCourses,
     scenarioDetail: {
       scenarioId: "repair-nginx",
       organizationId: null,

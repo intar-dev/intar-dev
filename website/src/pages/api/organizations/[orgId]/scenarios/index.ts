@@ -22,11 +22,11 @@ export const GET: APIRoute = async ({ request, params }) => {
       organizationId,
       userId: authz.context.userId,
     });
-    const scenarios = await listScenarioCatalogForUser(
+    const catalog = await listScenarioCatalogForUser(
       authz.context.userId,
       organizationId,
     );
-    return jsonResponse({ scenarios });
+    return jsonResponse(catalog);
   } catch (error) {
     const { status, body } = toErrorResponse(
       error,

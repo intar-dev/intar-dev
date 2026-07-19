@@ -22,6 +22,7 @@ on:
       - "base-images.hcl"
       - "build-tools.hcl"
       - "builder.*.hcl"
+      - "courses.hcl"
       - "scenarios/**"
       - "website/**"
 

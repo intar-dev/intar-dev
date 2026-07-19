@@ -21,6 +21,21 @@ test.describe("focused state accessibility", () => {
     });
   }
 
+  for (const theme of ["light", "dark"] as const) {
+    test(`organization course catalog · ${theme}`, async ({
+      page,
+      ui,
+    }, testInfo) => {
+      await ui.open({ ...routeCase("organization-detail"), theme });
+      await page.getByRole("tab", { name: "Scenarios" }).click();
+
+      await expect(
+        page.getByRole("heading", { name: "Platform repair sequence" }),
+      ).toBeVisible();
+      await expectNoAxeViolations(page, testInfo);
+    });
+  }
+
   test("request access success announcement", async ({
     page,
     ui,

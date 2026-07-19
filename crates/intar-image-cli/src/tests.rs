@@ -1,16 +1,20 @@
 #![allow(clippy::unwrap_used)]
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Read;
 
 use clap::{CommandFactory, Parser, error::ErrorKind};
 use flate2::read::GzDecoder;
+use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 
 use super::{
     BASE_IMAGES_PATH, BUILD_TOOLS_PATH, BundleSourceFile, BundleUploadReceipt, Cli, Command,
     PreparedBundleScenario, TAR_BLOCK_SIZE, bundle_tar_size_bytes, bundle_url_from_publish_url,
-    collect_bundle_source_files, contract_image_arch_slug, discover_course_scenarios,
-    discover_legacy_scenarios, kino_version_from_package_id, parse_bundle_upload_response,
-    validate_bundle_rev, validate_scenario_arg, write_bundle_archive,
+    collect_bundle_source_files, contract_image_arch_slug, course_manifest_is_present,
+    course_manifest_path, discover_course_scenarios, discover_legacy_scenarios,
+    kino_version_from_package_id, load_bundle_course_catalog, parse_bundle_course_catalog,
+    parse_bundle_upload_response, validate_bundle_rev, validate_scenario_arg, write_bundle_archive,
 };
 
 fn write_scenario(scenario_dir: &std::path::Path, scenario_id: &str) {
@@ -20,6 +24,26 @@ fn write_scenario(scenario_dir: &std::path::Path, scenario_id: &str) {
         format!("scenario \"{scenario_id}\" {{\n  category = \"test\"\n}}\n"),
     )
     .unwrap();
+}
+
+fn known_scenarios(ids: &[&str]) -> HashSet<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+fn ordered_course_hcl() -> &'static str {
+    r#"
+course "linux-operations" {
+  title       = "  Linux operations  "
+  description = "Practice diagnosing and repairing common Linux failures."
+  scenarios   = ["broken-nginx", "pair-ping"]
+}
+
+course "cluster-operations" {
+  title       = "Cluster operations"
+  description = "Repair a small cluster."
+  scenarios   = ["workshop-cluster"]
+}
+"#
 }
 
 #[test]
@@ -280,6 +304,7 @@ fn flattens_nested_course_paths_with_explicit_catalog_and_tool_sources() {
         }],
         &base_images,
         &build_tools,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -423,6 +448,282 @@ fn rejects_unsafe_scenario_arguments() {
     assert!(validate_scenario_arg(".").is_err());
     assert!(validate_scenario_arg("..").is_err());
     assert!(validate_scenario_arg("../escape").is_err());
+}
+
+#[test]
+fn parses_and_normalizes_courses_in_curriculum_order() {
+    let catalog = parse_bundle_course_catalog(
+        ordered_course_hcl(),
+        &known_scenarios(&["broken-nginx", "pair-ping", "workshop-cluster"]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(catalog).unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "mode": "replace",
+            "courses": [
+                {
+                    "course_id": "linux-operations",
+                    "title": "Linux operations",
+                    "description": "Practice diagnosing and repairing common Linux failures.",
+                    "scenario_ids": ["broken-nginx", "pair-ping"],
+                },
+                {
+                    "course_id": "cluster-operations",
+                    "title": "Cluster operations",
+                    "description": "Repair a small cluster.",
+                    "scenario_ids": ["workshop-cluster"],
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_course_fields_and_ids() {
+    let known = known_scenarios(&["broken-nginx"]);
+    let invalid_catalogs = [
+        (
+            "course \"../escape\" {\n  title = \"Title\"\n  description = \"Description\"\n  scenarios = [\"broken-nginx\"]\n}",
+            "invalid course id",
+        ),
+        (
+            "course \"linux\" {\n  description = \"Description\"\n  scenarios = [\"broken-nginx\"]\n}",
+            "non-empty title",
+        ),
+        (
+            "course \"linux\" {\n  title = \"   \"\n  description = \"Description\"\n  scenarios = [\"broken-nginx\"]\n}",
+            "non-empty title",
+        ),
+        (
+            "course \"linux\" {\n  title = \"Title\"\n  scenarios = [\"broken-nginx\"]\n}",
+            "non-empty description",
+        ),
+        (
+            "course \"linux\" {\n  title = \"Title\"\n  description = \"  \"\n  scenarios = [\"broken-nginx\"]\n}",
+            "non-empty description",
+        ),
+        (
+            "course \"linux\" {\n  title = \"Title\"\n  description = \"Description\"\n}",
+            "missing required scenarios",
+        ),
+        (
+            "course \"linux\" {\n  title = \"Title\"\n  description = \"Description\"\n  scenarios = []\n}",
+            "at least one scenario",
+        ),
+        (
+            "course \"linux\" {\n  title = \"Title\"\n  description = \"Description\"\n  scenarios = [\"../escape\"]\n}",
+            "invalid course scenario id",
+        ),
+    ];
+
+    for (hcl, expected) in invalid_catalogs {
+        let error = parse_bundle_course_catalog(hcl, &known).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected),
+            "expected error containing {expected:?}, got {error:#}"
+        );
+    }
+}
+
+#[test]
+fn rejects_duplicate_courses_and_memberships() {
+    let known = known_scenarios(&["broken-nginx", "pair-ping"]);
+    let invalid_catalogs = [
+        (
+            r#"
+course "linux" {
+  title = "One"
+  description = "One"
+  scenarios = ["broken-nginx"]
+}
+course "linux" {
+  title = "Two"
+  description = "Two"
+  scenarios = ["pair-ping"]
+}
+"#,
+            "duplicate course 'linux'",
+        ),
+        (
+            "course \"linux\" {\n  title = \"One\"\n  description = \"One\"\n  scenarios = [\"broken-nginx\", \"broken-nginx\"]\n}",
+            "lists scenario 'broken-nginx' more than once",
+        ),
+        (
+            r#"
+course "linux" {
+  title = "One"
+  description = "One"
+  scenarios = ["broken-nginx"]
+}
+course "networking" {
+  title = "Two"
+  description = "Two"
+  scenarios = ["broken-nginx"]
+}
+"#,
+            "belongs to multiple courses",
+        ),
+    ];
+
+    for (hcl, expected) in invalid_catalogs {
+        let error = parse_bundle_course_catalog(hcl, &known).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(expected),
+            "expected error containing {expected:?}, got {error:#}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unknown_course_scenario_references() {
+    let error = parse_bundle_course_catalog(
+        "course \"linux\" {\n  title = \"Linux\"\n  description = \"Linux\"\n  scenarios = [\"not-in-tree\"]\n}",
+        &known_scenarios(&["broken-nginx"]),
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("references unknown scenario 'not-in-tree'"));
+}
+
+#[test]
+fn distinguishes_missing_and_empty_course_manifests() {
+    let temp = tempfile::tempdir().unwrap();
+    let course_path = temp.path().join("courses.hcl");
+
+    assert!(!course_manifest_is_present(&course_path).unwrap());
+    assert!(
+        load_bundle_course_catalog(&course_path, &[])
+            .unwrap()
+            .is_none()
+    );
+
+    fs::write(&course_path, "# Explicitly clear the course catalog.\n").unwrap();
+    assert!(course_manifest_is_present(&course_path).unwrap());
+    let catalog = load_bundle_course_catalog(&course_path, &[])
+        .unwrap()
+        .expect("an empty file is an explicit replacement");
+    assert_eq!(
+        serde_json::to_value(catalog).unwrap(),
+        serde_json::json!({ "version": 1, "mode": "replace", "courses": [] })
+    );
+}
+
+#[test]
+fn partial_bundle_uses_complete_course_snapshot_and_archives_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let base_images_path = temp.path().join("base-images.hcl");
+    let build_tools_path = temp.path().join("build-tools.hcl");
+    let course_path = temp.path().join("courses.hcl");
+    let courses_root = temp.path().join("courses");
+    let selected_scenario_dir = courses_root.join("linux/broken-nginx");
+    let other_scenario_dir = courses_root.join("networking/pair-ping");
+    fs::write(&base_images_path, "base images").unwrap();
+    fs::write(&build_tools_path, "build tools").unwrap();
+    write_scenario(&selected_scenario_dir, "broken-nginx");
+    write_scenario(&other_scenario_dir, "pair-ping");
+    fs::write(
+        &course_path,
+        "course \"linux\" {\n  title = \"Linux\"\n  description = \"Linux\"\n  scenarios = [\"broken-nginx\", \"pair-ping\"]\n}\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        course_manifest_path(Some(&courses_root)).unwrap(),
+        course_path
+    );
+    let complete_paths = discover_course_scenarios(&courses_root)
+        .unwrap()
+        .into_iter()
+        .map(|scenario| scenario.scenario_path)
+        .collect::<Vec<_>>();
+    let catalog = load_bundle_course_catalog(&course_path, &complete_paths)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(catalog).unwrap()["courses"][0]["scenario_ids"],
+        serde_json::json!(["broken-nginx", "pair-ping"])
+    );
+
+    let selected = vec![PreparedBundleScenario {
+        scenario_id: "broken-nginx".to_owned(),
+        scenario_dir: selected_scenario_dir,
+        content_hash: "hash".to_owned(),
+    }];
+    let source_files = collect_bundle_source_files(
+        &selected,
+        &base_images_path,
+        &build_tools_path,
+        Some(&course_path),
+    )
+    .unwrap();
+    let archive_path = temp.path().join("partial.tar.gz");
+    write_bundle_archive(&archive_path, &source_files).unwrap();
+
+    let decoder = GzDecoder::new(fs::File::open(archive_path).unwrap());
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .unwrap()
+        .map(|entry| {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            (path, bytes)
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(entries["courses.hcl"], fs::read(&course_path).unwrap());
+    assert!(entries.contains_key("scenarios/broken-nginx/scenario.hcl"));
+    assert!(!entries.contains_key("scenarios/pair-ping/scenario.hcl"));
+}
+
+#[test]
+fn complete_source_validation_rejects_invalid_course_during_partial_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let scenario_dir = temp.path().join("scenarios/broken-nginx");
+    fs::create_dir_all(&scenario_dir).unwrap();
+    let scenario_path = scenario_dir.join("scenario.hcl");
+    fs::write(
+        &scenario_path,
+        "scenario \"broken-nginx\" { category = \"linux\" }",
+    )
+    .unwrap();
+    let course_path = temp.path().join("courses.hcl");
+    fs::write(
+        &course_path,
+        "course \"linux\" {\n  title = \"Linux\"\n  description = \"Linux\"\n  scenarios = [\"pair-ping\"]\n}\n",
+    )
+    .unwrap();
+
+    let error = load_bundle_course_catalog(&course_path, &[scenario_path]).unwrap_err();
+    assert!(format!("{error:#}").contains("references unknown scenario 'pair-ping'"));
+}
+
+#[test]
+fn course_manifest_does_not_change_scenario_content_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let scenario_dir = temp.path().join("scenarios/broken-nginx");
+    fs::create_dir_all(&scenario_dir).unwrap();
+    fs::write(scenario_dir.join("scenario.hcl"), "scenario source").unwrap();
+
+    let hash = || {
+        scenario_content_hash(&ScenarioContentHashInput {
+            scenario_id: "broken-nginx",
+            scenario_dir: &scenario_dir,
+            base_definition: "base definition",
+            kino_version: "0.1.24",
+            target_arch: "amd64",
+        })
+        .unwrap()
+    };
+    let before = hash();
+    fs::write(temp.path().join("courses.hcl"), ordered_course_hcl()).unwrap();
+    let after = hash();
+
+    assert_eq!(before, after);
 }
 
 #[test]

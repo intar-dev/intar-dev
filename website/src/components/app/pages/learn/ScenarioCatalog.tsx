@@ -13,6 +13,7 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
+  PaginatedWeightedCollection,
 } from "@/components/app/patterns/CollectionPagination";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
@@ -20,7 +21,6 @@ import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
 import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaLine";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
 import {
-  CATALOG_SORT_COMPARATORS,
   CATALOG_SORT_OPTIONS,
   compactCatalogSearch,
   normalizeCatalogSearch,
@@ -42,10 +42,16 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
+import type {
+  ScenarioCatalogWireEntry,
+  ScenarioCourseWireEntry,
+} from "@/lib/scenario-runs";
+import { CourseCatalogSections } from "./CourseCatalogSections";
+import { buildCourseCatalogView } from "./course-catalog";
 
 interface ScenarioCatalogResponse {
   scenarios: ScenarioCatalogWireEntry[];
+  courses: ScenarioCourseWireEntry[];
 }
 
 interface MyAssignmentsResponse {
@@ -109,6 +115,7 @@ export function ScenarioCatalog() {
   const activeRuns = (myRuns.data?.runs ?? []).filter((run) => run.active);
 
   const allEntries = scenarios.data?.scenarios ?? [];
+  const allCourses = scenarios.data?.courses ?? [];
   const assignments = myAssignments.data?.assignments ?? [];
 
   const allTags = useMemo(
@@ -146,35 +153,25 @@ export function ScenarioCatalog() {
     return () => window.clearTimeout(timeout);
   }, [navigate, searchState, searchText]);
 
-  const filtered = useMemo(() => {
-    const needle = searchState.q.toLowerCase();
-    const filteredEntries = allEntries.filter((scenario) => {
-      if (
-        searchState.difficulty &&
-        scenario.difficulty !== searchState.difficulty
-      ) {
-        return false;
-      }
-      if (searchState.category && scenario.category !== searchState.category) {
-        return false;
-      }
-      if (
-        searchState.tags.length &&
-        !searchState.tags.every((tag) => scenario.tags.includes(tag))
-      ) {
-        return false;
-      }
-      if (!needle) return true;
-      return (
-        scenario.title.toLowerCase().includes(needle) ||
-        scenario.tagline.toLowerCase().includes(needle) ||
-        scenario.category.toLowerCase().includes(needle) ||
-        scenario.tags.some((tag) => tag.toLowerCase().includes(needle))
-      );
-    });
-
-    return filteredEntries.sort(CATALOG_SORT_COMPARATORS[searchState.sort]);
-  }, [allEntries, searchState]);
+  const catalogView = useMemo(
+    () =>
+      buildCourseCatalogView(allEntries, allCourses, {
+        q: searchState.q,
+        difficulty: searchState.difficulty,
+        category: searchState.category,
+        tags: searchState.tags,
+        sort: searchState.sort,
+      }),
+    [allCourses, allEntries, searchState],
+  );
+  const paginationUnits = useMemo(
+    () =>
+      catalogView.units.map((unit) => ({
+        item: unit,
+        weight: unit.weight,
+      })),
+    [catalogView.units],
+  );
 
   const toggleTag = (tag: string) => {
     const nextTags = searchState.tags.includes(tag)
@@ -409,17 +406,19 @@ export function ScenarioCatalog() {
             end={
               <>
                 <span className="text-metadata tabular-nums">
-                  {filtered.length} of {allEntries.length}
+                  {catalogView.visibleScenarioCount} of {allEntries.length}
                 </span>
-                <SortSelect
-                  value={searchState.sort}
-                  onChange={(sort) =>
-                    void navigateCatalogSearch(navigate, {
-                      ...searchState,
-                      sort,
-                    })
-                  }
-                />
+                {catalogView.individualScenarioCount ? (
+                  <SortSelect
+                    value={searchState.sort}
+                    onChange={(sort) =>
+                      void navigateCatalogSearch(navigate, {
+                        ...searchState,
+                        sort,
+                      })
+                    }
+                  />
+                ) : null}
               </>
             }
           >
@@ -444,7 +443,7 @@ export function ScenarioCatalog() {
 
       {scenarios.error ? null : scenarios.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {Array.from({ length: 6 }, (_, index) => (
+          {Array.from({ length: 9 }, (_, index) => (
             <Skeleton key={index} className="h-52 rounded-xl" />
           ))}
         </div>
@@ -454,7 +453,7 @@ export function ScenarioCatalog() {
           title="No scenarios are enabled yet"
           description="This list will fill once an admin enables a scenario with a briefing and at least one probe."
         />
-      ) : !filtered.length ? (
+      ) : !catalogView.visibleScenarioCount ? (
         <EmptyState
           icon={<Search />}
           title="No scenarios match your filters"
@@ -466,20 +465,21 @@ export function ScenarioCatalog() {
           }
         />
       ) : (
-        <PaginatedCollection
-          items={filtered}
+        <PaginatedWeightedCollection
+          units={paginationUnits}
           pageSize={COLLECTION_PAGE_SIZE.cards}
           itemLabel="scenarios"
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
         >
-          {(visibleScenarios) => (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {visibleScenarios.map((scenario) => (
-                <ScenarioCard key={scenario.scenarioId} scenario={scenario} />
-              ))}
-            </div>
+          {(visibleUnits) => (
+            <CourseCatalogSections
+              units={visibleUnits}
+              renderScenario={(scenario) => (
+                <ScenarioCard scenario={scenario} headingLevel={4} />
+              )}
+            />
           )}
-        </PaginatedCollection>
+        </PaginatedWeightedCollection>
       )}
     </PageShell>
   );
@@ -497,8 +497,8 @@ function SortSelect({
       value={value}
       onValueChange={(next) => onChange(next as CatalogSort)}
     >
-      <SelectTrigger size="sm" aria-label="Sort scenarios">
-        Sort:{" "}
+      <SelectTrigger size="sm" aria-label="Sort individual scenarios">
+        Individual sort:{" "}
         {CATALOG_SORT_OPTIONS.find((option) => option.value === value)?.label}
       </SelectTrigger>
       <SelectContent align="end">

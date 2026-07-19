@@ -18,6 +18,7 @@ use std::{fs, process::Command as ProcessCommand};
 
 const BASE_IMAGES_PATH: &str = "base-images.hcl";
 const BUILD_TOOLS_PATH: &str = "build-tools.hcl";
+const COURSES_PATH: &str = "courses.hcl";
 const IMAGE_PUBLISH_TOKEN_ENV: &str = "INTAR_IMAGE_PUBLISH_TOKEN";
 const DEFAULT_BUNDLE_OUTPUT_ROOT: &str = "dist/bundles";
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
@@ -168,8 +169,21 @@ fn main() -> Result<()> {
 
 fn validate_command(args: &ScenarioCommand) -> Result<()> {
     let base_catalog = load_base_image_catalog(&args.base_images)?;
-    let scenario_paths =
-        selected_scenario_paths(args.scenario.as_deref(), args.courses_root.as_deref())?;
+    let course_manifest_path = course_manifest_path(args.courses_root.as_deref())?;
+    let complete_scenario_paths = if course_manifest_is_present(&course_manifest_path)? {
+        let complete_scenario_paths = selected_scenario_paths(None, args.courses_root.as_deref())?;
+        load_bundle_course_catalog(&course_manifest_path, &complete_scenario_paths)?;
+        Some(complete_scenario_paths)
+    } else {
+        None
+    };
+    let scenario_paths = match (args.scenario.as_deref(), complete_scenario_paths) {
+        (Some(scenario), _) => {
+            selected_scenario_paths(Some(scenario), args.courses_root.as_deref())?
+        }
+        (None, Some(complete_scenario_paths)) => complete_scenario_paths,
+        (None, None) => selected_scenario_paths(None, args.courses_root.as_deref())?,
+    };
     for scenario_path in scenario_paths {
         let scenario = load_scenario(&scenario_path)?;
         validate_scenario(&scenario, &base_catalog, args.vm.as_deref(), "amd64")?;
@@ -335,8 +349,24 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         .map(Ok)
         .unwrap_or_else(default_bundle_rev)?;
     validate_bundle_rev(&rev)?;
-    let scenario_paths =
-        selected_scenario_paths(args.scenario.as_deref(), args.courses_root.as_deref())?;
+    let course_manifest_path = course_manifest_path(args.courses_root.as_deref())?;
+    let (course_catalog, complete_scenario_paths) =
+        if course_manifest_is_present(&course_manifest_path)? {
+            let complete_scenario_paths =
+                selected_scenario_paths(None, args.courses_root.as_deref())?;
+            let course_catalog =
+                load_bundle_course_catalog(&course_manifest_path, &complete_scenario_paths)?;
+            (course_catalog, Some(complete_scenario_paths))
+        } else {
+            (None, None)
+        };
+    let scenario_paths = match (args.scenario.as_deref(), complete_scenario_paths) {
+        (Some(scenario), _) => {
+            selected_scenario_paths(Some(scenario), args.courses_root.as_deref())?
+        }
+        (None, Some(complete_scenario_paths)) => complete_scenario_paths,
+        (None, None) => selected_scenario_paths(None, args.courses_root.as_deref())?,
+    };
 
     let mut prepared_scenarios = Vec::new();
     for scenario_path in scenario_paths {
@@ -361,8 +391,14 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
         });
     }
 
-    let source_files =
-        collect_bundle_source_files(&prepared_scenarios, &args.base_images, &args.build_tools)?;
+    let source_files = collect_bundle_source_files(
+        &prepared_scenarios,
+        &args.base_images,
+        &args.build_tools,
+        course_catalog
+            .as_ref()
+            .map(|_| course_manifest_path.as_path()),
+    )?;
     let output_path = args
         .output
         .clone()
@@ -379,13 +415,16 @@ fn bundle_command(args: &BundleCommand) -> Result<()> {
             })
         })
         .collect::<Vec<_>>();
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "rev": rev,
         "kino_version": build_tools.kino.version,
         "build_format_version": BUILD_FORMAT_VERSION,
         "target_arch": config.qemu.target_arch,
         "scenarios": scenarios_meta,
     });
+    if let Some(course_catalog) = &course_catalog {
+        meta["course_catalog"] = serde_json::to_value(course_catalog)?;
+    }
 
     println!(
         "bundled {} scenarios ({} files) -> {}",

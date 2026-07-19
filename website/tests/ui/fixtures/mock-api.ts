@@ -270,7 +270,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
 
       if (pathname === "/api/scenarios" && method === "GET") {
-        await json(route, { scenarios: server.state.scenarios });
+        await json(route, {
+          scenarios: server.state.scenarios,
+          courses: server.state.courses,
+        });
         return;
       }
       if (
@@ -534,7 +537,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/organizations\/[^/]+\/scenarios$/.test(pathname) &&
         method === "GET"
       ) {
-        await json(route, { scenarios: server.state.scenarios });
+        await json(route, {
+          scenarios: server.state.organizationScenarios,
+          courses: server.state.organizationCourses,
+        });
         return;
       }
       if (

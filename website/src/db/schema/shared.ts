@@ -26,6 +26,19 @@ export type ImageBuildStatus =
   | "failed"
   | "stale";
 
+export interface ScenarioCourseCatalogCourse {
+  courseId: string;
+  title: string;
+  description: string;
+  scenarioIds: string[];
+}
+
+export interface ScenarioCourseCatalogSnapshotV1 {
+  version: 1;
+  mode: "replace";
+  courses: ScenarioCourseCatalogCourse[];
+}
+
 export interface ImageBuildBundleMeta {
   buildFormatVersion: string;
   scenarios: Array<{
@@ -33,6 +46,7 @@ export interface ImageBuildBundleMeta {
     arch: ImageArchitecture;
     contentHash: string;
   }>;
+  courseCatalog?: ScenarioCourseCatalogSnapshotV1;
   [key: string]: unknown;
 }
 

@@ -34,12 +34,12 @@ export function AppShell() {
           Skip to main content
         </a>
         <AppSidebar />
-        <SidebarInset>
+        <SidebarInset className="min-w-0">
           <AppBar />
           <main
             id="main-content"
             tabIndex={-1}
-            className="flex flex-1 flex-col focus:outline-none"
+            className="flex min-w-0 flex-1 flex-col focus:outline-none"
           >
             <Outlet />
           </main>
