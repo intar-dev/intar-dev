@@ -61,6 +61,29 @@ fn direct_render_uses_raw_zstd_outputs_and_direct_boot_args() {
     assert!(!rendered.paths.work_root.join("build.pkr.hcl").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_render_keeps_qmp_argument_short_for_long_work_paths() {
+    let directory = tempdir().unwrap();
+    let long_work_root = directory.path().join("w".repeat(120));
+    let rendered = render_test_direct_build_in_work_root(
+        &directory,
+        QemuBuildConfig::default(),
+        long_work_root.clone(),
+    );
+
+    let expected_host_path = long_work_root.join("qemu/broken-nginx/web/qmp.sock");
+    assert!(expected_host_path.is_absolute());
+    assert!(expected_host_path.as_os_str().as_encoded_bytes().len() > 108);
+    assert_eq!(rendered.paths.qmp_socket_path, expected_host_path);
+    assert!(
+        rendered
+            .qemu_args
+            .windows(2)
+            .any(|pair| pair == ["-qmp", "unix:qmp.sock,server=on,wait=off"])
+    );
+}
+
 #[test]
 fn direct_prepare_writes_root_disk_and_intarbuild_seed() {
     let directory = tempdir().unwrap();
