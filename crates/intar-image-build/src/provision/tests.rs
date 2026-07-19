@@ -6,8 +6,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use intar_image_scenario::Scenario;
+use tempfile::tempdir;
 
-use super::{render_scenario_provision_script, shell_quote};
+use super::{
+    FAILED_STEP_LOG_TAIL_BYTES, GeneratedStepScript, append_step_scripts,
+    render_scenario_provision_script, shell_quote,
+};
 
 fn render_minimal_provision_script() -> String {
     render_minimal_provision_script_with_cpu("1")
@@ -95,6 +99,92 @@ fn run_bash(script: &str, syntax_only: bool) -> Output {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn visible_step_failure_emits_bounded_log_tail_and_preserves_status() {
+    let directory = tempdir().unwrap();
+    let step_path = directory.path().join("visible-step.sh");
+    let log_path = directory.path().join("visible-step.log");
+    let step_path = step_path.to_string_lossy().into_owned();
+    let log_path = log_path.to_string_lossy().into_owned();
+    let generated = GeneratedStepScript {
+        content: format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nexec >{} 2>&1\nhead -c 70000 /dev/zero | tr '\\0' x\nprintf '\\nsuffix\\n'\nexit 37\n",
+            shell_quote(&log_path)
+        ),
+        hidden: false,
+        log_path: Some(log_path.clone()),
+        marker: "INTAR_TEST_VISIBLE_STEP".to_string(),
+        path: step_path,
+        phase_name: "step_server_configure".to_string(),
+    };
+    let mut script = "#!/usr/bin/env bash\nset -euo pipefail\nlog_phase() { :; }\n".to_string();
+    append_step_scripts(&mut script, &[generated]).unwrap();
+
+    assert!(script.contains("if bash "));
+    assert!(script.contains(&format!(
+        "tail -c {FAILED_STEP_LOG_TAIL_BYTES} -- \"$step_log\" >&2 || true"
+    )));
+    assert!(script.contains("exit \"$step_status\""));
+    assert!(
+        !script
+            .lines()
+            .any(|line| line.starts_with("trap ") && line.contains("ERR"))
+    );
+
+    let stderr_path = directory.path().join("provision.stderr");
+    let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+    let mut child = Command::new("bash")
+        .arg("-s")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(37));
+    let stderr = std::fs::read_to_string(stderr_path).unwrap();
+    let header = format!(
+        "[intar-build] scenario step failed: phase=step_server_configure status=37 log={log_path}; showing last {FAILED_STEP_LOG_TAIL_BYTES} bytes\n"
+    );
+    let footer = "\n[intar-build] end scenario step failure log: phase=step_server_configure\n";
+    let (_, after_header) = stderr.split_once(&header).unwrap();
+    let (log_tail, after_footer) = after_header.split_once(footer).unwrap();
+    assert_eq!(log_tail.len(), FAILED_STEP_LOG_TAIL_BYTES);
+    assert!(log_tail.ends_with("\nsuffix\n"));
+    assert!(after_footer.is_empty());
+}
+
+#[test]
+fn hidden_step_failure_output_remains_suppressed() {
+    let directory = tempdir().unwrap();
+    let step_path = directory.path().join("hidden-step.sh");
+    let generated = GeneratedStepScript {
+        content: "#!/usr/bin/env bash\nset -euo pipefail\ntrap 'rm -f -- \"$0\"' EXIT\nexec >/dev/null 2>&1\nprintf 'hidden failure output\\n'\nexit 42\n"
+            .to_string(),
+        hidden: true,
+        log_path: None,
+        marker: "INTAR_TEST_HIDDEN_STEP".to_string(),
+        path: step_path.to_string_lossy().into_owned(),
+        phase_name: "step_server_break-app".to_string(),
+    };
+    let mut script = "#!/usr/bin/env bash\nset -euo pipefail\nlog_phase() { :; }\n".to_string();
+    append_step_scripts(&mut script, &[generated]).unwrap();
+
+    assert!(!script.contains("scenario step failed"));
+    assert!(!script.contains("tail -c"));
+
+    let output = run_bash(&script, false);
+    assert_eq!(output.status.code(), Some(42));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
