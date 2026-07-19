@@ -19,7 +19,7 @@ use tempfile::{TempDir, tempdir};
 use super::{
     DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest, QEMU_EXIT_POLL_INTERVAL,
     QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild, SSH_POLL_INTERVAL,
-    prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
+    connect_qmp_socket, prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
 };
 use crate::config::QemuBuildConfig;
 use crate::kino::KinoArtifact;

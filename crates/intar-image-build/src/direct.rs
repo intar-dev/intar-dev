@@ -169,8 +169,9 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         initrd_path: &base_rootfs.paths.initrd_path,
         serial_log_path: &paths.serial_log_path,
         // QEMU's Unix socket path is limited to 108 bytes on Linux. Run QEMU
-        // from the build work directory and keep this process argument short;
-        // host-side cleanup and QMP clients continue to use the absolute path.
+        // from the build work directory and keep this process argument short.
+        // Host-side cleanup keeps the absolute path, while QMP clients connect
+        // through a short, private symlink created below.
         qmp_socket_path: Path::new(QMP_SOCKET_FILE_NAME),
         ssh_host_port,
         memory_mib: request.config.build_memory_mb,
@@ -516,7 +517,7 @@ fn request_qemu_powerdown(
     rendered: &RenderedDirectBuild,
     shutdown_deadline: Instant,
 ) -> Result<()> {
-    let mut stream = UnixStream::connect(&rendered.paths.qmp_socket_path).with_context(|| {
+    let mut stream = connect_qmp_socket(&rendered.paths.qmp_socket_path).with_context(|| {
         format!(
             "failed to connect to QMP socket '{}'",
             rendered.paths.qmp_socket_path.display()
@@ -558,6 +559,41 @@ fn request_qemu_powerdown(
         bail!("QMP reported shutdown before acknowledging system_powerdown");
     }
     wait_for_guest_shutdown_event(&mut reader, shutdown_deadline)
+}
+
+#[cfg(unix)]
+fn connect_qmp_socket(qmp_socket_path: &Path) -> Result<UnixStream> {
+    // Unix-domain socket APIs reject the pathname supplied by the client when
+    // it exceeds SUN_LEN even if QEMU successfully bound the same socket from
+    // its work directory using the relative name `qmp.sock`. Resolve the
+    // trusted absolute socket through a private short alias so connect(2) sees
+    // a bounded pathname. The connected stream remains valid after the alias
+    // directory is removed on return.
+    let absolute_qmp_socket_path = if qmp_socket_path.is_absolute() {
+        qmp_socket_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve the current directory for a relative QMP socket")?
+            .join(qmp_socket_path)
+    };
+    let alias_root = tempfile::Builder::new()
+        .prefix("intar-qmp-")
+        .tempdir_in("/tmp")
+        .context("failed to create short QMP socket alias directory")?;
+    let alias_path = alias_root.path().join(QMP_SOCKET_FILE_NAME);
+    std::os::unix::fs::symlink(&absolute_qmp_socket_path, &alias_path).with_context(|| {
+        format!(
+            "failed to create short QMP socket alias '{}' -> '{}'",
+            alias_path.display(),
+            absolute_qmp_socket_path.display()
+        )
+    })?;
+    UnixStream::connect(&alias_path).with_context(|| {
+        format!(
+            "failed to connect through short QMP socket alias '{}'",
+            alias_path.display()
+        )
+    })
 }
 
 #[cfg(unix)]
