@@ -71,7 +71,7 @@ export function RunTimeline({
   );
 
   return (
-    <section aria-labelledby="run-timeline-heading" className="space-y-6">
+    <section aria-labelledby="run-timeline-heading" className="space-y-4">
       <header className="space-y-1">
         <p className="text-eyebrow">{run.scenarioName}</p>
         <h1
@@ -126,19 +126,22 @@ function TimelineRow({
 
   return (
     <li
-      className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-x-3 pb-7 last:pb-0 sm:grid-cols-[9rem_1.25rem_minmax(0,1fr)] sm:gap-x-4"
+      className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-x-3 pb-4 last:pb-0 sm:grid-cols-[8rem_1.25rem_minmax(0,1fr)]"
       aria-current={isCurrent ? "step" : undefined}
     >
       <div className="hidden pt-0.5 text-right sm:block">
         <TimelineTime item={item} />
       </div>
-      <div className="relative flex justify-center" aria-hidden="true">
+      <div
+        className="relative flex justify-center pt-6 sm:-translate-y-0.5 sm:pt-0"
+        aria-hidden="true"
+      >
         {!isLast ? (
-          <span className="absolute top-5 bottom-[-1.75rem] w-px bg-border" />
+          <span className="absolute -bottom-10 top-11 w-px bg-border sm:-bottom-4 sm:top-5" />
         ) : null}
         <TimelineMarker item={item} />
       </div>
-      <div className="min-w-0 pb-1">
+      <div className="min-w-0">
         <div className="mb-1 sm:hidden">
           <TimelineTime item={item} />
         </div>
@@ -166,7 +169,7 @@ function TimelineTime({ item }: { item: RunTimelineItem }) {
     <time
       dateTime={date.toISOString()}
       title={date.toLocaleString()}
-      className="text-caption tabular-nums"
+      className="text-caption whitespace-nowrap tabular-nums"
     >
       {date.toLocaleString(undefined, {
         month: "short",
@@ -180,7 +183,7 @@ function TimelineTime({ item }: { item: RunTimelineItem }) {
 }
 
 function TimelineMarker({ item }: { item: RunTimelineItem }) {
-  const iconClassName = "size-3.5";
+  const iconClassName = "size-3";
   let icon: ReactNode;
 
   switch (item.type) {
@@ -216,8 +219,9 @@ function TimelineMarker({ item }: { item: RunTimelineItem }) {
 
   return (
     <span
+      data-timeline-marker
       className={cn(
-        "relative z-10 flex size-7 items-center justify-center rounded-full border bg-background",
+        "relative z-10 flex size-6 items-center justify-center rounded-full border bg-background",
         markerToneClass(item.tone),
       )}
     >
@@ -245,7 +249,7 @@ function TimelineEvent({
       );
     case "probe_changes":
       return (
-        <div className="space-y-2">
+        <div className="space-y-1">
           <EventCopy
             title="Checks updated"
             meta={showMachine ? item.vmName : undefined}
@@ -318,11 +322,13 @@ function EventCopy({
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <h2 data-timeline-title className="text-sm font-semibold">
+          {title}
+        </h2>
         {meta ? <span className="text-caption font-medium">{meta}</span> : null}
       </div>
       {detail ? (
-        <p className="max-w-[68ch] text-sm leading-6 text-muted-foreground">
+        <p className="max-w-[68ch] text-sm leading-5 text-muted-foreground">
           {detail}
         </p>
       ) : null}
@@ -336,10 +342,12 @@ function ProbeChanges({ changes }: { changes: RunTimelineProbeChange[] }) {
       {changes.map((change) => (
         <li
           key={change.probeId}
-          className="flex min-h-10 flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2"
+          className="grid min-h-8 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 py-1"
         >
-          <span className="min-w-0 font-medium">{change.label}</span>
-          <span className="flex shrink-0 items-center gap-1.5">
+          <span className="min-w-0 font-medium leading-5 [overflow-wrap:anywhere]">
+            {change.label}
+          </span>
+          <span className="flex shrink-0 items-center gap-1">
             {change.from ? (
               <>
                 <ProbeStatus status={change.from} />
@@ -453,9 +461,10 @@ function SessionArtifacts({
   );
 
   return (
-    <div className="mt-3 max-w-4xl divide-y border-y">
+    <div className="mt-2 max-w-4xl divide-y border-y">
       {replayAvailability === "ready" ? (
         <DisclosureRow
+          density="compact"
           title={
             <span className="flex items-center gap-2">
               <Play className="size-4 text-muted-foreground" aria-hidden />
@@ -487,7 +496,7 @@ function SessionArtifacts({
       ) : (
         <p
           className={cn(
-            "py-3 text-sm",
+            "py-2 text-sm",
             replayAvailability === "unavailable"
               ? "text-destructive"
               : "text-muted-foreground",
@@ -501,6 +510,7 @@ function SessionArtifacts({
       )}
 
       <DisclosureRow
+        density="compact"
         title="Transcript"
         meta={session.transcriptTruncated ? "Trimmed" : undefined}
         open={transcriptOpen}
@@ -532,6 +542,7 @@ function SessionArtifacts({
 
       {castUrl ? (
         <DisclosureRow
+          density="compact"
           title={
             <span className="flex items-center gap-2">
               <TerminalSquare
@@ -569,7 +580,7 @@ function SessionArtifacts({
                   {visibleCommands.map((entry, index) => (
                     <li
                       key={`${entry.atSeconds}-${index}`}
-                      className="grid grid-cols-[3rem_minmax(0,1fr)] gap-3 py-2.5"
+                      className="grid grid-cols-[3rem_minmax(0,1fr)] gap-2 py-2"
                     >
                       <span className="font-mono text-[0.7rem] text-muted-foreground tabular-nums">
                         {formatReplayTimestamp(entry.atSeconds)}

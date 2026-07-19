@@ -41,6 +41,22 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "run-ending-light-desktop");
   });
 
+  test("run · dense multi-probe history", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      variant: "long",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Checks updated" }),
+    ).toHaveCount(2);
+    await expect(
+      page.locator('ol[aria-label="Run timeline"] ul > li'),
+    ).toHaveCount(6);
+    await expectRouteScreenshot(page, "run-probes-dense-dark-desktop");
+  });
+
   test("run · inline replay", async ({ page, ui }) => {
     await ui.open({
       ...routeCase("run-workspace"),
@@ -247,6 +263,22 @@ test.describe("focused mobile workspace", () => {
       runState: "ending",
     });
     await expectRouteScreenshot(page, "run-ending-dark-mobile");
+  });
+
+  test("run dense multi-probe history", async ({ page, ui }) => {
+    await ui.open({
+      ...routeCase("run-workspace"),
+      theme: "dark",
+      variant: "long",
+      runState: "ending",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Checks updated" }),
+    ).toHaveCount(2);
+    await expect(
+      page.locator('ol[aria-label="Run timeline"] ul > li'),
+    ).toHaveCount(6);
+    await expectRouteScreenshot(page, "run-probes-dense-dark-mobile");
   });
 
   test("run inline replay", async ({ page, ui }) => {

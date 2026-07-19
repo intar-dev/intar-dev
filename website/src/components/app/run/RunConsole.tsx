@@ -110,14 +110,15 @@ function CheckRow(props: {
 
   return (
     <DisclosureRow
+      density="compact"
       open={props.open}
       onOpenChange={props.onOpenChange}
       leading={<StatusIcon status={probe.status} />}
       title={title}
-      contentClassName="space-y-2"
+      contentClassName="space-y-1"
     >
       {objective?.bodyMarkdown ? (
-        <Markdown className="space-y-2 text-xs leading-6 text-muted-foreground">
+        <Markdown className="space-y-1 text-xs leading-5 text-muted-foreground">
           {objective.bodyMarkdown}
         </Markdown>
       ) : null}

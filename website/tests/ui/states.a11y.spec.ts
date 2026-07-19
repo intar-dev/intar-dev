@@ -1,6 +1,10 @@
 import { expect, test } from "./fixtures/test";
 import { routeCase } from "./routes";
 import { expectNoAxeViolations } from "./support/axe";
+import {
+  coarsePointerTargetViolations,
+  expectNoHorizontalOverflow,
+} from "./support/layout";
 
 test.describe("focused state accessibility", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -182,6 +186,11 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       sheet.getByRole("heading", { name: "Run checks and assistance" }),
     ).toBeVisible();
+    expect(
+      await coarsePointerTargetViolations(page),
+      "open run checks sheet coarse-pointer controls smaller than 44px",
+    ).toEqual([]);
+    await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 

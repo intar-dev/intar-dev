@@ -23,6 +23,105 @@ function noContent(route: Route) {
   return route.fulfill({ status: 204, body: "" });
 }
 
+function probeSnapshots(variant: MockApiState["variant"]) {
+  if (variant === "long") {
+    return [
+      {
+        id: "snapshot-dense-1",
+        vmId: "run-vm-web",
+        runtimeVmName: "repair-nginx-web-7f3a",
+        observedAt: FIXED_NOW - 5 * 60_000,
+        probes: [
+          {
+            id: "boot-ready",
+            label: "Machine ready",
+            kind: "systemd_unit",
+            phase: "boot",
+            status: "pending",
+          },
+          {
+            id: "nginx-listening",
+            label: "nginx listens on port 80",
+            kind: "tcp_connect",
+            phase: "scenario",
+            status: "fail",
+          },
+          {
+            id: "health-endpoint",
+            label: "health endpoint returns ok",
+            kind: "http_request",
+            phase: "scenario",
+            status: "pending",
+          },
+        ],
+      },
+      {
+        id: "snapshot-dense-2",
+        vmId: "run-vm-web",
+        runtimeVmName: "repair-nginx-web-7f3a",
+        observedAt: FIXED_NOW - 2 * 60_000,
+        probes: [
+          {
+            id: "boot-ready",
+            label: "Machine ready",
+            kind: "systemd_unit",
+            phase: "boot",
+            status: "pass",
+          },
+          {
+            id: "nginx-listening",
+            label: "nginx listens on port 80",
+            kind: "tcp_connect",
+            phase: "scenario",
+            status: "pass",
+          },
+          {
+            id: "health-endpoint",
+            label:
+              "health endpoint returns ok through the public ingress while preserving the original host header, forwarding the full request path, keeping cache-control intact, and refusing fallback content from the maintenance virtual host",
+            kind: "http_request",
+            phase: "scenario",
+            status: "pass",
+          },
+        ],
+      },
+    ];
+  }
+
+  return [
+    {
+      id: "snapshot-1",
+      vmId: "run-vm-web",
+      runtimeVmName: "repair-nginx-web-7f3a",
+      observedAt: FIXED_NOW - 5 * 60_000,
+      probes: [
+        {
+          id: "nginx-listening",
+          label: "nginx listens on port 80",
+          kind: "tcp_connect",
+          phase: "scenario",
+          status: "fail",
+        },
+      ],
+    },
+    {
+      id: "snapshot-2",
+      vmId: "run-vm-web",
+      runtimeVmName: "repair-nginx-web-7f3a",
+      observedAt: FIXED_NOW - 2 * 60_000,
+      probes: [
+        {
+          id: "nginx-listening",
+          label: "nginx listens on port 80",
+          kind: "tcp_connect",
+          phase: "scenario",
+          status: "pass",
+        },
+      ],
+    },
+  ];
+}
+
 function segment(pathname: string, pattern: RegExp): string | null {
   const match = pathname.match(pattern);
   return match?.[1] ? decodeURIComponent(match[1]) : null;
@@ -312,38 +411,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         method === "GET"
       ) {
         await json(route, {
-          snapshots: [
-            {
-              id: "snapshot-1",
-              vmId: "run-vm-web",
-              runtimeVmName: "repair-nginx-web-7f3a",
-              observedAt: FIXED_NOW - 5 * 60_000,
-              probes: [
-                {
-                  id: "nginx-listening",
-                  label: "nginx listens on port 80",
-                  kind: "tcp_connect",
-                  phase: "scenario",
-                  status: "fail",
-                },
-              ],
-            },
-            {
-              id: "snapshot-2",
-              vmId: "run-vm-web",
-              runtimeVmName: "repair-nginx-web-7f3a",
-              observedAt: FIXED_NOW - 2 * 60_000,
-              probes: [
-                {
-                  id: "nginx-listening",
-                  label: "nginx listens on port 80",
-                  kind: "tcp_connect",
-                  phase: "scenario",
-                  status: "pass",
-                },
-              ],
-            },
-          ],
+          snapshots: probeSnapshots(server.state.variant),
         });
         return;
       }
