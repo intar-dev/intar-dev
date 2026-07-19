@@ -141,7 +141,7 @@ function TimelineRow({
         ) : null}
         <TimelineMarker item={item} />
       </div>
-      <div className="min-w-0">
+      <div className="w-full min-w-0 max-w-4xl">
         <div className="mb-1 sm:hidden">
           <TimelineTime item={item} />
         </div>
@@ -338,7 +338,10 @@ function EventCopy({
 
 function ProbeChanges({ changes }: { changes: RunTimelineProbeChange[] }) {
   return (
-    <ul className="max-w-2xl divide-y border-y text-sm">
+    <ul
+      data-timeline-surface="probe-changes"
+      className="w-full divide-y border-y text-sm"
+    >
       {changes.map((change) => (
         <li
           key={change.probeId}
@@ -461,7 +464,10 @@ function SessionArtifacts({
   );
 
   return (
-    <div className="mt-2 max-w-4xl divide-y border-y">
+    <div
+      data-timeline-surface="session-artifacts"
+      className="mt-2 w-full divide-y border-y"
+    >
       {replayAvailability === "ready" ? (
         <DisclosureRow
           density="compact"

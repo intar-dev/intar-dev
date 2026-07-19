@@ -5,6 +5,7 @@ import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
   expectTimelineMarkerTitleAlignment,
+  expectTimelineSurfaceWidths,
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
@@ -242,6 +243,16 @@ test.describe("timeline marker and title alignment", () => {
 
       await expectTimelineMarkerTitleAlignment(page);
     });
+
+    test("structured event content shares one width", async ({ page, ui }) => {
+      await ui.open({
+        ...routeCase("run-workspace"),
+        theme: "dark",
+        runState: "replay",
+      });
+
+      await expectTimelineSurfaceWidths(page);
+    });
   });
 
   test.describe("mobile", () => {
@@ -312,6 +323,7 @@ test.describe("coarse pointer and mobile overflow", () => {
     await page.getByRole("button", { name: "Replay", exact: true }).click();
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expectTimelineSurfaceWidths(page);
     expect(
       await coarsePointerTargetViolations(page),
       "expanded inline replay coarse-pointer controls smaller than 44px",
