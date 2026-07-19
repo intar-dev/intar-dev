@@ -43,6 +43,85 @@ fn host_qmp_powerdown_accepts_a_clean_bounded_qemu_exit() {
 
 #[cfg(unix)]
 #[test]
+fn host_qmp_powerdown_connects_beneath_an_overlong_work_path() {
+    let directory = tempdir().unwrap();
+    let long_work_root = directory.path().join("w".repeat(120));
+    let rendered = render_test_direct_build_in_work_root(
+        &directory,
+        QemuBuildConfig {
+            qemu_exit_timeout_seconds: 1,
+            ..QemuBuildConfig::default()
+        },
+        long_work_root,
+    );
+    assert!(
+        rendered
+            .paths
+            .qmp_socket_path
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            > 108
+    );
+
+    // Model QEMU's relative bind: the kernel creates qmp.sock in the long
+    // work directory even though the pathname passed to bind(2) stays short.
+    let qemu_work_alias = directory.path().join("qmp-work");
+    std::os::unix::fs::symlink(&rendered.paths.work_root, &qemu_work_alias).unwrap();
+    let qemu_socket_alias = qemu_work_alias.join("qmp.sock");
+    assert!(qemu_socket_alias.as_os_str().as_encoded_bytes().len() < 108);
+    let listener = UnixListener::bind(qemu_socket_alias).unwrap();
+
+    let exit_marker = directory.path().join("qemu-exit-long-path");
+    let server_marker = exit_marker.clone();
+    let qmp_server =
+        thread::spawn(move || serve_acknowledged_powerdown(listener, Some(server_marker)));
+    let mut qemu = Command::new("sh")
+        .args([
+            "-c",
+            "while [ ! -e \"$1\" ]; do sleep 0.01; done",
+            "qemu-test",
+        ])
+        .arg(&exit_marker)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    wait_for_qemu_shutdown(&mut qemu, &rendered).unwrap();
+
+    assert_eq!(
+        qmp_server.join().unwrap(),
+        vec![
+            "{\"execute\":\"qmp_capabilities\",\"id\":\"qmp_capabilities\"}\n",
+            "{\"execute\":\"system_powerdown\",\"id\":\"system_powerdown\"}\n",
+        ]
+    );
+    assert!(qemu.try_wait().unwrap().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
+fn qmp_client_resolves_a_relative_socket_before_creating_its_alias() {
+    let relative_directory = tempfile::Builder::new()
+        .prefix("intar-qmp-relative-")
+        .tempdir_in(".")
+        .unwrap();
+    let relative_root = PathBuf::from(relative_directory.path().file_name().unwrap());
+    let relative_socket_path = relative_root.join("qmp.sock");
+    assert!(relative_socket_path.is_relative());
+    let listener = UnixListener::bind(&relative_socket_path).unwrap();
+
+    let client = connect_qmp_socket(&relative_socket_path).unwrap();
+    let (server, _) = listener.accept().unwrap();
+
+    drop(client);
+    drop(server);
+}
+
+#[cfg(unix)]
+#[test]
 fn host_poweroff_fails_closed_when_qmp_is_unavailable() {
     let directory = tempdir().unwrap();
     let rendered = render_test_direct_build(&directory, QemuBuildConfig::default());
