@@ -11,6 +11,7 @@ on:
         options:
           - intar-agent
           - intar-builder
+          - intar-image-cli
           - kino
           - stargate
       bump:
@@ -116,6 +117,12 @@ jobs:
               package="intar-builder"
               binary="intar-builder"
               tag_prefix="builder/"
+              ;;
+            intar-image-cli)
+              manifest="crates/intar-image-cli/Cargo.toml"
+              package="intar-image-cli"
+              binary="intar-image-cli"
+              tag_prefix="image-cli/"
               ;;
             kino)
               manifest="crates/kino/Cargo.toml"
@@ -258,6 +265,9 @@ jobs:
             workdir="$(mktemp -d)"
             cp "${binary}" "${workdir}/${BINARY}"
             chmod +x "${workdir}/${BINARY}"
+            if [ "${PACKAGE}" = "intar-image-cli" ]; then
+              cp base-images.hcl build-tools.hcl "${workdir}/"
+            fi
             if [ "${PACKAGE}" = "intar-agent" ]; then
               if [ "${arch}" != "amd64" ]; then
                 echo "Jailed scenario hosts currently support x86_64 only." >&2
@@ -324,6 +334,86 @@ jobs:
           fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
+
+      - name: Smoke-test image CLI release package
+        if: inputs.project == 'intar-image-cli'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          cleanup_smoke() {
+            rm -rf "${smoke_root}"
+          }
+          trap cleanup_smoke EXIT
+
+          (
+            cd dist
+            sha256sum --check --strict "intar-image-cli_${VERSION}_checksums.txt"
+          )
+
+          for arch in amd64 arm64; do
+            archive="dist/intar-image-cli_${VERSION}_linux_${arch}.tar.gz"
+            extract_dir="${smoke_root}/${arch}"
+            mkdir -p "${extract_dir}"
+
+            while IFS= read -r entry; do
+              entry="${entry#./}"
+              case "${entry}" in
+                ""|intar-image-cli|base-images.hcl|build-tools.hcl) ;;
+                *)
+                  echo "unexpected path in ${archive}: ${entry}" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(tar -tzf "${archive}")
+
+            tar -xzf "${archive}" -C "${extract_dir}"
+            test -x "${extract_dir}/intar-image-cli"
+            cmp base-images.hcl "${extract_dir}/base-images.hcl"
+            cmp build-tools.hcl "${extract_dir}/build-tools.hcl"
+            mapfile -t packaged_files < <(
+              find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
+                | LC_ALL=C sort
+            )
+            expected_files=(base-images.hcl build-tools.hcl intar-image-cli)
+            if [ "${packaged_files[*]}" != "${expected_files[*]}" ]; then
+              echo "unexpected files in ${archive}: ${packaged_files[*]}" >&2
+              exit 1
+            fi
+          done
+
+          test "$("${smoke_root}/amd64/intar-image-cli" --version)" = \
+            "intar-image-cli ${VERSION}"
+
+          fixture_root="${smoke_root}/fixture"
+          scenario_dir="${fixture_root}/courses/release-smoke/broken-nginx"
+          mkdir -p "${scenario_dir}"
+          cp scenarios/broken-nginx/scenario.hcl "${scenario_dir}/scenario.hcl"
+
+          "${smoke_root}/amd64/intar-image-cli" validate \
+            --courses-root "${fixture_root}/courses" \
+            --base-images "${smoke_root}/amd64/base-images.hcl"
+          "${smoke_root}/amd64/intar-image-cli" bundle \
+            --courses-root "${fixture_root}/courses" \
+            --base-images "${smoke_root}/amd64/base-images.hcl" \
+            --build-tools "${smoke_root}/amd64/build-tools.hcl" \
+            --rev release-smoke \
+            --output "${fixture_root}/bundle.tar.gz" \
+            --no-upload
+
+          bundle_listing="${fixture_root}/bundle-listing.txt"
+          tar -tzf "${fixture_root}/bundle.tar.gz" | LC_ALL=C sort > "${bundle_listing}"
+          mapfile -t bundled_files < "${bundle_listing}"
+          expected_bundle_files=(
+            base-images.hcl
+            build-tools.hcl
+            scenarios/broken-nginx/scenario.hcl
+          )
+          if [ "${bundled_files[*]}" != "${expected_bundle_files[*]}" ]; then
+            echo "unexpected nested-course bundle paths: ${bundled_files[*]}" >&2
+            exit 1
+          fi
 
       - name: Smoke-test jailed scenario-host package
         if: inputs.project == 'intar-agent'
