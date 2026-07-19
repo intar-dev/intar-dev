@@ -4,7 +4,7 @@ use std::io::{BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
 use std::net::TcpListener;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +28,7 @@ use crate::ssh::{BuildSshSession, generate_build_ssh_key};
 const SSH_USERNAME: &str = "ubuntu";
 const SSH_HOST: &str = "127.0.0.1";
 const DIRECT_PROVISION_COMMAND: &str = "sudo bash /tmp/intar-provision.sh";
+const QMP_SOCKET_FILE_NAME: &str = "qmp.sock";
 // A build guest can briefly expose port 22 before its ephemeral key and
 // network setup have settled. Avoid hammering OpenSSH's unauthenticated
 // connection limits while retaining responsive readiness detection.
@@ -167,7 +168,10 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         kernel_path: &base_rootfs.paths.kernel_path,
         initrd_path: &base_rootfs.paths.initrd_path,
         serial_log_path: &paths.serial_log_path,
-        qmp_socket_path: &paths.qmp_socket_path,
+        // QEMU's Unix socket path is limited to 108 bytes on Linux. Run QEMU
+        // from the build work directory and keep this process argument short;
+        // host-side cleanup and QMP clients continue to use the absolute path.
+        qmp_socket_path: Path::new(QMP_SOCKET_FILE_NAME),
         ssh_host_port,
         memory_mib: request.config.build_memory_mb,
         cpu_count: request.config.build_cpus,
@@ -284,7 +288,7 @@ fn direct_build_paths(request: &DirectBuildRequest, vm: &VmDefinition) -> Direct
         qemu_args_path: work_root.join("qemu.args"),
         build_log_path: work_root.join("build.log"),
         serial_log_path: work_root.join("serial.log"),
-        qmp_socket_path: work_root.join("qmp.sock"),
+        qmp_socket_path: work_root.join(QMP_SOCKET_FILE_NAME),
         work_root,
     }
 }
@@ -322,6 +326,7 @@ fn spawn_qemu(rendered: &RenderedDirectBuild) -> Result<Child> {
 
     Command::new(&rendered.config.qemu_binary)
         .args(&rendered.qemu_args)
+        .current_dir(&rendered.paths.work_root)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

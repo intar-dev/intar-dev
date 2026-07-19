@@ -24,9 +24,14 @@ use super::{
 use crate::config::QemuBuildConfig;
 use crate::kino::KinoArtifact;
 
-fn render_test_direct_build(
+fn render_test_direct_build(directory: &TempDir, config: QemuBuildConfig) -> RenderedDirectBuild {
+    render_test_direct_build_in_work_root(directory, config, directory.path().join(".work"))
+}
+
+fn render_test_direct_build_in_work_root(
     directory: &TempDir,
     mut config: QemuBuildConfig,
+    work_root: PathBuf,
 ) -> RenderedDirectBuild {
     let scenario = intar_image_scenario::Scenario::parse(
         r#"
@@ -74,7 +79,7 @@ base_image "trixie" {
     )
     .unwrap();
     config.output_root = directory.path().join("dist");
-    config.work_root = directory.path().join(".work");
+    config.work_root = work_root;
 
     render_direct_build(&DirectBuildRequest {
         scenario_path: "scenarios/broken-nginx/scenario.hcl".into(),
