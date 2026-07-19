@@ -93,6 +93,7 @@ describe("live E2E options", () => {
   it("defaults readiness beyond the quota-scaled agent deadline", () => {
     const options = parseOptions([], requiredEnv);
 
+    expect(options.scenarioId).toBe("broken-nginx");
     expect(options.waitReadyMs).toBe(480_000);
     expect(options.waitReadyMs).toBeGreaterThan(360_000);
     expect(options.pollMs).toBe(100);

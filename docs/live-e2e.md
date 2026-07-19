@@ -74,10 +74,10 @@ but it will skip registry publish and log upload:
 
 ```sh
 intar-builder doctor --config /etc/intar-builder/config.toml
-just bundle-images pair-ping builder.sample.amd64.hcl local-e2e true
+just bundle-images broken-nginx builder.sample.amd64.hcl local-e2e true
 intar-builder run-once \
   --config /etc/intar-builder/config.toml \
-  --scenario pair-ping \
+  --scenario broken-nginx \
   --bundle dist/bundles/local-e2e.tar.gz
 ```
 
@@ -145,10 +145,10 @@ the Linux/KVM builder host, keep the `qemu`, `builder`, and `jobs` sections from
 ```sh
 export INTAR_REGISTRY_PUBLISH_TOKEN="local-registry-publish-token"
 intar-builder doctor --config /etc/intar-builder/config.toml
-just bundle-images pair-ping builder.sample.amd64.hcl local-e2e true
+just bundle-images broken-nginx builder.sample.amd64.hcl local-e2e true
 intar-builder run-once \
   --config /etc/intar-builder/config.toml \
-  --scenario pair-ping \
+  --scenario broken-nginx \
   --bundle dist/bundles/local-e2e.tar.gz
 ```
 
@@ -192,22 +192,14 @@ export INTAR_LIVE_ARTIFACTS="<kernel_sha256_hex>=/path/to/vmlinuz,<initrd_sha256
 
 Use environment variables so shell history does not capture the cookie or token.
 
-For the fractional-CPU release proof, publish a V3 scenario whose VM contains:
-
-```hcl
-cpu = 0.125
-vcpus = 1
-```
-
-The catalog must report `cpu_millis = 125` and `vcpu_count = 1`. After proving
-one busy VM is capped, run eight busy 125-millicore VMs on a host with one
-schedulable CPU and verify the ninth reservation is refused.
+The checked-in public proof uses `broken-nginx`. Pass `--scenario` and the
+matching manifests explicitly when exercising a separately maintained fixture.
 
 ```sh
 export INTAR_LIVE_BASE_URL="https://intar.dev"
 export INTAR_LIVE_COOKIE="__Secure-better-auth.session_token=..."
 export INTAR_IMAGE_PUBLISH_TOKEN="..."
-export INTAR_LIVE_MANIFESTS="$PWD/dist/pair-ping-web-amd64.raw.zst.manifest.json,$PWD/dist/pair-ping-db-amd64.raw.zst.manifest.json"
+export INTAR_LIVE_MANIFESTS="$PWD/dist/broken-nginx-webserver-amd64.raw.zst.manifest.json"
 
 just live-e2e
 ```
@@ -245,9 +237,9 @@ The harness fails unless all of these are true:
 - The VM report shows the requested quota/topology, `cpu.stat` usage and
   throttling counters, and healthy sandbox state; the complete process tree is
   in the VM unit/cgroup.
-- The two-VM `pair-ping` run starts and reaches terminal-ready inside the
-  readiness timeout; the warm-start performance budget remains a separate
-  reflink-host gate.
+- The selected run starts and reaches terminal-ready inside the readiness
+  timeout; the warm-start performance budget remains a separate reflink-host
+  gate.
 - Run payloads redact unrevealed hint bodies and solution markdown.
 - Skip-ahead hint reveal attempts are rejected without mutating reveal state.
 - The next hint reveal returns only that hint body and keeps later hints gated.
@@ -257,7 +249,8 @@ The harness fails unless all of these are true:
 - VMs in the same run have distinct generated terminal public keys.
 - Guest terminal probes cannot reach link-local metadata over HTTP or the host
   gateway over TCP port 22.
-- Same-run peer VM IPs are reachable over TCP port 22.
+- For a separately supplied multi-VM fixture, same-run peer VM IPs are
+  reachable over TCP port 22.
 - Teardown reaches `completed`.
 - Fresh terminal session creation and old browser terminal websocket URLs are
   rejected after teardown.
@@ -311,14 +304,6 @@ the old self-hosted image builder:
   the allowlisted devices, and independently proves both the inherited
   jailer-installed Landlock boundary and the VM-specific
   `VmConfig.landlock_enable` layer fail closed alongside seccomp.
-- A busy `cpu = 0.125`, `vcpus = 1` guest exposes
-  `cpu.max = 12500 100000`, `cpu.max.burst = 0`, increments `nr_throttled`, and
-  stays within the documented elapsed-time bound after warm-up.
-- Eight 125-millicore VMs consume exactly one schedulable CPU; a ninth launch is
-  rejected, and every VMM descendant and attributable KVM helper is accounted
-  to the correct unit.
-- `workshop-cluster` reaches solved state, proving the selected cloud kernel
-  carries the k3s modules needed by the scenario.
 - The guest reports a larger filesystem after `disk_mib` expansion when the
   requested runtime disk size exceeds the build image size.
 - Serial logs still include Intar runtime phases with the quiet published kernel
@@ -327,8 +312,8 @@ the old self-hosted image builder:
   drift guard.
 - The sparse raw-zstd round trip preserves the advertised virtual size and
   restores a sparse raw file on the agent.
-- Capture p50 time to Kino ready and the harness-logged compressed image sizes
-  for broken-nginx and workshop-cluster.
+- Capture p50 time to Kino ready and the harness-logged compressed image size
+  for broken-nginx.
 
 Useful evidence commands on the Linux/KVM proof host:
 
