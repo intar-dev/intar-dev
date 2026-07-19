@@ -14,6 +14,7 @@ export function DisclosureRow({
   leading,
   title,
   meta,
+  density = "comfortable",
   open,
   defaultOpen,
   onOpenChange,
@@ -23,6 +24,7 @@ export function DisclosureRow({
   leading?: ReactNode;
   title: ReactNode;
   meta?: ReactNode;
+  density?: "comfortable" | "compact";
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -31,7 +33,14 @@ export function DisclosureRow({
 }) {
   return (
     <Collapsible open={open} defaultOpen={defaultOpen} onOpenChange={onOpenChange}>
-      <CollapsibleTrigger className="group flex min-h-11 w-full items-center gap-3 py-2 text-left">
+      <CollapsibleTrigger
+        className={cn(
+          "group flex w-full items-center text-left",
+          density === "compact"
+            ? "min-h-9 gap-2 py-1"
+            : "min-h-11 gap-3 py-2",
+        )}
+      >
         {leading}
         <span
           className="min-w-0 flex-1 truncate text-sm font-medium"
@@ -51,10 +60,14 @@ export function DisclosureRow({
       </CollapsibleTrigger>
       <CollapsibleContent
         className={cn(
-          "pt-1 pb-3",
+          density === "compact" ? "pt-1 pb-2" : "pt-1 pb-3",
           // Align panel content under the title when a leading icon is set
-          // (size-4 icon + gap-3).
-          leading ? "pl-7" : undefined,
+          // (size-4 icon + the density-specific trigger gap).
+          leading
+            ? density === "compact"
+              ? "pl-6"
+              : "pl-7"
+            : undefined,
           contentClassName,
         )}
       >

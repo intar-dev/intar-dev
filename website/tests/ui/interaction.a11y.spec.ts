@@ -4,6 +4,7 @@ import { ROUTE_CASES, routeCase } from "./routes";
 import {
   coarsePointerTargetViolations,
   expectNoHorizontalOverflow,
+  expectTimelineMarkerTitleAlignment,
 } from "./support/layout";
 import {
   REPLAY_TERMINAL_COLS,
@@ -227,6 +228,45 @@ test.describe("wide operational density", () => {
   });
 });
 
+test.describe("timeline marker and title alignment", () => {
+  test.describe("desktop", () => {
+    test.use({ viewport: { width: 1440, height: 900 } });
+
+    test("markers center on their event titles", async ({ page, ui }) => {
+      await ui.open({
+        ...routeCase("run-workspace"),
+        theme: "dark",
+        variant: "long",
+        runState: "ending",
+      });
+
+      await expectTimelineMarkerTitleAlignment(page);
+    });
+  });
+
+  test.describe("mobile", () => {
+    test.use({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+
+    test("markers center on titles below mobile timestamps", async ({
+      page,
+      ui,
+    }) => {
+      await ui.open({
+        ...routeCase("run-workspace"),
+        theme: "dark",
+        variant: "long",
+        runState: "ending",
+      });
+
+      await expectTimelineMarkerTitleAlignment(page);
+    });
+  });
+});
+
 test.describe("coarse pointer and mobile overflow", () => {
   test.use({
     viewport: { width: 390, height: 844 },
@@ -272,6 +312,10 @@ test.describe("coarse pointer and mobile overflow", () => {
     await page.getByRole("button", { name: "Replay", exact: true }).click();
     await expect(page.locator(".run-artifact-player")).toBeVisible();
     await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(
+      await coarsePointerTargetViolations(page),
+      "expanded inline replay coarse-pointer controls smaller than 44px",
+    ).toEqual([]);
     await expectNoHorizontalOverflow(page);
   });
 });

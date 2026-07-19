@@ -132,3 +132,77 @@ export async function coarsePointerTargetViolations(page: Page) {
       .filter((target) => target.width < 44 || target.height < 44);
   });
 }
+
+export async function expectTimelineMarkerTitleAlignment(
+  page: Page,
+  toleranceCssPixels = 2,
+) {
+  const measurements = await page
+    .locator('ol[aria-label="Run timeline"] > li')
+    .evaluateAll((rows) =>
+      rows.map((row, index) => {
+        const marker = row.querySelector<HTMLElement>(
+          "[data-timeline-marker]",
+        );
+        const title = row.querySelector<HTMLElement>("[data-timeline-title]");
+        const connector = marker?.parentElement?.querySelector<HTMLElement>(
+          ".absolute",
+        );
+        const nextMarker = rows[index + 1]?.querySelector<HTMLElement>(
+          "[data-timeline-marker]",
+        );
+        const markerRect = marker?.getBoundingClientRect() ?? null;
+        const titleRect = title?.getBoundingClientRect() ?? null;
+        const connectorRect = connector?.getBoundingClientRect() ?? null;
+        const nextMarkerRect = nextMarker?.getBoundingClientRect() ?? null;
+        return {
+          index,
+          title: title?.textContent?.trim().replace(/\s+/g, " ") ?? null,
+          markerCenterY: markerRect
+            ? markerRect.top + markerRect.height / 2
+            : null,
+          titleCenterY: titleRect ? titleRect.top + titleRect.height / 2 : null,
+          connectorBottomY: connectorRect?.bottom ?? null,
+          nextMarkerTopY: nextMarkerRect?.top ?? null,
+        };
+      }),
+    );
+
+  expect(measurements.length, "timeline must contain events").toBeGreaterThan(
+    0,
+  );
+  for (const measurement of measurements) {
+    expect(
+      measurement.markerCenterY,
+      `timeline event ${measurement.index + 1} (${measurement.title ?? "untitled"}) is missing [data-timeline-marker]`,
+    ).not.toBeNull();
+    expect(
+      measurement.titleCenterY,
+      `timeline event ${measurement.index + 1} is missing [data-timeline-title]`,
+    ).not.toBeNull();
+
+    const delta = Math.abs(
+      (measurement.markerCenterY ?? Number.POSITIVE_INFINITY) -
+        (measurement.titleCenterY ?? Number.NEGATIVE_INFINITY),
+    );
+    expect(
+      delta,
+      `timeline marker/title center delta for ${measurement.title ?? `event ${measurement.index + 1}`} in CSS pixels`,
+    ).toBeLessThanOrEqual(toleranceCssPixels);
+
+    if (measurement.nextMarkerTopY !== null) {
+      expect(
+        measurement.connectorBottomY,
+        `timeline event ${measurement.index + 1} (${measurement.title ?? "untitled"}) is missing its connector`,
+      ).not.toBeNull();
+      const connectorGap = Math.abs(
+        measurement.nextMarkerTopY -
+          (measurement.connectorBottomY ?? Number.NEGATIVE_INFINITY),
+      );
+      expect(
+        connectorGap,
+        `timeline connector gap before event ${measurement.index + 2} in CSS pixels`,
+      ).toBeLessThanOrEqual(toleranceCssPixels);
+    }
+  }
+}
