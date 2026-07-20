@@ -109,6 +109,7 @@ test("large card collections paginate without repeating items", async ({
   await page.reload({ waitUntil: "domcontentloaded" });
   await ui.settle();
 
+  await page.getByRole("button", { name: "General practice" }).click();
   const pagination = page.getByRole("navigation", {
     name: "scenarios pagination",
   });
@@ -116,6 +117,9 @@ test("large card collections paginate without repeating items", async ({
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
+  expect(new URL(page.url()).searchParams.get("course")).toBe(
+    "general-practice",
+  );
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
   await expect(generalPractice).toContainText("19 scenarios");
@@ -150,6 +154,57 @@ test("large card collections paginate without repeating items", async ({
   await expect(scenarioLinks).toHaveCount(9);
 });
 
+test("course drill-down returns to the originating catalog page", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  ui.server.state.scenarios = paginatedScenarioFixtures().slice(0, 10);
+  ui.server.state.courses = ui.server.state.scenarios.map(
+    (scenario, index) => ({
+      courseId: `paging-course-${index + 1}`,
+      organizationId: null,
+      title: `Paging course ${index + 1}`,
+      description: "A compact curriculum used to verify course navigation.",
+      scenarioIds: [scenario.scenarioId],
+    }),
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const pagination = page.getByRole("navigation", {
+    name: "courses pagination",
+  });
+  await pagination.getByRole("button", { name: /^Next/ }).click();
+  await expect(pagination).toContainText("10–10 of 10 courses");
+
+  const courseButton = page.getByRole("button", {
+    name: "Paging course 10",
+  });
+  await courseButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Paging course 10" }),
+  ).toBeFocused();
+
+  await page.goBack();
+  await expect(pagination).toContainText("10–10 of 10 courses");
+  await expect(courseButton).toBeFocused();
+
+  await courseButton.click();
+  await page.getByRole("button", { name: "All courses" }).click();
+  await expect(pagination).toContainText("10–10 of 10 courses");
+  await expect(courseButton).toBeFocused();
+
+  const search = page.getByRole("textbox", {
+    name: "Search courses and scenarios",
+  });
+  await search.fill("Paging course");
+  await expect
+    .poll(() => new URL(page.url()).searchParams.get("q"))
+    .toBe("Paging course");
+  await expect(search).toBeFocused();
+});
+
 test("public courses preserve curriculum order and place standalone work in General practice", async ({
   page,
   ui,
@@ -165,17 +220,24 @@ test("public courses preserve curriculum order and place standalone work in Gene
   ).toBeVisible();
 
   const course = page.locator(
-    'section[data-course-id="operations"][data-course-scope="public"]',
+    'li[data-course-id="operations"][data-course-scope="public"]',
   );
   await expect(
     course.getByRole("heading", { name: "Linux operations" }),
   ).toBeVisible();
   await expect(course).toContainText("2 scenarios");
   await expect(course).toContainText("~95 min total");
-  const courseLinks = course.locator('a[href^="/courses/"]');
+  await expect(course.locator('a[href^="/courses/"]')).toHaveCount(0);
+  await course.getByRole("button", { name: "Linux operations" }).click();
+
+  const courseDetail = page.locator(
+    'section[data-course-id="operations"][data-course-scope="public"][data-course-view="detail"]',
+  );
+  const courseLinks = courseDetail.locator('a[href^="/courses/"]');
   await expect(courseLinks).toHaveCount(2);
-  await expect(course.locator("h3")).toHaveCount(1);
-  await expect(course.locator("h4")).toHaveCount(2);
+  expect(new URL(page.url()).searchParams.get("course")).toBe(
+    "public:operations",
+  );
   await expect(courseLinks.nth(0)).toHaveAttribute(
     "href",
     "/courses/repair-nginx",
@@ -184,7 +246,20 @@ test("public courses preserve curriculum order and place standalone work in Gene
     "href",
     "/courses/repair-dns",
   );
+  await expect(
+    courseDetail.getByRole("heading", { name: "Linux operations" }),
+  ).toBeFocused();
 
+  await courseDetail.getByRole("button", { name: "All courses" }).click();
+  await expect(
+    course.getByRole("button", { name: "Linux operations" }),
+  ).toBeFocused();
+  const generalPracticeIndex = page.locator(
+    'li[data-course-id="general-practice"][data-course-scope="generated"]',
+  );
+  await generalPracticeIndex
+    .getByRole("button", { name: "General practice" })
+    .click();
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
@@ -227,6 +302,7 @@ test("matching the General practice title reveals all eligible members", async (
     .getByRole("textbox", { name: "Search courses and scenarios" })
     .fill("General practice");
 
+  await page.getByRole("button", { name: "General practice" }).click();
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
@@ -249,15 +325,19 @@ test("partially available courses remain visible", async ({ page, ui }) => {
   await ui.settle();
 
   const course = page.locator(
-    'section[data-course-id="operations"][data-course-scope="public"]',
+    'li[data-course-id="operations"][data-course-scope="public"]',
   );
   await expect(course).toContainText("1 scenario");
-  await expect(
-    course.locator('a[href="/courses/repair-nginx"]'),
-  ).toBeVisible();
-  await expect(course.locator('a[href="/courses/repair-dns"]')).toHaveCount(
-    0,
+  await course.getByRole("button", { name: "Linux operations" }).click();
+  const courseDetail = page.locator(
+    'section[data-course-id="operations"][data-course-scope="public"][data-course-view="detail"]',
   );
+  await expect(
+    courseDetail.locator('a[href="/courses/repair-nginx"]'),
+  ).toBeVisible();
+  await expect(
+    courseDetail.locator('a[href="/courses/repair-dns"]'),
+  ).toHaveCount(0);
 });
 
 test("organization catalogs render public courses before scoped courses", async ({
@@ -267,23 +347,45 @@ test("organization catalogs render public courses before scoped courses", async 
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
   await page.getByRole("tab", { name: "Courses" }).click();
 
-  const courses = page.locator('section[data-course-id="operations"]');
+  const courses = page.locator(
+    'li[data-course-id="operations"][data-course-view="index"]',
+  );
   await expect(courses).toHaveCount(2);
   await expect(courses.nth(0)).toHaveAttribute("data-course-scope", "public");
   await expect(courses.nth(1)).toHaveAttribute(
     "data-course-scope",
     "org-platform",
   );
-  await expect(courses.nth(0).locator('a[href*="repair-dns"]')).toHaveCount(1);
-  await expect(courses.nth(0).locator('a[href*="repair-nginx"]')).toHaveCount(
+  await expect(courses.locator('a[href*="repair-dns"]')).toHaveCount(0);
+  await courses.nth(0).getByRole("button").click();
+  let selectedCourse = page.locator(
+    'section[data-course-view="detail"][data-course-scope="public"]',
+  );
+  await expect(selectedCourse.locator('a[href*="repair-dns"]')).toHaveCount(1);
+  await expect(selectedCourse.locator('a[href*="repair-nginx"]')).toHaveCount(
     0,
   );
-  await expect(courses.nth(1).locator('a[href*="repair-nginx"]')).toHaveCount(
+  await selectedCourse.getByRole("button", { name: "All courses" }).click();
+
+  const organizationCourse = page.locator(
+    'li[data-course-id="operations"][data-course-scope="org-platform"]',
+  );
+  await organizationCourse.getByRole("button").click();
+  selectedCourse = page.locator(
+    'section[data-course-view="detail"][data-course-scope="org-platform"]',
+  );
+  await expect(selectedCourse.locator('a[href*="repair-nginx"]')).toHaveCount(
     1,
   );
   await expect(
-    courses.nth(1).locator('a[href*="platform-logrotate"]'),
+    selectedCourse.locator('a[href*="platform-logrotate"]'),
   ).toHaveCount(1);
+  await selectedCourse.getByRole("button", { name: "All courses" }).click();
+
+  await page
+    .locator('li[data-course-scope="generated"]')
+    .getByRole("button", { name: "General practice" })
+    .click();
   const generalPractice = page
     .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
@@ -539,6 +641,11 @@ test("200% text remains operable without page overflow", async ({
   await page.waitForTimeout(100);
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  await page.getByRole("button", { name: "Linux operations" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Repair a broken nginx service" }),
+  ).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
 
 test("organization courses remain operable at 200% text", async ({
@@ -551,11 +658,19 @@ test("organization courses remain operable at 200% text", async ({
     document.documentElement.style.fontSize = "200%";
   });
   await page.waitForTimeout(100);
-  const courseHeading = page.getByRole("heading", {
+  const course = page.locator(
+    'li[data-course-id="operations"][data-course-scope="org-platform"]',
+  );
+  const courseButton = course.getByRole("button", {
     name: "Platform repair sequence",
   });
-  await courseHeading.scrollIntoViewIfNeeded();
-  await expect(courseHeading).toBeVisible();
+  await courseButton.scrollIntoViewIfNeeded();
+  await expect(courseButton).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await courseButton.click();
+  await expect(
+    page.getByRole("heading", { name: "Repair a broken nginx service" }),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

@@ -38,6 +38,7 @@ export function ScenarioCard({
     <Link
       to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
+      preloadDelay={250}
       className={cn(
         "group flex min-h-56 min-w-0 flex-col gap-6 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-6",
         scenario.progress.status === "in_progress" && "border-brand-border",

@@ -15,7 +15,6 @@ import { InlineFeedback } from "../../patterns/InlineFeedback";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
-  PaginatedWeightedCollection,
 } from "../../patterns/CollectionPagination";
 import { MetaDifficulty } from "../../patterns/MetaLine";
 import { Section } from "../../patterns/Section";
@@ -33,8 +32,12 @@ import type {
   ScenarioCatalogWireEntry,
   ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
-import { CourseCatalogSections } from "../learn/CourseCatalogSections";
-import { buildCourseCatalogView } from "../learn/course-catalog";
+import { CourseCatalogBrowser } from "../learn/CourseCatalogSections";
+import {
+  buildCourseCatalogSection,
+  buildCourseCatalogView,
+  courseCatalogKey,
+} from "../learn/course-catalog";
 import {
   type OrganizationDetailResponse,
   fetchJson,
@@ -57,7 +60,15 @@ interface SavedSource extends SourceSummary {
   hcl: string;
 }
 
-export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
+export function OrganizationScenariosSection({
+  detail,
+  selectedCourseKey,
+  onCourseChange,
+}: {
+  detail: Detail;
+  selectedCourseKey?: string | undefined;
+  onCourseChange: (courseKey: string | undefined) => void;
+}) {
   const queryClient = useQueryClient();
   const admin = detail.role !== "member";
   const [hcl, setHcl] = useState("");
@@ -248,13 +259,25 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
       }),
     [courses],
   );
-  const paginationUnits = useMemo(
+  const selectedCourse = useMemo(
     () =>
-      catalogView.units.map((unit) => ({
-        item: unit,
-        weight: unit.weight,
-      })),
-    [catalogView.units],
+      selectedCourseKey
+        ? courses.find(
+            (course) => courseCatalogKey(course) === selectedCourseKey,
+          )
+        : undefined,
+    [courses, selectedCourseKey],
+  );
+  const selectedSection = useMemo(
+    () =>
+      selectedCourse
+        ? buildCourseCatalogSection(selectedCourse, {
+            q: "",
+            tags: [],
+            sort: null,
+          })
+        : null,
+    [selectedCourse],
   );
   const privateEntries = entries.filter(
     (scenario) => scenario.organizationId === detail.id,
@@ -274,24 +297,21 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
               : "Failed to load courses"}
           </InlineFeedback>
         ) : entries.length ? (
-          <PaginatedWeightedCollection
-            units={paginationUnits}
-            pageSize={COLLECTION_PAGE_SIZE.cards}
-            itemLabel="scenarios"
-          >
-            {(visibleUnits) => (
-              <CourseCatalogSections
-                units={visibleUnits}
-                gridClassName="sm:grid-cols-2"
-                renderScenario={(scenario) => (
-                  <OrganizationScenarioCard
-                    scenario={scenario}
-                    organizationId={detail.id}
-                  />
-                )}
+          <CourseCatalogBrowser
+            courses={catalogView.courses}
+            selectedCourseKey={selectedCourseKey}
+            selectedSection={selectedSection}
+            onSelectCourse={(courseKey) => onCourseChange(courseKey)}
+            onShowAllCourses={() => onCourseChange(undefined)}
+            gridClassName="sm:grid-cols-2"
+            resetKey="organization-courses"
+            renderScenario={(scenario) => (
+              <OrganizationScenarioCard
+                scenario={scenario}
+                organizationId={detail.id}
               />
             )}
-          </PaginatedWeightedCollection>
+          />
         ) : (
           <p className="text-sm text-muted-foreground">
             No published courses are available yet.
@@ -524,6 +544,7 @@ function OrganizationScenarioCard({
       to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
       search={{ organizationId }}
+      preloadDelay={250}
       className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
     >
       <Card variant="interactive" className="h-full gap-4 px-(--card-spacing)">

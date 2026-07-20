@@ -1,89 +1,320 @@
-import { Fragment, type ReactNode } from "react";
-import { BookOpenCheck, CircleCheck, Clock3 } from "lucide-react";
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  BookOpenCheck,
+  CircleCheck,
+  Clock3,
+  Search,
+} from "lucide-react";
+import {
+  COLLECTION_PAGE_SIZE,
+  CollectionPagination,
+  PaginatedCollection,
+  paginateCollection,
+} from "@/components/app/patterns/CollectionPagination";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
 import {
+  courseCatalogKey,
   courseHeadingId,
-  type CourseCatalogDisplayUnit,
   type CourseCatalogSectionView,
 } from "./course-catalog";
 
-export function CourseCatalogSections({
-  units,
+export function CourseCatalogBrowser({
+  courses,
+  selectedCourseKey,
+  selectedSection,
+  onSelectCourse,
+  onShowAllCourses,
+  onClearFilters,
   renderScenario,
   gridClassName = "md:grid-cols-2 xl:grid-cols-3",
+  resetKey,
 }: {
-  units: readonly CourseCatalogDisplayUnit[];
+  courses: readonly CourseCatalogSectionView[];
+  selectedCourseKey?: string | undefined;
+  selectedSection?: CourseCatalogSectionView | null | undefined;
+  onSelectCourse: (courseKey: string) => void;
+  onShowAllCourses: () => void;
+  onClearFilters?: (() => void) | undefined;
   renderScenario: (scenario: ScenarioCatalogWireEntry) => ReactNode;
   gridClassName?: string;
+  resetKey?: string | number | boolean | null;
 }) {
-  const courses = units.filter((unit) => unit.kind === "course");
-  const generalPracticeUnits = units.filter(
-    (unit) => unit.kind === "general-practice-scenario",
+  const [returnFocusKey, setReturnFocusKey] = useState<
+    string | null | undefined
+  >(undefined);
+  const [indexPageState, setIndexPageState] = useState(() => ({
+    page: 1,
+    resetKey,
+  }));
+  const previousSelectedCourseKey = useRef(selectedCourseKey);
+  const indexResetPending = !Object.is(indexPageState.resetKey, resetKey);
+  const indexPage = paginateCollection(
+    courses,
+    indexResetPending ? 1 : indexPageState.page,
+    COLLECTION_PAGE_SIZE.cards,
   );
-  const generalPracticeSection = generalPracticeUnits[0]?.section;
+
+  useEffect(() => {
+    if (indexResetPending || indexPageState.page !== indexPage.page) {
+      setIndexPageState({ page: indexPage.page, resetKey });
+    }
+  }, [indexPage.page, indexPageState.page, indexResetPending, resetKey]);
+
+  useEffect(() => {
+    const previousCourseKey = previousSelectedCourseKey.current;
+    previousSelectedCourseKey.current = selectedCourseKey;
+    if (!previousCourseKey || selectedCourseKey) return;
+
+    const selectedIndex = courses.findIndex(
+      (section) => courseCatalogKey(section.course) === previousCourseKey,
+    );
+    if (selectedIndex >= 0) {
+      setIndexPageState({
+        page: Math.floor(selectedIndex / COLLECTION_PAGE_SIZE.cards) + 1,
+        resetKey,
+      });
+      setReturnFocusKey(previousCourseKey);
+    } else {
+      setReturnFocusKey(null);
+    }
+  }, [courses, resetKey, selectedCourseKey]);
+
+  if (selectedCourseKey) {
+    if (!selectedSection) {
+      return <CourseUnavailable onShowAllCourses={onShowAllCourses} />;
+    }
+    return (
+      <CourseDetail
+        section={selectedSection}
+        onShowAllCourses={onShowAllCourses}
+        onClearFilters={onClearFilters}
+        renderScenario={renderScenario}
+        gridClassName={gridClassName}
+        resetKey={
+          selectedCourseKey +
+          "|" +
+          String(resetKey === undefined ? "" : resetKey)
+        }
+      />
+    );
+  }
 
   return (
-    <div className="space-y-10">
-      {courses.map((unit) => (
-        <CourseSection
-          key={unit.key}
-          section={unit.section}
-          gridClassName={gridClassName}
-          renderScenario={renderScenario}
-        />
-      ))}
-      {generalPracticeSection ? (
-        <CourseSection
-          section={{
-            ...generalPracticeSection,
-            visibleScenarios: generalPracticeUnits.map(
-              (unit) => unit.scenario,
-            ),
-          }}
-          gridClassName={gridClassName}
-          renderScenario={renderScenario}
-        />
-      ) : null}
+    <>
+      <CourseIndex
+        courses={indexPage.items}
+        focusCourseKey={returnFocusKey}
+        onFocusRestored={() => setReturnFocusKey(undefined)}
+        onSelectCourse={onSelectCourse}
+      />
+      <CollectionPagination
+        page={indexPage.page}
+        pageSize={indexPage.pageSize}
+        totalItems={indexPage.totalItems}
+        itemLabel="courses"
+        onPageChange={(page) => setIndexPageState({ page, resetKey })}
+      />
+    </>
+  );
+}
+
+function CourseIndex({
+  courses,
+  focusCourseKey,
+  onFocusRestored,
+  onSelectCourse,
+}: {
+  courses: readonly CourseCatalogSectionView[];
+  focusCourseKey: string | null | undefined;
+  onFocusRestored: () => void;
+  onSelectCourse: (courseKey: string) => void;
+}) {
+  const controls = useRef(new Map<string, HTMLButtonElement>());
+  const list = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (focusCourseKey === undefined) return;
+    const control = focusCourseKey
+      ? controls.current.get(focusCourseKey)
+      : undefined;
+    (control ?? list.current)?.focus();
+    onFocusRestored();
+  }, [courses, focusCourseKey, onFocusRestored]);
+
+  return (
+    <div ref={list} tabIndex={-1} className="outline-none">
+      <ul className="divide-y overflow-hidden rounded-xl border bg-card">
+        {courses.map((section) => {
+          const key = courseCatalogKey(section.course);
+          const headingId = courseHeadingId(section.course) + "-index";
+          const scenarioCount = section.accessibleScenarios.length;
+          const progressPercent = Math.round(
+            (section.solvedCount / scenarioCount) * 100,
+          );
+          const matchingCount = section.visibleScenarios.length;
+
+          return (
+            <li
+              key={key}
+              className="@container/course"
+              data-course-id={section.course.courseId ?? "general-practice"}
+              data-course-scope={courseScope(section)}
+              data-course-view="index"
+            >
+              <button
+                ref={(node) => {
+                  if (node) controls.current.set(key, node);
+                  else controls.current.delete(key);
+                }}
+                type="button"
+                aria-labelledby={headingId}
+                onClick={() => onSelectCourse(key)}
+                className="group grid w-full min-w-0 gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:items-center"
+              >
+                <span className="min-w-0 space-y-2">
+                  <span className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-eyebrow">
+                      {courseEyebrow(section)}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-text @3xl/course:hidden">
+                      View scenarios
+                      <ArrowRight className="size-4" aria-hidden />
+                    </span>
+                  </span>
+                  <span
+                    id={headingId}
+                    role="heading"
+                    aria-level={3}
+                    className="block font-heading text-xl font-bold tracking-[-0.025em] text-balance [overflow-wrap:anywhere] transition-colors group-hover:text-brand-text sm:text-2xl"
+                  >
+                    {section.course.title}
+                  </span>
+                  <span className="block max-w-3xl text-body text-muted-foreground text-pretty">
+                    {section.course.description}
+                  </span>
+                  <span className="block pt-2">
+                    <span className="flex flex-wrap items-center justify-between gap-x-5 gap-y-2 text-sm tabular-nums">
+                      <span className="font-medium text-foreground">
+                        {section.solvedCount} of {scenarioCount} solved
+                      </span>
+                      {matchingCount < scenarioCount ? (
+                        <span className="text-muted-foreground">
+                          {matchingCount} matching{" "}
+                          {matchingCount === 1 ? "scenario" : "scenarios"}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span
+                      role="progressbar"
+                      aria-label={section.course.title + " solved progress"}
+                      aria-valuemin={0}
+                      aria-valuemax={scenarioCount}
+                      aria-valuenow={section.solvedCount}
+                      className="mt-2 block h-1.5 overflow-hidden rounded-full bg-muted"
+                    >
+                      <span
+                        className="block h-full rounded-full bg-brand-text transition-[width] motion-reduce:transition-none"
+                        style={{ width: progressPercent + "%" }}
+                      />
+                    </span>
+                  </span>
+                </span>
+
+                <span className="flex flex-wrap items-center justify-between gap-5 border-t pt-4 @3xl/course:min-w-64 @3xl/course:border-t-0 @3xl/course:pt-0">
+                  <span className="flex flex-wrap gap-x-5 gap-y-2 text-sm tabular-nums text-foreground">
+                    <span className="inline-flex items-center gap-1.5 font-medium">
+                      <BookOpenCheck
+                        className="size-4 text-brand-text"
+                        aria-hidden
+                      />
+                      {scenarioCount}{" "}
+                      {scenarioCount === 1 ? "scenario" : "scenarios"}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 font-medium">
+                      <Clock3
+                        className="size-4 text-brand-text"
+                        aria-hidden
+                      />
+                      ~{section.totalEstimatedMinutes} min total
+                    </span>
+                  </span>
+                  <span className="hidden items-center gap-2 whitespace-nowrap text-sm font-semibold text-brand-text @3xl/course:inline-flex">
+                    View scenarios
+                    <ArrowRight
+                      className="size-4 transition-transform group-hover:translate-x-0.5"
+                      aria-hidden
+                    />
+                  </span>
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
 
-function CourseSection({
+function CourseDetail({
   section,
-  gridClassName,
+  onShowAllCourses,
+  onClearFilters,
   renderScenario,
+  gridClassName,
+  resetKey,
 }: {
   section: CourseCatalogSectionView;
-  gridClassName: string;
+  onShowAllCourses: () => void;
+  onClearFilters?: (() => void) | undefined;
   renderScenario: (scenario: ScenarioCatalogWireEntry) => ReactNode;
+  gridClassName: string;
+  resetKey: string;
 }) {
   const headingId = courseHeadingId(section.course);
+  const heading = useRef<HTMLHeadingElement>(null);
   const scenarioCount = section.accessibleScenarios.length;
+
+  useEffect(() => {
+    heading.current?.focus();
+  }, [section.course]);
 
   return (
     <section
-      className="space-y-5 border-t-2 border-foreground/10 pt-6 first:border-t-0 first:pt-0"
+      className="space-y-6"
       aria-labelledby={headingId}
       data-course-id={section.course.courseId ?? "general-practice"}
-      data-course-scope={
-        section.course.kind === "general-practice"
-          ? "generated"
-          : (section.course.organizationId ?? "public")
-      }
+      data-course-scope={courseScope(section)}
+      data-course-view="detail"
     >
-      <header className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="-ml-2"
+        onClick={onShowAllCourses}
+      >
+        <ArrowLeft className="size-4" aria-hidden />
+        All courses
+      </Button>
+
+      <header className="grid gap-5 border-b pb-6 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
         <div className="min-w-0 space-y-2">
-          <p className="text-eyebrow">
-            {section.course.kind === "general-practice"
-              ? "Open practice"
-              : section.course.organizationId
-                ? "Organization course"
-                : "Course"}
-          </p>
+          <p className="text-eyebrow">{courseEyebrow(section)}</p>
           <h3
+            ref={heading}
             id={headingId}
-            className="font-heading text-2xl font-bold tracking-[-0.03em] text-balance [overflow-wrap:anywhere]"
+            tabIndex={-1}
+            className="font-heading text-2xl font-bold tracking-[-0.03em] text-balance outline-none [overflow-wrap:anywhere] sm:text-3xl"
           >
             {section.course.title}
           </h3>
@@ -95,29 +326,102 @@ function CourseSection({
           <CourseMetric
             icon={<BookOpenCheck className="size-4" aria-hidden />}
             label="Scenarios"
-            value={`${scenarioCount} ${scenarioCount === 1 ? "scenario" : "scenarios"}`}
+            value={
+              scenarioCount +
+              " " +
+              (scenarioCount === 1 ? "scenario" : "scenarios")
+            }
           />
           <CourseMetric
             icon={<Clock3 className="size-4" aria-hidden />}
             label="Estimated time"
-            value={`~${section.totalEstimatedMinutes} min total`}
+            value={"~" + section.totalEstimatedMinutes + " min total"}
           />
           <CourseMetric
             icon={<CircleCheck className="size-4" aria-hidden />}
             label="Solved progress"
-            value={`${section.solvedCount} of ${scenarioCount} solved`}
+            value={section.solvedCount + " of " + scenarioCount + " solved"}
           />
         </dl>
       </header>
-      <ScenarioGrid className={gridClassName}>
-        {section.visibleScenarios.map((scenario) => (
-          <Fragment key={scenario.scenarioId}>
-            {renderScenario(scenario)}
-          </Fragment>
-        ))}
-      </ScenarioGrid>
+
+      {section.visibleScenarios.length ? (
+        <PaginatedCollection
+          items={section.visibleScenarios}
+          pageSize={COLLECTION_PAGE_SIZE.cards}
+          itemLabel="scenarios"
+          resetKey={resetKey}
+        >
+          {(visibleScenarios) => (
+            <ScenarioGrid className={gridClassName}>
+              {visibleScenarios.map((scenario) => (
+                <Fragment key={scenario.scenarioId}>
+                  {renderScenario(scenario)}
+                </Fragment>
+              ))}
+            </ScenarioGrid>
+          )}
+        </PaginatedCollection>
+      ) : (
+        <div className="flex min-h-44 flex-col items-start justify-center gap-3 rounded-xl border border-dashed bg-muted/20 p-6">
+          <span className="flex size-9 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+            <Search className="size-4" aria-hidden />
+          </span>
+          <div>
+            <h4 className="font-heading text-lg font-bold">
+              No scenarios match your filters
+            </h4>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Clear the filters to see every scenario in this course.
+            </p>
+          </div>
+          {onClearFilters ? (
+            <Button variant="outline" onClick={onClearFilters}>
+              Clear filters
+            </Button>
+          ) : null}
+        </div>
+      )}
     </section>
   );
+}
+
+function CourseUnavailable({
+  onShowAllCourses,
+}: {
+  onShowAllCourses: () => void;
+}) {
+  return (
+    <div
+      role="status"
+      className="flex min-h-48 flex-col items-start justify-center gap-3 rounded-xl border border-dashed bg-muted/20 p-6"
+    >
+      <div>
+        <h3 className="font-heading text-xl font-bold">Course not available</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          It may have been unpublished or may not be available in this catalog.
+        </p>
+      </div>
+      <Button variant="outline" onClick={onShowAllCourses}>
+        <ArrowLeft className="size-4" aria-hidden />
+        All courses
+      </Button>
+    </div>
+  );
+}
+
+function courseEyebrow(section: CourseCatalogSectionView) {
+  return section.course.kind === "general-practice"
+    ? "Open practice"
+    : section.course.organizationId
+      ? "Organization course"
+      : "Course";
+}
+
+function courseScope(section: CourseCatalogSectionView) {
+  return section.course.kind === "general-practice"
+    ? "generated"
+    : (section.course.organizationId ?? "public");
 }
 
 function CourseMetric({
