@@ -11,6 +11,7 @@ export type AdminPeopleTab = "requests" | "users" | "organizations";
 
 export interface OrganizationDetailSearch {
   tab?: OrganizationDetailTab;
+  course?: string;
 }
 
 export interface AdminPeopleSearch {
@@ -36,9 +37,15 @@ export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
 export function validateOrganizationDetailSearch(
   search: Record<string, unknown>,
 ): OrganizationDetailSearch {
-  return isOrganizationDetailTab(search.tab) && search.tab !== "overview"
-    ? { tab: search.tab }
-    : {};
+  if (!isOrganizationDetailTab(search.tab) || search.tab === "overview") {
+    return {};
+  }
+  if (search.tab !== "courses") return { tab: search.tab };
+  const course =
+    typeof search.course === "string" && search.course.trim()
+      ? search.course.trim()
+      : undefined;
+  return course ? { tab: "courses", course } : { tab: "courses" };
 }
 
 export function validateAdminPeopleSearch(

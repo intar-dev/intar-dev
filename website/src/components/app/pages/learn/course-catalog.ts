@@ -20,23 +20,7 @@ export interface CourseCatalogSectionView {
   solvedCount: number;
 }
 
-export type CourseCatalogDisplayUnit =
-  | {
-      kind: "course";
-      key: string;
-      weight: number;
-      section: CourseCatalogSectionView;
-    }
-  | {
-      kind: "general-practice-scenario";
-      key: string;
-      weight: 1;
-      section: CourseCatalogSectionView;
-      scenario: ScenarioCatalogWireEntry;
-    };
-
 export interface CourseCatalogView {
-  units: CourseCatalogDisplayUnit[];
   courses: CourseCatalogSectionView[];
   generalPractice: CourseCatalogSectionView | null;
   visibleScenarioCount: number;
@@ -46,69 +30,52 @@ export function buildCourseCatalogView(
   courses: readonly ScenarioCatalogCourseWireEntry[],
   filter: CourseCatalogFilter,
 ): CourseCatalogView {
-  const needle = filter.q.trim().toLowerCase();
   const sections: CourseCatalogSectionView[] = [];
-  const units: CourseCatalogDisplayUnit[] = [];
   let generalPractice: CourseCatalogSectionView | null = null;
 
   for (const course of courses) {
-    const accessibleScenarios = course.scenarios;
-    if (!accessibleScenarios.length) continue;
-
-    const structurallyEligible = accessibleScenarios.filter((scenario) =>
-      matchesStructuredFilters(scenario, filter),
-    );
-    const courseTitleMatches = Boolean(
-      needle && course.title.toLowerCase().includes(needle),
-    );
-    const visibleScenarios = courseTitleMatches
-      ? structurallyEligible
-      : structurallyEligible.filter((scenario) =>
-          matchesScenarioSearch(scenario, needle),
-        );
-    if (!visibleScenarios.length) continue;
-
-    if (course.kind === "general-practice" && filter.sort) {
-      visibleScenarios.sort(CATALOG_SORT_COMPARATORS[filter.sort]);
-    }
-
-    const section = summarizeCourse(
-      course,
-      accessibleScenarios,
-      visibleScenarios,
-    );
+    const section = buildCourseCatalogSection(course, filter);
+    if (!section.visibleScenarios.length) continue;
     sections.push(section);
 
     if (course.kind === "general-practice") {
       generalPractice = section;
-      units.push(
-        ...visibleScenarios.map(
-          (scenario): CourseCatalogDisplayUnit => ({
-            kind: "general-practice-scenario",
-            key: `general-practice:${scenario.scenarioId}`,
-            weight: 1,
-            section,
-            scenario,
-          }),
-        ),
-      );
-      continue;
     }
-
-    units.push({
-      kind: "course",
-      key: courseCatalogKey(course),
-      weight: visibleScenarios.length,
-      section,
-    });
   }
 
   return {
-    units,
     courses: sections,
     generalPractice,
-    visibleScenarioCount: units.reduce((total, unit) => total + unit.weight, 0),
+    visibleScenarioCount: sections.reduce(
+      (total, section) => total + section.visibleScenarios.length,
+      0,
+    ),
   };
+}
+
+export function buildCourseCatalogSection(
+  course: ScenarioCatalogCourseWireEntry,
+  filter: CourseCatalogFilter,
+): CourseCatalogSectionView {
+  const needle = filter.q.trim().toLowerCase();
+  const accessibleScenarios = course.scenarios;
+  const structurallyEligible = accessibleScenarios.filter((scenario) =>
+    matchesStructuredFilters(scenario, filter),
+  );
+  const courseTitleMatches = Boolean(
+    needle && course.title.toLowerCase().includes(needle),
+  );
+  const visibleScenarios = courseTitleMatches
+    ? structurallyEligible
+    : structurallyEligible.filter((scenario) =>
+        matchesScenarioSearch(scenario, needle),
+      );
+
+  if (course.kind === "general-practice" && filter.sort) {
+    visibleScenarios.sort(CATALOG_SORT_COMPARATORS[filter.sort]);
+  }
+
+  return summarizeCourse(course, accessibleScenarios, visibleScenarios);
 }
 
 export function courseCatalogKey(

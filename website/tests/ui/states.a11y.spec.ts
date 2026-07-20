@@ -32,6 +32,12 @@ test.describe("focused state accessibility", () => {
       await expect(
         page.getByRole("heading", { name: "Platform repair sequence" }),
       ).toBeVisible();
+      await page
+        .getByRole("button", { name: "Platform repair sequence" })
+        .click();
+      await expect(
+        page.getByRole("heading", { name: "Repair a broken nginx service" }),
+      ).toBeVisible();
       await expectNoAxeViolations(page, testInfo);
     });
   }

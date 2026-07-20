@@ -61,6 +61,10 @@ test("learner discovery filters the catalog", async ({ page, ui }) => {
   const search = page.getByLabel(/Search courses and scenarios/i);
   await search.fill("DNS");
   await expect(
+    page.getByRole("heading", { name: "Linux operations" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Linux operations" }).click();
+  await expect(
     page.getByRole("heading", { name: /Trace an intermittent DNS failure/i }),
   ).toBeVisible();
   await expect(

@@ -13,7 +13,6 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
   PaginatedCollection,
-  PaginatedWeightedCollection,
 } from "@/components/app/patterns/CollectionPagination";
 import { EmptyState } from "@/components/app/patterns/StateCard";
 import { FilterBar, FilterChip } from "@/components/app/patterns/FilterBar";
@@ -43,8 +42,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
-import { CourseCatalogSections } from "./CourseCatalogSections";
-import { buildCourseCatalogView } from "./course-catalog";
+import { CourseCatalogBrowser } from "./CourseCatalogSections";
+import {
+  buildCourseCatalogSection,
+  buildCourseCatalogView,
+  courseCatalogKey,
+} from "./course-catalog";
 
 interface MyAssignmentsResponse {
   assignments: Array<{
@@ -145,24 +148,41 @@ export function ScenarioCatalog() {
     return () => window.clearTimeout(timeout);
   }, [navigate, searchState, searchText]);
 
-  const catalogView = useMemo(
-    () =>
-      buildCourseCatalogView(allCourses, {
-        q: searchState.q,
-        difficulty: searchState.difficulty,
-        category: searchState.category,
-        tags: searchState.tags,
-        sort: searchState.sort,
-      }),
-    [allCourses, searchState],
+  const catalogFilter = useMemo(
+    () => ({
+      q: searchState.q,
+      difficulty: searchState.difficulty,
+      category: searchState.category,
+      tags: searchState.tags,
+      sort: searchState.sort,
+    }),
+    [
+      searchState.category,
+      searchState.difficulty,
+      searchState.q,
+      searchState.sort,
+      searchState.tags,
+    ],
   );
-  const paginationUnits = useMemo(
+  const catalogView = useMemo(
+    () => buildCourseCatalogView(allCourses, catalogFilter),
+    [allCourses, catalogFilter],
+  );
+  const selectedCourse = useMemo(
     () =>
-      catalogView.units.map((unit) => ({
-        item: unit,
-        weight: unit.weight,
-      })),
-    [catalogView.units],
+      searchState.course
+        ? allCourses.find(
+            (course) => courseCatalogKey(course) === searchState.course,
+          )
+        : undefined,
+    [allCourses, searchState.course],
+  );
+  const selectedSection = useMemo(
+    () =>
+      selectedCourse
+        ? buildCourseCatalogSection(selectedCourse, catalogFilter)
+        : null,
+    [catalogFilter, selectedCourse],
   );
 
   const toggleTag = (tag: string) => {
@@ -182,6 +202,7 @@ export function ScenarioCatalog() {
   const clearFilters = () => {
     setSearchText("");
     void navigateCatalogSearch(navigate, {
+      course: searchState.course,
       q: "",
       difficulty: undefined,
       category: undefined,
@@ -292,7 +313,7 @@ export function ScenarioCatalog() {
         </Alert>
       ) : null}
 
-      {activeRuns.length ? (
+      {!searchState.course && activeRuns.length ? (
         <section className="space-y-4" aria-labelledby="active-work-heading">
           <div className="flex flex-wrap items-baseline justify-between gap-3">
             <div>
@@ -337,7 +358,7 @@ export function ScenarioCatalog() {
         </section>
       ) : null}
 
-      {assignments.length ? (
+      {!searchState.course && assignments.length ? (
         <section className="space-y-4" aria-labelledby="assignments-heading">
           <div>
             <p className="text-eyebrow">From your organizations</p>
@@ -385,7 +406,7 @@ export function ScenarioCatalog() {
           <div>
             <p className="text-eyebrow">Course catalog</p>
             <h2 id="catalog-heading" className="mt-2 text-section-title">
-              Choose your next course
+              {searchState.course ? "Course catalog" : "Choose your next course"}
             </h2>
           </div>
           <FilterBar
@@ -398,9 +419,12 @@ export function ScenarioCatalog() {
             end={
               <>
                 <span className="text-metadata tabular-nums">
-                  {catalogView.visibleScenarioCount} of {allEntries.length}
+                  {selectedSection
+                    ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
+                    : `${catalogView.courses.length} of ${allCourses.length} courses`}
                 </span>
-                {catalogView.generalPractice ? (
+                {selectedSection?.course.kind === "general-practice" &&
+                selectedSection.visibleScenarios.length ? (
                   <SortSelect
                     value={searchState.sort}
                     onChange={(sort) =>
@@ -445,7 +469,7 @@ export function ScenarioCatalog() {
           title="No courses are available yet"
           description="This catalog will fill once an admin enables a scenario with a briefing and at least one probe."
         />
-      ) : !catalogView.visibleScenarioCount ? (
+      ) : !searchState.course && !catalogView.visibleScenarioCount ? (
         <EmptyState
           icon={<Search />}
           title="No courses match your filters"
@@ -457,21 +481,29 @@ export function ScenarioCatalog() {
           }
         />
       ) : (
-        <PaginatedWeightedCollection
-          units={paginationUnits}
-          pageSize={COLLECTION_PAGE_SIZE.cards}
-          itemLabel="scenarios"
+        <CourseCatalogBrowser
+          courses={catalogView.courses}
+          selectedCourseKey={searchState.course}
+          selectedSection={selectedSection}
+          onSelectCourse={(course) =>
+            void navigateCatalogSearch(
+              navigate,
+              { ...searchState, course },
+              false,
+            )
+          }
+          onShowAllCourses={() =>
+            void navigateCatalogSearch(
+              navigate,
+              { ...searchState, course: undefined },
+            )
+          }
+          onClearFilters={clearFilters}
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
-        >
-          {(visibleUnits) => (
-            <CourseCatalogSections
-              units={visibleUnits}
-              renderScenario={(scenario) => (
-                <ScenarioCard scenario={scenario} headingLevel={4} />
-              )}
-            />
+          renderScenario={(scenario) => (
+            <ScenarioCard scenario={scenario} headingLevel={4} />
           )}
-        </PaginatedWeightedCollection>
+        />
       )}
     </PageShell>
   );
@@ -507,10 +539,11 @@ function SortSelect({
 function navigateCatalogSearch(
   navigate: ReturnType<typeof useNavigate>,
   next: NormalizedCatalogSearch,
+  replace = true,
 ) {
   return navigate({
     to: ".",
-    replace: true,
+    replace,
     search: compactCatalogSearch(next),
   });
 }

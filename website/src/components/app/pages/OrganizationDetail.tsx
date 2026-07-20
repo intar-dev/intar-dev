@@ -75,6 +75,13 @@ export function OrganizationDetail() {
       search: tab === "overview" ? {} : { tab },
     });
   };
+  const setCourse = (course: string | undefined) => {
+    void navigate({
+      to: ".",
+      replace: course === undefined,
+      search: course ? { tab: "courses", course } : { tab: "courses" },
+    });
+  };
 
   if (organization.error) {
     return (
@@ -158,7 +165,11 @@ export function OrganizationDetail() {
           <OrganizationOverview detail={detail} setTab={setTab} />
         </TabsContent>
         <TabsContent value="courses" className="min-w-0">
-          <OrganizationScenariosSection detail={detail} />
+          <OrganizationScenariosSection
+            detail={detail}
+            selectedCourseKey={routeSearch.course}
+            onCourseChange={setCourse}
+          />
         </TabsContent>
         <TabsContent value="people" className="min-w-0">
           <MembersSection detail={detail} />

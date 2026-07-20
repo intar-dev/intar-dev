@@ -4,8 +4,12 @@ import type {
   ScenarioCatalogWireEntry,
   ScenarioProgress,
 } from "@/lib/scenario-runs";
-import { paginateWeightedCollection } from "@/components/app/patterns/CollectionPagination";
-import { buildCourseCatalogView, courseCatalogKey } from "./course-catalog";
+import { paginateCollection } from "@/components/app/patterns/CollectionPagination";
+import {
+  buildCourseCatalogSection,
+  buildCourseCatalogView,
+  courseCatalogKey,
+} from "./course-catalog";
 
 type AuthoredCourse = Extract<
   ScenarioCatalogCourseWireEntry,
@@ -41,10 +45,9 @@ describe("course catalog view", () => {
     expect(
       view.generalPractice?.visibleScenarios.map((entry) => entry.scenarioId),
     ).toEqual(["standalone-a", "standalone-z"]);
-    expect(view.units.map((unit) => unit.kind)).toEqual([
-      "course",
-      "general-practice-scenario",
-      "general-practice-scenario",
+    expect(view.courses.map((section) => section.course.kind)).toEqual([
+      "authored",
+      "general-practice",
     ]);
   });
 
@@ -153,69 +156,54 @@ describe("course catalog view", () => {
     expect(courseCatalogKey(generated)).toBe("general-practice");
   });
 
-  it("packs a mixed authored course and generated members toward nine", () => {
-    const authoredScenarios = numberedScenarios("course", 5);
-    const generalScenarios = numberedScenarios("general", 6);
-    const view = buildCourseCatalogView(
-      [
-        authored("linux", authoredScenarios),
-        generalPractice(generalScenarios),
-      ],
-      { q: "", tags: [] },
+  it("keeps top-level courses in catalog order and paginates them by nine", () => {
+    const courses = Array.from({ length: 19 }, (_, index) =>
+      authored(
+        `course-${index + 1}`,
+        [scenario(`scenario-${index + 1}`, `Scenario ${index + 1}`)],
+        `Course ${index + 1}`,
+      ),
     );
+    const view = buildCourseCatalogView(courses, { q: "", tags: [] });
 
-    const first = paginateView(view, 1);
-    const second = paginateView(view, 2);
+    const pages = [1, 2, 3].map((page) => paginateCourseIndex(view, page));
 
-    expect(first.items.map((unit) => unit.kind)).toEqual([
-      "course",
-      "general-practice-scenario",
-      "general-practice-scenario",
-      "general-practice-scenario",
-      "general-practice-scenario",
-    ]);
-    expect([first.start, first.end, first.totalItems]).toEqual([1, 9, 11]);
-    expect([second.start, second.end]).toEqual([10, 11]);
+    expect(pages.map((page) => page.items.length)).toEqual([9, 9, 1]);
+    expect(pages[0]?.items[0]?.course.title).toBe("Course 1");
+    expect(pages[2]?.items[0]?.course.title).toBe("Course 19");
   });
 
   it("paginates nineteen General practice members as 9/9/1", () => {
-    const view = buildCourseCatalogView(
-      [generalPractice(numberedScenarios("general", 19))],
-      { q: "", tags: [] },
+    const section = buildCourseCatalogSection(
+      generalPractice(numberedScenarios("general", 19)),
+      { q: "", tags: [], sort: "title" },
     );
 
-    const pages = [1, 2, 3].map((page) => paginateView(view, page));
+    const pages = [1, 2, 3].map((page) =>
+      paginateCollection(section.visibleScenarios, page, 9),
+    );
 
     expect(pages.map((page) => page.items.length)).toEqual([9, 9, 1]);
-    expect(pages.map((page) => [page.start, page.end])).toEqual([
-      [1, 9],
-      [10, 18],
-      [19, 19],
-    ]);
     expect(pages[0]?.totalPages).toBe(3);
+    expect(section.accessibleScenarios).toHaveLength(19);
   });
 
-  it("keeps an oversized authored course alone", () => {
-    const view = buildCourseCatalogView(
-      [
-        authored("linux", numberedScenarios("course", 11)),
-        generalPractice([scenario("general-1", "General 1")]),
-      ],
+  it("paginates a selected authored curriculum without reordering it", () => {
+    const section = buildCourseCatalogSection(
+      authored("linux", numberedScenarios("course", 11)),
       { q: "", tags: [] },
     );
 
-    const first = paginateView(view, 1);
-    const second = paginateView(view, 2);
+    const first = paginateCollection(section.visibleScenarios, 1, 9);
+    const second = paginateCollection(section.visibleScenarios, 2, 9);
 
-    expect(first.items).toHaveLength(1);
-    expect(first.items[0]).toMatchObject({ kind: "course", weight: 11 });
-    expect([first.start, first.end]).toEqual([1, 11]);
-    expect(second.items).toHaveLength(1);
-    expect(second.items[0]).toMatchObject({
-      kind: "general-practice-scenario",
-      weight: 1,
-    });
-    expect([second.start, second.end]).toEqual([12, 12]);
+    expect(first.items.map((entry) => entry.scenarioId)).toEqual(
+      numberedScenarios("course", 9).map((entry) => entry.scenarioId),
+    );
+    expect(second.items.map((entry) => entry.scenarioId)).toEqual([
+      "course-10",
+      "course-11",
+    ]);
   });
 
   it("hides General practice and its sort target when filters remove every member", () => {
@@ -229,19 +217,24 @@ describe("course catalog view", () => {
     );
 
     expect(view.generalPractice).toBeNull();
-    expect(view.units).toEqual([]);
+    expect(view.courses).toEqual([]);
+
+    const selectedSection = buildCourseCatalogSection(
+      generalPractice([
+        scenario("hard", "Hard repair", { difficulty: "hard" }),
+      ]),
+      { q: "", difficulty: "easy", tags: [] },
+    );
+    expect(selectedSection.accessibleScenarios).toHaveLength(1);
+    expect(selectedSection.visibleScenarios).toEqual([]);
   });
 });
 
-function paginateView(
+function paginateCourseIndex(
   view: ReturnType<typeof buildCourseCatalogView>,
   page: number,
 ) {
-  return paginateWeightedCollection(
-    view.units.map((unit) => ({ item: unit, weight: unit.weight })),
-    page,
-    9,
-  );
+  return paginateCollection(view.courses, page, 9);
 }
 
 function numberedScenarios(prefix: string, count: number) {

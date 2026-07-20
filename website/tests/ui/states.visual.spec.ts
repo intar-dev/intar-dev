@@ -100,10 +100,22 @@ test.describe("focused visual states", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await ui.settle();
 
+    await page.getByRole("button", { name: "General practice" }).click();
     await expect(
       page.getByRole("navigation", { name: "scenarios pagination" }),
     ).toContainText("1–9 of 19 scenarios");
     await expectRouteScreenshot(page, "catalog-paginated-light-desktop");
+  });
+
+  test("catalog · authored course", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+    await page.getByRole("button", { name: "Linux operations" }).click();
+    await expect(
+      page.locator(
+        'section[data-course-id="operations"][data-course-view="detail"]',
+      ),
+    ).toBeVisible();
+    await expectRouteScreenshot(page, "catalog-authored-light-desktop");
   });
 
   test("request access success", async ({ page, ui }) => {
@@ -317,8 +329,12 @@ for (const viewport of [
       test(`${theme} · combined General practice`, async ({ page, ui }) => {
         await ui.open({ ...routeCase("organization-detail"), theme });
         await page.getByRole("tab", { name: "Courses" }).click();
+        await page
+          .locator('li[data-course-scope="generated"]')
+          .getByRole("button", { name: "General practice" })
+          .click();
         const generalPractice = page.locator(
-          'section[data-course-scope="generated"]',
+          'section[data-course-scope="generated"][data-course-view="detail"]',
         );
         await generalPractice.scrollIntoViewIfNeeded();
         await expect(
