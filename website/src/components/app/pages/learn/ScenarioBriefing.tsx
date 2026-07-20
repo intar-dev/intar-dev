@@ -54,9 +54,9 @@ interface ScenarioDetailResponse {
 export function ScenarioBriefing() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { scenarioId } = useParams({ from: "/app/scenarios/$scenarioId" });
+  const { scenarioId } = useParams({ from: "/app/courses/$scenarioId" });
   const { organizationId } = useSearch({
-    from: "/app/scenarios/$scenarioId",
+    from: "/app/courses/$scenarioId",
   });
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [waitingForCapacity, setWaitingForCapacity] = useState(false);

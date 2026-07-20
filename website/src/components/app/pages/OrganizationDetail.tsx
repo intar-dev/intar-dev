@@ -25,7 +25,10 @@ import {
   type OrganizationDetailResponse,
   fetchJson,
 } from "./organization-detail/types";
-import type { OrganizationDetailTab } from "./tab-search";
+import {
+  isOrganizationDetailTab,
+  type OrganizationDetailTab,
+} from "./tab-search";
 
 export function OrganizationDetail() {
   const { orgId } = useParams({ from: "/app/organizations/$orgId" });
@@ -47,7 +50,12 @@ export function OrganizationDetail() {
     void authClient.organization.setActive({ organizationId: detail.id });
   }, [detail?.id]);
 
-  const requestedTab = routeSearch.tab ?? "overview";
+  // Search params may still contain a pre-cutover value in the address bar.
+  // Normalize defensively here as well as in validateSearch so no invalid tab
+  // leaves the controlled tab set without a selected panel.
+  const requestedTab = isOrganizationDetailTab(routeSearch.tab)
+    ? routeSearch.tab
+    : "overview";
   const admin = detail?.role !== "member";
   const activeTab: OrganizationDetailTab =
     (requestedTab === "progress" || requestedTab === "settings") && !admin
@@ -135,7 +143,7 @@ export function OrganizationDetail() {
         <div className="min-w-0 max-w-full overflow-x-auto border-b px-1 pt-1">
           <TabsList variant="line" className="min-w-max pb-1">
             <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="scenarios">Scenarios</TabsTrigger>
+            <TabsTrigger value="courses">Courses</TabsTrigger>
             <TabsTrigger value="people">Members</TabsTrigger>
             <TabsTrigger value="assignments">Assignments</TabsTrigger>
             {admin ? (
@@ -149,7 +157,7 @@ export function OrganizationDetail() {
         <TabsContent value="overview" className="min-w-0">
           <OrganizationOverview detail={detail} setTab={setTab} />
         </TabsContent>
-        <TabsContent value="scenarios" className="min-w-0">
+        <TabsContent value="courses" className="min-w-0">
           <OrganizationScenariosSection detail={detail} />
         </TabsContent>
         <TabsContent value="people" className="min-w-0">

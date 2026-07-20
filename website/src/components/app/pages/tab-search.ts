@@ -1,6 +1,6 @@
 export type OrganizationDetailTab =
   | "overview"
-  | "scenarios"
+  | "courses"
   | "people"
   | "assignments"
   | "progress"
@@ -19,7 +19,7 @@ export interface AdminPeopleSearch {
 
 export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
   "overview",
-  "scenarios",
+  "courses",
   "people",
   "assignments",
   "progress",

@@ -5,9 +5,16 @@ import {
   type ScenarioCourseCatalogSnapshotV1,
   vmScenarios,
 } from "@/db/schema";
-import type { ScenarioCourseWireEntry } from "@/lib/scenario-runs/types";
 
 const PUBLIC_COURSE_CATALOG_SCOPE = "public";
+
+export interface VisibleScenarioCourse {
+  courseId: string;
+  organizationId: string | null;
+  title: string;
+  description: string;
+  scenarioIds: string[];
+}
 
 export interface CourseCatalogReferenceValidation {
   ok: boolean;
@@ -65,9 +72,9 @@ export async function validateScenarioCourseCatalogReferences(
 
     const existingIsVisible = Boolean(
       existing &&
-        existing.enabled &&
-        (existing.organizationId === null ||
-          existing.organizationId === input.organizationId),
+      existing.enabled &&
+      (existing.organizationId === null ||
+        existing.organizationId === input.organizationId),
     );
     if (!existingIsVisible) {
       invalidScenarioIds.push(scenarioId);
@@ -118,7 +125,7 @@ export async function listVisibleScenarioCourses(
     organizationId: string | null;
     scenarios: Array<{ scenarioId: string; organizationId: string | null }>;
   },
-): Promise<ScenarioCourseWireEntry[]> {
+): Promise<VisibleScenarioCourse[]> {
   const scopeKeys = [
     scenarioCourseCatalogScopeKey(null),
     ...(input.organizationId
@@ -156,11 +163,7 @@ export async function listVisibleScenarioCourses(
 
   return [
     ...(publicRow
-      ? projectVisibleCourses(
-          publicRow,
-          availableIds,
-          organizationMembership,
-        )
+      ? projectVisibleCourses(publicRow, availableIds, organizationMembership)
       : []),
     ...(organizationRow
       ? projectVisibleCourses(organizationRow, availableIds, new Set())
@@ -180,13 +183,17 @@ function projectVisibleCourses(
   },
   availableIds: Set<string>,
   excludedIds: Set<string>,
-): ScenarioCourseWireEntry[] {
-  const courses: ScenarioCourseWireEntry[] = [];
+): VisibleScenarioCourse[] {
+  const courses: VisibleScenarioCourse[] = [];
+  const claimedIds = new Set(excludedIds);
   for (const course of row.courses) {
-    const scenarioIds = course.scenarioIds.filter(
-      (scenarioId) =>
-        availableIds.has(scenarioId) && !excludedIds.has(scenarioId),
-    );
+    const scenarioIds = course.scenarioIds.filter((scenarioId) => {
+      if (!availableIds.has(scenarioId) || claimedIds.has(scenarioId)) {
+        return false;
+      }
+      claimedIds.add(scenarioId);
+      return true;
+    });
     if (!scenarioIds.length) continue;
     courses.push({
       courseId: course.courseId,

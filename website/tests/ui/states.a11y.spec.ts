@@ -27,7 +27,7 @@ test.describe("focused state accessibility", () => {
       ui,
     }, testInfo) => {
       await ui.open({ ...routeCase("organization-detail"), theme });
-      await page.getByRole("tab", { name: "Scenarios" }).click();
+      await page.getByRole("tab", { name: "Courses" }).click();
 
       await expect(
         page.getByRole("heading", { name: "Platform repair sequence" }),

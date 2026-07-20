@@ -270,6 +270,16 @@ export function createMockApiState(input?: {
       tags: ["linux", "storage", "organization"],
       status: "new",
     }),
+    catalogScenario({
+      scenarioId: "platform-firewall",
+      organizationId: "org-platform",
+      title: "Trace a private firewall regression",
+      tagline: "A fleet-only policy blocks east-west service traffic.",
+      difficulty: "hard",
+      category: "Platform networking",
+      tags: ["networking", "firewall", "organization"],
+      status: "new",
+    }),
   ];
   const organizationCourses = [
     {

@@ -1,6 +1,6 @@
 import type {
+  ScenarioCatalogCourseWireEntry,
   ScenarioCatalogWireEntry,
-  ScenarioCourseWireEntry,
 } from "@/lib/scenario-runs";
 import { CATALOG_SORT_COMPARATORS, type CatalogSort } from "./catalog-search";
 
@@ -13,7 +13,7 @@ export interface CourseCatalogFilter {
 }
 
 export interface CourseCatalogSectionView {
-  course: ScenarioCourseWireEntry;
+  course: ScenarioCatalogCourseWireEntry;
   accessibleScenarios: ScenarioCatalogWireEntry[];
   visibleScenarios: ScenarioCatalogWireEntry[];
   totalEstimatedMinutes: number;
@@ -28,40 +28,31 @@ export type CourseCatalogDisplayUnit =
       section: CourseCatalogSectionView;
     }
   | {
-      kind: "scenario";
+      kind: "general-practice-scenario";
       key: string;
       weight: 1;
+      section: CourseCatalogSectionView;
       scenario: ScenarioCatalogWireEntry;
     };
 
 export interface CourseCatalogView {
   units: CourseCatalogDisplayUnit[];
   courses: CourseCatalogSectionView[];
-  individualScenarios: ScenarioCatalogWireEntry[];
-  individualScenarioCount: number;
+  generalPractice: CourseCatalogSectionView | null;
   visibleScenarioCount: number;
 }
 
 export function buildCourseCatalogView(
-  scenarios: readonly ScenarioCatalogWireEntry[],
-  courses: readonly ScenarioCourseWireEntry[],
+  courses: readonly ScenarioCatalogCourseWireEntry[],
   filter: CourseCatalogFilter,
 ): CourseCatalogView {
-  const scenarioById = new Map(
-    scenarios.map((scenario) => [scenario.scenarioId, scenario]),
-  );
-  const membership = resolveMembership(courses, scenarioById);
   const needle = filter.q.trim().toLowerCase();
-  const courseSections: CourseCatalogSectionView[] = [];
+  const sections: CourseCatalogSectionView[] = [];
   const units: CourseCatalogDisplayUnit[] = [];
+  let generalPractice: CourseCatalogSectionView | null = null;
 
   for (const course of courses) {
-    const key = courseCatalogKey(course);
-    const accessibleScenarios = course.scenarioIds.flatMap((scenarioId) => {
-      if (membership.get(scenarioId) !== key) return [];
-      const scenario = scenarioById.get(scenarioId);
-      return scenario ? [scenario] : [];
-    });
+    const accessibleScenarios = course.scenarios;
     if (!accessibleScenarios.length) continue;
 
     const structurallyEligible = accessibleScenarios.filter((scenario) =>
@@ -77,72 +68,61 @@ export function buildCourseCatalogView(
         );
     if (!visibleScenarios.length) continue;
 
+    if (course.kind === "general-practice" && filter.sort) {
+      visibleScenarios.sort(CATALOG_SORT_COMPARATORS[filter.sort]);
+    }
+
     const section = summarizeCourse(
       course,
       accessibleScenarios,
       visibleScenarios,
     );
-    courseSections.push(section);
+    sections.push(section);
+
+    if (course.kind === "general-practice") {
+      generalPractice = section;
+      units.push(
+        ...visibleScenarios.map(
+          (scenario): CourseCatalogDisplayUnit => ({
+            kind: "general-practice-scenario",
+            key: `general-practice:${scenario.scenarioId}`,
+            weight: 1,
+            section,
+            scenario,
+          }),
+        ),
+      );
+      continue;
+    }
+
     units.push({
       kind: "course",
-      key,
+      key: courseCatalogKey(course),
       weight: visibleScenarios.length,
       section,
     });
   }
 
-  const individualScenarios = scenarios
-    .filter((scenario) => !membership.has(scenario.scenarioId))
-    .filter((scenario) => matchesStructuredFilters(scenario, filter))
-    .filter((scenario) => matchesScenarioSearch(scenario, needle));
-  if (filter.sort) {
-    individualScenarios.sort(CATALOG_SORT_COMPARATORS[filter.sort]);
-  }
-  units.push(
-    ...individualScenarios.map(
-      (scenario): CourseCatalogDisplayUnit => ({
-        kind: "scenario",
-        key: `scenario:${scenario.scenarioId}`,
-        weight: 1,
-        scenario,
-      }),
-    ),
-  );
-
   return {
     units,
-    courses: courseSections,
-    individualScenarios,
-    individualScenarioCount: scenarios.filter(
-      (scenario) => !membership.has(scenario.scenarioId),
-    ).length,
+    courses: sections,
+    generalPractice,
     visibleScenarioCount: units.reduce((total, unit) => total + unit.weight, 0),
   };
 }
 
-export function courseCatalogKey(course: ScenarioCourseWireEntry): string {
-  return `${course.organizationId ?? "public"}:${course.courseId}`;
+export function courseCatalogKey(
+  course: ScenarioCatalogCourseWireEntry,
+): string {
+  return course.kind === "general-practice"
+    ? "general-practice"
+    : `${course.organizationId ?? "public"}:${course.courseId}`;
 }
 
-export function courseHeadingId(course: ScenarioCourseWireEntry): string {
+export function courseHeadingId(
+  course: ScenarioCatalogCourseWireEntry,
+): string {
   return `course-${courseCatalogKey(course).replace(/[^a-zA-Z0-9_-]/g, "-")}-heading`;
-}
-
-function resolveMembership(
-  courses: readonly ScenarioCourseWireEntry[],
-  scenarioById: ReadonlyMap<string, ScenarioCatalogWireEntry>,
-): Map<string, string> {
-  const membership = new Map<string, string>();
-  for (const course of courses) {
-    const key = courseCatalogKey(course);
-    for (const scenarioId of course.scenarioIds) {
-      if (!scenarioById.has(scenarioId)) continue;
-      if (course.organizationId !== null || !membership.has(scenarioId)) {
-        membership.set(scenarioId, key);
-      }
-    }
-  }
-  return membership;
 }
 
 function matchesStructuredFilters(
@@ -173,7 +153,7 @@ function matchesScenarioSearch(
 }
 
 function summarizeCourse(
-  course: ScenarioCourseWireEntry,
+  course: ScenarioCatalogCourseWireEntry,
   accessibleScenarios: ScenarioCatalogWireEntry[],
   visibleScenarios: ScenarioCatalogWireEntry[],
 ): CourseCatalogSectionView {

@@ -206,7 +206,7 @@ export function ScenarioDetails() {
           <DropdownMenuItem
             render={
               <Link
-                to="/scenarios/$scenarioId"
+                to="/courses/$scenarioId"
                 params={{ scenarioId: scenarioRecord.scenarioId }}
               />
             }

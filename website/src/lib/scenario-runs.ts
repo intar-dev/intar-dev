@@ -3,7 +3,7 @@ export type {
   ScenarioProgress,
   ScenarioCatalogWireEntry,
   ScenarioCatalogWireResponse,
-  ScenarioCourseWireEntry,
+  ScenarioCatalogCourseWireEntry,
   ScenarioDetail,
   ScenarioRunRecord,
   ScenarioTerminalSessionResult,

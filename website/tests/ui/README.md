@@ -9,16 +9,16 @@ bundle.
 ## Suites
 
 - `bun run test:ui:visual` runs the Chromium visual suites.
-  - `routes.visual.spec.ts`: 17 routes × 2 themes × desktop/mobile = 68.
+  - `routes.visual.spec.ts`: 18 routes × 2 themes × desktop/mobile = 72.
   - `dense.visual.spec.ts`: 7 dense routes × 2 themes × tablet = 14.
-  - The primary baseline count is therefore exactly 82, with additional
+  - The primary baseline count is therefore exactly 86, with additional
     focused run, organization, build, people, and authoring snapshots.
-- `bun run test:ui:a11y` runs axe on all 17 routes in both themes, exercises
+- `bun run test:ui:a11y` runs axe on all 18 routes in both themes, exercises
   high-risk empty, error, permission, dialog, operational-detail,
   remote-access, validation, and mobile-sheet states, and runs the keyboard,
   focus, reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   checks.
-- `bun run test:ui:smoke` runs seven workflow archetypes in Chromium, Firefox,
+- `bun run test:ui:smoke` runs eight workflow archetypes in Chromium, Firefox,
   and WebKit.
 - `bun run test:ui` runs the complete release gate with one worker in CI.
 

@@ -8,7 +8,7 @@ export function BrandMark({
 }: {
   className?: string;
   compact?: boolean;
-  to?: "/" | "/scenarios";
+  to?: "/" | "/courses";
 }) {
   return (
     <Link

@@ -13,6 +13,7 @@ import { useBreadcrumbOverrides, usePageChromeValue } from "./page-chrome";
 
 const SEGMENT_LABELS: Record<string, string> = {
   admin: "Admin",
+  courses: "Courses",
   scenarios: "Scenarios",
   runs: "My runs",
   organizations: "Organizations",

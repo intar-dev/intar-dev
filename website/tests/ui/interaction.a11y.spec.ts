@@ -12,6 +12,7 @@ import {
   REPLAY_TERMINAL_LINE_HEIGHT,
   REPLAY_TERMINAL_ROWS,
 } from "../../src/lib/replay/config";
+import type { ScenarioCatalogWireResponse } from "../../src/lib/scenario-runs";
 
 test("keyboard-only landing navigation keeps focus visible", async ({
   page,
@@ -65,16 +66,37 @@ test("organization tabs support keyboard navigation and update the URL", async (
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "light" });
   const overview = page.getByRole("tab", { name: "Overview" });
-  const scenarios = page.getByRole("tab", { name: "Scenarios" });
+  const courses = page.getByRole("tab", { name: "Courses" });
 
   await overview.focus();
   await expect(overview).toBeFocused();
   await page.keyboard.press("ArrowRight");
 
-  await expect(scenarios).toBeFocused();
+  await expect(courses).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(scenarios).toHaveAttribute("aria-selected", "true");
-  await expect(page).toHaveURL(/tab=scenarios/);
+  await expect(courses).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/tab=courses/);
+});
+
+test("legacy organization scenario tab falls back to Overview", async ({
+  page,
+  ui,
+}) => {
+  const route = routeCase("organization-detail");
+  await ui.open({
+    ...route,
+    path: `${route.path}?tab=scenarios`,
+    theme: "light",
+  });
+
+  await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByRole("tab", { name: "Courses" })).toHaveAttribute(
+    "aria-selected",
+    "false",
+  );
 });
 
 test("large card collections paginate without repeating items", async ({
@@ -90,9 +112,13 @@ test("large card collections paginate without repeating items", async ({
   const pagination = page.getByRole("navigation", {
     name: "scenarios pagination",
   });
-  const scenarioLinks = page.locator('a[href^="/scenarios/paging-scenario-"]');
+  const scenarioLinks = page.locator('a[href^="/courses/paging-scenario-"]');
+  const generalPractice = page
+    .getByRole("heading", { name: "General practice" })
+    .locator("xpath=ancestor::section");
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
+  await expect(generalPractice).toContainText("19 scenarios");
   const firstPageHrefs = await scenarioLinks.evaluateAll((links) =>
     links.map((link) => link.getAttribute("href")),
   );
@@ -100,6 +126,7 @@ test("large card collections paginate without repeating items", async ({
   await pagination.getByRole("button", { name: /^Next/ }).click();
   await expect(pagination).toContainText("10–18 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
+  await expect(generalPractice).toContainText("19 scenarios");
   const secondPageHrefs = await scenarioLinks.evaluateAll((links) =>
     links.map((link) => link.getAttribute("href")),
   );
@@ -111,20 +138,31 @@ test("large card collections paginate without repeating items", async ({
   await pagination.getByRole("button", { name: "Page 3" }).click();
   await expect(pagination).toContainText("19–19 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(1);
+  await expect(generalPractice).toContainText("19 scenarios");
   await expect(
     pagination.getByRole("button", { name: "Page 3" }),
   ).toHaveAttribute("aria-current", "page");
 
-  await page.getByRole("textbox", { name: "Search scenarios" }).fill("Paging");
+  await page
+    .getByRole("textbox", { name: "Search courses and scenarios" })
+    .fill("Paging");
   await expect(pagination).toContainText("1–9 of 19 scenarios");
   await expect(scenarioLinks).toHaveCount(9);
 });
 
-test("public courses preserve curriculum order and leave standalone work after them", async ({
+test("public courses preserve curriculum order and place standalone work in General practice", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Courses");
+  await expect(
+    page.getByRole("heading", {
+      level: 2,
+      name: "Choose your next course",
+    }),
+  ).toBeVisible();
 
   const course = page.locator(
     'section[data-course-id="operations"][data-course-scope="public"]',
@@ -134,23 +172,70 @@ test("public courses preserve curriculum order and leave standalone work after t
   ).toBeVisible();
   await expect(course).toContainText("2 scenarios");
   await expect(course).toContainText("~95 min total");
-  const courseLinks = course.locator('a[href^="/scenarios/"]');
+  const courseLinks = course.locator('a[href^="/courses/"]');
   await expect(courseLinks).toHaveCount(2);
+  await expect(course.locator("h3")).toHaveCount(1);
+  await expect(course.locator("h4")).toHaveCount(2);
   await expect(courseLinks.nth(0)).toHaveAttribute(
     "href",
-    "/scenarios/repair-nginx",
+    "/courses/repair-nginx",
   );
   await expect(courseLinks.nth(1)).toHaveAttribute(
     "href",
-    "/scenarios/repair-dns",
+    "/courses/repair-dns",
   );
 
-  const individual = page
-    .getByRole("heading", { name: "Individual scenarios" })
+  const generalPractice = page
+    .getByRole("heading", { name: "General practice" })
     .locator("xpath=ancestor::section");
   await expect(
-    individual.locator('a[href="/scenarios/recover-postgres"]'),
+    generalPractice.locator('a[href="/courses/recover-postgres"]'),
   ).toBeVisible();
+  await expect(generalPractice).toContainText("Open practice");
+});
+
+test("catalog API exposes scenarios only inside nested courses", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+
+  const catalog = (await page.evaluate(async () => {
+    const response = await fetch("/api/scenarios");
+    return response.json();
+  })) as ScenarioCatalogWireResponse;
+
+  expect(catalog).not.toHaveProperty("scenarios");
+  expect(catalog.courses.map((course: { kind: string }) => course.kind)).toEqual(
+    ["authored", "general-practice"],
+  );
+  expect(catalog.courses[0]).not.toHaveProperty("scenarioIds");
+  expect(catalog.courses[0]?.scenarios[0]).toHaveProperty("progress");
+  expect(catalog.courses[1]).toMatchObject({
+    courseId: null,
+    organizationId: null,
+    title: "General practice",
+  });
+});
+
+test("matching the General practice title reveals all eligible members", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
+  await page
+    .getByRole("textbox", { name: "Search courses and scenarios" })
+    .fill("General practice");
+
+  const generalPractice = page
+    .getByRole("heading", { name: "General practice" })
+    .locator("xpath=ancestor::section");
+  await expect(
+    generalPractice.locator('a[href="/courses/recover-postgres"]'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Linux operations" }),
+  ).toHaveCount(0);
 });
 
 test("partially available courses remain visible", async ({ page, ui }) => {
@@ -168,9 +253,9 @@ test("partially available courses remain visible", async ({ page, ui }) => {
   );
   await expect(course).toContainText("1 scenario");
   await expect(
-    course.locator('a[href="/scenarios/repair-nginx"]'),
+    course.locator('a[href="/courses/repair-nginx"]'),
   ).toBeVisible();
-  await expect(course.locator('a[href="/scenarios/repair-dns"]')).toHaveCount(
+  await expect(course.locator('a[href="/courses/repair-dns"]')).toHaveCount(
     0,
   );
 });
@@ -180,7 +265,7 @@ test("organization catalogs render public courses before scoped courses", async 
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
-  await page.getByRole("tab", { name: "Scenarios" }).click();
+  await page.getByRole("tab", { name: "Courses" }).click();
 
   const courses = page.locator('section[data-course-id="operations"]');
   await expect(courses).toHaveCount(2);
@@ -199,6 +284,35 @@ test("organization catalogs render public courses before scoped courses", async 
   await expect(
     courses.nth(1).locator('a[href*="platform-logrotate"]'),
   ).toHaveCount(1);
+  const generalPractice = page
+    .getByRole("heading", { name: "General practice" })
+    .locator("xpath=ancestor::section");
+  await expect(
+    generalPractice.locator('a[href*="recover-postgres"]'),
+  ).toHaveCount(1);
+  await expect(
+    generalPractice.locator('a[href*="platform-firewall"]'),
+  ).toHaveCount(1);
+
+  const catalog = (await page.evaluate(async () => {
+    const response = await fetch("/api/organizations/org-platform/scenarios");
+    return response.json();
+  })) as ScenarioCatalogWireResponse;
+  const scenarioIds = catalog.courses.flatMap(
+    (course: { scenarios: Array<{ scenarioId: string }> }) =>
+      course.scenarios.map((scenario) => scenario.scenarioId),
+  );
+  expect(catalog.courses.map((course: { kind: string }) => course.kind)).toEqual(
+    ["authored", "authored", "general-practice"],
+  );
+  expect(new Set(scenarioIds).size).toBe(scenarioIds.length);
+  expect(scenarioIds).toEqual([
+    "repair-dns",
+    "repair-nginx",
+    "platform-logrotate",
+    "recover-postgres",
+    "platform-firewall",
+  ]);
 });
 
 test("destructive dialog traps focus and restores it", async ({ page, ui }) => {
@@ -432,7 +546,7 @@ test("organization courses remain operable at 200% text", async ({
   ui,
 }) => {
   await ui.open({ ...routeCase("organization-detail"), theme: "dark" });
-  await page.getByRole("tab", { name: "Scenarios" }).click();
+  await page.getByRole("tab", { name: "Courses" }).click();
   await page.evaluate(() => {
     document.documentElement.style.fontSize = "200%";
   });
@@ -456,11 +570,30 @@ test("unknown route has a designed recovery path", async ({ page, ui }) => {
   );
   await expect(
     page
-      .getByRole("link", { name: /home|scenarios|workshop/i })
-      .or(page.getByRole("button", { name: /home|scenarios|workshop/i }))
+      .getByRole("link", { name: /home|courses|workshop/i })
+      .or(page.getByRole("button", { name: /home|courses|workshop/i }))
       .first(),
   ).toBeVisible();
 });
+
+for (const legacyPath of ["/scenarios", "/scenarios/repair-nginx"] as const) {
+  test(`legacy learner route ${legacyPath} is removed without redirecting`, async ({
+    page,
+    ui,
+  }) => {
+    await ui.open({
+      path: legacyPath,
+      sessionRole: "learner",
+      theme: "light",
+    });
+
+    await expect(page).toHaveURL(new RegExp(`${legacyPath}$`));
+    await expect(page.getByText("That route is not in the manual")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Browse courses" }),
+    ).toHaveAttribute("href", "/courses");
+  });
+}
 
 test("Recursive Mono keeps terminal cell geometry stable", async ({
   page,

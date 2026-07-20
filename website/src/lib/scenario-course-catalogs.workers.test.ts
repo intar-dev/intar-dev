@@ -5,8 +5,11 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  agentHosts,
   organization,
   scenarioCourseCatalogs,
+  scenarioRuns,
+  user,
   vmScenarios,
   vmScenarioVms,
   type ScenarioCourseCatalogSnapshotV1,
@@ -82,9 +85,9 @@ describe("scenario course catalog storage", () => {
       createdAt: 110,
       updatedAt: 210,
     });
-    expect(rows.find((row) => row.scopeKey === "public")?.coursesJson).toEqual(
-      [course("public-course", ["public-one"])],
-    );
+    expect(rows.find((row) => row.scopeKey === "public")?.coursesJson).toEqual([
+      course("public-course", ["public-one"]),
+    ]);
     expect(
       rows.find((row) => row.scopeKey === "organization:org-b")?.coursesJson,
     ).toEqual([course("org-b-course", ["org-b-one"])]);
@@ -175,11 +178,7 @@ describe("scenario course catalog reference validation", () => {
       }),
     ).resolves.toEqual({
       ok: false,
-      invalidScenarioIds: [
-        "public-disabled",
-        "org-a-enabled",
-        "missing",
-      ],
+      invalidScenarioIds: ["public-disabled", "org-a-enabled", "missing"],
     });
 
     await expect(
@@ -224,8 +223,10 @@ describe("scenario course catalog reads", () => {
     await insertScenario(null, "public-one");
     await insertScenario(null, "public-two");
     await insertScenario(null, "public-three");
+    await insertScenario(null, "public-standalone");
     await insertScenario(null, "public-hidden", false);
     await insertScenario("org-a", "org-a-one");
+    await insertScenario("org-a", "org-a-standalone");
     await insertScenario("org-a", "org-a-hidden", false);
     await insertScenario("org-b", "org-b-one");
 
@@ -264,24 +265,42 @@ describe("scenario course catalog reads", () => {
     const catalog = await listScenarioCatalogForUser("learner");
     expect(catalog.courses).toEqual([
       {
+        kind: "authored",
         courseId: "public-curriculum",
         organizationId: null,
         title: "public-curriculum title",
         description: "public-curriculum description",
-        scenarioIds: ["public-two", "public-one"],
+        scenarios: [
+          expect.objectContaining({ scenarioId: "public-two" }),
+          expect.objectContaining({ scenarioId: "public-one" }),
+        ],
       },
       {
+        kind: "authored",
         courseId: "partial-public",
         organizationId: null,
         title: "partial-public title",
         description: "partial-public description",
-        scenarioIds: ["public-three"],
+        scenarios: [expect.objectContaining({ scenarioId: "public-three" })],
+      },
+      {
+        kind: "general-practice",
+        courseId: null,
+        organizationId: null,
+        title: "General practice",
+        description:
+          "Standalone systems for focused practice outside a guided curriculum.",
+        scenarios: [
+          expect.objectContaining({ scenarioId: "public-standalone" }),
+        ],
       },
     ]);
-    expect(catalog.scenarios.map((scenario) => scenario.scenarioId)).toEqual([
+    expect(catalog).not.toHaveProperty("scenarios");
+    expect(flattenScenarioIds(catalog)).toEqual([
+      "public-two",
       "public-one",
       "public-three",
-      "public-two",
+      "public-standalone",
     ]);
   });
 
@@ -289,36 +308,140 @@ describe("scenario course catalog reads", () => {
     const catalog = await listScenarioCatalogForUser("learner", "org-a");
     expect(catalog.courses).toEqual([
       {
+        kind: "authored",
         courseId: "public-curriculum",
         organizationId: null,
         title: "public-curriculum title",
         description: "public-curriculum description",
-        scenarioIds: ["public-two"],
+        scenarios: [expect.objectContaining({ scenarioId: "public-two" })],
       },
       {
+        kind: "authored",
         courseId: "partial-public",
         organizationId: null,
         title: "partial-public title",
         description: "partial-public description",
-        scenarioIds: ["public-three"],
+        scenarios: [expect.objectContaining({ scenarioId: "public-three" })],
       },
       {
+        kind: "authored",
         courseId: "organization-curriculum",
         organizationId: "org-a",
         title: "organization-curriculum title",
         description: "organization-curriculum description",
-        scenarioIds: ["public-one", "org-a-one"],
+        scenarios: [
+          expect.objectContaining({ scenarioId: "public-one" }),
+          expect.objectContaining({ scenarioId: "org-a-one" }),
+        ],
+      },
+      {
+        kind: "general-practice",
+        courseId: null,
+        organizationId: null,
+        title: "General practice",
+        description:
+          "Standalone systems for focused practice outside a guided curriculum.",
+        scenarios: [
+          expect.objectContaining({ scenarioId: "org-a-standalone" }),
+          expect.objectContaining({ scenarioId: "public-standalone" }),
+        ],
       },
     ]);
-    expect(catalog.scenarios.map((scenario) => scenario.scenarioId)).toEqual([
-      "org-a-one",
-      "public-one",
-      "public-three",
+    expect(flattenScenarioIds(catalog)).toEqual([
       "public-two",
+      "public-three",
+      "public-one",
+      "org-a-one",
+      "org-a-standalone",
+      "public-standalone",
     ]);
-    expect(catalog.scenarios).not.toContainEqual(
-      expect.objectContaining({ scenarioId: "org-b-one" }),
+    expect(flattenScenarioIds(catalog)).not.toContain("org-b-one");
+    expect(new Set(flattenScenarioIds(catalog)).size).toBe(
+      flattenScenarioIds(catalog).length,
     );
+  });
+
+  it("omits General practice when authored courses claim every visible scenario", async () => {
+    await syncScenarioCourseCatalogSnapshot(drizzle(env.DB), {
+      snapshot: snapshot(
+        course("complete-curriculum", [
+          "public-three",
+          "public-standalone",
+          "public-two",
+          "public-one",
+        ]),
+      ),
+      sourceRevision: "complete-public-rev",
+      organizationId: null,
+      nowUnixMs: 200,
+    });
+
+    const catalog = await listScenarioCatalogForUser("learner");
+    expect(catalog.courses).toHaveLength(1);
+    expect(catalog.courses[0]).toMatchObject({
+      kind: "authored",
+      courseId: "complete-curriculum",
+    });
+    expect(flattenScenarioIds(catalog)).toEqual([
+      "public-three",
+      "public-standalone",
+      "public-two",
+      "public-one",
+    ]);
+  });
+
+  it("nests progress with its scenario and defensively projects each scenario once", async () => {
+    const db = drizzle(env.DB);
+    await db.insert(user).values({
+      id: "learner",
+      name: "Learner",
+      email: "learner@example.test",
+      emailVerified: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await db.insert(agentHosts).values({
+      id: "progress-host",
+      userId: "learner",
+      name: "Progress host",
+    });
+    await db.insert(scenarioRuns).values(completedScenarioRun("public-two"));
+    await syncScenarioCourseCatalogSnapshot(db, {
+      snapshot: snapshot(
+        course("first-course", ["public-two", "public-two"]),
+        course("second-course", ["public-two", "public-one"]),
+      ),
+      sourceRevision: "duplicate-defense-rev",
+      organizationId: null,
+      nowUnixMs: 220,
+    });
+
+    const catalog = await listScenarioCatalogForUser("learner");
+    expect(
+      flattenScenarioIds(catalog).filter((id) => id === "public-two"),
+    ).toEqual(["public-two"]);
+    expect(catalog.courses[0]).toMatchObject({
+      kind: "authored",
+      courseId: "first-course",
+      scenarios: [
+        {
+          scenarioId: "public-two",
+          progress: {
+            status: "completed",
+            activeRunId: null,
+            attemptCount: 1,
+            completedCount: 1,
+            bestSolveMs: 500,
+            lastPlayedAt: 3_000,
+          },
+        },
+      ],
+    });
+    expect(catalog.courses[1]).toMatchObject({
+      kind: "authored",
+      courseId: "second-course",
+      scenarios: [expect.objectContaining({ scenarioId: "public-one" })],
+    });
   });
 });
 
@@ -392,5 +515,46 @@ function course(
     title: `${courseId} title`,
     description: `${courseId} description`,
     scenarioIds,
+  };
+}
+
+function flattenScenarioIds(
+  catalog: Awaited<ReturnType<typeof listScenarioCatalogForUser>>,
+): string[] {
+  return catalog.courses.flatMap((course) =>
+    course.scenarios.map((scenario) => scenario.scenarioId),
+  );
+}
+
+function completedScenarioRun(
+  scenarioId: string,
+): typeof scenarioRuns.$inferInsert {
+  return {
+    runId: `${scenarioId}-run`,
+    userId: "learner",
+    organizationId: null,
+    hostId: "progress-host",
+    scenarioId,
+    scenarioName: scenarioId,
+    title: scenarioId,
+    tagline: "Test",
+    briefingMarkdown: "Briefing",
+    objectivesJson: "[]",
+    difficulty: "easy",
+    estimatedMinutes: 10,
+    tagsJson: [],
+    hintsJson: [],
+    solutionMarkdown: "Solution",
+    revealedHintsJson: [],
+    solutionAssisted: false,
+    vmCount: 1,
+    state: "completed",
+    stateRank: 1,
+    activeKey: null,
+    stateJson: "{}",
+    solvedAt: 1_500,
+    completedAt: 3_000,
+    createdAt: 1_000,
+    updatedAt: 3_000,
   };
 }

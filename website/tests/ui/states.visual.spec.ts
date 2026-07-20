@@ -304,13 +304,32 @@ for (const viewport of [
     for (const theme of ["light", "dark"] as const) {
       test(`${theme}`, async ({ page, ui }) => {
         await ui.open({ ...routeCase("organization-detail"), theme });
-        await page.getByRole("tab", { name: "Scenarios" }).click();
+        await page.getByRole("tab", { name: "Courses" }).click();
         await expect(
           page.getByRole("heading", { name: "Platform repair sequence" }),
         ).toBeVisible();
         await expectRouteScreenshot(
           page,
-          `organization-scenarios-${theme}-${viewport.id}`,
+          `organization-courses-${theme}-${viewport.id}`,
+        );
+      });
+
+      test(`${theme} · combined General practice`, async ({ page, ui }) => {
+        await ui.open({ ...routeCase("organization-detail"), theme });
+        await page.getByRole("tab", { name: "Courses" }).click();
+        const generalPractice = page.locator(
+          'section[data-course-scope="generated"]',
+        );
+        await generalPractice.scrollIntoViewIfNeeded();
+        await expect(
+          generalPractice.locator('a[href*="recover-postgres"]'),
+        ).toHaveCount(1);
+        await expect(
+          generalPractice.locator('a[href*="platform-firewall"]'),
+        ).toHaveCount(1);
+        await expectRouteScreenshot(
+          page,
+          `organization-general-practice-${theme}-${viewport.id}`,
         );
       });
     }

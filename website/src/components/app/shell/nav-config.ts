@@ -41,12 +41,12 @@ export const NAV_SECTIONS: NavSection[] = [
     requires: "signedIn",
     items: [
       {
-        id: "scenarios",
-        label: "Scenarios",
-        to: "/scenarios",
+        id: "courses",
+        label: "Courses",
+        to: "/courses",
         icon: BookOpen,
         requires: "signedIn",
-        matchPrefix: "/scenarios",
+        matchPrefix: "/courses",
       },
       {
         id: "runs",

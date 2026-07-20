@@ -18,9 +18,10 @@ export function CourseCatalogSections({
   gridClassName?: string;
 }) {
   const courses = units.filter((unit) => unit.kind === "course");
-  const individualScenarios = units.flatMap((unit) =>
-    unit.kind === "scenario" ? [unit.scenario] : [],
+  const generalPracticeUnits = units.filter(
+    (unit) => unit.kind === "general-practice-scenario",
   );
+  const generalPracticeSection = generalPracticeUnits[0]?.section;
 
   return (
     <div className="space-y-10">
@@ -32,31 +33,17 @@ export function CourseCatalogSections({
           renderScenario={renderScenario}
         />
       ))}
-      {individualScenarios.length ? (
-        <section
-          className="space-y-4 border-t-2 border-foreground/10 pt-6"
-          aria-labelledby="individual-scenarios-heading"
-        >
-          <header className="space-y-1">
-            <p className="text-eyebrow">Open practice</p>
-            <h3
-              id="individual-scenarios-heading"
-              className="text-section-title"
-            >
-              Individual scenarios
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Standalone systems you can tackle in any order.
-            </p>
-          </header>
-          <ScenarioGrid className={gridClassName}>
-            {individualScenarios.map((scenario) => (
-              <Fragment key={scenario.scenarioId}>
-                {renderScenario(scenario)}
-              </Fragment>
-            ))}
-          </ScenarioGrid>
-        </section>
+      {generalPracticeSection ? (
+        <CourseSection
+          section={{
+            ...generalPracticeSection,
+            visibleScenarios: generalPracticeUnits.map(
+              (unit) => unit.scenario,
+            ),
+          }}
+          gridClassName={gridClassName}
+          renderScenario={renderScenario}
+        />
       ) : null}
     </div>
   );
@@ -78,13 +65,21 @@ function CourseSection({
     <section
       className="space-y-5 border-t-2 border-foreground/10 pt-6 first:border-t-0 first:pt-0"
       aria-labelledby={headingId}
-      data-course-id={section.course.courseId}
-      data-course-scope={section.course.organizationId ?? "public"}
+      data-course-id={section.course.courseId ?? "general-practice"}
+      data-course-scope={
+        section.course.kind === "general-practice"
+          ? "generated"
+          : (section.course.organizationId ?? "public")
+      }
     >
       <header className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-end">
         <div className="min-w-0 space-y-2">
           <p className="text-eyebrow">
-            {section.course.organizationId ? "Organization course" : "Course"}
+            {section.course.kind === "general-practice"
+              ? "Open practice"
+              : section.course.organizationId
+                ? "Organization course"
+                : "Course"}
           </p>
           <h3
             id={headingId}

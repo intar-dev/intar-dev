@@ -42,17 +42,9 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import type {
-  ScenarioCatalogWireEntry,
-  ScenarioCourseWireEntry,
-} from "@/lib/scenario-runs";
+import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
 import { CourseCatalogSections } from "./CourseCatalogSections";
 import { buildCourseCatalogView } from "./course-catalog";
-
-interface ScenarioCatalogResponse {
-  scenarios: ScenarioCatalogWireEntry[];
-  courses: ScenarioCourseWireEntry[];
-}
 
 interface MyAssignmentsResponse {
   assignments: Array<{
@@ -66,7 +58,7 @@ interface MyAssignmentsResponse {
 }
 
 export function ScenarioCatalog() {
-  const routeSearch = useSearch({ from: "/app/scenarios" });
+  const routeSearch = useSearch({ from: "/app/courses" });
   const searchState = useMemo(
     () => normalizeCatalogSearch(routeSearch),
     [routeSearch],
@@ -74,7 +66,7 @@ export function ScenarioCatalog() {
   const navigate = useNavigate();
   const [searchText, setSearchText] = useState(searchState.q);
 
-  const scenarios = useQuery({
+  const courses = useQuery({
     queryKey: ["scenarios", "list"],
     queryFn: async () => {
       const response = await fetch("/api/scenarios", {
@@ -87,11 +79,11 @@ export function ScenarioCatalog() {
           error?: string;
         } | null;
         throw new Error(
-          body?.error ?? `Failed to load scenarios (${response.status})`,
+          body?.error ?? `Failed to load courses (${response.status})`,
         );
       }
 
-      return (await response.json()) as ScenarioCatalogResponse;
+      return (await response.json()) as ScenarioCatalogWireResponse;
     },
     staleTime: 10_000,
   });
@@ -114,8 +106,8 @@ export function ScenarioCatalog() {
   const myRuns = useMyRuns();
   const activeRuns = (myRuns.data?.runs ?? []).filter((run) => run.active);
 
-  const allEntries = scenarios.data?.scenarios ?? [];
-  const allCourses = scenarios.data?.courses ?? [];
+  const allCourses = courses.data?.courses ?? [];
+  const allEntries = allCourses.flatMap((course) => course.scenarios);
   const assignments = myAssignments.data?.assignments ?? [];
 
   const allTags = useMemo(
@@ -155,14 +147,14 @@ export function ScenarioCatalog() {
 
   const catalogView = useMemo(
     () =>
-      buildCourseCatalogView(allEntries, allCourses, {
+      buildCourseCatalogView(allCourses, {
         q: searchState.q,
         difficulty: searchState.difficulty,
         category: searchState.category,
         tags: searchState.tags,
         sort: searchState.sort,
       }),
-    [allCourses, allEntries, searchState],
+    [allCourses, searchState],
   );
   const paginationUnits = useMemo(
     () =>
@@ -289,13 +281,13 @@ export function ScenarioCatalog() {
 
   return (
     <PageShell width="default" density="comfortable">
-      {scenarios.error ? (
+      {courses.error ? (
         <Alert variant="destructive">
-          <AlertTitle>Could not load scenarios</AlertTitle>
+          <AlertTitle>Could not load courses</AlertTitle>
           <AlertDescription>
-            {scenarios.error instanceof Error
-              ? scenarios.error.message
-              : "Failed to load scenarios"}
+            {courses.error instanceof Error
+              ? courses.error.message
+              : "Failed to load courses"}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -363,7 +355,7 @@ export function ScenarioCatalog() {
                 {visibleAssignments.map((assignment) => (
                   <Link
                     key={assignment.assignmentId}
-                    to="/scenarios/$scenarioId"
+                    to="/courses/$scenarioId"
                     params={{ scenarioId: assignment.scenarioId }}
                     search={{ organizationId: assignment.organizationId }}
                     className="group flex min-h-16 items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/60 sm:px-6"
@@ -391,16 +383,16 @@ export function ScenarioCatalog() {
       {allEntries.length ? (
         <section className="space-y-4" aria-labelledby="catalog-heading">
           <div>
-            <p className="text-eyebrow">Workshop catalog</p>
+            <p className="text-eyebrow">Course catalog</p>
             <h2 id="catalog-heading" className="mt-2 text-section-title">
-              Choose the next system
+              Choose your next course
             </h2>
           </div>
           <FilterBar
             search={searchText}
             onSearchChange={setSearchText}
-            searchPlaceholder="Search scenarios…"
-            searchLabel="Search scenarios"
+            searchPlaceholder="Search courses and scenarios…"
+            searchLabel="Search courses and scenarios"
             filtersActive={filtersActive}
             onClear={clearFilters}
             end={
@@ -408,7 +400,7 @@ export function ScenarioCatalog() {
                 <span className="text-metadata tabular-nums">
                   {catalogView.visibleScenarioCount} of {allEntries.length}
                 </span>
-                {catalogView.individualScenarioCount ? (
+                {catalogView.generalPractice ? (
                   <SortSelect
                     value={searchState.sort}
                     onChange={(sort) =>
@@ -441,7 +433,7 @@ export function ScenarioCatalog() {
         </section>
       ) : null}
 
-      {scenarios.error ? null : scenarios.isLoading ? (
+      {courses.error ? null : courses.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 9 }, (_, index) => (
             <Skeleton key={index} className="h-52 rounded-xl" />
@@ -450,13 +442,13 @@ export function ScenarioCatalog() {
       ) : !allEntries.length ? (
         <EmptyState
           icon={<ShieldCheck />}
-          title="No scenarios are enabled yet"
-          description="This list will fill once an admin enables a scenario with a briefing and at least one probe."
+          title="No courses are available yet"
+          description="This catalog will fill once an admin enables a scenario with a briefing and at least one probe."
         />
       ) : !catalogView.visibleScenarioCount ? (
         <EmptyState
           icon={<Search />}
-          title="No scenarios match your filters"
+          title="No courses match your filters"
           description="Try a different search term, or clear the filters to see everything."
           action={
             <Button variant="outline" onClick={clearFilters}>
@@ -497,8 +489,8 @@ function SortSelect({
       value={value}
       onValueChange={(next) => onChange(next as CatalogSort)}
     >
-      <SelectTrigger size="sm" aria-label="Sort individual scenarios">
-        Individual sort:{" "}
+      <SelectTrigger size="sm" aria-label="Sort General practice scenarios">
+        General practice sort:{" "}
         {CATALOG_SORT_OPTIONS.find((option) => option.value === value)?.label}
       </SelectTrigger>
       <SelectContent align="end">

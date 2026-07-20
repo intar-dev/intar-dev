@@ -122,13 +122,13 @@ const appLayoutRoute = createRoute({
   notFoundComponent: AppRouteNotFound,
 });
 
-const scenarioCatalogRoute = createRoute({
+const courseCatalogRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "scenarios",
+  path: "courses",
   head: () =>
     routeHead(
-      "Scenarios",
-      "Choose a systems repair scenario or resume active lab work.",
+      "Courses",
+      "Choose a systems repair course or resume active lab work.",
     ),
   validateSearch: validateCatalogSearch,
   component: lazyRouteComponent(
@@ -137,9 +137,9 @@ const scenarioCatalogRoute = createRoute({
   ),
 });
 
-const scenarioBriefingRoute = createRoute({
+const courseScenarioBriefingRoute = createRoute({
   getParentRoute: () => appLayoutRoute,
-  path: "scenarios/$scenarioId",
+  path: "courses/$scenarioId",
   validateSearch: validateScenarioBriefingSearch,
   head: () =>
     routeHead(
@@ -180,7 +180,7 @@ const organizationsRoute = createRoute({
   head: () =>
     routeHead(
       "Organizations",
-      "Open your organization workspace and private scenario catalog.",
+      "Open your organization workspace and private course catalog.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/Organizations"),
@@ -195,7 +195,7 @@ const organizationDetailRoute = createRoute({
   head: () =>
     routeHead(
       "Organization workspace",
-      "Manage identity, private scenarios, runners, people, and progress.",
+      "Manage identity, private courses, runners, people, and progress.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationDetail"),
@@ -322,8 +322,8 @@ const routeTree = rootRoute.addChildren([
     organizationDirectSignInRoute,
   ]),
   appLayoutRoute.addChildren([
-    scenarioCatalogRoute,
-    scenarioBriefingRoute,
+    courseCatalogRoute,
+    courseScenarioBriefingRoute,
     scenarioRunRoute,
     runsListRoute,
     organizationsRoute,
@@ -426,11 +426,11 @@ function AppRouteNotFound() {
           <p className="text-eyebrow">Unknown work order</p>
           <p className="text-page-title">That route is not in the manual</p>
           <p className="text-sm leading-6 text-muted-foreground">
-            Check the address, or return to the scenario catalog to choose your
+            Check the address, or return to the course catalog to choose your
             next repair.
           </p>
         </div>
-        <Button render={<Link to="/scenarios" />}>Browse scenarios</Button>
+        <Button render={<Link to="/courses" />}>Browse courses</Button>
       </div>
     </>
   );
@@ -453,11 +453,11 @@ function RouteNotFound() {
           <p className="text-eyebrow">Unknown work order</p>
           <h1 className="text-page-title">That route is not in the manual</h1>
           <p className="text-body text-muted-foreground">
-            Check the address, or return to the scenario catalog to choose your
+            Check the address, or return to the course catalog to choose your
             next repair.
           </p>
         </div>
-        <Button render={<Link to="/scenarios" />}>Browse scenarios</Button>
+        <Button render={<Link to="/courses" />}>Browse courses</Button>
       </main>
     </>
   );

@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { ScenarioCatalogWireEntry } from "@/lib/scenario-runs";
+import type { ScenarioCatalogWireResponse } from "@/lib/scenario-runs";
 import type { OrganizationDetailTab } from "../tab-search";
 import {
   type AssignmentsResponse,
@@ -59,10 +59,10 @@ export function OrganizationOverview({
           onClick={() => setTab("people")}
         />
         <OverviewMetric
-          label="Scenarios"
-          value="Private"
-          action="Open catalog"
-          onClick={() => setTab("scenarios")}
+          label="Courses"
+          value="Catalog"
+          action="Open courses"
+          onClick={() => setTab("courses")}
         />
         <OverviewMetric
           label="Runners"
@@ -247,7 +247,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
   const catalog = useQuery({
     queryKey: ["organizations", detail.id, "scenarios"],
     queryFn: () =>
-      fetchJson<{ scenarios: ScenarioCatalogWireEntry[] }>(
+      fetchJson<ScenarioCatalogWireResponse>(
         `/api/organizations/${encodeURIComponent(detail.id)}/scenarios`,
       ),
   });
@@ -286,7 +286,8 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
 
   const entries = assignments.data?.assignments ?? [];
   const assignedIds = new Set(entries.map((entry) => entry.scenarioId));
-  const catalogEntries = catalog.data?.scenarios ?? [];
+  const catalogEntries =
+    catalog.data?.courses.flatMap((course) => course.scenarios) ?? [];
   const assignable = catalogEntries.filter(
     (scenario) => !assignedIds.has(scenario.scenarioId),
   );
@@ -346,7 +347,7 @@ export function AssignmentsSection({ detail }: { detail: Detail }) {
                     </span>
                     <div className="min-w-0 flex-1">
                       <Link
-                        to="/scenarios/$scenarioId"
+                        to="/courses/$scenarioId"
                         params={{ scenarioId: entry.scenarioId }}
                         search={{ organizationId: detail.id }}
                         className="text-sm font-semibold hover:text-primary"

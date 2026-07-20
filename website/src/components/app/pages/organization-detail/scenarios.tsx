@@ -31,7 +31,7 @@ import {
 } from "@/lib/authoring-wasm";
 import type {
   ScenarioCatalogWireEntry,
-  ScenarioCourseWireEntry,
+  ScenarioCatalogWireResponse,
 } from "@/lib/scenario-runs";
 import { CourseCatalogSections } from "../learn/CourseCatalogSections";
 import { buildCourseCatalogView } from "../learn/course-catalog";
@@ -72,10 +72,9 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
   const catalog = useQuery({
     queryKey: ["organizations", detail.id, "scenarios"],
     queryFn: () =>
-      fetchJson<{
-        scenarios: ScenarioCatalogWireEntry[];
-        courses: ScenarioCourseWireEntry[];
-      }>(`/api/organizations/${encodeURIComponent(detail.id)}/scenarios`),
+      fetchJson<ScenarioCatalogWireResponse>(
+        `/api/organizations/${encodeURIComponent(detail.id)}/scenarios`,
+      ),
   });
   const sources = useQuery({
     queryKey: ["organizations", detail.id, "scenario-sources"],
@@ -238,16 +237,16 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
     },
   });
 
-  const entries = catalog.data?.scenarios ?? [];
   const courses = catalog.data?.courses ?? [];
+  const entries = courses.flatMap((course) => course.scenarios);
   const catalogView = useMemo(
     () =>
-      buildCourseCatalogView(entries, courses, {
+      buildCourseCatalogView(courses, {
         q: "",
         tags: [],
         sort: null,
       }),
-    [courses, entries],
+    [courses],
   );
   const paginationUnits = useMemo(
     () =>
@@ -265,14 +264,14 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
   return (
     <div className="space-y-8">
       <Section
-        title="Organization catalog"
-        description="Public scenarios and this organization's private scenarios are visible to every member. Private runs use organization runners only."
+        title="Organization courses"
+        description="Public courses and this organization's private course catalog are visible to every member. Private runs use organization runners only."
       >
         {catalog.error ? (
           <InlineFeedback tone="error">
             {catalog.error instanceof Error
               ? catalog.error.message
-              : "Failed to load scenarios"}
+              : "Failed to load courses"}
           </InlineFeedback>
         ) : entries.length ? (
           <PaginatedWeightedCollection
@@ -295,7 +294,7 @@ export function OrganizationScenariosSection({ detail }: { detail: Detail }) {
           </PaginatedWeightedCollection>
         ) : (
           <p className="text-sm text-muted-foreground">
-            No published scenarios are available yet.
+            No published courses are available yet.
           </p>
         )}
         {admin && privateEntries.length ? (
@@ -522,7 +521,7 @@ function OrganizationScenarioCard({
 }) {
   return (
     <Link
-      to="/scenarios/$scenarioId"
+      to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
       search={{ organizationId }}
       className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"

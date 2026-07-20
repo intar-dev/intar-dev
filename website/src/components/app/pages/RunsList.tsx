@@ -61,9 +61,9 @@ export function RunsList() {
           title="No runs yet"
           description="Launch a scenario to get a VM-backed environment — finished runs keep their replay here."
           action={
-            <Button render={<Link to="/scenarios" />}>
+            <Button render={<Link to="/courses" />}>
               <BookOpen className="size-4" />
-              Browse scenarios
+              Browse courses
             </Button>
           }
         />

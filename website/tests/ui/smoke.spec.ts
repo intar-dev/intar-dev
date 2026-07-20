@@ -58,7 +58,7 @@ test("transactional access request submits deterministically", async ({
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
-  const search = page.getByLabel(/Search scenarios/i);
+  const search = page.getByLabel(/Search courses and scenarios/i);
   await search.fill("DNS");
   await expect(
     page.getByRole("heading", { name: /Trace an intermittent DNS failure/i }),
@@ -66,6 +66,19 @@ test("learner discovery filters the catalog", async ({ page, ui }) => {
   await expect(
     page.getByRole("heading", { name: /Repair a broken nginx service/i }),
   ).toBeHidden();
+});
+
+test("scenario briefing is nested beneath the Courses breadcrumb", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
+  const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+  await expect(breadcrumb.getByRole("link", { name: "Courses" })).toHaveAttribute(
+    "href",
+    "/courses",
+  );
+  await expect(page).toHaveURL(/\/courses\/repair-nginx$/);
 });
 
 test("run workspace opens a deterministic terminal transport", async ({

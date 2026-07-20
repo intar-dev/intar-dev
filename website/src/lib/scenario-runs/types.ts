@@ -43,17 +43,26 @@ export interface ScenarioCatalogWireEntry extends ScenarioCatalogEntry {
   progress: ScenarioProgress;
 }
 
-export interface ScenarioCourseWireEntry {
-  courseId: string;
-  organizationId: string | null;
-  title: string;
-  description: string;
-  scenarioIds: string[];
-}
+export type ScenarioCatalogCourseWireEntry =
+  | {
+      kind: "authored";
+      courseId: string;
+      organizationId: string | null;
+      title: string;
+      description: string;
+      scenarios: ScenarioCatalogWireEntry[];
+    }
+  | {
+      kind: "general-practice";
+      courseId: null;
+      organizationId: null;
+      title: "General practice";
+      description: string;
+      scenarios: ScenarioCatalogWireEntry[];
+    };
 
 export interface ScenarioCatalogWireResponse {
-  scenarios: ScenarioCatalogWireEntry[];
-  courses: ScenarioCourseWireEntry[];
+  courses: ScenarioCatalogCourseWireEntry[];
 }
 
 export interface ScenarioDetail {

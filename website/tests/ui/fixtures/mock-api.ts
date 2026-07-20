@@ -23,6 +23,70 @@ function noContent(route: Route) {
   return route.fulfill({ status: 204, body: "" });
 }
 
+const GENERAL_PRACTICE_DESCRIPTION =
+  "Standalone systems for focused practice outside a guided curriculum.";
+
+function nestedCourseCatalog(
+  scenarios: Array<Record<string, unknown>>,
+  courses: Array<Record<string, unknown>>,
+) {
+  const scenarioById = new Map(
+    scenarios.flatMap((scenario) =>
+      typeof scenario.scenarioId === "string"
+        ? [[scenario.scenarioId, scenario] as const]
+        : [],
+    ),
+  );
+  const claimed = new Set<string>();
+  const authored = courses.flatMap((course) => {
+    const members = Array.isArray(course.scenarioIds)
+      ? course.scenarioIds.flatMap((scenarioId) => {
+          if (typeof scenarioId !== "string" || claimed.has(scenarioId)) {
+            return [];
+          }
+          const scenario = scenarioById.get(scenarioId);
+          if (!scenario) return [];
+          claimed.add(scenarioId);
+          return [scenario];
+        })
+      : [];
+    if (!members.length) return [];
+    return [
+      {
+        kind: "authored" as const,
+        courseId: course.courseId,
+        organizationId: course.organizationId ?? null,
+        title: course.title,
+        description: course.description,
+        scenarios: members,
+      },
+    ];
+  });
+  const generalScenarios = scenarios.filter(
+    (scenario) =>
+      typeof scenario.scenarioId === "string" &&
+      !claimed.has(scenario.scenarioId),
+  );
+
+  return {
+    courses: [
+      ...authored,
+      ...(generalScenarios.length
+        ? [
+            {
+              kind: "general-practice" as const,
+              courseId: null,
+              organizationId: null,
+              title: "General practice" as const,
+              description: GENERAL_PRACTICE_DESCRIPTION,
+              scenarios: generalScenarios,
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
 function probeSnapshots(variant: MockApiState["variant"]) {
   if (variant === "long") {
     return [
@@ -194,7 +258,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (pathname === "/api/auth/sign-in/social" && method === "POST") {
-        await json(route, { redirect: false, url: "/scenarios" });
+        await json(route, { redirect: false, url: "/courses" });
         return;
       }
       if (pathname === "/api/auth/sign-out" && method === "POST") {
@@ -270,10 +334,10 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
 
       if (pathname === "/api/scenarios" && method === "GET") {
-        await json(route, {
-          scenarios: server.state.scenarios,
-          courses: server.state.courses,
-        });
+        await json(
+          route,
+          nestedCourseCatalog(server.state.scenarios, server.state.courses),
+        );
         return;
       }
       if (
@@ -537,10 +601,13 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         /^\/api\/organizations\/[^/]+\/scenarios$/.test(pathname) &&
         method === "GET"
       ) {
-        await json(route, {
-          scenarios: server.state.organizationScenarios,
-          courses: server.state.organizationCourses,
-        });
+        await json(
+          route,
+          nestedCourseCatalog(
+            server.state.organizationScenarios,
+            server.state.organizationCourses,
+          ),
+        );
         return;
       }
       if (

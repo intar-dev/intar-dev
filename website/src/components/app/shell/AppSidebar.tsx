@@ -37,7 +37,7 @@ export function AppSidebar() {
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <BrandMark
-          to="/scenarios"
+          to="/courses"
           className="px-1.5 group-data-[collapsible=icon]:[&_span]:hidden"
         />
       </SidebarHeader>

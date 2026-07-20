@@ -31,10 +31,10 @@ export const ROUTE_CASES = [
     path: `/oauth/consent?${oauthQuery}`,
     sessionRole: "learner",
   },
-  { id: "scenario-catalog", path: "/scenarios", sessionRole: "learner" },
+  { id: "scenario-catalog", path: "/courses", sessionRole: "learner" },
   {
     id: "scenario-briefing",
-    path: "/scenarios/repair-nginx",
+    path: "/courses/repair-nginx",
     sessionRole: "learner",
   },
   { id: "runs", path: "/runs", sessionRole: "learner" },

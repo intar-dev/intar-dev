@@ -17,6 +17,7 @@ import {
   type ScenarioProgress,
   type ScenarioCatalogWireResponse,
   type ScenarioCatalogWireEntry,
+  type ScenarioCatalogCourseWireEntry,
 } from "./types";
 import {
   loadEnabledScenarioRows,
@@ -309,14 +310,59 @@ export async function listScenarioCatalogForUser(
     listEnabledScenariosForUser({ organizationId }),
     getScenarioProgressByScenario(userId, organizationId),
   ]);
-  const wireScenarios: ScenarioCatalogWireEntry[] = scenarios.map((scenario) => ({
-    ...scenario,
-    progress:
-      progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
-  }));
+  const wireScenarios: ScenarioCatalogWireEntry[] = scenarios.map(
+    (scenario) => ({
+      ...scenario,
+      progress:
+        progressByScenario.get(scenario.scenarioId) ?? newScenarioProgress(),
+    }),
+  );
   const courses = await listVisibleScenarioCourses(drizzle(env.DB), {
     organizationId,
     scenarios: wireScenarios,
   });
-  return { scenarios: wireScenarios, courses };
+  const scenarioById = new Map(
+    wireScenarios.map((scenario) => [scenario.scenarioId, scenario]),
+  );
+  const claimedScenarioIds = new Set<string>();
+  const projectedCourses: ScenarioCatalogCourseWireEntry[] = [];
+
+  for (const course of courses) {
+    const courseScenarios: ScenarioCatalogWireEntry[] = [];
+    for (const scenarioId of course.scenarioIds) {
+      const scenario = scenarioById.get(scenarioId);
+      if (!scenario || claimedScenarioIds.has(scenarioId)) continue;
+      claimedScenarioIds.add(scenarioId);
+      courseScenarios.push(scenario);
+    }
+    if (!courseScenarios.length) continue;
+    projectedCourses.push({
+      kind: "authored",
+      courseId: course.courseId,
+      organizationId: course.organizationId,
+      title: course.title,
+      description: course.description,
+      scenarios: courseScenarios,
+    });
+  }
+
+  const generalPracticeScenarios: ScenarioCatalogWireEntry[] = [];
+  for (const scenario of wireScenarios) {
+    if (claimedScenarioIds.has(scenario.scenarioId)) continue;
+    claimedScenarioIds.add(scenario.scenarioId);
+    generalPracticeScenarios.push(scenario);
+  }
+  if (generalPracticeScenarios.length) {
+    projectedCourses.push({
+      kind: "general-practice",
+      courseId: null,
+      organizationId: null,
+      title: "General practice",
+      description:
+        "Standalone systems for focused practice outside a guided curriculum.",
+      scenarios: generalPracticeScenarios,
+    });
+  }
+
+  return { courses: projectedCourses };
 }

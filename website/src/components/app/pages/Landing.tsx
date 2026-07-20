@@ -55,7 +55,7 @@ export function Landing() {
   const signIn = useMutation({
     mutationFn: () =>
       startGithubSignIn({
-        callbackURL: `${window.location.origin}/scenarios`,
+        callbackURL: `${window.location.origin}/courses`,
         errorCallbackURL: `${window.location.origin}/`,
       }),
   });
@@ -111,7 +111,7 @@ export function Landing() {
                   render={
                     runs.isLoading ? undefined : (
                       <Link
-                        to={activeRun ? "/runs/$runId" : "/scenarios"}
+                        to={activeRun ? "/runs/$runId" : "/courses"}
                         params={activeRun ? { runId: activeRun.runId } : {}}
                       />
                     )
@@ -121,7 +121,7 @@ export function Landing() {
                     ? "Finding your work…"
                     : activeRun
                       ? "Resume lab"
-                      : "Browse scenarios"}
+                      : "Browse courses"}
                   {!runs.isLoading ? <ArrowRight className="size-4" /> : null}
                 </Button>
               ) : (

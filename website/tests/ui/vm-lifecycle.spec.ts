@@ -20,7 +20,7 @@ test("startup keeps the workspace useful and replaces milestones with the shell"
   await expect(page.getByText("Repair objectives")).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveCount(0);
 
-  const focusTarget = page.getByRole("link", { name: "Scenarios" }).first();
+  const focusTarget = page.getByRole("link", { name: "Courses" }).first();
   await focusTarget.focus();
   ui.server.setRunState("running");
 
@@ -166,6 +166,30 @@ test("a rejected shutdown stays in the confirmation dialog", async ({
   await expect(page).toHaveURL(/\/runs\/run-active$/);
   await expect(page.getByRole("heading", { name: "Run timeline" })).toHaveCount(
     0,
+  );
+});
+
+test("deleting a private run preserves its organization course context", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("run-workspace"),
+    theme: "dark",
+    runState: "archived",
+  });
+  ui.server.state.run.scenarioId = "platform-logrotate";
+  ui.server.state.run.organizationId = "org-platform";
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await page.getByRole("button", { name: "Page actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete run…" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Delete run" }).click();
+
+  await expect(page).toHaveURL(
+    /\/courses\/platform-logrotate\?organizationId=org-platform$/,
   );
 });
 

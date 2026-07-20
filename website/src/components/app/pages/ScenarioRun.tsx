@@ -175,13 +175,16 @@ export function ScenarioRun() {
       });
       if (attemptData?.scenarioId) {
         await navigate({
-          to: "/scenarios/$scenarioId",
+          to: "/courses/$scenarioId",
           params: { scenarioId: attemptData.scenarioId },
+          search: attemptData.organizationId
+            ? { organizationId: attemptData.organizationId }
+            : {},
         });
         return;
       }
 
-      await navigate({ to: "/scenarios" });
+      await navigate({ to: "/courses" });
     },
   });
 

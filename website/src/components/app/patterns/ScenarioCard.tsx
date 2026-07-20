@@ -36,7 +36,7 @@ export function ScenarioCard({
   const Heading = headingLevel === 4 ? "h4" : "h3";
   return (
     <Link
-      to="/scenarios/$scenarioId"
+      to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
       className={cn(
         "group flex min-h-56 min-w-0 flex-col gap-6 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-6",
