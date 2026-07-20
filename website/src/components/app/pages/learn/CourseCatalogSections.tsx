@@ -179,7 +179,7 @@ function CourseIndex({
                 type="button"
                 aria-labelledby={headingId}
                 onClick={() => onSelectCourse(key)}
-                className="group grid w-full min-w-0 gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:items-center"
+                className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:items-center"
               >
                 <span className="min-w-0 space-y-2">
                   <span className="flex flex-wrap items-center justify-between gap-3">
