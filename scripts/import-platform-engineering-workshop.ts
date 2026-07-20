@@ -897,7 +897,7 @@ function read(relative: string): string {
 function writeText(relative: string, content: string) {
   const target = join(outputRoot, relative);
   mkdirSync(resolve(target, ".."), { recursive: true });
-  writeFileSync(target, content.endsWith("\n") ? content : `${content}\n`);
+  writeFileSync(target, `${content.replace(/(?:\r?\n)+$/u, "")}\n`);
 }
 
 function writeExecutable(relative: string, content: string) {
