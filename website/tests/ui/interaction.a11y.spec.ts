@@ -181,6 +181,7 @@ test("course drill-down returns to the originating catalog page", async ({
   const courseButton = page.getByRole("button", {
     name: "Paging course 10",
   });
+  await expect(courseButton).toHaveCSS("cursor", "pointer");
   await courseButton.click();
   await expect(
     page.getByRole("heading", { name: "Paging course 10" }),
