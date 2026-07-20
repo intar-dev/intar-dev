@@ -5,6 +5,8 @@ import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
   imageBuilds,
   imageBuildBundles,
+  workshopPublicationCheckpoints,
+  workshopPublications,
   vmScenarios,
   vmScenarioVms,
 } from "@/db/schema";
@@ -229,6 +231,83 @@ export async function handleAgentImageIndex(
     });
   }
 
+  if (verified.agent.organizationId) {
+    const checkpointRows = await db
+      .select({ vmImages: workshopPublicationCheckpoints.vmImagesJson })
+      .from(workshopPublicationCheckpoints)
+      .innerJoin(
+        workshopPublications,
+        eq(
+          workshopPublications.id,
+          workshopPublicationCheckpoints.publicationId,
+        ),
+      )
+      .where(
+        and(
+          eq(workshopPublications.status, "published"),
+          eq(
+            workshopPublications.organizationId,
+            verified.agent.organizationId,
+          ),
+          eq(workshopPublicationCheckpoints.status, "verified"),
+        ),
+      );
+    for (const checkpoint of checkpointRows) {
+      for (const raw of checkpoint.vmImages ?? []) {
+        const imageKeyValue = raw.image_key ?? raw.imageKey;
+        const sha256 = normalizeSha256(
+          readString(raw.image_sha256) ?? readString(raw.imageSha256) ?? "",
+        );
+        const imageFormat =
+          readString(raw.image_format) ?? readString(raw.imageFormat);
+        const virtualSize =
+          raw.image_virtual_size_bytes ?? raw.imageVirtualSizeBytes;
+        const kernelSha256 = normalizeSha256(
+          readString(raw.kernel_sha256) ?? readString(raw.kernelSha256) ?? "",
+        );
+        const initrdSha256 = normalizeSha256(
+          readString(raw.initrd_sha256) ?? readString(raw.initrdSha256) ?? "",
+        );
+        const bootCmdline =
+          readString(raw.boot_cmdline) ?? readString(raw.bootCmdline);
+        if (
+          !isImageKey(imageKeyValue) ||
+          !sha256 ||
+          imageFormat !== "raw_zstd" ||
+          typeof virtualSize !== "number" ||
+          !Number.isSafeInteger(virtualSize) ||
+          virtualSize <= 0 ||
+          !kernelSha256 ||
+          !initrdSha256 ||
+          !bootCmdline
+        ) {
+          continue;
+        }
+        const imageKey = registryImageKey(imageKeyValue);
+        const object = await env.VM_IMAGE_REGISTRY_BUCKET.head(
+          imageObjectKey(imageKey, sha256),
+        );
+        if (!imageObjectMatchesSha(object, imageKey, sha256)) continue;
+        if (!(await bootArtifactsExist(env, [kernelSha256, initrdSha256]))) {
+          continue;
+        }
+        byKey.set(`${imageKey}:${sha256}`, {
+          image_key: imageKey,
+          image_sha256: sha256,
+          image_format: imageFormat,
+          image_virtual_size_bytes: virtualSize,
+          boot: {
+            kernel_sha256: kernelSha256,
+            initrd_sha256: initrdSha256,
+            cmdline: bootCmdline,
+          },
+          bytes: object.size,
+          download_url: `/agent/registry/images/${encodeURIComponent(imageKey)}/${sha256}`,
+        });
+      }
+    }
+  }
+
   return jsonResponse({
     images: [...byKey.values()].sort((a, b) =>
       a.image_key.localeCompare(b.image_key),
@@ -415,10 +494,42 @@ async function agentCanAccessImage(
         visibleScenarioScope(agent.organizationId),
       ),
     );
-  return rows.some(
-    (row) =>
-      isImageKey(row.imageKey) &&
-      registryImageKey(row.imageKey) === requestedImageKey,
+  if (
+    rows.some(
+      (row) =>
+        isImageKey(row.imageKey) &&
+        registryImageKey(row.imageKey) === requestedImageKey,
+    )
+  ) {
+    return true;
+  }
+  if (!agent.organizationId) return false;
+  const workshopRows = await db
+    .select({ vmImages: workshopPublicationCheckpoints.vmImagesJson })
+    .from(workshopPublicationCheckpoints)
+    .innerJoin(
+      workshopPublications,
+      eq(workshopPublications.id, workshopPublicationCheckpoints.publicationId),
+    )
+    .where(
+      and(
+        eq(workshopPublications.organizationId, agent.organizationId),
+        eq(workshopPublications.status, "published"),
+        eq(workshopPublicationCheckpoints.status, "verified"),
+      ),
+    );
+  return workshopRows.some((checkpoint) =>
+    (checkpoint.vmImages ?? []).some((image) => {
+      const imageKey = image.image_key ?? image.imageKey;
+      const imageSha = normalizeSha256(
+        readString(image.image_sha256) ?? readString(image.imageSha256) ?? "",
+      );
+      return (
+        isImageKey(imageKey) &&
+        registryImageKey(imageKey) === requestedImageKey &&
+        imageSha === sha256
+      );
+    }),
   );
 }
 
@@ -444,5 +555,31 @@ async function agentCanAccessArtifact(
       ),
     )
     .limit(1);
-  return rows.length > 0;
+  if (rows.length > 0) return true;
+  if (!agent.organizationId) return false;
+  const workshopRows = await db
+    .select({ vmImages: workshopPublicationCheckpoints.vmImagesJson })
+    .from(workshopPublicationCheckpoints)
+    .innerJoin(
+      workshopPublications,
+      eq(workshopPublications.id, workshopPublicationCheckpoints.publicationId),
+    )
+    .where(
+      and(
+        eq(workshopPublications.organizationId, agent.organizationId),
+        eq(workshopPublications.status, "published"),
+        eq(workshopPublicationCheckpoints.status, "verified"),
+      ),
+    );
+  return workshopRows.some((checkpoint) =>
+    (checkpoint.vmImages ?? []).some((image) => {
+      const kernelSha = normalizeSha256(
+        readString(image.kernel_sha256) ?? readString(image.kernelSha256) ?? "",
+      );
+      const initrdSha = normalizeSha256(
+        readString(image.initrd_sha256) ?? readString(image.initrdSha256) ?? "",
+      );
+      return kernelSha === sha256 || initrdSha === sha256;
+    }),
+  );
 }

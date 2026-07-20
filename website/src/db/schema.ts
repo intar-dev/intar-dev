@@ -20,6 +20,18 @@ export {
   imageBuilds,
 } from "./schema/platform";
 export {
+  activeRuntimeSlots,
+  hostResourceReservations,
+  runtimeAllocationLocks,
+  runtimeArtifactUploads,
+  runtimeArtifacts,
+  runtimeExecutions,
+  runtimeTerminalSessions,
+  runtimeVmAccessKeys,
+  runtimeVmActualState,
+  runtimeVms,
+} from "./schema/runtime";
+export {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRunProbeSnapshots,
@@ -49,6 +61,23 @@ export {
   scenarioAssignments,
   scenarioSources,
 } from "./schema/application";
+export {
+  workshopAssistGrants,
+  workshopEvents,
+  workshopHelpRequests,
+  workshopModuleProgress,
+  workshopSessionMembers,
+  workshopSessions,
+  workshopTemplateRevisions,
+  workshopTemplates,
+  workshopWorkspaceGenerations,
+  workshopWorkspaces,
+} from "./schema/workshops";
+export {
+  workshopPublicationCheckpoints,
+  workshopPublications,
+  workshopRegistryTokens,
+} from "./schema/workshop-registry";
 export type {
   AgentHostRole,
   HostCpuReservationQuotaPhase,
@@ -60,3 +89,24 @@ export type {
   ScenarioCourseCatalogSnapshotV1,
   ScenarioRunHintSnapshot,
 } from "./schema/shared";
+export type {
+  HostResourceReservationState,
+  RuntimeDomainKind,
+  RuntimeExecutionState,
+} from "./schema/runtime";
+export type {
+  WorkshopCurrentHealth,
+  WorkshopExplainBackStatus,
+  WorkshopHelpRequestStatus,
+  WorkshopManifestV1,
+  WorkshopProvisionState,
+  WorkshopSessionRole,
+  WorkshopSessionState,
+  WorkshopTechnicalStatus,
+  WorkshopWorkspaceGenerationState,
+  WorkshopWorkspaceState,
+} from "./schema/workshops";
+export type {
+  WorkshopCheckpointBuildStatus,
+  WorkshopPublicationStatus,
+} from "./schema/workshop-registry";

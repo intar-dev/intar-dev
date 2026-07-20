@@ -8,8 +8,8 @@ const viewports = [
   { id: "mobile", width: 390, height: 844 },
 ] as const;
 
-if (ROUTE_CASES.length * themes.length * viewports.length !== 72) {
-  throw new Error("Primary visual matrix must contain exactly 72 cases");
+if (ROUTE_CASES.length * themes.length * viewports.length !== 96) {
+  throw new Error("Primary visual matrix must contain exactly 96 cases");
 }
 
 for (const viewport of viewports) {

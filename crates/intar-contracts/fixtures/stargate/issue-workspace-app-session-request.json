@@ -1,0 +1,17 @@
+{
+  "route_id": "01j-workshop-app-argocd",
+  "target_username": "user",
+  "target_ip": "10.77.0.2",
+  "target_ssh_port": 22,
+  "target_host_key_openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeHostKeyForContractTestsOnly",
+  "target_private_key_openssh": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-contract-fixture-only\n-----END OPENSSH PRIVATE KEY-----\n",
+  "target_app_port": 30080,
+  "protocol": "http",
+  "route_expires_at": 1800000000,
+  "metadata": {
+    "host_id": "host-01",
+    "run_id": "runtime-01",
+    "vm_id": "workspace",
+    "user_id": "user-01"
+  }
+}

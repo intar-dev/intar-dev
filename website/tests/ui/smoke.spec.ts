@@ -78,11 +78,220 @@ test("scenario briefing is nested beneath the Courses breadcrumb", async ({
 }) => {
   await ui.open({ ...routeCase("scenario-briefing"), theme: "light" });
   const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
-  await expect(breadcrumb.getByRole("link", { name: "Courses" })).toHaveAttribute(
-    "href",
-    "/courses",
-  );
+  await expect(
+    breadcrumb.getByRole("link", { name: "Courses" }),
+  ).toHaveAttribute("href", "/courses");
   await expect(page).toHaveURL(/\/courses\/repair-nginx$/);
+});
+
+test("learner enters the live workshop and can raise a hand", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("workshops"), theme: "light" });
+  await page
+    .getByRole("link", { name: /Platform Engineering · July cohort/i })
+    .click();
+  await expect(page).toHaveURL(/\/workshops\/workshop-live$/);
+  await expect(
+    page.getByRole("heading", { name: "Talos and Cilium foundations" }).first(),
+  ).toBeVisible();
+  await expect(page.getByText("Shared slide")).toBeVisible();
+  await expect(
+    page.getByText(/boot the cluster and prove which layer owns pod networking/i),
+  ).toBeVisible();
+  await page
+    .getByLabel("What are you stuck on?")
+    .fill("Cilium reports one failed DNS path.");
+  await page.getByRole("button", { name: "Raise hand" }).click();
+  await expect(page.getByText("In the queue")).toBeVisible();
+
+  await page.getByRole("button", { name: "Native SSH" }).click();
+  const nativeSshDialog = page.getByRole("dialog");
+  await expect(
+    nativeSshDialog.getByRole("heading", {
+      name: "Native SSH for platform-workshop",
+    }),
+  ).toBeVisible();
+  await expect(nativeSshDialog.getByLabel("SSH command")).toContainText(
+    "workshop-route-test-only-native@stargate.example.test",
+  );
+});
+
+test("facilitator advances the native presenter deck with the keyboard", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("workshop-presenter"), theme: "dark" });
+  await expect(
+    page.getByRole("heading", { name: "Talos and Cilium foundations" }),
+  ).toBeVisible();
+  await page.keyboard.press("ArrowRight");
+  await expect(
+    page.getByRole("heading", { name: "Gitea and Argo CD" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Release module" }).click();
+  await page.getByRole("button", { name: "Focus activity" }).click();
+  await page.getByRole("button", { name: "Reveal solution" }).click();
+  await page.getByRole("button", { name: "Pause timer" }).click();
+  await expect(
+    page.getByRole("button", { name: "Resume timer" }),
+  ).toBeVisible();
+  expect(ui.server.requests).toContain(
+    "POST /api/workshops/workshop-live/actions",
+  );
+});
+
+test("facilitator roster exposes present, stale, and absent state accessibly", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("workshop-control-room"), theme: "light" });
+
+  await expect(page.getByLabel("Mina Learner presence: Present")).toBeVisible();
+  await expect(page.getByLabel("Owen Owner presence: Stale")).toBeVisible();
+  await expect(
+    page.getByLabel("Inez Instructor presence: Absent"),
+  ).toBeVisible();
+  await expect.poll(() =>
+    ui.server.requests.filter(
+      (request) =>
+        request === "POST /api/workshops/workshop-live/presence",
+    ).length,
+  ).toBe(1);
+});
+
+test("assigned helper opens only the learner-consented browser terminal", async ({
+  page,
+  ui,
+}) => {
+  ui.configure({ sessionRole: "instructor" });
+  const roster = ui.server.state.workshopSession.roster as Array<
+    Record<string, unknown>
+  >;
+  const learner = roster.find((member) => member.userId === "user-learner");
+  if (!learner) throw new Error("workshop learner fixture missing");
+  Object.assign(learner, {
+    helpState: "claimed",
+    helpAssignedToViewer: true,
+    assistGrant: {
+      id: "assist-mina",
+      workspaceId: "workspace-mina",
+      expiresAt: Date.now() + 15 * 60 * 1_000,
+    },
+  });
+  await page.goto("/workshops/workshop-live");
+
+  await page.getByRole("button", { name: "Open terminal" }).click();
+  await expect(
+    page.getByRole("dialog").getByText(/assisting Mina Learner/i),
+  ).toBeVisible();
+  expect(ui.server.requests).toContain(
+    "POST /api/workshops/workshop-live/terminal",
+  );
+});
+
+test("presenter can synchronize the first slide from an empty deck state", async ({
+  page,
+  ui,
+}) => {
+  ui.configure({ sessionRole: "instructor" });
+  ui.server.state.workshopSession.currentSlideId = null;
+  ui.server.state.workshopSession.currentSlideOrdinal = 0;
+  await page.goto("/workshops/workshop-live/present");
+
+  const showSlide = page.getByRole("button", { name: "Show slide" });
+  await expect(showSlide).toBeVisible();
+  await showSlide.click();
+  await expect(showSlide).toHaveCount(0);
+  expect(ui.server.requests).toContain(
+    "POST /api/workshops/workshop-live/actions",
+  );
+});
+
+test("projector is a chrome-free identity-safe display", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("workshop-projector"), theme: "dark" });
+
+  await expect(
+    page.getByRole("heading", { name: "Talos and Cilium foundations" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Boot a Talos cluster and prove that Cilium owns pod networking.",
+    ),
+  ).toBeVisible();
+  await expect(page.locator("[data-slot='sidebar']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-inset']")).toHaveCount(0);
+  await expect(page.locator("[data-slot='sidebar-trigger']")).toHaveCount(0);
+  await expect(page.getByText("Mina Learner")).toHaveCount(0);
+  await expect(page.getByText("minalearns@example.test")).toHaveCount(0);
+});
+
+test("organization owner schedules an explicit workshop roster", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
+  await page.getByText("Revision history (3)").click();
+  await expect(
+    page.getByRole("list", { name: "Platform Engineering Workshop revisions" }),
+  ).toContainText("r3");
+  await page.getByRole("button", { name: "Schedule" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "Schedule a workshop" }),
+  ).toBeVisible();
+  await dialog
+    .getByLabel("Template revision")
+    .selectOption("revision-platform-engineering-2");
+  await dialog.getByLabel("Role for Mina Learner").selectOption("participant");
+  await dialog.getByRole("button", { name: "Schedule workshop" }).click();
+  await expect(page).toHaveURL(/\/workshops\/workshop-new$/);
+});
+
+test("organization owner edits a versioned draft workshop roster", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
+  await page.getByRole("button", { name: "Edit roster" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("heading", { name: "Edit the draft roster" }),
+  ).toBeVisible();
+  await dialog
+    .getByLabel("Role for Inez Instructor")
+    .selectOption("participant");
+  await dialog.getByLabel("Role for Mina Learner").selectOption("helper");
+  await dialog.getByRole("button", { name: "Save roster" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(ui.server.requests).toContain(
+    "POST /api/workshops/workshop-upcoming/actions",
+  );
+});
+
+test("workshop list teaches empty and recovery states", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({
+    ...routeCase("workshops"),
+    theme: "light",
+    variant: "empty",
+  });
+  await expect(
+    page.getByRole("heading", { name: "No workshop sessions yet" }),
+  ).toBeVisible();
+
+  await ui.open({
+    ...routeCase("workshops"),
+    theme: "light",
+    variant: "error",
+  });
+  await expect(
+    page.getByRole("heading", { name: "Could not load workshops" }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
 });
 
 test("run workspace opens a deterministic terminal transport", async ({

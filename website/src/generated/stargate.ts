@@ -44,3 +44,25 @@ export interface IssueTerminalSessionResponse {
   browser?: BrowserTerminalSession;
   native?: NativeTerminalSession;
 }
+
+export type WorkspaceAppProtocol = "http";
+
+export interface IssueWorkspaceAppSessionRequest {
+  route_id: string;
+  target_username: string;
+  target_ip: string;
+  target_ssh_port: number;
+  target_host_key_openssh: string;
+  target_private_key_openssh: string;
+  target_app_port: number;
+  protocol: WorkspaceAppProtocol;
+  route_expires_at: number;
+  metadata?: RouteMetadata;
+}
+
+export interface IssueWorkspaceAppSessionResponse {
+  route_id: string;
+  url: string;
+  bootstrap_expires_at: number;
+  expires_at: number;
+}

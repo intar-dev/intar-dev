@@ -12,6 +12,8 @@ import {
   ssoProvider,
   user,
   vmScenarios,
+  workshopSessions,
+  workshopTemplates,
 } from "@/db/schema";
 import { appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
@@ -298,7 +300,7 @@ export async function deleteOrganization(params: {
     throw appError(
       409,
       "organization_not_empty",
-      "remove the organization provider, scenarios, runners, builds, and runs before deleting it",
+      "remove the organization provider, scenarios, workshops, runners, builds, and runs before deleting it",
     );
   }
   await drizzle(env.DB)
@@ -318,14 +320,20 @@ export async function leaveOrganization(params: {
       "transfer ownership or delete the organization first",
     );
   }
-  await drizzle(env.DB)
-    .delete(member)
-    .where(
-      and(
-        eq(member.organizationId, params.organizationId),
-        eq(member.userId, params.userId),
-      ),
-    );
+  await fenceOrganizationMembershipForWorkshopCleanup({
+    organizationId: params.organizationId,
+    userId: params.userId,
+  });
+  await revokeLiveWorkshopAccessBeforeMembershipRemoval({
+    organizationId: params.organizationId,
+    userId: params.userId,
+    actorUserId: params.userId,
+  });
+  await deleteOrganizationMembershipAfterWorkshopCleanup({
+    organizationId: params.organizationId,
+    userId: params.userId,
+    requireAdminAtCommit: false,
+  });
 }
 
 export async function transferOrganizationOwnership(params: {
@@ -372,21 +380,52 @@ export async function transferOrganizationOwnership(params: {
     );
   }
 
-  await db.batch([
-    db
-      .update(member)
-      .set({ role: "admin" })
-      .where(
-        and(
-          eq(member.organizationId, params.organizationId),
-          eq(member.userId, params.actorUserId),
-        ),
-      ),
-    db
-      .update(member)
-      .set({ role: "owner" })
-      .where(eq(member.id, params.targetMemberId)),
-  ]);
+  const transferred = await env.DB.prepare(
+    `WITH transfer_pair(target_id, owner_id) AS MATERIALIZED (
+       SELECT transfer_target.id, current_owner.id
+       FROM member transfer_target
+       JOIN member current_owner
+         ON current_owner.organization_id = transfer_target.organization_id
+       WHERE transfer_target.id = ?
+         AND transfer_target.organization_id = ?
+         AND transfer_target.role <> 'owner'
+         AND transfer_target.workshop_access_revoking_at IS NULL
+         AND current_owner.user_id = ?
+         AND current_owner.role = 'owner'
+     )
+     UPDATE member
+     SET role = CASE
+       WHEN id = (SELECT target_id FROM transfer_pair) THEN 'owner'
+       WHEN id = (SELECT owner_id FROM transfer_pair) THEN 'admin'
+       ELSE role
+     END
+     WHERE organization_id = ?
+       AND id IN (
+         SELECT target_id FROM transfer_pair
+         UNION ALL
+         SELECT owner_id FROM transfer_pair
+       )
+     RETURNING id, role`,
+  )
+    .bind(
+      params.targetMemberId,
+      params.organizationId,
+      params.actorUserId,
+      params.organizationId,
+    )
+    .all<{ id: string; role: string }>();
+  if (
+    transferred.results.length !== 2 ||
+    !transferred.results.some(
+      (entry) => entry.id === params.targetMemberId && entry.role === "owner",
+    )
+  ) {
+    throw appError(
+      409,
+      "ownership_transfer_changed",
+      "organization ownership changed while the transfer was being committed",
+    );
+  }
 }
 
 export async function updateOrganizationMemberRole(params: {
@@ -402,7 +441,7 @@ export async function updateOrganizationMemberRole(params: {
   });
   const db = drizzle(env.DB);
   const rows = await db
-    .select({ role: member.role })
+    .select({ role: member.role, userId: member.userId })
     .from(member)
     .where(
       and(
@@ -419,10 +458,50 @@ export async function updateOrganizationMemberRole(params: {
       "transfer ownership to change the owner role",
     );
   }
-  await db
-    .update(member)
-    .set({ role: params.role })
-    .where(eq(member.id, params.memberId));
+  const now = Date.now();
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE member
+       SET role = ?
+       WHERE id = ?
+         AND organization_id = ?
+         AND role <> 'owner'
+         AND workshop_access_revoking_at IS NULL
+         AND EXISTS (
+           SELECT 1
+           FROM member actor_membership
+           WHERE actor_membership.organization_id = ?
+             AND actor_membership.user_id = ?
+             AND actor_membership.role IN ('owner', 'admin')
+             AND actor_membership.workshop_access_revoking_at IS NULL
+         )`,
+    ).bind(
+      params.role,
+      params.memberId,
+      params.organizationId,
+      params.organizationId,
+      params.actorUserId,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_sessions
+       SET version = version + 1,
+           updated_at = max(updated_at, ?)
+       WHERE organization_id = ?
+         AND EXISTS (
+           SELECT 1
+           FROM workshop_session_members roster
+           WHERE roster.session_id = workshop_sessions.id
+             AND roster.user_id = ?
+         )`,
+    ).bind(now, params.organizationId, rows[0].userId),
+  ]);
+  if (results[0]?.meta.changes !== 1) {
+    throw appError(
+      409,
+      "organization_membership_changed",
+      "organization membership or administrative authority changed while the role was being updated",
+    );
+  }
 }
 
 export async function removeOrganizationMember(params: {
@@ -437,7 +516,7 @@ export async function removeOrganizationMember(params: {
   });
   const db = drizzle(env.DB);
   const rows = await db
-    .select({ role: member.role })
+    .select({ role: member.role, userId: member.userId })
     .from(member)
     .where(
       and(
@@ -454,14 +533,216 @@ export async function removeOrganizationMember(params: {
       "the organization owner cannot be removed",
     );
   }
-  await db
-    .delete(member)
-    .where(
-      and(
-        eq(member.id, params.memberId),
-        eq(member.organizationId, params.organizationId),
-      ),
-    );
+  await fenceOrganizationMembershipForWorkshopCleanup({
+    organizationId: params.organizationId,
+    userId: rows[0].userId,
+    memberId: params.memberId,
+  });
+  await revokeLiveWorkshopAccessBeforeMembershipRemoval({
+    organizationId: params.organizationId,
+    userId: rows[0].userId,
+    actorUserId: params.actorUserId,
+  });
+  await deleteOrganizationMembershipAfterWorkshopCleanup({
+    organizationId: params.organizationId,
+    userId: rows[0].userId,
+    memberId: params.memberId,
+    actorUserId: params.actorUserId,
+    requireAdminAtCommit: true,
+  });
+}
+
+async function fenceOrganizationMembershipForWorkshopCleanup(input: {
+  organizationId: string;
+  userId: string;
+  memberId?: string;
+}): Promise<void> {
+  const now = Date.now();
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE member
+       SET workshop_access_revoking_at = coalesce(workshop_access_revoking_at, ?)
+       WHERE organization_id = ?
+         AND user_id = ?
+         AND role <> 'owner'
+         AND (? IS NULL OR id = ?)
+       RETURNING id`,
+    ).bind(
+      now,
+      input.organizationId,
+      input.userId,
+      input.memberId ?? null,
+      input.memberId ?? null,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_sessions
+       SET version = version + 1,
+           updated_at = max(updated_at, ?)
+       WHERE organization_id = ?
+         AND EXISTS (
+           SELECT 1
+           FROM workshop_session_members roster
+           WHERE roster.session_id = workshop_sessions.id
+             AND roster.user_id = ?
+         )`,
+    ).bind(now, input.organizationId, input.userId),
+  ]);
+  if (results[0]?.meta.changes !== 1) {
+    throw organizationWorkshopCleanupChanged();
+  }
+}
+
+async function revokeLiveWorkshopAccessBeforeMembershipRemoval(input: {
+  organizationId: string;
+  userId: string;
+  actorUserId: string;
+}): Promise<void> {
+  // Keep this import lazy: the workshop runtime orchestrator imports the
+  // organization role helpers through workshop/shared.
+  const { revokeLiveWorkshopAccessForOrganizationMember } = await import(
+    "@/lib/workshops/membership-revocation"
+  );
+  await revokeLiveWorkshopAccessForOrganizationMember(input);
+}
+
+async function deleteOrganizationMembershipAfterWorkshopCleanup(input: {
+  organizationId: string;
+  userId: string;
+  memberId?: string;
+  actorUserId?: string;
+  requireAdminAtCommit: boolean;
+}): Promise<void> {
+  const removed = await env.DB.prepare(
+    `DELETE FROM member
+     WHERE organization_id = ?
+       AND user_id = ?
+       AND (? IS NULL OR id = ?)
+       AND role <> 'owner'
+       AND workshop_access_revoking_at IS NOT NULL
+       AND (
+         ? = 0
+         OR EXISTS (
+           SELECT 1
+           FROM member actor_membership
+           WHERE actor_membership.organization_id = ?
+             AND actor_membership.user_id = ?
+             AND actor_membership.role IN ('owner', 'admin')
+             AND actor_membership.workshop_access_revoking_at IS NULL
+         )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_route_issuance_intents intent
+         JOIN workshop_workspaces intent_workspace
+           ON intent_workspace.id = intent.workspace_id
+         WHERE intent.organization_id = ?
+           AND (
+             intent.actor_user_id = ?
+             OR intent_workspace.user_id = ?
+           )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_workspaces workspace
+         JOIN workshop_sessions session ON session.id = workspace.session_id
+         WHERE session.organization_id = ?
+           AND workspace.user_id = ?
+           AND (
+             workspace.state NOT IN ('ended', 'failed')
+             OR json_array_length(workspace.terminal_route_usernames_json) > 0
+             OR json_array_length(workspace.application_route_ids_json) > 0
+             OR EXISTS (
+               SELECT 1
+               FROM workshop_workspace_generations generation
+               LEFT JOIN runtime_executions execution
+                 ON execution.id = generation.runtime_execution_id
+               WHERE generation.workspace_id = workspace.id
+                 AND (
+                   generation.state NOT IN ('archived', 'failed')
+                   OR execution.state NOT IN ('archived', 'failed')
+                   OR EXISTS (
+                     SELECT 1
+                     FROM runtime_terminal_sessions terminal_session
+                     WHERE terminal_session.execution_id = generation.runtime_execution_id
+                       AND terminal_session.ended_at IS NULL
+                   )
+                 )
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM runtime_executions domain_execution
+               LEFT JOIN active_runtime_slots active_slot
+                 ON active_slot.execution_id = domain_execution.id
+               LEFT JOIN host_resource_reservations reservation
+                 ON reservation.execution_id = domain_execution.id
+               WHERE domain_execution.domain_kind = 'workshop'
+                 AND domain_execution.domain_id = workspace.id
+                 AND (
+                   domain_execution.state NOT IN ('archived', 'failed')
+                   OR active_slot.execution_id IS NOT NULL
+                   OR reservation.state <> 'released'
+                   OR EXISTS (
+                     SELECT 1
+                     FROM host_desired_state desired_state,
+                          json_each(desired_state.doc_json, '$.vms') desired_vm
+                     WHERE json_extract(desired_vm.value, '$.run_id') = domain_execution.id
+                       AND json_extract(desired_vm.value, '$.desired_phase') <> 'absent'
+                   )
+                   OR EXISTS (
+                     SELECT 1
+                     FROM runtime_terminal_sessions terminal_session
+                     WHERE terminal_session.execution_id = domain_execution.id
+                       AND terminal_session.ended_at IS NULL
+                   )
+                 )
+             )
+           )
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_assist_grants grant_record
+         JOIN workshop_sessions session ON session.id = grant_record.session_id
+         WHERE session.organization_id = ?
+           AND (
+             grant_record.revoked_at IS NULL
+             OR json_array_length(grant_record.terminal_route_usernames_json) > 0
+           )
+           AND (
+             grant_record.learner_user_id = ?
+             OR grant_record.helper_user_id = ?
+           )
+       )
+     RETURNING id`,
+  )
+    .bind(
+      input.organizationId,
+      input.userId,
+      input.memberId ?? null,
+      input.memberId ?? null,
+      input.requireAdminAtCommit ? 1 : 0,
+      input.organizationId,
+      input.actorUserId ?? input.userId,
+      input.organizationId,
+      input.userId,
+      input.userId,
+      input.organizationId,
+      input.userId,
+      input.organizationId,
+      input.userId,
+      input.userId,
+    )
+    .first<{ id: string }>();
+  if (!removed) {
+    throw organizationWorkshopCleanupChanged();
+  }
+}
+
+function organizationWorkshopCleanupChanged() {
+  return appError(
+    409,
+    "organization_workshop_cleanup_changed",
+    "workshop access or organization authority changed while the membership was being removed; retry the removal",
+  );
 }
 
 async function organizationHasOwnedResources(
@@ -503,6 +784,16 @@ async function organizationHasOwnedResources(
       .select({ id: scenarioRuns.runId })
       .from(scenarioRuns)
       .where(eq(scenarioRuns.organizationId, organizationId))
+      .limit(1),
+    db
+      .select({ id: workshopTemplates.id })
+      .from(workshopTemplates)
+      .where(eq(workshopTemplates.organizationId, organizationId))
+      .limit(1),
+    db
+      .select({ id: workshopSessions.id })
+      .from(workshopSessions)
+      .where(eq(workshopSessions.organizationId, organizationId))
       .limit(1),
   ]);
   return results.some((rows) => rows.length > 0);

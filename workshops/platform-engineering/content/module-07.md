@@ -1,0 +1,80 @@
+# Module 07 (stretch) — CI on your terms: build inside the cluster
+
+## The goal
+
+At the end of this module your cluster builds its own container images: an Argo Workflow
+runs BuildKit (rootless) *inside* the cluster, builds the tiny app in [`app/`](app/) from
+your in-cluster Gitea, pushes it to your in-cluster Zot registry, and a Deployment runs
+it. Zero external services touched — git, build, registry, deploy all happen inside your
+Intar workspace.
+
+> **Honesty note:** this is the least-rehearsed path in the workshop (rootless BuildKit
+> on Talos is pioneer territory — nobody has published this combo). It's a presenter demo
+> first, self-paced lab second. If it fights you, watch the demo, file the scars, move on.
+
+## Why this matters
+
+CI is the last thing teams believe they can self-host ("we need GitHub Actions!").
+But a build is just a pod with elevated filesystem tricks: BuildKit replaced the archived
+Kaniko as the 2026 in-cluster answer, and a registry is a single binary (Zot, CNCF).
+Once *build → push → deploy* closes inside your platform, the loop is fully yours.
+
+## The task
+
+1. Enable **two** catalog apps: `zot.yaml` (registry, NodePort 30500) and
+   `argo-workflows.yaml` (workflow engine + the `build-and-push` WorkflowTemplate in
+   ns `builds` — a namespace labeled PSA-privileged because rootless BuildKit needs an
+   unconfined seccomp profile; find that label and understand why it's there).
+2. Look at [`app/`](app/) — a Dockerfile and one HTML file. Your Gitea repo already
+   contains it (it was seeded with the whole workshop repo). Notice the `FROM` line:
+   it pulls the base image from *your* Zot, not from Docker Hub — your platform builds
+   FROM your own registry, fully offline.
+3. **Seed the base image**: copy busybox from checkpoint 00's guest-local mirror into
+   YOUR registry (inside the workspace, against Zot's NodePort). `crane copy` is a
+   registry-to-registry copy; both ends are local, so this does not contact Docker Hub:
+
+   ```bash
+   MISE_OFFLINE=1 crane copy --insecure \
+     localhost:5001/library/busybox:1.37.0 localhost:30500/library/busybox:1.37.0
+   ```
+
+   That's the platform-team move: you decide what base images exist in your cloud.
+4. Submit a build with [`workflow-run.yaml`](workflow-run.yaml) and follow it to
+   `Succeeded`. Then prove the artifact is real: ask Zot's API what's in the registry
+   (NodePort 30500, standard OCI `/v2/` endpoints), then open the released **Zot
+   Registry** app button and find the same repository in its browser UI.
+5. Run the image: deliver [`hello-site.yaml`](hello-site.yaml) via GitOps, then curl the
+   page it serves.
+6. Run `./verify.sh`.
+
+## Hints
+
+## Check your work
+
+```bash
+./verify.sh
+```
+
+It checks: zot and argo-workflows apps Healthy (Synced is the happy path; sync is advisory); Zot's API answering on :30500;
+at least one `build-hello-site-*` workflow **Succeeded**; the `hello-site` image present
+in Zot's catalog; and the hello-site Deployment Available and serving the page.
+
+## Explain-back
+
+Tell your neighbor: list every network hop in your pipeline (git clone from ? → build
+runs where? → push to ? → kubelet pulls from ?). How many of those left your Intar
+workspace? That's the sovereignty argument in one answer.
+
+## Going deeper
+
+- Change `index.html` (v2!), push to Gitea, build `:v2`, and roll `hello-site` to it via
+  git. You've reinvented a release pipeline — how would you trigger the build on push?
+  (Gitea has webhooks; Argo has Events. Follow-up project for another workspace.)
+- Inspect the build pod's securityContext while a build runs. What does
+  `--oci-worker-no-process-sandbox` trade away, and why did the `builds` namespace need
+  the PSA `privileged` label on a Talos cluster?
+- Point the module-06 ksvc at `localhost:30500/hello-site:v1` — serverless serving of a
+  self-built image (the cluster's Knative config already skips tag-resolution for the
+  Zot registry names; find that setting in `config-deployment`).
+
+> Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/07-ci/verify.sh`. Layered hints and the solution are released separately by Intar.

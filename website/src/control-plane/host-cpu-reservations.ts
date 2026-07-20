@@ -4,6 +4,7 @@ import {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
+  hostResourceReservations,
   scenarioRuns,
 } from "@/db/schema";
 import {
@@ -214,18 +215,35 @@ export async function commitHostCpuReservation(
 
 export async function rollbackPendingHostCpuReservation(
   db: DrizzleD1Database,
-  input: { hostId: string; runId: string },
+  input: { hostId: string; runId: string; nowUnixMs?: number },
 ): Promise<boolean> {
-  const deleted = await db
-    .delete(hostCpuReservations)
-    .where(
-      and(
-        eq(hostCpuReservations.hostId, input.hostId),
-        eq(hostCpuReservations.runId, input.runId),
-        eq(hostCpuReservations.state, "pending"),
+  const nowUnixMs = input.nowUnixMs ?? Date.now();
+  const [deleted] = await db.batch([
+    db
+      .delete(hostCpuReservations)
+      .where(
+        and(
+          eq(hostCpuReservations.hostId, input.hostId),
+          eq(hostCpuReservations.runId, input.runId),
+          eq(hostCpuReservations.state, "pending"),
+        ),
+      )
+      .returning({ runId: hostCpuReservations.runId }),
+    db
+      .update(hostResourceReservations)
+      .set({
+        state: "released",
+        releasedAt: nowUnixMs,
+        updatedAt: nowUnixMs,
+      })
+      .where(
+        and(
+          eq(hostResourceReservations.executionId, input.runId),
+          eq(hostResourceReservations.hostId, input.hostId),
+          eq(hostResourceReservations.state, "pending"),
+        ),
       ),
-    )
-    .returning({ runId: hostCpuReservations.runId });
+  ]);
   return deleted.length > 0;
 }
 
@@ -264,6 +282,7 @@ export async function reconcileHostCpuReservations(
       failedAt: scenarioRuns.failedAt,
       vmCount: scenarioRuns.vmCount,
       stateJson: scenarioRuns.stateJson,
+      runtimeExecutionId: scenarioRuns.runtimeExecutionId,
       updatedAt: scenarioRuns.updatedAt,
     })
     .from(scenarioRuns)
@@ -308,6 +327,13 @@ export async function reconcileHostCpuReservations(
         runId: reservation.runId,
         nowUnixMs,
       });
+      await syncScenarioRuntimeResourceReservation(db, {
+        executionId: run.runtimeExecutionId ?? reservation.runId,
+        hostId,
+        cpuMillis: reservation.bootCpuMillis,
+        state: "committed",
+        nowUnixMs,
+      });
       committedRunIds.push(reservation.runId);
       continue;
     }
@@ -330,6 +356,13 @@ export async function reconcileHostCpuReservations(
             runId: reservation.runId,
             nowUnixMs,
           });
+          await syncScenarioRuntimeResourceReservation(db, {
+            executionId: run.runtimeExecutionId ?? reservation.runId,
+            hostId,
+            cpuMillis: reservation.bootCpuMillis,
+            state: "committed",
+            nowUnixMs,
+          });
           committedRunIds.push(reservation.runId);
           desiredRow = await loadDesiredState();
           continue;
@@ -338,6 +371,7 @@ export async function reconcileHostCpuReservations(
       await rollbackPendingHostCpuReservation(db, {
         hostId,
         runId: reservation.runId,
+        nowUnixMs,
       });
       expiredRunIds.push(reservation.runId);
     }
@@ -390,16 +424,36 @@ export async function reconcileHostCpuReservations(
         (vm) => vm.run_id === reservation.runId && vm.phase !== "absent",
       );
       if (!desiredRunning && !actualPresent) {
-        const deleted = await db
-          .delete(hostCpuReservations)
-          .where(
-            and(
-              eq(hostCpuReservations.hostId, hostId),
-              eq(hostCpuReservations.runId, reservation.runId),
-              eq(hostCpuReservations.state, "committed"),
+        const executionId = run?.runtimeExecutionId ?? reservation.runId;
+        const [deleted] = await db.batch([
+          db
+            .delete(hostCpuReservations)
+            .where(
+              and(
+                eq(hostCpuReservations.hostId, hostId),
+                eq(hostCpuReservations.runId, reservation.runId),
+                eq(hostCpuReservations.state, "committed"),
+              ),
+            )
+            .returning({ runId: hostCpuReservations.runId }),
+          db
+            .update(hostResourceReservations)
+            .set({
+              state: "released",
+              releasedAt: nowUnixMs,
+              updatedAt: nowUnixMs,
+            })
+            .where(
+              and(
+                eq(hostResourceReservations.executionId, executionId),
+                eq(hostResourceReservations.hostId, hostId),
+                inArray(hostResourceReservations.state, [
+                  "pending",
+                  "committed",
+                ]),
+              ),
             ),
-          )
-          .returning({ runId: hostCpuReservations.runId });
+        ]);
         if (deleted.length > 0) {
           releasedRunIds.push(reservation.runId);
         }
@@ -429,6 +483,13 @@ export async function reconcileHostCpuReservations(
       reservation.quotaPhase === nextPhase &&
       reservation.cpuMillis === nextCpuMillis
     ) {
+      await syncScenarioRuntimeResourceReservation(db, {
+        executionId: run.runtimeExecutionId ?? reservation.runId,
+        hostId,
+        cpuMillis: nextCpuMillis,
+        state: "committed",
+        nowUnixMs,
+      });
       continue;
     }
     const updated = await db
@@ -449,6 +510,12 @@ export async function reconcileHostCpuReservations(
       )
       .returning({ runId: hostCpuReservations.runId });
     if (updated.length > 0) {
+      await syncScenarioRuntimeResourceReservation(db, {
+        executionId: run.runtimeExecutionId ?? reservation.runId,
+        hostId,
+        cpuMillis: nextCpuMillis,
+        nowUnixMs,
+      });
       if (nextPhase === "steady") {
         sealedRunIds.push(reservation.runId);
       } else {
@@ -464,6 +531,53 @@ export async function reconcileHostCpuReservations(
     sealedRunIds,
     bootAccountingRunIds,
   };
+}
+
+async function syncScenarioRuntimeResourceReservation(
+  db: DrizzleD1Database,
+  input: {
+    executionId: string;
+    hostId: string;
+    cpuMillis?: number;
+    state?: "committed" | "released";
+    nowUnixMs: number;
+  },
+): Promise<void> {
+  if (input.state === "released") {
+    await db
+      .update(hostResourceReservations)
+      .set({
+        state: "released",
+        releasedAt: input.nowUnixMs,
+        updatedAt: input.nowUnixMs,
+      })
+      .where(
+        and(
+          eq(hostResourceReservations.executionId, input.executionId),
+          eq(hostResourceReservations.hostId, input.hostId),
+          inArray(hostResourceReservations.state, ["pending", "committed"]),
+        ),
+      );
+    return;
+  }
+  await db
+    .update(hostResourceReservations)
+    .set({
+      ...(input.cpuMillis === undefined
+        ? {}
+        : { cpuMillis: input.cpuMillis }),
+      ...(input.state === "committed"
+        ? { state: "committed" as const, expiresAt: null }
+        : {}),
+      updatedAt: input.nowUnixMs,
+    })
+    .where(
+      and(
+        eq(hostResourceReservations.executionId, input.executionId),
+        eq(hostResourceReservations.hostId, input.hostId),
+        inArray(hostResourceReservations.state, ["pending", "committed"]),
+      ),
+    );
 }
 
 function pendingRunHasDurableDesiredVms(input: {

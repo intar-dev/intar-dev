@@ -23,7 +23,7 @@ use tokio::{
 };
 
 use crate::{
-    GatewayHttpError, GatewayState,
+    GatewayHttpError, GatewayState, SessionLease,
     outbound::{BridgeEvent, PtyBridgeControl, PtyBridgeOptions, spawn_pty_bridge},
 };
 
@@ -95,16 +95,26 @@ pub async fn terminal_websocket(
 ) -> Result<Response, GatewayHttpError> {
     validate_origin(&headers, &state)?;
     let route_username = validate_terminal_token(&state, query.token.as_deref()).await?;
-    let route = state
-        .store
-        .get_route(&route_username)
-        .await?
-        .ok_or(StargateError::Unauthorized)?;
+    // Register before the route lookup so a concurrent assist revoke or
+    // workspace teardown cannot fall between authorization and the WebSocket
+    // upgrade. A cancelled admission lease is carried into the socket task.
+    let lease = state
+        .sessions
+        .register(route_username.clone(), SessionKind::BrowserTerminal, None);
+    let admission_cancel = lease.token();
+    let route = tokio::select! {
+        _ = admission_cancel.cancelled() => None,
+        route = state.store.get_route(&route_username) => route?,
+    }
+    .ok_or(StargateError::Unauthorized)?;
+    if admission_cancel.is_cancelled() {
+        return Err(GatewayHttpError(StargateError::Unauthorized));
+    }
 
     Ok(ws
         .max_frame_size(MAX_FRAME_BYTES)
         .max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, route)))
+        .on_upgrade(move |socket| handle_socket(socket, route, lease)))
 }
 
 pub(crate) fn build_terminal_websocket_url(
@@ -136,23 +146,19 @@ pub(crate) fn build_terminal_websocket_url(
     Ok(url.to_string())
 }
 
-async fn handle_socket(socket: WebSocket, state: GatewayState, route: RouteRecord) {
-    if let Err(error) = run_terminal_socket(socket, &state, route).await {
+async fn handle_socket(socket: WebSocket, route: RouteRecord, lease: SessionLease) {
+    if let Err(error) = run_terminal_socket(socket, route, lease).await {
         tracing::warn!(error = %error, "browser terminal websocket failed");
     }
 }
 
 async fn run_terminal_socket(
     socket: WebSocket,
-    state: &GatewayState,
     route: RouteRecord,
+    lease: SessionLease,
 ) -> Result<(), StargateError> {
-    let lease = state.sessions.register(
-        route.route_username.clone(),
-        SessionKind::BrowserTerminal,
-        None,
-    );
     let cancel = lease.token();
+    let expires_at = route.expires_at;
     let (socket_sink, socket_stream) = socket.split();
     let (output_tx, output_rx) = mpsc::channel(SOCKET_OUTPUT_CAPACITY);
     let (activity_tx, activity_rx) = mpsc::channel(1);
@@ -166,18 +172,29 @@ async fn run_terminal_socket(
     );
     let output = pump_socket_output(socket_sink, output_rx, cancel.clone());
     let idle = wait_for_idle(activity_rx, cancel.clone());
+    let expiry = wait_until(expires_at);
     tokio::pin!(input);
     tokio::pin!(output);
     tokio::pin!(idle);
+    tokio::pin!(expiry);
 
     let result = tokio::select! {
         _ = cancel.cancelled() => Ok(()),
         result = &mut input => result,
         result = &mut output => result,
         _ = &mut idle => Ok(()),
+        _ = &mut expiry => Ok(()),
     };
     cancel.cancel();
     result
+}
+
+async fn wait_until(expires_at: OffsetDateTime) {
+    let remaining = expires_at - OffsetDateTime::now_utc();
+    let Ok(remaining) = Duration::try_from(remaining) else {
+        return;
+    };
+    tokio_time::sleep(remaining).await;
 }
 
 async fn pump_socket_input(
@@ -519,7 +536,26 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
+    use stargate_core::SessionKind;
+
+    use crate::SessionRegistry;
+
     use super::{BridgeEvent, Message, forward_bridge_events};
+
+    #[tokio::test]
+    async fn route_revoke_cancels_a_pre_upgrade_browser_admission() {
+        let registry = SessionRegistry::default();
+        let lease = registry.register(
+            "workshop-helper-route".to_owned(),
+            SessionKind::BrowserTerminal,
+            None,
+        );
+        let cancelled = lease.token();
+
+        registry.terminate_username("workshop-helper-route").await;
+
+        assert!(cancelled.is_cancelled());
+    }
 
     #[tokio::test]
     async fn browser_output_progresses_while_target_input_is_permanently_blocked() {

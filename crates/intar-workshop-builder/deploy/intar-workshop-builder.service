@@ -1,0 +1,31 @@
+[Unit]
+Description=Intar trusted workshop checkpoint builder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=intar-builder
+Group=intar-builder
+SupplementaryGroups=kvm
+ExecStart=/usr/local/bin/intar-workshop-builder run --config /etc/intar/workshop-builder.toml
+Restart=on-failure
+RestartSec=15s
+KillSignal=SIGTERM
+TimeoutStopSec=3min
+KillMode=mixed
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/intar-workshop-builder
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

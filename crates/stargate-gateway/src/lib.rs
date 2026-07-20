@@ -6,6 +6,7 @@ mod session_registry;
 mod ssh;
 mod store;
 mod webssh;
+mod workspace_app;
 
 use std::sync::Arc;
 
@@ -37,6 +38,9 @@ pub struct PublicGatewayState {
     pub terminal_token_issuer: Arc<str>,
     pub terminal_token_audience: Arc<str>,
     pub terminal_token_secret: Arc<str>,
+    pub workspace_app_base_domain: Option<Arc<str>>,
+    pub workspace_app_bootstrap_ttl_seconds: u64,
+    pub workspace_app_session_ttl_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -74,6 +78,12 @@ impl GatewayState {
                 terminal_token_issuer: terminal_tokens.issuer.into(),
                 terminal_token_audience: terminal_tokens.audience.into(),
                 terminal_token_secret: terminal_tokens.hs256_secret.into(),
+                workspace_app_base_domain: web
+                    .workspace_app_base_domain
+                    .as_deref()
+                    .map(Arc::<str>::from),
+                workspace_app_bootstrap_ttl_seconds: web.workspace_app_bootstrap_ttl_seconds,
+                workspace_app_session_ttl_seconds: web.workspace_app_session_ttl_seconds,
             },
         })
     }
@@ -83,7 +93,15 @@ pub fn build_admin_router(state: GatewayState) -> Router {
     Router::new()
         .route("/healthz", get(admin::healthz))
         .route("/v1/terminal-sessions", post(admin::issue_terminal_session))
+        .route(
+            "/v1/workspace-app-sessions",
+            post(admin::issue_workspace_app_session),
+        )
         .route("/v1/routes/{username}", delete(admin::delete_route))
+        .route(
+            "/v1/workspace-app-routes/{route_id}",
+            delete(admin::delete_workspace_app_route),
+        )
         .with_state(state)
 }
 
@@ -91,6 +109,19 @@ pub fn build_public_router(state: GatewayState) -> Router {
     Router::new()
         .route("/healthz", get(admin::healthz))
         .route(TERMINAL_WS_PATH, get(webssh::terminal_websocket))
+        .route(
+            "/v1/workspace-apps/{route_id}",
+            axum::routing::any(workspace_app::proxy_workspace_app_root),
+        )
+        .route(
+            "/v1/workspace-apps/{route_id}/",
+            axum::routing::any(workspace_app::proxy_workspace_app_root),
+        )
+        .route(
+            "/v1/workspace-apps/{route_id}/{*path}",
+            axum::routing::any(workspace_app::proxy_workspace_app_path),
+        )
+        .fallback(workspace_app::proxy_workspace_app_host)
         .with_state(state)
 }
 

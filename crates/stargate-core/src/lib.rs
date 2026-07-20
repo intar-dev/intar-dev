@@ -9,9 +9,11 @@ pub use config::{
 pub use error::{Result, StargateError};
 pub use intar_contracts::stargate::{
     BrowserTerminalSession, IssueTerminalSessionRequest, IssueTerminalSessionResponse,
-    NativeTerminalAuthMode, NativeTerminalSession, RouteMetadata, SessionKind, TerminalSessionMode,
+    IssueWorkspaceAppSessionRequest, IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode,
+    NativeTerminalSession, RouteMetadata, SessionKind, TerminalSessionMode, WorkspaceAppProtocol,
 };
 pub use model::{
-    RegisteredRoute, RouteRecord, validate_route_username, validate_target_username,
-    validate_terminal_session_request,
+    RegisteredRoute, RegisteredWorkspaceAppRoute, RouteRecord, WorkspaceAppRouteRecord,
+    validate_route_username, validate_target_username, validate_terminal_session_request,
+    validate_workspace_app_session_request,
 };

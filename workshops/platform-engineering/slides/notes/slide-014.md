@@ -1,0 +1,3 @@
+Talos is the biggest identity shift of the day (module 01 goes deep). The pin matters: v1.13.6, never 1.12.x — cni:none docker clusters hung on readiness until the v1.13.0 fix (talos#12885). Default node memory limit is 2048 MB and the stack won't fit, so the scripts raise it (4096 CP / 6144 worker).
+
+Cilium tradeoff to name honestly: eBPF wants a modern kernel and nested Talos-in-Docker needs the required cgroup and privileged-workload capabilities. The dedicated Debian 13 image must prove all of them before publication. If they fail in a learner workspace, restore or reprovision; do not swap in a different cluster topology and call the lab complete.

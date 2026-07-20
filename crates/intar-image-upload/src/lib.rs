@@ -6,5 +6,5 @@ pub use config::ImageUploadConfig;
 pub use error::{Error, Result};
 pub use uploader::{
     ImageUploader, PublishArtifactFile, PublishBuildIdentity, PublishImageFile, PublishReceipt,
-    PublishedArtifact, PublishedImage,
+    PublishedArtifact, PublishedImage, UploadBlobReceipt, UploadImageBlob,
 };

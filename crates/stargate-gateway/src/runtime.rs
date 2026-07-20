@@ -57,6 +57,30 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
                     tracing::warn!(error = %error, "failed to delete expired routes");
                 }
             }
+            match expiry_gateway
+                .store
+                .delete_expired_workspace_app_routes(time::OffsetDateTime::now_utc())
+                .await
+            {
+                Ok(route_ids) => {
+                    for route_id in route_ids {
+                        expiry_gateway.sessions.terminate_username(&route_id).await;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to delete expired workspace app routes");
+                }
+            }
+            if let Err(error) = expiry_gateway
+                .store
+                .delete_expired_workspace_app_browser_sessions(time::OffsetDateTime::now_utc())
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "failed to delete expired workspace app browser sessions"
+                );
+            }
         }
     });
 
@@ -130,6 +154,20 @@ fn apply_env_overrides(settings: &mut ServerSettings) -> anyhow::Result<()> {
             .map(ToOwned::to_owned)
             .collect();
     }
+    if let Ok(value) = env::var("STARGATE_WORKSPACE_APP_BASE_DOMAIN") {
+        let value = value.trim();
+        settings.web.workspace_app_base_domain = if value.is_empty() {
+            None
+        } else {
+            Some(value.to_owned())
+        };
+    }
+    if let Ok(value) = env::var("STARGATE_WORKSPACE_APP_BOOTSTRAP_TTL_SECONDS") {
+        settings.web.workspace_app_bootstrap_ttl_seconds = value.parse()?;
+    }
+    if let Ok(value) = env::var("STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS") {
+        settings.web.workspace_app_session_ttl_seconds = value.parse()?;
+    }
     if let Ok(value) = env::var("STARGATE_DATABASE_PATH") {
         settings.database_path = value.into();
     }
@@ -196,12 +234,44 @@ fn validate_runtime_security(settings: &ServerSettings) -> anyhow::Result<()> {
         !settings.web.public_ssh_host.trim().is_empty(),
         "web.public_ssh_host must not be empty"
     );
+    if let Some(domain) = settings.web.workspace_app_base_domain.as_deref() {
+        ensure!(
+            settings.web.public_base_url.scheme() == "https",
+            "web.public_base_url must use https when workspace_app_base_domain is configured"
+        );
+        ensure!(
+            valid_dns_suffix(domain),
+            "web.workspace_app_base_domain must be a canonical lowercase DNS suffix"
+        );
+    }
+    ensure!(
+        (1..=300).contains(&settings.web.workspace_app_bootstrap_ttl_seconds),
+        "web.workspace_app_bootstrap_ttl_seconds must be between 1 and 300"
+    );
+    ensure!(
+        (1..=14_400).contains(&settings.web.workspace_app_session_ttl_seconds),
+        "web.workspace_app_session_ttl_seconds must be between 1 and 14400"
+    );
     ensure!(
         !settings.terminal_tokens.hs256_secret.trim().is_empty(),
         "terminal_tokens.hs256_secret must not be empty"
     );
     validate_jwks_url("admin_auth", settings.admin_auth.jwks_url.as_ref())?;
     Ok(())
+}
+
+fn valid_dns_suffix(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+            !bytes.is_empty()
+                && bytes.len() <= 63
+                && valid_edge(bytes[0])
+                && valid_edge(bytes[bytes.len() - 1])
+                && bytes.iter().all(|byte| valid_edge(*byte) || *byte == b'-')
+        })
 }
 
 fn validate_jwks_url(name: &str, url: Option<&url::Url>) -> anyhow::Result<()> {
@@ -334,7 +404,18 @@ fn server_task_result(name: &str, result: anyhow::Result<()>) -> anyhow::Result<
 mod tests {
     use std::{future::pending, time::Duration};
 
-    use super::supervise_server_tasks;
+    use super::{supervise_server_tasks, valid_dns_suffix};
+
+    #[test]
+    fn workspace_app_domain_requires_canonical_dns_labels() {
+        assert!(valid_dns_suffix("workshop-apps.intar.app"));
+        assert!(valid_dns_suffix("apps2.internal"));
+        assert!(!valid_dns_suffix("Workshop-Apps.intar.app"));
+        assert!(!valid_dns_suffix("workshop-apps..intar.app"));
+        assert!(!valid_dns_suffix("-workshop.intar.app"));
+        assert!(!valid_dns_suffix("workshop.intar.app."));
+        assert!(!valid_dns_suffix("https://workshop.intar.app"));
+    }
 
     #[tokio::test]
     async fn supervisor_reports_any_server_failure_without_waiting_for_earlier_tasks() {

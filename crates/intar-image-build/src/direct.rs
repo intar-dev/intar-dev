@@ -9,7 +9,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Error, Result, anyhow, bail};
+use anyhow::{Context as _, Error, Result, anyhow, bail, ensure};
 use intar_contracts::catalog::ScenarioManifestV3;
 use intar_image_scenario::{BaseImageSpec, Scenario, VmDefinition};
 use russh::keys::PrivateKey;
@@ -176,6 +176,7 @@ pub fn render_direct_build(request: &DirectBuildRequest) -> Result<RenderedDirec
         ssh_host_port,
         memory_mib: request.config.build_memory_mb,
         cpu_count: request.config.build_cpus,
+        boot_cmdline: crate::qemu::BUILD_BOOT_CMDLINE,
     });
     let qemu_args = qemu_command.args;
     fs::write(&paths.qemu_args_path, qemu_args.join("\n")).with_context(|| {
@@ -455,30 +456,66 @@ fn wait_for_ssh(
     )
 }
 
-fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &RenderedDirectBuild) -> Result<()> {
+pub struct DirectQemuShutdownInput<'a> {
+    pub qmp_socket_path: &'a Path,
+    pub serial_log_path: &'a Path,
+    pub build_log_path: &'a Path,
+    pub timeout_seconds: u64,
+}
+
+/// Complete the strict QMP powerdown handshake and reap a direct-QEMU guest.
+/// The helper fails closed and kills/reaps the child on every handshake or
+/// timeout failure.
+pub fn acknowledged_qmp_shutdown(
+    qemu: &mut Child,
+    input: &DirectQemuShutdownInput<'_>,
+) -> Result<()> {
+    acknowledged_qmp_shutdown_with_cancel(qemu, input, || false)
+}
+
+/// Complete the strict QMP shutdown handshake while allowing an operator
+/// shutdown to interrupt QMP polling. Cancellation fails closed: QEMU is
+/// killed and reaped before the error is returned.
+pub fn acknowledged_qmp_shutdown_with_cancel(
+    qemu: &mut Child,
+    input: &DirectQemuShutdownInput<'_>,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<()> {
+    if is_cancelled() {
+        return Err(qemu_failure_after_cleanup(
+            qemu,
+            anyhow!("QEMU shutdown cancelled"),
+        ));
+    }
     if let Some(status) = poll_qemu_or_cleanup(qemu)? {
         bail!(
             "QEMU exited with status {status} before the host requested acknowledged QMP powerdown; serial log: {}; build log: {}",
-            rendered.paths.serial_log_path.display(),
-            rendered.paths.build_log_path.display()
+            input.serial_log_path.display(),
+            input.build_log_path.display()
         );
     }
 
-    let qemu_exit_timeout_seconds = rendered.config.qemu_exit_timeout_seconds.max(1);
+    let qemu_exit_timeout_seconds = input.timeout_seconds.max(1);
     let deadline = Instant::now() + Duration::from_secs(qemu_exit_timeout_seconds);
-    if let Err(error) = request_qemu_powerdown(rendered, deadline) {
+    if let Err(error) = request_qemu_powerdown(input.qmp_socket_path, deadline, &is_cancelled) {
         return Err(qemu_failure_after_cleanup(
             qemu,
             anyhow!(
                 "failed to complete QMP guest powerdown handshake after provisioning; serial log: {}; build log: {}: {error:#}",
-                rendered.paths.serial_log_path.display(),
-                rendered.paths.build_log_path.display()
+                input.serial_log_path.display(),
+                input.build_log_path.display()
             ),
         ));
     }
     while Instant::now() < deadline {
+        if is_cancelled() {
+            return Err(qemu_failure_after_cleanup(
+                qemu,
+                anyhow!("QEMU shutdown cancelled"),
+            ));
+        }
         if let Some(status) = poll_qemu_or_cleanup(qemu)? {
-            return qemu_status_to_result(status, rendered);
+            return qemu_status_to_result(status, input);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -488,39 +525,52 @@ fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &RenderedDirectBuild) -> R
     }
 
     if let Some(status) = poll_qemu_or_cleanup(qemu)? {
-        return qemu_status_to_result(status, rendered);
+        return qemu_status_to_result(status, input);
     }
 
     Err(qemu_failure_after_cleanup(
         qemu,
         anyhow!(
             "timed out waiting {qemu_exit_timeout_seconds}s for QEMU to exit after a guest-originated QMP shutdown event; serial log: {}; build log: {}",
-            rendered.paths.serial_log_path.display(),
-            rendered.paths.build_log_path.display(),
+            input.serial_log_path.display(),
+            input.build_log_path.display(),
         ),
     ))
 }
 
-fn qemu_status_to_result(status: ExitStatus, rendered: &RenderedDirectBuild) -> Result<()> {
+fn wait_for_qemu_shutdown(qemu: &mut Child, rendered: &RenderedDirectBuild) -> Result<()> {
+    acknowledged_qmp_shutdown(
+        qemu,
+        &DirectQemuShutdownInput {
+            qmp_socket_path: &rendered.paths.qmp_socket_path,
+            serial_log_path: &rendered.paths.serial_log_path,
+            build_log_path: &rendered.paths.build_log_path,
+            timeout_seconds: rendered.config.qemu_exit_timeout_seconds,
+        },
+    )
+}
+
+fn qemu_status_to_result(status: ExitStatus, input: &DirectQemuShutdownInput<'_>) -> Result<()> {
     if status.success() {
         return Ok(());
     }
     bail!(
         "QEMU exited with status {status}; serial log: {}; build log: {}",
-        rendered.paths.serial_log_path.display(),
-        rendered.paths.build_log_path.display()
+        input.serial_log_path.display(),
+        input.build_log_path.display()
     )
 }
 
 #[cfg(unix)]
 fn request_qemu_powerdown(
-    rendered: &RenderedDirectBuild,
+    qmp_socket_path: &Path,
     shutdown_deadline: Instant,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<()> {
-    let mut stream = connect_qmp_socket(&rendered.paths.qmp_socket_path).with_context(|| {
+    let mut stream = connect_qmp_socket(qmp_socket_path).with_context(|| {
         format!(
             "failed to connect to QMP socket '{}'",
-            rendered.paths.qmp_socket_path.display()
+            qmp_socket_path.display()
         )
     })?;
     stream
@@ -535,7 +585,7 @@ fn request_qemu_powerdown(
         .context("failed to clone QMP socket for response reads")?;
     let mut reader = BufReader::new(reader_stream);
 
-    let greeting = read_qmp_message(&mut reader, "greeting", handshake_deadline)?;
+    let greeting = read_qmp_message(&mut reader, "greeting", handshake_deadline, is_cancelled)?;
     if !greeting
         .get("QMP")
         .is_some_and(serde_json::Value::is_object)
@@ -547,6 +597,7 @@ fn request_qemu_powerdown(
         &mut reader,
         "qmp_capabilities",
         handshake_deadline,
+        is_cancelled,
     )? {
         bail!("QMP reported shutdown before the host requested system_powerdown");
     }
@@ -555,10 +606,11 @@ fn request_qemu_powerdown(
         &mut reader,
         "system_powerdown",
         handshake_deadline,
+        is_cancelled,
     )? {
         bail!("QMP reported shutdown before acknowledging system_powerdown");
     }
-    wait_for_guest_shutdown_event(&mut reader, shutdown_deadline)
+    wait_for_guest_shutdown_event(&mut reader, shutdown_deadline, is_cancelled)
 }
 
 #[cfg(unix)]
@@ -602,7 +654,9 @@ fn execute_qmp_command(
     reader: &mut BufReader<UnixStream>,
     command: &str,
     deadline: Instant,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<bool> {
+    ensure!(!is_cancelled(), "QEMU shutdown cancelled");
     stream
         .set_write_timeout(Some(qmp_remaining(deadline, command)?))
         .with_context(|| format!("failed to set QMP {command} write timeout"))?;
@@ -620,7 +674,7 @@ fn execute_qmp_command(
 
     let mut saw_shutdown = false;
     loop {
-        let response = read_qmp_message(reader, command, deadline)?;
+        let response = read_qmp_message(reader, command, deadline, is_cancelled)?;
         if response.get("event").is_some() {
             saw_shutdown |= is_qmp_shutdown_event(&response);
             continue;
@@ -642,9 +696,10 @@ fn execute_qmp_command(
 fn wait_for_guest_shutdown_event(
     reader: &mut BufReader<UnixStream>,
     deadline: Instant,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<()> {
     loop {
-        let message = read_qmp_message(reader, "guest SHUTDOWN event", deadline)?;
+        let message = read_qmp_message(reader, "guest SHUTDOWN event", deadline, is_cancelled)?;
         if validate_guest_shutdown_event(&message)? {
             return Ok(());
         }
@@ -684,10 +739,12 @@ fn read_qmp_message(
     reader: &mut BufReader<UnixStream>,
     phase: &str,
     deadline: Instant,
+    is_cancelled: &impl Fn() -> bool,
 ) -> Result<serde_json::Value> {
     const MAX_QMP_MESSAGE_BYTES: usize = 64 * 1024;
     let mut line = String::new();
     loop {
+        ensure!(!is_cancelled(), "QEMU shutdown cancelled");
         qmp_remaining(deadline, phase)?;
         if line.len() > MAX_QMP_MESSAGE_BYTES {
             bail!("QMP {phase} response exceeded {MAX_QMP_MESSAGE_BYTES} bytes");
@@ -736,8 +793,9 @@ fn qmp_remaining(deadline: Instant, phase: &str) -> Result<Duration> {
 
 #[cfg(not(unix))]
 fn request_qemu_powerdown(
-    _rendered: &RenderedDirectBuild,
+    _qmp_socket_path: &Path,
     _shutdown_deadline: Instant,
+    _is_cancelled: &impl Fn() -> bool,
 ) -> Result<()> {
     bail!("QMP powerdown over Unix sockets is not available on this platform")
 }

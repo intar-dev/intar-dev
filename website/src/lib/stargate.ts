@@ -1,10 +1,15 @@
 import { env } from "cloudflare:workers";
 import { createAppId } from "@/lib/id";
-import type { IssueTerminalSessionResponse as StargateApiTerminalSessionResponse } from "@/generated/stargate";
+import type {
+  IssueTerminalSessionResponse as StargateApiTerminalSessionResponse,
+  IssueWorkspaceAppSessionResponse as StargateApiWorkspaceAppSessionResponse,
+} from "@/generated/stargate";
 
 const DEFAULT_ASSERTION_HEADER = "cf-access-jwt-assertion";
 const DEFAULT_ROUTE_TTL_SECONDS = 4 * 60 * 60;
 const DEFAULT_STARGATE_ADMIN_ORIGIN = "http://stargate.internal";
+const STARGATE_ADMIN_CREATE_TIMEOUT_MS = 30_000;
+const WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER = "__intar_bootstrap";
 const textEncoder = new TextEncoder();
 
 interface AssertionTokenOptions {
@@ -65,23 +70,55 @@ export type StargateTerminalSessionResult =
   | BrowserTerminalSessionResult
   | NativeTerminalSessionResult;
 
+export interface IssueStargateWorkspaceAppSessionInput {
+  routeId: string;
+  targetUsername: string;
+  targetHost: string;
+  targetSshPort: number;
+  targetHostKeyOpenssh: string;
+  targetPrivateKeyOpenssh: string;
+  targetAppPort: number;
+  expiresAt: Date;
+  metadata: {
+    hostId: string;
+    runId: string;
+    vmId: string;
+    userId: string;
+  };
+}
+
+export interface StargateWorkspaceAppSessionResult {
+  routeId: string;
+  url: string;
+  bootstrapExpiresAt: number;
+  expiresAt: number;
+}
+
 export async function issueStargateTerminalSession(
   input: IssueStargateTerminalSessionInput,
 ): Promise<StargateTerminalSessionResult> {
   const response = await stargateAdminFetch("/v1/terminal-sessions", {
     method: "POST",
+    signal: AbortSignal.timeout(STARGATE_ADMIN_CREATE_TIMEOUT_MS),
     headers: {
       "content-type": "application/json",
-      [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]: await createAssertionToken({
-        secret: requiredValue(env.STARGATE_ADMIN_AUTH_SECRET, "STARGATE_ADMIN_AUTH_SECRET"),
-        issuer: requiredValue(env.STARGATE_ADMIN_AUTH_ISSUER, "STARGATE_ADMIN_AUTH_ISSUER"),
-        audience: requiredValue(
-          env.STARGATE_ADMIN_AUTH_AUDIENCE,
-          "STARGATE_ADMIN_AUTH_AUDIENCE",
-        ),
-        subject: "intar-admin",
-        ttlSeconds: 60,
-      }),
+      [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]:
+        await createAssertionToken({
+          secret: requiredValue(
+            env.STARGATE_ADMIN_AUTH_SECRET,
+            "STARGATE_ADMIN_AUTH_SECRET",
+          ),
+          issuer: requiredValue(
+            env.STARGATE_ADMIN_AUTH_ISSUER,
+            "STARGATE_ADMIN_AUTH_ISSUER",
+          ),
+          audience: requiredValue(
+            env.STARGATE_ADMIN_AUTH_AUDIENCE,
+            "STARGATE_ADMIN_AUTH_AUDIENCE",
+          ),
+          subject: "intar-admin",
+          ttlSeconds: 60,
+        }),
     },
     body: JSON.stringify({
       route_username: input.routeUsername,
@@ -104,12 +141,18 @@ export async function issueStargateTerminalSession(
   });
 
   if (!response.ok) {
-    throw new Error(`stargate terminal session create failed (${response.status})`);
+    throw new Error(
+      `stargate terminal session create failed (${response.status})`,
+    );
   }
 
-  const body = (await response.json()) as Partial<StargateApiTerminalSessionResponse>;
+  const body =
+    (await response.json()) as Partial<StargateApiTerminalSessionResponse>;
 
-  if (typeof body.route_username !== "string" || typeof body.expires_at !== "number") {
+  if (
+    typeof body.route_username !== "string" ||
+    typeof body.expires_at !== "number"
+  ) {
     throw new Error("invalid stargate terminal session response");
   }
 
@@ -157,7 +200,97 @@ export async function issueStargateTerminalSession(
   };
 }
 
-export async function deleteStargateRoute(routeUsername: string): Promise<void> {
+export async function issueStargateWorkspaceAppSession(
+  input: IssueStargateWorkspaceAppSessionInput,
+): Promise<StargateWorkspaceAppSessionResult> {
+  const response = await stargateAdminFetch("/v1/workspace-app-sessions", {
+    method: "POST",
+    signal: AbortSignal.timeout(STARGATE_ADMIN_CREATE_TIMEOUT_MS),
+    headers: {
+      "content-type": "application/json",
+      [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]:
+        await createAssertionToken({
+          secret: requiredValue(
+            env.STARGATE_ADMIN_AUTH_SECRET,
+            "STARGATE_ADMIN_AUTH_SECRET",
+          ),
+          issuer: requiredValue(
+            env.STARGATE_ADMIN_AUTH_ISSUER,
+            "STARGATE_ADMIN_AUTH_ISSUER",
+          ),
+          audience: requiredValue(
+            env.STARGATE_ADMIN_AUTH_AUDIENCE,
+            "STARGATE_ADMIN_AUTH_AUDIENCE",
+          ),
+          subject: "intar-admin",
+          ttlSeconds: 60,
+        }),
+    },
+    body: JSON.stringify({
+      route_id: input.routeId,
+      target_username: input.targetUsername,
+      target_ip: input.targetHost,
+      target_ssh_port: input.targetSshPort,
+      target_host_key_openssh: input.targetHostKeyOpenssh,
+      target_private_key_openssh: input.targetPrivateKeyOpenssh,
+      target_app_port: input.targetAppPort,
+      protocol: "http",
+      route_expires_at: Math.floor(input.expiresAt.getTime() / 1000),
+      metadata: {
+        host_id: input.metadata.hostId,
+        run_id: input.metadata.runId,
+        vm_id: input.metadata.vmId,
+        user_id: input.metadata.userId,
+      },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `stargate workspace application create failed (${response.status})`,
+    );
+  }
+  return parseStargateWorkspaceAppSessionResponse(await response.json());
+}
+
+export function parseStargateWorkspaceAppSessionResponse(
+  value: unknown,
+): StargateWorkspaceAppSessionResult {
+  const body = value as Partial<StargateApiWorkspaceAppSessionResponse> | null;
+  if (
+    !body ||
+    typeof body.route_id !== "string" ||
+    typeof body.url !== "string" ||
+    typeof body.bootstrap_expires_at !== "number" ||
+    typeof body.expires_at !== "number" ||
+    body.bootstrap_expires_at > body.expires_at
+  ) {
+    throw new Error("invalid stargate workspace application response");
+  }
+  let bootstrapUrl: URL;
+  try {
+    bootstrapUrl = new URL(body.url);
+  } catch {
+    throw new Error("invalid stargate workspace application response");
+  }
+  if (
+    (bootstrapUrl.protocol !== "http:" && bootstrapUrl.protocol !== "https:") ||
+    bootstrapUrl.username ||
+    bootstrapUrl.password ||
+    !bootstrapUrl.searchParams.get(WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER)
+  ) {
+    throw new Error("invalid stargate workspace application response");
+  }
+  return {
+    routeId: body.route_id,
+    url: body.url,
+    bootstrapExpiresAt: body.bootstrap_expires_at * 1000,
+    expiresAt: body.expires_at * 1000,
+  };
+}
+
+export async function deleteStargateRoute(
+  routeUsername: string,
+): Promise<void> {
   const trimmed = routeUsername.trim();
   if (!trimmed) {
     return;
@@ -168,16 +301,23 @@ export async function deleteStargateRoute(routeUsername: string): Promise<void> 
     {
       method: "DELETE",
       headers: {
-        [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]: await createAssertionToken({
-          secret: requiredValue(env.STARGATE_ADMIN_AUTH_SECRET, "STARGATE_ADMIN_AUTH_SECRET"),
-          issuer: requiredValue(env.STARGATE_ADMIN_AUTH_ISSUER, "STARGATE_ADMIN_AUTH_ISSUER"),
-          audience: requiredValue(
-            env.STARGATE_ADMIN_AUTH_AUDIENCE,
-            "STARGATE_ADMIN_AUTH_AUDIENCE",
-          ),
-          subject: "intar-admin",
-          ttlSeconds: 60,
-        }),
+        [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]:
+          await createAssertionToken({
+            secret: requiredValue(
+              env.STARGATE_ADMIN_AUTH_SECRET,
+              "STARGATE_ADMIN_AUTH_SECRET",
+            ),
+            issuer: requiredValue(
+              env.STARGATE_ADMIN_AUTH_ISSUER,
+              "STARGATE_ADMIN_AUTH_ISSUER",
+            ),
+            audience: requiredValue(
+              env.STARGATE_ADMIN_AUTH_AUDIENCE,
+              "STARGATE_ADMIN_AUTH_AUDIENCE",
+            ),
+            subject: "intar-admin",
+            ttlSeconds: 60,
+          }),
       },
     },
   );
@@ -187,6 +327,44 @@ export async function deleteStargateRoute(routeUsername: string): Promise<void> 
   }
   if (!response.ok) {
     throw new Error(`stargate route delete failed (${response.status})`);
+  }
+}
+
+export async function deleteStargateWorkspaceAppRoute(
+  routeId: string,
+): Promise<void> {
+  const trimmed = routeId.trim();
+  if (!trimmed) return;
+  const response = await stargateAdminFetch(
+    `/v1/workspace-app-routes/${encodeURIComponent(trimmed)}`,
+    {
+      method: "DELETE",
+      headers: {
+        [assertionHeader(env.STARGATE_ADMIN_AUTH_HEADER)]:
+          await createAssertionToken({
+            secret: requiredValue(
+              env.STARGATE_ADMIN_AUTH_SECRET,
+              "STARGATE_ADMIN_AUTH_SECRET",
+            ),
+            issuer: requiredValue(
+              env.STARGATE_ADMIN_AUTH_ISSUER,
+              "STARGATE_ADMIN_AUTH_ISSUER",
+            ),
+            audience: requiredValue(
+              env.STARGATE_ADMIN_AUTH_AUDIENCE,
+              "STARGATE_ADMIN_AUTH_AUDIENCE",
+            ),
+            subject: "intar-admin",
+            ttlSeconds: 60,
+          }),
+      },
+    },
+  );
+  if (response.status === 404 || response.status === 204) return;
+  if (!response.ok) {
+    throw new Error(
+      `stargate workspace application delete failed (${response.status})`,
+    );
   }
 }
 
@@ -219,7 +397,9 @@ async function stargateAdminFetch(
   );
 }
 
-async function createAssertionToken(options: AssertionTokenOptions): Promise<string> {
+async function createAssertionToken(
+  options: AssertionTokenOptions,
+): Promise<string> {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const payload = {
     iss: options.issuer,
@@ -260,7 +440,10 @@ function base64UrlEncode(bytes: Uint8Array): string {
   for (const byte of bytes) {
     binary += String.fromCharCode(byte);
   }
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function assertionHeader(value?: string): string {

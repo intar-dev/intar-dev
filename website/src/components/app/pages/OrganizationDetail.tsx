@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { Building2 } from "lucide-react";
 import { ContentHeader } from "../patterns/ContentHeader";
 import { MetaLine } from "../patterns/MetaLine";
@@ -10,6 +11,7 @@ import { ErrorState } from "../patterns/StateCard";
 import { usePageChrome } from "../shell/page-chrome";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { authClient } from "@/lib/auth-client";
 import {
@@ -139,6 +141,20 @@ export function OrganizationDetail() {
               </span>,
             ]}
           />
+        }
+        actions={
+          <Button
+            size="sm"
+            variant="outline"
+            render={
+              <Link
+                to="/organizations/$orgId/workshops"
+                params={{ orgId: detail.id }}
+              />
+            }
+          >
+            Workshops
+          </Button>
         }
       />
 

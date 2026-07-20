@@ -15,6 +15,7 @@ const hostRuntimeMock = vi.hoisted(() => ({
 const dbMock = vi.hoisted(() => {
   const state = {
     referencedRuns: [] as Array<{ runId: string }>,
+    activeWorkshopRuntimes: [] as Array<{ executionId: string }>,
     activeBuilds: [] as Array<{ buildId: string }>,
     deletedHosts: [] as Array<{ id: string }>,
     limitedSelectCall: 0,
@@ -28,7 +29,9 @@ const dbMock = vi.hoisted(() => {
           const rows =
             state.limitedSelectCall === 0
               ? state.referencedRuns
-              : state.activeBuilds;
+              : state.limitedSelectCall === 1
+                ? state.activeWorkshopRuntimes
+                : state.activeBuilds;
           state.limitedSelectCall += 1;
           return Promise.resolve(rows);
         }),
@@ -64,6 +67,7 @@ describe("agent host deletion", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dbMock.state.referencedRuns = [];
+    dbMock.state.activeWorkshopRuntimes = [];
     dbMock.state.activeBuilds = [];
     dbMock.state.deletedHosts = [{ id: "host-1" }];
     dbMock.state.limitedSelectCall = 0;
@@ -111,8 +115,26 @@ describe("agent host deletion", () => {
       hostId: "host-1",
     });
     expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
-    expect(dbMock.db.select).toHaveBeenCalledTimes(4);
+    expect(dbMock.db.select).toHaveBeenCalledTimes(6);
     expect(hostRuntimeMock.retireHostRuntime).toHaveBeenCalledWith("host-1");
+  });
+
+  it("requires active workshop runtimes to be drained or recovered first", async () => {
+    dbMock.state.activeWorkshopRuntimes = [
+      { executionId: "workshop-execution-1" },
+    ];
+
+    const response = await deleteHostRequest();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "host has active workshop runtimes and must be drained or recovered first",
+      code: "host_has_active_workshop_runtimes",
+      hostId: "host-1",
+    });
+    expect(dbMock.db.delete).not.toHaveBeenCalled();
+    expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 
   it("requires a builder with active image builds to be drained first", async () => {
@@ -142,7 +164,7 @@ describe("agent host deletion", () => {
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error:
-        "host deletion conflicted with a new run, active build, or concurrent update",
+        "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
       code: "host_delete_conflict",
       hostId: "host-1",
     });
@@ -163,12 +185,12 @@ describe("agent host deletion", () => {
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error:
-        "host deletion conflicted with a new run, active build, or concurrent update",
+        "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
       code: "host_delete_conflict",
       hostId: "host-1",
     });
     expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
-    expect(dbMock.db.select).toHaveBeenCalledTimes(4);
+    expect(dbMock.db.select).toHaveBeenCalledTimes(6);
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 });

@@ -23,6 +23,24 @@ pub struct PublishArtifactFile {
     pub filename: String,
 }
 
+/// One pre-published image blob. This is used by atomic publication workflows
+/// whose domain manifest is committed by a later endpoint after every blob is
+/// present. It deliberately exposes no arbitrary object key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UploadImageBlob {
+    pub image_key: String,
+    pub scenario_id: String,
+    pub vm_name: String,
+    pub sha256: String,
+    pub source_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UploadBlobReceipt {
+    pub object_key: String,
+    pub already_exists: bool,
+}
+
 /// Identity of the control-plane build assignment authorizing a builder
 /// publish. Operator-token publishes deliberately omit this context; builder
 /// agent JWTs are accepted by the registry only when these fields still match
@@ -89,6 +107,39 @@ impl ImageUploader {
         images: &[PublishImageFile],
     ) -> Result<PublishReceipt> {
         self.publish_manifest_with_artifacts(manifest, images, &[])
+    }
+
+    /// Upload an image into the registry's content-addressed multipart store
+    /// without publishing a scenario manifest. A caller can then atomically
+    /// commit another domain manifest that references the verified blob.
+    pub fn upload_image_blob(&self, image: &UploadImageBlob) -> Result<UploadBlobReceipt> {
+        validate_upload_image_blob(image)?;
+        self.upload_blob(
+            &serde_json::json!({
+                "kind": "image",
+                "sha256": image.sha256,
+                "image_key": image.image_key,
+                "scenario_id": image.scenario_id,
+                "vm_name": image.vm_name,
+            }),
+            &image.source_path,
+        )
+    }
+
+    /// Upload one boot artifact into the registry's content-addressed
+    /// multipart store without publishing a scenario manifest.
+    pub fn upload_artifact_blob(
+        &self,
+        artifact: &PublishArtifactFile,
+    ) -> Result<UploadBlobReceipt> {
+        let sha256 = normalize_sha256(&artifact.sha256)?;
+        self.upload_blob(
+            &serde_json::json!({
+                "kind": "artifact",
+                "sha256": sha256,
+            }),
+            &artifact.source_path,
+        )
     }
 
     /// Publish a scenario manifest. Image and boot artifact payloads are
@@ -166,11 +217,18 @@ impl ImageUploader {
         Ok(serde_json::from_str(&body)?)
     }
 
-    fn upload_blob(&self, create_body: &serde_json::Value, source_path: &Path) -> Result<()> {
+    fn upload_blob(
+        &self,
+        create_body: &serde_json::Value,
+        source_path: &Path,
+    ) -> Result<UploadBlobReceipt> {
         let uploads_url = sibling_endpoint(&self.endpoint, "uploads")?;
         let create: UploadCreateResponse = self.post_json(uploads_url.clone(), create_body)?;
         if create.already_exists {
-            return Ok(());
+            return Ok(UploadBlobReceipt {
+                object_key: create.object_key,
+                already_exists: true,
+            });
         }
         let upload_id = create
             .upload_id
@@ -225,7 +283,10 @@ impl ImageUploader {
                 "parts": parts,
             }),
         )?;
-        Ok(())
+        Ok(UploadBlobReceipt {
+            object_key: create.object_key,
+            already_exists: false,
+        })
     }
 
     fn post_json<T: serde::de::DeserializeOwned>(
@@ -246,6 +307,20 @@ impl ImageUploader {
         }
         Ok(serde_json::from_str(&text)?)
     }
+}
+
+fn validate_upload_image_blob(image: &UploadImageBlob) -> Result<()> {
+    normalize_filename(&format!("{}.raw.zst", image.image_key))?;
+    normalize_sha256(&image.sha256)?;
+    for value in [&image.scenario_id, &image.vm_name] {
+        if !is_safe_identity_slug(value) || value.contains('.') {
+            return Err(Error::InvalidKey(value.clone()));
+        }
+    }
+    if !image.source_path.is_file() {
+        return Err(Error::InvalidPath(image.source_path.display().to_string()));
+    }
+    Ok(())
 }
 
 impl PublishBuildIdentity {
@@ -422,8 +497,8 @@ mod tests {
     use intar_contracts::catalog::ImageArchitecture;
 
     use super::{
-        PublishArtifactFile, PublishBuildIdentity, PublishImageFile, architecture_name,
-        normalize_filename, normalize_sha256,
+        PublishArtifactFile, PublishBuildIdentity, PublishImageFile, UploadImageBlob,
+        architecture_name, normalize_filename, normalize_sha256, validate_upload_image_blob,
     };
 
     #[test]
@@ -450,6 +525,23 @@ mod tests {
 
         assert_eq!(file.sha256, sha256);
         assert_eq!(file.filename, format!("{}.artifact", "a".repeat(64)));
+    }
+
+    #[test]
+    fn validates_atomic_image_blob_identity() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let image = UploadImageBlob {
+            image_key: "workshop-publication-checkpoint-workspace-x86_64".to_owned(),
+            scenario_id: "workshop-publication-checkpoint".to_owned(),
+            vm_name: "workspace".to_owned(),
+            sha256: "a".repeat(64),
+            source_path: temp.path().to_path_buf(),
+        };
+        validate_upload_image_blob(&image).unwrap();
+
+        let mut invalid = image;
+        invalid.scenario_id = "../escape".to_owned();
+        assert!(validate_upload_image_blob(&invalid).is_err());
     }
 
     #[test]

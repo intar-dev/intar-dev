@@ -10,6 +10,15 @@ public_base_url = "https://ws.intar.app"
 public_ssh_host = "ssh.intar.app"
 public_ssh_port = 22
 allowed_origins = ["https://ws.intar.app"]
+# Configure the matching wildcard DNS/tunnel route before enabling workshops.
+workspace_app_base_domain = "workshop-apps.intar.app"
+# Stargate stores only SHA-256 digests of both tokens. A route replacement
+# rotates them and a route deletion invalidates them immediately.
+workspace_app_bootstrap_ttl_seconds = 60
+# Stargate does not query Intar's D1 membership on proxied app requests. This
+# TTL therefore bounds retained browser access after sign-out/member removal;
+# session teardown and route deletion remain immediate revocation paths.
+workspace_app_session_ttl_seconds = 900
 
 [admin_auth]
 assertion_header = "x-stargate-admin-assertion"

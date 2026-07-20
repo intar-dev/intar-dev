@@ -85,6 +85,75 @@ impl BuildSshSession {
             })
     }
 
+    /// Download one trusted guest file without invoking a host `ssh` binary.
+    /// The remote path is shell-quoted and the local destination must not
+    /// already exist.
+    pub async fn download_file(&mut self, remote_path: &str, local_path: &Path) -> Result<()> {
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create '{}'", parent.display()))?;
+        }
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(local_path)
+            .with_context(|| format!("failed to create '{}'", local_path.display()))?;
+        let remote = shell_quote(remote_path);
+        let command = format!("cat -- {remote}");
+        let result = async {
+            let mut channel = self
+                .session
+                .channel_open_session()
+                .await
+                .context("failed to open build SSH download channel")?;
+            channel
+                .exec(true, command.as_str())
+                .await
+                .with_context(|| format!("failed to download guest file {remote}"))?;
+            channel
+                .eof()
+                .await
+                .context("failed to close build SSH download stdin")?;
+            let mut exit_status = None;
+            let mut error_tail = Vec::new();
+            while let Some(message) = channel.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => output
+                        .write_all(&data)
+                        .context("failed to write downloaded guest file")?,
+                    ChannelMsg::ExtendedData { data, .. } => {
+                        append_limited(&mut error_tail, &data);
+                    }
+                    ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+                    ChannelMsg::ExitSignal {
+                        signal_name,
+                        error_message,
+                        ..
+                    } => bail!(
+                        "build SSH download {remote} exited from signal {signal_name:?}: {error_message}"
+                    ),
+                    _ => {}
+                }
+            }
+            match exit_status {
+                Some(0) => output
+                    .sync_all()
+                    .context("failed to sync downloaded guest file"),
+                Some(code) => bail!(
+                    "build SSH download {remote} failed with status {code}: {}",
+                    String::from_utf8_lossy(&error_tail)
+                ),
+                None => bail!("build SSH download {remote} closed without exit status"),
+            }
+        }
+        .await;
+        if result.is_err() {
+            drop(output);
+            let _ = std::fs::remove_file(local_path);
+        }
+        result
+    }
+
     pub async fn run(&mut self, command: &str, inherit_output: bool) -> Result<()> {
         self.exec_with_optional_input(command, None, inherit_output, None)
             .await

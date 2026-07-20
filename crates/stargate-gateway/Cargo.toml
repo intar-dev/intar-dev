@@ -9,17 +9,22 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum = { workspace = true, features = ["http1", "json", "macros", "query", "tokio", "ws"] }
+base64.workspace = true
 bytes.workspace = true
 clap = { workspace = true, features = ["env"] }
 dashmap.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 jsonwebtoken.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls"] }
 russh.workspace = true
 sd-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 stargate-core = { path = "../stargate-core" }
 tempfile.workspace = true

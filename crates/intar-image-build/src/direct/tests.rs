@@ -17,9 +17,10 @@ use std::time::Instant;
 use tempfile::{TempDir, tempdir};
 
 use super::{
-    DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest, QEMU_EXIT_POLL_INTERVAL,
-    QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild, SSH_POLL_INTERVAL,
-    connect_qmp_socket, prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
+    DIRECT_PROVISION_COMMAND, DirectBuildPrepareInput, DirectBuildRequest, DirectQemuShutdownInput,
+    QEMU_EXIT_POLL_INTERVAL, QMP_IO_TIMEOUT, QMP_READ_POLL_INTERVAL, RenderedDirectBuild,
+    SSH_POLL_INTERVAL, acknowledged_qmp_shutdown_with_cancel, connect_qmp_socket,
+    prepare_direct_build_inputs, render_direct_build, wait_for_qemu_shutdown,
 };
 use crate::config::QemuBuildConfig;
 use crate::kino::KinoArtifact;
@@ -114,6 +115,34 @@ fn direct_provisioning_requires_success_before_host_poweroff() {
 fn qemu_exit_poll_is_independent_from_ssh_readiness_backoff() {
     assert_eq!(QEMU_EXIT_POLL_INTERVAL, Duration::from_millis(100));
     assert!(QEMU_EXIT_POLL_INTERVAL < SSH_POLL_INTERVAL);
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_kills_and_reaps_qemu_before_returning() {
+    let directory = tempdir().unwrap();
+    let mut qemu = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let error = acknowledged_qmp_shutdown_with_cancel(
+        &mut qemu,
+        &DirectQemuShutdownInput {
+            qmp_socket_path: &directory.path().join("missing-qmp.sock"),
+            serial_log_path: &directory.path().join("serial.log"),
+            build_log_path: &directory.path().join("build.log"),
+            timeout_seconds: 300,
+        },
+        || true,
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("shutdown cancelled"));
+    assert!(qemu.try_wait().unwrap().is_some());
 }
 
 #[cfg(unix)]

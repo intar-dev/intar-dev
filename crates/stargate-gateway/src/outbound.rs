@@ -1,7 +1,10 @@
 use std::{
     future::Future,
+    io,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::Arc,
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 
@@ -15,7 +18,8 @@ use russh::{
     kex,
     keys::{PrivateKeyWithHashAlg, ssh_key::PublicKey},
 };
-use stargate_core::RouteRecord;
+use stargate_core::{RouteRecord, WorkspaceAppRouteRecord};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -162,22 +166,132 @@ struct PreparedSshTarget {
     private_key: Arc<russh::keys::PrivateKey>,
 }
 
+/// An authenticated SSH direct-tcpip stream. The SSH session handle is kept
+/// alive for exactly as long as Hyper owns this stream.
+pub struct DirectTcpIpTunnel {
+    _session: client::Handle<StrictHostKey>,
+    stream: russh::ChannelStream<Msg>,
+}
+
+impl AsyncRead for DirectTcpIpTunnel {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for DirectTcpIpTunnel {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+pub async fn open_workspace_app_tunnel(
+    route: &WorkspaceAppRouteRecord,
+) -> anyhow::Result<DirectTcpIpTunnel> {
+    let target = PreparedSshTarget::from_parts(
+        &route.target_ip,
+        route.target_ssh_port,
+        &route.target_host_key_openssh,
+        &route.target_private_key_openssh,
+    )?;
+    let session = connect_authenticated_target(target, &route.target_username).await?;
+    let channel = session
+        .channel_open_direct_tcpip(
+            "127.0.0.1",
+            u32::from(route.target_app_port),
+            "127.0.0.1",
+            0,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed opening guest direct-tcpip channel to port {}",
+                route.target_app_port
+            )
+        })?;
+    Ok(DirectTcpIpTunnel {
+        _session: session,
+        stream: channel.into_stream(),
+    })
+}
+
 impl PreparedSshTarget {
     fn new(route: &RouteRecord) -> anyhow::Result<Self> {
-        let ip = route
-            .target_ip
+        Self::from_parts(
+            &route.target_ip,
+            route.target_port,
+            &route.target_host_key_openssh,
+            &route.target_private_key_openssh,
+        )
+    }
+
+    fn from_parts(
+        target_ip: &str,
+        target_port: u16,
+        target_host_key_openssh: &str,
+        target_private_key_openssh: &str,
+    ) -> anyhow::Result<Self> {
+        let ip = target_ip
             .parse::<IpAddr>()
-            .with_context(|| format!("target_ip '{}' is not a literal IP", route.target_ip))?;
-        let expected_host_key = route.target_host_key().context("invalid target host key")?;
-        let private_key = russh::keys::decode_secret_key(&route.target_private_key_openssh, None)
+            .with_context(|| format!("target_ip '{target_ip}' is not a literal IP"))?;
+        let expected_host_key =
+            PublicKey::from_openssh(target_host_key_openssh).context("invalid target host key")?;
+        let private_key = russh::keys::decode_secret_key(target_private_key_openssh, None)
             .context("invalid target private key")?;
 
         Ok(Self {
-            addr: SocketAddr::new(ip, route.target_port),
+            addr: SocketAddr::new(ip, target_port),
             expected_host_key,
             private_key: Arc::new(private_key),
         })
     }
+}
+
+async fn connect_authenticated_target(
+    target: PreparedSshTarget,
+    target_username: &str,
+) -> anyhow::Result<client::Handle<StrictHostKey>> {
+    let mut session = client::connect(
+        client_config(),
+        target.addr,
+        StrictHostKey {
+            expected: target.expected_host_key,
+        },
+    )
+    .await
+    .with_context(|| format!("failed connecting to target {}", target.addr))?;
+    let rsa_hash_alg = session
+        .best_supported_rsa_hash()
+        .await
+        .context("failed to negotiate target public-key hash algorithms")?
+        .flatten();
+    let auth_result = session
+        .authenticate_publickey(
+            target_username,
+            PrivateKeyWithHashAlg::new(target.private_key, rsa_hash_alg),
+        )
+        .await
+        .context("target public-key authentication failed")?;
+    if !auth_result.success() {
+        bail!("target public-key authentication was rejected");
+    }
+    Ok(session)
 }
 
 struct StrictHostKey {

@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -13,12 +14,16 @@ on:
       - "base-images.hcl"
       - "build-tools.hcl"
       - "crates/**"
+      - "scripts/import-platform-engineering-workshop.ts"
+      - "scripts/check-platform-engineering-workshop-import.ts"
+      - "workshops/**"
       - "website/src/generated/**"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -27,6 +32,9 @@ on:
       - "base-images.hcl"
       - "build-tools.hcl"
       - "crates/**"
+      - "scripts/import-platform-engineering-workshop.ts"
+      - "scripts/check-platform-engineering-workshop-import.ts"
+      - "workshops/**"
       - "website/src/generated/**"
   workflow_dispatch:
 
@@ -59,8 +67,51 @@ jobs:
         with:
           tool: just,cargo-nextest
 
+      - name: Install Bun for pinned workshop import checks
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
       - name: Run workspace checks
         run: just verify
+
+      - name: Validate and bundle reference workshop
+        env:
+          PINNED_REVISION: 1b6fad43551a720b143d7a52799f81c4c89455cb
+        run: |
+          set -euo pipefail
+          bundle_root="$(mktemp -d)"
+          cleanup_bundle() {
+            rm -rf "${bundle_root}"
+          }
+          trap cleanup_bundle EXIT
+
+          upstream_root="${bundle_root}/upstream"
+          regeneration_root="${bundle_root}/regeneration"
+          git init --quiet "${upstream_root}"
+          git -C "${upstream_root}" remote add origin \
+            https://github.com/randax/Platform-Engineering-Workshop.git
+          git -C "${upstream_root}" fetch --depth=1 origin "${PINNED_REVISION}"
+          git -C "${upstream_root}" checkout --quiet --detach FETCH_HEAD
+          mkdir -p "${regeneration_root}"
+          (
+            cd "${regeneration_root}"
+            bun "${GITHUB_WORKSPACE}/scripts/import-platform-engineering-workshop.ts" \
+              "${upstream_root}"
+          )
+          bun scripts/check-platform-engineering-workshop-import.ts \
+            "${regeneration_root}/workshops/platform-engineering" \
+            workshops/platform-engineering
+
+          cargo run --locked -p intar-workshop-cli -- \
+            validate workshops/platform-engineering
+          cargo run --locked -p intar-workshop-cli -- \
+            bundle workshops/platform-engineering \
+            --output "${bundle_root}/first.tar.gz"
+          cargo run --locked -p intar-workshop-cli -- \
+            bundle workshops/platform-engineering \
+            --output "${bundle_root}/second.tar.gz"
+          cmp "${bundle_root}/first.tar.gz" "${bundle_root}/second.tar.gz"
 
       - name: Check generated contracts
         run: just check-generated-contracts

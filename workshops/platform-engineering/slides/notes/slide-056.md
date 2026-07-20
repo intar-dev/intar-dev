@@ -1,0 +1,1 @@
+The portal module — and the second honest-ecosystem interlude of the day (build vs. buy). Everything built so far is APIs and YAML: perfect for platform engineers, invisible to everyone else. A portal is how a platform gets adopted.

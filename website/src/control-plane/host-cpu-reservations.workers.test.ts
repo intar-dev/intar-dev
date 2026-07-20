@@ -17,6 +17,7 @@ import {
   hostActualState,
   hostCpuReservations,
   hostDesiredState,
+  hostResourceReservations,
   scenarioRuns,
   user,
 } from "@/db/schema";
@@ -213,6 +214,7 @@ describe("host CPU reservations", () => {
       now,
       projectedQuotaState("generation-a", "boot_burst"),
     );
+    await seedGenericRuntimeReservation(hostId, runId, now, 2_000);
     await commitHostCpuReservation(db, { hostId, runId, nowUnixMs: now });
     await seedRunningDesiredState(hostId, runId, "run-seal-capacity-vm", now);
 
@@ -272,6 +274,15 @@ describe("host CPU reservations", () => {
         quotaPhase: "steady",
       }),
     ]);
+    await expect(
+      db
+        .select({
+          cpuMillis: hostResourceReservations.cpuMillis,
+          state: hostResourceReservations.state,
+        })
+        .from(hostResourceReservations)
+        .where(eq(hostResourceReservations.executionId, runId)),
+    ).resolves.toEqual([{ cpuMillis: 1_000, state: "committed" }]);
 
     await expect(
       reserveHostCpuInD1(db, {
@@ -723,6 +734,36 @@ async function seedRunningDesiredState(
     createdAt: now,
     updatedAt: now,
   });
+}
+
+async function seedGenericRuntimeReservation(
+  hostId: string,
+  runId: string,
+  now: number,
+  cpuMillis: number,
+): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO runtime_vms (
+         id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json,
+         image_sha256, cpu_millis, memory_mib, disk_mib, created_at, updated_at
+       ) VALUES (?, ?, 'vm', 0, ?, ?, ?, 1000, 512, 4096, ?, ?)`,
+    ).bind(
+      `${runId}:vm`,
+      runId,
+      `${runId}-vm`,
+      JSON.stringify({ scenario: "scenario", vm: "vm", arch: "x86_64" }),
+      "2".repeat(64),
+      now,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO host_resource_reservations (
+         execution_id, host_id, cpu_millis, memory_mib, worst_case_disk_mib,
+         state, expires_at, released_at, created_at, updated_at
+       ) VALUES (?, ?, ?, 512, 4096, 'committed', NULL, NULL, ?, ?)`,
+    ).bind(runId, hostId, cpuMillis, now, now),
+  ]);
 }
 
 function quotaVmReport(input: {

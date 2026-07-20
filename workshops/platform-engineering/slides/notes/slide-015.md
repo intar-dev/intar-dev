@@ -1,0 +1,3 @@
+The Git topology is the single most important architectural decision in the workshop — it removes live GitHub, SaaS credentials, shared egress, and external rate limits from the write path. This replicates the CNOE idpbuilder pattern; idpbuilder itself is kind-only (issue #74), so we copy the pattern and its manifests, not the binary.
+
+ApplicationSets vs app-of-apps: ApplicationSets are for stamping many clusters; we have one cluster with disparate components, which is exactly the app-of-apps shape. Crossplane's CRDs blow the 262KB client-side annotation limit, so CRD-heavy apps get ServerSideApply=true; CR-shipping apps get SkipDryRunOnMissingResource=true.
