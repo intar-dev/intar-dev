@@ -1,0 +1,72 @@
+name: Workshop application edge
+run-name: "Workshop application edge ${{ inputs.operation || 'validate' }} @ ${{ github.ref_name }}"
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/workshop-app-edge.yml"
+      - "ops/cloudflare/workshop-app-routing.json"
+      - "ops/cloudflare/workshop-app-routing.mjs"
+      - "ops/cloudflare/workshop-app-routing.test.mjs"
+      - "docs/workshops-rollout.md"
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read or reconcile the workshop application edge state
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - rollback
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate desired state
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate configuration
+        run: node ops/cloudflare/workshop-app-routing.mjs validate
+
+      - name: Test reconciler safeguards
+        run: node --test ops/cloudflare/workshop-app-routing.test.mjs
+
+  reconcile:
+    name: ${{ inputs.operation }} production edge
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 10
+    concurrency:
+      group: workshop-application-edge-production
+      cancel-in-progress: false
+    steps:
+      - name: Require reviewed main revision
+        run: test "${GITHUB_REF}" = "refs/heads/main"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify deployment revision
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Inventory and ${{ inputs.operation }} edge state
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_INTAR_APP_ZONE_ID }}
+          CLOUDFLARE_WORKSHOP_EDGE_API_TOKEN: ${{ secrets.CLOUDFLARE_WORKSHOP_EDGE_API_TOKEN }}
+          INTAR_EDGE_MUTATION_APPROVED: ${{ inputs.operation != 'plan' && 'true' || 'false' }}
+        run: node ops/cloudflare/workshop-app-routing.mjs "${{ inputs.operation }}"
