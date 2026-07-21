@@ -10,6 +10,7 @@ fn boot_cpu_guardian_encodes_namespace_lockdown_as_systemd_uint64_mask() {
 #[test]
 fn hard_cpu_lease_uses_a_monotonic_deadline_and_attests_steady_quota() {
     let root = tempfile::tempdir().expect("temporary cgroup root");
+    let unit_name = "intar-vm-test.service";
     let cgroup = Path::new("/intar.slice/intar-vms.slice/intar-vm-test.service");
     let directory = root
         .path()
@@ -21,8 +22,24 @@ fn hard_cpu_lease_uses_a_monotonic_deadline_and_attests_steady_quota() {
     let started = Instant::now();
     let deadline = started + Duration::from_millis(10);
 
-    seal_cpu_controller_at_deadline(root.path(), cgroup, steady, deadline)
-        .expect("seal fake controller");
+    seal_cpu_unit_at_deadline_with(
+        unit_name,
+        cgroup,
+        steady,
+        deadline,
+        |observed_unit, observed_cgroup, quota| {
+            assert_eq!(observed_unit, unit_name);
+            assert_eq!(observed_cgroup, cgroup);
+            let relative = observed_cgroup.strip_prefix("/").expect("relative");
+            let directory = root.path().join(relative);
+            // Fake systemd's SetUnitProperties write. The production watchdog
+            // reaches this mutation through the existing D-Bus backend so the
+            // daemon can retain ProtectControlGroups=yes.
+            std::fs::write(directory.join("cpu.max"), quota.cpu_max())?;
+            assert_cpu_quota_at(root.path(), observed_cgroup, quota)
+        },
+    )
+    .expect("seal fake controller through systemd callback");
 
     assert!(started.elapsed() >= Duration::from_millis(10));
     assert_cpu_quota_at(root.path(), cgroup, steady).expect("attest fake controller");
