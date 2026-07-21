@@ -194,8 +194,11 @@ flag is enabled.
 Migration `0005_runtime_executions.sql` creates the generic execution ledger,
 `0009_scenario_runtime_data_backfill.sql` copies existing VM, key, artifact,
 terminal, and reservation data, and `0010_runtime_artifact_ingestion.sql`
-finishes the generic multipart-upload/sealing ledger. No scenario may start
-while the migration sequence is in flight.
+finishes the generic multipart-upload/sealing ledger.
+`0015_legacy_scenario_runtime_backfill.sql` repairs scenario state documents
+written before the V6 CPU cutover and replays their dependent runtime records.
+No scenario may start while either the initial migration sequence or that
+forward repair is in flight.
 
 First capture all currently enabled scenarios with a read-only query:
 
@@ -317,9 +320,22 @@ The expected ordered D1 additions are:
 | `0012_workshop_agenda_focus.sql` | canonical agenda focus for briefing, lab, break, tinker, and retro timers |
 | `0013_workshop_presence.sql` | durable roster heartbeat timestamps for server-derived present, stale, and absent state |
 | `0014_workshop_live_membership_guards.sql` | route-issuance ledger plus fail-closed roster, workspace, generation, help, and assistance identity guards during membership removal |
+| `0015_legacy_scenario_runtime_backfill.sql` | deterministic pre-V6 scenario VM, key, artifact, terminal, upload, seal, and reservation repair |
 
-All eleven migrations are forward-only. `0005` also installs synchronization and
+All twelve migrations are forward-only. `0005` also installs synchronization and
 conflict triggers, so selectively removing tables is not a rollback.
+
+Pre-V6 scenario state stores CPU allocation as
+`provisioning.resources.vcpus`; newer state stores `cpuMillis`. Migration
+`0009` required the newer field and therefore could not reconstruct those
+older VMs. Migration `0015` applies the same deterministic conversion used by
+the V6 cutover, `cpu_millis = vcpus * 1000`, and then idempotently replays the
+dependent access keys, artifacts, eligible terminal sessions, multipart
+uploads, completed-VM seals, and reservations. Because `0009` is already
+ledgered, this correction must remain a new forward migration deployed by the
+GitHub Actions workflow; do not edit historical D1 rows or run repair SQL from
+an operator workstation. Keep starts frozen until `0015` is ledgered and every
+mismatch check below returns zero.
 
 ## 6. Prove the migration and scenario compatibility
 
@@ -328,7 +344,7 @@ Verify the ledger and foreign keys first:
 ```sh
 cd website
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
-  "SELECT id, name, applied_at FROM d1_migrations WHERE name IN ('0004_workshops.sql','0005_runtime_executions.sql','0006_workshop_registry.sql','0007_workshop_runtime_delivery.sql','0008_workshop_publication_claim_lease.sql','0009_scenario_runtime_data_backfill.sql','0010_runtime_artifact_ingestion.sql','0011_workshop_roster_runtime_guard.sql','0012_workshop_agenda_focus.sql','0013_workshop_presence.sql','0014_workshop_live_membership_guards.sql') ORDER BY id;"
+  "SELECT id, name, applied_at FROM d1_migrations WHERE name IN ('0004_workshops.sql','0005_runtime_executions.sql','0006_workshop_registry.sql','0007_workshop_runtime_delivery.sql','0008_workshop_publication_claim_lease.sql','0009_scenario_runtime_data_backfill.sql','0010_runtime_artifact_ingestion.sql','0011_workshop_roster_runtime_guard.sql','0012_workshop_agenda_focus.sql','0013_workshop_presence.sql','0014_workshop_live_membership_guards.sql','0015_legacy_scenario_runtime_backfill.sql') ORDER BY id;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   'PRAGMA foreign_key_check;'
@@ -346,27 +362,30 @@ bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "WITH expected AS (SELECT s.run_id, coalesce(json_array_length(s.state_json, '$.vms'), 0) AS vm_count FROM scenario_runs s), actual AS (SELECT e.domain_id AS run_id, count(v.id) AS vm_count FROM runtime_executions e LEFT JOIN runtime_vms v ON v.execution_id = e.id WHERE e.domain_kind = 'scenario' GROUP BY e.domain_id) SELECT count(*) AS vm_backfill_mismatches FROM expected LEFT JOIN actual USING (run_id) WHERE expected.vm_count <> coalesce(actual.vm_count, 0);"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
+  "WITH expected AS (SELECT s.runtime_execution_id AS execution_id, json_extract(vm.value, '$.id') AS vm_id, cast(json_extract(vm.value, '$.ordinal') AS integer) AS ordinal, json_extract(vm.value, '$.runtimeVmName') AS runtime_vm_name, CASE WHEN cast(json_extract(vm.value, '$.provisioning.resources.cpuMillis') AS integer) > 0 THEN cast(json_extract(vm.value, '$.provisioning.resources.cpuMillis') AS integer) WHEN cast(json_extract(vm.value, '$.provisioning.resources.vcpuCount') AS integer) > 0 THEN cast(json_extract(vm.value, '$.provisioning.resources.vcpuCount') AS integer) * 1000 WHEN cast(json_extract(vm.value, '$.provisioning.resources.vcpus') AS integer) > 0 THEN cast(json_extract(vm.value, '$.provisioning.resources.vcpus') AS integer) * 1000 ELSE NULL END AS cpu_millis, cast(json_extract(vm.value, '$.provisioning.resources.memoryMib') AS integer) AS memory_mib, cast(json_extract(vm.value, '$.provisioning.resources.diskMib') AS integer) AS disk_mib FROM scenario_runs s JOIN json_each(s.state_json, '$.vms') vm) SELECT count(*) AS vm_spec_mismatches FROM expected LEFT JOIN runtime_vms actual ON actual.execution_id = expected.execution_id AND actual.vm_id = expected.vm_id WHERE actual.id IS NULL OR actual.ordinal IS NOT expected.ordinal OR actual.runtime_vm_name IS NOT expected.runtime_vm_name OR actual.cpu_millis IS NOT expected.cpu_millis OR actual.memory_mib IS NOT expected.memory_mib OR actual.disk_mib IS NOT expected.disk_mib;"
+
+bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   'SELECT count(*) AS access_key_mismatches FROM scenario_run_ssh_keys k JOIN scenario_runs s ON s.run_id = k.run_id LEFT JOIN runtime_vms v ON v.execution_id = s.runtime_execution_id AND v.vm_id = k.vm_id LEFT JOIN runtime_vm_access_keys a ON a.runtime_vm_id = v.id AND a.execution_id = s.runtime_execution_id WHERE a.runtime_vm_id IS NULL;'
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   'SELECT count(*) AS artifact_mismatches FROM scenario_run_artifacts a JOIN scenario_runs s ON s.run_id = a.run_id LEFT JOIN runtime_artifacts r ON r.id = a.id AND r.execution_id = s.runtime_execution_id WHERE r.id IS NULL;'
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
-  'SELECT count(*) AS artifact_upload_mismatches FROM scenario_run_artifact_uploads legacy JOIN runtime_artifacts artifact ON artifact.id = legacy.artifact_id LEFT JOIN runtime_artifact_uploads runtime ON runtime.artifact_id = legacy.artifact_id WHERE runtime.artifact_id IS NULL OR runtime.r2_upload_id IS NOT legacy.r2_upload_id OR runtime.uploaded_parts_json <> legacy.uploaded_parts_json OR runtime.next_expected_part <> legacy.next_expected_part OR runtime.updated_at <> legacy.updated_at;'
+  'SELECT count(*) AS artifact_upload_mismatches FROM scenario_run_artifact_uploads legacy LEFT JOIN runtime_artifacts artifact ON artifact.id = legacy.artifact_id LEFT JOIN runtime_artifact_uploads runtime ON runtime.artifact_id = legacy.artifact_id WHERE artifact.id IS NULL OR runtime.artifact_id IS NULL OR runtime.r2_upload_id IS NOT legacy.r2_upload_id OR runtime.uploaded_parts_json <> legacy.uploaded_parts_json OR runtime.next_expected_part <> legacy.next_expected_part OR runtime.updated_at <> legacy.updated_at;'
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT count(*) AS invalid_runtime_artifact_rows FROM runtime_artifacts WHERE upload_status NOT IN ('pending','uploaded') OR (upload_status = 'uploaded' AND uploaded_at IS NULL) OR (upload_status = 'pending' AND uploaded_at IS NOT NULL); SELECT count(*) AS invalid_runtime_artifact_upload_rows FROM runtime_artifact_uploads WHERE next_expected_part <= 0 OR NOT json_valid(uploaded_parts_json);"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
-  "WITH expected AS (SELECT s.runtime_execution_id AS execution_id, runtime_vm.id AS runtime_vm_id, cast(json_extract(session.value, '$.index') AS integer) AS ordinal, cast(json_extract(session.value, '$.startTimestampMs') AS integer) AS started_at, cast(json_extract(session.value, '$.startTimestampMs') AS integer) + cast(json_extract(session.value, '$.durationMs') AS integer) AS ended_at, cast(json_extract(session.value, '$.exitCode') AS integer) AS exit_code, artifact.id AS recording_artifact_id FROM scenario_runs s JOIN json_each(s.state_json, '$.vms') vm JOIN json_each(vm.value, '$.sessionTimeline') session JOIN runtime_vms runtime_vm ON runtime_vm.execution_id = s.runtime_execution_id AND runtime_vm.vm_id = json_extract(vm.value, '$.id') LEFT JOIN runtime_artifacts artifact ON artifact.execution_id = s.runtime_execution_id AND artifact.id = json_extract(session.value, '$.castArtifactId') WHERE json_type(session.value, '$.index') = 'integer' AND cast(json_extract(session.value, '$.startTimestampMs') AS integer) >= 0 AND cast(json_extract(session.value, '$.durationMs') AS integer) >= 0) SELECT count(*) AS terminal_session_mismatches FROM expected LEFT JOIN runtime_terminal_sessions actual ON actual.execution_id = expected.execution_id AND actual.runtime_vm_id = expected.runtime_vm_id AND actual.ordinal = expected.ordinal WHERE actual.id IS NULL OR actual.started_at IS NOT expected.started_at OR actual.ended_at IS NOT expected.ended_at OR actual.exit_code IS NOT expected.exit_code OR actual.recording_artifact_id IS NOT expected.recording_artifact_id;"
+  "WITH expected AS (SELECT s.runtime_execution_id AS execution_id, runtime_vm.id AS runtime_vm_id, cast(json_extract(session.value, '$.index') AS integer) AS ordinal, cast(json_extract(session.value, '$.startTimestampMs') AS integer) AS started_at, cast(json_extract(session.value, '$.startTimestampMs') AS integer) + cast(json_extract(session.value, '$.durationMs') AS integer) AS ended_at, cast(json_extract(session.value, '$.exitCode') AS integer) AS exit_code, artifact.id AS recording_artifact_id FROM scenario_runs s JOIN json_each(s.state_json, '$.vms') vm JOIN json_each(vm.value, '$.sessionTimeline') session LEFT JOIN runtime_vms runtime_vm ON runtime_vm.execution_id = s.runtime_execution_id AND runtime_vm.vm_id = json_extract(vm.value, '$.id') LEFT JOIN runtime_artifacts artifact ON artifact.execution_id = s.runtime_execution_id AND artifact.id = json_extract(session.value, '$.castArtifactId') WHERE json_type(session.value, '$.index') = 'integer' AND cast(json_extract(session.value, '$.startTimestampMs') AS integer) >= 0 AND cast(json_extract(session.value, '$.durationMs') AS integer) >= 0) SELECT count(*) AS terminal_session_mismatches FROM expected LEFT JOIN runtime_terminal_sessions actual ON actual.execution_id = expected.execution_id AND actual.runtime_vm_id = expected.runtime_vm_id AND actual.ordinal = expected.ordinal WHERE expected.runtime_vm_id IS NULL OR actual.id IS NULL OR actual.started_at IS NOT expected.started_at OR actual.ended_at IS NOT expected.ended_at OR actual.exit_code IS NOT expected.exit_code OR actual.recording_artifact_id IS NOT expected.recording_artifact_id;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT count(*) AS active_slot_mismatches FROM scenario_runs s LEFT JOIN active_runtime_slots slot ON slot.user_id = s.user_id AND slot.execution_id = s.runtime_execution_id WHERE s.active_key IS NOT NULL AND slot.user_id IS NULL; SELECT count(*) AS unexpected_slots_after_drain FROM active_runtime_slots; SELECT count(*) AS unreleased_reservations_after_drain FROM host_resource_reservations WHERE state IN ('pending', 'committed');"
 ```
 
-Migration `0009` reconstructs historical terminal-session metadata from each
-scenario VM's timeline. It intentionally does not copy plaintext bodies from
-`scenario_run_session_transcripts` into
+Migrations `0009` and `0015` reconstruct historical terminal-session metadata
+from each scenario VM's timeline. They intentionally do not copy plaintext
+bodies from `scenario_run_session_transcripts` into
 `runtime_terminal_sessions.transcript_r2_key`; existing scenario history keeps
 using the legacy transcript table until a separate encrypted/R2 transcript
 migration is designed. A zero terminal-session mismatch therefore proves the
@@ -883,7 +902,7 @@ resolve to the same organization.
 
 ## Abort and rollback boundaries
 
-### Before `0004`–`0014`
+### Before `0004`–`0015`
 
 Re-enable only the scenarios and runners recorded before the drain. Remove any
 unapplied canary flag rule. No database rollback is needed.

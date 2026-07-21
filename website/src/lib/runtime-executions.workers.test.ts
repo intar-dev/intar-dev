@@ -268,6 +268,258 @@ describe("domain-neutral runtime executions", () => {
     ]);
   });
 
+  it("repairs vcpus-only scenario runtime children after the original backfill", async () => {
+    await reset();
+    await applyD1Migrations(
+      env.DB,
+      d1Migrations.filter((migration) => migration.name < "0005"),
+    );
+    await seedRuntimeOwner(false);
+
+    const runId = "legacy-vcpu-scenario";
+    const vmId = "legacy-vm";
+    const runtimeVmId = `${runId}:${vmId}`;
+    const artifactId = "legacy-recording-artifact";
+    const stateJson = JSON.stringify({
+      phase: "completed",
+      vms: [
+        {
+          id: vmId,
+          ordinal: 0,
+          runtimeVmName: "scenario-a-web-legacy-1",
+          phase: "completed",
+          provisioning: {
+            imageKey: { scenario: "scenario-a", vm: "web", arch: "x86_64" },
+            imageSha256: "a".repeat(64),
+            resources: { vcpus: 1, memoryMib: 512, diskMib: 4_096 },
+          },
+          terminalTarget: {
+            host: "192.0.2.10",
+            port: 22,
+            username: "ubuntu",
+            hostKeyOpenssh: "ssh-ed25519 host-key",
+            checkedAt: 3_500,
+          },
+          sessionTimeline: [
+            {
+              index: 0,
+              startTimestampMs: 3_100,
+              durationMs: 250,
+              exitCode: 0,
+              castArtifactId: artifactId,
+            },
+          ],
+        },
+      ],
+    });
+
+    await env.DB.batch([
+      legacyScenarioRunInsert({
+        runId,
+        state: "completed",
+        stateRank: 8,
+        activeKey: null,
+        completedAt: 4_000,
+        stateJson,
+      }),
+      env.DB.prepare(
+        `INSERT INTO scenario_run_ssh_keys (
+           id, run_id, vm_id, runtime_vm_name, public_key_openssh,
+           private_key_ciphertext_b64, private_key_iv_b64, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        "legacy-ssh-key",
+        runId,
+        vmId,
+        "scenario-a-web-legacy-1",
+        "ssh-ed25519 learner-key",
+        "legacy-key-ciphertext",
+        "legacy-key-iv",
+        3_000,
+      ),
+      env.DB.prepare(
+        `INSERT INTO scenario_run_artifacts (
+           id, run_id, vm_id, ordinal, kind, filename, content_type,
+           size_bytes, sha256, r2_key, upload_status, created_at, uploaded_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        artifactId,
+        runId,
+        vmId,
+        0,
+        "ssh_recording_segment",
+        "session-0.cast",
+        "application/x-asciicast",
+        128,
+        "b".repeat(64),
+        `runs/${runId}/${vmId}/session-0.cast`,
+        "uploaded",
+        3_100,
+        3_200,
+      ),
+      env.DB.prepare(
+        `INSERT INTO scenario_run_artifact_uploads (
+           artifact_id, r2_upload_id, uploaded_parts_json,
+           next_expected_part, updated_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        artifactId,
+        "legacy-r2-upload",
+        '[{"partNumber":1,"etag":"etag-1"}]',
+        2,
+        3_150,
+      ),
+    ]);
+
+    await applyD1Migrations(
+      env.DB,
+      d1Migrations.filter(
+        (migration) =>
+          migration.name >= "0005" && migration.name < "0015",
+      ),
+    );
+
+    const beforeRepair = await runtimeBackfillCounts(runId);
+    expect(beforeRepair).toEqual({
+      vms: 0,
+      accessKeys: 0,
+      artifacts: 0,
+      uploads: 0,
+      terminalSessions: 0,
+    });
+
+    const correctiveMigrations = d1Migrations.filter(
+      (migration) =>
+        migration.name === "0015_legacy_scenario_runtime_backfill.sql",
+    );
+    expect(correctiveMigrations).toHaveLength(1);
+    await applyD1Migrations(env.DB, correctiveMigrations);
+
+    const [vm, accessKey, artifact, upload, terminal, foreignKeys] =
+      await Promise.all([
+        env.DB.prepare(
+          `SELECT id, execution_id, vm_id, cpu_millis, memory_mib, disk_mib,
+                  artifact_writes_sealed, terminal_host, terminal_port,
+                  terminal_username, terminal_host_key_openssh,
+                  terminal_observed_at
+           FROM runtime_vms
+           WHERE id = ?`,
+        )
+          .bind(runtimeVmId)
+          .first(),
+        env.DB.prepare(
+          `SELECT runtime_vm_id, execution_id, public_key_openssh,
+                  private_key_ciphertext_b64, private_key_iv_b64, created_at
+           FROM runtime_vm_access_keys
+           WHERE runtime_vm_id = ?`,
+        )
+          .bind(runtimeVmId)
+          .first(),
+        env.DB.prepare(
+          `SELECT id, execution_id, runtime_vm_id, ordinal, kind, filename,
+                  content_type, size_bytes, sha256, r2_key, upload_status,
+                  created_at, uploaded_at
+           FROM runtime_artifacts
+           WHERE id = ?`,
+        )
+          .bind(artifactId)
+          .first(),
+        env.DB.prepare(
+          `SELECT artifact_id, r2_upload_id, uploaded_parts_json,
+                  next_expected_part, updated_at
+           FROM runtime_artifact_uploads
+           WHERE artifact_id = ?`,
+        )
+          .bind(artifactId)
+          .first(),
+        env.DB.prepare(
+          `SELECT id, execution_id, runtime_vm_id, ordinal, started_at,
+                  ended_at, exit_code, recording_artifact_id,
+                  transcript_r2_key, created_at, updated_at
+           FROM runtime_terminal_sessions
+           WHERE runtime_vm_id = ? AND ordinal = 0`,
+        )
+          .bind(runtimeVmId)
+          .first(),
+        env.DB.prepare("PRAGMA foreign_key_check").all(),
+      ]);
+
+    expect(vm).toEqual({
+      id: runtimeVmId,
+      execution_id: runId,
+      vm_id: vmId,
+      cpu_millis: 1_000,
+      memory_mib: 512,
+      disk_mib: 4_096,
+      artifact_writes_sealed: 1,
+      terminal_host: "192.0.2.10",
+      terminal_port: 22,
+      terminal_username: "ubuntu",
+      terminal_host_key_openssh: "ssh-ed25519 host-key",
+      terminal_observed_at: 3_500,
+    });
+    expect(accessKey).toEqual({
+      runtime_vm_id: runtimeVmId,
+      execution_id: runId,
+      public_key_openssh: "ssh-ed25519 learner-key",
+      private_key_ciphertext_b64: "legacy-key-ciphertext",
+      private_key_iv_b64: "legacy-key-iv",
+      created_at: 3_000,
+    });
+    expect(artifact).toEqual({
+      id: artifactId,
+      execution_id: runId,
+      runtime_vm_id: runtimeVmId,
+      ordinal: 0,
+      kind: "ssh_recording_segment",
+      filename: "session-0.cast",
+      content_type: "application/x-asciicast",
+      size_bytes: 128,
+      sha256: "b".repeat(64),
+      r2_key: `runs/${runId}/${vmId}/session-0.cast`,
+      upload_status: "uploaded",
+      created_at: 3_100,
+      uploaded_at: 3_200,
+    });
+    expect(upload).toEqual({
+      artifact_id: artifactId,
+      r2_upload_id: "legacy-r2-upload",
+      uploaded_parts_json: '[{"partNumber":1,"etag":"etag-1"}]',
+      next_expected_part: 2,
+      updated_at: 3_150,
+    });
+    expect(terminal).toEqual({
+      id: `${runId}:${vmId}:session:0`,
+      execution_id: runId,
+      runtime_vm_id: runtimeVmId,
+      ordinal: 0,
+      started_at: 3_100,
+      ended_at: 3_350,
+      exit_code: 0,
+      recording_artifact_id: artifactId,
+      transcript_r2_key: null,
+      created_at: 3_000,
+      updated_at: 3_000,
+    });
+    expect(foreignKeys.results).toEqual([]);
+
+    for (const migration of correctiveMigrations) {
+      for (const query of migration.queries) {
+        await env.DB.prepare(query).run();
+      }
+    }
+    expect(await runtimeBackfillCounts(runId)).toEqual({
+      vms: 1,
+      accessKeys: 1,
+      artifacts: 1,
+      uploads: 1,
+      terminalSessions: 1,
+    });
+    expect(
+      (await env.DB.prepare("PRAGMA foreign_key_check").all()).results,
+    ).toEqual([]);
+  });
+
   it("creates a recovery generation without changing domain identity", async () => {
     const db = drizzle(env.DB);
     const original = await createRuntimeExecution({
@@ -813,12 +1065,44 @@ function scenarioRun(
   };
 }
 
+async function runtimeBackfillCounts(runId: string) {
+  const row = await env.DB.prepare(
+    `SELECT
+       (SELECT count(*) FROM runtime_vms WHERE execution_id = ?) AS vms,
+       (SELECT count(*) FROM runtime_vm_access_keys WHERE execution_id = ?) AS access_keys,
+       (SELECT count(*) FROM runtime_artifacts WHERE execution_id = ?) AS artifacts,
+       (SELECT count(*)
+        FROM runtime_artifact_uploads upload
+        INNER JOIN runtime_artifacts artifact ON artifact.id = upload.artifact_id
+        WHERE artifact.execution_id = ?) AS uploads,
+       (SELECT count(*) FROM runtime_terminal_sessions WHERE execution_id = ?)
+         AS terminal_sessions`,
+  )
+    .bind(runId, runId, runId, runId, runId)
+    .first<{
+      vms: number;
+      access_keys: number;
+      artifacts: number;
+      uploads: number;
+      terminal_sessions: number;
+    }>();
+  if (!row) throw new Error("runtime backfill count query returned no row");
+  return {
+    vms: row.vms,
+    accessKeys: row.access_keys,
+    artifacts: row.artifacts,
+    uploads: row.uploads,
+    terminalSessions: row.terminal_sessions,
+  };
+}
+
 function legacyScenarioRunInsert(input: {
   runId: string;
   state: string;
   stateRank: number;
   activeKey: string | null;
   completedAt: number | null;
+  stateJson?: string;
 }) {
   return env.DB.prepare(
     `INSERT INTO scenario_runs (
@@ -829,12 +1113,13 @@ function legacyScenarioRunInsert(input: {
        updated_at
      ) VALUES (?, 'learner', 'academy', 'runtime-host', 'scenario-a',
        'scenario-a', 'Scenario A', '', '', '[]', 'easy', 10, '[]', '[]', '',
-       1, ?, ?, ?, '{}', ?, 3000, 3000)`,
+       1, ?, ?, ?, ?, ?, 3000, 3000)`,
   ).bind(
     input.runId,
     input.state,
     input.stateRank,
     input.activeKey,
+    input.stateJson ?? "{}",
     input.completedAt,
   );
 }
