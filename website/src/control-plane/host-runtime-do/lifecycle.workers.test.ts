@@ -1,6 +1,21 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const stargateMocks = vi.hoisted(() => ({
+  deleteStargateRoute: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/stargate", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/stargate")>()),
+  deleteStargateRoute: stargateMocks.deleteStargateRoute,
+}));
+import {
+  activeRuntimeSlots,
+  hostResourceReservations,
+  runtimeExecutions,
+  runtimeVms,
+} from "@/db/schema";
 import {
   testImageKey,
   seedHost,
@@ -50,6 +65,36 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       runtimeVmName,
       now,
     });
+    await db.batch([
+      db
+        .update(runtimeExecutions)
+        .set({ leaseExpiresAt: now - 1, updatedAt: now })
+        .where(eq(runtimeExecutions.id, runId)),
+      db.insert(runtimeVms).values({
+        id: "runtime-vm-expired",
+        executionId: runId,
+        vmId: "vm-1",
+        ordinal: 0,
+        runtimeVmName,
+        imageKeyJson: testImageKey,
+        imageSha256: "2".repeat(64),
+        cpuMillis: 1_000,
+        memoryMib: 512,
+        diskMib: 4_096,
+        createdAt: now,
+        updatedAt: now,
+      }),
+      db.insert(hostResourceReservations).values({
+        executionId: runId,
+        hostId,
+        cpuMillis: 1_000,
+        memoryMib: 512,
+        worstCaseDiskMib: 4_096,
+        state: "committed",
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ]);
     await mutateStoredHostDesiredState(db, hostId, now, (draft) => {
       upsertDesiredVm(draft, {
         run_id: runId,
@@ -94,6 +139,23 @@ describe("HostRuntimeDO run lifecycle projection", () => {
       (vm) => vm.run_id === runId && vm.vm_name === runtimeVmName,
     );
     expect(desiredVm?.desired_phase).toBe("absent");
+
+    const [[execution], slots, [reservation]] = await Promise.all([
+      db
+        .select({ state: runtimeExecutions.state })
+        .from(runtimeExecutions)
+        .where(eq(runtimeExecutions.id, runId)),
+      db
+        .select({ executionId: activeRuntimeSlots.executionId })
+        .from(activeRuntimeSlots),
+      db
+        .select({ state: hostResourceReservations.state })
+        .from(hostResourceReservations)
+        .where(eq(hostResourceReservations.executionId, runId)),
+    ]);
+    expect(execution?.state).toBe("archived");
+    expect(slots).toEqual([]);
+    expect(reservation?.state).toBe("released");
 
     ws.close();
   });

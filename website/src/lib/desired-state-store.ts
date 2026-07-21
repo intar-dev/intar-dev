@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, type SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { hostDesiredState } from "@/db/schema";
 import type { HostDesiredStateV2 } from "@/generated/bridge";
@@ -45,12 +45,18 @@ export async function loadOrCreateHostDesiredState(
 
 const MUTATE_DESIRED_STATE_MAX_ATTEMPTS = 5;
 
+export interface HostDesiredStateWriteGuard {
+  condition: SQL;
+  assertSatisfied: () => Promise<void>;
+}
+
 export async function mutateStoredHostDesiredState(
   db: DrizzleD1Database,
   hostId: string,
   nowUnixMs: number,
   mutator: DesiredStateMutator,
   initialState?: HostDesiredStateV2,
+  writeGuard?: HostDesiredStateWriteGuard,
 ): Promise<HostDesiredStateV2> {
   // Optimistic concurrency: the doc is mutated by worker routes and the host
   // runtime DO alarm concurrently, and an unconditional write would silently
@@ -77,12 +83,14 @@ export async function mutateStoredHostDesiredState(
         and(
           eq(hostDesiredState.hostId, hostId),
           eq(hostDesiredState.version, current.version),
+          writeGuard?.condition,
         ),
       )
       .returning({ version: hostDesiredState.version });
     if (updated.length > 0) {
       return next;
     }
+    await writeGuard?.assertSatisfied();
   }
 
   throw new Error(

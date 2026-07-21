@@ -18,6 +18,9 @@ pub struct DirectBootQemuInput<'a> {
     pub ssh_host_port: u16,
     pub memory_mib: u32,
     pub cpu_count: u32,
+    /// Trusted kernel command line for this direct boot. Callers must source
+    /// this from builder configuration, never from an untrusted bundle.
+    pub boot_cmdline: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +51,7 @@ pub fn render_direct_boot_qemu_command(input: &DirectBootQemuInput<'_>) -> Direc
         "-initrd".to_string(),
         input.initrd_path.display().to_string(),
         "-append".to_string(),
-        BUILD_BOOT_CMDLINE.to_string(),
+        input.boot_cmdline.to_string(),
         "-drive".to_string(),
         format!(
             "if=virtio,format=raw,discard=unmap,detect-zeroes=unmap,file={}",
@@ -113,6 +116,7 @@ mod tests {
 
     #[test]
     fn renders_direct_kernel_boot_qemu_args() {
+        const TRUSTED_BOOT_CMDLINE: &str = "root=/dev/vda rw console=ttyS0 intar.workshop=1";
         let config = QemuBuildConfig {
             accelerator: "kvm".to_string(),
             qemuargs: vec![vec!["-device".to_string(), "virtio-rng-pci".to_string()]],
@@ -129,6 +133,7 @@ mod tests {
             ssh_host_port: 22_222,
             memory_mib: 2048,
             cpu_count: 2,
+            boot_cmdline: TRUSTED_BOOT_CMDLINE,
         });
 
         assert_eq!(command.binary, Path::new("qemu-system-x86_64"));
@@ -160,7 +165,7 @@ mod tests {
             command
                 .args
                 .windows(2)
-                .any(|pair| pair == ["-append", BUILD_BOOT_CMDLINE])
+                .any(|pair| pair == ["-append", TRUSTED_BOOT_CMDLINE])
         );
         assert!(command.args.iter().any(|arg| {
             arg == "if=virtio,format=raw,discard=unmap,detect-zeroes=unmap,file=/work/root.raw"
@@ -205,6 +210,7 @@ mod tests {
             ssh_host_port: 22_222,
             memory_mib: 2048,
             cpu_count: 2,
+            boot_cmdline: BUILD_BOOT_CMDLINE,
         });
 
         assert!(

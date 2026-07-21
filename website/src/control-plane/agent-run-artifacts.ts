@@ -1,23 +1,23 @@
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  scenarioRunArtifacts,
-  scenarioRunArtifactUploads,
+  runtimeTerminalSessions,
   scenarioRuns,
   scenarioRunSessionTranscripts,
 } from "@/db/schema";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import { recomputeRunState, type SessionTimelineEntry } from "@/lib/run-state";
 import {
-  artifactIdFor,
+  advanceArtifactUpload,
   artifactMetadataMatches,
   artifactWritesSealedResponse,
-  buildArtifactObjectKey,
   decodePathSegment,
+  ensureArtifactState,
+  initializeArtifactUpload,
   jsonResponse,
   loadArtifactForRunVm,
   loadArtifactStatesForRunVm,
-  loadStoredRunLifecycle,
+  loadArtifactUploadState,
   markArtifactUploaded,
   normalizeArtifactInputs,
   parseRunState,
@@ -197,8 +197,7 @@ async function handleBeginRunUpload(
 
   const existingArtifacts = await loadArtifactStatesForRunVm(
     db,
-    runVm.runId,
-    runVm.vmId,
+    runVm,
   );
   if (runVm.artifactWritesSealed) {
     const isIdempotentRetry = artifacts.every((artifact) => {
@@ -220,48 +219,24 @@ async function handleBeginRunUpload(
     const existing = existingArtifacts.find(
       (candidate) => candidate.ordinal === artifact.ordinal,
     );
-    const artifactId =
-      existing?.id ?? artifactIdFor(runVm.vmId, artifact.ordinal);
-    const r2Key =
-      existing?.r2Key ??
-      buildArtifactObjectKey({
-        runId: runVm.runId,
-        vmId: runVm.vmId,
-        ordinal: artifact.ordinal,
-        kind: artifact.kind,
-        filename: artifact.filename,
-      });
-
-    if (existing) {
-      if (!artifactMetadataMatches(existing, artifact)) {
-        return jsonResponse(
-          {
-            error: `artifact ${artifact.ordinal} metadata does not match existing upload`,
-          },
-          409,
-        );
-      }
-      continue;
+    if (existing && !artifactMetadataMatches(existing, artifact)) {
+      return jsonResponse(
+        {
+          error: `artifact ${artifact.ordinal} metadata does not match existing upload`,
+        },
+        409,
+      );
     }
-
-    await db.insert(scenarioRunArtifacts).values({
-      id: artifactId,
-      runId: runVm.runId,
-      vmId: runVm.vmId,
-      ordinal: artifact.ordinal,
-      kind: artifact.kind,
-      filename: artifact.filename,
-      contentType: artifact.contentType,
-      sizeBytes: artifact.sizeBytes,
-      sha256: artifact.sha256,
-      r2Key,
-      uploadStatus: "pending",
+    await ensureArtifactState({
+      db,
+      runVm,
+      artifact,
+      ...(existing ? { existing } : {}),
       createdAt: now,
-      uploadedAt: null,
     });
   }
 
-  await transitionRunVmToArchiving(db, runVm.runId, runVm.vmId, now);
+  await transitionRunVmToArchiving(db, runVm, now);
 
   return jsonResponse({ runId: runVm.runId, vmName: runVm.runtimeVmName });
 }
@@ -285,7 +260,7 @@ async function handleMultipartBegin(
   }
 
   const { db, runVm } = resolved;
-  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
+  const artifact = await loadArtifactForRunVm(db, runVm, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
@@ -306,23 +281,14 @@ async function handleMultipartBegin(
     });
     await markArtifactUploaded({
       db,
-      runId,
-      vmId: runVm.vmId,
+      runVm,
       artifact,
       uploadedAt: now,
     });
     return jsonResponse({ done: true, nextExpectedPart: 1 });
   }
 
-  const existingUploadRows = await db
-    .select({
-      r2UploadId: scenarioRunArtifactUploads.r2UploadId,
-      nextExpectedPart: scenarioRunArtifactUploads.nextExpectedPart,
-    })
-    .from(scenarioRunArtifactUploads)
-    .where(eq(scenarioRunArtifactUploads.artifactId, artifact.id))
-    .limit(1);
-  const existingUpload = existingUploadRows[0];
+  const existingUpload = await loadArtifactUploadState(db, artifact);
   if (existingUpload?.r2UploadId) {
     return jsonResponse({
       done: false,
@@ -339,24 +305,13 @@ async function handleMultipartBegin(
     },
   );
 
-  await db
-    .insert(scenarioRunArtifactUploads)
-    .values({
-      artifactId: artifact.id,
-      r2UploadId: multipart.uploadId,
-      uploadedPartsJson: "[]",
-      nextExpectedPart: 1,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: scenarioRunArtifactUploads.artifactId,
-      set: {
-        r2UploadId: multipart.uploadId,
-        uploadedPartsJson: "[]",
-        nextExpectedPart: 1,
-        updatedAt: now,
-      },
-    });
+  await initializeArtifactUpload({
+    db,
+    runVm,
+    artifact,
+    r2UploadId: multipart.uploadId,
+    updatedAt: now,
+  });
 
   return jsonResponse({ done: false, nextExpectedPart: 1 });
 }
@@ -385,21 +340,12 @@ async function handleMultipartPart(
   if (runVm.artifactWritesSealed) {
     return artifactWritesSealedResponse();
   }
-  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
+  const artifact = await loadArtifactForRunVm(db, runVm, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
 
-  const uploadRows = await db
-    .select({
-      r2UploadId: scenarioRunArtifactUploads.r2UploadId,
-      uploadedPartsJson: scenarioRunArtifactUploads.uploadedPartsJson,
-      nextExpectedPart: scenarioRunArtifactUploads.nextExpectedPart,
-    })
-    .from(scenarioRunArtifactUploads)
-    .where(eq(scenarioRunArtifactUploads.artifactId, artifact.id))
-    .limit(1);
-  const upload = uploadRows[0];
+  const upload = await loadArtifactUploadState(db, artifact);
   if (!upload?.r2UploadId) {
     return jsonResponse({ error: "multipart upload not initialized" }, 409);
   }
@@ -421,14 +367,14 @@ async function handleMultipartPart(
     etag: uploadedPart.etag,
   });
 
-  await db
-    .update(scenarioRunArtifactUploads)
-    .set({
-      uploadedPartsJson: JSON.stringify(uploadedParts),
-      nextExpectedPart: partNumber + 1,
-      updatedAt: Date.now(),
-    })
-    .where(eq(scenarioRunArtifactUploads.artifactId, artifact.id));
+  await advanceArtifactUpload({
+    db,
+    runVm,
+    artifact,
+    uploadedParts,
+    nextExpectedPart: partNumber + 1,
+    updatedAt: Date.now(),
+  });
 
   return jsonResponse({ ok: true, nextExpectedPart: partNumber + 1 });
 }
@@ -452,7 +398,7 @@ async function handleArtifactComplete(
   }
 
   const { db, runVm } = resolved;
-  const artifact = await loadArtifactForRunVm(db, runId, runVm.vmId, ordinal);
+  const artifact = await loadArtifactForRunVm(db, runVm, ordinal);
   if (!artifact) {
     return jsonResponse({ error: "artifact not found" }, 404);
   }
@@ -472,23 +418,14 @@ async function handleArtifactComplete(
     });
     await markArtifactUploaded({
       db,
-      runId,
-      vmId: runVm.vmId,
+      runVm,
       artifact,
       uploadedAt: now,
     });
     return jsonResponse({ ok: true, uploaded: true });
   }
 
-  const uploadRows = await db
-    .select({
-      r2UploadId: scenarioRunArtifactUploads.r2UploadId,
-      uploadedPartsJson: scenarioRunArtifactUploads.uploadedPartsJson,
-    })
-    .from(scenarioRunArtifactUploads)
-    .where(eq(scenarioRunArtifactUploads.artifactId, artifact.id))
-    .limit(1);
-  const upload = uploadRows[0];
+  const upload = await loadArtifactUploadState(db, artifact);
   if (!upload?.r2UploadId) {
     return jsonResponse({ error: "multipart upload not initialized" }, 409);
   }
@@ -506,8 +443,7 @@ async function handleArtifactComplete(
 
   await markArtifactUploaded({
     db,
-    runId,
-    vmId: runVm.vmId,
+    runVm,
     artifact,
     uploadedAt: now,
   });
@@ -536,15 +472,12 @@ async function handleRunComplete(
 
   // Completion is idempotent so a lost response does not strand the agent's
   // durable archive job after artifact writes have been sealed.
-  const lifecycle = await loadStoredRunLifecycle(db, runId);
-  const alreadyCompleted = lifecycle?.state.vms.some(
-    (vm) => vm.id === runVm.vmId && vm.phase === "completed",
-  );
-  if (alreadyCompleted) {
+  if (runVm.artifactWritesSealed) {
+    await transitionRunVmToCompleted(db, runVm, Date.now());
     return jsonResponse({ ok: true });
   }
 
-  const artifacts = await loadArtifactStatesForRunVm(db, runId, runVm.vmId);
+  const artifacts = await loadArtifactStatesForRunVm(db, runVm);
   if (artifacts.some((artifact) => artifact.uploadStatus !== "uploaded")) {
     return jsonResponse(
       { error: "all artifacts must be uploaded before completing the run" },
@@ -553,7 +486,7 @@ async function handleRunComplete(
   }
 
   const now = Date.now();
-  await transitionRunVmToCompleted(db, runId, runVm.vmId, now);
+  await transitionRunVmToCompleted(db, runVm, now);
 
   return jsonResponse({ ok: true });
 }
@@ -604,8 +537,7 @@ async function handleRunTimeline(
   // appends can lose entries.
   const artifactRows = await loadArtifactStatesForRunVm(
     db,
-    runVm.runId,
-    runVm.vmId,
+    runVm,
   );
   const castIdByFilename = new Map(
     artifactRows
@@ -618,12 +550,78 @@ async function handleRunTimeline(
   }
 
   const now = Date.now();
+  if (runVm.runtimeVmId) {
+    for (const session of sessions) {
+      const transcriptR2Key =
+        runVm.domainKind === "workshop"
+          ? buildTerminalTranscriptObjectKey({
+              runId: runVm.runId,
+              runtimeVmId: runVm.runtimeVmId,
+              sessionIndex: session.entry.index,
+            })
+          : null;
+      if (transcriptR2Key) {
+        await env.VM_RUN_ARTIFACTS_BUCKET.put(
+          transcriptR2Key,
+          session.transcript,
+          { httpMetadata: { contentType: "text/plain; charset=utf-8" } },
+        );
+      }
+      const recordingArtifact = artifactRows.find(
+        (artifact) => artifact.id === session.entry.castArtifactId,
+      );
+      await db
+        .insert(runtimeTerminalSessions)
+        .values({
+          id: `${runVm.runtimeVmId}:session:${session.entry.index}`,
+          executionId: runVm.runId,
+          runtimeVmId: runVm.runtimeVmId,
+          ordinal: session.entry.index,
+          startedAt: Math.floor(session.entry.startTimestampMs),
+          endedAt: Math.floor(
+            session.entry.startTimestampMs + session.entry.durationMs,
+          ),
+          exitCode: session.entry.exitCode,
+          recordingArtifactId:
+            recordingArtifact?.storageKind === "runtime"
+              ? recordingArtifact.id
+              : null,
+          transcriptR2Key,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [
+            runtimeTerminalSessions.runtimeVmId,
+            runtimeTerminalSessions.ordinal,
+          ],
+          set: {
+            startedAt: Math.floor(session.entry.startTimestampMs),
+            endedAt: Math.floor(
+              session.entry.startTimestampMs + session.entry.durationMs,
+            ),
+            exitCode: session.entry.exitCode,
+            recordingArtifactId:
+              recordingArtifact?.storageKind === "runtime"
+                ? recordingArtifact.id
+                : null,
+            transcriptR2Key,
+            updatedAt: now,
+          },
+        });
+    }
+  }
+
+  if (runVm.domainKind === "workshop") {
+    return jsonResponse({ ok: true });
+  }
+
   for (const session of sessions) {
     await db
       .insert(scenarioRunSessionTranscripts)
       .values({
         id: `${runVm.vmId}:session:${session.entry.index}`,
-        runId: runVm.runId,
+        runId: runVm.domainId,
         vmId: runVm.vmId,
         sessionIndex: session.entry.index,
         transcript: session.transcript,
@@ -644,7 +642,7 @@ async function handleRunTimeline(
   const runRows = await db
     .select({ stateJson: scenarioRuns.stateJson })
     .from(scenarioRuns)
-    .where(eq(scenarioRuns.runId, runVm.runId))
+    .where(eq(scenarioRuns.runId, runVm.domainId))
     .limit(1);
   const run = runRows[0];
   if (!run) {
@@ -666,9 +664,26 @@ async function handleRunTimeline(
       stateJson: JSON.stringify(nextState),
       updatedAt: now,
     })
-    .where(eq(scenarioRuns.runId, runVm.runId));
+    .where(eq(scenarioRuns.runId, runVm.domainId));
 
   return jsonResponse({ ok: true });
+}
+
+function buildTerminalTranscriptObjectKey(input: {
+  runId: string;
+  runtimeVmId: string;
+  sessionIndex: number;
+}): string {
+  return [
+    "runtime-transcripts",
+    sanitizeTranscriptKeySegment(input.runId),
+    sanitizeTranscriptKeySegment(input.runtimeVmId),
+    `${input.sessionIndex}.txt`,
+  ].join("/");
+}
+
+function sanitizeTranscriptKeySegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-+/g, "-");
 }
 
 function normalizeTimelineSessions(

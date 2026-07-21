@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, time::D
 
 use anyhow::Context;
 use russh::{
-    ChannelId, MethodKind, MethodSet, Preferred, cipher, compression, kex,
+    ChannelId, Disconnect, MethodKind, MethodSet, Preferred, cipher, compression, kex,
     keys::ssh_key::Algorithm,
     mac,
     server::{self, Auth, Msg, Server as _, Session},
@@ -26,6 +26,8 @@ pub struct SshConnection {
     state: GatewayState,
     peer_addr: Option<SocketAddr>,
     route: Option<RouteRecord>,
+    route_admission: Option<SessionLease>,
+    connection_lease: Option<SessionLease>,
     channels: HashMap<ChannelId, ChannelState>,
 }
 
@@ -78,6 +80,8 @@ impl server::Server for SshProxyServer {
             state: self.state.clone(),
             peer_addr,
             route: None,
+            route_admission: None,
+            connection_lease: None,
             channels: HashMap::new(),
         }
     }
@@ -95,14 +99,18 @@ impl server::Handler for SshConnection {
         user: &str,
         public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<Auth, Self::Error> {
-        let route = self.state.store.get_route(user).await?;
-        let Some(route) = route else {
+        self.clear_route_authorization();
+        let Some((route, admission)) = self.load_route_with_admission(user).await? else {
             return Ok(Auth::reject());
         };
         if !route.allows_client_public_key(public_key)? {
             return Ok(Auth::reject());
         }
+        if admission.token().is_cancelled() {
+            return Ok(Auth::reject());
+        }
         self.route = Some(route);
+        self.route_admission = Some(admission);
         Ok(Auth::Accept)
     }
 
@@ -111,22 +119,72 @@ impl server::Handler for SshConnection {
         user: &str,
         public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<Auth, Self::Error> {
-        let route = match self.route.clone() {
-            Some(route) => route,
-            None => match self.state.store.get_route(user).await? {
-                Some(route) => route,
-                None => return Ok(Auth::reject()),
-            },
+        let (route, admission) = match (self.route.clone(), self.route_admission.as_ref()) {
+            (Some(route), Some(admission))
+                if route.route_username == user && !admission.token().is_cancelled() =>
+            {
+                (route, None)
+            }
+            _ => {
+                self.clear_route_authorization();
+                let Some((route, admission)) = self.load_route_with_admission(user).await? else {
+                    return Ok(Auth::reject());
+                };
+                (route, Some(admission))
+            }
         };
         if !route.allows_client_public_key(public_key)? {
+            return Ok(Auth::reject());
+        }
+        if let Some(admission) = admission {
+            if admission.token().is_cancelled() {
+                return Ok(Auth::reject());
+            }
+            self.route_admission = Some(admission);
+        }
+        if self
+            .route_admission
+            .as_ref()
+            .is_none_or(|lease| lease.token().is_cancelled())
+        {
             return Ok(Auth::reject());
         }
         self.route = Some(route);
         Ok(Auth::Accept)
     }
 
-    async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
         let _ = self.peer_addr;
+        let Some(route) = self.route.as_ref() else {
+            session.disconnect(Disconnect::ByApplication, "route unavailable", "en-US")?;
+            return Ok(());
+        };
+        let Some(admission) = self.route_admission.as_ref() else {
+            session.disconnect(Disconnect::ByApplication, "route unavailable", "en-US")?;
+            return Ok(());
+        };
+        if admission.token().is_cancelled() || route.is_expired_at(time::OffsetDateTime::now_utc())
+        {
+            session.disconnect(Disconnect::ByApplication, "route revoked", "en-US")?;
+            return Ok(());
+        }
+
+        // Keep the pre-lookup admission registered until the connection lease
+        // (which owns a disconnect handle) is visible in the same registry.
+        // Route deletion therefore catches one of the two entries throughout
+        // the auth-to-channel transition.
+        let connection_lease = self.state.sessions.register(
+            route.route_username.clone(),
+            SessionKind::NativeSsh,
+            Some(session.handle()),
+        );
+        if admission.token().is_cancelled() || connection_lease.token().is_cancelled() {
+            connection_lease.terminate();
+            session.disconnect(Disconnect::ByApplication, "route revoked", "en-US")?;
+            return Ok(());
+        }
+        self.connection_lease = Some(connection_lease);
+        self.route_admission = None;
         Ok(())
     }
 
@@ -136,6 +194,12 @@ impl server::Handler for SshConnection {
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if !self.connection_route_is_active() {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
         if !self.channels.is_empty() {
             reply
                 .reject(russh::ChannelOpenFailure::ResourceShortage)
@@ -189,6 +253,11 @@ impl server::Handler for SshConnection {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if !self.connection_route_is_active() {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         let route = self
             .route
             .clone()
@@ -228,6 +297,11 @@ impl server::Handler for SshConnection {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if !self.connection_route_is_active() {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         let route = self
             .route
             .clone()
@@ -345,6 +419,44 @@ impl server::Handler for SshConnection {
 }
 
 impl SshConnection {
+    async fn load_route_with_admission(
+        &self,
+        username: &str,
+    ) -> anyhow::Result<Option<(RouteRecord, SessionLease)>> {
+        let admission =
+            self.state
+                .sessions
+                .register(username.to_owned(), SessionKind::NativeSsh, None);
+        let cancel = admission.token();
+        let route = tokio::select! {
+            _ = cancel.cancelled() => None,
+            route = self.state.store.get_route(username) => route?,
+        };
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        if cancel.is_cancelled() || route.is_expired_at(time::OffsetDateTime::now_utc()) {
+            return Ok(None);
+        }
+        Ok(Some((route, admission)))
+    }
+
+    fn clear_route_authorization(&mut self) {
+        self.route = None;
+        self.route_admission = None;
+        self.connection_lease = None;
+    }
+
+    fn connection_route_is_active(&self) -> bool {
+        self.route.as_ref().is_some_and(|route| {
+            !route.is_expired_at(time::OffsetDateTime::now_utc())
+                && self
+                    .connection_lease
+                    .as_ref()
+                    .is_some_and(|lease| !lease.token().is_cancelled())
+        })
+    }
+
     fn pty_for(&self, channel: ChannelId) -> PtySpec {
         match self.channels.get(&channel) {
             Some(ChannelState::Pending { pty: Some(pty) }) => pty.clone(),

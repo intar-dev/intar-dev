@@ -11,6 +11,8 @@ on:
         options:
           - intar-agent
           - intar-builder
+          - intar-workshop-cli
+          - intar-workshop-builder
           - intar-image-cli
           - kino
           - stargate
@@ -117,6 +119,18 @@ jobs:
               package="intar-builder"
               binary="intar-builder"
               tag_prefix="builder/"
+              ;;
+            intar-workshop-cli)
+              manifest="crates/intar-workshop-cli/Cargo.toml"
+              package="intar-workshop-cli"
+              binary="intar-workshop-cli"
+              tag_prefix="workshop-cli/"
+              ;;
+            intar-workshop-builder)
+              manifest="crates/intar-workshop-builder/Cargo.toml"
+              package="intar-workshop-builder"
+              binary="intar-workshop-builder"
+              tag_prefix="workshop-builder/"
               ;;
             intar-image-cli)
               manifest="crates/intar-image-cli/Cargo.toml"
@@ -323,17 +337,109 @@ jobs:
                   | xargs -0 sha256sum > deploy/SHA256SUMS
               )
             fi
+            if [ "${PACKAGE}" = "intar-workshop-builder" ]; then
+              if [ "${arch}" != "amd64" ]; then
+                echo "Workshop checkpoint builders currently support x86_64 only." >&2
+                exit 1
+              fi
+              cp -R crates/intar-workshop-builder/deploy "${workdir}/deploy"
+              cp crates/intar-workshop-builder/config.example.toml "${workdir}/workshop-builder.config.example.toml"
+              chmod +x "${workdir}/deploy/intar-workshop-sanitize"
+            fi
             tar -C "${workdir}" -czf "${dist_dir}/${archive}.tar.gz" .
             rm -rf "${workdir}"
           }
           build_archive amd64 x86_64-unknown-linux-musl
-          if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-agent" ]; then
+          if [ "${PACKAGE}" = "intar-builder" ] || [ "${PACKAGE}" = "intar-agent" ] || [ "${PACKAGE}" = "intar-workshop-builder" ]; then
             echo "Skipping arm64 ${PACKAGE} artifact; the current KVM host baseline is x86_64 only."
           else
             build_archive arm64 aarch64-unknown-linux-musl
           fi
           cd "${dist_dir}"
           sha256sum "${BINARY}_${VERSION}_"* > "${BINARY}_${VERSION}_checksums.txt"
+
+      - name: Smoke-test workshop CLI release package
+        if: inputs.project == 'intar-workshop-cli'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          cleanup_smoke() {
+            rm -rf "${smoke_root}"
+          }
+          trap cleanup_smoke EXIT
+
+          (
+            cd dist
+            sha256sum --check --strict "intar-workshop-cli_${VERSION}_checksums.txt"
+          )
+
+          for arch in amd64 arm64; do
+            archive="dist/intar-workshop-cli_${VERSION}_linux_${arch}.tar.gz"
+            extract_dir="${smoke_root}/${arch}"
+            mkdir -p "${extract_dir}"
+            tar -xzf "${archive}" -C "${extract_dir}"
+            test -x "${extract_dir}/intar-workshop-cli"
+            test "$(find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')" = \
+              "intar-workshop-cli"
+          done
+
+          test "$("${smoke_root}/amd64/intar-workshop-cli" --version)" = \
+            "intar-workshop-cli ${VERSION}"
+          "${smoke_root}/amd64/intar-workshop-cli" validate workshops/platform-engineering
+          "${smoke_root}/amd64/intar-workshop-cli" bundle workshops/platform-engineering \
+            --output "${smoke_root}/platform-engineering.tar.gz"
+          test -s "${smoke_root}/platform-engineering.tar.gz"
+
+      - name: Smoke-test workshop builder release package
+        if: inputs.project == 'intar-workshop-builder'
+        env:
+          VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          set -euo pipefail
+          smoke_root="$(mktemp -d)"
+          cleanup_smoke() {
+            rm -rf "${smoke_root}"
+          }
+          trap cleanup_smoke EXIT
+
+          (
+            cd dist
+            sha256sum --check --strict "intar-workshop-builder_${VERSION}_checksums.txt"
+          )
+
+          archive="dist/intar-workshop-builder_${VERSION}_linux_amd64.tar.gz"
+          extract_dir="${smoke_root}/amd64"
+          mkdir -p "${extract_dir}"
+          tar -xzf "${archive}" -C "${extract_dir}"
+
+          mapfile -t packaged_files < <(
+            find "${extract_dir}" -type f -printf '%P\n' | LC_ALL=C sort
+          )
+          expected_files=(
+            deploy/intar-workshop-builder.service
+            deploy/intar-workshop-sanitize
+            intar-workshop-builder
+            workshop-builder.config.example.toml
+          )
+          if [ "${packaged_files[*]}" != "${expected_files[*]}" ]; then
+            echo "unexpected files in ${archive}: ${packaged_files[*]}" >&2
+            exit 1
+          fi
+
+          test -x "${extract_dir}/intar-workshop-builder"
+          test -x "${extract_dir}/deploy/intar-workshop-sanitize"
+          test "$("${extract_dir}/intar-workshop-builder" --version)" = \
+            "intar-workshop-builder ${VERSION}"
+          "${extract_dir}/intar-workshop-builder" --help | grep -q 'run-once'
+          bash -n "${extract_dir}/deploy/intar-workshop-sanitize"
+          cmp crates/intar-workshop-builder/deploy/intar-workshop-builder.service \
+            "${extract_dir}/deploy/intar-workshop-builder.service"
+          cmp crates/intar-workshop-builder/deploy/intar-workshop-sanitize \
+            "${extract_dir}/deploy/intar-workshop-sanitize"
+          cmp crates/intar-workshop-builder/config.example.toml \
+            "${extract_dir}/workshop-builder.config.example.toml"
 
       - name: Smoke-test image CLI release package
         if: inputs.project == 'intar-image-cli'

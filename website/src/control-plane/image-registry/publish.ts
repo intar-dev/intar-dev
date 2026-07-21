@@ -5,11 +5,14 @@ import {
   imageBuilds,
   scenarioSources,
   vmScenarioVms,
+  workshopPublicationCheckpoints,
+  workshopPublications,
   type AgentHostRole,
   type ImageBuildStatus,
 } from "@/db/schema";
 import {
   type ImageArchitecture,
+  type ImageKey,
   type ScenarioManifestV3,
 } from "@/generated/catalog";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
@@ -241,7 +244,7 @@ export type PrunedImages = {
 export async function catalogReferencedImageShas(
   db: DrizzleD1Database,
 ): Promise<Set<string>> {
-  const rows = await db
+  const scenarioRows = await db
     .select({
       imageKey: vmScenarioVms.imageKeyJson,
       imageSha256: vmScenarioVms.imageSha256,
@@ -250,11 +253,43 @@ export async function catalogReferencedImageShas(
     .where(isNotNull(vmScenarioVms.imageSha256));
 
   const referenced = new Set<string>();
-  for (const row of rows) {
+  for (const row of scenarioRows) {
     if (!isImageKey(row.imageKey)) continue;
     const sha256 = normalizeSha256(row.imageSha256 ?? "");
     if (!sha256) continue;
     referenced.add(`${registryImageKey(row.imageKey)}:${sha256}`);
+  }
+
+  // Workshop checkpoint images are immutable revision inputs just like
+  // scenario catalog images. Keep every image referenced by a published
+  // checkpoint so a later scenario publication cannot prune it.
+  const workshopRows = await db
+    .select({ images: workshopPublicationCheckpoints.vmImagesJson })
+    .from(workshopPublicationCheckpoints)
+    .innerJoin(
+      workshopPublications,
+      eq(workshopPublicationCheckpoints.publicationId, workshopPublications.id),
+    )
+    .where(
+      and(
+        eq(workshopPublications.status, "published"),
+        eq(workshopPublicationCheckpoints.status, "verified"),
+        isNotNull(workshopPublicationCheckpoints.vmImagesJson),
+      ),
+    );
+  for (const row of workshopRows) {
+    for (const image of row.images ?? []) {
+      const imageKey = image.image_key ?? image.imageKey;
+      const sha256 = normalizeSha256(
+        typeof image.image_sha256 === "string"
+          ? image.image_sha256
+          : typeof image.imageSha256 === "string"
+            ? image.imageSha256
+            : "",
+      );
+      if (!isImageKey(imageKey) || !sha256) continue;
+      referenced.add(`${registryImageKey(imageKey)}:${sha256}`);
+    }
   }
   return referenced;
 }
@@ -369,11 +404,20 @@ export async function bumpHostCachedImages(
   manifest: ScenarioManifestV3,
   organizationId: string | null = null,
 ): Promise<void> {
-  const nowUnixMs = Date.now();
   const images = manifest.vms.map((vm) => ({
     image_key: vm.image_key,
     image_sha256: vm.image_sha256,
   }));
+  await bumpCachedImages(db, images, organizationId);
+}
+
+export async function bumpCachedImages(
+  db: DrizzleD1Database,
+  images: Array<{ image_key: ImageKey; image_sha256: string }>,
+  organizationId: string | null = null,
+): Promise<void> {
+  if (images.length === 0) return;
+  const nowUnixMs = Date.now();
   const hosts = await db
     .select({
       id: agentHosts.id,

@@ -6,6 +6,7 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
+  runtimeExecutions,
 } from "@/db/schema";
 import { markDesiredVmAbsent } from "@/lib/desired-state";
 import {
@@ -308,6 +309,11 @@ export async function deleteFinishedScenarioRunForUser(params: {
   }
 
   await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, row.runId));
+  if (row.runtimeExecutionId) {
+    await db
+      .delete(runtimeExecutions)
+      .where(eq(runtimeExecutions.id, row.runtimeExecutionId));
+  }
 }
 
 export async function expireOverdueRunLeases(

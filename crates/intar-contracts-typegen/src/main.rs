@@ -16,7 +16,10 @@ use intar_contracts::{
         ENV_VM_HOSTNAME, GUEST_USERNAME, RECORDING_DISK_LABEL, RUNTIME_DISK_LABEL,
         RUNTIME_ENV_FILENAME, RuntimeEnv,
     },
-    stargate::{IssueTerminalSessionRequest, IssueTerminalSessionResponse},
+    stargate::{
+        IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
+        IssueWorkspaceAppSessionResponse,
+    },
 };
 use schemars::schema_for;
 
@@ -56,6 +59,14 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("stargate-issue-terminal-session-response.schema.json"),
         &schema_for!(IssueTerminalSessionResponse),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-issue-workspace-app-session-request.schema.json"),
+        &schema_for!(IssueWorkspaceAppSessionRequest),
+    )?;
+    write_schema(
+        &schema_dir.join("stargate-issue-workspace-app-session-response.schema.json"),
+        &schema_for!(IssueWorkspaceAppSessionResponse),
     )?;
     write_schema(
         &schema_dir.join("catalog-scenario-manifest-v3.schema.json"),
@@ -98,6 +109,14 @@ fn main() -> Result<()> {
     copy_fixture(
         "crates/intar-contracts/fixtures/stargate/issue-terminal-session-response.json",
         &fixture_dir.join("stargate/issue-terminal-session-response.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/stargate/issue-workspace-app-session-request.json",
+        &fixture_dir.join("stargate/issue-workspace-app-session-request.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-contracts/fixtures/stargate/issue-workspace-app-session-response.json",
+        &fixture_dir.join("stargate/issue-workspace-app-session-response.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/catalog/scenario-manifest-v3.json",
@@ -242,6 +261,28 @@ export interface IssueTerminalSessionResponse {
   expires_at: number;
   browser?: BrowserTerminalSession;
   native?: NativeTerminalSession;
+}
+
+export type WorkspaceAppProtocol = "http";
+
+export interface IssueWorkspaceAppSessionRequest {
+  route_id: string;
+  target_username: string;
+  target_ip: string;
+  target_ssh_port: number;
+  target_host_key_openssh: string;
+  target_private_key_openssh: string;
+  target_app_port: number;
+  protocol: WorkspaceAppProtocol;
+  route_expires_at: number;
+  metadata?: RouteMetadata;
+}
+
+export interface IssueWorkspaceAppSessionResponse {
+  route_id: string;
+  url: string;
+  bootstrap_expires_at: number;
+  expires_at: number;
 }
 "#
 }

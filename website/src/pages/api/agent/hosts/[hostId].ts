@@ -7,6 +7,7 @@ import {
   hostActualState,
   hostDesiredState,
   imageBuilds,
+  runtimeExecutions,
   scenarioRuns,
 } from "@/db/schema";
 import type {
@@ -108,6 +109,26 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     return hostHasRunHistoryResponse(host.id);
   }
 
+  const activeWorkshopRuntimes = await db
+    .select({ executionId: runtimeExecutions.id })
+    .from(runtimeExecutions)
+    .where(
+      and(
+        eq(runtimeExecutions.hostId, host.id),
+        eq(runtimeExecutions.domainKind, "workshop"),
+        inArray(runtimeExecutions.state, [
+          "queued",
+          "provisioning",
+          "ready",
+          "archiving",
+        ]),
+      ),
+    )
+    .limit(1);
+  if (activeWorkshopRuntimes.length > 0) {
+    return hostHasActiveWorkshopRuntimesResponse(host.id);
+  }
+
   if (host.role === "builder") {
     const activeBuilds = await db
       .select({ buildId: imageBuilds.id })
@@ -143,6 +164,24 @@ export const DELETE: APIRoute = async ({ request, params }) => {
           ),
         ),
     );
+  const activeWorkshopRuntimeGuard = () =>
+    notExists(
+      db
+        .select({ executionId: runtimeExecutions.id })
+        .from(runtimeExecutions)
+        .where(
+          and(
+            eq(runtimeExecutions.hostId, host.id),
+            eq(runtimeExecutions.domainKind, "workshop"),
+            inArray(runtimeExecutions.state, [
+              "queued",
+              "provisioning",
+              "ready",
+              "archiving",
+            ]),
+          ),
+        ),
+    );
   const deletedHosts = await db
     .delete(agentHosts)
     .where(
@@ -150,6 +189,7 @@ export const DELETE: APIRoute = async ({ request, params }) => {
         eq(agentHosts.id, hostId),
         eq(agentHosts.userId, authz.context.userId),
         runGuard(),
+        activeWorkshopRuntimeGuard(),
         host.role === "builder" ? activeBuildGuard() : undefined,
       ),
     )
@@ -158,7 +198,7 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     return jsonResponse(
       {
         error:
-          "host deletion conflicted with a new run, active build, or concurrent update",
+          "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
         code: "host_delete_conflict",
         hostId: host.id,
       },
@@ -197,6 +237,18 @@ function hostHasActiveBuildsResponse(hostId: string): Response {
     {
       error: "builder host has active image builds and must be drained first",
       code: "host_has_active_builds",
+      hostId,
+    },
+    { status: 409 },
+  );
+}
+
+function hostHasActiveWorkshopRuntimesResponse(hostId: string): Response {
+  return jsonResponse(
+    {
+      error:
+        "host has active workshop runtimes and must be drained or recovered first",
+      code: "host_has_active_workshop_runtimes",
       hostId,
     },
     { status: 409 },

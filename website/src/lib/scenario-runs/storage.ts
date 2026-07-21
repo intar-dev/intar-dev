@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import { releaseActiveRuntimeSlot } from "@/lib/runtime-executions";
 import { appError } from "@/lib/app-error";
 import {
   hostActualState,
@@ -238,6 +239,17 @@ export async function updateRunState(
       )
       .returning({ runId: scenarioRuns.runId });
     if (updated.length) {
+      if (
+        row.runtimeExecutionId &&
+        (input.releaseActiveSlot === true ||
+          (terminal && deleteRequestedAt === null))
+      ) {
+        await releaseActiveRuntimeSlot({
+          executionId: row.runtimeExecutionId,
+          expectedGeneration: 1,
+          now,
+        });
+      }
       return;
     }
   }
@@ -249,6 +261,7 @@ export function fromDbRow(row: typeof scenarioRuns.$inferSelect) {
     runId: row.runId,
     userId: row.userId,
     organizationId: row.organizationId,
+    runtimeExecutionId: row.runtimeExecutionId,
     hostId: row.hostId,
     scenarioId: row.scenarioId,
     scenarioName: row.scenarioName,

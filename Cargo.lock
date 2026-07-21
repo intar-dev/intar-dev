@@ -2418,6 +2418,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "intar-workshop-builder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "intar-contracts",
+ "intar-image-build",
+ "intar-image-upload",
+ "intar-workshop-manifest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "intar-workshop-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "intar-workshop-manifest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "intar-workshop-manifest"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "hcl-rs",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "internal-russh-num-bigint"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5060,17 +5112,22 @@ version = "0.2.5"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "dashmap",
  "futures-util",
+ "getrandom 0.4.3",
  "http",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "reqwest",
  "russh",
  "sd-notify",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "stargate-core",
  "tempfile",

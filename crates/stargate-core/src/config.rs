@@ -24,6 +24,19 @@ pub struct WebSettings {
     pub public_ssh_port: u16,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    /// Optional wildcard suffix used for private workspace applications.
+    /// `workshop-apps.intar.dev` produces
+    /// `https://<route-id>.workshop-apps.intar.dev/`.
+    #[serde(default)]
+    pub workspace_app_base_domain: Option<String>,
+    /// Time available to exchange the one-time capability returned by the
+    /// workspace-app issuance API.
+    #[serde(default = "default_workspace_app_bootstrap_ttl_seconds")]
+    pub workspace_app_bootstrap_ttl_seconds: u64,
+    /// Maximum lifetime of the opaque, route-bound browser session. The
+    /// effective lifetime is also capped by the route expiry.
+    #[serde(default = "default_workspace_app_session_ttl_seconds")]
+    pub workspace_app_session_ttl_seconds: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +79,14 @@ fn default_log_filter() -> String {
 
 fn default_public_ssh_port() -> u16 {
     22
+}
+
+fn default_workspace_app_bootstrap_ttl_seconds() -> u64 {
+    60
+}
+
+fn default_workspace_app_session_ttl_seconds() -> u64 {
+    15 * 60
 }
 
 fn default_state_dir() -> PathBuf {

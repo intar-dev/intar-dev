@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IssueWorkspaceAppSessionResponse",
+  "type": "object",
+  "properties": {
+    "bootstrap_expires_at": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "expires_at": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "route_id": {
+      "type": "string"
+    },
+    "url": {
+      "description": "URL containing a short-lived, single-use bootstrap capability. The\npublic gateway exchanges it for a route-bound browser session and\nredirects to the same URL without the capability.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "route_id",
+    "url",
+    "bootstrap_expires_at",
+    "expires_at"
+  ]
+}

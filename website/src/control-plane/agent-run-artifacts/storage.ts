@@ -2,9 +2,16 @@ import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   agentHosts,
+  runtimeArtifactUploads,
+  runtimeArtifacts,
+  runtimeExecutions,
+  runtimeVms,
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
+  workshopWorkspaceGenerations,
+  workshopWorkspaces,
+  type RuntimeDomainKind,
 } from "@/db/schema";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
 import {
@@ -25,17 +32,21 @@ export interface AgentRunArtifactInput {
   sha256?: string;
 }
 
-interface UploadedPartRecord {
+export interface UploadedPartRecord {
   partNumber: number;
   etag: string;
 }
 
 export interface ResolvedRunVm {
+  domainKind: RuntimeDomainKind;
+  domainId: string;
   runId: string;
   hostId: string;
   userId: string;
-  scenarioId: string;
+  scenarioId: string | null;
+  workshopSessionId: string | null;
   vmId: string;
+  runtimeVmId: string | null;
   runtimeVmName: string;
   artifactWritesSealed: boolean;
 }
@@ -44,6 +55,8 @@ export interface SourceArtifactState {
   id: string;
   runId: string;
   vmId: string;
+  runtimeVmId: string | null;
+  storageKind: "runtime" | "scenario";
   ordinal: number;
   kind: string;
   filename: string;
@@ -57,23 +70,50 @@ export interface SourceArtifactState {
 
 export async function markArtifactUploaded(input: {
   db: ReturnType<typeof drizzle>;
-  runId: string;
-  vmId: string;
+  runVm: ResolvedRunVm;
   artifact: SourceArtifactState;
   uploadedAt: number;
 }): Promise<void> {
-  await input.db
+  const runtimeUpdate = input.db
+    .update(runtimeArtifacts)
+    .set({
+      uploadStatus: "uploaded",
+      uploadedAt: input.uploadedAt,
+    })
+    .where(eq(runtimeArtifacts.id, input.artifact.id));
+  const runtimeUploadDelete = input.db
+    .delete(runtimeArtifactUploads)
+    .where(eq(runtimeArtifactUploads.artifactId, input.artifact.id));
+  const scenarioUpdate = input.db
     .update(scenarioRunArtifacts)
     .set({
       uploadStatus: "uploaded",
       uploadedAt: input.uploadedAt,
     })
     .where(eq(scenarioRunArtifacts.id, input.artifact.id));
-
-  await input.db
+  const scenarioUploadDelete = input.db
     .delete(scenarioRunArtifactUploads)
     .where(eq(scenarioRunArtifactUploads.artifactId, input.artifact.id));
 
+  if (
+    input.artifact.storageKind === "runtime" &&
+    input.runVm.domainKind === "scenario"
+  ) {
+    await input.db.batch([
+      runtimeUpdate,
+      runtimeUploadDelete,
+      scenarioUpdate,
+      scenarioUploadDelete,
+    ]);
+  } else if (input.artifact.storageKind === "runtime") {
+    await input.db.batch([runtimeUpdate, runtimeUploadDelete]);
+  } else {
+    await input.db.batch([scenarioUpdate, scenarioUploadDelete]);
+  }
+
+  if (input.runVm.domainKind !== "scenario") {
+    return;
+  }
   if (
     input.artifact.kind !== "ssh_recording_segment" &&
     input.artifact.kind !== "ssh_recording_raw"
@@ -88,7 +128,7 @@ export async function markArtifactUploaded(input: {
       updatedAt: scenarioRuns.updatedAt,
     })
     .from(scenarioRuns)
-    .where(eq(scenarioRuns.runId, input.runId))
+    .where(eq(scenarioRuns.runId, input.runVm.domainId))
     .limit(1);
   const run = runRows[0];
   if (!run) {
@@ -103,7 +143,7 @@ export async function markArtifactUploaded(input: {
     const nextState = recomputeRunState({
       ...state,
       vms: state.vms.map((vm) =>
-        vm.id === input.vmId ? { ...vm, hasRecording: true } : vm,
+        vm.id === input.runVm.vmId ? { ...vm, hasRecording: true } : vm,
       ),
     });
     await input.db
@@ -112,15 +152,15 @@ export async function markArtifactUploaded(input: {
         stateJson: JSON.stringify(nextState),
         updatedAt: input.uploadedAt,
       })
-      .where(eq(scenarioRuns.runId, input.runId));
+      .where(eq(scenarioRuns.runId, input.runVm.domainId));
     return;
   }
 
   const replayArtifact: ScenarioReplayArtifact = {
     id: input.artifact.id,
     hostId: "",
-    runId: input.runId,
-    vmId: input.vmId,
+    runId: input.runVm.domainId,
+    vmId: input.runVm.vmId,
     kind: input.artifact.kind,
     filename: input.artifact.filename,
     contentType: input.artifact.contentType,
@@ -132,7 +172,7 @@ export async function markArtifactUploaded(input: {
   const nextState = recomputeRunState({
     ...state,
     vms: state.vms.map((vm) => {
-      if (vm.id !== input.vmId) {
+      if (vm.id !== input.runVm.vmId) {
         return vm;
       }
 
@@ -155,7 +195,7 @@ export async function markArtifactUploaded(input: {
       stateJson: JSON.stringify(nextState),
       updatedAt: input.uploadedAt,
     })
-    .where(eq(scenarioRuns.runId, input.runId));
+    .where(eq(scenarioRuns.runId, input.runVm.domainId));
 }
 
 export async function requireVerifiedRunVm(
@@ -205,6 +245,140 @@ export async function resolveRunVm(input: {
   vmName: string;
   hostId: string;
 }): Promise<ResolvedRunVm | null> {
+  const runtimeRows = await input.db
+    .select({
+      runId: runtimeExecutions.id,
+      hostId: runtimeExecutions.hostId,
+      organizationId: runtimeExecutions.organizationId,
+      agentHostOrganizationId: agentHosts.organizationId,
+      userId: runtimeExecutions.userId,
+      domainKind: runtimeExecutions.domainKind,
+      domainId: runtimeExecutions.domainId,
+      generation: runtimeExecutions.generation,
+      runtimeVmId: runtimeVms.id,
+      vmId: runtimeVms.vmId,
+      runtimeVmName: runtimeVms.runtimeVmName,
+      artifactWritesSealed: runtimeVms.artifactWritesSealed,
+    })
+    .from(runtimeExecutions)
+    .innerJoin(runtimeVms, eq(runtimeVms.executionId, runtimeExecutions.id))
+    .innerJoin(agentHosts, eq(agentHosts.id, runtimeExecutions.hostId))
+    .where(
+      and(
+        eq(runtimeExecutions.id, input.runId),
+        eq(runtimeExecutions.hostId, input.hostId),
+        eq(runtimeVms.runtimeVmName, input.vmName),
+      ),
+    )
+    .limit(1);
+  const runtime = runtimeRows[0];
+  if (!runtime || !runtime.hostId) {
+    return resolveLegacyScenarioRunVm(input);
+  }
+
+  if (runtime.domainKind === "workshop") {
+    const generationRows = await input.db
+      .select({
+        generationId: workshopWorkspaceGenerations.id,
+        generationOrdinal: workshopWorkspaceGenerations.ordinal,
+        generationHostId: workshopWorkspaceGenerations.hostId,
+        generationState: workshopWorkspaceGenerations.state,
+        workspaceId: workshopWorkspaces.id,
+        workspaceUserId: workshopWorkspaces.userId,
+        currentGenerationId: workshopWorkspaces.currentGenerationId,
+        sessionId: workshopWorkspaces.sessionId,
+      })
+      .from(workshopWorkspaceGenerations)
+      .innerJoin(
+        workshopWorkspaces,
+        eq(
+          workshopWorkspaces.id,
+          workshopWorkspaceGenerations.workspaceId,
+        ),
+      )
+      .where(
+        eq(workshopWorkspaceGenerations.runtimeExecutionId, runtime.runId),
+      )
+      .limit(1);
+    const generation = generationRows[0];
+    const historicalArchive =
+      generation?.generationState === "archiving" ||
+      generation?.generationState === "archived" ||
+      generation?.generationState === "failed";
+    if (
+      !generation ||
+      generation.generationOrdinal !== runtime.generation ||
+      generation.generationHostId !== runtime.hostId ||
+      generation.workspaceId !== runtime.domainId ||
+      generation.workspaceUserId !== runtime.userId ||
+      runtime.organizationId === null ||
+      runtime.agentHostOrganizationId !== runtime.organizationId ||
+      (generation.currentGenerationId !== generation.generationId &&
+        !historicalArchive)
+    ) {
+      return null;
+    }
+    return {
+      domainKind: "workshop",
+      domainId: runtime.domainId,
+      runId: runtime.runId,
+      hostId: runtime.hostId,
+      userId: runtime.userId,
+      scenarioId: null,
+      workshopSessionId: generation.sessionId,
+      vmId: runtime.vmId,
+      runtimeVmId: runtime.runtimeVmId,
+      runtimeVmName: runtime.runtimeVmName,
+      artifactWritesSealed: runtime.artifactWritesSealed,
+    };
+  }
+
+  const scenarioRows = await input.db
+    .select({
+      scenarioId: scenarioRuns.scenarioId,
+      stateJson: scenarioRuns.stateJson,
+    })
+    .from(scenarioRuns)
+    .where(
+      and(
+        eq(scenarioRuns.runId, runtime.domainId),
+        eq(scenarioRuns.runtimeExecutionId, runtime.runId),
+      ),
+    )
+    .limit(1);
+  const scenario = scenarioRows[0];
+  if (!scenario) {
+    return null;
+  }
+  const state = parseRunState(scenario.stateJson);
+  const scenarioVm = state.vms.find(
+    (candidate) => candidate.id === runtime.vmId,
+  );
+  if (!scenarioVm || scenarioVm.runtimeVmName !== runtime.runtimeVmName) {
+    return null;
+  }
+  return {
+    domainKind: "scenario",
+    domainId: runtime.domainId,
+    runId: runtime.runId,
+    hostId: runtime.hostId,
+    userId: runtime.userId,
+    scenarioId: scenario.scenarioId,
+    workshopSessionId: null,
+    vmId: runtime.vmId,
+    runtimeVmId: runtime.runtimeVmId,
+    runtimeVmName: runtime.runtimeVmName,
+    artifactWritesSealed:
+      runtime.artifactWritesSealed || scenarioVm.phase === "completed",
+  };
+}
+
+async function resolveLegacyScenarioRunVm(input: {
+  db: ReturnType<typeof drizzle>;
+  runId: string;
+  vmName: string;
+  hostId: string;
+}): Promise<ResolvedRunVm | null> {
   const rows = await input.db
     .select({
       runId: scenarioRuns.runId,
@@ -223,24 +397,22 @@ export async function resolveRunVm(input: {
     )
     .limit(1);
   const row = rows[0];
-  if (!row) {
-    return null;
-  }
-
+  if (!row) return null;
   const state = parseRunState(row.stateJson);
   const vm = state.vms.find(
     (candidate) => candidate.runtimeVmName === input.vmName,
   );
-  if (!vm) {
-    return null;
-  }
-
+  if (!vm) return null;
   return {
+    domainKind: "scenario",
+    domainId: row.runId,
     runId: row.runId,
     hostId: row.hostId,
     userId: row.userId,
     scenarioId: row.scenarioId,
+    workshopSessionId: null,
     vmId: vm.id,
+    runtimeVmId: null,
     runtimeVmName: vm.runtimeVmName,
     artifactWritesSealed: vm.phase === "completed",
   };
@@ -248,24 +420,54 @@ export async function resolveRunVm(input: {
 
 export async function loadArtifactForRunVm(
   db: ReturnType<typeof drizzle>,
-  runId: string,
-  vmId: string,
+  runVm: ResolvedRunVm,
   ordinal: number,
 ) {
-  const artifacts = await loadArtifactStatesForRunVm(db, runId, vmId);
+  const artifacts = await loadArtifactStatesForRunVm(db, runVm);
   return artifacts.find((artifact) => artifact.ordinal === ordinal) ?? null;
 }
 
 export async function loadArtifactStatesForRunVm(
   db: ReturnType<typeof drizzle>,
-  runId: string,
-  vmId: string,
+  runVm: ResolvedRunVm,
 ): Promise<SourceArtifactState[]> {
-  const rows = await db
+  if (runVm.runtimeVmId) {
+    const rows = await db
+      .select({
+        id: runtimeArtifacts.id,
+        runId: runtimeArtifacts.executionId,
+        runtimeVmId: runtimeArtifacts.runtimeVmId,
+        ordinal: runtimeArtifacts.ordinal,
+        kind: runtimeArtifacts.kind,
+        filename: runtimeArtifacts.filename,
+        contentType: runtimeArtifacts.contentType,
+        sizeBytes: runtimeArtifacts.sizeBytes,
+        sha256: runtimeArtifacts.sha256,
+        r2Key: runtimeArtifacts.r2Key,
+        uploadStatus: runtimeArtifacts.uploadStatus,
+        uploadedAt: runtimeArtifacts.uploadedAt,
+      })
+      .from(runtimeArtifacts)
+      .where(
+        and(
+          eq(runtimeArtifacts.executionId, runVm.runId),
+          eq(runtimeArtifacts.runtimeVmId, runVm.runtimeVmId),
+        ),
+      )
+      .orderBy(runtimeArtifacts.ordinal);
+    if (rows.length || runVm.domainKind === "workshop") {
+      return rows.map((row) => ({
+        ...row,
+        vmId: runVm.vmId,
+        storageKind: "runtime" as const,
+      }));
+    }
+  }
+
+  const legacyRows = await db
     .select({
       id: scenarioRunArtifacts.id,
       runId: scenarioRunArtifacts.runId,
-      vmId: scenarioRunArtifacts.vmId,
       ordinal: scenarioRunArtifacts.ordinal,
       kind: scenarioRunArtifacts.kind,
       filename: scenarioRunArtifacts.filename,
@@ -279,22 +481,262 @@ export async function loadArtifactStatesForRunVm(
     .from(scenarioRunArtifacts)
     .where(
       and(
-        eq(scenarioRunArtifacts.runId, runId),
-        eq(scenarioRunArtifacts.vmId, vmId),
+        eq(scenarioRunArtifacts.runId, runVm.domainId),
+        eq(scenarioRunArtifacts.vmId, runVm.vmId),
       ),
     )
     .orderBy(scenarioRunArtifacts.ordinal);
 
-  return rows;
+  return legacyRows.map((row) => ({
+    ...row,
+    vmId: runVm.vmId,
+    runtimeVmId: null,
+    storageKind: "scenario" as const,
+  }));
+}
+
+export async function ensureArtifactState(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  artifact: {
+    ordinal: number;
+    kind: string;
+    filename: string;
+    contentType: string;
+    sizeBytes: number;
+    sha256: string;
+  };
+  existing?: SourceArtifactState;
+  createdAt: number;
+}): Promise<SourceArtifactState> {
+  const identityVmId =
+    input.runVm.domainKind === "scenario"
+      ? input.runVm.vmId
+      : input.runVm.runtimeVmId;
+  if (!identityVmId) {
+    throw new Error("runtime VM identity is missing");
+  }
+  const artifactId =
+    input.existing?.id ?? artifactIdFor(identityVmId, input.artifact.ordinal);
+  const r2Key =
+    input.existing?.r2Key ??
+    buildArtifactObjectKey({
+      runId: input.runVm.runId,
+      vmId: identityVmId,
+      ordinal: input.artifact.ordinal,
+      kind: input.artifact.kind,
+      filename: input.artifact.filename,
+    });
+
+  if (input.runVm.runtimeVmId) {
+    await input.db
+      .insert(runtimeArtifacts)
+      .values({
+        id: artifactId,
+        executionId: input.runVm.runId,
+        runtimeVmId: input.runVm.runtimeVmId,
+        ordinal: input.artifact.ordinal,
+        kind: input.artifact.kind,
+        filename: input.artifact.filename,
+        contentType: input.artifact.contentType,
+        sizeBytes: input.artifact.sizeBytes,
+        sha256: input.artifact.sha256,
+        r2Key,
+        uploadStatus: input.existing?.uploadStatus ?? "pending",
+        createdAt: input.createdAt,
+        uploadedAt: input.existing?.uploadedAt ?? null,
+      })
+      .onConflictDoNothing();
+  }
+
+  if (input.runVm.domainKind === "scenario") {
+    await input.db
+      .insert(scenarioRunArtifacts)
+      .values({
+        id: artifactId,
+        runId: input.runVm.domainId,
+        vmId: input.runVm.vmId,
+        ordinal: input.artifact.ordinal,
+        kind: input.artifact.kind,
+        filename: input.artifact.filename,
+        contentType: input.artifact.contentType,
+        sizeBytes: input.artifact.sizeBytes,
+        sha256: input.artifact.sha256,
+        r2Key,
+        uploadStatus: input.existing?.uploadStatus ?? "pending",
+        createdAt: input.createdAt,
+        uploadedAt: input.existing?.uploadedAt ?? null,
+      })
+      .onConflictDoNothing();
+  }
+
+  const stored = await loadArtifactForRunVm(
+    input.db,
+    input.runVm,
+    input.artifact.ordinal,
+  );
+  if (!stored || !artifactMetadataMatches(stored, input.artifact)) {
+    throw new Error("artifact ledger did not converge");
+  }
+  return stored;
+}
+
+export async function loadArtifactUploadState(
+  db: ReturnType<typeof drizzle>,
+  artifact: SourceArtifactState,
+): Promise<{
+  r2UploadId: string | null;
+  uploadedPartsJson: string;
+  nextExpectedPart: number;
+} | null> {
+  if (artifact.storageKind === "runtime") {
+    const rows = await db
+      .select({
+        r2UploadId: runtimeArtifactUploads.r2UploadId,
+        uploadedParts: runtimeArtifactUploads.uploadedPartsJson,
+        nextExpectedPart: runtimeArtifactUploads.nextExpectedPart,
+      })
+      .from(runtimeArtifactUploads)
+      .where(eq(runtimeArtifactUploads.artifactId, artifact.id))
+      .limit(1);
+    const row = rows[0];
+    return row
+      ? {
+          r2UploadId: row.r2UploadId,
+          uploadedPartsJson: JSON.stringify(row.uploadedParts),
+          nextExpectedPart: row.nextExpectedPart,
+        }
+      : null;
+  }
+  const rows = await db
+    .select({
+      r2UploadId: scenarioRunArtifactUploads.r2UploadId,
+      uploadedPartsJson: scenarioRunArtifactUploads.uploadedPartsJson,
+      nextExpectedPart: scenarioRunArtifactUploads.nextExpectedPart,
+    })
+    .from(scenarioRunArtifactUploads)
+    .where(eq(scenarioRunArtifactUploads.artifactId, artifact.id))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function initializeArtifactUpload(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  artifact: SourceArtifactState;
+  r2UploadId: string;
+  updatedAt: number;
+}): Promise<void> {
+  const runtimeInsert = input.db
+    .insert(runtimeArtifactUploads)
+    .values({
+      artifactId: input.artifact.id,
+      r2UploadId: input.r2UploadId,
+      uploadedPartsJson: [],
+      nextExpectedPart: 1,
+      updatedAt: input.updatedAt,
+    })
+    .onConflictDoUpdate({
+      target: runtimeArtifactUploads.artifactId,
+      set: {
+        r2UploadId: input.r2UploadId,
+        uploadedPartsJson: [],
+        nextExpectedPart: 1,
+        updatedAt: input.updatedAt,
+      },
+    });
+  const scenarioInsert = input.db
+    .insert(scenarioRunArtifactUploads)
+    .values({
+      artifactId: input.artifact.id,
+      r2UploadId: input.r2UploadId,
+      uploadedPartsJson: "[]",
+      nextExpectedPart: 1,
+      updatedAt: input.updatedAt,
+    })
+    .onConflictDoUpdate({
+      target: scenarioRunArtifactUploads.artifactId,
+      set: {
+        r2UploadId: input.r2UploadId,
+        uploadedPartsJson: "[]",
+        nextExpectedPart: 1,
+        updatedAt: input.updatedAt,
+      },
+    });
+  if (
+    input.artifact.storageKind === "runtime" &&
+    input.runVm.domainKind === "scenario"
+  ) {
+    await input.db.batch([runtimeInsert, scenarioInsert]);
+    return;
+  }
+  if (input.artifact.storageKind === "runtime") {
+    await runtimeInsert;
+  } else {
+    await scenarioInsert;
+  }
+}
+
+export async function advanceArtifactUpload(input: {
+  db: ReturnType<typeof drizzle>;
+  runVm: ResolvedRunVm;
+  artifact: SourceArtifactState;
+  uploadedParts: UploadedPartRecord[];
+  nextExpectedPart: number;
+  updatedAt: number;
+}): Promise<void> {
+  const runtimeUpdate = input.db
+    .update(runtimeArtifactUploads)
+    .set({
+      uploadedPartsJson: input.uploadedParts,
+      nextExpectedPart: input.nextExpectedPart,
+      updatedAt: input.updatedAt,
+    })
+    .where(eq(runtimeArtifactUploads.artifactId, input.artifact.id));
+  const scenarioUpdate = input.db
+    .update(scenarioRunArtifactUploads)
+    .set({
+      uploadedPartsJson: JSON.stringify(input.uploadedParts),
+      nextExpectedPart: input.nextExpectedPart,
+      updatedAt: input.updatedAt,
+    })
+    .where(eq(scenarioRunArtifactUploads.artifactId, input.artifact.id));
+  if (
+    input.artifact.storageKind === "runtime" &&
+    input.runVm.domainKind === "scenario"
+  ) {
+    await input.db.batch([runtimeUpdate, scenarioUpdate]);
+    return;
+  }
+  if (input.artifact.storageKind === "runtime") {
+    await runtimeUpdate;
+  } else {
+    await scenarioUpdate;
+  }
 }
 
 export async function transitionRunVmToArchiving(
   db: ReturnType<typeof drizzle>,
-  runId: string,
-  vmId: string,
+  runVm: ResolvedRunVm,
   now: number,
 ): Promise<void> {
-  const run = await loadStoredRunLifecycle(db, runId);
+  if (runVm.runtimeVmId) {
+    await db
+      .update(runtimeExecutions)
+      .set({
+        state: sql`CASE
+          WHEN ${runtimeExecutions.state} IN ('queued', 'provisioning', 'ready')
+            THEN 'archiving'
+          ELSE ${runtimeExecutions.state}
+        END`,
+        archiveRequestedAt: sql`coalesce(${runtimeExecutions.archiveRequestedAt}, ${now})`,
+        updatedAt: now,
+      })
+      .where(eq(runtimeExecutions.id, runVm.runId));
+  }
+  if (runVm.domainKind !== "scenario") return;
+
+  const run = await loadStoredRunLifecycle(db, runVm.domainId);
   if (!run) {
     return;
   }
@@ -303,7 +745,7 @@ export async function transitionRunVmToArchiving(
   const nextState = recomputeRunState({
     ...run.state,
     vms: run.state.vms.map((vm) =>
-      vm.id === vmId &&
+      vm.id === runVm.vmId &&
       vm.phase !== "failed" &&
       canAdvanceVmPhase(vm.phase, "archived")
         ? {
@@ -316,7 +758,7 @@ export async function transitionRunVmToArchiving(
 
   await persistStoredRunLifecycle(
     db,
-    runId,
+    runVm.domainId,
     run,
     {
       ...nextState,
@@ -328,11 +770,24 @@ export async function transitionRunVmToArchiving(
 
 export async function transitionRunVmToCompleted(
   db: ReturnType<typeof drizzle>,
-  runId: string,
-  vmId: string,
+  runVm: ResolvedRunVm,
   now: number,
 ): Promise<void> {
-  const run = await loadStoredRunLifecycle(db, runId);
+  if (runVm.runtimeVmId) {
+    await db
+      .update(runtimeVms)
+      .set({ artifactWritesSealed: true, updatedAt: now })
+      .where(
+        and(
+          eq(runtimeVms.id, runVm.runtimeVmId),
+          eq(runtimeVms.executionId, runVm.runId),
+        ),
+      );
+    await archiveRuntimeExecutionWhenAllVmsSealed(db, runVm.runId, now);
+  }
+  if (runVm.domainKind !== "scenario") return;
+
+  const run = await loadStoredRunLifecycle(db, runVm.domainId);
   if (!run) {
     return;
   }
@@ -340,7 +795,7 @@ export async function transitionRunVmToCompleted(
   const nextState = recomputeRunState({
     ...run.state,
     vms: run.state.vms.map((vm) =>
-      vm.id === vmId
+      vm.id === runVm.vmId
         ? {
             ...vm,
             phase: "completed",
@@ -360,7 +815,7 @@ export async function transitionRunVmToCompleted(
 
   await persistStoredRunLifecycle(
     db,
-    runId,
+    runVm.domainId,
     run,
     {
       ...nextState,
@@ -375,7 +830,7 @@ export async function transitionRunVmToCompleted(
         JSON.stringify({
           event: "scenario_run_lifecycle_timing",
           metric: "vm_absent_to_archive_complete",
-          runId,
+          runId: runVm.domainId,
           startedAt: vmAbsentAt,
           completedAt: now,
           durationMs: Math.max(0, now - vmAbsentAt),
@@ -383,6 +838,31 @@ export async function transitionRunVmToCompleted(
       );
     }
   }
+}
+
+async function archiveRuntimeExecutionWhenAllVmsSealed(
+  db: ReturnType<typeof drizzle>,
+  executionId: string,
+  now: number,
+): Promise<void> {
+  await db
+    .update(runtimeExecutions)
+    .set({
+      state: "archived",
+      archiveRequestedAt: sql`coalesce(${runtimeExecutions.archiveRequestedAt}, ${now})`,
+      endedAt: sql`coalesce(${runtimeExecutions.endedAt}, ${now})`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(runtimeExecutions.id, executionId),
+        sql`NOT EXISTS (
+          SELECT 1 FROM runtime_vms pending_vm
+          WHERE pending_vm.execution_id = ${executionId}
+            AND pending_vm.artifact_writes_sealed = 0
+        )`,
+      ),
+    );
 }
 
 export async function loadStoredRunLifecycle(

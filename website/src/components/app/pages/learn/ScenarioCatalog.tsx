@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -68,6 +68,7 @@ export function ScenarioCatalog() {
   );
   const navigate = useNavigate();
   const [searchText, setSearchText] = useState(searchState.q);
+  const pendingSearchNavigation = useRef<number | null>(null);
 
   const courses = useQuery({
     queryKey: ["scenarios", "list"],
@@ -140,12 +141,21 @@ export function ScenarioCatalog() {
     const nextQuery = searchText.trim();
     if (nextQuery === searchState.q) return;
     const timeout = window.setTimeout(() => {
+      if (pendingSearchNavigation.current === timeout) {
+        pendingSearchNavigation.current = null;
+      }
       void navigateCatalogSearch(navigate, {
         ...searchState,
         q: nextQuery,
       });
     }, 250);
-    return () => window.clearTimeout(timeout);
+    pendingSearchNavigation.current = timeout;
+    return () => {
+      window.clearTimeout(timeout);
+      if (pendingSearchNavigation.current === timeout) {
+        pendingSearchNavigation.current = null;
+      }
+    };
   }, [navigate, searchState, searchText]);
 
   const catalogFilter = useMemo(
@@ -485,13 +495,17 @@ export function ScenarioCatalog() {
           courses={catalogView.courses}
           selectedCourseKey={searchState.course}
           selectedSection={selectedSection}
-          onSelectCourse={(course) =>
+          onSelectCourse={(course) => {
+            if (pendingSearchNavigation.current !== null) {
+              window.clearTimeout(pendingSearchNavigation.current);
+              pendingSearchNavigation.current = null;
+            }
             void navigateCatalogSearch(
               navigate,
-              { ...searchState, course },
+              { ...searchState, q: searchText.trim(), course },
               false,
-            )
-          }
+            );
+          }}
           onShowAllCourses={() =>
             void navigateCatalogSearch(
               navigate,

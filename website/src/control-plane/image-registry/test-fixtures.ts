@@ -208,19 +208,24 @@ export interface HostSelectRow {
   scenarioEnabled: boolean;
 }
 
-// Publish runs two select().from().where() queries in order: the cached-image
-// host bump (agentHosts) and then the prune's catalog-reference guard
-// (vmScenarioVms).
+// Publish runs three select queries in order: the cached-image host bump, the
+// scenario catalog-reference guard, and the published-workshop checkpoint
+// guard. The last query includes an inner join, so the fixture exposes both
+// Drizzle chain shapes.
 export function publishPruneDb(
   hostRows: HostSelectRow[],
   imageRefRows: Array<{ imageKey: unknown; imageSha256: string | null }>,
+  workshopRows: Array<{ images: unknown[] | null }> = [],
 ) {
-  const selectWhere = vi
-    .fn()
-    .mockResolvedValueOnce(hostRows)
-    .mockResolvedValueOnce(imageRefRows);
-  const selectFrom = vi.fn(() => ({ where: selectWhere }));
-  const select = vi.fn(() => ({ from: selectFrom }));
+  const rowSets = [hostRows, imageRefRows, workshopRows];
+  let queryIndex = 0;
+  const select = vi.fn(() => {
+    const rows = rowSets[queryIndex++] ?? [];
+    const where = vi.fn().mockResolvedValue(rows);
+    const innerJoin = vi.fn(() => ({ where }));
+    const from = vi.fn(() => ({ where, innerJoin }));
+    return { from };
+  });
 
   return {
     kind: "test-db",

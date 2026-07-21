@@ -5,8 +5,9 @@ use axum::{
 };
 use serde_json::json;
 use stargate_core::{
-    IssueTerminalSessionRequest, IssueTerminalSessionResponse, NativeTerminalAuthMode,
-    NativeTerminalSession, StargateError, TerminalSessionMode, validate_terminal_session_request,
+    IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
+    IssueWorkspaceAppSessionResponse, NativeTerminalAuthMode, NativeTerminalSession, StargateError,
+    TerminalSessionMode, validate_terminal_session_request, validate_workspace_app_session_request,
 };
 
 use crate::{GatewayHttpError, GatewayState, webssh};
@@ -57,6 +58,35 @@ pub async fn issue_terminal_session(
     Ok(Json(response))
 }
 
+pub async fn issue_workspace_app_session(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(request): Json<IssueWorkspaceAppSessionRequest>,
+) -> Result<Json<IssueWorkspaceAppSessionResponse>, GatewayHttpError> {
+    state.admin_auth.validate_headers(&headers).await?;
+    crate::workspace_app::ensure_workspace_app_origin_configured(&state)?;
+    let route = validate_workspace_app_session_request(request)?;
+    let bootstrap = crate::workspace_app::new_workspace_app_bootstrap(
+        route.expires_at,
+        state.public_web.workspace_app_bootstrap_ttl_seconds,
+    )?;
+    let stored = state
+        .store
+        .upsert_workspace_app_route(route, &bootstrap.token_sha256, bootstrap.expires_at)
+        .await?;
+    // An upsert is also a route authorization rotation. Close any HTTP or
+    // WebSocket tunnel that was established under the replaced credentials.
+    state.sessions.terminate_username(&stored.route_id).await;
+    let url =
+        crate::workspace_app::build_workspace_app_url(&state, &stored.route_id, &bootstrap.token)?;
+    Ok(Json(IssueWorkspaceAppSessionResponse {
+        route_id: stored.route_id,
+        url,
+        bootstrap_expires_at: bootstrap.expires_at.unix_timestamp(),
+        expires_at: stored.expires_at.unix_timestamp(),
+    }))
+}
+
 pub async fn delete_route(
     State(state): State<GatewayState>,
     headers: HeaderMap,
@@ -67,6 +97,19 @@ pub async fn delete_route(
         return Err(GatewayHttpError(StargateError::RouteNotFound(username)));
     }
     state.sessions.terminate_username(&username).await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_workspace_app_route(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(route_id): Path<String>,
+) -> Result<axum::http::StatusCode, GatewayHttpError> {
+    state.admin_auth.validate_headers(&headers).await?;
+    if !state.store.delete_workspace_app_route(&route_id).await? {
+        return Err(GatewayHttpError(StargateError::RouteNotFound(route_id)));
+    }
+    state.sessions.terminate_username(&route_id).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

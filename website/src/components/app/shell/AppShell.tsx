@@ -12,6 +12,7 @@ export function AppShell() {
     select: (state) => state.location.pathname,
   });
   const previousPath = useRef(pathname);
+  const projectorMode = /^\/workshops\/[^/]+\/projector\/?$/.test(pathname);
 
   useEffect(() => {
     if (previousPath.current === pathname) return;
@@ -26,25 +27,35 @@ export function AppShell() {
 
   return (
     <PageChromeProvider>
-      <SidebarProvider>
-        <a
-          href="#main-content"
-          className="fixed top-3 left-3 z-[100] inline-flex min-h-11 -translate-y-24 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-md transition-transform focus:translate-y-0 motion-reduce:transition-none"
+      {projectorMode ? (
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex min-h-svh min-w-0 flex-col bg-background focus:outline-none"
         >
-          Skip to main content
-        </a>
-        <AppSidebar />
-        <SidebarInset className="min-w-0">
-          <AppBar />
-          <main
-            id="main-content"
-            tabIndex={-1}
-            className="flex min-w-0 flex-1 flex-col focus:outline-none"
+          <Outlet />
+        </main>
+      ) : (
+        <SidebarProvider>
+          <a
+            href="#main-content"
+            className="fixed top-3 left-3 z-[100] inline-flex min-h-11 -translate-y-24 items-center rounded-lg bg-primary px-4 py-2 font-semibold text-primary-foreground shadow-md transition-transform focus:translate-y-0 motion-reduce:transition-none"
           >
-            <Outlet />
-          </main>
-        </SidebarInset>
-      </SidebarProvider>
+            Skip to main content
+          </a>
+          <AppSidebar />
+          <SidebarInset className="min-w-0">
+            <AppBar />
+            <main
+              id="main-content"
+              tabIndex={-1}
+              className="flex min-w-0 flex-1 flex-col focus:outline-none"
+            >
+              <Outlet />
+            </main>
+          </SidebarInset>
+        </SidebarProvider>
+      )}
     </PageChromeProvider>
   );
 }

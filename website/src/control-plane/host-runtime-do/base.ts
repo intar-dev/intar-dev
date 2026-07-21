@@ -21,6 +21,8 @@ import type { HostDesiredStateV2 } from "@/generated/bridge";
 
 export const HOST_BUILD_MAINTENANCE_INTERVAL_MS = 60_000;
 export const DESIRED_VERSION_LAG_REPUSH_AFTER_MS = 10_000;
+export const RUNTIME_LEASE_CLEANUP_RETRY_MS = 10_000;
+export const WORKSHOP_RECOVERY_RETRY_MS = 10_000;
 
 export interface SocketAttachment {
   hostId: string;
@@ -286,16 +288,56 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       .filter((vm) => vm.desired_phase === "running")
       .map((vm) => vm.lease_expires_at_unix_ms)
       .sort((left, right) => left - right)[0];
+    const runtimeLease = await this.env.DB.prepare(
+      `SELECT min(execution.lease_expires_at) AS expires_at
+       FROM runtime_executions execution
+       WHERE execution.host_id = ?
+         AND execution.lease_expires_at IS NOT NULL
+         AND execution.state <> 'archived'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM runtime_executions newer
+           WHERE newer.domain_kind = execution.domain_kind
+             AND newer.domain_id = execution.domain_id
+             AND newer.generation > execution.generation
+         )`,
+    )
+      .bind(hostId)
+      .first<{ expires_at: number | null }>();
+    const nextRuntimeLeaseExpiry = runtimeLease?.expires_at ?? undefined;
     const nextReservationExpiry = await nextPendingHostCpuReservationExpiry(
       drizzle(this.env.DB),
       hostId,
     );
+    const pendingWorkshopRecovery = await this.env.DB.prepare(
+      `SELECT 1 AS pending
+       FROM workshop_workspaces workspace
+       INNER JOIN workshop_workspace_generations generation
+         ON generation.id = workspace.current_generation_id
+       INNER JOIN workshop_sessions session ON session.id = workspace.session_id
+       WHERE session.state IN ('lobby', 'live')
+         AND workspace.state IN ('recovering', 'failed')
+         AND generation.state IN ('queued', 'failed')
+         AND EXISTS (
+           SELECT 1
+           FROM workshop_events event
+           WHERE event.session_id = workspace.session_id
+             AND event.type = 'workspace.host_failure_recovery_requested'
+             AND json_extract(event.payload_json, '$.generationId') = generation.id
+             AND json_extract(event.payload_json, '$.failedHostId') = ?
+         )
+       LIMIT 1`,
+    )
+      .bind(hostId)
+      .first<{ pending: number }>();
 
     if (
       !activeSocket &&
       !undeliveredDesired &&
       typeof nextLeaseExpiry !== "number" &&
+      typeof nextRuntimeLeaseExpiry !== "number" &&
       typeof nextReservationExpiry !== "number" &&
+      !pendingWorkshopRecovery &&
       desiredState.builds.length === 0
     ) {
       // A lagging applied version alone does not keep the alarm armed:
@@ -310,8 +352,18 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       // the expiry to avoid a no-op alarm fire exactly on the boundary.
       candidates.push(Math.max(now + 1, nextLeaseExpiry + 1));
     }
+    if (typeof nextRuntimeLeaseExpiry === "number") {
+      candidates.push(
+        nextRuntimeLeaseExpiry <= now
+          ? now + RUNTIME_LEASE_CLEANUP_RETRY_MS
+          : nextRuntimeLeaseExpiry + 1,
+      );
+    }
     if (typeof nextReservationExpiry === "number") {
       candidates.push(Math.max(now + 1, nextReservationExpiry + 1));
+    }
+    if (pendingWorkshopRecovery) {
+      candidates.push(now + WORKSHOP_RECOVERY_RETRY_MS);
     }
     if (lag.lagging && activeSocket) {
       candidates.push(now + DESIRED_VERSION_LAG_REPUSH_AFTER_MS);
@@ -671,9 +723,7 @@ function latestVmAbsenceAt(state: RunStateDocument): number | null {
 }
 
 function logLifecycleTiming(input: {
-  metric:
-    | "accepted_to_terminal_ready"
-    | "teardown_requested_to_vm_absent";
+  metric: "accepted_to_terminal_ready" | "teardown_requested_to_vm_absent";
   runId: string;
   startedAt: number;
   completedAt: number;

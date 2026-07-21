@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use intar_contracts::stargate::{IssueTerminalSessionRequest, RouteMetadata, TerminalSessionMode};
+use intar_contracts::stargate::{
+    IssueTerminalSessionRequest, IssueWorkspaceAppSessionRequest, RouteMetadata,
+    TerminalSessionMode, WorkspaceAppProtocol,
+};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -8,6 +11,7 @@ use crate::{Result, StargateError};
 
 const ROUTE_USERNAME_MAX_LEN: usize = 128;
 const TARGET_USERNAME_MAX_LEN: usize = 64;
+const WORKSPACE_APP_ROUTE_ID_MAX_LEN: usize = 63;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegisteredRoute {
@@ -32,6 +36,40 @@ pub struct RouteRecord {
     pub authorized_client_public_keys_openssh: Vec<String>,
     pub target_host_key_openssh: String,
     pub target_private_key_openssh: String,
+    #[serde(with = "time::serde::timestamp")]
+    pub expires_at: OffsetDateTime,
+    pub metadata: RouteMetadata,
+    #[serde(with = "time::serde::timestamp")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::timestamp")]
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RegisteredWorkspaceAppRoute {
+    pub route_id: String,
+    pub target_username: String,
+    pub target_ip: String,
+    pub target_ssh_port: u16,
+    pub target_host_key_openssh: String,
+    pub target_private_key_openssh: String,
+    pub target_app_port: u16,
+    pub protocol: WorkspaceAppProtocol,
+    #[serde(with = "time::serde::timestamp")]
+    pub expires_at: OffsetDateTime,
+    pub metadata: RouteMetadata,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceAppRouteRecord {
+    pub route_id: String,
+    pub target_username: String,
+    pub target_ip: String,
+    pub target_ssh_port: u16,
+    pub target_host_key_openssh: String,
+    pub target_private_key_openssh: String,
+    pub target_app_port: u16,
+    pub protocol: WorkspaceAppProtocol,
     #[serde(with = "time::serde::timestamp")]
     pub expires_at: OffsetDateTime,
     pub metadata: RouteMetadata,
@@ -73,6 +111,11 @@ pub fn validate_terminal_session_request(
         normalize_authorized_client_public_keys(request.authorized_client_public_keys_openssh)?;
 
     let mode = request.mode;
+    if mode == TerminalSessionMode::Browser && !authorized_client_public_keys_openssh.is_empty() {
+        return Err(StargateError::Validation(
+            "authorized_client_public_keys_openssh must be empty for browser sessions".to_owned(),
+        ));
+    }
     Ok((
         RegisteredRoute {
             route_username: request.route_username,
@@ -87,6 +130,87 @@ pub fn validate_terminal_session_request(
         },
         mode,
     ))
+}
+
+pub fn validate_workspace_app_session_request(
+    request: IssueWorkspaceAppSessionRequest,
+) -> Result<RegisteredWorkspaceAppRoute> {
+    validate_workspace_app_route_id(&request.route_id)?;
+    validate_target_username(&request.target_username)?;
+    if request.target_ssh_port == 0 {
+        return Err(StargateError::Validation(
+            "target_ssh_port must be between 1 and 65535".to_owned(),
+        ));
+    }
+    if request.target_app_port == 0 {
+        return Err(StargateError::Validation(
+            "target_app_port must be between 1 and 65535".to_owned(),
+        ));
+    }
+    let _ = request
+        .target_ip
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| StargateError::Validation("target_ip must be a literal IP".to_owned()))?;
+    let expires_at = validate_future_timestamp(request.route_expires_at)?;
+    validate_target_credentials(
+        &request.target_host_key_openssh,
+        &request.target_private_key_openssh,
+    )?;
+
+    Ok(RegisteredWorkspaceAppRoute {
+        route_id: request.route_id,
+        target_username: request.target_username,
+        target_ip: request.target_ip,
+        target_ssh_port: request.target_ssh_port,
+        target_host_key_openssh: request.target_host_key_openssh,
+        target_private_key_openssh: request.target_private_key_openssh,
+        target_app_port: request.target_app_port,
+        protocol: request.protocol,
+        expires_at,
+        metadata: request.metadata,
+    })
+}
+
+fn validate_future_timestamp(raw: i64) -> Result<OffsetDateTime> {
+    let value = OffsetDateTime::from_unix_timestamp(raw).map_err(|_| {
+        StargateError::Validation("route_expires_at must be a valid Unix timestamp".to_owned())
+    })?;
+    if value <= OffsetDateTime::now_utc() {
+        return Err(StargateError::Validation(
+            "route_expires_at must be in the future".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_target_credentials(host_key: &str, private_key: &str) -> Result<()> {
+    let _ = russh::keys::ssh_key::PublicKey::from_openssh(host_key)
+        .map_err(|_| StargateError::Validation("target_host_key_openssh is invalid".to_owned()))?;
+    let _ = russh::keys::decode_secret_key(private_key, None).map_err(|_| {
+        StargateError::Validation("target_private_key_openssh is invalid".to_owned())
+    })?;
+    Ok(())
+}
+
+fn validate_workspace_app_route_id(route_id: &str) -> Result<()> {
+    if route_id.is_empty() || route_id.len() > WORKSPACE_APP_ROUTE_ID_MAX_LEN {
+        return Err(StargateError::Validation(format!(
+            "route_id must be 1..={WORKSPACE_APP_ROUTE_ID_MAX_LEN} characters"
+        )));
+    }
+    let bytes = route_id.as_bytes();
+    let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    if !valid_edge(bytes[0])
+        || !valid_edge(bytes[bytes.len() - 1])
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    {
+        return Err(StargateError::Validation(
+            "route_id must be a lowercase DNS label".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 impl RouteRecord {
@@ -111,6 +235,18 @@ impl RouteRecord {
             .any(|expected| expected.key_data() == candidate.key_data()))
     }
 
+    pub fn target_host_key(&self) -> Result<russh::keys::ssh_key::PublicKey> {
+        Ok(russh::keys::ssh_key::PublicKey::from_openssh(
+            &self.target_host_key_openssh,
+        )?)
+    }
+
+    pub fn is_expired_at(&self, now: OffsetDateTime) -> bool {
+        self.expires_at <= now
+    }
+}
+
+impl WorkspaceAppRouteRecord {
     pub fn target_host_key(&self) -> Result<russh::keys::ssh_key::PublicKey> {
         Ok(russh::keys::ssh_key::PublicKey::from_openssh(
             &self.target_host_key_openssh,
@@ -246,9 +382,7 @@ mod tests {
             target_port: 22,
             target_host_key_openssh: target_host_key.public_key().to_openssh().expect("host"),
             target_private_key_openssh: private_key_openssh(&target_key),
-            authorized_client_public_keys_openssh: vec![
-                target_host_key.public_key().to_openssh().expect("client"),
-            ],
+            authorized_client_public_keys_openssh: Vec::new(),
             route_expires_at: (OffsetDateTime::now_utc() + time::Duration::hours(1))
                 .unix_timestamp(),
             mode: TerminalSessionMode::Browser,
@@ -316,6 +450,41 @@ mod tests {
         assert_eq!(
             route.authorized_client_public_keys_openssh,
             vec![client_key_openssh]
+        );
+    }
+
+    #[test]
+    fn browser_terminal_request_rejects_native_client_keys() {
+        let mut rng = russh::keys::key::safe_rng();
+        let target_host_key =
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
+        let target_key =
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("target key");
+        let client_key =
+            russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("client key");
+
+        let request = IssueTerminalSessionRequest {
+            route_username: "workshop-helper-browser".to_owned(),
+            target_username: "ubuntu".to_owned(),
+            target_ip: "127.0.0.1".to_owned(),
+            target_port: 22,
+            target_host_key_openssh: target_host_key.public_key().to_openssh().expect("host"),
+            target_private_key_openssh: private_key_openssh(&target_key),
+            authorized_client_public_keys_openssh: vec![
+                client_key.public_key().to_openssh().expect("client"),
+            ],
+            route_expires_at: (OffsetDateTime::now_utc() + time::Duration::hours(1))
+                .unix_timestamp(),
+            mode: TerminalSessionMode::Browser,
+            metadata: RouteMetadata::default(),
+        };
+
+        let error = validate_terminal_session_request(request)
+            .expect_err("browser routes must never authorize native SSH keys");
+        assert!(
+            error
+                .to_string()
+                .contains("must be empty for browser sessions")
         );
     }
 

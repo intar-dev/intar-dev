@@ -4,7 +4,10 @@ use intar_contracts::{
         VmReportV2,
     },
     catalog::ScenarioManifestV3,
-    stargate::{IssueTerminalSessionRequest, IssueTerminalSessionResponse},
+    stargate::{
+        IssueTerminalSessionRequest, IssueTerminalSessionResponse, IssueWorkspaceAppSessionRequest,
+        IssueWorkspaceAppSessionResponse,
+    },
 };
 
 #[test]
@@ -18,6 +21,20 @@ fn stargate_request_fixture_round_trips() {
 fn stargate_response_fixture_round_trips() {
     assert_round_trip::<IssueTerminalSessionResponse>(include_str!(
         "../fixtures/stargate/issue-terminal-session-response.json"
+    ));
+}
+
+#[test]
+fn stargate_workspace_app_request_fixture_round_trips() {
+    assert_round_trip::<IssueWorkspaceAppSessionRequest>(include_str!(
+        "../fixtures/stargate/issue-workspace-app-session-request.json"
+    ));
+}
+
+#[test]
+fn stargate_workspace_app_response_fixture_round_trips() {
+    assert_round_trip::<IssueWorkspaceAppSessionResponse>(include_str!(
+        "../fixtures/stargate/issue-workspace-app-session-response.json"
     ));
 }
 

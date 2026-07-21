@@ -11,14 +11,18 @@ mod rootfs;
 mod seed;
 mod ssh;
 
-pub use artifact::{RawZstdArtifact, write_raw_zstd_artifact};
+pub use artifact::{
+    RawZstdArtifact, expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel,
+    write_raw_zstd_artifact, write_raw_zstd_artifact_with_cancel,
+};
 pub use config::{BuildConfig, ConfigError, QemuBuildConfig, RawUploadConfig};
 pub use content_hash::{
     BUILD_FORMAT_VERSION, ScenarioContentHashInput, scenario_content_hash, sha256_bytes_hex,
 };
 pub use direct::{
     DirectBuildArtifact, DirectBuildOutput, DirectBuildPaths, DirectBuildPrepareInput,
-    DirectBuildRequest, RenderedDirectBuild, prepare_direct_build_inputs, render_direct_build,
+    DirectBuildRequest, DirectQemuShutdownInput, RenderedDirectBuild, acknowledged_qmp_shutdown,
+    acknowledged_qmp_shutdown_with_cancel, prepare_direct_build_inputs, render_direct_build,
     run_direct_build,
 };
 pub use disk::{
@@ -38,4 +42,4 @@ pub use seed::{
     AUTHORIZED_KEYS_FILENAME, BUILD_ENV_FILENAME, BuildSeedInput, INTAR_BUILD_SEED_LABEL,
     INTAR_BUILD_SEED_LABEL_TEXT, render_build_env, write_build_seed,
 };
-pub use ssh::{BuildSshKey, generate_build_ssh_key, private_key_to_openssh};
+pub use ssh::{BuildSshKey, BuildSshSession, generate_build_ssh_key, private_key_to_openssh};

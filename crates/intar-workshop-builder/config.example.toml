@@ -1,0 +1,89 @@
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "replace-with-a-builder-bootstrap-token"
+http_timeout_seconds = 120
+
+[worker]
+work_root = "/var/lib/intar-workshop-builder/bundles"
+architecture = "x86_64"
+poll_interval_seconds = 5
+error_retry_seconds = 15
+max_compressed_bundle_bytes = 67108864
+max_expanded_bundle_bytes = 536870912
+max_bundle_entries = 4096
+
+[execution]
+work_root = "/var/lib/intar-workshop-builder/executions"
+qemu_binary = "/usr/bin/qemu-system-x86_64"
+e2fsck_binary = "/usr/sbin/e2fsck"
+resize2fs_binary = "/usr/sbin/resize2fs"
+ssh_username = "ubuntu"
+accelerator = "kvm"
+require_kvm = true
+ssh_wait_timeout_seconds = 1200
+script_timeout_seconds = 3600
+shutdown_timeout_seconds = 300
+sanitizer_path = "/usr/local/sbin/intar-workshop-sanitize"
+probe_every_seconds = 10
+probe_timeout_seconds = 120
+
+# The image name must exactly match workspace.vm.image in workshop.hcl. This
+# is a dedicated, operator-built Debian disk with the Intar build-seed service,
+# workshop toolchain/repository/offline images, Kino, and the fixed sanitizer.
+[[execution.images]]
+name = "platform-engineering-workshop-debian13-1b6fad4"
+architecture = "x86_64"
+disk = "/var/cache/intar-workshop-builder/bases/platform-engineering-debian13.raw"
+kernel = "/var/cache/intar-workshop-builder/bases/vmlinuz-6.12-intar"
+initrd = "/var/cache/intar-workshop-builder/bases/initrd.img-6.12-intar"
+boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
+# These paths are archived once on the trusted build generation, removed before
+# every seal, absent during cold-boot proof, and restored only after the next
+# mutable generation starts. Never list participant lab/content paths here.
+guest_build_material_paths = [
+  "/opt/platform-engineering-workshop/scripts/catch-up.sh",
+  "/opt/platform-engineering-workshop/solutions",
+]
+# Cold-boot proof checks every exact path below. Build material must be repeated
+# here, and participant-only image construction must omit all other answer,
+# facilitator, source-control, backup, and duplicate-repository paths.
+guest_forbidden_participant_paths = [
+  "/opt/platform-engineering-workshop/.git",
+  "/opt/platform-engineering-workshop/scripts/catch-up.sh",
+  "/opt/platform-engineering-workshop/solutions",
+  "/opt/platform-engineering-workshop/solutions.bak",
+  "/opt/platform-engineering-workshop/solutions-backup",
+  "/opt/platform-engineering-workshop/slides",
+  "/opt/platform-engineering-workshop/docs/HELPERS.md",
+  "/opt/platform-engineering-workshop/lab/00-setup/README.md",
+  "/opt/platform-engineering-workshop/lab/00-setup/solve.sh",
+  "/opt/platform-engineering-workshop/lab/01-cluster/README.md",
+  "/opt/platform-engineering-workshop/lab/01-cluster/solve.sh",
+  "/opt/platform-engineering-workshop/lab/02-gitops/README.md",
+  "/opt/platform-engineering-workshop/lab/02-gitops/solve.sh",
+  "/opt/platform-engineering-workshop/lab/03-data/README.md",
+  "/opt/platform-engineering-workshop/lab/03-data/solve.sh",
+  "/opt/platform-engineering-workshop/lab/04-self-service/README.md",
+  "/opt/platform-engineering-workshop/lab/04-self-service/solve.sh",
+  "/opt/platform-engineering-workshop/lab/05-debug-with-ai/README.md",
+  "/opt/platform-engineering-workshop/lab/05-debug-with-ai/solve.sh",
+  "/opt/platform-engineering-workshop/lab/06-serverless/README.md",
+  "/opt/platform-engineering-workshop/lab/06-serverless/solve.sh",
+  "/opt/platform-engineering-workshop/lab/07-ci/README.md",
+  "/opt/platform-engineering-workshop/lab/07-ci/solve.sh",
+  "/opt/platform-engineering-workshop/lab/08-portal/README.md",
+  "/opt/platform-engineering-workshop/lab/08-portal/solve.sh",
+  "/opt/platform-engineering-workshop/lab/09-capstone/README.md",
+  "/opt/platform-engineering-workshop/lab/09-capstone/solve.sh",
+  "/opt/platform-engineering-workshop/lab/10-day2-ops/README.md",
+  "/opt/platform-engineering-workshop/lab/10-day2-ops/solve.sh",
+  "/opt/platform-engineering-workshop.bak",
+  "/opt/platform-engineering-workshop-backup",
+  "/opt/platform-engineering-workshop-copy",
+  "/opt/Platform-Engineering-Workshop",
+  "/root/platform-engineering-workshop",
+  "/root/Platform-Engineering-Workshop",
+  "/home/ubuntu/platform-engineering-workshop",
+  "/home/ubuntu/Platform-Engineering-Workshop",
+]

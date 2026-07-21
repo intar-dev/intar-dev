@@ -1,11 +1,15 @@
 import { env } from "cloudflare:workers";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
-import { appError, errorChainMatches } from "@/lib/app-error";
-import { strictCpuCapacity } from "@/control-plane/host-cpu-reservations";
+import { AppError, appError, errorChainMatches } from "@/lib/app-error";
+import {
+  bootCpuReservationForSteadyVms,
+  strictCpuCapacity,
+} from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
   hostActualState,
+  runtimeExecutions,
   scenarioRuns,
   scenarioRunSshKeys,
 } from "@/db/schema";
@@ -23,6 +27,22 @@ import {
   rollbackHostCpu,
 } from "@/lib/host-cpu-reservation-client";
 import { createAppId } from "@/lib/id";
+import {
+  availableRuntimeHostResources,
+  loadActiveRuntimeResourceSnapshot,
+  RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS,
+  runtimeResourcesFit,
+  type RuntimeResourceDemand,
+} from "@/lib/runtime-capacity";
+import {
+  runtimeCapacityAllocationKey,
+  withRuntimeAllocationLock,
+} from "@/lib/runtime-allocation-lock";
+import {
+  createRuntimeExecution,
+  updateRuntimeExecutionState,
+  type RuntimeVmSpec,
+} from "@/lib/runtime-executions";
 import { revokeAllRoutes } from "@/lib/route-revocation";
 import {
   RUN_PHASE_ORDER,
@@ -62,7 +82,10 @@ export const HOST_HEARTBEAT_TTL_MS = 90_000;
 
 export type HostSelectionResult =
   | { ok: true; hostIds: string[] }
-  | { ok: false; reason: "unavailable" | "image_not_ready" };
+  | {
+      ok: false;
+      reason: "unavailable" | "image_not_ready" | "resource_capacity";
+    };
 
 export type ScenarioRouteType = "browser" | "native_profile_keys";
 
@@ -206,69 +229,39 @@ export async function startScenarioRunInternal(params: {
         }) satisfies RunVmStateDocument,
     ),
   });
-
-  let hostId: string;
-  if (params.hostId) {
-    await assertScenarioLaunchHostForUser(
-      params.hostId,
-      params.userId,
-      requiredImages,
-      organizationId,
-    );
-    const reservation = await reserveScenarioBootCpuWithJitter({
-      hostIds: [params.hostId],
-      runId,
-      steadyCpuMillisByVm,
-    });
-    if (!reservation.ok) {
-      throw reservation.reason === "boot_capacity_pending"
-        ? bootCapacityPendingError({
-            scenarioId: scenario.scenarioId,
-            hostId: params.hostId,
-          })
-        : appError(
-            409,
-            "scenario_host_unavailable",
-            "host cannot provide strict CPU isolation",
-          );
-    }
-    hostId = reservation.hostId;
-  } else {
-    const selection = await selectScenarioHosts(requiredImages, organizationId);
-    if (!selection.ok) {
-      if (selection.reason === "image_not_ready") {
-        throw appError(
-          409,
-          "image_not_ready",
-          "scenario images are not ready on any available host",
-        );
-      }
-      throw appError(
-        409,
-        "scenario_host_unavailable",
-        "no scenario host available",
-      );
-    }
-
-    const reservation = await reserveScenarioBootCpuWithJitter({
-      hostIds: selection.hostIds,
-      runId,
-      steadyCpuMillisByVm,
-    });
-    if (!reservation.ok) {
-      throw reservation.reason === "boot_capacity_pending"
-        ? bootCapacityPendingError({ scenarioId: scenario.scenarioId })
-        : appError(
-            409,
-            "scenario_host_unavailable",
-            "no scenario host can provide strict CPU isolation",
-          );
-    }
-    hostId = reservation.hostId;
-  }
-
   const db = drizzle(env.DB);
+  const runtimeVms = runtimeVmSpecsFromScenarioState(provisionedState);
+  const leaseDurationSeconds = Math.max(
+    0,
+    ...provisionedState.vms.map(
+      (vm) => vm.provisioning.leaseDurationSeconds ?? 0,
+    ),
+  );
+  const runtimeReservationResources = scenarioRuntimeReservationResources(
+    runtimeVms,
+    steadyCpuMillisByVm,
+  );
+  let hostId: string | null = null;
+  let runtimeCreated = false;
   try {
+    const allocated = await allocateScenarioRuntime({
+      scenarioId: scenario.scenarioId,
+      runId,
+      userId: params.userId,
+      organizationId,
+      ...(params.hostId ? { requestedHostId: params.hostId } : {}),
+      requiredImages,
+      steadyCpuMillisByVm,
+      reservationResources: runtimeReservationResources,
+      runtimeVms,
+      leaseExpiresAt:
+        leaseDurationSeconds > 0
+          ? createdAt + leaseDurationSeconds * 1_000
+          : null,
+      now: createdAt,
+    });
+    hostId = allocated.hostId;
+    runtimeCreated = true;
     const preparedSshKeys = await sshKeyRowsPromise;
     if (!preparedSshKeys.ok) {
       throw preparedSshKeys.error;
@@ -282,6 +275,7 @@ export async function startScenarioRunInternal(params: {
         runId,
         userId: params.userId,
         organizationId,
+        runtimeExecutionId: runId,
         hostId,
         scenarioId: scenario.scenarioId,
         scenarioName: scenario.scenarioId,
@@ -319,23 +313,46 @@ export async function startScenarioRunInternal(params: {
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
     });
+    await updateRuntimeExecutionState({
+      executionId: runId,
+      expectedGeneration: 1,
+      state: "provisioning",
+      observedAt: createdAt,
+    });
+    await env.DB.prepare(
+      `UPDATE host_resource_reservations
+       SET state = 'committed', expires_at = NULL, updated_at = ?
+       WHERE execution_id = ? AND host_id = ? AND state = 'pending'`,
+    )
+      .bind(createdAt, runId, hostId)
+      .run();
     await commitHostCpu({ hostId, runId });
   } catch (error) {
-    await Promise.allSettled([
-      markRunVmsAbsentInDesiredState({
-        hostId,
-        runId,
-        vms: provisionedState.vms,
-        nowUnixMs: Date.now(),
-        db,
-      }),
-    ]);
+    if (hostId) {
+      await Promise.allSettled([
+        markRunVmsAbsentInDesiredState({
+          hostId,
+          runId,
+          vms: provisionedState.vms,
+          nowUnixMs: Date.now(),
+          db,
+        }),
+      ]);
+    }
     await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId));
-    await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
+    if (runtimeCreated) {
+      await db.delete(runtimeExecutions).where(eq(runtimeExecutions.id, runId));
+    }
+    if (hostId) {
+      await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
+    }
     // Two concurrent starts race past the pre-check; the unique index on
     // active_key rejects the loser.
     if (isActiveKeyUniqueViolation(error)) {
       throw activeRunConflictError();
+    }
+    if (error instanceof AppError && error.code === "runtime_allocation_busy") {
+      throw bootCapacityPendingError({ scenarioId: scenario.scenarioId });
     }
     throw error;
   }
@@ -347,6 +364,160 @@ export async function startScenarioRunInternal(params: {
     acceptedAt: createdAt,
     reused: false,
   };
+}
+
+async function allocateScenarioRuntime(input: {
+  scenarioId: string;
+  runId: string;
+  userId: string;
+  organizationId: string | null;
+  requestedHostId?: string;
+  requiredImages: RequiredScenarioImage[];
+  steadyCpuMillisByVm: number[];
+  reservationResources: RuntimeResourceDemand;
+  runtimeVms: RuntimeVmSpec[];
+  leaseExpiresAt: number | null;
+  now: number;
+}): Promise<{ hostId: string }> {
+  return withRuntimeAllocationLock({
+    key: runtimeCapacityAllocationKey(input.organizationId),
+    now: input.now,
+    operation: async () => {
+      let candidateHostIds: string[];
+      if (input.requestedHostId) {
+        await assertScenarioLaunchHostForUser(
+          input.requestedHostId,
+          input.userId,
+          input.requiredImages,
+          input.organizationId,
+        );
+        await assertScenarioRuntimeCapacity(
+          input.requestedHostId,
+          input.reservationResources,
+          input.now,
+        );
+        candidateHostIds = [input.requestedHostId];
+      } else {
+        const selection = await selectScenarioHosts(
+          input.requiredImages,
+          input.organizationId,
+          input.reservationResources,
+          input.now,
+        );
+        if (!selection.ok) {
+          if (selection.reason === "image_not_ready") {
+            throw appError(
+              409,
+              "image_not_ready",
+              "scenario images are not ready on any available host",
+            );
+          }
+          throw appError(
+            409,
+            "scenario_host_unavailable",
+            selection.reason === "resource_capacity"
+              ? "no scenario host has enough CPU, memory, and worst-case disk capacity"
+              : "no scenario host available",
+          );
+        }
+        candidateHostIds = selection.hostIds;
+      }
+
+      const reservation = await reserveScenarioBootCpuWithJitter({
+        hostIds: candidateHostIds,
+        runId: input.runId,
+        steadyCpuMillisByVm: input.steadyCpuMillisByVm,
+      });
+      if (!reservation.ok) {
+        throw reservation.reason === "boot_capacity_pending"
+          ? bootCapacityPendingError({
+              scenarioId: input.scenarioId,
+              ...(input.requestedHostId
+                ? { hostId: input.requestedHostId }
+                : {}),
+            })
+          : appError(
+              409,
+              "scenario_host_unavailable",
+              input.requestedHostId
+                ? "host cannot provide strict CPU isolation"
+                : "no scenario host can provide strict CPU isolation",
+            );
+      }
+
+      try {
+        await createRuntimeExecution({
+          executionId: input.runId,
+          userId: input.userId,
+          organizationId: input.organizationId,
+          hostId: reservation.hostId,
+          domainKind: "scenario",
+          domainId: input.runId,
+          ...(input.leaseExpiresAt !== null
+            ? { leaseExpiresAt: input.leaseExpiresAt }
+            : {}),
+          vms: input.runtimeVms,
+          claimActiveSlot: true,
+          reservationState: "pending",
+          reservationExpiresAt:
+            input.now + RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS,
+          reservationResources: input.reservationResources,
+          now: input.now,
+        });
+      } catch (error) {
+        await Promise.allSettled([
+          rollbackHostCpu({ hostId: reservation.hostId, runId: input.runId }),
+        ]);
+        throw error;
+      }
+      return { hostId: reservation.hostId };
+    },
+  });
+}
+
+export function scenarioRuntimeReservationResources(
+  vms: RuntimeVmSpec[],
+  steadyCpuMillisByVm: readonly number[],
+): RuntimeResourceDemand {
+  const resources = vms.reduce<RuntimeResourceDemand>(
+    (total, vm) => ({
+      cpuMillis: total.cpuMillis + vm.cpuMillis,
+      memoryMib: total.memoryMib + vm.memoryMib,
+      worstCaseDiskMib: total.worstCaseDiskMib + vm.diskMib,
+    }),
+    { cpuMillis: 0, memoryMib: 0, worstCaseDiskMib: 0 },
+  );
+  return {
+    ...resources,
+    cpuMillis: bootCpuReservationForSteadyVms(steadyCpuMillisByVm),
+  };
+}
+
+function runtimeVmSpecsFromScenarioState(
+  state: RunStateDocument,
+): RuntimeVmSpec[] {
+  return state.vms.map((vm) => {
+    const resources = vm.provisioning.resources;
+    const imageKey = vm.provisioning.imageKey;
+    const imageSha256 = vm.provisioning.imageSha256?.trim() ?? "";
+    if (!resources || !imageKey || !imageSha256) {
+      throw appError(
+        409,
+        "scenario_runtime_spec_incomplete",
+        `scenario VM ${vm.scenarioVmName} is missing immutable runtime metadata`,
+      );
+    }
+    return {
+      vmId: vm.id,
+      ordinal: vm.ordinal,
+      runtimeVmName: vm.runtimeVmName,
+      imageKey,
+      imageSha256,
+      cpuMillis: resources.cpuMillis,
+      memoryMib: resources.memoryMib,
+      diskMib: resources.diskMib,
+    };
+  });
 }
 
 export async function assertScenarioLaunchHostForUser(
@@ -513,9 +684,12 @@ export function bootCapacityPendingError(context?: {
 }
 
 export function isActiveKeyUniqueViolation(error: unknown): boolean {
+  if (error instanceof AppError && error.code === "runtime_active_slot_conflict") {
+    return true;
+  }
   return errorChainMatches(
     error,
-    /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx/,
+    /UNIQUE constraint failed.*active_key|scenario_runs_active_key_uidx|active_runtime_slots|runtime_active_slot_conflict/,
   );
 }
 
@@ -714,9 +888,10 @@ export async function revokeScenarioNativeProfileRoutesForUser(
 export async function selectScenarioHosts(
   requiredImages: RequiredScenarioImage[],
   organizationId: string | null = null,
+  requiredResources?: RuntimeResourceDemand,
+  now = Date.now(),
 ): Promise<HostSelectionResult> {
   const db = drizzle(env.DB);
-  const now = Date.now();
   const rows = await db
     .select({
       id: agentHosts.id,
@@ -786,12 +961,31 @@ export async function selectScenarioHosts(
     return { ok: false, reason: "unavailable" };
   }
 
-  const imageReadyCandidates = candidates.filter((candidate) =>
+  let imageReadyCandidates = candidates.filter((candidate) =>
     hostHasImagesReady(candidate.actualReport, requiredImages),
   );
 
   if (!imageReadyCandidates.length) {
     return { ok: false, reason: "image_not_ready" };
+  }
+
+  const availableResourcesByHost = new Map<string, RuntimeResourceDemand>();
+  if (requiredResources) {
+    const snapshot = await loadActiveRuntimeResourceSnapshot(now);
+    imageReadyCandidates = imageReadyCandidates.filter((candidate) => {
+      if (!candidate.actualReport) return false;
+      const available = availableRuntimeHostResources({
+        hostId: candidate.id,
+        report: candidate.actualReport,
+        snapshot,
+      });
+      if (!available) return false;
+      availableResourcesByHost.set(candidate.id, available);
+      return runtimeResourcesFit(requiredResources, available);
+    });
+    if (!imageReadyCandidates.length) {
+      return { ok: false, reason: "resource_capacity" };
+    }
   }
 
   const activeRuns = await db
@@ -821,6 +1015,15 @@ export async function selectScenarioHosts(
     if (leftRuns !== rightRuns) {
       return leftRuns - rightRuns;
     }
+    const leftAvailable = availableResourcesByHost.get(left.id);
+    const rightAvailable = availableResourcesByHost.get(right.id);
+    if (
+      leftAvailable &&
+      rightAvailable &&
+      leftAvailable.cpuMillis !== rightAvailable.cpuMillis
+    ) {
+      return rightAvailable.cpuMillis - leftAvailable.cpuMillis;
+    }
     if (left.reportedFreeCpuMillis !== right.reportedFreeCpuMillis) {
       return right.reportedFreeCpuMillis - left.reportedFreeCpuMillis;
     }
@@ -843,4 +1046,32 @@ export async function selectScenarioHosts(
   return hostIds.length
     ? { ok: true, hostIds }
     : { ok: false, reason: "unavailable" };
+}
+
+async function assertScenarioRuntimeCapacity(
+  hostId: string,
+  requiredResources: RuntimeResourceDemand,
+  now: number,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const [actual] = await db
+    .select({ report: hostActualState.reportJson })
+    .from(hostActualState)
+    .where(eq(hostActualState.hostId, hostId))
+    .limit(1);
+  const snapshot = await loadActiveRuntimeResourceSnapshot(now);
+  const available = actual?.report
+    ? availableRuntimeHostResources({
+        hostId,
+        report: actual.report,
+        snapshot,
+      })
+    : null;
+  if (!available || !runtimeResourcesFit(requiredResources, available)) {
+    throw appError(
+      409,
+      "scenario_host_unavailable",
+      "host does not have enough CPU, memory, and worst-case disk capacity",
+    );
+  }
 }

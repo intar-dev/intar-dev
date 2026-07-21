@@ -47,7 +47,14 @@ function actionableConsoleError(text: string, variant: DataVariant) {
 
 async function waitForReady(page: Page) {
   await expect(page.locator("main")).toHaveCount(1);
-  await expect(page.locator("h1").first()).toBeVisible();
+  const projector = /^\/workshops\/[^/]+\/projector\/?$/.test(
+    new URL(page.url()).pathname,
+  );
+  await expect(
+    projector
+      ? page.locator("[data-workshop-projector]")
+      : page.locator("h1").first(),
+  ).toBeVisible();
   await page.evaluate(async () => {
     await document.fonts?.ready;
   });

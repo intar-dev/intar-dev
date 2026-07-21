@@ -333,6 +333,279 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
+      if (pathname === "/api/workshops" && method === "GET") {
+        await json(route, { sessions: server.state.workshopSessions });
+        return;
+      }
+      const workshopSessionId = segment(
+        pathname,
+        /^\/api\/workshops\/([^/]+)$/,
+      );
+      if (workshopSessionId && method === "GET") {
+        const session = structuredClone(server.state.workshopSession);
+        if (url.searchParams.get("view") === "projector") {
+          const modules = Array.isArray(session.modules)
+            ? (session.modules as Array<Record<string, unknown>>)
+            : [];
+          const slides = Array.isArray(session.slides)
+            ? (session.slides as Array<Record<string, unknown>>)
+            : [];
+          session.viewer = {
+            userId: "projector-viewer",
+            role: "participant",
+            checkedIn: false,
+            canFacilitate: false,
+            canPresent: false,
+          };
+          session.modules = modules
+            .filter((module) => module.released === true)
+            .map((module) => ({
+              ...module,
+              dependsOn: [],
+              health: "unknown",
+              contentMarkdown: null,
+              facilitatorNotesMarkdown: null,
+              solutionMarkdown: null,
+              solutionRevealed: false,
+              explainBackPrompt: null,
+              explainBackCompletedAt: null,
+              verifiedAt: null,
+              hints: [],
+              probes: [],
+            }));
+          session.agenda = [];
+          const currentSlideOrdinal = Number(session.currentSlideOrdinal ?? 0);
+          session.slides = slides.map((slide, ordinal) => {
+            const released =
+              ordinal === currentSlideOrdinal && slide.released === true;
+            return {
+              ...slide,
+              bodyMarkdown: released ? slide.bodyMarkdown : null,
+              notesMarkdown: null,
+              released,
+            };
+          });
+          session.workspace = null;
+          session.helpRequest = null;
+          session.assistGrant = null;
+          session.roster = [];
+          session.capacity = null;
+        }
+        await json(route, { session });
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/presence$/.test(pathname) &&
+        method === "POST"
+      ) {
+        await json(route, {
+          observedAt: FIXED_NOW,
+          lastSeenAt: FIXED_NOW,
+          state: "present",
+        });
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/actions$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        const workshop = server.state.workshopSession;
+        const action = String(body.action ?? "");
+        workshop.version = Number(workshop.version ?? 1) + 1;
+        if (action === "check_in") {
+          (workshop.viewer as Record<string, unknown>).checkedIn = true;
+        }
+        if (action === "open_lobby") workshop.state = "lobby";
+        if (action === "go_live") workshop.state = "live";
+        if (action === "end_session") workshop.state = "ended";
+        if (action === "announce") {
+          workshop.announcement = String(body.message ?? "");
+        }
+        if (action === "set_slide") {
+          const ordinal = Number(body.slideOrdinal ?? 0);
+          workshop.currentSlideOrdinal = ordinal;
+          const slides = workshop.slides as Array<Record<string, unknown>>;
+          workshop.currentSlideId = slides[ordinal]?.id ?? null;
+        }
+        if (action === "focus_module") {
+          workshop.currentModuleId = String(body.moduleId ?? "");
+          const agenda = workshop.agenda as Array<Record<string, unknown>>;
+          for (const item of agenda) {
+            item.active = item.moduleId === body.moduleId;
+          }
+        }
+        if (action === "focus_agenda") {
+          const agendaItemId = String(body.agendaItemId ?? "");
+          const agenda = workshop.agenda as Array<Record<string, unknown>>;
+          const focused = agenda.find((item) => item.id === agendaItemId);
+          workshop.currentAgendaItemId = agendaItemId;
+          workshop.currentModuleId = focused?.moduleId ?? null;
+          for (const item of agenda) item.active = item.id === agendaItemId;
+        }
+        if (action === "release_module") {
+          const moduleId = String(body.moduleId ?? "");
+          const modules = workshop.modules as Array<Record<string, unknown>>;
+          const module = modules.find((entry) => entry.id === moduleId);
+          if (module) {
+            module.released = true;
+            module.state = "available";
+          }
+          const agenda = workshop.agenda as Array<Record<string, unknown>>;
+          for (const item of agenda) {
+            if (item.moduleId === moduleId) item.released = true;
+          }
+        }
+        if (action === "reveal_hint") {
+          const modules = workshop.modules as Array<Record<string, unknown>>;
+          const module = modules.find((entry) => entry.id === body.moduleId);
+          const hints = (module?.hints ?? []) as Array<Record<string, unknown>>;
+          const hint = hints.find((entry) => entry.id === body.hintId);
+          if (hint) {
+            hint.revealed = true;
+            hint.bodyMarkdown =
+              "Inspect the boundary with `talosctl health` before debugging Cilium.";
+          }
+        }
+        if (action === "complete_explain_back") {
+          const modules = workshop.modules as Array<Record<string, unknown>>;
+          const module = modules.find((entry) => entry.id === body.moduleId);
+          if (module) module.explainBackCompletedAt = FIXED_NOW;
+        }
+        if (action === "reveal_solution") {
+          const modules = workshop.modules as Array<Record<string, unknown>>;
+          const module = modules.find((entry) => entry.id === body.moduleId);
+          if (module) module.solutionRevealed = true;
+        }
+        if (action === "pause_timer") {
+          const timer = workshop.timer as Record<string, unknown> | null;
+          if (timer) {
+            timer.pausedAt = FIXED_NOW;
+            timer.remainingMs = Math.max(
+              0,
+              Number(timer.endsAt ?? FIXED_NOW) - FIXED_NOW,
+            );
+            timer.endsAt = null;
+            timer.observedAt = FIXED_NOW;
+          }
+        }
+        if (action === "resume_timer") {
+          const timer = workshop.timer as Record<string, unknown> | null;
+          if (timer) {
+            timer.endsAt = FIXED_NOW + Number(timer.remainingMs ?? 0);
+            timer.pausedAt = null;
+            timer.observedAt = FIXED_NOW;
+          }
+        }
+        if (action === "provision_checked_in") {
+          const roster = workshop.roster as Array<Record<string, unknown>>;
+          for (const member of roster) {
+            if (member.role === "participant" && member.checkedInAt) {
+              member.workspaceState = "ready";
+            }
+          }
+        }
+        if (action === "replace_roster") {
+          const sessionId = pathname.split("/").at(-2);
+          const sessions = server.state.organizationWorkshops.sessions as Array<
+            Record<string, unknown>
+          >;
+          const summary = sessions.find((entry) => entry.id === sessionId);
+          if (summary) {
+            summary.version = Number(summary.version ?? 1) + 1;
+            summary.draftRoster = Array.isArray(body.members)
+              ? body.members
+              : [];
+          }
+        }
+        if (action === "claim_help") {
+          const roster = workshop.roster as Array<Record<string, unknown>>;
+          const member = roster.find((entry) => entry.userId === body.userId);
+          if (member) {
+            member.helpState = "claimed";
+            member.helpAssignedToViewer = true;
+          }
+        }
+        if (action === "resolve_help") {
+          const roster = workshop.roster as Array<Record<string, unknown>>;
+          const member = roster.find((entry) => entry.userId === body.userId);
+          if (member) {
+            member.helpState = "none";
+            member.helpAssignedToViewer = false;
+          }
+        }
+        if (action === "grant_assist") {
+          workshop.assistGrant = {
+            id: "assist-fixture",
+            helperName: "Inez Instructor",
+            expiresAt: FIXED_NOW + 15 * 60_000,
+            revokedAt: null,
+          };
+        }
+        if (action === "revoke_assist") workshop.assistGrant = null;
+        await json(route, { session: workshop });
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/help-requests$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        server.state.workshopSession.helpRequest = {
+          id: "help-fixture",
+          state: "open",
+          message: String(body.message ?? ""),
+          moduleId: body.moduleId ?? null,
+          requestedAt: FIXED_NOW,
+          claimedByName: null,
+        };
+        await json(route, { session: server.state.workshopSession }, 201);
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/help-requests\/[^/]+$/.test(pathname) &&
+        method === "DELETE"
+      ) {
+        server.state.workshopSession.helpRequest = null;
+        server.state.workshopSession.assistGrant = null;
+        await json(route, { session: server.state.workshopSession });
+        return;
+      }
+      if (
+        /^\/api\/workshops\/[^/]+\/terminal$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        if (body.mode === "native") {
+          await json(route, {
+            routeUsername: "workshop-route-test-only-native",
+            expiresAt: FIXED_NOW + 15 * 60_000,
+            native: {
+              authMode: "profile_keys",
+              authorizedKeyCount: 1,
+              host: "stargate.example.test",
+              port: 2222,
+              username: "workshop-route-test-only-native",
+              command:
+                "ssh -p 2222 workshop-route-test-only-native@stargate.example.test",
+              publicHostKeyOpenssh: "ssh-ed25519 test-only-host-key",
+              publicHostKeyFingerprintSha256: "SHA256:test-only-fingerprint",
+              knownHostsLine:
+                "[stargate.example.test]:2222 ssh-ed25519 test-only-host-key",
+            },
+          });
+          return;
+        }
+        await json(route, {
+          routeUsername: "workshop-route-test-only",
+          expiresAt: FIXED_NOW + 15 * 60_000,
+          browser: {
+            websocketUrl: "ws://terminal.example.test/terminal/workshop-live",
+          },
+        });
+        return;
+      }
+
       if (pathname === "/api/scenarios" && method === "GET") {
         await json(
           route,
@@ -527,6 +800,32 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         };
         server.state.organizations.push(organization);
         await json(route, { organization }, 201);
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/workshops$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, server.state.organizationWorkshops);
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/workshop-sessions$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        const session = structuredClone(server.state.workshopSession);
+        session.id = "workshop-new";
+        session.title = String(body.title ?? "New workshop");
+        session.state = "draft";
+        session.startsAt = Number(
+          body.startsAt ?? FIXED_NOW + 24 * 60 * 60_000,
+        );
+        session.endsAt = Number(session.startsAt) + 4 * 60 * 60_000;
+        session.lobbyOpensAt = Number(session.startsAt) - 30 * 60_000;
+        session.currentModuleId = null;
+        session.currentSlideOrdinal = 0;
+        await json(route, { session }, 201);
         return;
       }
       const organizationId = segment(

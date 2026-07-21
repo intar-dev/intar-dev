@@ -10,7 +10,15 @@ import {
   parseBridgeMessageV6,
   serializeBridgeMessageV6,
 } from "@/control-plane/bridge-v6";
-import { agentHosts, hostActualState } from "@/db/schema";
+import {
+  agentHosts,
+  hostActualState,
+  hostResourceReservations,
+  type RuntimeExecutionState,
+  type WorkshopCurrentHealth,
+  type WorkshopManifestV1,
+  type WorkshopWorkspaceGenerationState,
+} from "@/db/schema";
 import {
   commitHostCpuReservation,
   reconcileHostCpuReservations,
@@ -29,6 +37,12 @@ import {
 } from "@/lib/build-scheduler";
 import { expireOverdueRunLeases } from "@/lib/scenario-runs";
 import {
+  archiveRuntimeExecution,
+  updateRuntimeExecutionState,
+} from "@/lib/runtime-executions";
+import { expireOverdueRuntimeExecutions } from "@/lib/runtime-lease-expiry";
+import { recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
+import {
   isReportedHostRoleAllowed,
   resolveScenarioEnabledForHostRole,
 } from "@/lib/scenario-hosts";
@@ -36,7 +50,47 @@ import type {
   BridgeMessageV6,
   HostDesiredStateV2,
   HostStateReportV2,
+  VmActualStateV2,
+  VmProbeSnapshotV1,
+  VmReportV2,
 } from "@/generated/bridge";
+import { recordWorkshopModuleObservation } from "@/lib/workshops/progress";
+import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
+import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
+
+export const WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS = 90_000;
+export const WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE = 8;
+
+type RuntimeVmReportContext = {
+  executionId: string;
+  userId: string;
+  organizationId: string | null;
+  hostId: string;
+  domainKind: "scenario" | "workshop";
+  domainId: string;
+  generation: number;
+  state: RuntimeExecutionState;
+  archiveRequestedAt: number | null;
+  runtimeVmId: string;
+  vmId: string;
+  runtimeVmName: string;
+};
+
+type CurrentWorkshopRuntimeContext = {
+  generationId: string;
+  workspaceId: string;
+  sessionId: string;
+  participantUserId: string;
+  manifest: WorkshopManifestV1;
+};
+
+type RuntimeVmAggregateRow = {
+  vmId: string;
+  terminalHost: string | null;
+  phase: VmActualStateV2["phase"] | null;
+  report: VmActualStateV2 | null;
+  observedAt: number | null;
+};
 
 export class HostRuntimeDO extends HostRuntimeBase {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
@@ -71,7 +125,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    await this.reconcileHost(hostId);
+    await this.reconcileHost(hostId, {
+      recoverUnavailableWorkshopRuntimes: true,
+    });
   }
 
   override async webSocketMessage(
@@ -631,6 +687,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
         );
       });
     }
+    await this.applyRuntimeInventoryReport(hostId, report, expectedSessionId);
     await this.withCpuReservationLock(async () => {
       await reconcileHostCpuReservations(db, hostId, now);
     });
@@ -644,23 +701,50 @@ export class HostRuntimeDO extends HostRuntimeBase {
     let projectionOutcome: RunProjectionOutcome | null = null;
     await this.withRunProjectionLock(report.run_id, async () => {
       const run = await this.loadRun(report.run_id);
-      if (!run || run.hostId !== hostId) {
-        return;
+      if (run?.hostId === hostId) {
+        projectionOutcome = await this.persistRunState(
+          report.run_id,
+          (latest) =>
+            applyVmReportToRunState({
+              runId: report.run_id,
+              current: latest,
+              report,
+            }),
+          {
+            keepDeleteRequestedAt: true,
+            initialRow: run,
+            expectedHostSession: {
+              hostId,
+              activeSessionId: expectedSessionId,
+            },
+          },
+        );
       }
-      projectionOutcome = await this.persistRunState(
-        report.run_id,
-        (latest) =>
-          applyVmReportToRunState({
-            runId: report.run_id,
-            current: latest,
-            report,
-          }),
-        {
-          keepDeleteRequestedAt: true,
-          initialRow: run,
-          expectedHostSession: { hostId, activeSessionId: expectedSessionId },
-        },
-      );
+
+      if (projectionOutcome !== "stale_session") {
+        try {
+          await this.applyRuntimeVmActualState(
+            hostId,
+            runtimeActualStateFromReport(report),
+            report.observed_at_unix_ms,
+            expectedSessionId,
+          );
+        } catch (error) {
+          // Scenario projection remains authoritative during the shared-runtime
+          // migration. A missing mirror credential must not regress its
+          // established lifecycle; workshop errors remain observable and are
+          // retried by the agent's next report.
+          console.error(
+            JSON.stringify({
+              message: "runtime VM report projection failed",
+              hostId,
+              executionId: report.run_id,
+              runtimeVmName: report.vm_name,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        }
+      }
     });
 
     if (projectionOutcome === "stale_session") {
@@ -684,6 +768,384 @@ export class HostRuntimeDO extends HostRuntimeBase {
           eq(agentHosts.activeSessionId, expectedSessionId),
         ),
       );
+  }
+
+  private async applyRuntimeInventoryReport(
+    hostId: string,
+    report: HostStateReportV2,
+    expectedSessionId: string,
+  ): Promise<void> {
+    for (const actual of report.vms) {
+      await this.withRunProjectionLock(actual.run_id, async () => {
+        try {
+          await this.applyRuntimeVmActualState(
+            hostId,
+            actual,
+            actual.updated_at_unix_ms,
+            expectedSessionId,
+            { workshopsOnly: true },
+          );
+        } catch (error) {
+          logRuntimeProjectionFailure(hostId, actual, error);
+        }
+      });
+    }
+
+    const desired = await loadOrCreateHostDesiredState(
+      drizzle(this.env.DB),
+      hostId,
+      Date.now(),
+    );
+    if (report.applied_desired_version < desired.version) return;
+
+    const reported = new Set(
+      report.vms.map((vm) => runtimeVmIdentity(vm.run_id, vm.vm_name)),
+    );
+    for (const expected of desired.vms) {
+      if (
+        expected.desired_phase !== "running" ||
+        reported.has(runtimeVmIdentity(expected.run_id, expected.vm_name))
+      ) {
+        continue;
+      }
+      const missing = missingRuntimeVmActualState(
+        expected.run_id,
+        expected.vm_name,
+        report.observed_at_unix_ms,
+        report.applied_desired_version,
+      );
+      await this.withRunProjectionLock(expected.run_id, async () => {
+        try {
+          await this.applyRuntimeVmActualState(
+            hostId,
+            missing,
+            report.observed_at_unix_ms,
+            expectedSessionId,
+            { workshopsOnly: true },
+          );
+        } catch (error) {
+          logRuntimeProjectionFailure(hostId, missing, error);
+        }
+      });
+    }
+  }
+
+  private async applyRuntimeVmActualState(
+    hostId: string,
+    report: VmActualStateV2,
+    observedAt: number,
+    expectedSessionId: string,
+    options: { workshopsOnly?: boolean } = {},
+  ): Promise<void> {
+    const context = await this.loadRuntimeVmReportContext(
+      hostId,
+      report.run_id,
+      report.vm_name,
+    );
+    if (!context) return;
+    if (options.workshopsOnly && context.domainKind !== "workshop") return;
+    if (
+      context.domainKind === "workshop" &&
+      (context.state === "archived" || context.state === "failed")
+    ) {
+      return;
+    }
+
+    const workshop =
+      context.domainKind === "workshop"
+        ? await this.loadCurrentWorkshopRuntimeContext(context)
+        : null;
+    if (context.domainKind === "workshop" && !workshop) return;
+
+    const outcome = await recordRuntimeVmActualState({
+      executionId: context.executionId,
+      expectedGeneration: context.generation,
+      vmId: context.vmId,
+      hostId,
+      report,
+      observedAt,
+      expectedHostSessionId: expectedSessionId,
+    });
+    if (outcome === "stale") return;
+
+    const now = observedAt;
+    const reservationCommitAt = Date.now();
+    await drizzle(this.env.DB)
+      .update(hostResourceReservations)
+      .set({ state: "committed", updatedAt: now })
+      .where(
+        and(
+          eq(hostResourceReservations.executionId, context.executionId),
+          eq(hostResourceReservations.hostId, hostId),
+          eq(hostResourceReservations.state, "pending"),
+          sql`(${hostResourceReservations.expiresAt} IS NULL OR ${hostResourceReservations.expiresAt} > ${reservationCommitAt})`,
+        ),
+      );
+
+    // Scenario lifecycle remains projected by persistRunState above. The
+    // generic mirror intentionally stops here until every scenario start has
+    // runtime access credentials.
+    if (!workshop) return;
+    if (
+      !(await this.isActiveHostSession({
+        hostId,
+        activeSessionId: expectedSessionId,
+      }))
+    ) {
+      return;
+    }
+    const currentWorkshop =
+      await this.loadCurrentWorkshopRuntimeContext(context);
+    if (
+      !currentWorkshop ||
+      currentWorkshop.generationId !== workshop.generationId
+    ) {
+      return;
+    }
+
+    const actual = await this.loadRuntimeVmAggregate(context.executionId);
+    const aggregateObservedAt = actual.reduce(
+      (latest, vm) => Math.max(latest, vm.observedAt ?? 0),
+      now,
+    );
+    const aggregate = aggregateRuntimeExecutionState({
+      currentState: context.state,
+      archiveRequestedAt: context.archiveRequestedAt,
+      actual,
+    });
+    try {
+      if (aggregate.state === "archived") {
+        await archiveRuntimeExecution({
+          executionId: context.executionId,
+          expectedGeneration: context.generation,
+          endedAt: aggregateObservedAt,
+        });
+      } else {
+        await updateRuntimeExecutionState({
+          executionId: context.executionId,
+          expectedGeneration: context.generation,
+          state: aggregate.state,
+          observedAt: aggregateObservedAt,
+        });
+      }
+    } catch {
+      // A checkpoint restore can install a newer execution while this report
+      // is being aggregated. The current-generation guard is authoritative.
+      return;
+    }
+
+    await recordWorkshopGenerationState({
+      generationId: currentWorkshop.generationId,
+      update: {
+        state: runtimeStateToWorkshopGenerationState(aggregate.state),
+        runtimeExecutionId: context.executionId,
+        hostId,
+        error: aggregate.error,
+        observedAt: aggregateObservedAt,
+      },
+    });
+    await this.projectWorkshopProbeProgress(
+      currentWorkshop,
+      actual,
+      aggregateObservedAt,
+    );
+  }
+
+  private async loadRuntimeVmReportContext(
+    hostId: string,
+    executionId: string,
+    runtimeVmName: string,
+  ): Promise<RuntimeVmReportContext | null> {
+    const row = await this.env.DB.prepare(
+      `SELECT
+         execution.id AS execution_id,
+         execution.user_id,
+         execution.organization_id,
+         execution.host_id,
+         execution.domain_kind,
+         execution.domain_id,
+         execution.generation,
+         execution.state,
+         execution.archive_requested_at,
+         vm.id AS runtime_vm_id,
+         vm.vm_id,
+         vm.runtime_vm_name
+       FROM runtime_executions execution
+       INNER JOIN runtime_vms vm ON vm.execution_id = execution.id
+       WHERE execution.id = ?
+         AND execution.host_id = ?
+         AND vm.runtime_vm_name = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM runtime_executions newer
+           WHERE newer.domain_kind = execution.domain_kind
+             AND newer.domain_id = execution.domain_id
+             AND newer.generation > execution.generation
+         )
+       LIMIT 1`,
+    )
+      .bind(executionId, hostId, runtimeVmName)
+      .first<{
+        execution_id: string;
+        user_id: string;
+        organization_id: string | null;
+        host_id: string;
+        domain_kind: "scenario" | "workshop";
+        domain_id: string;
+        generation: number;
+        state: RuntimeExecutionState;
+        archive_requested_at: number | null;
+        runtime_vm_id: string;
+        vm_id: string;
+        runtime_vm_name: string;
+      }>();
+    if (!row) return null;
+    return {
+      executionId: row.execution_id,
+      userId: row.user_id,
+      organizationId: row.organization_id,
+      hostId: row.host_id,
+      domainKind: row.domain_kind,
+      domainId: row.domain_id,
+      generation: row.generation,
+      state: row.state,
+      archiveRequestedAt: row.archive_requested_at,
+      runtimeVmId: row.runtime_vm_id,
+      vmId: row.vm_id,
+      runtimeVmName: row.runtime_vm_name,
+    };
+  }
+
+  private async loadCurrentWorkshopRuntimeContext(
+    runtime: RuntimeVmReportContext,
+  ): Promise<CurrentWorkshopRuntimeContext | null> {
+    const row = await this.env.DB.prepare(
+      `SELECT
+         generation.id AS generation_id,
+         workspace.id AS workspace_id,
+         workspace.session_id,
+         workspace.user_id AS participant_user_id,
+         revision.manifest_json
+       FROM workshop_workspace_generations generation
+       INNER JOIN workshop_workspaces workspace
+         ON workspace.id = generation.workspace_id
+        AND workspace.current_generation_id = generation.id
+       INNER JOIN workshop_sessions session ON session.id = workspace.session_id
+       INNER JOIN workshop_template_revisions revision
+         ON revision.id = session.template_revision_id
+       WHERE generation.runtime_execution_id = ?
+         AND generation.ordinal = ?
+         AND generation.host_id = ?
+         AND workspace.id = ?
+         AND workspace.user_id = ?
+         AND session.state IN ('lobby', 'live')
+       LIMIT 1`,
+    )
+      .bind(
+        runtime.executionId,
+        runtime.generation,
+        runtime.hostId,
+        runtime.domainId,
+        runtime.userId,
+      )
+      .first<{
+        generation_id: string;
+        workspace_id: string;
+        session_id: string;
+        participant_user_id: string;
+        manifest_json: string;
+      }>();
+    if (!row) return null;
+    return {
+      generationId: row.generation_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      participantUserId: row.participant_user_id,
+      manifest: JSON.parse(row.manifest_json) as WorkshopManifestV1,
+    };
+  }
+
+  private async loadRuntimeVmAggregate(
+    executionId: string,
+  ): Promise<RuntimeVmAggregateRow[]> {
+    const rows = await this.env.DB.prepare(
+      `SELECT
+         vm.vm_id,
+         vm.terminal_host,
+         actual.phase,
+         actual.report_json,
+         actual.observed_at
+       FROM runtime_vms vm
+       LEFT JOIN runtime_vm_actual_state actual
+         ON actual.runtime_vm_id = vm.id
+        AND actual.execution_id = vm.execution_id
+       WHERE vm.execution_id = ?
+       ORDER BY vm.ordinal ASC`,
+    )
+      .bind(executionId)
+      .all<{
+        vm_id: string;
+        terminal_host: string | null;
+        phase: VmActualStateV2["phase"] | null;
+        report_json: string | null;
+        observed_at: number | null;
+      }>();
+    return rows.results.map((row) => ({
+      vmId: row.vm_id,
+      terminalHost: row.terminal_host,
+      phase: row.phase,
+      report: row.report_json
+        ? (JSON.parse(row.report_json) as VmActualStateV2)
+        : null,
+      observedAt: row.observed_at,
+    }));
+  }
+
+  private async projectWorkshopProbeProgress(
+    workshop: CurrentWorkshopRuntimeContext,
+    actual: RuntimeVmAggregateRow[],
+    observedAt: number,
+  ): Promise<void> {
+    const snapshots = latestProbeSnapshots(actual);
+    const progressRows = await this.env.DB.prepare(
+      `SELECT module_id, technical_status, current_health
+       FROM workshop_module_progress
+       WHERE session_id = ? AND user_id = ?`,
+    )
+      .bind(workshop.sessionId, workshop.participantUserId)
+      .all<{
+        module_id: string;
+        technical_status: string;
+        current_health: WorkshopCurrentHealth;
+      }>();
+    const current = new Map(
+      progressRows.results.map((row) => [row.module_id, row]),
+    );
+    for (const module of workshop.manifest.modules) {
+      if (module.probeIds.length === 0) continue;
+      const probes = module.probeIds.map((probeId) => snapshots.get(probeId));
+      const allPassing =
+        probes.length > 0 && probes.every((probe) => probe?.status === "pass");
+      const currentHealth: WorkshopCurrentHealth = allPassing
+        ? "passing"
+        : probes.some((probe) => probe?.status === "fail")
+          ? "failing"
+          : "unknown";
+      const existing = current.get(module.id);
+      if (
+        existing?.current_health === currentHealth &&
+        (!allPassing || existing.technical_status === "verified")
+      ) {
+        continue;
+      }
+      await recordWorkshopModuleObservation({
+        sessionId: workshop.sessionId,
+        participantUserId: workshop.participantUserId,
+        moduleId: module.id,
+        ...(allPassing ? { technicalStatus: "verified" as const } : {}),
+        currentHealth,
+        observedAt,
+      });
+    }
   }
 
   private async applyBridgeBuildReport(
@@ -724,7 +1186,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
   private async reconcileHost(
     hostId: string,
-    options?: { reconcileCpuReservations?: boolean },
+    options?: {
+      reconcileCpuReservations?: boolean;
+      recoverUnavailableWorkshopRuntimes?: boolean;
+    },
   ): Promise<void> {
     const now = Date.now();
     const db = drizzle(this.env.DB);
@@ -733,6 +1198,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       db,
       wakeHostRuntime: false,
     });
+    await expireOverdueRuntimeExecutions(hostId, now);
     if (options?.reconcileCpuReservations !== false) {
       await this.withCpuReservationLock(async () => {
         await reconcileHostCpuReservations(db, hostId, now);
@@ -740,6 +1206,16 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
 
     const activeSocket = await this.findActiveSocket(hostId);
+    if (options?.recoverUnavailableWorkshopRuntimes && !activeSocket) {
+      const host = await this.loadRequiredHost(hostId);
+      if (workshopHostFailureRecoveryIsDue(host, now)) {
+        await recoverWorkshopRuntimesFromFailedHost({
+          hostId,
+          now,
+          maxWorkspaces: WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE,
+        });
+      }
+    }
     if (activeSocket?.attachment.bridgeProtocol === "v6") {
       const lag = await this.loadDesiredVersionLag(hostId, now);
       const shouldRepushLaggingVersion =
@@ -833,6 +1309,154 @@ export class HostRuntimeDO extends HostRuntimeBase {
       release();
     }
   }
+}
+
+function workshopHostFailureRecoveryIsDue(
+  host: Pick<
+    typeof agentHosts.$inferSelect,
+    "disconnectedAt" | "lastHeartbeatAt"
+  >,
+  now: number,
+): boolean {
+  const unavailableSince = host.disconnectedAt ?? host.lastHeartbeatAt;
+  return (
+    unavailableSince !== null &&
+    now - unavailableSince >= WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS
+  );
+}
+
+function runtimeActualStateFromReport(report: VmReportV2): VmActualStateV2 {
+  return {
+    run_id: report.run_id,
+    vm_name: report.vm_name,
+    phase: report.phase,
+    terminal: report.terminal,
+    ssh_host_keys_openssh: report.ssh_host_keys_openssh,
+    probes: report.probes,
+    updated_at_unix_ms: report.observed_at_unix_ms,
+    ...(report.desired_version !== undefined
+      ? { desired_version: report.desired_version }
+      : {}),
+    ...(report.network !== undefined ? { network: report.network } : {}),
+    ...(report.runtime_constraints !== undefined
+      ? { runtime_constraints: report.runtime_constraints }
+      : {}),
+    ...(report.resource_state !== undefined
+      ? { resource_state: report.resource_state }
+      : {}),
+    ...(report.sandbox !== undefined ? { sandbox: report.sandbox } : {}),
+    ...(report.archive !== undefined ? { archive: report.archive } : {}),
+    ...(report.error !== undefined ? { error: report.error } : {}),
+  };
+}
+
+function missingRuntimeVmActualState(
+  executionId: string,
+  runtimeVmName: string,
+  observedAt: number,
+  desiredVersion: number,
+): VmActualStateV2 {
+  const reason = "VM is missing from the authoritative host inventory";
+  return {
+    run_id: executionId,
+    vm_name: runtimeVmName,
+    desired_version: desiredVersion,
+    phase: "absent",
+    terminal: {
+      state: "failed",
+      reason,
+      observed_at_unix_ms: observedAt,
+    },
+    ssh_host_keys_openssh: [],
+    probes: [],
+    error: reason,
+    updated_at_unix_ms: observedAt,
+  };
+}
+
+function runtimeVmIdentity(executionId: string, runtimeVmName: string): string {
+  return `${executionId}\0${runtimeVmName}`;
+}
+
+function logRuntimeProjectionFailure(
+  hostId: string,
+  report: Pick<VmActualStateV2, "run_id" | "vm_name">,
+  error: unknown,
+): void {
+  console.error(
+    JSON.stringify({
+      message: "runtime VM report projection failed",
+      hostId,
+      executionId: report.run_id,
+      runtimeVmName: report.vm_name,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+}
+
+function aggregateRuntimeExecutionState(input: {
+  currentState: RuntimeExecutionState;
+  archiveRequestedAt: number | null;
+  actual: RuntimeVmAggregateRow[];
+}): {
+  state: RuntimeExecutionState;
+  error: string | null;
+} {
+  const archiving =
+    input.archiveRequestedAt !== null || input.currentState === "archiving";
+  const allReported =
+    input.actual.length > 0 && input.actual.every((vm) => vm.phase !== null);
+  if (archiving) {
+    const allAbsent =
+      allReported &&
+      input.actual.every(
+        (vm) => vm.phase === "absent" || vm.phase === "stopped",
+      );
+    return { state: allAbsent ? "archived" : "archiving", error: null };
+  }
+
+  const failed = input.actual.find(
+    (vm) =>
+      vm.phase === "failed" || vm.phase === "absent" || vm.phase === "stopped",
+  );
+  if (failed) {
+    return {
+      state: "failed",
+      error:
+        failed.report?.error?.trim() ||
+        `VM ${failed.vmId} reported ${failed.phase}`,
+    };
+  }
+
+  const ready =
+    allReported &&
+    input.actual.every(
+      (vm) =>
+        (vm.phase === "ready" || vm.phase === "solved") &&
+        vm.terminalHost !== null,
+    );
+  return { state: ready ? "ready" : "provisioning", error: null };
+}
+
+function runtimeStateToWorkshopGenerationState(
+  state: RuntimeExecutionState,
+): WorkshopWorkspaceGenerationState {
+  return state;
+}
+
+function latestProbeSnapshots(
+  actual: RuntimeVmAggregateRow[],
+): Map<string, VmProbeSnapshotV1> {
+  const snapshots = new Map<string, VmProbeSnapshotV1>();
+  for (const vm of actual) {
+    for (const probe of vm.report?.probes ?? []) {
+      const current = snapshots.get(probe.id);
+      if (!current || probe.checked_at_unix_ms >= current.checked_at_unix_ms) {
+        snapshots.set(probe.id, probe);
+      }
+    }
+  }
+  return snapshots;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
