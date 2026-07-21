@@ -91,10 +91,11 @@ item below has evidence attached to the release ticket.
   main-only branch policy, pinned deployment identity, expected host command
   protocol, and all three live route counts. `reviewed` mode requires an
   independent reviewer plus prevent-self-review. `single-operator` mode is an
-  explicit exception for a repository with exactly one collaborator, who must
-  be an administrator, and no required-reviewer rule; the actor and triggering
-  actor must be that sole collaborator. Do not apply if the workflow cannot
-  verify every fact for the selected mode.
+  explicit, time-boxed commissioning exception with no required-reviewer rule;
+  the configured login and immutable account ID must match both the original
+  and rerun actors. Its expiry must be in the future but no more than seven
+  days away. Do not apply if the workflow cannot verify every fact for the
+  selected mode.
 
 If any gate is false, leave the feature flag's default `false`, stop the
 rollout, and keep Workshops inaccessible. Do not substitute a scenario fleet,
@@ -575,6 +576,10 @@ Configure these `production` environment values:
   has exactly one collaborator and that collaborator is an administrator;
 - variable `STARGATE_SINGLE_OPERATOR_LOGIN`, set to the sole administrator's
   GitHub login only while `STARGATE_DEPLOY_APPROVAL_MODE=single-operator`;
+- variable `STARGATE_SINGLE_OPERATOR_ID`, set to that account's immutable
+  numeric GitHub actor ID;
+- variable `STARGATE_SINGLE_OPERATOR_EXPIRES_AT`, set to a UTC timestamp no
+  more than seven days ahead, in `YYYY-MM-DDTHH:MM:SSZ` form;
 - secret `STARGATE_DEPLOY_SSH_PRIVATE_KEY`, containing only the dedicated
   private key;
 - secret `STARGATE_DEPLOY_KNOWN_HOSTS`, containing the pinned
@@ -583,11 +588,12 @@ Configure these `production` environment values:
 
 Always allow deployments from the `main` branch only. In `reviewed` mode,
 require at least one independent reviewer and enable prevent-self-review. In
-`single-operator` mode, keep the reviewer rule absent: the workflow lists all
-repository collaborators and proceeds only when the actor is the sole
-administrator and also the original triggering actor. Adding any collaborator
-therefore fails closed until the approval mode and protection are deliberately
-reconciled.
+`single-operator` mode, keep the reviewer rule absent: the workflow proceeds
+only when the pinned account login and immutable ID match both the original
+and triggering actor before the short-lived expiry. Another collaborator
+cannot use or rerun that exception. When another operator is enrolled, replace
+the exception with `reviewed` mode and an independent reviewer instead of
+extending its expiry.
 
 Dispatch **Stargate production** from `main` with `operation=plan`. Its host
 output must show an active service and zero terminal routes, workspace

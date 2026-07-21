@@ -104,6 +104,9 @@ jobs:
       DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
       APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
       SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
+      SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
+      SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
+      ACTOR_ID: ${{ github.actor_id }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
 
     steps:
@@ -121,6 +124,7 @@ jobs:
           test "${DEPLOY_HOST}" = intar.app
           test "${DEPLOY_PORT}" = 2222
           test "${DEPLOY_USER}" = stargate-deploy
+          test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           case "${APPROVAL_MODE}" in
@@ -140,32 +144,21 @@ jobs:
               [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
               [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
               [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
+              [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
+              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
               jq -e '
                 ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
               ' <<<"${environment_json}" >/dev/null
-              collaborators_json="$(
-                gh api "repos/${GITHUB_REPOSITORY}/collaborators?affiliation=all&per_page=100" \
-                  --paginate --slurp
-              )"
-              collaborator_count="$(jq 'add | length' <<<"${collaborators_json}")"
-              operator_count="$(
-                jq --arg login "${SINGLE_OPERATOR_LOGIN}" \
-                  'add | map(select(.login == $login)) | length' \
-                  <<<"${collaborators_json}"
-              )"
-              printf 'collaborator_count=%s operator_count=%s\n' \
-                "${collaborator_count}" "${operator_count}"
-              test "${collaborator_count}" -eq 1
-              test "${operator_count}" -eq 1
-              operator_permission_json="$(
-                gh api \
-                  "repos/${GITHUB_REPOSITORY}/collaborators/${SINGLE_OPERATOR_LOGIN}/permission"
-              )"
-              jq -e --arg login "${SINGLE_OPERATOR_LOGIN}" '
-                .user.login == $login and .permission == "admin"
-              ' <<<"${operator_permission_json}" >/dev/null
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              printf 'single_operator_expires_at=%s remaining_seconds=%s\n' \
+                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}"
               ;;
             *)
               printf 'Unsupported Stargate approval mode: %s\n' \
