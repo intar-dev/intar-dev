@@ -25,6 +25,7 @@ export default defineConfig({
           STARGATE_ADMIN_AUTH_ISSUER: "intar.dev",
           STARGATE_ADMIN_AUTH_SECRET: "test-stargate-secret",
           STARGATE_ROUTE_TTL_SECONDS: "14400",
+          STARGATE_WORKSPACE_APP_BASE_DOMAIN: "intar.app",
         },
         d1Databases: ["DB"],
         durableObjects: {

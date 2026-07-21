@@ -109,7 +109,7 @@ describe("workshop access revocation during organization membership removal", ()
     accessMocks.issueStargateWorkspaceAppSession.mockImplementation(
       async (input: { routeId: string; expiresAt: Date }) => ({
         routeId: input.routeId,
-        url: `https://${input.routeId}.apps.example.test/`,
+        url: `https://${input.routeId}.intar.app/?__intar_bootstrap=one-time`,
         bootstrapExpiresAt: input.expiresAt.getTime() - 14 * 60_000,
         expiresAt: input.expiresAt.getTime(),
       }),
@@ -472,6 +472,43 @@ describe("workshop access revocation during organization membership removal", ()
     }
   });
 
+  it("cleans up the requested route when gateway response validation fails", async () => {
+    await seedLiveWorkshopFixture();
+    accessMocks.issueStargateWorkspaceAppSession.mockRejectedValueOnce(
+      new Error("invalid stargate workspace application response"),
+    );
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toThrow("invalid stargate workspace application response");
+
+    const request = accessMocks.issueStargateWorkspaceAppSession.mock
+      .calls[0]?.[0] as { routeId: string } | undefined;
+    expect(request?.routeId).toMatch(/^wa-[a-z0-9-]+$/);
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledOnce();
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      request?.routeId,
+    );
+    await expect(
+      env.DB.prepare(
+        "SELECT id FROM workshop_route_issuance_intents WHERE workspace_id = ?",
+      )
+        .bind(WORKSPACE_ID)
+        .all(),
+    ).resolves.toMatchObject({ results: [] });
+    await expect(
+      drizzle(env.DB)
+        .select({ routes: workshopWorkspaces.applicationRouteIdsJson })
+        .from(workshopWorkspaces)
+        .where(eq(workshopWorkspaces.id, WORKSPACE_ID)),
+    ).resolves.toEqual([{ routes: [APPLICATION_ROUTE] }]);
+  });
+
   it("blocks application issuance interleaved after the removal cleanup snapshot", async () => {
     await seedLiveWorkshopFixture();
     let interleavedResult:
@@ -583,7 +620,7 @@ describe("workshop access revocation during organization membership removal", ()
     );
     resolveGateway({
       routeId: gatewayRequest.routeId,
-      url: `https://${gatewayRequest.routeId}.apps.example.test/`,
+      url: `https://${gatewayRequest.routeId}.intar.app/?__intar_bootstrap=one-time`,
       bootstrapExpiresAt: gatewayRequest.expiresAt.getTime() - 1_000,
       expiresAt: gatewayRequest.expiresAt.getTime(),
     });
