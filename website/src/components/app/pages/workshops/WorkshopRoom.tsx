@@ -325,7 +325,8 @@ export function WorkshopRoom() {
         </div>
       ) : null}
 
-      {session.viewer.role !== "participant" ? (
+      {session.viewer.role !== "participant" ||
+      session.viewer.canFacilitate ? (
         <FacilitatorControlRoom
           session={session}
           busyAction={busyAction}
