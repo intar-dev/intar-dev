@@ -87,11 +87,14 @@ item below has evidence attached to the release ticket.
   record, the exact Tunnel ingress order, and the final cache-bypass rule as
   desired before any workshop route is issued. See Cloudflare's
   [Universal SSL coverage and limitations][universal-ssl].
-- A protected **Stargate production** `plan` run has proved the environment's
-  required-reviewer and prevent-self-review metadata is readable, the main-only
-  branch policy is exact, the pinned deployment identity reaches the expected
-  host command protocol, and all three live route counts are zero. Do not apply
-  if the workflow cannot independently verify any of those facts.
+- A **Stargate production** `plan` run has proved the configured approval mode,
+  main-only branch policy, pinned deployment identity, expected host command
+  protocol, and all three live route counts. `reviewed` mode requires an
+  independent reviewer plus prevent-self-review. `single-operator` mode is an
+  explicit exception for a repository with exactly one collaborator, who must
+  be an administrator, and no required-reviewer rule; the actor and triggering
+  actor must be that sole collaborator. Do not apply if the workflow cannot
+  verify every fact for the selected mode.
 
 If any gate is false, leave the feature flag's default `false`, stop the
 rollout, and keep Workshops inaccessible. Do not substitute a scenario fleet,
@@ -131,6 +134,23 @@ runner IDs:
 publication ID, content SHA-256, template ID, revision ID:
 old/new execution IDs for restore and host recovery:
 ```
+
+### Single-user commissioning boundary
+
+Before additional identities are enrolled, the sole organization owner may be
+rostered as a `participant`. Organization ownership still grants session,
+facilitator, and presenter controls, while the participant role grants only
+that user's learner workspace, terminal, applications, and progress. It does
+not grant helper assistance: a separate helper remains required to claim a
+request or receive an assist grant.
+
+This mode can prove one-seat allocation, the learner lifecycle, presentation
+controls, checkpoint restore on the same eligible runner, and one route's HTTP
+and WebSocket behavior. It cannot satisfy helper-consent isolation,
+non-member denial with an independent identity, two-learner host/cookie
+isolation, or host-to-host recovery. Keep those acceptance items open and keep
+the organization flag off for a general pilot until the full identity and
+runner roster above is available.
 
 Store command output, screenshots, browser traces, and host logs in the release
 ticket. Redact `cookie`, bearer-token, private-key, and Stargate assertion
@@ -482,18 +502,26 @@ Create the production environment secrets before dispatching the workflow:
   **Account Filter Lists Edit** as required; include them only on this dedicated
   token and do not reuse the website deployment token.
 
-Protect the GitHub `production` environment with a required reviewer, prevent
-self-review, and restrict deployment branches to `main`. The workflow also
-checks `refs/heads/main` before checkout and the reconciler independently
-rejects an apply or rollback outside a manually dispatched main-branch run.
+Prefer protecting the GitHub `production` environment with a required
+reviewer and prevent-self-review. During initial commissioning by a repository
+with exactly one administrator and no other collaborators, the documented
+single-operator exception may be used instead. In both modes, restrict
+deployment branches to `main`. The workflow also checks `refs/heads/main`
+before checkout and the reconciler independently rejects an apply or rollback
+outside a manually dispatched main-branch run.
 
 From `main`, dispatch **Workshop application edge** with `operation=plan`.
-Review the redacted inventory and require only the three expected changes.
-Then dispatch `operation=apply` and approve the `production` environment. The
-workflow serializes runs, verifies the checked-out commit, rejects mutations
-from any branch other than `main`, applies the cache rule and Tunnel before
-creating DNS, and re-reads all three resources before succeeding. It never
-prints the API token.
+In `single-operator` mode, also supply
+`single_operator_confirmation=SINGLE OPERATOR WORKSHOP EDGE`. Review the
+redacted inventory and require only the three expected changes. Then dispatch
+`operation=apply` with `confirmation=APPLY WORKSHOP EDGE` and, in
+single-operator mode, the same single-operator confirmation. In `reviewed`
+mode, approve the `production` environment. The workflow serializes runs,
+verifies the checked-out commit and approval guard, rejects mutations from any
+branch other than `main`, applies the cache rule and Tunnel before creating
+DNS, and re-reads all three resources before succeeding. It never prints the
+API token. A rollback requires `confirmation=ROLLBACK WORKSHOP EDGE` and the
+single-operator confirmation when that mode is active.
 
 Prove the existing exact hostname and the new edge path before issuing a real
 route:
@@ -542,30 +570,44 @@ Configure these `production` environment values:
 - variable `STARGATE_DEPLOY_HOST=intar.app`;
 - variable `STARGATE_DEPLOY_PORT=2222`;
 - variable `STARGATE_DEPLOY_USER=stargate-deploy`;
+- variable `STARGATE_DEPLOY_APPROVAL_MODE`, set to `reviewed` when an
+  independent approver exists or `single-operator` only while the repository
+  has exactly one collaborator and that collaborator is an administrator;
+- variable `STARGATE_SINGLE_OPERATOR_LOGIN`, set to the sole administrator's
+  GitHub login only while `STARGATE_DEPLOY_APPROVAL_MODE=single-operator`;
 - secret `STARGATE_DEPLOY_SSH_PRIVATE_KEY`, containing only the dedicated
   private key;
 - secret `STARGATE_DEPLOY_KNOWN_HOSTS`, containing the pinned
   `[intar.app]:2222` ED25519 host-key line verified through an independent
   channel.
 
-Require at least one independent reviewer, enable prevent-self-review, and
-allow deployments from the `main` branch only. The workflow re-reads those
-protections and fails closed if they are absent or weaker than required.
+Always allow deployments from the `main` branch only. In `reviewed` mode,
+require at least one independent reviewer and enable prevent-self-review. In
+`single-operator` mode, keep the reviewer rule absent: the workflow lists all
+repository collaborators and proceeds only when the actor is the sole
+administrator and also the original triggering actor. Adding any collaborator
+therefore fails closed until the approval mode and protection are deliberately
+reconciled.
 
 Dispatch **Stargate production** from `main` with `operation=plan`. Its host
 output must show an active service and zero terminal routes, workspace
-application routes, and browser sessions. For the cutover, dispatch it again
-with:
+application routes, and browser sessions. In `single-operator` mode, include
+`single_operator_confirmation=SINGLE OPERATOR STARGATE` on this and every
+other dispatch. For the cutover, dispatch it again with:
 
 - `operation=apply`;
 - the exact approved `stargate/v<version>` release tag;
-- `confirmation=DEPLOY STARGATE`.
+- `confirmation=DEPLOY STARGATE`;
+- in `single-operator` mode only,
+  `single_operator_confirmation=SINGLE OPERATOR STARGATE`.
 
-Approve the protected environment only after comparing the plan with the
-drain record. The host command validates the archive before mutation, makes an
-online SQLite backup while the existing service remains healthy, checks the
-drain again after stopping it, atomically installs the binary, and installs a
-systemd drop-in equivalent to:
+In `reviewed` mode, approve the protected environment only after comparing the
+plan with the drain record. In `single-operator` mode, the sole operator makes
+that comparison before entering the exact dispatch confirmation. The host
+command validates the archive before mutation, makes an online SQLite backup
+while the existing service remains healthy, checks the drain again after
+stopping it, atomically installs the binary, and installs a systemd drop-in
+equivalent to:
 
 ```toml
 workspace_app_base_domain = "intar.app"
@@ -587,9 +629,10 @@ SQLite migrations remain in place. The workflow finally requires:
 
 To restore an earlier release, dispatch the same workflow with
 `operation=rollback`, the exact backup ID, and
-`confirmation=ROLLBACK STARGATE`. Rollback makes a second safety backup before
-stopping the service and restores that safety backup automatically if the
-requested rollback fails.
+`confirmation=ROLLBACK STARGATE`. In `single-operator` mode, also supply the
+same single-operator confirmation. Rollback makes a second safety backup
+before stopping the service and restores that safety backup automatically if
+the requested rollback fails.
 
 After the CI cutover, run the existing browser-terminal scenario smoke once
 starts are re-enabled; the `ws.intar.app` terminal path must remain unchanged.

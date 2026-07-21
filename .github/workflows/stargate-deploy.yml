@@ -25,6 +25,10 @@ on:
         description: Type DEPLOY STARGATE or ROLLBACK STARGATE for a mutation
         required: false
         type: string
+      single_operator_confirmation:
+        description: Type SINGLE OPERATOR STARGATE only when no independent reviewer exists
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -55,9 +59,12 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
         run: |
           set -euo pipefail
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          test -z "${SINGLE_OPERATOR_CONFIRMATION}" || \
+            test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR STARGATE"
           case "${OPERATION}" in
             plan)
               [[ "${RELEASE_TAG}" =~ ^stargate/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -95,6 +102,9 @@ jobs:
       DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
       DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
       DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
+      APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
+      SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
+      SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
 
     steps:
       - name: Checkout
@@ -113,13 +123,44 @@ jobs:
           test "${DEPLOY_USER}" = stargate-deploy
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
-          jq -e '
-            any(.protection_rules[]?;
-              .type == "required_reviewers" and
-              .prevent_self_review == true and
-              ((.reviewers // []) | length) > 0
-            )
-          ' <<<"${environment_json}" >/dev/null
+          case "${APPROVAL_MODE}" in
+            reviewed)
+              test -z "${SINGLE_OPERATOR_CONFIRMATION}"
+              jq -e '
+                any(.protection_rules[]?;
+                  .type == "required_reviewers" and
+                  .prevent_self_review == true and
+                  ((.reviewers // []) | length) > 0
+                )
+              ' <<<"${environment_json}" >/dev/null
+              ;;
+            single-operator)
+              test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR STARGATE"
+              test -n "${SINGLE_OPERATOR_LOGIN}"
+              test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              jq -e '
+                ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
+              ' <<<"${environment_json}" >/dev/null
+              collaborators_json="$(
+                gh api "repos/${GITHUB_REPOSITORY}/collaborators?affiliation=all&per_page=100" \
+                  --paginate --slurp
+              )"
+              jq -e --arg login "${SINGLE_OPERATOR_LOGIN}" '
+                add as $collaborators |
+                ($collaborators | length) == 1 and
+                $collaborators[0].login == $login and
+                $collaborators[0].permissions.admin == true
+              ' <<<"${collaborators_json}" >/dev/null
+              ;;
+            *)
+              printf 'Unsupported Stargate approval mode: %s\n' \
+                "${APPROVAL_MODE:-<unset>}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'approval_mode=%s actor=%s\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
+            tee -a "${GITHUB_STEP_SUMMARY}"
 
           branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
           jq -e '
