@@ -804,6 +804,7 @@ export function createMockApiState(input?: {
       checkedIn: !facilitator,
       canFacilitate: facilitator,
       canPresent: facilitator,
+      canAssist: facilitator,
     },
     modules: workshopModules,
     agenda: workshopAgenda,

@@ -269,6 +269,7 @@ export interface WorkshopViewer {
   checkedIn: boolean;
   canFacilitate: boolean;
   canPresent: boolean;
+  canAssist: boolean;
 }
 
 export interface WorkshopSessionDetail {

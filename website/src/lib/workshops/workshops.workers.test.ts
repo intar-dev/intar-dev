@@ -302,6 +302,94 @@ describe("standalone workshops", () => {
     });
   });
 
+  it("lets one organization owner facilitate while rostered as the participant", async () => {
+    const template = await createTemplateFixture();
+    const session = await createWorkshopSession({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      templateRevisionId: template.revisionId,
+      title: "Single operator canary",
+      scheduledStartAt: Date.now() + 60 * 60 * 1_000,
+    });
+
+    await expect(
+      performWorkshopSessionAction({
+        sessionId: session.id,
+        actorUserId: "owner-a",
+        action: "replace_roster",
+        expectedVersion: 1,
+        payload: {
+          members: [{ userId: "owner-a", role: "participant" }],
+        },
+      }),
+    ).resolves.toEqual({ kind: "updated" });
+
+    const draft = await getWorkshopSessionProjection({
+      sessionId: session.id,
+      userId: "owner-a",
+    });
+    expect(draft.session.viewer).toMatchObject({
+      role: "participant",
+      canFacilitate: true,
+      canPresent: true,
+      canAssist: false,
+    });
+    expect(draft.session.roster).toEqual([
+      expect.objectContaining({ userId: "owner-a", role: "participant" }),
+    ]);
+    expect(
+      draft.session.modules.find((module) => module.id === "00-setup"),
+    ).toMatchObject({
+      facilitatorNotesMarkdown: "Help anyone still blocked.",
+    });
+
+    await performWorkshopSessionAction({
+      sessionId: session.id,
+      actorUserId: "owner-a",
+      action: "open_lobby",
+      expectedVersion: 2,
+      payload: {},
+    });
+    await checkInToWorkshop({ sessionId: session.id, userId: "owner-a" });
+    const prepared = await prepareCheckedInWorkshopWorkspaces({
+      sessionId: session.id,
+      actorUserId: "owner-a",
+    });
+    expect(prepared.requests).toEqual([
+      expect.objectContaining({ participantUserId: "owner-a" }),
+    ]);
+
+    const help = await createWorkshopHelpRequest({
+      sessionId: session.id,
+      userId: "owner-a",
+      message: "Need a second pair of eyes.",
+    });
+    await expect(
+      claimWorkshopHelpRequest({
+        sessionId: session.id,
+        helpRequestId: help.id,
+        helperUserId: "owner-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "workshop_helper_required",
+    });
+  });
+
+  it("does not let an ordinary participant replace the facilitator", async () => {
+    const setup = await createSessionFixture();
+    await expect(
+      replaceWorkshopRoster({
+        sessionId: setup.sessionId,
+        actorUserId: "owner-a",
+        members: [{ userId: "learner-a", role: "participant" }],
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "workshop_facilitator_missing",
+    });
+  });
+
   it("atomically rolls back invalid roster edits and allows one concurrent CAS winner", async () => {
     const setup = await createSessionFixture();
     await expect(

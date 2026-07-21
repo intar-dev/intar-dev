@@ -16,7 +16,11 @@ import {
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
-import { requireOrganizationRole } from "@/lib/organizations";
+import {
+  isOrganizationAdminRole,
+  requireOrganizationRole,
+  type OrganizationRole,
+} from "@/lib/organizations";
 import { revokeWorkshopSessionAssistRoutes } from "./assistance";
 import { teardownWorkshopSessionRuntimes } from "./runtime-orchestrator";
 import {
@@ -324,14 +328,6 @@ export async function replaceWorkshopRoster(params: {
     }
     memberByUser.set(userId, entry.role);
   }
-  if (![...memberByUser.values()].includes("facilitator")) {
-    throw appError(
-      400,
-      "workshop_facilitator_missing",
-      "workshop roster must contain at least one facilitator",
-    );
-  }
-
   const db = workshopDb();
   const existingWorkspace = await db
     .select({ id: workshopWorkspaces.id })
@@ -347,7 +343,7 @@ export async function replaceWorkshopRoster(params: {
   }
   const userIds = [...memberByUser.keys()];
   const organizationMembers = await db
-    .select({ userId: member.userId })
+    .select({ userId: member.userId, role: member.role })
     .from(member)
     .where(
       and(
@@ -361,6 +357,18 @@ export async function replaceWorkshopRoster(params: {
       400,
       "workshop_roster_non_member",
       "every workshop roster entry must be an organization member",
+    );
+  }
+  const hasManager =
+    [...memberByUser.values()].includes("facilitator") ||
+    organizationMembers.some((entry) =>
+      isOrganizationAdminRole(entry.role as OrganizationRole),
+    );
+  if (!hasManager) {
+    throw appError(
+      400,
+      "workshop_facilitator_missing",
+      "workshop roster must contain a facilitator or organization admin",
     );
   }
   const existing = await db

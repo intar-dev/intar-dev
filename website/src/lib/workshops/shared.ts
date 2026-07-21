@@ -32,6 +32,7 @@ export interface WorkshopSessionAccess {
   state: WorkshopSessionState;
   version: number;
   role: WorkshopSessionRole;
+  organizationRole: OrganizationRole | null;
 }
 
 export interface WorkshopManagerAccess {
@@ -57,6 +58,7 @@ export async function requireWorkshopSessionMember(params: {
       version: workshopSessions.version,
       role: workshopSessionMembers.role,
       organizationMembershipId: member.id,
+      organizationRole: member.role,
     })
     .from(workshopSessionMembers)
     .innerJoin(
@@ -102,6 +104,7 @@ export async function requireWorkshopSessionMember(params: {
     state: row.state,
     version: row.version,
     role: row.role,
+    organizationRole: (row.organizationRole as OrganizationRole | null) ?? null,
   };
 }
 

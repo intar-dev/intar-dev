@@ -702,7 +702,9 @@ function EditRosterDialog({
     const selected = new Map(
       (session.draftRoster ?? []).map((entry) => [entry.userId, entry.role]),
     );
-    selected.set(viewerUserId, "facilitator");
+    if (!selected.has(viewerUserId)) {
+      selected.set(viewerUserId, "facilitator");
+    }
     return Object.fromEntries(
       members.map((member) => [
         member.userId,
@@ -792,7 +794,7 @@ function EditRosterDialog({
   );
 }
 
-function RosterEditor({
+export function RosterEditor({
   members,
   viewerUserId,
   roster,
@@ -831,8 +833,7 @@ function RosterEditor({
               <label>
                 <span className="sr-only">Role for {member.name}</span>
                 <select
-                  value={viewer ? "facilitator" : (roster[member.userId] ?? "excluded")}
-                  disabled={viewer}
+                  value={roster[member.userId] ?? "excluded"}
                   onChange={(event) =>
                     onChange({
                       ...roster,
@@ -844,7 +845,9 @@ function RosterEditor({
                   <option value="participant">Participant</option>
                   <option value="helper">Helper</option>
                   <option value="facilitator">Facilitator</option>
-                  <option value="excluded">Not enrolled</option>
+                  <option value="excluded" disabled={viewer}>
+                    Not enrolled
+                  </option>
                 </select>
               </label>
             </div>

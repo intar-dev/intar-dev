@@ -10,6 +10,7 @@ import {
   createWorkshopSession,
   replaceWorkshopRoster,
 } from "@/lib/workshops/sessions";
+import { withWorkshopManagerRosterDefault } from "@/lib/workshops/roster-input";
 import { workshopDb } from "@/lib/workshops/shared";
 
 export const prerender = false;
@@ -31,11 +32,10 @@ export const POST: APIRoute = async ({ request, params }) => {
   } | null;
   try {
     await requireWorkshopsEnabledForOrganization(organizationId);
-    const rosterByUser = new Map(
-      parseRoster(body?.members).map((entry) => [entry.userId, entry.role]),
+    const roster = withWorkshopManagerRosterDefault(
+      parseRoster(body?.members),
+      authz.context.userId,
     );
-    rosterByUser.set(authz.context.userId, "facilitator");
-    const roster = [...rosterByUser].map(([userId, role]) => ({ userId, role }));
     const organizationMembers = await workshopDb()
       .select({ userId: member.userId })
       .from(member)

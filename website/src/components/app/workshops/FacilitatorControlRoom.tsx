@@ -299,6 +299,7 @@ export function FacilitatorControlRoom({
         <HelpQueue
           members={helpQueue}
           busy={busyAction != null}
+          canAssist={session.viewer.canAssist}
           onAction={onAction}
           onOpenAssistTerminal={onOpenAssistTerminal}
         />
@@ -810,11 +811,13 @@ function ModuleControlLedger({
 function HelpQueue({
   members,
   busy,
+  canAssist,
   onAction,
   onOpenAssistTerminal,
 }: {
   members: WorkshopRosterMember[];
   busy: boolean;
+  canAssist: boolean;
   onAction: FacilitatorControlRoomProps["onAction"];
   onOpenAssistTerminal: FacilitatorControlRoomProps["onOpenAssistTerminal"];
 }) {
@@ -850,7 +853,9 @@ function HelpQueue({
                   {member.helpState}
                 </span>
               </span>
-              {member.helpState === "open" ? (
+              {!canAssist ? (
+                <Badge variant="outline">Helper required</Badge>
+              ) : member.helpState === "open" ? (
                 <Button
                   size="xs"
                   variant="outline"

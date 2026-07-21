@@ -268,9 +268,16 @@ export async function getWorkshopSessionProjection(params: {
   );
   const ownWorkspace =
     workspaces.find((entry) => entry.userId === params.userId) ?? null;
-  const canSeeRoomProgress =
+  const canFacilitate =
+    !projectorView &&
+    (access.role === "facilitator" ||
+      (access.organizationRole !== null &&
+        isOrganizationAdminRole(access.organizationRole)));
+  const canAssist =
     !projectorView &&
     (access.role === "facilitator" || access.role === "helper");
+  const canSeeRoomProgress =
+    !projectorView && (canFacilitate || access.role === "helper");
   const helpRequests = projectorView
     ? []
     : await listWorkshopHelpRequests(
@@ -281,7 +288,7 @@ export async function getWorkshopSessionProjection(params: {
     ? []
     : await listActiveWorkshopAssistGrants({
         sessionId: params.sessionId,
-        ...(access.role === "participant" ? { userId: params.userId } : {}),
+        ...(!canSeeRoomProgress ? { userId: params.userId } : {}),
       });
   const userNames = new Map(roster.map((entry) => [entry.userId, entry.name]));
   const ownHelp =
@@ -306,7 +313,7 @@ export async function getWorkshopSessionProjection(params: {
   const slides = projectSlides(
     context.manifest,
     session,
-    !projectorView && access.role === "facilitator",
+    canFacilitate,
   );
   const projectedAt = Date.now();
 
@@ -348,8 +355,9 @@ export async function getWorkshopSessionProjection(params: {
         userId: params.userId,
         role: access.role,
         checkedIn: viewer.checkedInAt !== null,
-        canFacilitate: !projectorView && access.role === "facilitator",
-        canPresent: !projectorView && access.role === "facilitator",
+        canFacilitate,
+        canPresent: canFacilitate,
+        canAssist,
       },
       modules: projectorView
         ? projectProjectorModules(context.manifest, session)
@@ -361,7 +369,7 @@ export async function getWorkshopSessionProjection(params: {
             ...(access.role === "participant"
               ? { participantUserId: params.userId }
               : {}),
-            facilitator: access.role === "facilitator",
+            facilitator: canFacilitate,
           }),
       agenda: projectorView
         ? []

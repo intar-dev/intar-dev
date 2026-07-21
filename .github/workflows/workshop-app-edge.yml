@@ -20,8 +20,17 @@ on:
           - plan
           - apply
           - rollback
+      confirmation:
+        description: Type APPLY WORKSHOP EDGE or ROLLBACK WORKSHOP EDGE for a mutation
+        required: false
+        type: string
+      single_operator_confirmation:
+        description: Type SINGLE OPERATOR WORKSHOP EDGE only when no independent reviewer exists
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -48,6 +57,11 @@ jobs:
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
+      SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
+      SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
     concurrency:
       group: workshop-application-edge-production
       cancel-in-progress: false
@@ -62,6 +76,68 @@ jobs:
 
       - name: Verify deployment revision
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Verify protected production dispatch
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          case "${OPERATION}" in
+            plan) test -z "${CONFIRMATION}" ;;
+            apply) test "${CONFIRMATION}" = "APPLY WORKSHOP EDGE" ;;
+            rollback) test "${CONFIRMATION}" = "ROLLBACK WORKSHOP EDGE" ;;
+            *) exit 2 ;;
+          esac
+
+          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
+          case "${APPROVAL_MODE}" in
+            reviewed)
+              test -z "${SINGLE_OPERATOR_CONFIRMATION}"
+              jq -e '
+                any(.protection_rules[]?;
+                  .type == "required_reviewers" and
+                  .prevent_self_review == true and
+                  ((.reviewers // []) | length) > 0
+                )
+              ' <<<"${environment_json}" >/dev/null
+              ;;
+            single-operator)
+              test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR WORKSHOP EDGE"
+              test -n "${SINGLE_OPERATOR_LOGIN}"
+              test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              jq -e '
+                ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
+              ' <<<"${environment_json}" >/dev/null
+              collaborators_json="$(
+                gh api "repos/${GITHUB_REPOSITORY}/collaborators?affiliation=all&per_page=100" \
+                  --paginate --slurp
+              )"
+              jq -e --arg login "${SINGLE_OPERATOR_LOGIN}" '
+                add as $collaborators |
+                ($collaborators | length) == 1 and
+                $collaborators[0].login == $login and
+                $collaborators[0].permissions.admin == true
+              ' <<<"${collaborators_json}" >/dev/null
+              ;;
+            *)
+              printf 'Unsupported production approval mode: %s\n' \
+                "${APPROVAL_MODE:-<unset>}" >&2
+              exit 1
+              ;;
+          esac
+
+          branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
+          jq -e '
+            (.branch_policies // .) as $policies |
+            ($policies | length) == 1 and
+            $policies[0].type == "branch" and
+            $policies[0].name == "main"
+          ' <<<"${branch_policies}" >/dev/null
+
+          printf 'approval_mode=%s actor=%s\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
+            tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Inventory and ${{ inputs.operation }} edge state
         env:

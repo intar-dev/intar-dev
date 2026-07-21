@@ -46,6 +46,7 @@ import {
   replaceWorkshopRoster,
   updateWorkshopSession,
 } from "./sessions";
+import { withWorkshopManagerRosterDefault } from "./roster-input";
 
 export type WorkshopActionResult =
   | { kind: "updated" }
@@ -214,17 +215,13 @@ export async function performWorkshopSessionAction(params: {
   const expectedVersion = requireVersion(params.expectedVersion);
   switch (params.action) {
     case "replace_roster": {
-      const rosterByUser = new Map(
-        parseRoster(params.payload.members).map((entry) => [
-          entry.userId,
-          entry.role,
-        ]),
-      );
-      rosterByUser.set(params.actorUserId, "facilitator");
       await replaceWorkshopRoster({
         sessionId: params.sessionId,
         actorUserId: params.actorUserId,
-        members: [...rosterByUser].map(([userId, role]) => ({ userId, role })),
+        members: withWorkshopManagerRosterDefault(
+          parseRoster(params.payload.members),
+          params.actorUserId,
+        ),
         expectedVersion,
         draftOnly: true,
       });
