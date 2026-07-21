@@ -87,6 +87,11 @@ item below has evidence attached to the release ticket.
   record, the exact Tunnel ingress order, and the final cache-bypass rule as
   desired before any workshop route is issued. See Cloudflare's
   [Universal SSL coverage and limitations][universal-ssl].
+- A protected **Stargate production** `plan` run has proved the environment's
+  required-reviewer and prevent-self-review metadata is readable, the main-only
+  branch policy is exact, the pinned deployment identity reaches the expected
+  host command protocol, and all three live route counts are zero. Do not apply
+  if the workflow cannot independently verify any of those facts.
 
 If any gate is false, leave the feature flag's default `false`, stop the
 rollout, and keep Workshops inaccessible. Do not substitute a scenario fleet,
@@ -100,7 +105,8 @@ Assign one operator to each role before starting:
 - release operator: merges the approved commit and watches GitHub Actions;
 - database observer: runs read-only D1 checks and records the Time Travel
   bookmark;
-- host operator: drains runners and performs the Stargate rollout;
+- host operator: drains routes, performs the one-time restricted Stargate CI
+  bootstrap, and approves the CI-owned rollout;
 - facilitator: drives the canary session;
 - two learner accounts and one separate helper account, all explicit members
   of the canary organization;
@@ -113,6 +119,8 @@ tokens in the ticket:
 release commit:
 website production run:
 stargate release tag and checksum:
+stargate deployment run and backup ID:
+stargate rollback run and safety backup ID, if any:
 pre-migration D1 bookmark:
 canary organization ID and slug:
 canary session ID:
@@ -506,58 +514,90 @@ must report `CF-Cache-Status: DYNAMIC`.
 
 ### 7.3 Replace the service
 
-Confirm again that Stargate has zero live terminal and application routes:
+The production binary is replaced only by
+`.github/workflows/stargate-deploy.yml`. The workflow is main-only, serialized,
+uses the protected `production` environment, verifies the GitHub release
+archive and extracted binary, and delegates the host mutation to the root-owned
+`ops/stargate/intar-deploy-stargate` command. Do not copy a binary into
+production from a workstation.
 
-```sh
-sudo -u stargate sqlite3 /var/lib/stargate/routes.sqlite3 \
-  "SELECT count(*) FROM routes WHERE expires_at > unixepoch();"
-sudo -u stargate sqlite3 /var/lib/stargate/routes.sqlite3 \
-  "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'workspace_app_routes';"
-sudo -u stargate sqlite3 /var/lib/stargate/routes.sqlite3 \
-  "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'workspace_app_browser_sessions';"
+Bootstrap its restricted host identity once through the existing root
+management channel or provider console:
+
+1. create a dedicated ED25519 key with the exact comment
+   `intar-stargate-production-ci` and no access to any other host;
+2. transfer only its public key, `ops/stargate/bootstrap-deploy-user`, and
+   `ops/stargate/intar-deploy-stargate` to a root-only temporary directory;
+3. run `bootstrap-deploy-user PUBLIC_KEY_FILE DEPLOY_COMMAND_FILE` as root;
+4. delete the transferred temporary files and retain the private key only as
+   the GitHub environment secret described below.
+
+The bootstrap creates a locked `stargate-deploy` service account, a restricted
+`authorized_keys` entry, the root-owned deployment command, and a narrow
+passwordless sudo rule for that command. It does not grant a general root
+shell. Run the bootstrap again to rotate the key or update the host command.
+
+Configure these `production` environment values:
+
+- variable `STARGATE_DEPLOY_HOST=intar.app`;
+- variable `STARGATE_DEPLOY_PORT=2222`;
+- variable `STARGATE_DEPLOY_USER=stargate-deploy`;
+- secret `STARGATE_DEPLOY_SSH_PRIVATE_KEY`, containing only the dedicated
+  private key;
+- secret `STARGATE_DEPLOY_KNOWN_HOSTS`, containing the pinned
+  `[intar.app]:2222` ED25519 host-key line verified through an independent
+  channel.
+
+Require at least one independent reviewer, enable prevent-self-review, and
+allow deployments from the `main` branch only. The workflow re-reads those
+protections and fails closed if they are absent or weaker than required.
+
+Dispatch **Stargate production** from `main` with `operation=plan`. Its host
+output must show an active service and zero terminal routes, workspace
+application routes, and browser sessions. For the cutover, dispatch it again
+with:
+
+- `operation=apply`;
+- the exact approved `stargate/v<version>` release tag;
+- `confirmation=DEPLOY STARGATE`.
+
+Approve the protected environment only after comparing the plan with the
+drain record. The host command validates the archive before mutation, makes an
+online SQLite backup while the existing service remains healthy, checks the
+drain again after stopping it, atomically installs the binary, and installs a
+systemd drop-in equivalent to:
+
+```toml
+workspace_app_base_domain = "intar.app"
+workspace_app_bootstrap_ttl_seconds = 60
+workspace_app_session_ttl_seconds = 900
 ```
 
-Before the new binary starts, the second and third results may be `0`. Stop Stargate,
-copy `/usr/local/bin/stargate`, `/etc/stargate/stargate.toml`, and
-`/var/lib/stargate/routes.sqlite3` to explicitly named cutover backups, then:
+It then waits for readiness, verifies migrations `2` and `3`, exercises the
+host-first `200/401/404` routing contract, and prints the named backup ID. A
+failed host transaction automatically restores the prior binary,
+configuration, and drop-in; a failed public routing verification triggers a
+rollback to that same backup before the workflow ends in failure. The additive
+SQLite migrations remain in place. The workflow finally requires:
 
-1. install the verified binary at `/usr/local/bin/stargate` mode `0755`;
-2. keep the existing admin, SSH, database, key, and token settings;
-3. add this exact web setting:
+- `https://ws.intar.app/healthz` to succeed;
+- `https://wa-no-such-route.intar.app/` to return `401`;
+- `https://garbage.intar.app/` to return `404`;
+- the final host plan to remain readable through the pinned deployment key.
 
-   ```toml
-   workspace_app_base_domain = "intar.app"
-   workspace_app_bootstrap_ttl_seconds = 60
-   workspace_app_session_ttl_seconds = 900
-   ```
+To restore an earlier release, dispatch the same workflow with
+`operation=rollback`, the exact backup ID, and
+`confirmation=ROLLBACK STARGATE`. Rollback makes a second safety backup before
+stopping the service and restores that safety backup automatically if the
+requested rollback fails.
 
-4. start `stargate.service` and wait for systemd `READY=1`;
-5. verify the automatic SQLx migration and service health:
-
-   ```sh
-   sudo systemctl is-active stargate.service
-   sudo journalctl --unit stargate.service --since '-10 minutes' --no-pager
-   sudo -u stargate sqlite3 /var/lib/stargate/routes.sqlite3 \
-     'SELECT version, description, success FROM _sqlx_migrations ORDER BY version;'
-   curl --fail-with-body --silent --show-error http://127.0.0.1:8081/healthz
-   curl --fail-with-body --silent --show-error https://ws.intar.app/healthz
-   ```
-
-Require migration `2`, description `workspace app routes`, and migration `3`,
-description `workspace app browser sessions`, both with `success = 1`. Run the
-existing browser-terminal scenario smoke once starts are re-enabled; the
-`ws.intar.app` terminal path must remain unchanged. Issue one test application
-route and prove its bootstrap URL returns a `303` with `Cache-Control:
-no-store`, removes `__intar_bootstrap` from the location, and sets an
-`HttpOnly; Secure; SameSite=Lax` route-specific cookie. Reusing the consumed
-bootstrap must return `401`; deleting the route must make the cookie fail for
-both HTTP and WebSocket requests.
-
-If the service does not become healthy, stop it and restore the prior binary
-and TOML. Migrations `0002` and `0003` are additive, so leave the new empty
-tables in the SQLite database unless the database itself is corrupt. Restart
-the old service and prove the existing terminal path before removing the
-wildcard DNS route.
+After the CI cutover, run the existing browser-terminal scenario smoke once
+starts are re-enabled; the `ws.intar.app` terminal path must remain unchanged.
+Issue one real workshop application route and prove its bootstrap URL returns
+a `303` with `Cache-Control: no-store`, removes `__intar_bootstrap` from the
+location, and sets an `HttpOnly; Secure; SameSite=Lax` route-specific cookie.
+Reusing the consumed bootstrap must return `401`; deleting the route must make
+the cookie fail for both HTTP and WebSocket requests.
 
 ## 8. Publish and prewarm the canary revision
 
@@ -964,15 +1004,20 @@ before reopening starts.
 
 ### Stargate failure
 
-Keep the workshop flag unmatched. With zero active routes, restore the previous
-binary and TOML, restart `stargate.service`, and prove `ws.intar.app` terminal
-health. The additive `workspace_app_routes` and
-`workspace_app_browser_sessions` tables may remain. Remove wildcard DNS/ingress
-only after confirming no workspace-app route exists. Dispatch **Workshop
-application edge** from `main` with `operation=rollback` and approve the
-`production` environment; it removes only the owned wildcard CNAME and managed
-cache rule, restores the exact `[ws, 404]` Tunnel baseline, and verifies that
-state. Do not manually replace the whole Cache Rules ruleset.
+Keep the workshop flag unmatched and disable route issuance. Drain all routes,
+then dispatch **Stargate production** from `main` with `operation=rollback`, the
+recorded backup ID, and `confirmation=ROLLBACK STARGATE`. Approve the protected
+`production` environment, record the new rollback safety backup ID, and prove
+`ws.intar.app` terminal health. Do not manually replace the binary or TOML.
+The additive `workspace_app_routes` and `workspace_app_browser_sessions` tables
+may remain.
+
+Remove wildcard DNS/ingress only after confirming no workspace-app route
+exists. Dispatch **Workshop application edge** from `main` with
+`operation=rollback` and approve the `production` environment; it removes only
+the owned wildcard CNAME and managed cache rule, restores the exact `[ws, 404]`
+Tunnel baseline, and verifies that state. Do not manually replace the whole
+Cache Rules ruleset.
 
 ### Publication or prewarm failure
 
