@@ -1,0 +1,72 @@
+name: Stargate deployment validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/stargate-deploy.yml"
+      - ".github/workflows/stargate-deploy-validate.yml"
+      - "ops/stargate/**"
+      - "docs/workshops-rollout.md"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/stargate-deploy.yml"
+      - ".github/workflows/stargate-deploy-validate.yml"
+      - "ops/stargate/**"
+      - "docs/workshops-rollout.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate host deployment scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check Bash syntax
+        run: |
+          test -x ops/stargate/intar-deploy-stargate
+          test -x ops/stargate/bootstrap-deploy-user
+          bash -n ops/stargate/intar-deploy-stargate
+          bash -n ops/stargate/bootstrap-deploy-user
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Run ShellCheck
+        run: |
+          shellcheck --severity=warning ops/stargate/intar-deploy-stargate
+          shellcheck --severity=warning ops/stargate/bootstrap-deploy-user
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: v1.7.7
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
+      - name: Validate workflow semantics
+        run: |
+          "$(go env GOPATH)/bin/actionlint" \
+            .github/workflows/stargate-deploy.yml \
+            .github/workflows/stargate-deploy-validate.yml
+
+      - name: Check whitespace
+        run: |
+          if git grep -nI -E '[[:blank:]]+$' -- \
+            .github/workflows/stargate-deploy.yml \
+            .github/workflows/stargate-deploy-validate.yml \
+            ops/stargate/intar-deploy-stargate \
+            ops/stargate/bootstrap-deploy-user \
+            docs/workshops-rollout.md; then
+            exit 1
+          fi

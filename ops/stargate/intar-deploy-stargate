@@ -1,0 +1,544 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+readonly PROTOCOL_VERSION="1"
+readonly SERVICE="stargate.service"
+readonly BINARY="/usr/local/bin/stargate"
+readonly CONFIG="/etc/stargate/stargate.toml"
+readonly DATABASE="/var/lib/stargate/routes.sqlite3"
+readonly DROP_IN="/etc/systemd/system/stargate.service.d/20-workspace-apps.conf"
+readonly LOCK="/run/lock/intar-stargate-deploy.lock"
+readonly STAGING_ROOT="/var/lib/intar-stargate-deploy/staging"
+readonly BACKUP_ROOT="/var/backups/intar/stargate"
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf 'stargate-deploy: %s\n' "$*" >&2
+}
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] || die "must run as root"
+}
+
+require_commands() {
+  local command
+  for command in curl flock install python3 sha256sum sort systemctl tar; do
+    command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
+  done
+}
+
+validate_sha256() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]] || die "invalid SHA-256"
+}
+
+validate_tag() {
+  [[ "$1" =~ ^stargate/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "invalid release tag"
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+validate_backup_id() {
+  [[ "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]] || die "invalid backup id"
+}
+
+database_scalar() {
+  local sql="$1"
+  python3 - "$DATABASE" "$sql" <<'PY'
+import sqlite3
+import sys
+
+database, sql = sys.argv[1:]
+uri = f"file:{database}?mode=ro"
+with sqlite3.connect(uri, uri=True) as connection:
+    connection.execute("PRAGMA query_only = ON")
+    row = connection.execute(sql).fetchone()
+if row is None or len(row) != 1:
+    raise SystemExit("query did not return one scalar")
+print(row[0])
+PY
+}
+
+table_exists() {
+  local table="$1"
+  [ "$(database_scalar "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '$table'")" -eq 1 ]
+}
+
+route_counts() {
+  local terminal=0
+  local applications=0
+  local browsers=0
+
+  if table_exists routes; then
+    terminal="$(database_scalar "SELECT count(*) FROM routes WHERE expires_at > unixepoch()")"
+  fi
+  if table_exists workspace_app_routes; then
+    applications="$(database_scalar "SELECT count(*) FROM workspace_app_routes WHERE expires_at > unixepoch()")"
+  fi
+  if table_exists workspace_app_browser_sessions; then
+    browsers="$(database_scalar "SELECT count(*) FROM workspace_app_browser_sessions WHERE expires_at > unixepoch()")"
+  fi
+
+  printf '%s %s %s\n' "$terminal" "$applications" "$browsers"
+}
+
+require_drained() {
+  local terminal applications browsers
+  read -r terminal applications browsers < <(route_counts)
+  if [ "$terminal" -ne 0 ] || [ "$applications" -ne 0 ] || [ "$browsers" -ne 0 ]; then
+    die "Stargate is not drained (terminal=$terminal applications=$applications browser_sessions=$browsers)"
+  fi
+  log "drain verified (terminal=0 applications=0 browser_sessions=0)"
+}
+
+wait_ready() {
+  local attempt
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if systemctl is-active --quiet "$SERVICE" && \
+      curl --fail --silent --show-error --max-time 2 \
+        http://127.0.0.1:8081/healthz >/dev/null; then
+      log "service reached READY state"
+      return 0
+    fi
+    sleep 1
+  done
+  systemctl status "$SERVICE" --no-pager >&2 || true
+  return 1
+}
+
+verify_migrations() {
+  local successful
+  table_exists _sqlx_migrations || die "SQLx migration table is missing"
+  successful="$(database_scalar \
+    "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3) AND success = 1")"
+  [ "$successful" -eq 2 ] || die "workspace application migrations 2 and 3 are not successful"
+  log "workspace application migrations 2 and 3 are successful"
+}
+
+backup_database() {
+  local destination="$1"
+  python3 - "$DATABASE" "$destination" <<'PY'
+import sqlite3
+import sys
+
+source_path, destination_path = sys.argv[1:]
+with sqlite3.connect(source_path) as source:
+    with sqlite3.connect(destination_path) as destination:
+        source.backup(destination)
+        result = destination.execute("PRAGMA quick_check").fetchone()
+if result != ("ok",):
+    raise SystemExit(f"backup quick_check failed: {result!r}")
+PY
+  chmod 0600 "$destination"
+}
+
+capture_backup() {
+  local reason="$1"
+  local backup_id
+  local backup_dir
+  local current_sha256
+
+  current_sha256="$(sha256sum "$BINARY" | awk '{print $1}')"
+  backup_id="$(date -u +%Y%m%dT%H%M%SZ)-${reason}-sha-${current_sha256:0:12}"
+  backup_id="${backup_id//[^A-Za-z0-9._-]/_}"
+  backup_dir="$BACKUP_ROOT/$backup_id"
+  [ ! -e "$backup_dir" ] || die "backup already exists: $backup_id"
+
+  install -d -o root -g root -m 0700 "$backup_dir"
+  cp --preserve=mode,ownership,timestamps -- "$BINARY" "$backup_dir/stargate"
+  cp --preserve=mode,ownership,timestamps -- "$CONFIG" "$backup_dir/stargate.toml"
+  backup_database "$backup_dir/routes.sqlite3"
+  if [ -e "$DROP_IN" ]; then
+    cp --preserve=mode,ownership,timestamps -- "$DROP_IN" "$backup_dir/workspace-apps.conf"
+    : >"$backup_dir/drop-in-present"
+  else
+    : >"$backup_dir/drop-in-absent"
+  fi
+  (
+    cd "$backup_dir"
+    if [ -f workspace-apps.conf ]; then
+      sha256sum stargate stargate.toml routes.sqlite3 workspace-apps.conf \
+        drop-in-present
+    else
+      sha256sum stargate stargate.toml routes.sqlite3 drop-in-absent
+    fi
+  ) >"$backup_dir/SHA256SUMS"
+  chmod 0600 "$backup_dir/SHA256SUMS" \
+    "$backup_dir/routes.sqlite3" \
+    "$backup_dir/drop-in-"*
+  printf '%s\n' "$backup_id"
+}
+
+verify_backup() {
+  local backup_dir="$1"
+  local actual_files
+  local expected_files
+
+  [ -f "$backup_dir/stargate" ] || {
+    log "backup binary is missing"
+    return 1
+  }
+  [ -f "$backup_dir/stargate.toml" ] || {
+    log "backup config is missing"
+    return 1
+  }
+  [ -f "$backup_dir/SHA256SUMS" ] || {
+    log "backup checksums are missing"
+    return 1
+  }
+
+  if [ -f "$backup_dir/drop-in-present" ] && \
+    [ ! -e "$backup_dir/drop-in-absent" ] && \
+    [ -f "$backup_dir/workspace-apps.conf" ]; then
+    expected_files="$(printf '%s\n' \
+      drop-in-present routes.sqlite3 stargate stargate.toml \
+      workspace-apps.conf | sort)"
+  elif [ -f "$backup_dir/drop-in-absent" ] && \
+    [ ! -e "$backup_dir/drop-in-present" ] && \
+    [ ! -e "$backup_dir/workspace-apps.conf" ]; then
+    expected_files="$(printf '%s\n' \
+      drop-in-absent routes.sqlite3 stargate stargate.toml | sort)"
+  else
+    log "backup has an inconsistent drop-in marker"
+    return 1
+  fi
+
+  actual_files="$(awk '{print $2}' "$backup_dir/SHA256SUMS" | sort)"
+  [ "$actual_files" = "$expected_files" ] || {
+    log "backup checksum manifest has unexpected entries"
+    return 1
+  }
+  (
+    cd "$backup_dir"
+    sha256sum --check --strict SHA256SUMS
+  ) >/dev/null || {
+    log "backup checksum verification failed"
+    return 1
+  }
+
+  python3 - "$backup_dir/routes.sqlite3" <<'PY' || {
+import sqlite3
+import sys
+
+database = sys.argv[1]
+uri = f"file:{database}?mode=ro"
+with sqlite3.connect(uri, uri=True) as connection:
+    result = connection.execute("PRAGMA quick_check").fetchone()
+if result != ("ok",):
+    raise SystemExit(f"backup quick_check failed: {result!r}")
+PY
+    log "backup SQLite verification failed"
+    return 1
+  }
+}
+
+restore_runtime_files() {
+  local backup_dir="$1"
+
+  verify_backup "$backup_dir" || return 1
+
+  install -o root -g root -m 0755 "$backup_dir/stargate" "$BINARY"
+  install -o root -g stargate -m 0640 "$backup_dir/stargate.toml" "$CONFIG"
+  if [ -f "$backup_dir/drop-in-present" ]; then
+    [ -f "$backup_dir/workspace-apps.conf" ] || {
+      log "backup drop-in is missing"
+      return 1
+    }
+    install -D -o root -g root -m 0644 "$backup_dir/workspace-apps.conf" "$DROP_IN"
+  elif [ -f "$backup_dir/drop-in-absent" ]; then
+    rm -f -- "$DROP_IN"
+  else
+    log "backup does not record drop-in state"
+    return 1
+  fi
+  systemctl daemon-reload
+}
+
+service_environment_has() {
+  systemctl show "$SERVICE" --property=Environment --value | \
+    tr ' ' '\n' | grep -Fqx "$1"
+}
+
+verify_runtime_config() {
+  service_environment_has 'STARGATE_WORKSPACE_APP_BASE_DOMAIN=intar.app' || \
+    die "workspace application base domain is not active"
+  service_environment_has 'STARGATE_WORKSPACE_APP_BOOTSTRAP_TTL_SECONDS=60' || \
+    die "workspace application bootstrap TTL is not active"
+  service_environment_has 'STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS=900' || \
+    die "workspace application session TTL is not active"
+}
+
+verify_host_routing() {
+  local status
+
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --max-time 5 --header 'Host: ws.intar.app' \
+    http://127.0.0.1:8080/healthz)"
+  [ "$status" = 200 ] || die "local ws.intar.app health returned $status"
+
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --max-time 5 --header 'Host: wa-no-such-route.intar.app' \
+    http://127.0.0.1:8080/)"
+  [ "$status" = 401 ] || die "local canonical workspace app host returned $status"
+
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --max-time 5 --header 'Host: garbage.intar.app' \
+    http://127.0.0.1:8080/)"
+  [ "$status" = 404 ] || die "local arbitrary app-domain host returned $status"
+  log "local host routing verified (ws=200 workspace_app=401 arbitrary=404)"
+}
+
+install_workspace_drop_in() {
+  local temporary
+  temporary="$(mktemp)"
+  chmod 0600 "$temporary"
+  cat >"$temporary" <<'EOF_DROP_IN'
+[Service]
+Environment=STARGATE_WORKSPACE_APP_BASE_DOMAIN=intar.app
+Environment=STARGATE_WORKSPACE_APP_BOOTSTRAP_TTL_SECONDS=60
+Environment=STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS=900
+EOF_DROP_IN
+  install -D -o root -g root -m 0644 "$temporary" "$DROP_IN"
+  rm -f -- "$temporary"
+}
+
+plan() {
+  local terminal applications browsers
+  local service_state="inactive"
+  local base_domain="absent"
+  local bootstrap_ttl="absent"
+  local session_ttl="absent"
+  local migrations="missing"
+
+  systemctl is-active --quiet "$SERVICE" && service_state="active"
+  read -r terminal applications browsers < <(route_counts)
+  if service_environment_has 'STARGATE_WORKSPACE_APP_BASE_DOMAIN=intar.app'; then
+    base_domain="intar.app"
+  fi
+  if service_environment_has 'STARGATE_WORKSPACE_APP_BOOTSTRAP_TTL_SECONDS=60'; then
+    bootstrap_ttl="60"
+  fi
+  if service_environment_has 'STARGATE_WORKSPACE_APP_SESSION_TTL_SECONDS=900'; then
+    session_ttl="900"
+  fi
+  if table_exists _sqlx_migrations && \
+    [ "$(database_scalar "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3) AND success = 1")" -eq 2 ]; then
+    migrations="ready"
+  fi
+
+  printf 'protocol=%s\n' "$PROTOCOL_VERSION"
+  printf 'service=%s\n' "$service_state"
+  printf 'binary_sha256=%s\n' "$(sha256sum "$BINARY" | awk '{print $1}')"
+  printf 'terminal_routes=%s\n' "$terminal"
+  printf 'workspace_app_routes=%s\n' "$applications"
+  printf 'browser_sessions=%s\n' "$browsers"
+  printf 'workspace_app_base_domain=%s\n' "$base_domain"
+  printf 'workspace_app_bootstrap_ttl_seconds=%s\n' "$bootstrap_ttl"
+  printf 'workspace_app_session_ttl_seconds=%s\n' "$session_ttl"
+  printf 'workspace_app_migrations=%s\n' "$migrations"
+}
+
+apply_release() {
+  local tag="$1"
+  local archive_sha256="$2"
+  local binary_sha256="$3"
+  local version
+  local staging_dir
+  local archive
+  local extracted
+  local listing
+  local backup_id=""
+  local deployment_started=0
+
+  version="$(validate_tag "$tag")"
+  validate_sha256 "$archive_sha256"
+  validate_sha256 "$binary_sha256"
+  require_drained
+  systemctl is-active --quiet "$SERVICE" || die "Stargate must be active before apply"
+
+  install -d -o root -g root -m 0700 "$STAGING_ROOT"
+  staging_dir="$(mktemp -d "$STAGING_ROOT/release.XXXXXXXX")"
+  archive="$staging_dir/stargate.tar.gz"
+  extracted="$staging_dir/extracted"
+
+  cleanup_staging() {
+    if [[ -n "${staging_dir:-}" && \
+      "$staging_dir" == "$STAGING_ROOT"/release.* && \
+      -d "$staging_dir" ]]; then
+      rm -rf -- "$staging_dir"
+    fi
+  }
+  trap cleanup_staging EXIT
+
+  cat >"$archive"
+  chmod 0600 "$archive"
+  [ "$(sha256sum "$archive" | awk '{print $1}')" = "$archive_sha256" ] || \
+    die "release archive SHA-256 mismatch"
+  listing="$(tar -tzf "$archive")"
+  if [ "$listing" != $'./\n./stargate' ] && [ "$listing" != "stargate" ]; then
+    die "release archive has an unexpected file layout"
+  fi
+  install -d -o root -g root -m 0700 "$extracted"
+  tar --extract --gzip --file "$archive" --directory "$extracted" \
+    --no-same-owner --no-same-permissions
+  [ -f "$extracted/stargate" ] || die "release binary is missing"
+  [ ! -L "$extracted/stargate" ] || die "release binary must not be a symlink"
+  [ "$(sha256sum "$extracted/stargate" | awk '{print $1}')" = "$binary_sha256" ] || \
+    die "release binary SHA-256 mismatch"
+  chmod 0755 "$extracted/stargate"
+  backup_id="$(capture_backup "pre-${version}")"
+  log "created backup $backup_id"
+
+  recover_apply_on_exit() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$deployment_started" -eq 1 ]; then
+      log "apply failed; restoring runtime files from $backup_id"
+      set +e
+      systemctl stop "$SERVICE" || true
+      if ! restore_runtime_files "$BACKUP_ROOT/$backup_id"; then
+        log "automatic restore failed; manual recovery from $backup_id is required"
+      fi
+      systemctl start "$SERVICE" || true
+      wait_ready || true
+    fi
+    cleanup_staging
+    exit "$status"
+  }
+
+  exit_for_signal() {
+    local signal="$1"
+    local status="$2"
+    log "received $signal during apply"
+    exit "$status"
+  }
+
+  trap recover_apply_on_exit EXIT
+  trap 'exit_for_signal HUP 129' HUP
+  trap 'exit_for_signal INT 130' INT
+  trap 'exit_for_signal TERM 143' TERM
+
+  deployment_started=1
+  systemctl stop "$SERVICE"
+  require_drained
+
+  install -o root -g root -m 0755 "$extracted/stargate" "$BINARY.new"
+  mv -f -- "$BINARY.new" "$BINARY"
+  install_workspace_drop_in
+  systemctl daemon-reload
+  systemctl start "$SERVICE"
+  wait_ready
+  verify_migrations
+  [ "$(sha256sum "$BINARY" | awk '{print $1}')" = "$binary_sha256" ] || \
+    die "installed binary SHA-256 mismatch"
+  verify_runtime_config
+  verify_host_routing
+  deployment_started=0
+  cleanup_staging
+  trap - EXIT HUP INT TERM
+
+  printf 'backup_id=%s\n' "$backup_id"
+  plan
+}
+
+rollback_release() {
+  local backup_id="$1"
+  local backup_dir
+  local safety_backup
+  local rollback_started=0
+
+  validate_backup_id "$backup_id"
+  backup_dir="$BACKUP_ROOT/$backup_id"
+  [ -d "$backup_dir" ] || die "backup does not exist: $backup_id"
+  verify_backup "$backup_dir" || die "backup verification failed: $backup_id"
+  require_drained
+  systemctl is-active --quiet "$SERVICE" || die "Stargate must be active before rollback"
+
+  safety_backup="$(capture_backup "pre-rollback")"
+  log "created rollback safety backup $safety_backup"
+
+  recover_rollback_on_exit() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [ "$rollback_started" -eq 1 ]; then
+      log "rollback failed; restoring runtime files from $safety_backup"
+      set +e
+      systemctl stop "$SERVICE" || true
+      if ! restore_runtime_files "$BACKUP_ROOT/$safety_backup"; then
+        log "automatic restore failed; manual recovery from $safety_backup is required"
+      fi
+      systemctl start "$SERVICE" || true
+      wait_ready || true
+    fi
+    exit "$status"
+  }
+
+  exit_for_signal() {
+    local signal="$1"
+    local status="$2"
+    log "received $signal during rollback"
+    exit "$status"
+  }
+
+  trap recover_rollback_on_exit EXIT
+  trap 'exit_for_signal HUP 129' HUP
+  trap 'exit_for_signal INT 130' INT
+  trap 'exit_for_signal TERM 143' TERM
+
+  rollback_started=1
+  systemctl stop "$SERVICE"
+  require_drained
+  restore_runtime_files "$backup_dir"
+  systemctl start "$SERVICE"
+  wait_ready
+  rollback_started=0
+  trap - EXIT HUP INT TERM
+
+  printf 'rollback_safety_backup_id=%s\n' "$safety_backup"
+  plan
+}
+
+usage() {
+  cat >&2 <<'EOF_USAGE'
+usage:
+  intar-deploy-stargate plan
+  intar-deploy-stargate apply stargate/vX.Y.Z ARCHIVE_SHA256 BINARY_SHA256 < archive.tar.gz
+  intar-deploy-stargate rollback BACKUP_ID
+EOF_USAGE
+  exit 2
+}
+
+main() {
+  require_root
+  require_commands
+
+  case "${1:-}" in
+    plan)
+      [ "$#" -eq 1 ] || usage
+      plan
+      ;;
+    apply)
+      [ "$#" -eq 4 ] || usage
+      install -d -o root -g root -m 0700 "$BACKUP_ROOT" "$STAGING_ROOT"
+      exec 9>"$LOCK"
+      flock -n 9 || die "another Stargate deployment is active"
+      apply_release "$2" "$3" "$4"
+      ;;
+    rollback)
+      [ "$#" -eq 2 ] || usage
+      install -d -o root -g root -m 0700 "$BACKUP_ROOT" "$STAGING_ROOT"
+      exec 9>"$LOCK"
+      flock -n 9 || die "another Stargate deployment is active"
+      rollback_release "$2"
+      ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,296 @@
+name: Stargate production
+run-name: "Stargate ${{ inputs.operation }} ${{ inputs.operation == 'rollback' && inputs.rollback_backup || inputs.release_tag }} @ ${{ github.sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to perform
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - rollback
+      release_tag:
+        description: Exact Stargate release tag for plan/apply
+        required: false
+        default: stargate/v0.2.7
+        type: string
+      rollback_backup:
+        description: Exact host backup ID for rollback
+        required: false
+        type: string
+      confirmation:
+        description: Type DEPLOY STARGATE or ROLLBACK STARGATE for a mutation
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: stargate-production
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate deployment request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require main revision
+        run: test "${GITHUB_REF}" = refs/heads/main
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          case "${OPERATION}" in
+            plan)
+              [[ "${RELEASE_TAG}" =~ ^stargate/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              test -z "${ROLLBACK_BACKUP}"
+              test -z "${CONFIRMATION}"
+              ;;
+            apply)
+              test "${CONFIRMATION}" = "DEPLOY STARGATE"
+              [[ "${RELEASE_TAG}" =~ ^stargate/v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              test -z "${ROLLBACK_BACKUP}"
+              ;;
+            rollback)
+              test "${CONFIRMATION}" = "ROLLBACK STARGATE"
+              [[ "${ROLLBACK_BACKUP}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+              ;;
+            *) exit 2 ;;
+          esac
+
+      - name: Validate host deployment scripts
+        run: |
+          test -x ops/stargate/intar-deploy-stargate
+          test -x ops/stargate/bootstrap-deploy-user
+          bash -n ops/stargate/intar-deploy-stargate
+          bash -n ops/stargate/bootstrap-deploy-user
+
+  deploy:
+    name: ${{ inputs.operation }} production Stargate
+    needs: preflight
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify protected production dispatch
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = refs/heads/main
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          test "${DEPLOY_HOST}" = intar.app
+          test "${DEPLOY_PORT}" = 2222
+          test "${DEPLOY_USER}" = stargate-deploy
+
+          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
+          jq -e '
+            any(.protection_rules[]?;
+              .type == "required_reviewers" and
+              .prevent_self_review == true and
+              ((.reviewers // []) | length) > 0
+            )
+          ' <<<"${environment_json}" >/dev/null
+
+          branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
+          jq -e '
+            (.branch_policies // .) as $policies |
+            ($policies | length) == 1 and
+            $policies[0].type == "branch" and
+            $policies[0].name == "main"
+          ' <<<"${branch_policies}" >/dev/null
+
+      - name: Verify release provenance
+        if: inputs.operation != 'rollback'
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse --verify "${RELEASE_TAG}^{commit}")"
+          git merge-base --is-ancestor "${tag_commit}" "${GITHUB_SHA}"
+          version="${RELEASE_TAG#stargate/v}"
+          manifest_version="$(
+            git show "${RELEASE_TAG}:crates/stargate-gateway/Cargo.toml" |
+              awk -F ' *= *' '$1 == "version" {gsub(/"/, "", $2); print $2; exit}'
+          )"
+          test "${manifest_version}" = "${version}"
+
+      - name: Configure pinned SSH identity
+        id: ssh
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPLOY_PRIVATE_KEY}"
+          test -n "${DEPLOY_KNOWN_HOSTS}"
+          install -d -m 0700 "${RUNNER_TEMP}/intar-ssh"
+          install -m 0600 /dev/null "${RUNNER_TEMP}/intar-ssh/id_ed25519"
+          install -m 0600 /dev/null "${RUNNER_TEMP}/intar-ssh/known_hosts"
+          printf '%s\n' "${DEPLOY_PRIVATE_KEY}" >"${RUNNER_TEMP}/intar-ssh/id_ed25519"
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" >"${RUNNER_TEMP}/intar-ssh/known_hosts"
+          public_key="$(ssh-keygen -y -P '' -f "${RUNNER_TEMP}/intar-ssh/id_ed25519")"
+          [[ "${public_key}" = ssh-ed25519\ * ]]
+          test "$(grep -cve '^[[:space:]]*$' "${RUNNER_TEMP}/intar-ssh/known_hosts")" -eq 1
+          awk '
+            $1 == "[intar.app]:2222" &&
+            $2 == "ssh-ed25519" &&
+            $3 ~ /^[A-Za-z0-9+\/=]+$/ { matches += 1 }
+            END { exit(matches == 1 ? 0 : 1) }
+          ' "${RUNNER_TEMP}/intar-ssh/known_hosts"
+
+          cat >"${RUNNER_TEMP}/intar-ssh/config" <<EOF_SSH
+          Host intar-stargate-production
+            HostName ${DEPLOY_HOST}
+            Port ${DEPLOY_PORT}
+            User ${DEPLOY_USER}
+            IdentityFile ${RUNNER_TEMP}/intar-ssh/id_ed25519
+            UserKnownHostsFile ${RUNNER_TEMP}/intar-ssh/known_hosts
+            BatchMode yes
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            HostKeyAlgorithms ssh-ed25519
+            PubkeyAcceptedAlgorithms ssh-ed25519
+            ConnectTimeout 10
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+            ClearAllForwardings yes
+            RequestTTY no
+          EOF_SSH
+          chmod 0600 "${RUNNER_TEMP}/intar-ssh/config"
+
+      - name: Read host deployment plan
+        run: |
+          set -euo pipefail
+          ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
+            intar-stargate-production plan
+
+      - name: Download and verify release
+        if: inputs.operation == 'apply'
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#stargate/v}"
+          archive="stargate_${version}_linux_amd64.tar.gz"
+          checksums="stargate_${version}_checksums.txt"
+          mkdir -p "${RUNNER_TEMP}/stargate-release/extracted"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${archive}" \
+            --pattern "${checksums}" \
+            --dir "${RUNNER_TEMP}/stargate-release"
+
+          grep -E "^[0-9a-f]{64}  ${archive}$" \
+            "${RUNNER_TEMP}/stargate-release/${checksums}" \
+            >"${RUNNER_TEMP}/stargate-release/expected"
+          test "$(wc -l <"${RUNNER_TEMP}/stargate-release/expected")" -eq 1
+          (
+            cd "${RUNNER_TEMP}/stargate-release"
+            sha256sum --check --strict expected
+          )
+          test "$(tar -tzf "${RUNNER_TEMP}/stargate-release/${archive}")" = $'./\n./stargate'
+          tar -xzf "${RUNNER_TEMP}/stargate-release/${archive}" \
+            -C "${RUNNER_TEMP}/stargate-release/extracted" \
+            --no-same-owner --no-same-permissions
+          test -f "${RUNNER_TEMP}/stargate-release/extracted/stargate"
+          test ! -L "${RUNNER_TEMP}/stargate-release/extracted/stargate"
+
+          archive_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/${archive}" | awk '{print $1}')"
+          binary_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/extracted/stargate" | awk '{print $1}')"
+          {
+            printf 'archive=%s\n' "${RUNNER_TEMP}/stargate-release/${archive}"
+            printf 'archive_sha256=%s\n' "${archive_sha256}"
+            printf 'binary_sha256=%s\n' "${binary_sha256}"
+          } >>"${GITHUB_OUTPUT}"
+        id: release
+
+      - name: Apply release
+        if: inputs.operation == 'apply'
+        id: apply
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ARCHIVE: ${{ steps.release.outputs.archive }}
+          ARCHIVE_SHA256: ${{ steps.release.outputs.archive_sha256 }}
+          BINARY_SHA256: ${{ steps.release.outputs.binary_sha256 }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/stargate-apply-output"
+          ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
+            intar-stargate-production apply \
+              "${RELEASE_TAG}" "${ARCHIVE_SHA256}" "${BINARY_SHA256}" \
+            <"${ARCHIVE}" | tee "${output}"
+          backup_id="$(awk -F= '$1 == "backup_id" {print $2}' "${output}")"
+          [[ "${backup_id}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+          test "$(grep -c '^backup_id=' "${output}")" -eq 1
+          printf 'backup_id=%s\n' "${backup_id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Roll back release
+        if: inputs.operation == 'rollback'
+        env:
+          ROLLBACK_BACKUP: ${{ inputs.rollback_backup }}
+        run: |
+          set -euo pipefail
+          ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
+            intar-stargate-production rollback "${ROLLBACK_BACKUP}"
+
+      - name: Verify public routing
+        if: inputs.operation != 'plan'
+        id: public
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error https://ws.intar.app/healthz >/dev/null
+          garbage_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://garbage.intar.app/)"
+          test "${garbage_status}" = 404
+          if [ "${OPERATION}" = apply ]; then
+            application_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://wa-no-such-route.intar.app/)"
+            test "${application_status}" = 401
+          fi
+
+      - name: Restore prior release after failed public verification
+        if: failure() && inputs.operation == 'apply' && steps.apply.outcome == 'success' && steps.public.outcome == 'failure'
+        env:
+          BACKUP_ID: ${{ steps.apply.outputs.backup_id }}
+        run: |
+          set -euo pipefail
+          [[ "${BACKUP_ID}" =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9._-]+$ ]]
+          ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
+            intar-stargate-production rollback "${BACKUP_ID}"
+
+      - name: Read final host state
+        if: always() && steps.ssh.outcome == 'success'
+        run: |
+          set -euo pipefail
+          ssh -F "${RUNNER_TEMP}/intar-ssh/config" \
+            intar-stargate-production plan

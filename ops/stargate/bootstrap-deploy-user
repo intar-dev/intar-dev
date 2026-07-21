@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+readonly DEPLOY_USER="stargate-deploy"
+readonly DEPLOY_HOME="/var/lib/stargate-deploy"
+readonly DEPLOY_COMMAND="/usr/local/sbin/intar-deploy-stargate"
+readonly SSH_WRAPPER="/usr/local/sbin/intar-stargate-deploy-ssh-wrapper"
+readonly SUDOERS_FILE="/etc/sudoers.d/intar-stargate-deploy"
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf 'usage: bootstrap-deploy-user PUBLIC_KEY_FILE DEPLOY_COMMAND_FILE\n' >&2
+  exit 2
+}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+[ "$#" -eq 2 ] || usage
+
+public_key_file="$1"
+deploy_command_file="$2"
+[ -f "$public_key_file" ] || die "public key file is missing"
+[ -f "$deploy_command_file" ] || die "deploy command file is missing"
+bash -n "$deploy_command_file"
+
+public_key="$(sed -n '1p' "$public_key_file")"
+[ "$(wc -l <"$public_key_file")" -eq 1 ] || die "public key file must contain one line"
+[[ "$public_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+\ intar-stargate-production-ci$ ]] || \
+  die "public key must be the dedicated Intar Stargate CI ED25519 key"
+
+if ! id "$DEPLOY_USER" >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir "$DEPLOY_HOME" \
+    --shell /bin/bash "$DEPLOY_USER"
+fi
+
+IFS=: read -r account_name _ account_uid _ _ account_home account_shell \
+  < <(getent passwd "$DEPLOY_USER")
+[ "$account_name" = "$DEPLOY_USER" ] || die "unexpected deploy account name"
+[ "$account_uid" -gt 0 ] && [ "$account_uid" -lt 1000 ] || \
+  die "deploy account must have a non-root system UID"
+[ "$account_home" = "$DEPLOY_HOME" ] || die "deploy account has an unexpected home"
+[ "$account_shell" = /bin/bash ] || die "deploy account has an unexpected shell"
+passwd --lock "$DEPLOY_USER" >/dev/null
+
+install -o root -g root -m 0755 "$deploy_command_file" "$DEPLOY_COMMAND"
+
+temporary_wrapper="$(mktemp)"
+cat >"$temporary_wrapper" <<'EOF_WRAPPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly DEPLOY_COMMAND="/usr/local/sbin/intar-deploy-stargate"
+read -r -a arguments <<<"${SSH_ORIGINAL_COMMAND:-}"
+
+case "${arguments[0]:-}" in
+  plan)
+    [ "${#arguments[@]}" -eq 1 ] || exit 64
+    exec sudo -n "$DEPLOY_COMMAND" plan
+    ;;
+  apply)
+    [ "${#arguments[@]}" -eq 4 ] || exit 64
+    exec sudo -n "$DEPLOY_COMMAND" apply \
+      "${arguments[1]}" "${arguments[2]}" "${arguments[3]}"
+    ;;
+  rollback)
+    [ "${#arguments[@]}" -eq 2 ] || exit 64
+    exec sudo -n "$DEPLOY_COMMAND" rollback "${arguments[1]}"
+    ;;
+  *) exit 64 ;;
+esac
+EOF_WRAPPER
+bash -n "$temporary_wrapper"
+install -o root -g root -m 0755 "$temporary_wrapper" "$SSH_WRAPPER"
+rm -f -- "$temporary_wrapper"
+
+install -d -o "$DEPLOY_USER" -g "$DEPLOY_USER" -m 0700 "$DEPLOY_HOME/.ssh"
+temporary_key="$(mktemp)"
+printf 'command="%s",restrict %s\n' "$SSH_WRAPPER" "$public_key" >"$temporary_key"
+install -o "$DEPLOY_USER" -g "$DEPLOY_USER" -m 0600 \
+  "$temporary_key" "$DEPLOY_HOME/.ssh/authorized_keys"
+rm -f -- "$temporary_key"
+
+temporary_sudoers="$(mktemp)"
+cat >"$temporary_sudoers" <<EOF_SUDOERS
+Defaults:${DEPLOY_USER} !requiretty
+${DEPLOY_USER} ALL=(root) NOPASSWD: ${DEPLOY_COMMAND} *
+EOF_SUDOERS
+visudo --check --file "$temporary_sudoers" >/dev/null
+install -o root -g root -m 0440 "$temporary_sudoers" "$SUDOERS_FILE"
+rm -f -- "$temporary_sudoers"
+
+sudo -u "$DEPLOY_USER" env SSH_ORIGINAL_COMMAND=plan "$SSH_WRAPPER" >/dev/null
+printf 'bootstrapped %s with restricted CI access\n' "$DEPLOY_USER"
