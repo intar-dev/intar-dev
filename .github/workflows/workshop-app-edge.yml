@@ -105,6 +105,9 @@ jobs:
             single-operator)
               test "${SINGLE_OPERATOR_CONFIRMATION}" = "SINGLE OPERATOR WORKSHOP EDGE"
               test -n "${SINGLE_OPERATOR_LOGIN}"
+              [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
+              [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
+              [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               jq -e '
@@ -114,12 +117,23 @@ jobs:
                 gh api "repos/${GITHUB_REPOSITORY}/collaborators?affiliation=all&per_page=100" \
                   --paginate --slurp
               )"
+              collaborator_count="$(jq 'add | length' <<<"${collaborators_json}")"
+              operator_count="$(
+                jq --arg login "${SINGLE_OPERATOR_LOGIN}" \
+                  'add | map(select(.login == $login)) | length' \
+                  <<<"${collaborators_json}"
+              )"
+              printf 'collaborator_count=%s operator_count=%s\n' \
+                "${collaborator_count}" "${operator_count}"
+              test "${collaborator_count}" -eq 1
+              test "${operator_count}" -eq 1
+              operator_permission_json="$(
+                gh api \
+                  "repos/${GITHUB_REPOSITORY}/collaborators/${SINGLE_OPERATOR_LOGIN}/permission"
+              )"
               jq -e --arg login "${SINGLE_OPERATOR_LOGIN}" '
-                add as $collaborators |
-                ($collaborators | length) == 1 and
-                $collaborators[0].login == $login and
-                $collaborators[0].permissions.admin == true
-              ' <<<"${collaborators_json}" >/dev/null
+                .user.login == $login and .permission == "admin"
+              ' <<<"${operator_permission_json}" >/dev/null
               ;;
             *)
               printf 'Unsupported production approval mode: %s\n' \
