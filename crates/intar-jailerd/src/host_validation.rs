@@ -348,6 +348,8 @@ pub fn run_boot_cpu_guardian(request: BootCpuGuardianRequest) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub(super) fn spawn_hard_cpu_seal(
+    mut backend: SystemdHostBackend,
+    unit_name: String,
     control_group: PathBuf,
     steady_quota: CpuQuota,
     deadline: Instant,
@@ -355,14 +357,18 @@ pub(super) fn spawn_hard_cpu_seal(
     std::thread::Builder::new()
         .name("jailerd-hard-cpu-lease".to_owned())
         .spawn(move || {
-            if let Err(error) = seal_cpu_controller_at_deadline(
-                Path::new("/sys/fs/cgroup"),
+            if let Err(error) = seal_cpu_unit_at_deadline_with(
+                &unit_name,
                 &control_group,
                 steady_quota,
                 deadline,
+                |unit_name, control_group, quota| {
+                    backend.update_unit_cpu_quota(unit_name, control_group, quota)
+                },
             ) {
                 tracing::error!(
                     ?error,
+                    unit = unit_name,
                     cgroup = %control_group.display(),
                     "hard boot CPU lease controller failed"
                 );
@@ -373,21 +379,20 @@ pub(super) fn spawn_hard_cpu_seal(
 }
 
 #[cfg(any(target_os = "linux", test))]
-pub(super) fn seal_cpu_controller_at_deadline(
-    cgroup_root: &Path,
+pub(super) fn seal_cpu_unit_at_deadline_with<F>(
+    unit_name: &str,
     control_group: &Path,
     steady_quota: CpuQuota,
     deadline: Instant,
-) -> Result<()> {
+    seal: F,
+) -> Result<()>
+where
+    F: FnOnce(&str, &Path, CpuQuota) -> Result<()>,
+{
     if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
         std::thread::sleep(remaining);
     }
-    let relative = control_group.strip_prefix("/").unwrap_or(control_group);
-    let directory = cgroup_root.join(relative);
-    // Lower the hard quota first. cpu.max.burst is already zero from launch,
-    // but rewrite and attest it so a mutated controller cannot retain credits.
-    std::fs::write(directory.join("cpu.max"), steady_quota.cpu_max())?;
-    clear_cpu_burst_and_attest_at(cgroup_root, control_group, steady_quota)
+    seal(unit_name, control_group, steady_quota)
 }
 
 #[cfg(target_os = "linux")]

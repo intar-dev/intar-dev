@@ -527,7 +527,13 @@ impl HostBackend for SystemdHostBackend {
             return Err(error).context("verify transient unit CPU controller");
         }
         if let (Some(cgroup_path), Some(boot_deadline)) = (&cgroup_path, boot_deadline) {
-            spawn_hard_cpu_seal(cgroup_path.clone(), spec.steady_cpu_quota, boot_deadline)?;
+            spawn_hard_cpu_seal(
+                self.clone(),
+                spec.unit_name.clone(),
+                cgroup_path.clone(),
+                spec.steady_cpu_quota,
+                boot_deadline,
+            )?;
         }
         Ok(StartedUnit {
             unit_name: spec.unit_name.clone(),
