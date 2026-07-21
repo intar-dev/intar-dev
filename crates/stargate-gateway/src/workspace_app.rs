@@ -6,19 +6,23 @@ use axum::{
         header::{self, HeaderName},
         uri::Authority,
     },
+    middleware::Next,
     response::IntoResponse,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use sha2::{Digest as _, Sha256};
-use stargate_core::{SessionKind, StargateError, WorkspaceAppRouteRecord};
+use stargate_core::{SessionKind, StargateError, validate_workspace_app_route_id};
 use time::OffsetDateTime;
 
 use crate::{GatewayHttpError, GatewayState, outbound::open_workspace_app_tunnel};
 
 const FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+const FORWARDED_PORT: HeaderName = HeaderName::from_static("x-forwarded-port");
+const CLOUDFLARE_CACHE_CONTROL: HeaderName =
+    HeaderName::from_static("cloudflare-cdn-cache-control");
 const BOOTSTRAP_QUERY_PARAMETER: &str = "__intar_bootstrap";
 const SECURE_COOKIE_PREFIX: &str = "__Host-intar-wapp-";
 const DEVELOPMENT_COOKIE_PREFIX: &str = "intar-wapp-";
@@ -54,6 +58,7 @@ pub(crate) fn build_workspace_app_url(
     bootstrap_token: &str,
 ) -> Result<String, StargateError> {
     ensure_workspace_app_origin_configured(state)?;
+    validate_workspace_app_route_id(route_id)?;
     let mut url = if let Some(domain) = state.public_web.workspace_app_base_domain.as_deref() {
         let scheme = state.public_web.public_base_url.scheme();
         if !matches!(scheme, "http" | "https") {
@@ -61,9 +66,20 @@ pub(crate) fn build_workspace_app_url(
                 "public_base_url must use http or https".to_owned(),
             ));
         }
-        format!("{scheme}://{route_id}.{domain}/")
+        let expected_host = format!("{route_id}.{domain}");
+        let url = format!("{scheme}://{expected_host}/")
             .parse::<url::Url>()
-            .map_err(|error| StargateError::Internal(error.to_string()))?
+            .map_err(|error| StargateError::Internal(error.to_string()))?;
+        if url.host_str() != Some(expected_host.as_str())
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+        {
+            return Err(StargateError::Internal(
+                "workspace app URL did not produce the configured first-level origin".to_owned(),
+            ));
+        }
+        url
     } else {
         state
             .public_web
@@ -84,13 +100,13 @@ pub(crate) fn ensure_workspace_app_origin_configured(
         Ok(())
     } else {
         Err(StargateError::Validation(
-            "workspace app wildcard origin is not configured".to_owned(),
+            "isolated workspace app origin is not configured".to_owned(),
         ))
     }
 }
 
-fn workspace_app_origin_is_safe(scheme: &str, has_wildcard_domain: bool) -> bool {
-    has_wildcard_domain || scheme == "http"
+fn workspace_app_origin_is_safe(scheme: &str, has_app_domain: bool) -> bool {
+    has_app_domain || scheme == "http"
 }
 
 pub async fn proxy_workspace_app_root(
@@ -110,15 +126,22 @@ pub async fn proxy_workspace_app_path(
     proxy_workspace_app(state, route_id, request, Some(&upstream_path)).await
 }
 
-pub async fn proxy_workspace_app_host(
+pub async fn dispatch_public_request(
     State(state): State<GatewayState>,
-    headers: HeaderMap,
     request: Request<Body>,
-) -> Result<Response<Body>, GatewayHttpError> {
-    let Some(route_id) = route_id_from_host(&headers, &state) else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
-    };
-    proxy_workspace_app(state, route_id, request, None).await
+    next: Next,
+) -> Response<Body> {
+    match classify_public_request(request.headers(), &state) {
+        Ok(PublicRequestTarget::Gateway) => next.run(request).await,
+        Ok(PublicRequestTarget::WorkspaceApp(route_id)) => {
+            match proxy_workspace_app(state, route_id, request, None).await {
+                Ok(response) => response,
+                Err(error) => error.into_response(),
+            }
+        }
+        Ok(PublicRequestTarget::Unknown) => StatusCode::NOT_FOUND.into_response(),
+        Err(()) => StatusCode::BAD_REQUEST.into_response(),
+    }
 }
 
 async fn proxy_workspace_app(
@@ -130,6 +153,9 @@ async fn proxy_workspace_app(
     if !valid_route_id(&route_id) {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
+    if request.method() == Method::CONNECT {
+        return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
+    }
     if let Some(bootstrap_token) = bootstrap_token(request.uri()) {
         return exchange_workspace_app_bootstrap(
             &state,
@@ -140,10 +166,6 @@ async fn proxy_workspace_app(
         )
         .await;
     }
-    if request.method() == Method::CONNECT {
-        return Ok(StatusCode::METHOD_NOT_ALLOWED.into_response());
-    }
-
     let session_cookie_name = workspace_app_cookie_name(&state, &route_id);
     let session_token = cookie_value(request.headers(), &session_cookie_name)
         .filter(|token| valid_opaque_token(token))
@@ -179,7 +201,6 @@ async fn proxy_workspace_app(
     remove_workspace_app_cookies(request.headers_mut());
     rewrite_request(
         &mut request,
-        &route,
         upstream_path,
         state.public_web.public_base_url.scheme(),
     )?;
@@ -239,7 +260,8 @@ async fn proxy_workspace_app(
         return Ok(StatusCode::BAD_GATEWAY.into_response());
     }
     remove_hop_by_hop_headers(response.headers_mut(), valid_websocket_upgrade);
-    remove_reserved_set_cookies(response.headers_mut());
+    sanitize_upstream_set_cookies(response.headers_mut());
+    apply_private_no_store(response.headers_mut());
 
     if let Some(downstream_upgrade) = downstream_upgrade
         && valid_websocket_upgrade
@@ -321,6 +343,7 @@ fn sanitized_bootstrap_redirect(
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, location)
         .header(header::CACHE_CONTROL, "no-store")
+        .header(CLOUDFLARE_CACHE_CONTROL, "no-store")
         .header("pragma", "no-cache")
         .header("referrer-policy", "no-referrer");
     if let Some(cookie) = cookie {
@@ -440,23 +463,112 @@ fn remove_workspace_app_cookies(headers: &mut HeaderMap) {
     }
 }
 
-fn remove_reserved_set_cookies(headers: &mut HeaderMap) {
-    let remaining = headers
+fn sanitize_upstream_set_cookies(headers: &mut HeaderMap) {
+    let sanitized = headers
         .get_all(header::SET_COOKIE)
         .iter()
-        .filter(|value| {
-            value
-                .to_str()
-                .ok()
-                .and_then(|cookie| cookie.split_once('='))
-                .is_none_or(|(name, _)| !reserved_cookie_name(name.trim()))
-        })
-        .cloned()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(sanitize_set_cookie)
         .collect::<Vec<_>>();
     headers.remove(header::SET_COOKIE);
-    for value in remaining {
+    for value in sanitized {
         headers.append(header::SET_COOKIE, value);
     }
+}
+
+fn sanitize_set_cookie(cookie: &str) -> Option<HeaderValue> {
+    if cookie.bytes().any(|byte| byte.is_ascii_control()) {
+        return None;
+    }
+    let mut segments = cookie.split(';');
+    let cookie_pair = segments.next()?.trim();
+    let (name, value) = cookie_pair.split_once('=')?;
+    if !valid_cookie_token(name) || !valid_cookie_value(value) || reserved_cookie_name(name) {
+        return None;
+    }
+
+    let mut attributes = Vec::new();
+    let mut has_secure = false;
+    for raw_attribute in segments {
+        let attribute = raw_attribute.trim();
+        if attribute.is_empty() {
+            return None;
+        }
+        let attribute_name = attribute
+            .split_once('=')
+            .map_or(attribute, |(name, _)| name)
+            .trim();
+        if !valid_cookie_token(attribute_name) {
+            return None;
+        }
+        if attribute_name.eq_ignore_ascii_case("domain") {
+            continue;
+        }
+        if attribute_name.eq_ignore_ascii_case("secure") {
+            if attribute.contains('=') {
+                return None;
+            }
+            has_secure = true;
+        }
+        attributes.push(attribute);
+    }
+    if !has_secure {
+        attributes.push("Secure");
+    }
+
+    let mut value = cookie_pair.to_owned();
+    for attribute in attributes {
+        value.push_str("; ");
+        value.push_str(attribute);
+    }
+    HeaderValue::from_str(&value).ok()
+}
+
+fn valid_cookie_value(value: &str) -> bool {
+    let value = if value.starts_with('"') || value.ends_with('"') {
+        value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .filter(|value| !value.contains('"'))
+            .unwrap_or("\0")
+    } else {
+        value
+    };
+    value.bytes().all(|byte| {
+        matches!(
+            byte,
+            0x21 | 0x23..=0x2b | 0x2d..=0x3a | 0x3c..=0x5b | 0x5d..=0x7e
+        )
+    })
+}
+
+fn valid_cookie_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii()
+                && !byte.is_ascii_control()
+                && !matches!(
+                    byte,
+                    b'(' | b')'
+                        | b'<'
+                        | b'>'
+                        | b'@'
+                        | b','
+                        | b';'
+                        | b':'
+                        | b'\\'
+                        | b'"'
+                        | b'/'
+                        | b'['
+                        | b']'
+                        | b'?'
+                        | b'='
+                        | b'{'
+                        | b'}'
+                        | b' '
+                        | b'\t'
+                )
+        })
 }
 
 fn reserved_cookie_name(name: &str) -> bool {
@@ -465,7 +577,6 @@ fn reserved_cookie_name(name: &str) -> bool {
 
 fn rewrite_request(
     request: &mut Request<Body>,
-    route: &WorkspaceAppRouteRecord,
     upstream_path: Option<&str>,
     forwarded_proto: &str,
 ) -> Result<(), GatewayHttpError> {
@@ -480,24 +591,67 @@ fn rewrite_request(
             .map_err(|error| StargateError::Internal(error.to_string()))?;
     }
 
-    let original_host = request.headers().get(header::HOST).cloned();
+    let original_host = request
+        .headers()
+        .get(header::HOST)
+        .cloned()
+        .ok_or_else(|| StargateError::Internal("validated Host header disappeared".to_owned()))?;
+    let original_authority = original_host
+        .to_str()
+        .map_err(|error| StargateError::Internal(error.to_string()))?
+        .parse::<Authority>()
+        .map_err(|error| StargateError::Internal(error.to_string()))?;
+    let forwarded_port = original_authority
+        .port_u16()
+        .unwrap_or_else(|| if forwarded_proto == "https" { 443 } else { 80 });
+    let default_port = if forwarded_proto == "https" { 443 } else { 80 };
+    let public_host = if original_authority.port_u16() == Some(default_port) {
+        HeaderValue::from_str(original_authority.host())
+            .map_err(|error| StargateError::Internal(error.to_string()))?
+    } else {
+        original_host
+    };
     let preserve_upgrade = is_websocket_upgrade_request(request.method(), request.headers());
     remove_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
+    remove_forwarding_headers(request.headers_mut());
 
-    if let Some(host) = original_host {
-        request.headers_mut().insert(FORWARDED_HOST, host);
-    }
+    request
+        .headers_mut()
+        .insert(FORWARDED_HOST, public_host.clone());
     request.headers_mut().insert(
         FORWARDED_PROTO,
         HeaderValue::from_str(forwarded_proto)
             .map_err(|error| StargateError::Internal(error.to_string()))?,
     );
     request.headers_mut().insert(
-        header::HOST,
-        HeaderValue::from_str(&format!("127.0.0.1:{}", route.target_app_port))
+        FORWARDED_PORT,
+        HeaderValue::from_str(&forwarded_port.to_string())
             .map_err(|error| StargateError::Internal(error.to_string()))?,
     );
+    request.headers_mut().insert(header::HOST, public_host);
     Ok(())
+}
+
+fn remove_forwarding_headers(headers: &mut HeaderMap) {
+    let names = headers
+        .keys()
+        .filter(|name| name.as_str() == "forwarded" || name.as_str().starts_with("x-forwarded-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        headers.remove(name);
+    }
+}
+
+fn apply_private_no_store(headers: &mut HeaderMap) {
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(
+        CLOUDFLARE_CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
 }
 
 fn remove_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
@@ -551,33 +705,123 @@ fn is_websocket_upgrade_headers(headers: &HeaderMap) -> bool {
             })
 }
 
-fn route_id_from_host(headers: &HeaderMap, state: &GatewayState) -> Option<String> {
-    let domain = state.public_web.workspace_app_base_domain.as_deref()?;
-    route_id_from_authority(headers.get(header::HOST)?.to_str().ok()?, domain)
+#[derive(Debug, Eq, PartialEq)]
+enum PublicRequestTarget {
+    Gateway,
+    WorkspaceApp(String),
+    Unknown,
 }
 
-fn route_id_from_authority(authority: &str, domain: &str) -> Option<String> {
-    let authority = authority.parse::<Authority>().ok()?;
-    let hostname = authority.host().trim_end_matches('.').to_ascii_lowercase();
-    let suffix = format!(".{domain}");
-    let route_id = hostname.strip_suffix(&suffix)?;
-    if !valid_route_id(route_id) {
-        return None;
+fn classify_public_request(
+    headers: &HeaderMap,
+    state: &GatewayState,
+) -> Result<PublicRequestTarget, ()> {
+    let authority = single_host_authority(headers)?;
+    classify_authority(
+        authority,
+        &state.public_web.public_base_url,
+        state.public_web.workspace_app_base_domain.as_deref(),
+    )
+}
+
+fn single_host_authority(headers: &HeaderMap) -> Result<&str, ()> {
+    let mut values = headers.get_all(header::HOST).iter();
+    let authority = values.next().ok_or(())?.to_str().map_err(|_| ())?;
+    if values.next().is_some() {
+        return Err(());
     }
-    Some(route_id.to_owned())
+    Ok(authority)
+}
+
+fn classify_authority(
+    raw_authority: &str,
+    public_base_url: &url::Url,
+    workspace_app_base_domain: Option<&str>,
+) -> Result<PublicRequestTarget, ()> {
+    if raw_authority.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(());
+    }
+    let authority = raw_authority.parse::<Authority>().map_err(|_| ())?;
+    let hostname = authority.host();
+    let remainder = raw_authority.strip_prefix(hostname).ok_or(())?;
+    if !remainder.is_empty()
+        && authority
+            .port()
+            .is_none_or(|port| remainder != format!(":{}", port.as_str()))
+    {
+        return Err(());
+    }
+    if hostname.ends_with('.') {
+        return Err(());
+    }
+
+    let public_hostname = public_base_url.host_str().ok_or(())?;
+    if hostnames_equal(hostname, public_hostname) {
+        return gateway_port_is_valid(&authority, public_base_url)
+            .then_some(PublicRequestTarget::Gateway)
+            .ok_or(());
+    }
+
+    if !valid_dns_hostname(hostname) {
+        return Err(());
+    }
+    if public_base_url.scheme() == "https" && authority.port_u16().is_some_and(|port| port != 443) {
+        return Err(());
+    }
+    let Some(domain) = workspace_app_base_domain else {
+        return Ok(PublicRequestTarget::Unknown);
+    };
+    let suffix = format!(".{domain}");
+    let Some(route_id) = hostname.strip_suffix(&suffix) else {
+        return Ok(PublicRequestTarget::Unknown);
+    };
+    if validate_workspace_app_route_id(route_id).is_err() {
+        if !route_id.contains('.') && route_id.starts_with("wa-") {
+            return Err(());
+        }
+        return Ok(PublicRequestTarget::Unknown);
+    }
+    Ok(PublicRequestTarget::WorkspaceApp(route_id.to_owned()))
+}
+
+fn gateway_port_is_valid(authority: &Authority, public_base_url: &url::Url) -> bool {
+    if let Some(configured_port) = public_base_url.port() {
+        return authority.port_u16() == Some(configured_port);
+    }
+    let default_port = match public_base_url.scheme() {
+        "http" => 80,
+        "https" => 443,
+        _ => return false,
+    };
+    authority
+        .port_u16()
+        .is_none_or(|request_port| request_port == default_port)
+}
+
+fn hostnames_equal(authority_host: &str, url_host: &str) -> bool {
+    authority_host == url_host
+        || authority_host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .is_some_and(|host| host == url_host)
+}
+
+fn valid_dns_hostname(hostname: &str) -> bool {
+    !hostname.is_empty()
+        && hostname.len() <= 253
+        && hostname.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+            !bytes.is_empty()
+                && bytes.len() <= 63
+                && valid_edge(bytes[0])
+                && valid_edge(bytes[bytes.len() - 1])
+                && bytes.iter().all(|byte| valid_edge(*byte) || *byte == b'-')
+        })
 }
 
 fn valid_route_id(route_id: &str) -> bool {
-    if route_id.is_empty() || route_id.len() > 63 {
-        return false;
-    }
-    let bytes = route_id.as_bytes();
-    let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
-    valid_edge(bytes[0])
-        && valid_edge(bytes[bytes.len() - 1])
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    validate_workspace_app_route_id(route_id).is_ok()
 }
 
 async fn wait_until(expires_at: OffsetDateTime) {
@@ -591,11 +835,15 @@ async fn wait_until(expires_at: OffsetDateTime) {
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_token, is_websocket_upgrade_request, remove_hop_by_hop_headers,
-        remove_reserved_set_cookies, remove_workspace_app_cookies, route_id_from_authority,
-        uri_without_bootstrap, valid_opaque_token, workspace_app_origin_is_safe,
+        PublicRequestTarget, bootstrap_token, classify_authority, is_websocket_upgrade_request,
+        remove_hop_by_hop_headers, remove_workspace_app_cookies, rewrite_request,
+        sanitize_upstream_set_cookies, single_host_authority, uri_without_bootstrap,
+        valid_opaque_token, workspace_app_origin_is_safe,
     };
-    use axum::http::{HeaderMap, HeaderValue, Method, Uri, header};
+    use axum::{
+        body::Body,
+        http::{HeaderMap, HeaderValue, Method, Request, Uri, header},
+    };
     use stargate_core::SessionKind;
 
     use crate::SessionRegistry;
@@ -615,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn secure_workspace_apps_fail_closed_without_a_wildcard_origin() {
+    fn secure_workspace_apps_fail_closed_without_an_isolated_origin() {
         assert!(workspace_app_origin_is_safe("https", true));
         assert!(workspace_app_origin_is_safe("http", false));
         assert!(!workspace_app_origin_is_safe("https", false));
@@ -648,23 +896,124 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_one_canonical_route_label_on_the_wildcard_host() {
-        let domain = "workshop-apps.example.test";
+    fn classifies_only_canonical_first_level_workspace_app_hosts() {
+        let public_base_url = "https://ws.example.test".parse().expect("URL");
         assert_eq!(
-            route_id_from_authority("WA-123.workshop-apps.example.test:443", domain).as_deref(),
-            Some("wa-123")
+            classify_authority("ws.example.test", &public_base_url, Some("example.test")),
+            Ok(PublicRequestTarget::Gateway)
         );
         assert_eq!(
-            route_id_from_authority("wa-123.workshop-apps.example.test.", domain).as_deref(),
-            Some("wa-123")
+            classify_authority("wa-123.example.test", &public_base_url, None),
+            Ok(PublicRequestTarget::Unknown),
+            "HTTPS rollout without the app domain must fail closed"
+        );
+        assert_eq!(
+            classify_authority(
+                "wa-123.example.test:443",
+                &public_base_url,
+                Some("example.test")
+            ),
+            Ok(PublicRequestTarget::WorkspaceApp("wa-123".to_owned()))
+        );
+        assert_eq!(
+            classify_authority(
+                "nested.wa-123.example.test",
+                &public_base_url,
+                Some("example.test")
+            ),
+            Ok(PublicRequestTarget::Unknown)
+        );
+        assert_eq!(
+            classify_authority(
+                "garbage.example.test",
+                &public_base_url,
+                Some("example.test")
+            ),
+            Ok(PublicRequestTarget::Unknown)
         );
         assert!(
-            route_id_from_authority("nested.wa-123.workshop-apps.example.test", domain).is_none()
+            classify_authority(
+                "WA-123.example.test",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
         );
-        assert!(route_id_from_authority("-bad.workshop-apps.example.test", domain).is_none());
         assert!(
-            route_id_from_authority("wa-123.workshop-apps.example.test.evil", domain).is_none()
+            classify_authority(
+                "wa-123.example.test.",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
         );
+        assert!(
+            classify_authority(
+                "wa-123.example.test:8443",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+        assert!(
+            classify_authority(
+                "wa--opaque.example.test",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+        assert!(
+            classify_authority(
+                "wa-123.example.test:not-a-port",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+        assert!(
+            classify_authority(
+                "wa-123.example.test:99999",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+        assert!(
+            classify_authority(
+                "user@wa-123.example.test",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            classify_authority(
+                "wa-123.example.test.evil",
+                &public_base_url,
+                Some("example.test")
+            ),
+            Ok(PublicRequestTarget::Unknown)
+        );
+        assert!(
+            classify_authority(
+                "unknown.other.test:8443",
+                &public_base_url,
+                Some("example.test")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn requires_exactly_one_host_header() {
+        let missing = HeaderMap::new();
+        assert!(single_host_authority(&missing).is_err());
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(header::HOST, HeaderValue::from_static("ws.example.test"));
+        duplicate.append(header::HOST, HeaderValue::from_static("wa-a.example.test"));
+        assert!(single_host_authority(&duplicate).is_err());
     }
 
     #[test]
@@ -696,23 +1045,73 @@ mod tests {
     }
 
     #[test]
-    fn prevents_upstream_apps_from_overwriting_reserved_session_cookies() {
+    fn sanitizes_upstream_application_cookies_and_drops_malformed_or_reserved_values() {
         let mut headers = HeaderMap::new();
         headers.append(
             header::SET_COOKIE,
-            HeaderValue::from_static("application_session=kept; Path=/"),
+            HeaderValue::from_static(
+                "application_session=kept; Domain=example.test; Path=/; HttpOnly",
+            ),
         );
         headers.append(
             header::SET_COOKIE,
             HeaderValue::from_static("__Host-intar-wapp-route=clobber; Path=/; Secure"),
         );
-        remove_reserved_set_cookies(&mut headers);
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("malformed-cookie-without-value"),
+        );
+        headers.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("insecure_session=drop; Secure=true"),
+        );
+        sanitize_upstream_set_cookies(&mut headers);
         let values = headers
             .get_all(header::SET_COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
             .collect::<Vec<_>>();
-        assert_eq!(values, vec!["application_session=kept; Path=/"]);
+        assert_eq!(
+            values,
+            vec!["application_session=kept; Path=/; HttpOnly; Secure"]
+        );
+    }
+
+    #[test]
+    fn rewrites_spoofed_forwarding_headers_and_preserves_the_public_host() {
+        let mut request = Request::builder()
+            .uri("/hello")
+            .header(header::HOST, "wa-123.example.test")
+            .header("forwarded", "host=attacker.test")
+            .header("x-forwarded-host", "attacker.test")
+            .header("x-forwarded-proto", "http")
+            .header("x-forwarded-port", "80")
+            .body(Body::empty())
+            .expect("request");
+
+        rewrite_request(&mut request, None, "https").expect("rewrite");
+
+        assert_eq!(request.headers()[header::HOST], "wa-123.example.test");
+        assert_eq!(request.headers()["x-forwarded-host"], "wa-123.example.test");
+        assert_eq!(request.headers()["x-forwarded-proto"], "https");
+        assert_eq!(request.headers()["x-forwarded-port"], "443");
+        assert!(!request.headers().contains_key("forwarded"));
+
+        let mut explicit_default_port = Request::builder()
+            .uri("/hello")
+            .header(header::HOST, "wa-123.example.test:443")
+            .body(Body::empty())
+            .expect("request");
+        rewrite_request(&mut explicit_default_port, None, "https").expect("rewrite");
+        assert_eq!(
+            explicit_default_port.headers()[header::HOST],
+            "wa-123.example.test"
+        );
+        assert_eq!(
+            explicit_default_port.headers()["x-forwarded-host"],
+            "wa-123.example.test"
+        );
+        assert_eq!(explicit_default_port.headers()["x-forwarded-port"], "443");
     }
 
     #[test]

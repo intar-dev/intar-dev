@@ -70,6 +70,11 @@ pub async fn issue_workspace_app_session(
         route.expires_at,
         state.public_web.workspace_app_bootstrap_ttl_seconds,
     )?;
+    // Construct and validate the public capability URL before rotating any
+    // persisted route authorization. A bad origin configuration must leave an
+    // existing route and its browser sessions untouched.
+    let url =
+        crate::workspace_app::build_workspace_app_url(&state, &route.route_id, &bootstrap.token)?;
     let stored = state
         .store
         .upsert_workspace_app_route(route, &bootstrap.token_sha256, bootstrap.expires_at)
@@ -77,8 +82,6 @@ pub async fn issue_workspace_app_session(
     // An upsert is also a route authorization rotation. Close any HTTP or
     // WebSocket tunnel that was established under the replaced credentials.
     state.sessions.terminate_username(&stored.route_id).await;
-    let url =
-        crate::workspace_app::build_workspace_app_url(&state, &stored.route_id, &bootstrap.token)?;
     Ok(Json(IssueWorkspaceAppSessionResponse {
         route_id: stored.route_id,
         url,

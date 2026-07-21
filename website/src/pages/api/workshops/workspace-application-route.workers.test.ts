@@ -43,7 +43,7 @@ describe("workshop application issuance route", () => {
   it("returns the one-time URL as private no-store data after owner authorization", async () => {
     const issued = {
       routeId: "wa-route",
-      url: "https://wa-route.workshop-apps.example.test/?__intar_bootstrap=single-use",
+      url: "https://wa-route.intar.app/?__intar_bootstrap=single-use",
       bootstrapExpiresAt: 1_800_000_060_000,
       expiresAt: 1_800_000_900_000,
     };

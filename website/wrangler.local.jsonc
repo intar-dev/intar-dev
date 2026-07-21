@@ -13,6 +13,7 @@
     "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
+    "STARGATE_WORKSPACE_APP_BASE_DOMAIN": "intar.app",
   },
   "assets": {
     "directory": "./dist",

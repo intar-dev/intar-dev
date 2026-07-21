@@ -79,12 +79,14 @@ item below has evidence attached to the release ticket.
   independent. After placing two learners, another eligible runner must still
   have one full seat (4000 millicores, 16384 MiB memory, and 102400 MiB disk)
   for the recovery exercise.
-- The intended wildcard origin has a valid edge certificate for
-  `*.workshop-apps.intar.app`. Universal SSL in a full DNS zone does not cover
-  that deeper wildcard; use an Advanced Certificate or an equivalent custom
-  certificate. Total TLS does not issue certificates for Cloudflare Tunnel
-  hostnames. See Cloudflare's [Universal SSL limitations][universal-ssl] and
-  [Advanced Certificate Manager documentation][advanced-certificates].
+- The first-level route origin is configured as `<route-id>.intar.app`, with
+  canonical route IDs beginning `wa-`. The zone's existing Universal SSL
+  certificate covers these first-level subdomains; do not restore the deeper
+  `*.workshop-apps.intar.app` design, which would require a different
+  certificate. The protected edge workflow must report the owned wildcard DNS
+  record, the exact Tunnel ingress order, and the final cache-bypass rule as
+  desired before any workshop route is issued. See Cloudflare's
+  [Universal SSL coverage and limitations][universal-ssl].
 
 If any gate is false, leave the feature flag's default `false`, stop the
 rollout, and keep Workshops inaccessible. Do not substitute a scenario fleet,
@@ -435,34 +437,72 @@ continuing.
 Download the artifact matching the host, verify it against
 `stargate_<version>_checksums.txt`, and record both release tag and SHA-256.
 
-### 7.2 Provision wildcard DNS and TLS
+### 7.2 Reconcile the first-level wildcard edge
 
-Before changing the service:
+The desired edge state is checked in at
+`ops/cloudflare/workshop-app-routing.json` and is applied only by
+`.github/workflows/workshop-app-edge.yml`. It owns exactly these resources:
 
-1. Order and activate an edge certificate containing the exact SAN
-   `*.workshop-apps.intar.app`.
-2. Add a proxied wildcard CNAME for `*.workshop-apps.intar.app` to the
-   `stargate-web` tunnel target (`<TUNNEL_UUID>.cfargotunnel.com`).
-3. Install the checked-in ingress rule before the final `http_status:404` rule:
+- one proxied `*.intar.app` CNAME to
+  `8cdc5d07-3703-4508-9dc6-3dc861dd560b.cfargotunnel.com`, with automatic TTL;
+- the `*.intar.app` rule inserted between the existing exact `ws.intar.app`
+  rule and final `http_status:404` rule on that remotely managed Tunnel;
+- one final `http_request_cache_settings` rule, identified by the stable ref
+  `intar_workshop_app_hosts_bypass_cache_v1`, that sets `cache = false` for
+  `wa-*.intar.app`.
 
-   ```yaml
-   - hostname: "*.workshop-apps.intar.app"
-     service: http://127.0.0.1:8080
-   ```
+The reconciler uses Cloudflare's current [DNS Records API][dns-records-api],
+[remotely managed Tunnel configuration API][tunnel-configuration-api], and
+rule-level [Cache Rules API][cache-rules-api]. It never replaces a complete
+Cache Rules ruleset.
 
-4. Validate and reload the `stargate-web` cloudflared configuration. The
-   checked-in source is
-   `crates/stargate-gateway/deploy/cloudflared/web-tunnel.yml`.
-5. Prove DNS and TLS before issuing a real route. A random route ID must reach
-   the tunnel, complete certificate verification, and return `404`:
+Exact DNS records such as `ws.intar.app`, `ssh.intar.app`, and
+`admin.intar.app` take precedence over the wildcard and remain untouched. The
+reconciler also preserves unrelated Cache Rules and their order. It accepts
+only the exact Tunnel baseline `[ws, 404]` or desired
+`[ws, wildcard, 404]`; an unknown ingress, duplicate managed cache identity,
+changed managed rule, or conflicting wildcard DNS record aborts the run.
 
-   ```sh
-   curl --fail-with-body --silent --show-error https://ws.intar.app/healthz
-   curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
-     https://no-such-route.workshop-apps.intar.app/
-   ```
+Create the production environment secrets before dispatching the workflow:
 
-The second command must print `404`, not a TLS, DNS, tunnel, or origin error.
+- `CLOUDFLARE_ACCOUNT_ID` for the account that owns the Tunnel;
+- `CLOUDFLARE_INTAR_APP_ZONE_ID` for the `intar.app` zone;
+- `CLOUDFLARE_WORKSHOP_EDGE_API_TOKEN`, a dedicated token restricted to that
+  account and zone. Grant account **Cloudflare One Connector: cloudflared
+  Edit**, zone **DNS Edit**, and zone **Cache Rules Edit**. Cloudflare's current
+  Cache Rules API also documents account **Account Rulesets Edit** and
+  **Account Filter Lists Edit** as required; include them only on this dedicated
+  token and do not reuse the website deployment token.
+
+Protect the GitHub `production` environment with a required reviewer, prevent
+self-review, and restrict deployment branches to `main`. The workflow also
+checks `refs/heads/main` before checkout and the reconciler independently
+rejects an apply or rollback outside a manually dispatched main-branch run.
+
+From `main`, dispatch **Workshop application edge** with `operation=plan`.
+Review the redacted inventory and require only the three expected changes.
+Then dispatch `operation=apply` and approve the `production` environment. The
+workflow serializes runs, verifies the checked-out commit, rejects mutations
+from any branch other than `main`, applies the cache rule and Tunnel before
+creating DNS, and re-reads all three resources before succeeding. It never
+prints the API token.
+
+Prove the existing exact hostname and the new edge path before issuing a real
+route:
+
+```sh
+curl --fail-with-body --silent --show-error https://ws.intar.app/healthz
+curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
+  https://wa-no-such-route.intar.app/
+curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
+  https://garbage.intar.app/
+```
+
+Before the new Stargate binary starts, the two wildcard probes may both return
+`404`; they must not fail DNS, TLS, Tunnel, or origin connection. After the new
+binary starts, the canonical `wa-` hostname must return `401` and the arbitrary
+hostname must return `404`. A proxied static response under a real app route
+must report `CF-Cache-Status: DYNAMIC`.
 
 ### 7.3 Replace the service
 
@@ -486,7 +526,7 @@ copy `/usr/local/bin/stargate`, `/etc/stargate/stargate.toml`, and
 3. add this exact web setting:
 
    ```toml
-   workspace_app_base_domain = "workshop-apps.intar.app"
+   workspace_app_base_domain = "intar.app"
    workspace_app_bootstrap_ttl_seconds = 60
    workspace_app_session_ttl_seconds = 900
    ```
@@ -752,7 +792,7 @@ learner-room action:
 
 For every app require:
 
-- a short-lived URL under `<route-id>.workshop-apps.intar.app`;
+- a short-lived URL under `<route-id>.intar.app`;
 - a membership and workspace-owner check before route creation;
 - correct HTTP behavior, cookies, redirects, static assets, and any WebSocket
   upgrade used by the UI;
@@ -928,7 +968,11 @@ Keep the workshop flag unmatched. With zero active routes, restore the previous
 binary and TOML, restart `stargate.service`, and prove `ws.intar.app` terminal
 health. The additive `workspace_app_routes` and
 `workspace_app_browser_sessions` tables may remain. Remove wildcard DNS/ingress
-only after confirming no workspace-app route exists.
+only after confirming no workspace-app route exists. Dispatch **Workshop
+application edge** from `main` with `operation=rollback` and approve the
+`production` environment; it removes only the owned wildcard CNAME and managed
+cache rule, restores the exact `[ws, 404]` Tunnel baseline, and verifies that
+state. Do not manually replace the whole Cache Rules ruleset.
 
 ### Publication or prewarm failure
 
@@ -950,6 +994,8 @@ No additional organization may be enabled until the incident is understood,
 a forward fix has passed the same canary, and Courses/Scenarios regression
 evidence remains green.
 
-[advanced-certificates]: https://developers.cloudflare.com/ssl/edge-certificates/advanced-certificate-manager/
 [d1-time-travel]: https://developers.cloudflare.com/d1/reference/time-travel/
-[universal-ssl]: https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/
+[dns-records-api]: https://developers.cloudflare.com/api/resources/dns/subresources/records/
+[tunnel-configuration-api]: https://developers.cloudflare.com/api/resources/zero_trust/subresources/tunnels/subresources/cloudflared/subresources/configurations/
+[cache-rules-api]: https://developers.cloudflare.com/cache/how-to/cache-rules/create-api/
+[universal-ssl]: https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/

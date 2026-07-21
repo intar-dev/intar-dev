@@ -11,7 +11,7 @@ mod workspace_app;
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Json, Router, middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -106,23 +106,35 @@ pub fn build_admin_router(state: GatewayState) -> Router {
 }
 
 pub fn build_public_router(state: GatewayState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(admin::healthz))
-        .route(TERMINAL_WS_PATH, get(webssh::terminal_websocket))
-        .route(
-            "/v1/workspace-apps/{route_id}",
-            axum::routing::any(workspace_app::proxy_workspace_app_root),
-        )
-        .route(
-            "/v1/workspace-apps/{route_id}/",
-            axum::routing::any(workspace_app::proxy_workspace_app_root),
-        )
-        .route(
-            "/v1/workspace-apps/{route_id}/{*path}",
-            axum::routing::any(workspace_app::proxy_workspace_app_path),
-        )
-        .fallback(workspace_app::proxy_workspace_app_host)
-        .with_state(state)
+        .route(TERMINAL_WS_PATH, get(webssh::terminal_websocket));
+    // Path multiplexing is intentionally a local-HTTP development fallback.
+    // HTTPS installations must use isolated first-level application origins.
+    if state.public_web.workspace_app_base_domain.is_none()
+        && state.public_web.public_base_url.scheme() == "http"
+    {
+        router = router
+            .route(
+                "/v1/workspace-apps/{route_id}",
+                axum::routing::any(workspace_app::proxy_workspace_app_root),
+            )
+            .route(
+                "/v1/workspace-apps/{route_id}/",
+                axum::routing::any(workspace_app::proxy_workspace_app_root),
+            )
+            .route(
+                "/v1/workspace-apps/{route_id}/{*path}",
+                axum::routing::any(workspace_app::proxy_workspace_app_path),
+            );
+    }
+    router
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state,
+            workspace_app::dispatch_public_request,
+        ))
 }
 
 #[derive(Debug)]

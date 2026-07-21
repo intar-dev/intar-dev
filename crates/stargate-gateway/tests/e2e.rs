@@ -8,7 +8,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    Router, extract::ws::WebSocketUpgrade, http::HeaderMap, response::Response, routing::get,
+    Router,
+    extract::ws::WebSocketUpgrade,
+    http::{HeaderMap, HeaderValue, header},
+    response::{IntoResponse, Response},
+    routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -176,14 +180,44 @@ async fn workspace_app_http_and_websocket_are_forwarded_inside_ssh() -> Result<(
             reqwest::header::COOKIE,
             format!("{}; app_session=kept", browser.cookie),
         )
+        .header("forwarded", "host=attacker.test")
+        .header("x-forwarded-host", "attacker.test")
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-port", "443")
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("private, no-store")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cloudflare-cdn-cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let application_cookie = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        application_cookie,
+        vec!["application_session=kept; Path=/; HttpOnly; Secure"]
+    );
+    assert_eq!(
         response.text().await?,
         format!(
-            "/hello?from=browser|127.0.0.1:{}|app_session=kept",
-            harness.app_addr.port()
+            "/hello?from=browser|{}|app_session=kept|{}|http|{}|",
+            harness.public_addr,
+            harness.public_addr,
+            harness.public_addr.port()
         )
     );
 
@@ -259,11 +293,11 @@ async fn workspace_app_route_reissue_rotates_browser_authorization() -> Result<(
 async fn workspace_app_browser_cookie_is_bound_to_one_route() -> Result<()> {
     let harness = Harness::start().await?;
     let first = harness
-        .issue_workspace_app_session_with_route_id("wapp-first-unguessable")
+        .issue_workspace_app_session_with_route_id("wa-first-unguessable")
         .await?;
     let first_browser = harness.bootstrap_workspace_app(&first).await?;
     let second = harness
-        .issue_workspace_app_session_with_route_id("wapp-second-unguessable")
+        .issue_workspace_app_session_with_route_id("wa-second-unguessable")
         .await?;
     let mut second_url = url::Url::parse(&second.url)?;
     second_url.set_query(None);
@@ -336,13 +370,47 @@ async fn workspace_app_websocket_closes_at_browser_session_expiry() -> Result<()
 
 #[tokio::test]
 async fn wildcard_workspace_app_origin_bootstraps_http_and_websocket() -> Result<()> {
-    let domain = "workshop-apps.example.test";
+    let domain = "example.test";
     let harness = Harness::start_with_workspace_app_domain(Some(domain)).await?;
     let session = harness.issue_workspace_app_session().await?;
     let issued_url = url::Url::parse(&session.url)?;
     let public_host = format!("{}.{}", session.route_id, domain);
     assert_eq!(issued_url.host_str(), Some(public_host.as_str()));
     assert_eq!(issued_url.scheme(), "https");
+
+    let app_reserved_health = reqwest::Client::new()
+        .get(format!("http://{}/healthz", harness.public_addr))
+        .header(reqwest::header::HOST, &public_host)
+        .send()
+        .await?;
+    assert_eq!(
+        app_reserved_health.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let gateway_health = reqwest::Client::new()
+        .get(format!("http://{}/healthz", harness.public_addr))
+        .header(reqwest::header::HOST, "ws.example.test")
+        .send()
+        .await?;
+    assert_eq!(gateway_health.status(), reqwest::StatusCode::OK);
+    let unknown_host = reqwest::Client::new()
+        .get(format!("http://{}/healthz", harness.public_addr))
+        .header(reqwest::header::HOST, "garbage.example.test")
+        .send()
+        .await?;
+    assert_eq!(unknown_host.status(), reqwest::StatusCode::NOT_FOUND);
+    let uppercase_host = reqwest::Client::new()
+        .get(format!("http://{}/healthz", harness.public_addr))
+        .header(reqwest::header::HOST, "WA-bad.example.test")
+        .send()
+        .await?;
+    assert_eq!(uppercase_host.status(), reqwest::StatusCode::BAD_REQUEST);
+    let non_default_port = reqwest::Client::new()
+        .get(format!("http://{}/healthz", harness.public_addr))
+        .header(reqwest::header::HOST, format!("{public_host}:8443"))
+        .send()
+        .await?;
+    assert_eq!(non_default_port.status(), reqwest::StatusCode::BAD_REQUEST);
 
     let bootstrap_url = format!(
         "http://{}/?{}",
@@ -357,6 +425,13 @@ async fn wildcard_workspace_app_origin_bootstraps_http_and_websocket() -> Result
         .send()
         .await?;
     assert_eq!(bootstrap.status(), reqwest::StatusCode::SEE_OTHER);
+    assert_eq!(
+        bootstrap
+            .headers()
+            .get("cloudflare-cdn-cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
     assert_eq!(
         bootstrap
             .headers()
@@ -385,6 +460,49 @@ async fn wildcard_workspace_app_origin_bootstraps_http_and_websocket() -> Result
         .send()
         .await?;
     assert_eq!(http.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        http.text().await?,
+        format!("/hello|{public_host}||{public_host}|https|443|")
+    );
+    let explicit_default_port = reqwest::Client::new()
+        .get(format!("http://{}/hello", harness.public_addr))
+        .header(reqwest::header::HOST, format!("{public_host}:443"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await?;
+    assert_eq!(explicit_default_port.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        explicit_default_port.text().await?,
+        format!("/hello|{public_host}||{public_host}|https|443|")
+    );
+
+    for reserved_path in [
+        "/healthz".to_owned(),
+        "/v1/terminal/ws".to_owned(),
+        format!("/v1/workspace-apps/{}/hello", session.route_id),
+    ] {
+        let response = reqwest::Client::new()
+            .get(format!("http://{}{reserved_path}", harness.public_addr))
+            .header(reqwest::header::HOST, &public_host)
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{reserved_path} must be handled by the guest application"
+        );
+    }
+    let disabled_path_proxy = reqwest::Client::new()
+        .get(format!(
+            "http://{}/v1/workspace-apps/{}/hello",
+            harness.public_addr, session.route_id
+        ))
+        .header(reqwest::header::HOST, "ws.example.test")
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await?;
+    assert_eq!(disabled_path_proxy.status(), reqwest::StatusCode::NOT_FOUND);
 
     let mut websocket_request =
         format!("ws://{}/echo", harness.public_addr).into_client_request()?;
@@ -693,7 +811,7 @@ impl Harness {
     }
 
     async fn issue_workspace_app_session(&self) -> Result<IssueWorkspaceAppSessionResponse> {
-        self.issue_workspace_app_session_with_route_id("wapp-01-unguessable")
+        self.issue_workspace_app_session_with_route_id("wa-01-unguessable")
             .await
     }
 
@@ -1279,7 +1397,7 @@ impl server::Handler for TestTargetServer {
     }
 }
 
-async fn workspace_app_http(uri: axum::http::Uri, headers: HeaderMap) -> String {
+async fn workspace_app_http(uri: axum::http::Uri, headers: HeaderMap) -> Response {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -1288,7 +1406,45 @@ async fn workspace_app_http(uri: axum::http::Uri, headers: HeaderMap) -> String 
         .get(axum::http::header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    format!("{uri}|{host}|{cookie}")
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let forwarded_port = headers
+        .get("x-forwarded-port")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let forwarded = headers
+        .get("forwarded")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let mut response = format!(
+        "{uri}|{host}|{cookie}|{forwarded_host}|{forwarded_proto}|{forwarded_port}|{forwarded}"
+    )
+    .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=86400"),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "application_session=kept; Domain=attacker.test; Path=/; HttpOnly",
+        ),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static("__Host-intar-wapp-clobber=bad; Path=/; Secure"),
+    );
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static("malformed-cookie"),
+    );
+    response
 }
 
 async fn workspace_app_websocket(ws: WebSocketUpgrade) -> Response {

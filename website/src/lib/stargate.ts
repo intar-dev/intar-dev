@@ -10,6 +10,10 @@ const DEFAULT_ROUTE_TTL_SECONDS = 4 * 60 * 60;
 const DEFAULT_STARGATE_ADMIN_ORIGIN = "http://stargate.internal";
 const STARGATE_ADMIN_CREATE_TIMEOUT_MS = 30_000;
 const WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER = "__intar_bootstrap";
+const WORKSPACE_APP_BOOTSTRAP_TTL_MS = 60_000;
+const WORKSPACE_APP_ROUTE_ID_PATTERN =
+  /^wa-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const textEncoder = new TextEncoder();
 
 interface AssertionTokenOptions {
@@ -92,6 +96,13 @@ export interface StargateWorkspaceAppSessionResult {
   url: string;
   bootstrapExpiresAt: number;
   expiresAt: number;
+}
+
+export interface ParseStargateWorkspaceAppSessionResponseOptions {
+  expectedRouteId: string;
+  baseDomain: string;
+  now: number;
+  maximumExpiresAt: number;
 }
 
 export async function issueStargateTerminalSession(
@@ -249,23 +260,49 @@ export async function issueStargateWorkspaceAppSession(
       `stargate workspace application create failed (${response.status})`,
     );
   }
-  return parseStargateWorkspaceAppSessionResponse(await response.json());
+  return parseStargateWorkspaceAppSessionResponse(await response.json(), {
+    expectedRouteId: input.routeId,
+    baseDomain: requiredWorkspaceAppBaseDomain(
+      env.STARGATE_WORKSPACE_APP_BASE_DOMAIN,
+    ),
+    now: Date.now(),
+    maximumExpiresAt: input.expiresAt.getTime(),
+  });
 }
 
 export function parseStargateWorkspaceAppSessionResponse(
   value: unknown,
+  options: ParseStargateWorkspaceAppSessionResponseOptions,
 ): StargateWorkspaceAppSessionResult {
   const body = value as Partial<StargateApiWorkspaceAppSessionResponse> | null;
   if (
     !body ||
     typeof body.route_id !== "string" ||
     typeof body.url !== "string" ||
-    typeof body.bootstrap_expires_at !== "number" ||
-    typeof body.expires_at !== "number" ||
-    body.bootstrap_expires_at > body.expires_at
+    !isUnixTimestampSeconds(body.bootstrap_expires_at) ||
+    !isUnixTimestampSeconds(body.expires_at) ||
+    !isCanonicalWorkspaceAppRouteId(options.expectedRouteId) ||
+    body.route_id !== options.expectedRouteId ||
+    !Number.isSafeInteger(options.now) ||
+    !Number.isSafeInteger(options.maximumExpiresAt)
   ) {
     throw new Error("invalid stargate workspace application response");
   }
+
+  const baseDomain = requiredWorkspaceAppBaseDomain(options.baseDomain);
+  const expectedHostname = `${options.expectedRouteId}.${baseDomain}`;
+  const bootstrapExpiresAt = body.bootstrap_expires_at * 1_000;
+  const expiresAt = body.expires_at * 1_000;
+  if (
+    bootstrapExpiresAt <= options.now ||
+    bootstrapExpiresAt > options.now + WORKSPACE_APP_BOOTSTRAP_TTL_MS ||
+    expiresAt <= options.now ||
+    expiresAt > options.maximumExpiresAt ||
+    bootstrapExpiresAt > expiresAt
+  ) {
+    throw new Error("invalid stargate workspace application response");
+  }
+
   let bootstrapUrl: URL;
   try {
     bootstrapUrl = new URL(body.url);
@@ -273,19 +310,68 @@ export function parseStargateWorkspaceAppSessionResponse(
     throw new Error("invalid stargate workspace application response");
   }
   if (
-    (bootstrapUrl.protocol !== "http:" && bootstrapUrl.protocol !== "https:") ||
+    bootstrapUrl.protocol !== "https:" ||
     bootstrapUrl.username ||
     bootstrapUrl.password ||
-    !bootstrapUrl.searchParams.get(WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER)
+    bootstrapUrl.hostname !== expectedHostname ||
+    !hasExpectedWorkspaceAppAuthority(body.url, expectedHostname) ||
+    body.url.includes("#") ||
+    bootstrapUrl.port ||
+    bootstrapUrl.hash ||
+    !hasExactlyOneBootstrapCapability(bootstrapUrl)
   ) {
     throw new Error("invalid stargate workspace application response");
   }
   return {
     routeId: body.route_id,
     url: body.url,
-    bootstrapExpiresAt: body.bootstrap_expires_at * 1000,
-    expiresAt: body.expires_at * 1000,
+    bootstrapExpiresAt,
+    expiresAt,
   };
+}
+
+function hasExactlyOneBootstrapCapability(url: URL): boolean {
+  const capabilities = url.searchParams.getAll(
+    WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER,
+  );
+  return capabilities.length === 1 && (capabilities[0]?.trim().length ?? 0) > 0;
+}
+
+function hasExpectedWorkspaceAppAuthority(
+  value: string,
+  expectedHostname: string,
+): boolean {
+  const match = /^https:\/\/([^/?#]+)(?:[/?#]|$)/.exec(value);
+  const authority = match?.[1];
+  return (
+    authority === expectedHostname || authority === `${expectedHostname}:443`
+  );
+}
+
+function isUnixTimestampSeconds(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    Number.isSafeInteger(value * 1_000)
+  );
+}
+
+function isCanonicalWorkspaceAppRouteId(value: string): boolean {
+  return value.length <= 63 && WORKSPACE_APP_ROUTE_ID_PATTERN.test(value);
+}
+
+function requiredWorkspaceAppBaseDomain(value: string | undefined): string {
+  const domain = requiredValue(value, "STARGATE_WORKSPACE_APP_BASE_DOMAIN");
+  if (
+    domain.length > 253 ||
+    domain !== domain.toLowerCase() ||
+    !domain.includes(".") ||
+    domain.split(".").some((label) => !DNS_LABEL_PATTERN.test(label))
+  ) {
+    throw new Error("STARGATE_WORKSPACE_APP_BASE_DOMAIN is invalid");
+  }
+  return domain;
 }
 
 export async function deleteStargateRoute(
