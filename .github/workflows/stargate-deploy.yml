@@ -227,9 +227,11 @@ jobs:
 
           archive_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/${archive}" | awk '{print $1}')"
           binary_sha256="$(sha256sum "${RUNNER_TEMP}/stargate-release/extracted/stargate" | awk '{print $1}')"
-          printf 'archive=%s\n' "${RUNNER_TEMP}/stargate-release/${archive}" >>"${GITHUB_OUTPUT}"
-          printf 'archive_sha256=%s\n' "${archive_sha256}" >>"${GITHUB_OUTPUT}"
-          printf 'binary_sha256=%s\n' "${binary_sha256}" >>"${GITHUB_OUTPUT}"
+          {
+            printf 'archive=%s\n' "${RUNNER_TEMP}/stargate-release/${archive}"
+            printf 'archive_sha256=%s\n' "${archive_sha256}"
+            printf 'binary_sha256=%s\n' "${binary_sha256}"
+          } >>"${GITHUB_OUTPUT}"
         id: release
 
       - name: Apply release

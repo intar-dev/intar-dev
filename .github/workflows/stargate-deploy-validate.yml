@@ -52,7 +52,7 @@ jobs:
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: v1.7.7
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
 
       - name: Validate workflow semantics
         run: |
