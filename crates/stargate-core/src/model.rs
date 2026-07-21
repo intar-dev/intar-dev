@@ -192,13 +192,23 @@ fn validate_target_credentials(host_key: &str, private_key: &str) -> Result<()> 
     Ok(())
 }
 
-fn validate_workspace_app_route_id(route_id: &str) -> Result<()> {
-    if route_id.is_empty() || route_id.len() > WORKSPACE_APP_ROUTE_ID_MAX_LEN {
+pub fn validate_workspace_app_route_id(route_id: &str) -> Result<()> {
+    if route_id.len() > WORKSPACE_APP_ROUTE_ID_MAX_LEN {
         return Err(StargateError::Validation(format!(
-            "route_id must be 1..={WORKSPACE_APP_ROUTE_ID_MAX_LEN} characters"
+            "route_id must be at most {WORKSPACE_APP_ROUTE_ID_MAX_LEN} characters"
         )));
     }
-    let bytes = route_id.as_bytes();
+    let Some(opaque_id) = route_id.strip_prefix("wa-") else {
+        return Err(StargateError::Validation(
+            "route_id must start with 'wa-'".to_owned(),
+        ));
+    };
+    if opaque_id.is_empty() {
+        return Err(StargateError::Validation(
+            "route_id must contain a non-empty opaque ID after 'wa-'".to_owned(),
+        ));
+    }
+    let bytes = opaque_id.as_bytes();
     let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
     if !valid_edge(bytes[0])
         || !valid_edge(bytes[bytes.len() - 1])
@@ -207,7 +217,7 @@ fn validate_workspace_app_route_id(route_id: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
     {
         return Err(StargateError::Validation(
-            "route_id must be a lowercase DNS label".to_owned(),
+            "route_id suffix must be a lowercase DNS label".to_owned(),
         ));
     }
     Ok(())
@@ -321,6 +331,7 @@ mod tests {
 
     use super::{
         validate_route_username, validate_target_username, validate_terminal_session_request,
+        validate_workspace_app_route_id,
     };
 
     // Profile keys are stored with their comment; the key a client offers
@@ -365,6 +376,30 @@ mod tests {
     fn username_validation_rejects_disallowed_values() {
         assert!(validate_route_username("worker@bad").is_err());
         assert!(validate_target_username("").is_err());
+    }
+
+    #[test]
+    fn workspace_app_route_id_requires_canonical_wa_label() {
+        assert!(validate_workspace_app_route_id("wa-a").is_ok());
+        assert!(validate_workspace_app_route_id("wa-01-opaque").is_ok());
+        assert!(validate_workspace_app_route_id(&format!("wa-{}", "a".repeat(60))).is_ok());
+
+        for invalid in [
+            "",
+            "wa-",
+            "app-opaque",
+            "WA-opaque",
+            "wa--opaque",
+            "wa-opaque-",
+            "wa-opaque.value",
+            "wa-opaque_value",
+        ] {
+            assert!(
+                validate_workspace_app_route_id(invalid).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
+        assert!(validate_workspace_app_route_id(&format!("wa-{}", "a".repeat(61))).is_err());
     }
 
     #[test]

@@ -240,8 +240,21 @@ fn validate_runtime_security(settings: &ServerSettings) -> anyhow::Result<()> {
             "web.public_base_url must use https when workspace_app_base_domain is configured"
         );
         ensure!(
+            settings.web.public_base_url.port().is_none(),
+            "web.public_base_url must not use a non-default port when workspace_app_base_domain is configured"
+        );
+        ensure!(
             valid_dns_suffix(domain),
             "web.workspace_app_base_domain must be a canonical lowercase DNS suffix"
+        );
+        let public_host = settings
+            .web
+            .public_base_url
+            .host_str()
+            .context("web.public_base_url must include a host")?;
+        ensure!(
+            first_level_label(public_host, domain).is_some(),
+            "web.public_base_url host must be a first-level name under workspace_app_base_domain"
         );
     }
     ensure!(
@@ -272,6 +285,11 @@ fn valid_dns_suffix(domain: &str) -> bool {
                 && valid_edge(bytes[bytes.len() - 1])
                 && bytes.iter().all(|byte| valid_edge(*byte) || *byte == b'-')
         })
+}
+
+fn first_level_label<'a>(hostname: &'a str, domain: &str) -> Option<&'a str> {
+    let label = hostname.strip_suffix(&format!(".{domain}"))?;
+    (!label.is_empty() && !label.contains('.')).then_some(label)
 }
 
 fn validate_jwks_url(name: &str, url: Option<&url::Url>) -> anyhow::Result<()> {
@@ -404,17 +422,25 @@ fn server_task_result(name: &str, result: anyhow::Result<()>) -> anyhow::Result<
 mod tests {
     use std::{future::pending, time::Duration};
 
-    use super::{supervise_server_tasks, valid_dns_suffix};
+    use super::{first_level_label, supervise_server_tasks, valid_dns_suffix};
 
     #[test]
     fn workspace_app_domain_requires_canonical_dns_labels() {
-        assert!(valid_dns_suffix("workshop-apps.intar.app"));
+        assert!(valid_dns_suffix("intar.app"));
         assert!(valid_dns_suffix("apps2.internal"));
         assert!(!valid_dns_suffix("Workshop-Apps.intar.app"));
         assert!(!valid_dns_suffix("workshop-apps..intar.app"));
         assert!(!valid_dns_suffix("-workshop.intar.app"));
         assert!(!valid_dns_suffix("workshop.intar.app."));
         assert!(!valid_dns_suffix("https://workshop.intar.app"));
+    }
+
+    #[test]
+    fn public_gateway_is_a_first_level_name_under_the_app_domain() {
+        assert_eq!(first_level_label("ws.intar.app", "intar.app"), Some("ws"));
+        assert_eq!(first_level_label("intar.app", "intar.app"), None);
+        assert_eq!(first_level_label("nested.ws.intar.app", "intar.app"), None);
+        assert_eq!(first_level_label("ws.example.test", "intar.app"), None);
     }
 
     #[tokio::test]

@@ -24,9 +24,8 @@ pub struct WebSettings {
     pub public_ssh_port: u16,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
-    /// Optional wildcard suffix used for private workspace applications.
-    /// `workshop-apps.intar.dev` produces
-    /// `https://<route-id>.workshop-apps.intar.dev/`.
+    /// Optional base domain used for private workspace applications.
+    /// `intar.app` produces `https://<route-id>.intar.app/`.
     #[serde(default)]
     pub workspace_app_base_domain: Option<String>,
     /// Time available to exchange the one-time capability returned by the

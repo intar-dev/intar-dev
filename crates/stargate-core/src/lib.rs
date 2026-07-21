@@ -15,5 +15,5 @@ pub use intar_contracts::stargate::{
 pub use model::{
     RegisteredRoute, RegisteredWorkspaceAppRoute, RouteRecord, WorkspaceAppRouteRecord,
     validate_route_username, validate_target_username, validate_terminal_session_request,
-    validate_workspace_app_session_request,
+    validate_workspace_app_route_id, validate_workspace_app_session_request,
 };
