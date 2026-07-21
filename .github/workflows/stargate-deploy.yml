@@ -104,6 +104,11 @@ jobs:
       DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
       APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
       SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
+      SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
+      SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
+      SINGLE_OPERATOR_ADMIN_ATTESTED_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}
+      ACTOR_ID: ${{ github.actor_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
 
     steps:
@@ -121,16 +126,19 @@ jobs:
           test "${DEPLOY_HOST}" = intar.app
           test "${DEPLOY_PORT}" = 2222
           test "${DEPLOY_USER}" = stargate-deploy
+          test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           case "${APPROVAL_MODE}" in
             reviewed)
               test -z "${SINGLE_OPERATOR_CONFIRMATION}"
               jq -e '
-                any(.protection_rules[]?;
-                  .type == "required_reviewers" and
-                  .prevent_self_review == true and
-                  ((.reviewers // []) | length) > 0
+                .can_admins_bypass == false and
+                any(
+                  .protection_rules[]?;
+                    .type == "required_reviewers" and
+                    .prevent_self_review == true and
+                    ((.reviewers // []) | length) > 0
                 )
               ' <<<"${environment_json}" >/dev/null
               ;;
@@ -140,32 +148,36 @@ jobs:
               [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
               [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
               [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
+              [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
+              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
+              test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
+              test "${RUN_ATTEMPT}" = 1
+              triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
+              jq -e \
+                --arg login "${SINGLE_OPERATOR_LOGIN}" \
+                --arg id "${SINGLE_OPERATOR_ID}" '
+                  .type == "User" and
+                  .login == $login and
+                  ((.id | tostring) == $id)
+                ' <<<"${triggering_actor_json}" >/dev/null
               jq -e '
                 ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
               ' <<<"${environment_json}" >/dev/null
-              collaborators_json="$(
-                gh api "repos/${GITHUB_REPOSITORY}/collaborators?affiliation=all&per_page=100" \
-                  --paginate --slurp
-              )"
-              collaborator_count="$(jq 'add | length' <<<"${collaborators_json}")"
-              operator_count="$(
-                jq --arg login "${SINGLE_OPERATOR_LOGIN}" \
-                  'add | map(select(.login == $login)) | length' \
-                  <<<"${collaborators_json}"
-              )"
-              printf 'collaborator_count=%s operator_count=%s\n' \
-                "${collaborator_count}" "${operator_count}"
-              test "${collaborator_count}" -eq 1
-              test "${operator_count}" -eq 1
-              operator_permission_json="$(
-                gh api \
-                  "repos/${GITHUB_REPOSITORY}/collaborators/${SINGLE_OPERATOR_LOGIN}/permission"
-              )"
-              jq -e --arg login "${SINGLE_OPERATOR_LOGIN}" '
-                .user.login == $login and .permission == "admin"
-              ' <<<"${operator_permission_json}" >/dev/null
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              printf 'single_operator_expires_at=%s remaining_seconds=%s admin_attestation_age=%s\n' \
+                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}" \
+                "${attestation_age}"
               ;;
             *)
               printf 'Unsupported Stargate approval mode: %s\n' \
@@ -288,6 +300,31 @@ jobs:
             printf 'binary_sha256=%s\n' "${binary_sha256}"
           } >>"${GITHUB_OUTPUT}"
         id: release
+
+      - name: Recheck sole-operator mutation window
+        if: inputs.operation != 'plan'
+        run: |
+          set -euo pipefail
+          case "${APPROVAL_MODE}" in
+            reviewed)
+              ;;
+            single-operator)
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              ;;
+            *)
+              printf 'Unsupported Stargate approval mode: %s\n' \
+                "${APPROVAL_MODE:-<unset>}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Apply release
         if: inputs.operation == 'apply'

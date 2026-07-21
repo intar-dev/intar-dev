@@ -91,10 +91,11 @@ item below has evidence attached to the release ticket.
   main-only branch policy, pinned deployment identity, expected host command
   protocol, and all three live route counts. `reviewed` mode requires an
   independent reviewer plus prevent-self-review. `single-operator` mode is an
-  explicit exception for a repository with exactly one collaborator, who must
-  be an administrator, and no required-reviewer rule; the actor and triggering
-  actor must be that sole collaborator. Do not apply if the workflow cannot
-  verify every fact for the selected mode.
+  explicit, time-boxed commissioning exception with no required-reviewer rule;
+  the configured login and immutable account ID must match both the original
+  and rerun actors. Its expiry must be in the future but no more than seven
+  days away. Do not apply if the workflow cannot verify every fact for the
+  selected mode.
 
 If any gate is false, leave the feature flag's default `false`, stop the
 rollout, and keep Workshops inaccessible. Do not substitute a scenario fleet,
@@ -503,20 +504,22 @@ Create the production environment secrets before dispatching the workflow:
   token and do not reuse the website deployment token.
 
 Prefer protecting the GitHub `production` environment with a required
-reviewer and prevent-self-review. During initial commissioning by a repository
-with exactly one administrator and no other collaborators, the documented
-single-operator exception may be used instead. In both modes, restrict
-deployment branches to `main`. The workflow also checks `refs/heads/main`
-before checkout and the reconciler independently rejects an apply or rollback
-outside a manually dispatched main-branch run.
+reviewer, prevent-self-review, and administrator bypass disabled. During initial
+commissioning by a repository with exactly one administrator and no other
+collaborators, the documented single-operator exception may be used instead. In
+both modes, restrict deployment branches to `main`. The workflow also checks
+`refs/heads/main` before checkout and the reconciler independently rejects an
+apply or rollback outside a manually dispatched main-branch run.
 
 From `main`, dispatch **Workshop application edge** with `operation=plan`.
 In `single-operator` mode, also supply
-`single_operator_confirmation=SINGLE OPERATOR WORKSHOP EDGE`. Review the
-redacted inventory and require only the three expected changes. Then dispatch
-`operation=apply` with `confirmation=APPLY WORKSHOP EDGE` and, in
-single-operator mode, the same single-operator confirmation. In `reviewed`
-mode, approve the `production` environment. The workflow serializes runs,
+`single_operator_confirmation=SINGLE OPERATOR WORKSHOP EDGE` and refresh
+`STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT` immediately before the dispatch.
+Review the redacted inventory and require only the three expected changes. Then
+refresh the attestation and dispatch `operation=apply` with
+`confirmation=APPLY WORKSHOP EDGE` and, in single-operator mode, the same
+single-operator confirmation. In `reviewed` mode, approve the `production`
+environment. The workflow serializes runs,
 verifies the checked-out commit and approval guard, rejects mutations from any
 branch other than `main`, applies the cache rule and Tunnel before creating
 DNS, and re-reads all three resources before succeeding. It never prints the
@@ -575,6 +578,16 @@ Configure these `production` environment values:
   has exactly one collaborator and that collaborator is an administrator;
 - variable `STARGATE_SINGLE_OPERATOR_LOGIN`, set to the sole administrator's
   GitHub login only while `STARGATE_DEPLOY_APPROVAL_MODE=single-operator`;
+- variable `STARGATE_SINGLE_OPERATOR_ID`, set to that account's immutable
+  numeric GitHub actor ID;
+- variable `STARGATE_SINGLE_OPERATOR_EXPIRES_AT`, set to a UTC timestamp no
+  more than seven days ahead, in `YYYY-MM-DDTHH:MM:SSZ` form;
+- variable `STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT`, set by a repository
+  administrator to the current UTC timestamp immediately before opening a
+  commissioning window, after manually confirming that the pinned account
+  remains the only collaborator and has administrator access, in
+  `YYYY-MM-DDTHH:MM:SSZ` form; the workflow rejects attestations older than 15
+  minutes or dated in the future;
 - secret `STARGATE_DEPLOY_SSH_PRIVATE_KEY`, containing only the dedicated
   private key;
 - secret `STARGATE_DEPLOY_KNOWN_HOSTS`, containing the pinned
@@ -582,18 +595,26 @@ Configure these `production` environment values:
   channel.
 
 Always allow deployments from the `main` branch only. In `reviewed` mode,
-require at least one independent reviewer and enable prevent-self-review. In
-`single-operator` mode, keep the reviewer rule absent: the workflow lists all
-repository collaborators and proceeds only when the actor is the sole
-administrator and also the original triggering actor. Adding any collaborator
-therefore fails closed until the approval mode and protection are deliberately
-reconciled.
+require at least one independent reviewer, enable prevent-self-review, and
+disable administrator bypass. In `single-operator` mode, keep the reviewer rule
+absent: the workflow proceeds
+only when the pinned account login and immutable ID match both the original
+and triggering actor before the short-lived expiry. Because the workflow token
+cannot reliably enumerate organization collaborators, the fresh administrator
+attestation is the fail-closed commissioning assertion; the workflow does not
+claim to calculate collaborator count. Another collaborator cannot use or rerun
+the pinned exception. The timestamp authorizes first-attempt dispatches from the
+pinned account for up to 15 minutes; workflow reruns are rejected, so dispatch a
+new run and refresh the attestation after a failure. When another operator is
+enrolled, replace the exception with `reviewed` mode and an independent reviewer
+instead of extending its expiry.
 
 Dispatch **Stargate production** from `main` with `operation=plan`. Its host
 output must show an active service and zero terminal routes, workspace
 application routes, and browser sessions. In `single-operator` mode, include
 `single_operator_confirmation=SINGLE OPERATOR STARGATE` on this and every
-other dispatch. For the cutover, dispatch it again with:
+other dispatch, and refresh `STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT`
+immediately beforehand. For the cutover, dispatch it again with:
 
 - `operation=apply`;
 - the exact approved `stargate/v<version>` release tag;
