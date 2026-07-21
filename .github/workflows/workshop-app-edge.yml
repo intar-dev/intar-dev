@@ -63,7 +63,9 @@ jobs:
       SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
       SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
       SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
+      SINGLE_OPERATOR_ADMIN_ATTESTED_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}
       ACTOR_ID: ${{ github.actor_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
     concurrency:
       group: workshop-application-edge-production
@@ -99,10 +101,12 @@ jobs:
             reviewed)
               test -z "${SINGLE_OPERATOR_CONFIRMATION}"
               jq -e '
-                any(.protection_rules[]?;
-                  .type == "required_reviewers" and
-                  .prevent_self_review == true and
-                  ((.reviewers // []) | length) > 0
+                .can_admins_bypass == false and
+                any(
+                  .protection_rules[]?;
+                    .type == "required_reviewers" and
+                    .prevent_self_review == true and
+                    ((.reviewers // []) | length) > 0
                 )
               ' <<<"${environment_json}" >/dev/null
               ;;
@@ -114,19 +118,34 @@ jobs:
               [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
               [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
               [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
+              test "${RUN_ATTEMPT}" = 1
+              triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
+              jq -e \
+                --arg login "${SINGLE_OPERATOR_LOGIN}" \
+                --arg id "${SINGLE_OPERATOR_ID}" '
+                  .type == "User" and
+                  .login == $login and
+                  ((.id | tostring) == $id)
+                ' <<<"${triggering_actor_json}" >/dev/null
               jq -e '
                 ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
               ' <<<"${environment_json}" >/dev/null
               now_epoch="$(date -u +%s)"
               expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
               remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
               test "${remaining_seconds}" -gt 0
               test "${remaining_seconds}" -le 604800
-              printf 'single_operator_expires_at=%s remaining_seconds=%s\n' \
-                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}"
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              printf 'single_operator_expires_at=%s remaining_seconds=%s admin_attestation_age=%s\n' \
+                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}" \
+                "${attestation_age}"
               ;;
             *)
               printf 'Unsupported production approval mode: %s\n' \
@@ -145,6 +164,31 @@ jobs:
 
           printf 'approval_mode=%s actor=%s\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
             tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Recheck sole-operator mutation window
+        if: inputs.operation != 'plan'
+        run: |
+          set -euo pipefail
+          case "${APPROVAL_MODE}" in
+            reviewed)
+              ;;
+            single-operator)
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              ;;
+            *)
+              printf 'Unsupported production approval mode: %s\n' \
+                "${APPROVAL_MODE:-<unset>}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Inventory and ${{ inputs.operation }} edge state
         env:

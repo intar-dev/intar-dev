@@ -309,7 +309,27 @@ export function buildPlan(action, inventory) {
   ];
 }
 
-export function assertMutationContext(environment) {
+function parseExactUtcTimestamp(value, name) {
+  if (
+    typeof value !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)
+  ) {
+    throw new Error(`${name} must use YYYY-MM-DDTHH:MM:SSZ`);
+  }
+  const timestamp = Date.parse(value);
+  if (
+    !Number.isFinite(timestamp) ||
+    new Date(timestamp).toISOString().replace(".000Z", "Z") !== value
+  ) {
+    throw new Error(`${name} must be a valid UTC timestamp`);
+  }
+  return timestamp;
+}
+
+export function assertMutationContext(environment, now = Date.now()) {
+  if (!Number.isFinite(now)) {
+    throw new Error("edge mutation authorization time must be finite");
+  }
   if (
     environment.GITHUB_ACTIONS !== "true" ||
     environment.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
@@ -319,6 +339,30 @@ export function assertMutationContext(environment) {
     throw new Error(
       "edge mutation is permitted only by an approved workflow_dispatch run on refs/heads/main",
     );
+  }
+
+  if (environment.APPROVAL_MODE === "reviewed") {
+    return;
+  }
+  if (environment.APPROVAL_MODE !== "single-operator") {
+    throw new Error("edge mutation requires a supported production approval mode");
+  }
+
+  const expiresAt = parseExactUtcTimestamp(
+    environment.SINGLE_OPERATOR_EXPIRES_AT,
+    "SINGLE_OPERATOR_EXPIRES_AT",
+  );
+  const attestedAt = parseExactUtcTimestamp(
+    environment.SINGLE_OPERATOR_ADMIN_ATTESTED_AT,
+    "SINGLE_OPERATOR_ADMIN_ATTESTED_AT",
+  );
+  const remainingMilliseconds = expiresAt - now;
+  const attestationAgeMilliseconds = now - attestedAt;
+  if (remainingMilliseconds <= 0 || remainingMilliseconds > 604_800_000) {
+    throw new Error("single-operator expiry is outside the mutation window");
+  }
+  if (attestationAgeMilliseconds < 0 || attestationAgeMilliseconds > 900_000) {
+    throw new Error("single-operator admin attestation is outside the mutation window");
   }
 }
 

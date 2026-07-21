@@ -180,9 +180,76 @@ test("mutation is guarded by manual GitHub Actions main context", () => {
     GITHUB_EVENT_NAME: "workflow_dispatch",
     GITHUB_REF: "refs/heads/main",
     INTAR_EDGE_MUTATION_APPROVED: "true",
+    APPROVAL_MODE: "reviewed",
   };
   assert.doesNotThrow(() => assertMutationContext(approved));
   assert.throws(() => assertMutationContext({ ...approved, GITHUB_REF: "refs/heads/topic" }));
   assert.throws(() => assertMutationContext({ ...approved, GITHUB_EVENT_NAME: "push" }));
   assert.throws(() => assertMutationContext({ ...approved, INTAR_EDGE_MUTATION_APPROVED: "false" }));
+  assert.throws(() => assertMutationContext({ ...approved, APPROVAL_MODE: "unknown" }));
+  assert.throws(() => assertMutationContext(approved, Number.NaN), /must be finite/);
+});
+
+test("single-operator edge mutation requires current expiry and admin attestation", () => {
+  const now = Date.parse("2026-07-21T21:00:00Z");
+  const approved = {
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    INTAR_EDGE_MUTATION_APPROVED: "true",
+    APPROVAL_MODE: "single-operator",
+    SINGLE_OPERATOR_EXPIRES_AT: "2026-07-22T21:00:00Z",
+    SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "2026-07-21T20:55:00Z",
+  };
+  assert.doesNotThrow(() => assertMutationContext(approved, now));
+  assert.doesNotThrow(() =>
+    assertMutationContext(
+      {
+        ...approved,
+        SINGLE_OPERATOR_EXPIRES_AT: "2026-07-28T21:00:00Z",
+        SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "2026-07-21T20:45:00Z",
+      },
+      now,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertMutationContext(
+        { ...approved, SINGLE_OPERATOR_EXPIRES_AT: "2026-07-21T21:00:00Z" },
+        now,
+      ),
+    /expiry/,
+  );
+  assert.throws(
+    () =>
+      assertMutationContext(
+        { ...approved, SINGLE_OPERATOR_EXPIRES_AT: "2026-07-28T21:00:01Z" },
+        now,
+      ),
+    /expiry/,
+  );
+  assert.throws(
+    () =>
+      assertMutationContext(
+        { ...approved, SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "2026-07-21T20:44:59Z" },
+        now,
+      ),
+    /attestation/,
+  );
+  assert.throws(
+    () =>
+      assertMutationContext(
+        { ...approved, SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "2026-07-21T21:00:01Z" },
+        now,
+      ),
+    /attestation/,
+  );
+  assert.throws(
+    () =>
+      assertMutationContext(
+        { ...approved, SINGLE_OPERATOR_ADMIN_ATTESTED_AT: "2026-02-30T00:00:00Z" },
+        now,
+      ),
+    /valid UTC/,
+  );
 });
