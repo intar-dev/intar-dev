@@ -53,6 +53,11 @@ jobs:
           tool: cargo-zigbuild
           fallback: none
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
       - name: Set up Rust cache
         uses: namespacelabs/nscloud-cache-action@v1
         with:

@@ -239,6 +239,11 @@ jobs:
           tool: just,wasm-pack@0.15.0,cargo-zigbuild
           fallback: none
 
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: latest
+
       - name: Build browser scenario validator
         working-directory: ${{ github.workspace }}
         run: just generate-scenario-wasm
