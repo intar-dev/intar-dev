@@ -3,6 +3,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { FlagshipFeatureToggleService } from "@/lib/feature-toggles";
 import {
+  isWorkshopHcloudRuntimeEnabledForOrganization,
+  requireWorkshopHcloudRuntimeEnabledForOrganization,
+  WORKSHOP_HCLOUD_RUNTIME_FEATURE_FLAG,
   WORKSHOPS_FEATURE_FLAG,
   isWorkshopsEnabledForOrganization,
   requireWorkshopsEnabledForOrganization,
@@ -32,6 +35,28 @@ describe("workshop organization feature flag", () => {
     expect(getBoolean).toHaveBeenCalledWith(WORKSHOPS_FEATURE_FLAG, false, {
       targetingKey: "org-pilot",
       organizationId: "org-pilot",
+    });
+  });
+});
+
+describe("Hetzner workshop runtime feature flag", () => {
+  it("uses organization targeting and defaults off", async () => {
+    const service = {
+      getBoolean: vi.fn().mockResolvedValue(false),
+    };
+    await expect(
+      isWorkshopHcloudRuntimeEnabledForOrganization("org-a", service),
+    ).resolves.toBe(false);
+    expect(service.getBoolean).toHaveBeenCalledWith(
+      WORKSHOP_HCLOUD_RUNTIME_FEATURE_FLAG,
+      false,
+      { targetingKey: "org-a", organizationId: "org-a" },
+    );
+    await expect(
+      requireWorkshopHcloudRuntimeEnabledForOrganization("org-a", service),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: "workshop_hcloud_runtime_not_found",
     });
   });
 });

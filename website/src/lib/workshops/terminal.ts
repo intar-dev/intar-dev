@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   member,
+  runtimeExecutions,
   workshopAssistGrants,
   workshopSessions,
   workshopWorkspaceGenerations,
@@ -234,7 +235,10 @@ async function issueWorkshopTerminalSession(input: {
       },
     });
   } catch (error) {
-    await markWorkshopRouteIssuanceIntentIssued({ intentId, routeKey: routeUsername });
+    await markWorkshopRouteIssuanceIntentIssued({
+      intentId,
+      routeKey: routeUsername,
+    });
     await deleteStargateRoute(routeUsername);
     await completeWorkshopRouteIssuanceIntent(intentId);
     throw error;
@@ -287,6 +291,7 @@ async function issueWorkshopTerminalSession(input: {
     organizationId: access.organizationId,
     actorUserId: input.actorUserId,
     routeUsername,
+    runtimeExecutionId: target.executionId,
     now: Date.now(),
     ...(assistGrant ? { assistGrantId: assistGrant.id } : {}),
   });
@@ -326,35 +331,25 @@ async function recordIssuedRoute(input: {
   organizationId: string;
   actorUserId: string;
   routeUsername: string;
+  runtimeExecutionId: string;
   assistGrantId?: string;
   now: number;
 }): Promise<boolean> {
   const db = workshopDb();
-  if (input.assistGrantId) {
-    const grants = await db
-      .update(workshopAssistGrants)
-      .set({
-        terminalRouteUsernamesJson: appendUniqueJsonString(
-          workshopAssistGrants.terminalRouteUsernamesJson,
-          input.routeUsername,
-        ),
-        updatedAt: input.now,
-      })
-      .where(
-        and(
-          eq(workshopAssistGrants.id, input.assistGrantId),
-          eq(workshopAssistGrants.sessionId, input.sessionId),
-          eq(workshopAssistGrants.workspaceId, input.workspaceId),
-          eq(workshopAssistGrants.helperUserId, input.actorUserId),
-          sql`${workshopAssistGrants.revokedAt} is null`,
-          sql`${workshopAssistGrants.expiresAt} > ${input.now}`,
-          currentWorkshopMembershipExists(input),
-        ),
-      )
-      .returning({ id: workshopAssistGrants.id });
-    if (!grants[0]) return false;
-  }
-  const workspaces = await db
+  const runtimeFence = currentWorkshopRuntimeRouteExists(input);
+  const activeAssistGrant = input.assistGrantId
+    ? sql`exists (
+        select 1
+        from ${workshopAssistGrants}
+        where ${workshopAssistGrants.id} = ${input.assistGrantId}
+          and ${workshopAssistGrants.sessionId} = ${input.sessionId}
+          and ${workshopAssistGrants.workspaceId} = ${input.workspaceId}
+          and ${workshopAssistGrants.helperUserId} = ${input.actorUserId}
+          and ${workshopAssistGrants.revokedAt} is null
+          and ${workshopAssistGrants.expiresAt} > ${input.now}
+      )`
+    : undefined;
+  const workspaceUpdate = db
     .update(workshopWorkspaces)
     .set({
       terminalRouteUsernamesJson: appendUniqueJsonString(
@@ -369,11 +364,60 @@ async function recordIssuedRoute(input: {
         eq(workshopWorkspaces.sessionId, input.sessionId),
         eq(workshopWorkspaces.currentGenerationId, input.generationId),
         eq(workshopWorkspaces.state, "ready"),
+        runtimeFence,
+        activeAssistGrant,
         currentWorkshopMembershipExists(input),
       ),
     )
     .returning({ id: workshopWorkspaces.id });
-  return Boolean(workspaces[0]);
+  if (!input.assistGrantId) {
+    const workspaces = await workspaceUpdate;
+    return Boolean(workspaces[0]);
+  }
+  const grantUpdate = db
+    .update(workshopAssistGrants)
+    .set({
+      terminalRouteUsernamesJson: appendUniqueJsonString(
+        workshopAssistGrants.terminalRouteUsernamesJson,
+        input.routeUsername,
+      ),
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(workshopAssistGrants.id, input.assistGrantId),
+        eq(workshopAssistGrants.sessionId, input.sessionId),
+        eq(workshopAssistGrants.workspaceId, input.workspaceId),
+        eq(workshopAssistGrants.helperUserId, input.actorUserId),
+        sql`${workshopAssistGrants.revokedAt} is null`,
+        sql`${workshopAssistGrants.expiresAt} > ${input.now}`,
+        runtimeFence,
+        currentWorkshopMembershipExists(input),
+      ),
+    )
+    .returning({ id: workshopAssistGrants.id });
+  const [workspaces, grants] = await db.batch([workspaceUpdate, grantUpdate]);
+  return Boolean(workspaces[0] && grants[0]);
+}
+
+function currentWorkshopRuntimeRouteExists(input: {
+  workspaceId: string;
+  generationId: string;
+  runtimeExecutionId: string;
+}) {
+  return sql`exists (
+    select 1
+    from ${workshopWorkspaceGenerations}
+    join ${runtimeExecutions}
+      on ${runtimeExecutions.id} = ${workshopWorkspaceGenerations.runtimeExecutionId}
+    where ${workshopWorkspaceGenerations.id} = ${input.generationId}
+      and ${workshopWorkspaceGenerations.workspaceId} = ${input.workspaceId}
+      and ${workshopWorkspaceGenerations.state} = 'ready'
+      and ${runtimeExecutions.id} = ${input.runtimeExecutionId}
+      and ${runtimeExecutions.domainKind} = 'workshop'
+      and ${runtimeExecutions.domainId} = ${input.workspaceId}
+      and ${runtimeExecutions.state} = 'ready'
+  )`;
 }
 
 function currentWorkshopMembershipExists(input: {

@@ -19,6 +19,7 @@ import {
   workshopTemplates,
   type WorkshopManifestV1,
 } from "@/db/schema";
+import { toErrorResponse } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   FlagshipFeatureToggleService,
@@ -39,6 +40,10 @@ import {
   workshopAssetObjectKey,
   workshopPresentationAssetPaths,
 } from "./assets";
+import {
+  resolveWorkshopPublicationProvider,
+  workshopUsesHetznerProvider,
+} from "./provider";
 
 const WORKSHOP_PUBLICATION_PATH = "/registry/v1/workshop-bundles";
 const BUILDER_PATH = "/agent/registry/workshop-publications";
@@ -683,12 +688,30 @@ async function handleWorkshopBuilderResult(
       400,
     );
   }
+  let resolvedProvider: Awaited<
+    ReturnType<typeof resolveWorkshopPublicationProvider>
+  >;
+  try {
+    resolvedProvider = await resolveWorkshopPublicationProvider({
+      d1: env.DB,
+      organizationId: publication.organizationId,
+      source,
+    });
+  } catch (error) {
+    const response = toErrorResponse(
+      error,
+      "workshop provider resolution failed",
+      400,
+    );
+    return jsonResponse(response.body, response.status);
+  }
   let manifest: WorkshopManifestV1;
   try {
     manifest = validateWorkshopManifest(
       hydrateWorkshopManifest({
         source,
         checkpoints: checkpointReports,
+        ...(resolvedProvider ? { resolvedProvider } : {}),
       }),
     );
   } catch (error) {
@@ -758,6 +781,38 @@ async function handleWorkshopBuilderResult(
       publicationId,
       builder.hostId,
     ),
+    ...checkpointReports.flatMap((checkpoint) => {
+      const artifact = checkpoint.providerArtifact;
+      if (!artifact) return [];
+      return [
+        env.DB.prepare(
+          `INSERT INTO runtime_provider_checkpoint_artifacts (
+            id, template_revision_id, checkpoint_id, provider_kind,
+            r2_key, sha256, size_bytes, compression, signature_b64,
+            signing_key_id, workspace_agent_sha256, kino_sha256, status,
+            cold_boot_verified_at, created_at
+          )
+          SELECT ?, ?, ?, 'hetzner_cloud', ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?
+          FROM workshop_template_revisions
+          WHERE id = ?`,
+        ).bind(
+          createAppId(),
+          revisionId,
+          checkpoint.checkpointId,
+          artifact.r2Key,
+          artifact.sha256,
+          artifact.sizeBytes,
+          artifact.compression,
+          artifact.signatureB64,
+          artifact.signingKeyId,
+          artifact.workspaceAgentSha256,
+          artifact.kinoSha256,
+          now,
+          now,
+          revisionId,
+        ),
+      ];
+    }),
     env.DB.prepare(
       `UPDATE workshop_templates
        SET title = ?, summary = ?, current_revision_id = ?, updated_at = ?
@@ -1043,6 +1098,7 @@ async function verifyCheckpointReports(params: {
     readRequiredString(vm.id, "VM id"),
   );
   const requiredCheckpoints = new Set(params.source.requiredCheckpointIds);
+  const requiresProviderArtifact = workshopUsesHetznerProvider(params.source);
   const seen = new Set<string>();
   const reports: VerifiedCheckpointReport[] = [];
   for (const rawCheckpoint of params.raw) {
@@ -1061,6 +1117,15 @@ async function verifyCheckpointReports(params: {
     ) {
       throw new Error(
         `checkpoint ${checkpointId} must be sanitized and cold-boot verified`,
+      );
+    }
+    if (
+      requiresProviderArtifact &&
+      (checkpoint.runtime_bundle_cold_boot_verified ??
+        checkpoint.runtimeBundleColdBootVerified) !== true
+    ) {
+      throw new Error(
+        `checkpoint ${checkpointId} runtime bundle must be cold-boot verified on a clean direct-cloud base`,
       );
     }
     const rawImages = checkpoint.vm_images ?? checkpoint.vmImages;
@@ -1167,12 +1232,23 @@ async function verifyCheckpointReports(params: {
         boot_cmdline: bootCmdline,
       });
     }
+    const providerArtifact = requiresProviderArtifact
+      ? await verifyProviderCheckpointArtifact({
+          env: params.env,
+          checkpointId,
+          raw: checkpoint.runtime_bundle ?? checkpoint.runtimeBundle,
+        })
+      : undefined;
     reports.push({
       checkpointId,
       vmImages,
       rawVmImages: images,
       sanitized: true,
       coldBootVerified: true,
+      ...(requiresProviderArtifact
+        ? { runtimeBundleColdBootVerified: true as const }
+        : {}),
+      ...(providerArtifact ? { providerArtifact } : {}),
     });
   }
   if (seen.size !== requiredCheckpoints.size) {
@@ -1181,6 +1257,162 @@ async function verifyCheckpointReports(params: {
   return reports.sort((left, right) =>
     left.checkpointId.localeCompare(right.checkpointId),
   );
+}
+
+async function verifyProviderCheckpointArtifact(input: {
+  env: Cloudflare.Env;
+  checkpointId: string;
+  raw: unknown;
+}): Promise<NonNullable<WorkshopCheckpointBuildReport["providerArtifact"]>> {
+  const artifact = asRecord(
+    input.raw,
+    `checkpoint ${input.checkpointId} runtime_bundle`,
+  );
+  const sha256 = normalizeSha256(
+    readRequiredString(artifact.sha256, "runtime bundle sha256"),
+  );
+  if (!sha256) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} runtime bundle has an invalid sha256`,
+    );
+  }
+  const signatureB64 = readRequiredString(
+    artifact.signature_b64 ?? artifact.signatureB64,
+    "runtime bundle signature_b64",
+  );
+  if (!isEd25519Signature(signatureB64)) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} runtime bundle has an invalid signature`,
+    );
+  }
+  const signingKeyId = readRequiredString(
+    artifact.signing_key_id ?? artifact.signingKeyId,
+    "runtime bundle signing_key_id",
+  );
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(signingKeyId)) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} runtime bundle has an invalid signing key ID`,
+    );
+  }
+  const workspaceAgentSha256 = normalizeSha256(
+    readRequiredString(
+      artifact.workspace_agent_sha256 ?? artifact.workspaceAgentSha256,
+      "runtime bundle workspace_agent_sha256",
+    ),
+  );
+  if (!workspaceAgentSha256) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} runtime bundle has an invalid workspace-agent digest`,
+    );
+  }
+  const compression = artifact.compression;
+  if (
+    compression !== "none" &&
+    compression !== "gzip" &&
+    compression !== "zstd"
+  ) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} runtime bundle has an invalid compression`,
+    );
+  }
+  const r2Key = artifactObjectKey(sha256);
+  const object = await input.env.VM_IMAGE_REGISTRY_BUCKET.head(r2Key);
+  if (
+    !object ||
+    object.size <= 0 ||
+    normalizeSha256(object.customMetadata?.artifact_sha256 ?? "") !== sha256
+  ) {
+    throw new Error(
+      `checkpoint ${input.checkpointId} references a missing runtime bundle`,
+    );
+  }
+  const guestTools = await verifyPublishedGuestToolPair(
+    input.env,
+    workspaceAgentSha256,
+  );
+  return {
+    r2Key,
+    sha256,
+    sizeBytes: object.size,
+    compression,
+    signatureB64,
+    signingKeyId,
+    workspaceAgentSha256,
+    kinoSha256: guestTools.kinoSha256,
+  };
+}
+
+async function verifyPublishedGuestToolPair(
+  env: Cloudflare.Env,
+  expectedWorkspaceAgentSha256: string,
+): Promise<{ kinoSha256: string }> {
+  const current = await env.VM_IMAGE_REGISTRY_BUCKET.get(
+    "workspace-agent/releases/current.json",
+  );
+  if (!current || current.size <= 0 || current.size > 4_096) {
+    throw new Error("workspace guest-tools release manifest is unavailable");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await current.text());
+  } catch {
+    throw new Error("workspace guest-tools release manifest is invalid");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("workspace guest-tools release manifest is invalid");
+  }
+  const manifest = parsed as Record<string, unknown>;
+  const workspaceAgentSha256 = normalizeSha256(
+    typeof manifest.sha256 === "string" ? manifest.sha256 : "",
+  );
+  const kinoSha256 = normalizeSha256(
+    typeof manifest.kino_sha256 === "string" ? manifest.kino_sha256 : "",
+  );
+  const workspaceAgentSize = manifest.size_bytes;
+  const kinoSize = manifest.kino_size_bytes;
+  if (
+    manifest.schema_version !== 2 ||
+    workspaceAgentSha256 !== expectedWorkspaceAgentSha256 ||
+    !kinoSha256 ||
+    typeof workspaceAgentSize !== "number" ||
+    !Number.isSafeInteger(workspaceAgentSize) ||
+    workspaceAgentSize <= 0 ||
+    workspaceAgentSize > 128 * 1024 * 1024 ||
+    typeof kinoSize !== "number" ||
+    !Number.isSafeInteger(kinoSize) ||
+    kinoSize <= 0 ||
+    kinoSize > 128 * 1024 * 1024
+  ) {
+    throw new Error(
+      "workspace guest-tools release does not match the direct-cloud proof",
+    );
+  }
+  const [agent, kino] = await Promise.all([
+    env.VM_IMAGE_REGISTRY_BUCKET.head(
+      `workspace-agent/releases/${workspaceAgentSha256}/intar-workspace-agent`,
+    ),
+    env.VM_IMAGE_REGISTRY_BUCKET.head(
+      `workspace-agent/kino/releases/${kinoSha256}/kino`,
+    ),
+  ]);
+  if (!agent || agent.size !== workspaceAgentSize || !kino || kino.size !== kinoSize) {
+    throw new Error("pinned workspace guest-tools binaries are unavailable");
+  }
+  return { kinoSha256 };
+}
+
+function isEd25519Signature(value: string): boolean {
+  if (
+    value.length > 128 ||
+    !/^(?:[A-Za-z0-9+/]{4}){21}[A-Za-z0-9+/]{2}==$/.test(value)
+  ) {
+    return false;
+  }
+  try {
+    return atob(value).length === 64;
+  } catch {
+    return false;
+  }
 }
 
 function publicationReceipt(

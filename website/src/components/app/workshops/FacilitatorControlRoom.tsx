@@ -222,6 +222,25 @@ export function FacilitatorControlRoom({
                     </ul>
                   ) : null}
                 </>
+              ) : session.runtimeProvider?.kind === "hetzner_cloud" ? (
+                <>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+                    <CapacityFact
+                      label="Provider"
+                      value={`Hetzner ${session.runtimeProvider.serverType}`}
+                    />
+                    <CapacityFact
+                      label="Server limit"
+                      value={String(
+                        session.runtimeProvider.maxConcurrentServers,
+                      )}
+                    />
+                  </dl>
+                  <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+                    One direct server per learner · locations{" "}
+                    {session.runtimeProvider.permittedLocations.join(" → ")}
+                  </p>
+                </>
               ) : (
                 <p className="mt-2 text-sm text-muted-foreground">
                   Capacity appears when the lobby opens.
@@ -239,6 +258,8 @@ export function FacilitatorControlRoom({
                 </Button>
               ) : null}
             </div>
+
+            <WorkshopRuntimeCostCard session={session} />
 
             <form
               className="rounded-xl border bg-card p-4"
@@ -314,10 +335,246 @@ export function FacilitatorControlRoom({
   );
 }
 
+function WorkshopRuntimeCostCard({
+  session,
+}: {
+  session: WorkshopSessionDetail;
+}) {
+  if (session.runtimeProvider?.kind !== "hetzner_cloud" || !session.cost) {
+    return null;
+  }
+  const provider = session.runtimeProvider;
+  const forecast = session.cost.latestForecast;
+  const live = session.cost.live;
+  const final = session.cost.final;
+  const currency =
+    final?.currency ??
+    live?.currency ??
+    forecast?.currency ??
+    provider.connection.currency;
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-eyebrow">Estimated Hetzner cost</p>
+        <Badge
+          variant={
+            provider.connection.state === "active" ? "success" : "warning"
+          }
+        >
+          {provider.connection.state.replaceAll("_", " ")}
+        </Badge>
+      </div>
+      <p className="mt-2 text-sm font-semibold">
+        {provider.serverType} · {provider.connection.displayName}
+      </p>
+      {final ? (
+        <>
+          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <CapacityFact
+              label="Final gross estimate"
+              value={formatNativeCost(final.grossMicros, currency)}
+            />
+            <CapacityFact
+              label="Final net estimate"
+              value={formatNativeCost(final.netMicros, currency)}
+            />
+            <CapacityFact
+              label="Provider tax difference"
+              value={formatNativeCost(
+                final.grossMicros - final.netMicros,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="Gross forecast variance"
+              value={formatNativeCost(final.grossVarianceMicros, currency)}
+            />
+            <CapacityFact
+              label="Net forecast variance"
+              value={formatNativeCost(final.netVarianceMicros, currency)}
+            />
+            <CapacityFact
+              label="Generations / restores"
+              value={`${final.generationCount} / ${final.restoreCount}`}
+            />
+          </dl>
+          {final.manualCleanupUnverified ? (
+            <p className="mt-3 flex items-start gap-2 text-xs text-warning">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              This estimate includes an owner acknowledgement of manual cleanup
+              that Intar could not independently verify.
+            </p>
+          ) : null}
+        </>
+      ) : forecast ? (
+        <>
+          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <CapacityFact
+              label="Expected gross"
+              value={formatNativeCost(
+                forecast.expected.totalGrossMicros,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="Lease ceiling gross"
+              value={formatNativeCost(
+                forecast.leaseCeiling.totalGrossMicros,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="One restore gross"
+              value={formatNativeCost(
+                forecast.oneRestore.totalGrossMicros,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="Per learner gross"
+              value={formatNativeCost(
+                forecast.expected.serverGrossMicrosPerLearner +
+                  forecast.expected.ipv4GrossMicrosPerLearner,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="Expected net"
+              value={formatNativeCost(
+                forecast.expected.totalNetMicros,
+                currency,
+              )}
+            />
+            <CapacityFact
+              label="Provider tax difference"
+              value={formatNativeCost(
+                forecast.expected.totalGrossMicros -
+                  forecast.expected.totalNetMicros,
+                currency,
+              )}
+            />
+          </dl>
+          {forecast.trigger === "price_changed" ? (
+            <p className="mt-3 flex items-start gap-2 text-xs text-warning">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              Hetzner pricing changed in forecast v{forecast.version}. Review
+              the refreshed totals before provisioning.
+            </p>
+          ) : null}
+          {live ? (
+            <div className="mt-3 border-t pt-3">
+              <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                Live estimate
+              </p>
+              <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+                <CapacityFact
+                  label="Accrued gross / net"
+                  value={`${formatNativeCost(live.accruedGrossMicros, currency)} / ${formatNativeCost(live.accruedNetMicros, currency)}`}
+                />
+                <CapacityFact
+                  label="Scheduled-end gross / net"
+                  value={`${formatNativeCost(live.scheduledEndGrossMicros, currency)} / ${formatNativeCost(live.scheduledEndNetMicros, currency)}`}
+                />
+                <CapacityFact
+                  label="Lease-ceiling gross / net"
+                  value={`${formatNativeCost(live.leaseCeilingGrossMicros, currency)} / ${formatNativeCost(live.leaseCeilingNetMicros, currency)}`}
+                />
+                <CapacityFact
+                  label="Gross forecast variance"
+                  value={formatNativeCost(
+                    live.forecastGrossVarianceMicros,
+                    currency,
+                  )}
+                />
+                <CapacityFact
+                  label="Accumulating / cleanup pending"
+                  value={`${live.accumulatingResources} / ${live.cleanupPendingResources}`}
+                />
+                <CapacityFact
+                  label="Gross ceiling usage"
+                  value={
+                    live.grossCeilingMicros === null
+                      ? "No ceiling"
+                      : `${formatNativeCost(live.grossCeilingUsageMicros, currency)} / ${formatNativeCost(live.grossCeilingMicros, currency)}`
+                  }
+                />
+              </dl>
+            </div>
+          ) : null}
+          {forecast.exceedsGrossCeiling || live?.overGrossCeiling ? (
+            <p className="mt-2 flex items-start gap-2 text-xs text-warning">
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              {provider.grossCeilingOverrideAt === null
+                ? "Gross cost is above the organization ceiling; new provisioning and restores require an owner override."
+                : `Gross cost is above the organization ceiling; an owner override was recorded ${formatWorkshopTimestamp(provider.grossCeilingOverrideAt)}.`}
+            </p>
+          ) : null}
+        </>
+      ) : (
+        <p className="mt-2 text-sm text-muted-foreground">
+          The provider price forecast is pending.
+        </p>
+      )}
+      <p className="mt-3 text-[0.6875rem] text-muted-foreground">
+        Native {currency}; provider-reported net and gross values. Estimate, not
+        an invoice. Traffic, credits, promotions, and billing adjustments are
+        excluded.
+      </p>
+      {forecast ? (
+        <>
+          <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+            Price observed {formatWorkshopTimestamp(forecast.priceObservation.observedAt)} ·
+            forecast expires {formatWorkshopTimestamp(forecast.expiresAt)}.
+          </p>
+          <details className="mt-3 text-xs text-muted-foreground">
+            <summary className="w-fit cursor-pointer font-medium text-foreground">
+              Forecast assumptions and exclusions
+            </summary>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              <div>
+                <p className="font-medium text-foreground">Assumptions</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {forecast.assumptions.map((assumption) => (
+                    <li key={assumption}>{assumption}</li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium text-foreground">Excluded</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  {forecast.exclusions.map((exclusion) => (
+                    <li key={exclusion}>{exclusion}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </details>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function formatWorkshopMib(value: number): string {
   return value >= 1024 && value % 1024 === 0
     ? `${value / 1024} GiB`
     : `${value} MiB`;
+}
+
+function formatNativeCost(micros: number, currency: string): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(micros / 1_000_000);
+}
+
+function formatWorkshopTimestamp(at: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(at));
 }
 
 function RosterMatrix({
@@ -482,9 +739,7 @@ function ParticipantCatchUpControl({
   onAction: FacilitatorControlRoomProps["onAction"];
 }) {
   const available = checkpoints.filter((checkpoint) => checkpoint.released);
-  const [checkpointId, setCheckpointId] = useState(
-    available.at(-1)?.id ?? "",
-  );
+  const [checkpointId, setCheckpointId] = useState(available.at(-1)?.id ?? "");
   const retry =
     member.provisionState === "failed" || member.workspaceState === "failed";
   const actionLabel = retry
@@ -509,14 +764,19 @@ function ParticipantCatchUpControl({
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{actionLabel} {member.name}?</DialogTitle>
+          <DialogTitle>
+            {actionLabel} {member.name}?
+          </DialogTitle>
           <DialogDescription>
             Choose a released canonical checkpoint. Existing work after that
             checkpoint will be archived and replaced; covered modules are
             recorded as caught up, not verified.
           </DialogDescription>
         </DialogHeader>
-        <label className="space-y-2 text-sm" htmlFor={`checkpoint-${member.userId}`}>
+        <label
+          className="space-y-2 text-sm"
+          htmlFor={`checkpoint-${member.userId}`}
+        >
           <span className="font-medium">Starting checkpoint</span>
           <select
             id={`checkpoint-${member.userId}`}
@@ -606,8 +866,8 @@ function RosterModuleCell({
         </span>
       )}
       <span className="sr-only">
-        {memberName}, {module.title}: {workshopModuleStateLabel(progress.state)};
-        explain-back {explainBackStatusLabel(progress.explainBackStatus)}.
+        {memberName}, {module.title}: {workshopModuleStateLabel(progress.state)}
+        ; explain-back {explainBackStatusLabel(progress.explainBackStatus)}.
       </span>
     </div>
   );
@@ -645,7 +905,11 @@ function ExplainBackStatusBadge({
       title={`Explain-back: ${explainBackStatusLabel(status)}`}
       className={`shrink-0 rounded border px-1 py-0.5 text-[9px] font-semibold tracking-wide uppercase ${classes}`}
     >
-      {status === "completed" ? "EB done" : status === "pending" ? "EB due" : "EB n/a"}
+      {status === "completed"
+        ? "EB done"
+        : status === "pending"
+          ? "EB due"
+          : "EB n/a"}
     </span>
   );
 }

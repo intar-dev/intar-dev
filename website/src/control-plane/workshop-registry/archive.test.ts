@@ -14,7 +14,10 @@ import {
   WorkshopBundleValidationError,
   type WorkshopCheckpointBuildReport,
 } from "./archive";
-import { buildWorkshopBundleFixture } from "./test-support";
+import {
+  buildWorkshopBundleFixture,
+  type WorkshopCompiledFixture,
+} from "./test-support";
 
 describe("workshop source bundle validation", () => {
   it("accepts a deterministic bundle and preserves safe Markdown code examples", async () => {
@@ -103,6 +106,88 @@ describe("workshop source bundle validation", () => {
         },
       ],
     });
+  });
+
+  it("keeps Hetzner authoring input untrusted until publication supplies resolved metadata", async () => {
+    const fixture = await buildWorkshopBundleFixture({
+      mutateManifest(compiled) {
+        Object.assign(compiled.manifest.workspace, {
+          provider: {
+            kind: "hetzner_cloud",
+            vm_id: "workspace",
+            server_type: "cx43",
+            system_image: "debian-13",
+          },
+        });
+      },
+    });
+    const source = await validate(fixture);
+    const checkpoints = [
+      checkpoint("checkpoint-00", "a"),
+      checkpoint("checkpoint-01", "b"),
+    ];
+    expect(hydrateWorkshopManifest({ source, checkpoints }).workspace.provider).toBeUndefined();
+
+    const manifest = hydrateWorkshopManifest({
+      source,
+      checkpoints,
+      resolvedProvider: {
+        kind: "hetzner_cloud",
+        vmId: "workspace",
+        serverType: "cx43",
+        systemImage: "debian-13",
+        hardware: {
+          architecture: "x86",
+          cores: 8,
+          memoryMib: 16_384,
+          diskMib: 163_840,
+        },
+        compatible: true,
+      },
+    });
+    expect(manifest.workspace.provider).toMatchObject({
+      kind: "hetzner_cloud",
+      serverType: "cx43",
+      compatible: true,
+    });
+  });
+
+  it.each([
+    [
+      "an unknown VM",
+      (compiled: WorkshopCompiledFixture) => {
+        Object.assign(compiled.manifest.workspace, {
+          provider: {
+            kind: "hetzner_cloud",
+            vm_id: "missing",
+            server_type: "cx43",
+            system_image: "debian-13",
+          },
+        });
+      },
+      /references an unknown VM/,
+    ],
+    [
+      "multiple VMs",
+      (compiled: WorkshopCompiledFixture) => {
+        compiled.manifest.workspace.vms.push({
+          ...compiled.manifest.workspace.vms[0]!,
+          id: "second",
+        });
+        Object.assign(compiled.manifest.workspace, {
+          provider: {
+            kind: "hetzner_cloud",
+            vm_id: "workspace",
+            server_type: "cx43",
+            system_image: "debian-13",
+          },
+        });
+      },
+      /exactly one VM/,
+    ],
+  ])("rejects a Hetzner declaration with %s", async (_label, mutate, error) => {
+    const fixture = await buildWorkshopBundleFixture({ mutateManifest: mutate });
+    await expect(validate(fixture)).rejects.toThrow(error);
   });
 
   it.each([

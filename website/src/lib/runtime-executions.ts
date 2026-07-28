@@ -5,6 +5,7 @@ import type {
   HostResourceReservationState,
   RuntimeDomainKind,
   RuntimeExecutionState,
+  RuntimeProviderKind,
 } from "@/db/schema";
 
 const textEncoder = new TextEncoder();
@@ -26,6 +27,8 @@ export interface RuntimeExecutionHandle {
   userId: string;
   organizationId: string | null;
   hostId: string | null;
+  providerKind: RuntimeProviderKind;
+  providerConnectionId: string | null;
   domainKind: RuntimeDomainKind;
   domainId: string;
   generation: number;
@@ -47,6 +50,8 @@ export interface CreateRuntimeExecutionInput {
   userId: string;
   organizationId?: string | null;
   hostId?: string | null;
+  providerKind?: RuntimeProviderKind;
+  providerConnectionId?: string | null;
   domainKind: RuntimeDomainKind;
   domainId: string;
   checkpointId?: string | null;
@@ -64,6 +69,8 @@ export interface CreateRuntimeRecoveryGenerationInput {
   expectedGeneration: number;
   executionId?: string;
   hostId?: string | null;
+  providerKind?: RuntimeProviderKind;
+  providerConnectionId?: string | null;
   checkpointId: string;
   leaseExpiresAt?: number | null;
   vms: RuntimeVmSpec[];
@@ -77,6 +84,8 @@ interface RuntimeExecutionIdentityRow {
   user_id: string;
   organization_id: string | null;
   host_id: string | null;
+  provider_kind: RuntimeProviderKind;
+  provider_connection_id: string | null;
   domain_kind: RuntimeDomainKind;
   domain_id: string;
   generation: number;
@@ -96,6 +105,14 @@ export async function createRuntimeExecution(
   const domainId = requiredId(input.domainId, "domainId");
   const organizationId = normalizedOptionalId(input.organizationId);
   const hostId = normalizedOptionalId(input.hostId);
+  const providerKind = input.providerKind ?? "agent_kvm";
+  const providerConnectionId = normalizedOptionalId(input.providerConnectionId);
+  validateProviderIdentity({
+    providerKind,
+    providerConnectionId,
+    hostId,
+    domainKind: input.domainKind,
+  });
   const checkpointId = normalizedOptionalId(input.checkpointId);
   const now = validTimestamp(input.now ?? Date.now(), "now");
   const leaseExpiresAt = optionalTimestamp(
@@ -117,15 +134,18 @@ export async function createRuntimeExecution(
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO runtime_executions (
-        id, user_id, organization_id, host_id, domain_kind, domain_id,
+        id, user_id, organization_id, host_id, provider_kind,
+        provider_connection_id, domain_kind, domain_id,
         generation, source_execution_id, checkpoint_id, state,
         lease_expires_at, archive_requested_at, ended_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?)`,
     ).bind(
       executionId,
       userId,
       organizationId,
       hostId,
+      providerKind,
+      providerConnectionId,
       input.domainKind,
       domainId,
       checkpointId,
@@ -182,6 +202,8 @@ export async function createRuntimeExecution(
     userId,
     organizationId,
     hostId,
+    providerKind,
+    providerConnectionId,
     domainKind: input.domainKind,
     domainId,
     generation: 1,
@@ -207,6 +229,17 @@ export async function createRuntimeRecoveryGeneration(
     input.hostId === undefined
       ? source.host_id
       : normalizedOptionalId(input.hostId);
+  const providerKind = input.providerKind ?? source.provider_kind;
+  const providerConnectionId =
+    input.providerConnectionId === undefined
+      ? source.provider_connection_id
+      : normalizedOptionalId(input.providerConnectionId);
+  validateProviderIdentity({
+    providerKind,
+    providerConnectionId,
+    hostId,
+    domainKind: source.domain_kind,
+  });
   const checkpointId = requiredId(input.checkpointId, "checkpointId");
   const now = validTimestamp(input.now ?? Date.now(), "now");
   const leaseExpiresAt = optionalTimestamp(
@@ -224,12 +257,13 @@ export async function createRuntimeRecoveryGeneration(
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO runtime_executions (
-        id, user_id, organization_id, host_id, domain_kind, domain_id,
+        id, user_id, organization_id, host_id, provider_kind,
+        provider_connection_id, domain_kind, domain_id,
         generation, source_execution_id, checkpoint_id, state,
         lease_expires_at, archive_requested_at, ended_at, created_at, updated_at
       )
       SELECT
-        ?, source.user_id, source.organization_id, ?, source.domain_kind,
+        ?, source.user_id, source.organization_id, ?, ?, ?, source.domain_kind,
         source.domain_id, source.generation + 1, source.id, ?, 'queued',
         ?, NULL, NULL, ?, ?
       FROM runtime_executions source
@@ -245,6 +279,8 @@ export async function createRuntimeRecoveryGeneration(
     ).bind(
       executionId,
       hostId,
+      providerKind,
+      providerConnectionId,
       checkpointId,
       leaseExpiresAt,
       now,
@@ -328,6 +364,8 @@ export async function createRuntimeRecoveryGeneration(
     userId: source.user_id,
     organizationId: source.organization_id,
     hostId,
+    providerKind,
+    providerConnectionId,
     domainKind: source.domain_kind,
     domainId: source.domain_id,
     generation: input.expectedGeneration + 1,
@@ -722,11 +760,16 @@ export async function loadCurrentRuntimeVmTerminalTarget(input: {
     input.executionId,
     input.expectedGeneration,
   );
-  if (!execution.host_id) {
+  const transportSourceId =
+    execution.host_id ??
+    (execution.provider_connection_id
+      ? `provider:${execution.provider_connection_id}`
+      : null);
+  if (!transportSourceId) {
     throw appError(
       409,
       "runtime_terminal_not_ready",
-      "runtime execution has not been assigned to a host",
+      "runtime execution has not been assigned to a transport source",
     );
   }
   const vmId = normalizedOptionalId(input.vmId);
@@ -784,7 +827,7 @@ export async function loadCurrentRuntimeVmTerminalTarget(input: {
     domainId: execution.domain_id,
     userId: execution.user_id,
     organizationId: execution.organization_id,
-    hostId: execution.host_id,
+    hostId: transportSourceId,
     vmId: row.vm_id,
     runtimeVmName: row.runtime_vm_name,
     target: {
@@ -831,6 +874,78 @@ export async function requireCurrentRuntimeGeneration(
   return row;
 }
 
+/**
+ * Loads the provider-neutral execution identity and its immutable VM
+ * requirements. Provider implementations use this instead of reaching into
+ * agent-host desired state, which keeps Hetzner executions independent from
+ * `agent_hosts` and `DesiredVmV2`.
+ */
+export async function loadRuntimeExecutionHandle(
+  executionId: string,
+): Promise<RuntimeExecutionHandle> {
+  const id = requiredId(executionId, "executionId");
+  const execution = await loadRuntimeExecutionIdentity(id);
+  if (!execution) {
+    throw appError(
+      404,
+      "runtime_execution_not_found",
+      "runtime execution not found",
+    );
+  }
+  const vmRows = await env.DB.prepare(
+    `SELECT
+       id, vm_id, ordinal, runtime_vm_name, image_key_json, image_sha256,
+       cpu_millis, memory_mib, disk_mib
+     FROM runtime_vms
+     WHERE execution_id = ?
+     ORDER BY ordinal ASC`,
+  )
+    .bind(id)
+    .all<{
+      id: string;
+      vm_id: string;
+      ordinal: number;
+      runtime_vm_name: string;
+      image_key_json: string | object;
+      image_sha256: string;
+      cpu_millis: number;
+      memory_mib: number;
+      disk_mib: number;
+    }>();
+  const vms = vmRows.results.map((vm) => ({
+    runtimeVmId: vm.id,
+    vmId: vm.vm_id,
+    ordinal: vm.ordinal,
+    runtimeVmName: vm.runtime_vm_name,
+    imageKey:
+      typeof vm.image_key_json === "string"
+        ? (JSON.parse(vm.image_key_json) as object)
+        : vm.image_key_json,
+    imageSha256: vm.image_sha256,
+    cpuMillis: vm.cpu_millis,
+    memoryMib: vm.memory_mib,
+    diskMib: vm.disk_mib,
+  }));
+  return {
+    executionId: execution.id,
+    userId: execution.user_id,
+    organizationId: execution.organization_id,
+    hostId: execution.host_id,
+    providerKind: execution.provider_kind,
+    providerConnectionId: execution.provider_connection_id,
+    domainKind: execution.domain_kind,
+    domainId: execution.domain_id,
+    generation: execution.generation,
+    sourceExecutionId: execution.source_execution_id,
+    checkpointId: execution.checkpoint_id,
+    state: execution.state,
+    leaseExpiresAt: execution.lease_expires_at,
+    createdAt: execution.created_at,
+    vms,
+    resources: sumResources(vms),
+  };
+}
+
 async function loadRuntimeExecutionIdentity(
   executionId: string,
 ): Promise<RuntimeExecutionIdentityRow | null> {
@@ -840,6 +955,8 @@ async function loadRuntimeExecutionIdentity(
        execution.user_id,
        execution.organization_id,
        execution.host_id,
+       execution.provider_kind,
+       execution.provider_connection_id,
        execution.domain_kind,
        execution.domain_id,
        execution.generation,
@@ -859,6 +976,36 @@ async function loadRuntimeExecutionIdentity(
   )
     .bind(executionId)
     .first<RuntimeExecutionIdentityRow>();
+}
+
+function validateProviderIdentity(input: {
+  providerKind: RuntimeProviderKind;
+  providerConnectionId: string | null;
+  hostId: string | null;
+  domainKind: RuntimeDomainKind;
+}): void {
+  if (input.providerKind === "agent_kvm") {
+    if (input.providerConnectionId !== null) {
+      throw appError(
+        400,
+        "runtime_provider_identity_invalid",
+        "agent runtimes cannot reference an external provider connection",
+      );
+    }
+    return;
+  }
+  if (
+    input.providerKind !== "hetzner_cloud" ||
+    input.domainKind !== "workshop" ||
+    !input.providerConnectionId ||
+    input.hostId !== null
+  ) {
+    throw appError(
+      400,
+      "runtime_provider_identity_invalid",
+      "Hetzner runtimes require a workshop provider connection and no agent host",
+    );
+  }
 }
 
 function runtimeVmInsert(

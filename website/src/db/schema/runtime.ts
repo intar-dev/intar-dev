@@ -14,6 +14,7 @@ import { agentHosts } from "./platform";
 import { jsonText, nowMsDefault } from "./shared";
 
 export type RuntimeDomainKind = "scenario" | "workshop";
+export type RuntimeProviderKind = "agent_kvm" | "hetzner_cloud";
 export type RuntimeExecutionState =
   | "queued"
   | "provisioning"
@@ -36,6 +37,11 @@ export const runtimeExecutions = sqliteTable(
     hostId: text("host_id").references(() => agentHosts.id, {
       onDelete: "set null",
     }),
+    providerKind: text("provider_kind")
+      .$type<RuntimeProviderKind>()
+      .default("agent_kvm")
+      .notNull(),
+    providerConnectionId: text("provider_connection_id"),
     domainKind: text("domain_kind").$type<RuntimeDomainKind>().notNull(),
     domainId: text("domain_id").notNull(),
     generation: integer("generation").notNull(),
@@ -81,6 +87,14 @@ export const runtimeExecutions = sqliteTable(
     check(
       "runtime_executions_domain_kind_valid",
       sql`${table.domainKind} in ('scenario', 'workshop')`,
+    ),
+    check(
+      "runtime_executions_provider_kind_valid",
+      sql`${table.providerKind} in ('agent_kvm', 'hetzner_cloud')`,
+    ),
+    check(
+      "runtime_executions_provider_identity_valid",
+      sql`(${table.providerKind} = 'agent_kvm' AND ${table.providerConnectionId} is null) OR (${table.providerKind} = 'hetzner_cloud' AND ${table.domainKind} = 'workshop' AND ${table.providerConnectionId} is not null AND ${table.hostId} is null)`,
     ),
     check(
       "runtime_executions_generation_positive",
@@ -185,6 +199,9 @@ export const runtimeArtifacts = sqliteTable(
       table.ordinal,
     ),
     index("runtime_artifacts_r2_key_idx").on(table.r2Key),
+    uniqueIndex("runtime_artifacts_terminal_recording_content_uidx")
+      .on(table.runtimeVmId, table.kind, table.sha256, table.sizeBytes)
+      .where(sql`${table.kind} = 'terminal_recording'`),
     check("runtime_artifacts_ordinal_valid", sql`${table.ordinal} >= 0`),
     check("runtime_artifacts_size_valid", sql`${table.sizeBytes} >= 0`),
     check(

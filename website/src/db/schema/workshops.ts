@@ -73,6 +73,19 @@ export interface WorkshopManifestV1 {
   };
   workspace: {
     leaseGraceMinutes: number;
+    provider?: {
+      kind: "hetzner_cloud";
+      vmId: string;
+      serverType: string;
+      systemImage: string;
+      hardware: {
+        architecture: "x86";
+        cores: number;
+        memoryMib: number;
+        diskMib: number;
+      };
+      compatible: true;
+    };
     vms: Array<{
       id: string;
       name: string;

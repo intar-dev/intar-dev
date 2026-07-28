@@ -3,7 +3,21 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const providerMocks = vi.hoisted(() => ({ run: vi.fn() }));
+
+vi.mock("@/lib/hcloud-provider-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hcloud-provider-service")>()),
+  hcloudRunOperation: providerMocks.run,
+}));
+
+vi.mock("@/lib/workshops/feature-flag", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/workshops/feature-flag")>()),
+  requireWorkshopHcloudRuntimeEnabledForOrganization: vi
+    .fn()
+    .mockResolvedValue(undefined),
+}));
 import { handleAgentBootstrap, sha256Hex } from "@/control-plane/auth";
 import {
   artifactObjectKey,
@@ -13,6 +27,9 @@ import {
 import {
   agentBootstrapTokens,
   agentHosts,
+  organizationProviderConnections,
+  providerCredentialVersions,
+  runtimeProviderCheckpointArtifacts,
   organization,
   user,
   workshopPublicationCheckpoints,
@@ -39,6 +56,8 @@ describe("workshop registry publication lifecycle", () => {
   beforeEach(async () => {
     await resetD1Database();
     await seedRegistryPrincipals();
+    providerMocks.run.mockReset();
+    providerMocks.run.mockResolvedValue({ data: hcloudCatalog() });
   });
 
   it("publishes atomically after a builder verifies every checkpoint and preserves the immutable revision", async () => {
@@ -218,6 +237,225 @@ describe("workshop registry publication lifecycle", () => {
         "publication is already published and cannot accept a failed result",
     });
     expect(await db.select().from(workshopTemplateRevisions)).toHaveLength(1);
+  });
+
+  it("pins a live-resolved exact Hetzner type and immutable signed checkpoint bundles", async () => {
+    await seedHetznerConnection();
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+
+    const checkpoints = checkpointResult(receipt.publicationId);
+    await seedCheckpointObjects(checkpoints);
+    await attachRuntimeBundles(checkpoints);
+    const withoutDirectProof = structuredClone(checkpoints);
+    withoutDirectProof[0]!.runtime_bundle_cold_boot_verified = false;
+    const unproved = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: withoutDirectProof,
+    });
+    expect(unproved.status).toBe(400);
+    await expect(unproved.json()).resolves.toEqual({
+      error:
+        "checkpoint checkpoint-00 runtime bundle must be cold-boot verified on a clean direct-cloud base",
+    });
+    const wrongAgent = structuredClone(checkpoints);
+    (
+      wrongAgent[0] as (typeof wrongAgent)[number] & {
+        runtime_bundle: { workspace_agent_sha256: string };
+      }
+    ).runtime_bundle.workspace_agent_sha256 = "e".repeat(64);
+    const mismatchedAgent = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: wrongAgent,
+    });
+    expect(mismatchedAgent.status).toBe(400);
+    await expect(mismatchedAgent.json()).resolves.toEqual({
+      error: "workspace guest-tools release does not match the direct-cloud proof",
+    });
+
+    const result = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints,
+    });
+    expect(result.status).toBe(201);
+    const resultBody = (await result.json()) as { revision_id: string };
+
+    const db = drizzle(env.DB);
+    const [revisions, artifacts] = await Promise.all([
+      db
+        .select()
+        .from(workshopTemplateRevisions)
+        .where(eq(workshopTemplateRevisions.id, resultBody.revision_id)),
+      db
+        .select()
+        .from(runtimeProviderCheckpointArtifacts)
+        .where(
+          eq(
+            runtimeProviderCheckpointArtifacts.templateRevisionId,
+            resultBody.revision_id,
+          ),
+        ),
+    ]);
+    expect(revisions[0]?.manifestJson.workspace.provider).toEqual({
+      kind: "hetzner_cloud",
+      vmId: "workspace",
+      serverType: "cx43",
+      systemImage: "debian-13",
+      hardware: {
+        architecture: "x86",
+        cores: 8,
+        memoryMib: 16_384,
+        diskMib: 163_840,
+      },
+      compatible: true,
+    });
+    expect(artifacts).toHaveLength(2);
+    expect(artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkpointId: "checkpoint-00",
+          providerKind: "hetzner_cloud",
+          compression: "zstd",
+          sizeBytes: expect.any(Number),
+          status: "verified",
+          workspaceAgentSha256: "c".repeat(64),
+          kinoSha256: "d".repeat(64),
+        }),
+        expect.objectContaining({ checkpointId: "checkpoint-01" }),
+      ]),
+    );
+    expect(providerMocks.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "hcloud-connection-a",
+        operation: expect.objectContaining({
+          kind: "catalog",
+          requiredServerTypes: ["cx43"],
+          systemImage: "debian-13",
+        }),
+      }),
+    );
+    await expect(
+      env.DB.prepare(
+        "UPDATE runtime_provider_checkpoint_artifacts SET signing_key_id = 'replacement' WHERE template_revision_id = ?",
+      )
+        .bind(resultBody.revision_id)
+        .run(),
+    ).rejects.toThrow(/runtime provider checkpoint artifacts are immutable/);
+  });
+
+  it("fails Hetzner publication closed without a connection or signed runtime bundles", async () => {
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+    const checkpoints = checkpointResult(receipt.publicationId);
+    await seedCheckpointObjects(checkpoints);
+
+    const missingBundle = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints,
+    });
+    expect(missingBundle.status).toBe(400);
+    await expect(missingBundle.json()).resolves.toEqual({
+      error: "checkpoint checkpoint-00 runtime_bundle must be an object",
+    });
+
+    await attachRuntimeBundles(checkpoints);
+    const missingConnection = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints,
+    });
+    expect(missingConnection.status).toBe(409);
+    await expect(missingConnection.json()).resolves.toEqual({
+      error:
+        "an active organization Hetzner project connection is required to publish this workshop",
+      code: "hcloud_provider_connection_required",
+    });
+    expect(await drizzle(env.DB).select().from(workshopTemplateRevisions)).toEqual(
+      [],
+    );
+    expect(providerMocks.run).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pinned Hetzner type when the live catalog shape is undersized", async () => {
+    await seedHetznerConnection();
+    providerMocks.run.mockResolvedValue({
+      data: hcloudCatalog({ memory: 8 }),
+    });
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+    const checkpoints = checkpointResult(receipt.publicationId);
+    await seedCheckpointObjects(checkpoints);
+    await attachRuntimeBundles(checkpoints);
+
+    const result = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints,
+    });
+    expect(result.status).toBe(409);
+    await expect(result.json()).resolves.toMatchObject({
+      code: "hcloud_server_type_undersized",
+    });
+    expect(await drizzle(env.DB).select().from(workshopTemplateRevisions)).toEqual(
+      [],
+    );
+  });
+
+  it.each([
+    [
+      "missing",
+      (catalog: ReturnType<typeof hcloudCatalog>) => {
+        catalog.serverTypes = [];
+      },
+      "hcloud_server_type_unavailable",
+    ],
+    [
+      "deprecated",
+      (catalog: ReturnType<typeof hcloudCatalog>) => {
+        catalog.serverTypes[0]!.deprecated = true;
+      },
+      "hcloud_server_type_incompatible",
+    ],
+    [
+      "ARM",
+      (catalog: ReturnType<typeof hcloudCatalog>) => {
+        catalog.serverTypes[0]!.architecture = "arm";
+      },
+      "hcloud_server_type_incompatible",
+    ],
+  ])("rejects a %s exact Hetzner type during publication", async (_label, mutate, code) => {
+    await seedHetznerConnection();
+    const catalog = hcloudCatalog();
+    mutate(catalog);
+    providerMocks.run.mockResolvedValue({ data: catalog });
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+    const checkpoints = checkpointResult(receipt.publicationId);
+    await seedCheckpointObjects(checkpoints);
+    await attachRuntimeBundles(checkpoints);
+
+    const result = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints,
+    });
+    expect(result.status).toBe(409);
+    await expect(result.json()).resolves.toMatchObject({ code });
+    expect(await drizzle(env.DB).select().from(workshopTemplateRevisions)).toEqual(
+      [],
+    );
   });
 
   it("renews the assigned builder lease and does not hand unexpired work to another builder", async () => {
@@ -819,6 +1057,190 @@ async function seedCheckpointObjects(
       ]);
     }
   }
+}
+
+async function buildHetznerWorkshopBundleFixture() {
+  return buildWorkshopBundleFixture({
+    mutateManifest(compiled) {
+      Object.assign(compiled.manifest.workspace, {
+        provider: {
+          kind: "hetzner_cloud",
+          vm_id: "workspace",
+          server_type: "cx43",
+          system_image: "debian-13",
+        },
+      });
+    },
+  });
+}
+
+async function seedHetznerConnection(): Promise<void> {
+  const now = Date.now();
+  const db = drizzle(env.DB);
+  await db.insert(organizationProviderConnections).values({
+    id: "hcloud-connection-a",
+    organizationId: "org-a",
+    providerKind: "hetzner_cloud",
+    displayName: "Dedicated workshop project",
+    state: "active",
+    projectFingerprint: "project-fingerprint",
+    sentinelFirewallId: "42",
+    activeCredentialVersionId: "hcloud-credential-a-v1",
+    approvedLocationsJson: ["nbg1", "fsn1", "hel1"],
+    maxConcurrentServers: 5,
+    currency: "NOK",
+    ipv4Enabled: true,
+    lastValidatedAt: now,
+    createdBy: "publisher-a",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(providerCredentialVersions).values({
+    id: "hcloud-credential-a-v1",
+    connectionId: "hcloud-connection-a",
+    version: 1,
+    algorithm: "AES-256-GCM",
+    kekVersion: "v1",
+    aadSha256: "a".repeat(64),
+    encryptedTokenB64: "encrypted-token",
+    tokenIvB64: "token-iv",
+    wrappedDekB64: "wrapped-dek",
+    dekIvB64: "dek-iv",
+    envelopeCreatedAt: now,
+    tokenFingerprint: "b".repeat(64),
+    createdBy: "publisher-a",
+    activatedAt: now,
+    createdAt: now,
+  });
+}
+
+async function attachRuntimeBundles(
+  checkpoints: ReturnType<typeof checkpointResult>,
+): Promise<void> {
+  const signatureB64 = btoa("\0".repeat(64));
+  const workspaceAgentSha256 = "c".repeat(64);
+  const kinoSha256 = "d".repeat(64);
+  const workspaceAgent = "workspace-agent-binary";
+  const kino = "kino-binary";
+  await Promise.all([
+    env.VM_IMAGE_REGISTRY_BUCKET.put(
+      `workspace-agent/releases/${workspaceAgentSha256}/intar-workspace-agent`,
+      workspaceAgent,
+    ),
+    env.VM_IMAGE_REGISTRY_BUCKET.put(
+      `workspace-agent/kino/releases/${kinoSha256}/kino`,
+      kino,
+    ),
+    env.VM_IMAGE_REGISTRY_BUCKET.put(
+      "workspace-agent/releases/current.json",
+      JSON.stringify({
+        schema_version: 2,
+        sha256: workspaceAgentSha256,
+        size_bytes: workspaceAgent.length,
+        kino_sha256: kinoSha256,
+        kino_size_bytes: kino.length,
+      }),
+    ),
+  ]);
+  for (const [index, checkpoint] of checkpoints.entries()) {
+    const sha256 = (index === 0 ? "8" : "9").repeat(64);
+    await env.VM_IMAGE_REGISTRY_BUCKET.put(
+      artifactObjectKey(sha256),
+      `runtime bundle ${checkpoint.checkpoint_id}`,
+      { customMetadata: { artifact_sha256: sha256 } },
+    );
+    Object.assign(checkpoint, {
+      runtime_bundle: {
+        sha256,
+        compression: "zstd",
+        signature_b64: signatureB64,
+        signing_key_id: "workshop-runtime-v1",
+        workspace_agent_sha256: workspaceAgentSha256,
+      },
+    });
+  }
+}
+
+function hcloudCatalog(overrides: { memory?: number } = {}) {
+  const locations = ["nbg1", "fsn1", "hel1"].map((name, index) => ({
+    id: index + 1,
+    name,
+    description: name,
+    country: "DE",
+    city: name,
+    latitude: 0,
+    longitude: 0,
+    network_zone: "eu-central",
+  }));
+  const price = (location: string) => ({
+    location,
+    price_hourly: { net: "0.100000", gross: "0.125000" },
+    price_monthly: { net: "60.000000", gross: "75.000000" },
+    included_traffic: 20,
+    price_per_tb_traffic: { net: "1.000000", gross: "1.250000" },
+  });
+  return {
+    observedAt: new Date(1_750_000_000_000).toISOString(),
+    serverTypes: [
+      {
+        id: 43,
+        name: "cx43",
+        description: "CX43",
+        category: "shared",
+        cores: 8,
+        memory: overrides.memory ?? 16,
+        disk: 160,
+        storage_type: "local",
+        cpu_type: "shared",
+        architecture: "x86",
+        deprecated: false,
+        deprecation: null,
+        locations: locations.map((location) => ({
+          id: location.id,
+          name: location.name,
+          recommended: location.name === "nbg1",
+          available: true,
+          deprecation: null,
+        })),
+      },
+    ],
+    locations,
+    systemImages: [
+      {
+        id: 13,
+        status: "available",
+        type: "system",
+        name: "debian-13",
+        description: "Debian 13",
+        architecture: "x86",
+        deprecated: null,
+        deleted: null,
+        os_flavor: "debian",
+        os_version: "13",
+      },
+    ],
+    pricing: {
+      currency: "NOK",
+      vat_rate: "0.25",
+      server_types: [
+        {
+          id: 43,
+          name: "cx43",
+          prices: locations.map((location) => price(location.name)),
+        },
+      ],
+      primary_ips: [
+        {
+          type: "ipv4",
+          prices: locations.map((location) => ({
+            location: location.name,
+            price_hourly: { net: "0.010000", gross: "0.012500" },
+            price_monthly: { net: "5.000000", gross: "6.250000" },
+          })),
+        },
+      ],
+    },
+  };
 }
 
 async function registryRequest(

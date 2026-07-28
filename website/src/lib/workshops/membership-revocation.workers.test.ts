@@ -81,10 +81,7 @@ import {
 } from "@/lib/organizations";
 import { resetD1Database } from "@/test/d1-migrations";
 import { issueWorkshopWorkspaceApplication } from "./applications";
-import {
-  claimWorkshopHelpRequest,
-  revokeWorkshopAssist,
-} from "./assistance";
+import { claimWorkshopHelpRequest, revokeWorkshopAssist } from "./assistance";
 import { updateWorkshopSession } from "./sessions";
 
 const ORGANIZATION_ID = "organization-workshop-revocation";
@@ -472,6 +469,63 @@ describe("workshop access revocation during organization membership removal", ()
     }
   });
 
+  it("deletes an application route when archival wins the final recording race", async () => {
+    await seedLiveWorkshopFixture();
+    accessMocks.issueStargateWorkspaceAppSession.mockImplementationOnce(
+      async (input: { routeId: string; expiresAt: Date }) => {
+        const now = Date.now();
+        const db = drizzle(env.DB);
+        await db.batch([
+          db
+            .update(workshopWorkspaceGenerations)
+            .set({
+              state: "archiving",
+              archiveRequestedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(workshopWorkspaceGenerations.id, GENERATION_ID)),
+          db
+            .update(runtimeExecutions)
+            .set({
+              state: "archiving",
+              archiveRequestedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(runtimeExecutions.id, EXECUTION_ID)),
+        ]);
+        return {
+          routeId: input.routeId,
+          url: `https://${input.routeId}.intar.app/?__intar_bootstrap=one-time`,
+          bootstrapExpiresAt: input.expiresAt.getTime() - 14 * 60_000,
+          expiresAt: input.expiresAt.getTime(),
+        };
+      },
+    );
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toMatchObject({
+      code: "workshop_application_authorization_changed",
+    });
+
+    const routeId = accessMocks.issueStargateWorkspaceAppSession.mock
+      .calls[0]?.[0]?.routeId as string;
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      routeId,
+    );
+    await expect(
+      drizzle(env.DB)
+        .select({ routes: workshopWorkspaces.applicationRouteIdsJson })
+        .from(workshopWorkspaces)
+        .where(eq(workshopWorkspaces.id, WORKSPACE_ID)),
+    ).resolves.toEqual([{ routes: [APPLICATION_ROUTE] }]);
+  });
+
   it("cleans up the requested route when gateway response validation fails", async () => {
     await seedLiveWorkshopFixture();
     accessMocks.issueStargateWorkspaceAppSession.mockRejectedValueOnce(
@@ -581,7 +635,9 @@ describe("workshop access revocation during organization membership removal", ()
       actorUserId: "participant",
     });
     await vi.waitFor(() => {
-      expect(accessMocks.issueStargateWorkspaceAppSession).toHaveBeenCalledOnce();
+      expect(
+        accessMocks.issueStargateWorkspaceAppSession,
+      ).toHaveBeenCalledOnce();
     });
     const gatewayRequest = accessMocks.issueStargateWorkspaceAppSession.mock
       .calls[0]?.[0] as { routeId: string; expiresAt: Date } | undefined;
@@ -654,7 +710,10 @@ describe("workshop access revocation during organization membership removal", ()
       gatewayRequest.routeId,
     );
     await expect(
-      db.select().from(member).where(eq(member.id, membershipId("participant"))),
+      db
+        .select()
+        .from(member)
+        .where(eq(member.id, membershipId("participant"))),
     ).resolves.toEqual([]);
     await expect(
       env.DB.prepare(
@@ -748,12 +807,18 @@ describe("workshop access revocation during organization membership removal", ()
     const db = drizzle(env.DB);
     await expect(
       db
-        .select({ state: workshopSessions.state, version: workshopSessions.version })
+        .select({
+          state: workshopSessions.state,
+          version: workshopSessions.version,
+        })
         .from(workshopSessions)
         .where(eq(workshopSessions.id, SESSION_ID)),
     ).resolves.toEqual([{ state: "live", version: 4 }]);
     await expect(
-      db.select().from(member).where(eq(member.id, membershipId("facilitator"))),
+      db
+        .select()
+        .from(member)
+        .where(eq(member.id, membershipId("facilitator"))),
     ).resolves.toEqual([]);
     await expect(
       db

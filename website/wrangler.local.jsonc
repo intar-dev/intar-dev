@@ -14,6 +14,7 @@
     "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
     "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
     "STARGATE_WORKSPACE_APP_BASE_DOMAIN": "intar.app",
+    "WORKSPACE_AGENT_CONTROL_PLANE_URL": "http://localhost:4321",
   },
   "assets": {
     "directory": "./dist",

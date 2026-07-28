@@ -56,7 +56,22 @@ export interface WorkshopCheckpointBuildReport {
   }>;
   sanitized: true;
   coldBootVerified: true;
+  runtimeBundleColdBootVerified?: true;
+  providerArtifact?: {
+    r2Key: string;
+    sha256: string;
+    sizeBytes: number;
+    compression: "none" | "gzip" | "zstd";
+    signatureB64: string;
+    signingKeyId: string;
+    workspaceAgentSha256: string;
+    kinoSha256: string;
+  };
 }
+
+export type ResolvedWorkshopWorkspaceProvider = NonNullable<
+  WorkshopManifestV1["workspace"]["provider"]
+>;
 
 export class WorkshopBundleValidationError extends Error {
   constructor(
@@ -146,6 +161,7 @@ export async function validateWorkshopSourceBundle(params: {
 export function hydrateWorkshopManifest(params: {
   source: ValidatedWorkshopSourceBundle;
   checkpoints: WorkshopCheckpointBuildReport[];
+  resolvedProvider?: ResolvedWorkshopWorkspaceProvider;
 }): WorkshopManifestV1 {
   const sourceManifest = record(
     params.source.compiledManifest.manifest,
@@ -310,6 +326,9 @@ export function hydrateWorkshopManifest(params: {
         memoryMib: positiveInteger(vm.memory_mib, "workspace VM memory_mib"),
         diskMib: positiveInteger(vm.disk_gib, "workspace VM disk_gib") * 1_024,
       })),
+      ...(params.resolvedProvider
+        ? { provider: params.resolvedProvider }
+        : {}),
       checkpoints: params.checkpoints.map((checkpoint) => ({
         id: checkpoint.checkpointId,
         label: checkpoint.checkpointId,
@@ -430,6 +449,7 @@ function validateCompiledManifest(
     positiveInteger(vm.memory_mib, "workspace VM memory_mib");
     positiveInteger(vm.disk_gib, "workspace VM disk_gib");
   }
+  validateWorkspaceProviderDeclaration(workspace.provider, vmIds, vms.length);
 
   const modules = recordArray(manifest.modules, "manifest.modules");
   const moduleIds = uniqueStrings(
@@ -632,6 +652,44 @@ function validateCompiledManifest(
     workshopSlug,
     requiredCheckpointIds: [...checkpointIds].sort(),
   };
+}
+
+function validateWorkspaceProviderDeclaration(
+  value: unknown,
+  vmIds: ReadonlySet<string>,
+  vmCount: number,
+): void {
+  if (value === undefined || value === null) return;
+  const provider = record(value, "manifest.workspace.provider");
+  if (
+    string(provider.kind, "manifest.workspace.provider.kind") !==
+    "hetzner_cloud"
+  ) {
+    throw invalid("manifest.workspace.provider.kind is unsupported");
+  }
+  if (vmCount !== 1) {
+    throw invalid(
+      "Hetzner Cloud workshop workspaces must define exactly one VM",
+    );
+  }
+  const vmId = string(provider.vm_id, "manifest.workspace.provider.vm_id");
+  if (!vmIds.has(vmId)) {
+    throw invalid("manifest.workspace.provider.vm_id references an unknown VM");
+  }
+  const serverType = string(
+    provider.server_type,
+    "manifest.workspace.provider.server_type",
+  );
+  const systemImage = string(
+    provider.system_image,
+    "manifest.workspace.provider.system_image",
+  );
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(serverType)) {
+    throw invalid("manifest.workspace.provider.server_type is invalid");
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(systemImage)) {
+    throw invalid("manifest.workspace.provider.system_image is invalid");
+  }
 }
 
 function assertAcyclic(dependencies: ReadonlyMap<string, string[]>): void {

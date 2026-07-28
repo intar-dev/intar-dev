@@ -6,6 +6,7 @@ import {
   workshopEvents,
   workshopHelpRequests,
   workshopSessionMembers,
+  workshopSessionRuntimeProviders,
   workshopSessions,
   workshopTemplateRevisions,
   workshopTemplates,
@@ -22,6 +23,13 @@ import {
   type OrganizationRole,
 } from "@/lib/organizations";
 import { revokeWorkshopSessionAssistRoutes } from "./assistance";
+import {
+  createInitialWorkshopSessionForecast,
+  createWorkshopSessionForecastFromPinnedPrice,
+  prepareWorkshopSessionProvider,
+  refreshWorkshopSessionProviderPreflight,
+  type WorkshopRuntimeProviderInput,
+} from "./session-provider";
 import { teardownWorkshopSessionRuntimes } from "./runtime-orchestrator";
 import {
   appendWorkshopEvent,
@@ -155,6 +163,7 @@ export async function createWorkshopSession(params: {
   title: string;
   scheduledStartAt: number;
   lobbyOpensAt?: number;
+  runtimeProvider?: WorkshopRuntimeProviderInput;
 }): Promise<WorkshopSessionRecord> {
   await requireOrganizationRole({
     organizationId: params.organizationId,
@@ -195,6 +204,13 @@ export async function createWorkshopSession(params: {
       "workshop template revision not found",
     );
   }
+  const preparedProvider = await prepareWorkshopSessionProvider({
+    organizationId: params.organizationId,
+    manifest: revision.manifest,
+    ...(params.runtimeProvider === undefined
+      ? {}
+      : { runtimeProvider: params.runtimeProvider }),
+  });
   const lobbyOpensAt =
     params.lobbyOpensAt === undefined
       ? requireUnixMs(
@@ -226,6 +242,17 @@ export async function createWorkshopSession(params: {
       createdAt: now,
       updatedAt: now,
     }),
+    db.insert(workshopSessionRuntimeProviders).values({
+      sessionId,
+      providerKind: preparedProvider.providerKind,
+      connectionId: preparedProvider.connectionId,
+      serverType: preparedProvider.serverType,
+      hardwareJson: preparedProvider.hardware,
+      permittedLocationsJson: preparedProvider.permittedLocations,
+      initialPriceObservationJson: preparedProvider.initialPriceObservation,
+      createdAt: now,
+      updatedAt: now,
+    }),
     db.insert(workshopSessionMembers).values({
       id: createAppId(),
       sessionId,
@@ -241,8 +268,18 @@ export async function createWorkshopSession(params: {
     sessionId,
     actorUserId: params.actorUserId,
     type: "session.created",
-    payload: { templateRevisionId: params.templateRevisionId },
+    payload: {
+      templateRevisionId: params.templateRevisionId,
+      runtimeProvider: preparedProvider.providerKind,
+      providerConnectionId: preparedProvider.connectionId,
+      serverType: preparedProvider.serverType,
+    },
     createdAt: now,
+  });
+  await createInitialWorkshopSessionForecast({
+    sessionId,
+    prepared: preparedProvider,
+    actorUserId: params.actorUserId,
   });
   return {
     id: sessionId,
@@ -506,6 +543,11 @@ export async function replaceWorkshopRoster(params: {
     }
     throw error;
   }
+  await createWorkshopSessionForecastFromPinnedPrice({
+    sessionId: params.sessionId,
+    actorUserId: params.actorUserId,
+    trigger: "roster_changed",
+  });
   return listWorkshopRoster(params.sessionId);
 }
 
@@ -626,6 +668,13 @@ export async function updateWorkshopSession(params: {
     return loadWorkshopSession(params.sessionId);
   }
   const { manifest } = await loadWorkshopManifestForSession(params.sessionId);
+  if (current.state === "draft" && nextState === "lobby") {
+    await refreshWorkshopSessionProviderPreflight({
+      sessionId: params.sessionId,
+      actorUserId: params.actorUserId,
+      trigger: "lobby_refresh",
+    });
+  }
   const releasedGateModuleIds =
     current.state !== "lobby" && nextState === "lobby"
       ? manifest.modules
