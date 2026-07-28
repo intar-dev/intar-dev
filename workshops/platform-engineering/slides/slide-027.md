@@ -1,6 +1,6 @@
-# The live runtime stays offline
+# WiFi carries keystrokes, not gigabytes
 
-- Every image baked, every version pinned
-- Nothing downloads at runtime — by design
+- Every image externally pulled by digest
+- Learner VMs pull through controlled registry egress
 - That **is** platform lesson #1:
 - A platform needing internet is someone else's

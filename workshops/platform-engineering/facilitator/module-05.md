@@ -20,13 +20,13 @@ Verify against the running system, never against text — that's design principl
 
 ---
 
-The optional AI segment meets the moment without becoming a dependency. The required two-fault path is complete offline. Only learners who independently have a trusted assistant available should run `make-readonly-kubeconfig.sh` to give it read-only eyes on the cluster; never spend workshop time installing a client, creating an account, or fixing provider connectivity.
+The AI segment, meeting the moment head-on. Recommended flow for at least fault 4: run make-readonly-kubeconfig.sh to give an agent read-only eyes on the cluster (a 4-hour token), then point Claude Code / kubectl-ai / k8sgpt at the fault namespace.
 
 The prompt pattern that works, from the lab README: "Investigate namespace faultlab-04 and give me (1) your root-cause hypothesis in one sentence, (2) the exact kubectl commands whose output would prove it, (3) your confidence." Then the HUMAN runs those commands against the real cluster and passes verdict.
 
 Fault 4 is engineered so the obvious AI diagnosis is plausible AND wrong — don't reveal how. The deliverable is not the fix; it's the sentence "the agent claimed X; I checked Y; the claim was right/wrong because Z." Verification of agent output is the 2026 skill, and this is a rep of it.
 
-No agent handy is the expected offline case. Pair up: one person plays "confident AI" and states a diagnosis from the manifests alone; the other falsifies it against the cluster. Same muscle.
+No agent handy? Pair up: one person plays "confident AI" and states a diagnosis from the manifests alone; the other falsifies it against the cluster. Same muscle.
 
 Spoiler hygiene: each fault dir has description.md — that IS the spoiler; don't open it until you've committed to a diagnosis in writing.
 
@@ -37,7 +37,7 @@ The task: at least faults 1 and 4 (all four if time allows). inject.sh N seeds t
 
 House rule to repeat once more: one-sentence written diagnosis BEFORE any fix, then verify it against the cluster, then fix however you like — live edit, kubectl apply, agent-generated patch, all fine. verify.sh confirms every injected fault is actually fixed.
 
-For fault 4, use the pair version by default; let agent-assisted learners opt in without holding the room. Budget guidance: ~8 minutes on fault 1, the rest on fault 4.
+For fault 4, strongly nudge the agent-assisted path (or the pair version). Budget guidance: ~8 minutes on fault 1, the rest on fault 4.
 
 Wrap-up moment for the core arc, worth saying from the front: "In five modules you built a cloud — an OS layer, GitOps delivery, data services, a self-service API — and then you debugged it like an SRE. Everything after the break is a bonus tier. Nothing depends on it; all of it is worth it."
 
@@ -53,4 +53,4 @@ Logistics to announce before the break:
 - The last 30 minutes of the slot stay protected for open tinkering and questions regardless.
 - Anyone behind: catch-up.sh 5 (or any earlier module) during the break; helpers are around.
 
-Presenter prep during this break: no extra runtime is required for module 08's Backstage comparison. V1 uses the bundled architecture slide and never exposes an undeclared Backstage port.
+Presenter prep during this break: pre-enable backstage.yaml from the catalog on the projector cluster NOW — its first boot is slow (~2 GB image + a CNPG database) and module 08's demo needs it warm.

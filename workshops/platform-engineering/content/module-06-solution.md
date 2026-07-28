@@ -1,6 +1,6 @@
 # Canonical solution for module 06
 
-This is adapted verbatim from the pinned upstream `solve.sh`. Reveal it only after the learner has chosen to see the solution.
+This is adapted from the pinned upstream `solve.sh` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.
 
 ```bash
 #!/usr/bin/env bash

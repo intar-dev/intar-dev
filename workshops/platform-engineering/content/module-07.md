@@ -5,8 +5,8 @@
 At the end of this module your cluster builds its own container images: an Argo Workflow
 runs BuildKit (rootless) *inside* the cluster, builds the tiny app in [`app/`](app/) from
 your in-cluster Gitea, pushes it to your in-cluster Zot registry, and a Deployment runs
-it. Zero external services touched — git, build, registry, deploy all happen inside your
-Intar workspace.
+it. Zero external services touched — git, build, registry, deploy all happen on your
+laptop's cloud.
 
 > **Honesty note:** this is the least-rehearsed path in the workshop (rootless BuildKit
 > on Talos is pioneer territory — nobody has published this combo). It's a presenter demo
@@ -28,21 +28,20 @@ Once *build → push → deploy* closes inside your platform, the loop is fully 
 2. Look at [`app/`](app/) — a Dockerfile and one HTML file. Your Gitea repo already
    contains it (it was seeded with the whole workshop repo). Notice the `FROM` line:
    it pulls the base image from *your* Zot, not from Docker Hub — your platform builds
-   FROM your own registry, fully offline.
-3. **Seed the base image**: copy busybox from checkpoint 00's guest-local mirror into
-   YOUR registry (inside the workspace, against Zot's NodePort). `crane copy` is a
-   registry-to-registry copy; both ends are local, so this does not contact Docker Hub:
+   FROM your own registry, dependent on digest-pinned external pulls.
+3. **Seed the base image**: pull busybox into YOUR registry (host-side, against Zot's
+   NodePort). `crane copy` doesn't read your local docker — it's a registry-to-registry
+   copy that pulls busybox from Docker Hub and pushes it straight into Zot:
 
    ```bash
-   MISE_OFFLINE=1 crane copy --insecure \
-     localhost:5001/library/busybox:1.37.0 localhost:30500/library/busybox:1.37.0
+   crane copy --insecure \
+     docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028 localhost:30500/library/busybox:1.37.0
    ```
 
    That's the platform-team move: you decide what base images exist in your cloud.
 4. Submit a build with [`workflow-run.yaml`](workflow-run.yaml) and follow it to
    `Succeeded`. Then prove the artifact is real: ask Zot's API what's in the registry
-   (NodePort 30500, standard OCI `/v2/` endpoints), then open the released **Zot
-   Registry** app button and find the same repository in its browser UI.
+   (NodePort 30500, standard OCI `/v2/` endpoints).
 5. Run the image: deliver [`hello-site.yaml`](hello-site.yaml) via GitOps, then curl the
    page it serves.
 6. Run `./verify.sh`.
@@ -62,14 +61,14 @@ in Zot's catalog; and the hello-site Deployment Available and serving the page.
 ## Explain-back
 
 Tell your neighbor: list every network hop in your pipeline (git clone from ? → build
-runs where? → push to ? → kubelet pulls from ?). How many of those left your Intar
-workspace? That's the sovereignty argument in one answer.
+runs where? → push to ? → kubelet pulls from ?). How many of those left your laptop?
+That's the sovereignty argument in one answer.
 
 ## Going deeper
 
 - Change `index.html` (v2!), push to Gitea, build `:v2`, and roll `hello-site` to it via
   git. You've reinvented a release pipeline — how would you trigger the build on push?
-  (Gitea has webhooks; Argo has Events. Follow-up project for another workspace.)
+  (Gitea has webhooks; Argo has Events. At-home project.)
 - Inspect the build pod's securityContext while a build runs. What does
   `--oci-worker-no-process-sandbox` trade away, and why did the `builds` namespace need
   the PSA `privileged` label on a Talos cluster?

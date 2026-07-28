@@ -1,6 +1,6 @@
 # Canonical solution for module 07
 
-This is adapted from the pinned upstream `solve.sh` for Intar's offline guest-local mirror. Reveal it only after the learner has chosen to see the solution.
+This is adapted from the pinned upstream `solve.sh` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.
 
 ```bash
 #!/usr/bin/env bash
@@ -29,9 +29,9 @@ wait_exists builds workflowtemplate/build-and-push 180
 
 # 2. Seed YOUR registry with the (pre-pulled) base image — the app's Dockerfile
 #    builds FROM zot.zot.svc.cluster.local:5000, so the platform never touches
-#    an external registry. Both registries are guest-local plain HTTP endpoints.
-MISE_OFFLINE=1 crane copy --insecure \
-  localhost:5001/library/busybox:1.37.0 localhost:30500/library/busybox:1.37.0
+#    an external registry. Host-side crane against Zot's NodePort (plain HTTP).
+crane copy --insecure \
+  docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028 localhost:30500/library/busybox:1.37.0
 
 # 3. Build inside the cluster.
 WF_NAME="$(kubectl create -f "$LAB_DIR/workflow-run.yaml" -o jsonpath='{.metadata.name}')"
@@ -49,7 +49,6 @@ while true; do
 done
 
 curl -fsS http://localhost:30500/v2/_catalog
-# Open the released Zot Registry app button for the browser view.
 
 # 4. Run the built image, delivered via GitOps.
 CLONE="$(gitops_clone)"

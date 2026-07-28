@@ -1,0 +1,13 @@
+---
+# We own the Namespace here (repo convention: each component defines its
+# namespace in its component manifests) rather than leaning only on the
+# Application's CreateNamespace=true — that flag stays as a belt-and-braces
+# for catch-up.sh force-push ordering, but this file is the source of truth.
+# Kagent needs nothing beyond PodSecurity "baseline" (Talos default), so no
+# pod-security labels are set.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagent
+  labels:
+    app.kubernetes.io/name: kagent

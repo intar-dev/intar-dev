@@ -1,0 +1,36 @@
+# ArgoCD Application delivering YOUR platform API (XRD + Composition).
+# Copy to gitops/apps/platform-api.yaml in your platform repo and push.
+#
+# NOTE: spec.source.repoURL must match the other Applications — check with:
+#   kubectl -n argocd get application platform -o jsonpath='{.spec.source.repoURL}'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-api
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/platform-api
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      # The XRD/Composition CRDs come from the crossplane app — don't fail
+      # while Crossplane itself is still installing.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

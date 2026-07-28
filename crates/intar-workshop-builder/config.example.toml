@@ -13,6 +13,16 @@ max_compressed_bundle_bytes = 67108864
 max_expanded_bundle_bytes = 536870912
 max_bundle_entries = 4096
 
+# Required for direct-cloud (for example Hetzner) workshop publications. The
+# file contains either the raw 32-byte Ed25519 seed or its standard-base64
+# encoding and is injected by CI as a root-owned runtime secret. Alternatively
+# set `private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"`; never put
+# key material in this TOML file.
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_file = "/run/secrets/intar-workshop-runtime-ed25519"
+compression = "zstd"
+
 [execution]
 work_root = "/var/lib/intar-workshop-builder/executions"
 qemu_binary = "/usr/bin/qemu-system-x86_64"
@@ -27,6 +37,24 @@ shutdown_timeout_seconds = 300
 sanitizer_path = "/usr/local/sbin/intar-workshop-sanitize"
 probe_every_seconds = 10
 probe_timeout_seconds = 120
+
+# Mandatory together with runtime_bundle_signing. This is a minimal,
+# provider-equivalent Debian 13 disk with only the INTARBUILD seed/SSH
+# bootstrap contract; it must not contain workshop content or pre-pulled OCI
+# layers. CI installs the same statically linked workspace-agent artifact that
+# cloud-init uses. Replace every digest below with the exact artifact SHA-256.
+[execution.runtime_bundle_verification]
+system_image = "debian-13"
+architecture = "x86_64"
+disk = "/var/cache/intar-workshop-builder/bases/clean-debian13.raw"
+disk_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+kernel = "/var/cache/intar-workshop-builder/bases/clean-debian13-vmlinuz"
+kernel_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+initrd = "/var/cache/intar-workshop-builder/bases/clean-debian13-initrd.img"
+initrd_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
+workspace_agent_binary = "/usr/local/libexec/intar/intar-workspace-agent"
+workspace_agent_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 # The image name must exactly match workspace.vm.image in workshop.hcl. This
 # is a dedicated, operator-built Debian disk with the Intar build-seed service,

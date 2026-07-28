@@ -76,12 +76,11 @@ through this API?)
   back onto the XR (`ToCompositeFieldPath` patches) so developers can `kubectl get wdb`
   and see where to connect.
 
-## Optional AI assistance — with the v2 warning
+## AI assistants welcome — with the v2 warning
 
 Assistants are genuinely useful for reading Compositions. But this is where training-data
 skew bites hardest: if your assistant proposes Claims or provider-kubernetes `Object`
 wrappers, it's writing Crossplane v1. Paste it the XRD + composition from this repo as
-context and ask it to stay within v2 semantics. This is optional; the bundled content,
-hints, solution, and verifier are the complete offline path.
+context and ask it to stay within v2 semantics.
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/04-self-service/verify.sh`. Layered hints and the solution are released separately by Intar.

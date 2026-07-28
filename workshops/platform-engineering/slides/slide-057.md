@@ -6,6 +6,6 @@
 - The DB form? Creates a `WorkshopDatabase`
 - Module 04 already did the hard part
 
-Shown → a component's live **Monitoring** page: per-component metrics, logs & traces from the OTel stack, server-rendered, offline, light + dark.
+Shown → a component's live **Monitoring** page: per-component metrics, logs & traces from the OTel stack, server-rendered, digest-pinned, light + dark.
 
  **Cloud parallel:** the AWS · Azure · GCP Console — except this one is plain Go you can read end to end, not a product you log into.

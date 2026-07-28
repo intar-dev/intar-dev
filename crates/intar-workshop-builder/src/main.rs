@@ -7,8 +7,8 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use intar_workshop_builder::{
     KvmWorkshopBackend, WorkshopBuilderConfig, WorkshopExecutionBackend, WorkshopRegistryClient,
-    cleanup_stale_staging_directories, load, process_next_until_cancelled,
-    run_forever_until_cancelled,
+    cleanup_stale_staging_directories, load, preflight_runtime_bundle_signing,
+    process_next_until_cancelled, run_forever_until_cancelled,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -53,6 +53,7 @@ fn doctor(args: ConfigArgs) -> Result<()> {
     let config = load(&args.config)?;
     KvmWorkshopBackend::preflight(&config.execution, true)?;
     KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+    preflight_runtime_bundle_signing(&config.worker)?;
     info!(
         images = config.execution.images.len(),
         work_root = %config.execution.work_root.display(),
@@ -78,6 +79,7 @@ fn prepare_run_host(config: &WorkshopBuilderConfig) -> Result<()> {
     // before a new publication can be claimed.
     KvmWorkshopBackend::preflight(&config.execution, true)?;
     KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+    preflight_runtime_bundle_signing(&config.worker)?;
     for root in [&config.execution.work_root, &config.worker.work_root] {
         let removed = cleanup_stale_staging_directories(root)?;
         if removed > 0 {

@@ -1,0 +1,9 @@
+# Your first GitOps-delivered resource. Copy to gitops/components/demo/welcome.yaml
+# in your platform repo, put YOUR name in, commit, push — then watch ArgoCD.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: welcome
+data:
+  owner: "CHANGE ME"   # your name here
+  motto: "if it is not in git, it does not exist"

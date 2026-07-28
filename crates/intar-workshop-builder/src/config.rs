@@ -6,6 +6,8 @@ use intar_contracts::catalog::ImageArchitecture;
 use serde::Deserialize;
 use url::Url;
 
+use crate::contracts::RuntimeBundleCompression;
+
 pub const DEFAULT_MAX_COMPRESSED_BUNDLE_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_EXPANDED_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_MAX_BUNDLE_ENTRIES: usize = 4_096;
@@ -39,6 +41,23 @@ pub struct WorkerConfig {
     pub max_compressed_bundle_bytes: u64,
     pub max_expanded_bundle_bytes: u64,
     pub max_bundle_entries: usize,
+    /// Required when a claimed workshop selects the direct Hetzner runtime.
+    /// The secret itself is never present in TOML: the config names either a
+    /// root-owned file or an environment variable containing a base64 seed.
+    #[serde(default)]
+    pub runtime_bundle_signing: Option<RuntimeBundleSigningConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBundleSigningConfig {
+    pub key_id: String,
+    #[serde(default)]
+    pub private_key_file: Option<PathBuf>,
+    #[serde(default)]
+    pub private_key_env: Option<String>,
+    #[serde(default)]
+    pub compression: RuntimeBundleCompression,
 }
 
 impl Default for WorkerConfig {
@@ -51,6 +70,7 @@ impl Default for WorkerConfig {
             max_compressed_bundle_bytes: DEFAULT_MAX_COMPRESSED_BUNDLE_BYTES,
             max_expanded_bundle_bytes: DEFAULT_MAX_EXPANDED_BUNDLE_BYTES,
             max_bundle_entries: DEFAULT_MAX_BUNDLE_ENTRIES,
+            runtime_bundle_signing: None,
         }
     }
 }
@@ -82,7 +102,32 @@ pub struct KvmExecutionConfig {
     pub probe_every_seconds: u64,
     #[serde(default = "default_probe_timeout_seconds")]
     pub probe_timeout_seconds: u64,
+    /// Separate, operator-pinned pristine Debian image used only to prove the
+    /// direct-cloud reconstruction path. It must not be one of the authored
+    /// workshop build images.
+    #[serde(default)]
+    pub runtime_bundle_verification: Option<RuntimeBundleVerificationConfig>,
     pub images: Vec<WorkshopBaseImageConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBundleVerificationConfig {
+    /// Must exactly match `workspace.provider.hetzner_cloud.system_image`.
+    pub system_image: String,
+    pub architecture: ImageArchitecture,
+    pub disk: PathBuf,
+    pub disk_sha256: String,
+    pub kernel: PathBuf,
+    pub kernel_sha256: String,
+    pub initrd: PathBuf,
+    pub initrd_sha256: String,
+    pub boot_cmdline: String,
+    /// Exact guest agent installed by direct-cloud cloud-init. The builder
+    /// uploads this binary into the proof guest rather than trusting a copy in
+    /// the base image.
+    pub workspace_agent_binary: PathBuf,
+    pub workspace_agent_sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,12 +172,49 @@ impl WorkshopBuilderConfig {
         if self.worker.max_bundle_entries == 0 {
             bail!("worker.max_bundle_entries must be positive");
         }
+        if let Some(signing) = &self.worker.runtime_bundle_signing {
+            validate_runtime_bundle_signing(signing)?;
+        }
+        if self.worker.runtime_bundle_signing.is_some()
+            != self.execution.runtime_bundle_verification.is_some()
+        {
+            bail!(
+                "worker.runtime_bundle_signing and execution.runtime_bundle_verification must be configured together"
+            );
+        }
         if self.worker.architecture != ImageArchitecture::X86_64 {
             bail!("workshop KVM backend v1 supports only worker architecture x86_64");
         }
         validate_execution(&self.execution)?;
         Ok(())
     }
+}
+
+fn validate_runtime_bundle_signing(config: &RuntimeBundleSigningConfig) -> Result<()> {
+    if !is_safe_id(&config.key_id) {
+        bail!("worker.runtime_bundle_signing.key_id is invalid");
+    }
+    match (&config.private_key_file, &config.private_key_env) {
+        (Some(path), None) => {
+            if !path.is_absolute() || path == Path::new("/") {
+                bail!(
+                    "worker.runtime_bundle_signing.private_key_file must be an absolute file path"
+                );
+            }
+        }
+        (None, Some(name)) => {
+            if !is_safe_environment_name(name) {
+                bail!("worker.runtime_bundle_signing.private_key_env is invalid");
+            }
+        }
+        (Some(_), Some(_)) => {
+            bail!("worker.runtime_bundle_signing must select exactly one private-key source");
+        }
+        (None, None) => {
+            bail!("worker.runtime_bundle_signing must select a private-key source");
+        }
+    }
+    Ok(())
 }
 
 fn validate_execution(config: &KvmExecutionConfig) -> Result<()> {
@@ -188,8 +270,56 @@ fn validate_execution(config: &KvmExecutionConfig) -> Result<()> {
     if config.images.is_empty() {
         bail!("execution.images must contain at least one trusted base image");
     }
+    if let Some(proof) = &config.runtime_bundle_verification {
+        if proof.system_image != "debian-13" {
+            bail!("execution.runtime_bundle_verification.system_image must be 'debian-13'");
+        }
+        if proof.architecture != ImageArchitecture::X86_64 {
+            bail!("execution.runtime_bundle_verification supports only architecture x86_64");
+        }
+        for (label, path) in [
+            ("disk", &proof.disk),
+            ("kernel", &proof.kernel),
+            ("initrd", &proof.initrd),
+            ("workspace_agent_binary", &proof.workspace_agent_binary),
+        ] {
+            if !path.is_absolute() || path == Path::new("/") {
+                bail!(
+                    "execution.runtime_bundle_verification.{label} must be an absolute file path"
+                );
+            }
+        }
+        for (label, digest) in [
+            ("disk_sha256", proof.disk_sha256.as_str()),
+            ("kernel_sha256", proof.kernel_sha256.as_str()),
+            ("initrd_sha256", proof.initrd_sha256.as_str()),
+            (
+                "workspace_agent_sha256",
+                proof.workspace_agent_sha256.as_str(),
+            ),
+        ] {
+            if !is_sha256(digest) {
+                bail!(
+                    "execution.runtime_bundle_verification.{label} must be 64 lowercase hexadecimal characters"
+                );
+            }
+        }
+        if proof.boot_cmdline.trim().is_empty() || proof.boot_cmdline.contains(['\n', '\r', '\0']) {
+            bail!("execution.runtime_bundle_verification.boot_cmdline is invalid");
+        }
+    }
     let mut names = BTreeSet::new();
     for image in &config.images {
+        if config
+            .runtime_bundle_verification
+            .as_ref()
+            .is_some_and(|proof| proof.disk == image.disk)
+        {
+            bail!(
+                "execution runtime-bundle proof disk must be separate from authored image '{}'",
+                image.name
+            );
+        }
         if !is_safe_id(&image.name) {
             bail!("execution image name '{}' is invalid", image.name);
         }
@@ -331,6 +461,13 @@ fn is_safe_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
 fn is_safe_guest_name(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
@@ -338,6 +475,15 @@ fn is_safe_guest_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn is_safe_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && value.len() <= 128
 }
 
 fn is_absolute_guest_path(value: &str) -> bool {
@@ -415,6 +561,21 @@ guest_forbidden_participant_paths = [
   "/opt/debian13-workshop/.git",
   "/opt/debian13-workshop/canonical-catch-up",
 ]
+"#;
+
+    const RUNTIME_BUNDLE_VERIFICATION: &str = r#"
+[execution.runtime_bundle_verification]
+system_image = "debian-13"
+architecture = "x86_64"
+disk = "/var/lib/intar-workshop-builder/bases/clean-debian13.raw"
+disk_sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+kernel = "/var/lib/intar-workshop-builder/bases/clean-vmlinuz"
+kernel_sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+initrd = "/var/lib/intar-workshop-builder/bases/clean-initrd.img"
+initrd_sha256 = "3333333333333333333333333333333333333333333333333333333333333333"
+boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet"
+workspace_agent_binary = "/usr/local/libexec/intar/intar-workspace-agent"
+workspace_agent_sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
 "#;
 
     #[test]
@@ -585,5 +746,88 @@ work_root = "/"
                 .to_string()
                 .contains("must not be the filesystem root")
         );
+    }
+
+    #[test]
+    fn validates_ci_safe_runtime_signing_sources() {
+        let configured = parse(&format!(
+            r#"
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+compression = "gzip"
+{}
+{}"#,
+            EXECUTION, RUNTIME_BUNDLE_VERIFICATION
+        ))
+        .unwrap();
+        let signing = configured.worker.runtime_bundle_signing.unwrap();
+        assert_eq!(
+            signing.compression,
+            crate::contracts::RuntimeBundleCompression::Gzip
+        );
+        assert_eq!(
+            signing.private_key_env.as_deref(),
+            Some("INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64")
+        );
+
+        let error = parse(&format!(
+            r#"
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_file = "/run/secrets/runtime-key"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+{}
+{}"#,
+            EXECUTION, RUNTIME_BUNDLE_VERIFICATION
+        ))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("must select exactly one private-key source")
+        );
+    }
+
+    #[test]
+    fn rejects_partial_direct_cloud_proof_configuration() {
+        let error = parse(&format!(
+            r#"
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+{}"#,
+            EXECUTION
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("must be configured together"));
+
+        let error = parse(&format!(
+            r#"
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+{}
+{}"#,
+            EXECUTION, RUNTIME_BUNDLE_VERIFICATION
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("must be configured together"));
     }
 }

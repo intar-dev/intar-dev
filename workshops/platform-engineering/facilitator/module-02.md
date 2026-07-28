@@ -7,11 +7,11 @@ The architectural heart of the workshop. Everything from here to the end of the 
 
 The loop: edit → push → Gitea → ArgoCD → cluster. Say it twice; it's the muscle memory for the rest of the day.
 
-The design decision worth dwelling on: the git server is IN the cluster. Your platform does not depend on GitHub, live internet, or anyone's SaaS. That's "cloud on your terms" expressed in one architecture choice. It also makes the live workshop path fully offline.
+The design decision worth dwelling on: the git server is IN the cluster. Your platform does not depend on GitHub, on the venue WiFi, or on anyone's SaaS. That's "cloud on your terms" expressed in one architecture choice. (It also means the workshop survives conference WiFi.)
 
 ArgoCD v3 with the app-of-apps pattern: one root Application watches a directory in the repo and creates other Applications from it, in sync waves. This is genuinely how real platform teams bootstrap clusters — not a workshop simplification.
 
-In the lab they open Gitea and Argo CD through their released Intar app buttons (Gitea: gitea_admin / cloudbox123; Argo CD: admin, password fetched from the cluster — that's hint 1). Then the real thing: clone the platform repo FROM their own Gitea using the guest-local URL, add an Application + a ConfigMap with their own name in it, push, and watch a namespace materialize without ever running kubectl apply.
+In the lab they'll poke both UIs: Gitea at localhost:30300 (gitea_admin / cloudbox123), ArgoCD at localhost:30080 (admin, password fetched from the cluster — that's hint 1). Then the real thing: clone the platform repo FROM their own Gitea, add an Application + a ConfigMap with their own name in it, push, and watch a namespace materialize without ever running kubectl apply.
 
 
 ---
@@ -31,6 +31,6 @@ Then the lab: explore both UIs, answer the README's questions about the root App
 
 The win to celebrate on the projector: someone's namespace appearing in ArgoCD's UI seconds after their push. Ask the room: "who touched kubectl apply? Nobody? That's GitOps."
 
-Explain-back: "why is the git server inside the cluster — what breaks if we'd used GitHub instead?" (Answer: runtime internet dependency, SaaS dependency, and the sovereignty story.)
+Explain-back: "why is the git server inside the cluster — what breaks if we'd used GitHub instead?" (Answer: WiFi dependency, SaaS dependency, and the sovereignty story.)
 
 From this point on catch-up.sh works for every module — it force-pushes canonical state to their Gitea. Anyone stuck at 30 min: catch up, don't stall; the concepts land in 03–04 again.

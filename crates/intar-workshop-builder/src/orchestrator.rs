@@ -1,20 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::future::Future;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use intar_contracts::catalog::{ImageArchitecture, ImageFormat, ImageKey};
 use intar_image_upload::{PublishArtifactFile, UploadImageBlob};
-use intar_workshop_manifest::{Module, ValidatedWorkshop};
+use intar_workshop_manifest::{Module, ValidatedWorkshop, WorkspaceProvider};
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::backend::{
     BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, CheckpointImageTarget,
-    SealCheckpoint, SealedVmArtifact, WorkshopExecutionBackend,
+    RuntimeBundleColdBoot, SealCheckpoint, SealedVmArtifact, WorkshopExecutionBackend,
 };
 use crate::bundle::prepare_bundle;
 use crate::client::{PublicationRegistry, WorkshopBlobPublisher};
@@ -23,6 +23,7 @@ use crate::contracts::{
     BuiltVmImage, CheckpointBuildResult, WorkshopPublicationClaim, WorkshopPublicationResult,
 };
 use crate::hydrate::hydrate_workshop_manifest;
+use crate::runtime_bundle::{RuntimeBundleSigner, produce_runtime_bundle};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProcessOutcome {
@@ -139,6 +140,19 @@ where
     let prepared = prepare_bundle(claim, &bytes, worker)?;
     ensure_running(cancellation)?;
     let modules = stable_topological_modules(&prepared.workshop)?;
+    let runtime_bundle_signer = match &prepared.workshop.manifest.workspace.provider {
+        Some(WorkspaceProvider::HetznerCloud { system_image, .. }) => {
+            let config = worker.runtime_bundle_signing.as_ref().context(
+                "Hetzner-compatible workshop publication requires runtime bundle signing",
+            )?;
+            Some((
+                RuntimeBundleSigner::load(config)?,
+                config.compression,
+                system_image.as_str(),
+            ))
+        }
+        None => None,
+    };
     backend.begin(&BeginWorkshopBuild {
         publication_id: &claim.publication_id,
         bundle_root: &prepared.root,
@@ -221,11 +235,87 @@ where
             })?;
         let vm_images =
             hash_and_upload_artifacts(registry, &artifacts, &mut uploaded_artifacts, cancellation)?;
+        let runtime_bundle = if let Some((signer, compression, system_image)) =
+            &runtime_bundle_signer
+        {
+            ensure_running(cancellation)?;
+            let mut bundle = produce_runtime_bundle(
+                &prepared.root,
+                &prepared.workshop,
+                &modules,
+                index,
+                *compression,
+                signer,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to build runtime bundle for checkpoint '{}'",
+                    module.checkpoint
+                )
+            })?;
+            if u64::try_from(bundle.bytes.len()).unwrap_or(u64::MAX)
+                > worker.max_expanded_bundle_bytes
+            {
+                bail!(
+                    "runtime bundle for checkpoint '{}' exceeds the {} byte limit",
+                    module.checkpoint,
+                    worker.max_expanded_bundle_bytes
+                );
+            }
+            let signing_public_key_b64 = signer.verifying_key_b64();
+            let proof = backend
+                .cold_boot_runtime_bundle(&RuntimeBundleColdBoot {
+                    checkpoint_id: &module.checkpoint,
+                    system_image,
+                    bytes: &bundle.bytes,
+                    artifact: &bundle.artifact,
+                    signing_public_key_b64: &signing_public_key_b64,
+                    max_checkpoint_bytes: worker.max_expanded_bundle_bytes,
+                })
+                .with_context(|| {
+                    format!(
+                        "direct-cloud reconstruction proof for checkpoint '{}' failed",
+                        module.checkpoint
+                    )
+                })?;
+            if proof.workspace_agent_sha256.len() != 64
+                || !proof
+                    .workspace_agent_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                bail!(
+                    "direct-cloud proof for checkpoint '{}' returned an invalid workspace-agent digest",
+                    module.checkpoint
+                );
+            }
+            bundle.artifact.workspace_agent_sha256 = Some(proof.workspace_agent_sha256);
+            ensure_running(cancellation)?;
+            let mut file = tempfile::NamedTempFile::new_in(&worker.work_root)
+                .context("failed to create runtime bundle upload file")?;
+            file.write_all(&bundle.bytes)
+                .context("failed to write runtime bundle upload file")?;
+            file.as_file()
+                .sync_all()
+                .context("failed to sync runtime bundle upload file")?;
+            ensure_running(cancellation)?;
+            if uploaded_artifacts.insert(bundle.artifact.sha256.clone()) {
+                registry.upload_artifact(
+                    &PublishArtifactFile::new(file.path(), &bundle.artifact.sha256)
+                        .map_err(anyhow::Error::from)?,
+                )?;
+            }
+            Some(bundle.artifact)
+        } else {
+            None
+        };
         checkpoints.push(CheckpointBuildResult {
             checkpoint_id: module.checkpoint.clone(),
             vm_images,
             sanitized: true,
             cold_boot_verified: true,
+            runtime_bundle_cold_boot_verified: runtime_bundle.is_some(),
+            runtime_bundle,
         });
 
         if index + 1 < modules.len() {

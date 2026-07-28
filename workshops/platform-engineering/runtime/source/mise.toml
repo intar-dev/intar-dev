@@ -1,0 +1,31 @@
+[tools]
+"aqua:siderolabs/talos" = "1.13.6"
+kubectl = "1.36.2"
+helm = "3.21.3"
+crane = "0.21.7"
+"aqua:cilium/cilium-cli" = "0.19.5"
+jq = "1.8.2"
+
+[tasks."cluster:create"]
+description = "Create the Talos-in-Docker cluster and install Cilium"
+run = "./scripts/create-cluster.sh"
+
+[tasks."cluster:destroy"]
+description = "Destroy the Talos-in-Docker cluster"
+run = "./scripts/destroy-cluster.sh"
+
+[tasks."gitops:bootstrap"]
+description = "Install Gitea and Argo CD"
+run = "./scripts/bootstrap-gitops.sh"
+
+[tasks."gitops:seed"]
+description = "Push the learner repository to in-cluster Gitea"
+run = "./scripts/seed-gitea.sh"
+
+[tasks.status]
+description = "Show cluster and platform status"
+run = [
+  "kubectl get nodes -o wide",
+  "kubectl get applications -n argocd 2>/dev/null || true",
+  "kubectl get pods -A",
+]

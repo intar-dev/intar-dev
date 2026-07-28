@@ -1,0 +1,25 @@
+# The golden path: this is ALL a developer writes to get a running,
+# URL-addressable app with a Postgres database and an S3 bucket wired in.
+# Copy to gitops/components/demo/my-application.yaml and push.
+#
+# Crossplane v2: a namespaced XR created directly — not a Claim. Composes a
+# Knative Service (scale-to-zero, a *.sslip.io URL), a WorkshopDatabase
+# (composition-of-compositions → CNPG cluster), and an S3 bucket, then injects
+# DATABASE_URL + S3_* into the workload so it boots already connected.
+#
+# Reach it at (once Ready):
+#   http://my-app.<namespace>.127.0.0.1.sslip.io:31080
+apiVersion: platform.cloudbox.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+spec:
+  image: ghcr.io/randax/cloudbox-uploader@sha256:7f92e34249ccf95a1c9880ad205149459712aa4d4160548cd9e3c5c083eebc1d
+  replicas:
+    min: 0        # scale-to-zero
+    max: 3
+  database: true  # v1: always provisioned (see component VENDOR.md)
+  bucket: true    # v1: always provisioned
+  env:
+    - name: LOG_LEVEL
+      value: info

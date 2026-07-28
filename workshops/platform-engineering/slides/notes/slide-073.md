@@ -1,12 +1,5 @@
-Every model in this table can look competent at one well-formed tool call. Real incident
-diagnosis chains get → describe → logs → events → hypothesis while carrying state, which
-is why multi-turn evaluation matters.
+Every model in this table is fine at a SINGLE well-formed tool call — that's what most benchmarks measure, and it's why a quick demo of a small local model looks deceptively competent. The Berkeley Function-Calling Leaderboard v3 added a multi-turn, state-based category specifically because real agents don't stop after one call — they chain get → describe → logs → events → hypothesis, carrying state across every step. That's exactly the shape of a day-2 diagnosis, and it's exactly where small models fall off a cliff: Qwen3-4B goes from ~80%+ single-turn to ~16% multi-turn; Llama-3.1-8B-Instruct drops to ~5%. GPT-4o-class models drop too — call chains are hard for everyone — but only by roughly 2x, landing at 41–48%, not into single digits.
 
-Use the table as architecture context, not as a live benchmark promise. The Intar guest
-does not ask learners to install Ollama, load a model beside the cluster, or call a hosted
-provider. Those choices would change resource and network assumptions and are therefore
-outside the verified workshop contract.
+This isn't a random pick of numbers — qwen3:4b (2.5 GB, Ollama's own reference model for tool-calling docs) is the exact model beat 1 of the lab runs, host-side, dependent on digest-pinned external pulls, pre-pulled by the Intar checkpoint bootstrap. Watching it flail on your OWN fault, live, teaches this table better than reading it ever could — that's why beat 1 is built to fail instructively, not tightened until it accidentally succeeds.
 
-The transferable point is the cliff between a plausible single response and a sustained
-evidence chain. Purpose-built models may improve the numbers; every diagnosis still needs
-an explicit kill-test against the live system.
+Say plainly: this isn't a swipe at small models in general — it's a swipe at using a stock ≤8B chat model, unmodified, for a MULTI-TURN tool-calling job it wasn't tuned for. Purpose-built tool models (ToolACE-8B, xLAM-2) close much of this gap; that's just not the model an attendee pulls by default, and it's out of scope for a laptop lab.

@@ -77,8 +77,11 @@ struct RawRecordingEvent {
 
 struct RawEventLogWriter {
     file: File,
+    partial_path: PathBuf,
+    final_path: PathBuf,
     start_ts_unix_ms: u64,
     last_sync_ts_unix_ms: u64,
+    finished: bool,
 }
 
 impl RawEventLogWriter {
@@ -91,11 +94,14 @@ impl RawEventLogWriter {
     ) -> io::Result<(Self, PathBuf)> {
         fs::create_dir_all(output_dir)?;
 
-        let (file, path) = create_session_file(output_dir, start_ts_unix_ms)?;
+        let (file, partial_path, final_path) = create_session_file(output_dir, start_ts_unix_ms)?;
         let mut writer = Self {
             file,
+            partial_path,
+            final_path: final_path.clone(),
             start_ts_unix_ms,
             last_sync_ts_unix_ms: start_ts_unix_ms,
+            finished: false,
         };
 
         let header = RawRecordingHeader {
@@ -113,7 +119,7 @@ impl RawEventLogWriter {
         writer.file.write_all(b"\n")?;
         writer.file.sync_data()?;
 
-        Ok((writer, path))
+        Ok((writer, final_path))
     }
 
     fn write_input_bytes(&mut self, ts_unix_ms: u64, bytes: &[u8]) -> io::Result<()> {
@@ -151,7 +157,17 @@ impl RawEventLogWriter {
     }
 
     fn finish(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        if self.finished {
+            return Ok(());
+        }
+        self.file.sync_all()?;
+        // Publish completion without ever replacing a learner-created path.
+        // The final hard link becomes visible atomically; removing the partial
+        // link leaves one stable regular file for the artifact uploader.
+        fs::hard_link(&self.partial_path, &self.final_path)?;
+        fs::remove_file(&self.partial_path)?;
+        self.finished = true;
+        Ok(())
     }
 
     fn sync_data_if_due(&mut self, ts_unix_ms: u64) -> io::Result<()> {

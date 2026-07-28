@@ -1,0 +1,81 @@
+# Knative Eventing v1.22.2 (module 09: event-driven pipeline). Core +
+# in-memory channel + multi-tenant channel-based Broker — the smallest
+# working Broker/Trigger stack (in-memory = no Kafka; fine for a lab,
+# events are lost on dispatcher restart). Resource requests are halved vs
+# upstream (small cluster). SkipDryRun: mt-channel-broker ships CRs
+# (ConfigMap-backed defaults reference channel CRDs from the same sync).
+# Pairs with knative-serving (same wave, same minor version).
+#
+# Enable with:  cp gitops/catalog/knative-eventing.yaml gitops/apps/ && git add . && git commit -m 'enable knative-eventing' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: knative-eventing
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/knative-eventing
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: knative-eventing
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      # Without this, automated sync reverts the ignored fields every cycle
+      # and fights Knative's webhook controller → permanent OutOfSync.
+      - RespectIgnoreDifferences=true
+  # Knative's webhook injects the caBundle into its own webhook configs at
+  # runtime, so git (empty) never matches live → the app flaps OutOfSync
+  # forever and the health gate stalls app-of-apps. Ignore just that field.
+  # (Found by rehearsal-in-CI: knative-serving stuck OutOfSync Healthy.)
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - '.webhooks'
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - '.webhooks'
+    # Knative's five *aggregated* ClusterRoles ship with empty rules; Kubernetes'
+    # ClusterRole aggregation controller fills .rules at runtime from every role
+    # matching their aggregationRule labels, so git (empty) never matches live →
+    # permanent OutOfSync on .rules and the 600s health gate times out. Ignore
+    # .rules on exactly these five (NOT all ClusterRoles — the rest must sync).
+    # (Found by rehearsal-in-CI: knative-eventing stuck OutOfSync Healthy at module 09.)
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: addressable-resolver
+      jqPathExpressions: ['.rules']
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: channelable-manipulator
+      jqPathExpressions: ['.rules']
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: crossnamespace-subscriber
+      jqPathExpressions: ['.rules']
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: podspecable-binding
+      jqPathExpressions: ['.rules']
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: source-observer
+      jqPathExpressions: ['.rules']

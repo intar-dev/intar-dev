@@ -1,0 +1,26 @@
+# Submit a build: kubectl create -f workflow-run.yaml
+# (create, not apply — generateName mints a new Workflow per run)
+#
+# References the WorkflowTemplate `build-and-push` (ns builds) installed by the
+# argo-workflows catalog app. If parameter names don't line up, read the
+# template's inputs: kubectl -n builds get workflowtemplate build-and-push -o yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: build-hello-site-
+  namespace: builds
+spec:
+  workflowTemplateRef:
+    name: build-and-push
+  arguments:
+    parameters:
+      # Git repo to build from — the in-cluster Gitea copy of this repository.
+      - name: repo
+        value: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+      # Directory inside the repo containing the Dockerfile/context.
+      - name: path
+        value: lab/07-ci/app
+      # Where to push. Zot, from inside the cluster (BuildKit resolves cluster
+      # DNS; the kubelet later pulls the same artifact via localhost:30500).
+      - name: image
+        value: zot.zot.svc.cluster.local:5000/hello-site:v1

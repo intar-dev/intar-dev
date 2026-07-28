@@ -1,12 +1,7 @@
-Presenter architecture walkthrough, ~5 minutes. V1 intentionally declares no Backstage
-workspace application, so do not enable `backstage.yaml`, expose port 30700, or invent an
-undeclared route.
+Presenter demo, ~5 minutes, on the projector cluster (backstage.yaml was pre-enabled during the second break — first boot is slow: ~2 GB CNOE image plus a CNPG database, which is precisely why this is a demo and not the hands-on).
 
-Trace the loop on the slide instead: catalog entity → software template → new in-cluster
-Gitea repo → Argo CD Application → running pods. Open the released Gitea and Argo CD
-apps only if you want to ground those two hops in the learner's live platform.
+The loop to show: guest sign-in at :30700 → catalog entities fed from Gitea → run a software template → chase the result through Gitea (:30300, a new repo appeared) → ArgoCD (:30080, a new Application) → pods running.
 
-Narrate what to watch for: the template wires together git, CI/CD, and the catalog. That
-integration glue is the real, ongoing work of operating Backstage. The comparison lands
-after attendees built the same self-service shape in module 04 and put Cloudbox's form in
-front of it here: same shape, industrial strength, industrial weight.
+Narrate what to watch for: the template wires together git, CI/CD, and the catalog — that integration glue is the real, ongoing work of operating Backstage. The demo is deliberately placed AFTER attendees built the same self-service loop themselves in 04 and saw it fronted by a form minutes ago: same shape, industrial strength, industrial weight.
+
+backstage.yaml stays in the catalog — anyone with RAM to spare can run this exact loop at home. That's the fair test of the build-vs-buy slide.

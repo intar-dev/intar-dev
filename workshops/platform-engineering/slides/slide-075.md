@@ -1,10 +1,10 @@
 # GO — Module 10
 
-**Outcome:** connect live failure evidence to one Git diff, push a forward revert, and prove the rollout is healthy.
+**Outcome:** watch a stock local model flail on your own fault — then flip one field and watch a hosted model actually diagnose it.
 
 ```bash
-# inject a scenario → diagnose → git revert → verify
+# enable kagent.yaml, inject a scenario, open the app's Case file in the Console
 cd lab/10-day2-ops && ./verify.sh
 ```
 
-~20 min · fully offline · external agent comparison is optional
+~20 min · beat 1: `qwen3:4b` flails · beat 2: one `ModelConfig` push fixes it

@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faultlab-02
+  labels:
+    workshop/fault: "02"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: orders-db
+  namespace: faultlab-02
+spec:
+  instances: 1
+  bootstrap:
+    initdb:
+      database: orders
+      owner: orders
+  storage:
+    size: 1Gi
+    # was: localpath (a storage class that does not exist)
+    storageClass: local-path
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m

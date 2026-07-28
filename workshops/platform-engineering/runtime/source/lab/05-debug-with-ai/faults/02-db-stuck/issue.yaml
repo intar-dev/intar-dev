@@ -1,0 +1,30 @@
+# Fault 02 — do not read description.md until you have a diagnosis!
+# Requires module 03 (CNPG operator installed).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: faultlab-02
+  labels:
+    workshop/fault: "02"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: orders-db
+  namespace: faultlab-02
+spec:
+  instances: 1
+  bootstrap:
+    initdb:
+      database: orders
+      owner: orders
+  storage:
+    size: 1Gi
+    storageClass: localpath
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m

@@ -1,6 +1,6 @@
 use crate::error::{Result, WorkshopManifestError};
 use crate::model::{CompiledWorkshop, ValidatedWorkshop};
-use crate::validate::{load_and_validate, read_regular_source};
+use crate::validate::{load_and_validate, read_bundle_source};
 use flate2::{Compression, GzBuilder};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -31,7 +31,7 @@ pub fn build_bundle(root: impl AsRef<Path>) -> Result<WorkshopBundle> {
     compiled_json.push(b'\n');
     entries.insert(COMPILED_MANIFEST_PATH.to_string(), compiled_json);
     for source in &workshop.source_files {
-        entries.insert(source.clone(), read_regular_source(root, source)?);
+        entries.insert(source.clone(), read_bundle_source(root, source)?);
     }
 
     let encoder = GzBuilder::new()

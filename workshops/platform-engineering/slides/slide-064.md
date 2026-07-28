@@ -3,7 +3,7 @@
 **Outcome:** a database created from a form — provably real.
 
 ```bash
-# enable portal.yaml → open the Cloudbox Console app
+# enable portal.yaml → open http://localhost:30600
 cd lab/08-portal && ./verify.sh
 ```
 

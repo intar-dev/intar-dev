@@ -16,9 +16,8 @@ export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=u
 aws --endpoint-url http://localhost:30900 s3 mb s3://app-assets
 echo "hello from my own cloud" > /tmp/hello.txt
 aws --endpoint-url http://localhost:30900 s3 cp /tmp/hello.txt s3://app-assets/
-URL="$(aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
-curl -fsS "$URL"
-# For the browser view, use the released RustFS app button in Intar.
+aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600
+# open the printed URL in your browser
 
 cd "$WORKSHOP/lab/03-data" && ./verify.sh
 ```

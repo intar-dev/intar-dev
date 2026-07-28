@@ -1,6 +1,6 @@
-# Your progress, live in Intar
+# Your progress, live
 
-- Workshop room → **Now**, agenda, hints, explain-back
-- Technical verification and current probe health are separate
-- **Need help** stays available throughout
-- Cloudbox remains the platform app, not the progress authority
+- Cloudbox Console → **Workshop** page
+- One row per module, inferred from cluster
+- It reads live state — no self-reporting
+- `http://localhost:30600/workshop` (after module 02)

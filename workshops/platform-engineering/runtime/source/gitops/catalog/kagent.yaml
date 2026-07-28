@@ -1,0 +1,36 @@
+# Kagent v0.9.11 — day-2 Kubernetes AI agent (module 10).
+# Minimal profile: k8s-agent only, UI scaled to zero and tool RBAC read-only;
+# the default ModelConfig uses host-side Ollama qwen3:4b.
+# ServerSideApply covers large CRDs; SkipDryRun covers CRs installed with them.
+#
+# Enable with:  cp gitops/catalog/kagent.yaml gitops/apps/ && git add . && git commit -m 'enable kagent' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kagent
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/kagent
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kagent
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

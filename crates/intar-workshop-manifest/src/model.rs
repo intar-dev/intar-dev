@@ -26,7 +26,22 @@ pub struct Workspace {
     pub lease_grace_minutes: u32,
     pub initial_checkpoint: String,
     pub vms: Vec<WorkspaceVm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<WorkspaceProvider>,
     pub applications: Vec<WorkspaceApplication>,
+}
+
+/// Provider-specific authoring input. Absence means the existing `agent_kvm`
+/// runtime. Provider resolution happens at publication time so a source bundle
+/// remains deterministic and never needs organization cloud credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceProvider {
+    HetznerCloud {
+        vm_id: String,
+        server_type: String,
+        system_image: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -151,4 +166,55 @@ pub struct CompiledWorkshop<'a> {
     pub format_version: u8,
     pub scheduled_duration_minutes: u32,
     pub manifest: &'a WorkshopManifest,
+}
+
+/// Architecture reported by a runtime provider while resolving immutable
+/// publication metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderArchitecture {
+    X86,
+    Arm,
+}
+
+/// Normalized hardware returned by the Hetzner catalog resolver. API-specific
+/// units must be converted before constructing this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HetznerServerTypeObservation {
+    pub name: String,
+    pub architecture: ProviderArchitecture,
+    pub cores: u32,
+    pub memory_mib: u32,
+    pub disk_mib: u32,
+    pub deprecated: bool,
+}
+
+/// Immutable provider metadata written into the published/hydrated manifest.
+/// The explicit `compatible` proof can only be produced by the resolver path;
+/// unverified authoring input never has this representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
+pub enum ResolvedWorkspaceProvider {
+    #[serde(rename = "agent_kvm")]
+    AgentKvm,
+    #[serde(rename = "hetzner_cloud")]
+    HetznerCloud {
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        #[serde(rename = "serverType")]
+        server_type: String,
+        #[serde(rename = "systemImage")]
+        system_image: String,
+        hardware: ResolvedProviderHardware,
+        compatible: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedProviderHardware {
+    pub architecture: ProviderArchitecture,
+    pub cores: u32,
+    pub memory_mib: u32,
+    pub disk_mib: u32,
 }

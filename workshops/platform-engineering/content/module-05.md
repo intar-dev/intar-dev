@@ -51,15 +51,14 @@ For each fault you take on (do at least 1 and 4; all four if time allows):
 4. Fix it — live edit, `kubectl apply`, whatever you like. Re-check the symptom.
 5. `./verify.sh` when you're done with all your faults.
 
-### Optional external AI comparison
+### With an AI agent (recommended for at least fault 4)
 
-The two-fault path above is complete offline and requires no model, account, key, or
-network. If you independently have an agent available, you may give it read-only eyes on
-your cluster and make it do step 1–2 for you — then *you* do step 3 on its answer:
+Give an agent read-only eyes on your cluster and make it do step 1–2 for you — then *you*
+do step 3 on its answer:
 
 ```bash
 ./make-readonly-kubeconfig.sh          # writes ./ai-readonly.kubeconfig (4h token)
-# Supply that kubeconfig only to an assistant you already trust and operate.
+KUBECONFIG=$PWD/ai-readonly.kubeconfig claude    # or kubectl-ai, k8sgpt analyze, ...
 ```
 
 A prompt that works well: *"Something is wrong in namespace faultlab-04. Investigate and
@@ -68,8 +67,8 @@ whose output would prove it, (3) your confidence."* Then run those commands your
 against the real cluster, and pass verdict. The deliverable is not the fix — it's the
 sentence **"the agent claimed X; I checked Y; the claim was right/wrong because Z."**
 
-No agent handy is the expected offline case. Pair up: one of you plays "confident AI",
-states a diagnosis from the manifests alone; the other falsifies it against the cluster.
+No agent handy? Pair up: one of you plays "confident AI", states a diagnosis from the
+manifests alone; the other falsifies it against the cluster.
 
 ## Hints
 
@@ -92,13 +91,13 @@ you'd applied the fix for the wrong diagnosis?
 
 ## Going deeper
 
-- Optionally re-run fault 4 pointing your own agent at the cluster *with* read access —
+- Re-run fault 4 pointing your agent at the cluster *with* read access and ask it again —
   does live access change its answer versus manifest-only reasoning? (This is the whole
   argument for agentic tooling with real cluster eyes, and for keeping it read-only.)
 - Design your own fault for your neighbor: same contract (`issue.yaml`, `fix.yaml`,
   `description.md`), must survive their agent's first guess. Hardest part: making it
   *fair*.
-- If you already have `k8sgpt`, try `k8sgpt analyze --explain` across a fault namespace
-  and grade its output. Do not install it or fetch a model for this workshop.
+- Try `k8sgpt analyze --explain` across a fault namespace and grade its output: right
+  cause? right evidence? right fix?
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/05-debug-with-ai/verify.sh`. Layered hints and the solution are released separately by Intar.

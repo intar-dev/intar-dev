@@ -1,0 +1,39 @@
+# Cloudbox Console — the bespoke portal attendees wire up in module 08
+# (Backstage stays in the catalog as the presenter demo). Single Go binary +
+# htmx, built from apps/portal in this repo. UI: http://localhost:30600.
+# Reads platform state (ArgoCD Applications, CNPG Clusters, Knative
+# Services, pods, namespaces). XR self-service (the Databases page) requires
+# the module-08 Role in gitops/components/demo/ — it ships with the `demo`
+# namespace; until it lands, the Databases page shows a friendly forbidden
+# error. The gallery page talks to RustFS (bucket `images`, created by
+# picture-pipeline) and the uploader ksvc.
+#
+# Enable with:  cp gitops/catalog/portal.yaml gitops/apps/ && git add . && git commit -m 'enable portal' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: portal
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/portal
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: portal
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

@@ -1,6 +1,6 @@
 # Canonical solution for module 03
 
-This is adapted verbatim from the pinned upstream `solve.sh`. Reveal it only after the learner has chosen to see the solution.
+This is adapted from the pinned upstream `solve.sh` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.
 
 ```bash
 #!/usr/bin/env bash
@@ -50,7 +50,7 @@ if command -v aws >/dev/null 2>&1; then
   aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600
 else
   kubectl -n demo run solve-s3 --rm -i --restart=Never --quiet \
-    --image=public.ecr.aws/aws-cli/aws-cli:2.27.49 \
+    --image=public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581 \
     --env AWS_ACCESS_KEY_ID=cloudbox --env AWS_SECRET_ACCESS_KEY=cloudbox123 \
     --env AWS_REGION=us-east-1 \
     --command -- /bin/sh -c '

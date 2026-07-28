@@ -35,6 +35,39 @@ pub struct CheckpointBuildResult {
     pub vm_images: Vec<BuiltVmImage>,
     pub sanitized: bool,
     pub cold_boot_verified: bool,
+    /// Separate proof that the exact signed reconstruction bundle was applied
+    /// successfully by the direct-cloud guest agent on a fresh, pinned Debian
+    /// base. This is deliberately not inferred from `cold_boot_verified`,
+    /// which describes the sealed agent-KVM disk path.
+    pub runtime_bundle_cold_boot_verified: bool,
+    /// Learner-safe reconstruction material for direct cloud workspaces. KVM
+    /// publications omit it and continue using sealed VM images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_bundle: Option<RuntimeBundleArtifact>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBundleCompression {
+    None,
+    Gzip,
+    #[default]
+    Zstd,
+}
+
+/// Content-addressed artifact proof consumed by the Workshop registry. The
+/// signature covers the exact uploaded (and therefore compressed) bytes.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBundleArtifact {
+    pub sha256: String,
+    pub compression: RuntimeBundleCompression,
+    pub signature_b64: String,
+    pub signing_key_id: String,
+    /// SHA-256 of the exact workspace-agent binary that verified and applied
+    /// this bundle on the clean direct-cloud proof guest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_agent_sha256: Option<String>,
 }
 
 /// The only terminal payloads accepted by the workshop publication endpoint.

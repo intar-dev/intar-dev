@@ -1,8 +1,8 @@
-# Interlude: Backstage, traced
+# Interlude: Backstage, live
 
-Presenter walkthrough · ~5 min · no extra runtime
+Presenter demo · ~5 min · watch the projector
 
 - Catalog → template → new Gitea repo
 - → ArgoCD app → running pods
 - The template's glue is the real work
-- Compare the glue with your live Cloudbox path
+- `backstage.yaml` stays in the catalog — try at home

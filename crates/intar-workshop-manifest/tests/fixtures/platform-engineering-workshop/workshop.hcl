@@ -13,9 +13,15 @@ workspace {
 
   vm "workspace" {
     image        = "platform-workshop-debian13"
-    vcpu_millis = 4000
+    cpu_millis  = 4000
     memory_mib   = 16384
-    disk_gib     = 100
+    disk_mib     = 65536
+  }
+
+  provider "hetzner_cloud" {
+    vm_id        = "workspace"
+    server_type  = "cx43"
+    system_image = "debian-13"
   }
 
   application "gitea" {

@@ -1,7 +1,3 @@
-This section runs while checked-in workspaces finish provisioning. It needs zero keyboard,
-just attention. Its job is to turn "the cloud" from a place you rent into a list of
-things you can build. Every module later is one row of the table. ~8 minutes, unhurried.
+This section runs while the last laptops are still pulling images — it needs zero keyboard, just attention. Its job: turn "the cloud" from a place you rent into a list of things you can build. Every module later is one row of the table you're about to show. ~8 minutes, unhurried.
 
-If a workspace is still pending, tell the learner to stay in the room and use **Need
-help**. No download or local-machine setup should be happening; the control room should
-show whether the issue is allocation, cached-image readiness, or guest boot.
+If the Intar checkpoint bootstrap is still downloading for some people, say so now: "This next bit is exactly why we front-loaded the download — watch the screen, your laptop keeps working in the background."

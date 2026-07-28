@@ -1,0 +1,39 @@
+# OTel Collector 0.149.0 — the collection layer of the Victoria stack (#57,
+# Stage 2). Two collectors, plain manifests (no Operator, no cert-manager —
+# see the issue-57 decision comment):
+#   - agent   (DaemonSet)  → filelog + kubeletstats  → VictoriaLogs / VM
+#   - gateway (Deployment) → k8s_cluster + prometheus scrape + OTLP → VM / VLogs
+# This is what actually closes the collection gap: component logs + infra
+# metrics + /metrics scrapes, not just the 3 first-party apps' OTLP.
+# Sync-wave 1 so the VM/VLogs backends (wave 0) exist before the collector
+# starts exporting to them (it would retry anyway, but this keeps boot clean).
+#
+# Enable with:  cp gitops/catalog/otel-collector.yaml gitops/apps/ && git add . && git commit -m 'enable otel-collector' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/otel-collector
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

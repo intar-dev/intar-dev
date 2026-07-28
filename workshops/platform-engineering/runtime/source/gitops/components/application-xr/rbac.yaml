@@ -1,0 +1,30 @@
+# Extra Crossplane permissions for the Application composition.
+#
+# Crossplane v2 compositions emit arbitrary Kubernetes resources directly, and
+# Crossplane only gets RBAC over its own types — so every third-party API group
+# a composition touches must be granted explicitly (same mechanism as the
+# crossplane component's rbac.yaml, which already covers batch + core + CNPG).
+# The chart's `crossplane` ClusterRole aggregates any ClusterRole with the label
+# below.
+#
+# This composition additionally needs to create:
+#   - serving.knative.dev Services (the workload), and
+#   - platform.cloudbox.io WorkshopDatabases (composition-of-compositions).
+# Crossplane's rbac-manager usually generates RBAC for XR types automatically;
+# the platform.cloudbox.io grant here is belt-and-suspenders and cheap.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-aggregate-application-xr
+  labels:
+    app: crossplane
+    rbac.crossplane.io/aggregate-to-crossplane: "true"
+rules:
+  # Knative Serving: the workload the composition emits.
+  - apiGroups: ["serving.knative.dev"]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The platform's own XRs — the Application composes a WorkshopDatabase.
+  - apiGroups: ["platform.cloudbox.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

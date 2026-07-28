@@ -5,19 +5,15 @@ export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=u
 aws --endpoint-url http://localhost:30900 s3 mb s3://app-assets
 echo "hello from my own cloud" > hello.txt
 aws --endpoint-url http://localhost:30900 s3 cp hello.txt s3://app-assets/
-URL="$(aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
-curl -fsS "$URL"
+aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600
 ```
 
-`localhost` is correct for these terminal/API calls inside the Intar guest. For browser
-exploration, open **RustFS** from the workshop app buttons and find `app-assets/hello.txt`.
-
-The pinned guest also supports running the sequence in the cluster (`verify.sh` wants
-the uploaded object too, not just the bucket):
+No `aws` on your machine? Run the whole sequence in the cluster instead (`verify.sh`
+wants the uploaded object too, not just the bucket):
 
 ```bash
 kubectl -n demo run s3 --rm -i --restart=Never \
-  --image=public.ecr.aws/aws-cli/aws-cli:2.27.49 \
+  --image=public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581 \
   --env AWS_ACCESS_KEY_ID=cloudbox --env AWS_SECRET_ACCESS_KEY=cloudbox123 \
   --env AWS_REGION=us-east-1 \
   --command -- /bin/sh -c '

@@ -32,9 +32,8 @@ Everything goes through the git workflow from module 02 (your Gitea clone).
 3. **Claim your object storage.** RustFS speaks S3 on NodePort **30900**
    (access key `cloudbox`, secret `cloudbox123`). Using the `aws` CLI (or `mc`, or a
    3-line script — dealer's choice): create a bucket `app-assets`, upload any file, and
-   generate a **presigned URL**. Prove that URL from the workspace terminal with `curl`,
-   then open the released **RustFS** app button and find the object in its console. That
-   is you handing out a download link with zero AWS involved.
+   generate a **presigned URL**. Open it in your browser. That URL is you handing a
+   download link to someone with zero AWS involved.
 
 4. Run `./verify.sh`.
 

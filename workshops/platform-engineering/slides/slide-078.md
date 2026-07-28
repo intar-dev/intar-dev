@@ -7,6 +7,6 @@
    **Onboarding** → the labs, hints, locked-page teasers
    **Secure default** → "you hand the portal its keys" (RBAC)
    **Self-service** → New Database / New Function forms
-   **Thinnest viable** → all of it, in one workspace
+   **Thinnest viable** → all of it, on your laptop
 
 A shopping list of things you'd rent — assembled into a platform you **own**.

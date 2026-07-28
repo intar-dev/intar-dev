@@ -1,0 +1,180 @@
+# Picture pipeline (module 09 capstone): upload → RustFS → CloudEvent →
+# resize. First-party apps (apps/uploader, apps/resizer in this repo),
+# event mesh from knative-eventing, storage from rustfs.
+#
+# Flow: portal → uploader ksvc → puts original in s3://images/ → POSTs a
+# dev.cloudbox.image.uploaded CloudEvent to the Broker → Trigger delivers
+# it to the resizer ksvc → resizer writes the thumbnail back to s3://images/.
+#
+# Requires (module order): knative-serving, knative-eventing, rustfs —
+# hence SkipDryRunOnMissingResource on the Application.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pipeline
+---
+# In-memory, multi-tenant channel-based Broker. The broker class annotation
+# is explicit for teachability — config-br-defaults in knative-eventing
+# already defaults to MTChannelBasedBroker, so a bare Broker would behave
+# identically. In-memory = events are lost if the imc-dispatcher restarts;
+# deliberate for a lab (no Kafka).
+apiVersion: eventing.knative.dev/v1
+kind: Broker
+metadata:
+  name: default
+  namespace: pipeline
+  annotations:
+    eventing.knative.dev/broker.class: MTChannelBasedBroker
+spec:
+  # Point the broker AT the channel-template ConfigMap explicitly instead of
+  # relying on the cluster default (config-br-defaults). The mt-broker-controller
+  # resolves the cluster default once at startup into its config-store; if
+  # config-br-default-channel wasn't applied yet (ArgoCD races the eventing
+  # install), that cache stays empty and every reconcile fails
+  # "ChannelTemplateFailed: failed to find channelTemplate" forever. With an
+  # explicit spec.config the controller reads this ConfigMap via the live lister
+  # on each reconcile, so it recovers as soon as the ConfigMap exists.
+  config:
+    apiVersion: v1
+    kind: ConfigMap
+    name: config-br-default-channel
+    namespace: knative-eventing
+---
+# The uploader: receives a picture (from the portal), stores the original
+# in RustFS, emits a dev.cloudbox.image.uploaded CloudEvent to the Broker.
+# cluster-local: reachable only inside the cluster as
+# http://uploader.pipeline.svc.cluster.local (via kourier-internal) —
+# never exposed on the Kourier NodePort.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: uploader
+  namespace: pipeline
+  labels:
+    networking.knative.dev/visibility: cluster-local
+spec:
+  template:
+    spec:
+      containers:
+        # Built by CI from apps/uploader (multi-arch). Must be in the
+        # pre-pull list (scripts/images.txt).
+        - image: ghcr.io/randax/cloudbox-uploader@sha256:7f92e34249ccf95a1c9880ad205149459712aa4d4160548cd9e3c5c083eebc1d
+          env:
+            # WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral
+            # lab sandbox) — must match the rustfs component.
+            - name: S3_ENDPOINT
+              value: http://rustfs-svc.rustfs.svc.cluster.local:9000
+            - name: S3_ACCESS_KEY
+              value: cloudbox
+            - name: S3_SECRET_KEY
+              value: cloudbox123
+            - name: S3_BUCKET
+              value: images
+            # The MT broker ingress URL for Broker default in ns pipeline:
+            # http://broker-ingress.<eventing-ns>.svc.cluster.local/<ns>/<broker>
+            - name: BROKER_URL
+              value: http://broker-ingress.knative-eventing.svc.cluster.local/pipeline/default
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+# The resizer: subscribes (via the Trigger below) to upload events and
+# writes a resized copy back to the same bucket. Also cluster-local — only
+# the Broker ever calls it.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: resizer
+  namespace: pipeline
+  labels:
+    networking.knative.dev/visibility: cluster-local
+spec:
+  template:
+    spec:
+      containers:
+        # Built by CI from apps/resizer (multi-arch). Must be in the
+        # pre-pull list (scripts/images.txt).
+        - image: ghcr.io/randax/cloudbox-resizer@sha256:08ccc66e6e3aa4070104bef93cf7904a64376539ac1ecdaa8a5c4e888a2ed58c
+          env:
+            - name: S3_ENDPOINT
+              value: http://rustfs-svc.rustfs.svc.cluster.local:9000
+            - name: S3_ACCESS_KEY
+              value: cloudbox
+            - name: S3_SECRET_KEY
+              value: cloudbox123
+            - name: S3_BUCKET
+              value: images
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # Image decoding is the one memory-hungry step in the pipeline.
+              memory: 256Mi
+---
+# Route every dev.cloudbox.image.uploaded event on the Broker to the
+# resizer. Exact-match attribute filter — the classic Knative Trigger.
+apiVersion: eventing.knative.dev/v1
+kind: Trigger
+metadata:
+  name: resize-on-upload
+  namespace: pipeline
+spec:
+  broker: default
+  filter:
+    attributes:
+      type: dev.cloudbox.image.uploaded
+  subscriber:
+    ref:
+      apiVersion: serving.knative.dev/v1
+      kind: Service
+      name: resizer
+---
+# One-shot, idempotent bucket setup: GitOps can carry a Job, but not an S3
+# API call — same aws-cli image + head-bucket||mb pattern as
+# canonical module state's post.sh. Generous backoff: rustfs may still be
+# starting when this lands. The completed Job stays around (no TTL) so
+# ArgoCD does not recreate it on every reconcile.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-images-bucket
+  namespace: pipeline
+spec:
+  backoffLimit: 20
+  template:
+    metadata:
+      labels:
+        app: create-images-bucket
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          # Same pinned image the platform-api composition and post.sh use.
+          image: public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              EP=http://rustfs-svc.rustfs.svc.cluster.local:9000
+              aws --endpoint-url $EP s3api head-bucket --bucket images 2>/dev/null \
+                || aws --endpoint-url $EP s3api create-bucket --bucket images
+              echo "bucket images ready"
+          env:
+            # WORKSHOP-GRADE CREDENTIALS (see above).
+            - name: AWS_ACCESS_KEY_ID
+              value: cloudbox
+            - name: AWS_SECRET_ACCESS_KEY
+              value: cloudbox123
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

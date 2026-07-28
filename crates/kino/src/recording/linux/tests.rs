@@ -25,6 +25,13 @@ fn cast_writer_persists_header_and_events() {
     let (mut writer, recording_path) =
         RawEventLogWriter::start(temp.path(), start_ts_unix_ms, 120, 40, metadata)
             .unwrap_or_else(|error| panic!("recording writer start failed: {error}"));
+    assert!(!recording_path.exists());
+    assert!(
+        fs::read_dir(temp.path())
+            .unwrap_or_else(|error| panic!("read_dir failed: {error}"))
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "partial"))
+    );
 
     writer
         .write_input_bytes(start_ts_unix_ms, b"echo hello\n")
@@ -41,6 +48,13 @@ fn cast_writer_persists_header_and_events() {
     writer
         .finish()
         .unwrap_or_else(|error| panic!("finish failed: {error}"));
+    assert!(recording_path.exists());
+    assert!(
+        fs::read_dir(temp.path())
+            .unwrap_or_else(|error| panic!("read_dir failed: {error}"))
+            .filter_map(Result::ok)
+            .all(|entry| entry.path().extension().is_none_or(|ext| ext != "partial"))
+    );
 
     let content = fs::read_to_string(recording_path)
         .unwrap_or_else(|error| panic!("failed to read recording file: {error}"));

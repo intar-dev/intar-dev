@@ -1,0 +1,155 @@
+# Workshop addition: the `builds` namespace where Argo Workflows actually runs
+# workflow pods (the controller/server in `argo` are started with
+# --managed-namespace builds, see namespace-install.yaml).
+#
+# Talos enforces Pod Security Admission `baseline` cluster-wide. Rootless
+# BuildKit needs seccomp/AppArmor `Unconfined`, which baseline forbids, so this
+# namespace opts in to `privileged`. That is the entire reason builds get their
+# own namespace instead of running in `argo`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: builds
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+# The namespace-scoped Roles that namespace-install.yaml creates in `argo`
+# only cover `argo`. The controller and server service accounts need the same
+# rights in the managed namespace, so we mirror them here (rules copied from
+# argo-role / argo-server-role in namespace-install.yaml v4.0.7).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-managed-role
+  namespace: builds
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, get, update]
+  - apiGroups: [""]
+    resources: [pods, pods/exec]
+    verbs: [create, get, list, watch, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, watch, list]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, persistentvolumeclaims/finalizers]
+    verbs: [create, update, delete, get]
+  - apiGroups: [argoproj.io]
+    resources:
+      - workflows
+      - workflows/finalizers
+      - workflowtasksets
+      - workflowtasksets/finalizers
+      - workflowartifactgctasks
+    verbs: [get, list, watch, update, patch, delete, create]
+  - apiGroups: [argoproj.io]
+    resources: [workflowtemplates, workflowtemplates/finalizers]
+    verbs: [get, list, watch]
+  - apiGroups: [argoproj.io]
+    resources: [workflowtaskresults]
+    verbs: [list, watch, deletecollection]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [argoproj.io]
+    resources: [cronworkflows, cronworkflows/finalizers]
+    verbs: [get, list, watch, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [create, get, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-managed-binding
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-managed-role
+subjects:
+  - kind: ServiceAccount
+    name: argo
+    namespace: argo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-server-managed-role
+  namespace: builds
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, watch, list, create, update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [pods, pods/exec, pods/log]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [watch, create, patch]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get, list, watch]
+  - apiGroups: [argoproj.io]
+    resources:
+      - eventsources
+      - sensors
+      - workflows
+      - workfloweventbindings
+      - workflowtemplates
+      - cronworkflows
+      - cronworkflows/finalizers
+    verbs: [create, get, list, watch, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-server-managed-binding
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-server-managed-role
+subjects:
+  - kind: ServiceAccount
+    name: argo-server
+    namespace: argo
+---
+# Executor RBAC: every workflow pod's wait container (emissary executor)
+# reports progress by creating/patching WorkflowTaskResults. Workflows in this
+# lab run as the `default` service account of `builds`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-executor
+  namespace: builds
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflowtaskresults]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workflow-executor-binding
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-executor
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: builds

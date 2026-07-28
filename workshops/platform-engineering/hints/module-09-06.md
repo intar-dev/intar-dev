@@ -11,7 +11,7 @@ git add . && git commit -m "module 09: eventing + picture pipeline" && git push
 kubectl -n pipeline get broker,trigger,ksvc          # wait for Ready True across the board
 
 kubectl -n pipeline get pods -w &                    # the watcher
-# → open Intar's Cloudbox Console app → Gallery; upload, watch 0 → 1 → 0 twice
+# → http://localhost:30600/gallery — upload a photo, watch 0 → 1 → 0 twice
 kill %1
 
 export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=us-east-1
@@ -22,5 +22,5 @@ kubectl -n pipeline logs -l serving.knative.dev/service=resizer -c user-containe
 cd "$WORKSHOP/lab/09-capstone" && ./verify.sh
 ```
 
-(The canonical solution performs the same upload from inside the guest with `curl`; the
+(No browser? `solve.sh` uploads a test PNG with plain `curl` through the portal — the
 gallery form is just a multipart POST.)

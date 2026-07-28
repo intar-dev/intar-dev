@@ -1,0 +1,82 @@
+# The golden-path platform API: an Application. One manifest in — a running,
+# URL-addressable workload with its Postgres + bucket wired in — out. This is
+# the headline self-service abstraction (PRD-0003), built ON TOP of the
+# WorkshopDatabase XR from module 04 (composition-of-compositions).
+#
+# Crossplane v2 CompositeResourceDefinition — scope: Namespaced, NO claims
+# (v2 XRs are created directly in namespaces). Mirrors the WorkshopDatabase
+# XRD's shape/annotations exactly.
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: applications.platform.cloudbox.io
+spec:
+  scope: Namespaced
+  group: platform.cloudbox.io
+  names:
+    kind: Application
+    plural: applications
+    singular: application
+    shortNames:
+      - app
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - image
+              properties:
+                image:
+                  type: string
+                  description: Container image for the workload (any registry the cluster can pull).
+                replicas:
+                  type: object
+                  description: Autoscaling bounds for the Knative revision.
+                  default: {}
+                  properties:
+                    min:
+                      type: integer
+                      description: Minimum replicas. 0 = scale-to-zero (the default).
+                      minimum: 0
+                      default: 0
+                    max:
+                      type: integer
+                      description: Maximum replicas.
+                      minimum: 1
+                      default: 3
+                env:
+                  type: array
+                  description: Extra plain environment variables, appended to the platform-injected ones.
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - value
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+                database:
+                  type: boolean
+                  description: >-
+                    Provision a Postgres database (a WorkshopDatabase XR) and wire its
+                    connection secret into the workload as DATABASE_URL.
+                    v1 LIMITATION: this flag is not yet gated — a database is always
+                    provisioned regardless of the value (function-patch-and-transform
+                    cannot conditionally omit a composed resource). See VENDOR.md.
+                  default: true
+                bucket:
+                  type: boolean
+                  description: >-
+                    Provision an S3 bucket in RustFS and wire its name into the workload
+                    as S3_BUCKET.
+                    v1 LIMITATION: not yet gated — a bucket is always provisioned
+                    regardless of the value. See VENDOR.md.
+                  default: true

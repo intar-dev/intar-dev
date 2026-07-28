@@ -1,0 +1,54 @@
+# ArgoCD Application for YOUR team's workloads.
+# Copy this file to gitops/apps/demo.yaml in your platform repo (the Gitea clone)
+# and push — the root "platform" Application will pick it up.
+#
+# NOTE: spec.source.repoURL must match the URL the other Applications use.
+# Check it with:
+#   kubectl -n argocd get application platform -o jsonpath='{.spec.source.repoURL}'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/demo
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # Some manifests we add later (module 04) use CRDs that are installed by
+      # other Applications — don't fail the sync while those are still coming up.
+      - SkipDryRunOnMissingResource=true
+      # ...and honor ignoreDifferences below during sync, not just in the diff.
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
+  # Knative heavily defaults a Service's template + traffic after you apply it
+  # (container name, probes, concurrency, timeouts, 100%-latest traffic), so
+  # git never matches live and this app flaps OutOfSync forever. Ignore the
+  # fields Knative owns for Knative Services only (CNPG Clusters / Crossplane
+  # XRs in this same app are unaffected). Found by rehearsal-in-CI, module 06.
+  ignoreDifferences:
+    - group: serving.knative.dev
+      kind: Service
+      jqPathExpressions:
+        - '.spec.template'
+        - '.spec.traffic'

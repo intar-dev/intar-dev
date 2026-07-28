@@ -1,0 +1,247 @@
+# HOW an Application is implemented. Crossplane v2 pipeline mode with the same
+# function-patch-and-transform used by the WorkshopDatabase composition (module
+# 04) — no new function to install. In ONE reconcile it emits, into the XR's
+# own namespace:
+#
+#   1. workload  — a Knative Service (free scale-to-zero + a *.sslip.io URL via
+#                  Kourier; no separate ingress component needed).
+#   2. database  — a WorkshopDatabase XR. THIS is the make-or-break
+#                  composition-of-compositions: an Application XR that composes
+#                  another platform XR, which in turn composes a CNPG Cluster +
+#                  bucket Job. Reuses module 04 verbatim.
+#   3. bucket    — an S3 bucket in RustFS via the module 03/04 aws-cli Job.
+#
+# SECRET WIRING (the magic beat): the CNPG connection secret name is
+# DETERMINISTIC — WorkshopDatabase names its Cluster "<name>-pg", and CNPG then
+# creates the app secret "<name>-pg-app". So we can construct that name with a
+# Format patch and reference it into the workload's DATABASE_URL env via
+# secretKeyRef WITHOUT reading back a runtime-generated value. See VENDOR.md for
+# the exact assumptions this bakes in (secret name + key), which need a cluster
+# rehearsal to confirm.
+#
+# v1 SCOPE: database + bucket are ALWAYS emitted — function-patch-and-transform
+# has no per-resource conditional, so spec.database / spec.bucket are not yet
+# gated (deferred to a follow-up using function-go-templating or
+# function-cel-filter). The NATS queue and explicit ingress-host are also
+# deferred. See VENDOR.md.
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: application-knative
+  labels:
+    provider: knative
+spec:
+  compositeTypeRef:
+    apiVersion: platform.cloudbox.io/v1alpha1
+    kind: Application
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        # Must match the installed Function's name (shared with module 04):
+        #   kubectl get functions.pkg.crossplane.io
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          # ---------------------------------------------------- the workload
+          # A Knative Service. Named after the XR, so the developer gets a
+          # predictable URL: http://<name>.<namespace>.127.0.0.1.sslip.io:31080
+          - name: workload
+            base:
+              apiVersion: serving.knative.dev/v1
+              kind: Service
+              spec:
+                template:
+                  metadata:
+                    annotations:
+                      # Patched from spec.replicas.{min,max}. Defaults here match
+                      # the XRD defaults (scale-to-zero, max 3).
+                      autoscaling.knative.dev/minScale: "0"
+                      autoscaling.knative.dev/maxScale: "3"
+                  spec:
+                    containers:
+                        # Patched from spec.image. The base default is a real,
+                        # pre-pulled image so the manifest is valid on its own.
+                      - image: ghcr.io/randax/cloudbox-uploader@sha256:7f92e34249ccf95a1c9880ad205149459712aa4d4160548cd9e3c5c083eebc1d
+                        env:
+                          # [0] DB connection string. secretKeyRef.name is
+                          # patched to "<name>-pg-app" (the deterministic CNPG
+                          # app secret); key "uri" is CNPG's full DSN. The
+                          # revision will not go Ready until this secret exists,
+                          # which naturally orders the workload AFTER the DB.
+                          - name: DATABASE_URL
+                            valueFrom:
+                              secretKeyRef:
+                                name: placeholder-pg-app
+                                key: uri
+                          # [1..4] S3 wiring — WORKSHOP-GRADE CREDENTIALS,
+                          # committed on purpose (ephemeral lab), must match the
+                          # rustfs component. S3_BUCKET is patched to
+                          # "<name>-data" (the bucket resource below).
+                          - name: S3_ENDPOINT
+                            value: http://rustfs-svc.rustfs.svc.cluster.local:9000
+                          - name: S3_ACCESS_KEY
+                            value: cloudbox
+                          - name: S3_SECRET_KEY
+                            value: cloudbox123
+                          - name: S3_BUCKET
+                            value: placeholder
+                        resources:
+                          requests:
+                            cpu: 50m
+                            memory: 64Mi
+                          limits:
+                            memory: 256Mi
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: metadata.name
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.image
+                toFieldPath: spec.template.spec.containers[0].image
+              # DB secret name = "<name>-pg-app" (see header).
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.template.spec.containers[0].env[0].valueFrom.secretKeyRef.name
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-pg-app"
+              # S3_BUCKET = "<name>-data" (matches the bucket resource below).
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.template.spec.containers[0].env[4].value
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-data"
+              # Autoscaling bounds. Annotation values must be strings; the
+              # replicas arrive as JSON numbers (float64), so convert to int64
+              # before formatting (same gotcha module 04 hit with storageGB).
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.replicas.min
+                toFieldPath: spec.template.metadata.annotations["autoscaling.knative.dev/minScale"]
+                transforms:
+                  - type: convert
+                    convert:
+                      toType: int64
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%d"
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.replicas.max
+                toFieldPath: spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"]
+                transforms:
+                  - type: convert
+                    convert:
+                      toType: int64
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%d"
+              # NOTE (v2): appending the developer's spec.env to the platform-
+              # injected env is deferred. function-patch-and-transform's
+              # PatchPolicy has no `mergeOptions.appendSlice` (that was the
+              # classic Composition syntax); the modern array-append needs the
+              # right toFieldPath policy, verified on a cluster. v1 ships the
+              # platform-injected DB/S3 env only.
+            readinessChecks:
+              - type: MatchCondition
+                matchCondition:
+                  type: Ready
+                  status: "True"
+
+          # ---------------------------------------------------- the database
+          # Composition-of-compositions: an Application composing a
+          # WorkshopDatabase XR (module 04), which itself composes a CNPG
+          # Cluster + a bucket Job. Named after the Application, so the CNPG
+          # Cluster becomes "<name>-pg" and its app secret "<name>-pg-app" —
+          # the name the workload's DATABASE_URL above is wired to.
+          #
+          # NOTE: this is a namespaced XR; propagate the namespace so it lands
+          # alongside the workload.
+          - name: database
+            base:
+              apiVersion: platform.cloudbox.io/v1alpha1
+              kind: WorkshopDatabase
+              spec:
+                # The T-shirt is the only knob now (PRD-0006) — size bundles
+                # storage + HA. (A future tier cascades the app's own size here.)
+                size: small
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: metadata.name
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.namespace
+                toFieldPath: metadata.namespace
+            readinessChecks:
+              - type: MatchCondition
+                matchCondition:
+                  type: Ready
+                  status: "True"
+
+          # ---------------------------------------------------- the bucket
+          # The application's own S3 bucket ("<name>-data"), created by the same
+          # idempotent aws-cli Job pattern as modules 03/04. Job named
+          # "<name>-storage" to avoid colliding with the WorkshopDatabase's own
+          # bucket Job ("<name>-bucket", which makes "<name>-assets") in the same
+          # namespace. head-bucket||mb, so re-runs are safe.
+          - name: bucket
+            base:
+              apiVersion: batch/v1
+              kind: Job
+              spec:
+                backoffLimit: 6
+                template:
+                  spec:
+                    restartPolicy: OnFailure
+                    containers:
+                      - name: make-bucket
+                        image: public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581
+                        command: ["/bin/sh", "-c"]
+                        args:
+                          - |
+                            set -e
+                            EP=http://rustfs-svc.rustfs.svc.cluster.local:9000
+                            if aws --endpoint-url "$EP" s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+                              echo "bucket $BUCKET already exists"
+                            else
+                              aws --endpoint-url "$EP" s3 mb "s3://$BUCKET"
+                            fi
+                        env:
+                          - name: AWS_ACCESS_KEY_ID
+                            value: cloudbox
+                          - name: AWS_SECRET_ACCESS_KEY
+                            value: cloudbox123
+                          - name: AWS_REGION
+                            value: us-east-1
+                          - name: BUCKET
+                            value: placeholder # patched to "<name>-data"
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: metadata.name
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-storage"
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.template.spec.containers[0].env[3].value
+                transforms:
+                  - type: string
+                    string:
+                      type: Format
+                      fmt: "%s-data"
+            readinessChecks:
+              - type: MatchCondition
+                matchCondition:
+                  type: Complete
+                  status: "True"

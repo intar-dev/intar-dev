@@ -15,7 +15,11 @@ metadata. The crate:
   shutdown, sealed raw-zstd artifacts, and a new cold-boot verification for
   every checkpoint;
 - independently hashes and multipart-uploads every image/kernel/initrd before
-  posting one success result; and
+  posting one success result;
+- for a `hetzner_cloud` workshop, emits exactly one deterministic,
+  content-addressed reconstruction bundle per checkpoint through that same
+  generic artifact upload path and separately cold-boots that exact bundle on
+  a pinned clean Debian 13 base; and
 - posts one terminal failure and aborts the guest workflow on any non-shutdown
   error. Operator shutdown leaves the claim resumable instead of publishing a
   false terminal failure.
@@ -36,13 +40,81 @@ missing files, an unsafe work root, missing KVM access, missing filesystem
 tools, architecture mismatches, and workshops with anything other than one VM
 before a build starts. V1 rejects multi-VM workshops explicitly.
 
-## Dedicated guest contract
+## Direct-cloud reconstruction bundles
+
+A workshop whose HCL selects `hetzner_cloud` additionally requires
+`[worker.runtime_bundle_signing]`. `key_id` is public metadata. The Ed25519
+private seed is supplied either by an absolute `private_key_file` or by the
+named `private_key_env`; the latter contains standard-base64 for exactly 32
+bytes. The key itself must never be written into TOML. Unix key files must be
+regular files inaccessible to group and other users. `doctor`, `run`, and
+`run-once` validate a configured key before registry authentication.
+Production's protected `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID` must exactly
+match this `key_id`, and the protected
+`WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` public-key map must contain it.
+
+Each bundle contains a generated `checkpoint.json`, the exact workshop-root
+`LICENSE`, the explicitly allowlisted `runtime/source` learner tree,
+`runtime/bootstrap.sh`, `runtime/images.lock`,
+and the declared catch-up and verify scripts for the target module's dependency
+closure. Every installed file has a digest, mode, and normalized path in the
+generated manifest. Source traversal rejects symlinks, oversized files,
+solution/facilitator/presentation paths, answer-key filenames, tag-only OCI
+references, and digest references absent from the image lock. Participant and
+facilitator Markdown, presenter notes, hints, solution files, undeclared secret
+files, and OCI layer blobs therefore cannot enter a learner bundle. Entries,
+metadata, JSON, and compression are deterministic.
+The Ed25519 signature covers the exact compressed bytes whose SHA-256 is used
+by the generic artifact registry; the terminal checkpoint report sends
+`sha256`, `compression`, `signature_b64`, and `signing_key_id`.
+
+Signing alone is not a Hetzner compatibility proof. Direct-cloud publishing
+also requires `[execution.runtime_bundle_verification]`. It pins a separate
+minimal Debian 13 raw disk, kernel, initrd, and the exact statically linked
+`intar-workspace-agent` by SHA-256. `doctor` hashes every configured artifact
+before registry authentication. For every checkpoint, the builder clones that
+clean disk instead of the authored KVM checkpoint, boots it with a fresh seed
+and SSH key, uploads the exact just-signed bundle and pinned agent, and invokes
+the agent's `verify-bundle` path. That path verifies the digest and
+Ed25519 signature, requires tmpfs staging, safely extracts the bundle, applies
+the bootstrap and catch-up steps, installs the probe mappings, and runs the
+included verifiers. Only an acknowledged shutdown after success produces
+`runtime_bundle_cold_boot_verified = true`; the registry independently requires
+that explicit field for every `hetzner_cloud` artifact. A legacy sealed-disk
+`cold_boot_verified` value can never stand in for it.
+
+The proof disk contains only Debian 13 plus Intar's `INTARBUILD` seed/SSH
+bootstrap contract. It must not be the authored workshop image and must not
+contain workshop source, pre-pulled OCI layers, or an installed agent copy. The
+release archive carries `intar-workspace-agent` and its checksum; install that
+exact binary at the configured path. Record the clean disk/kernel/initrd
+digests from the operator-controlled image promotion job. Changing any pinned
+input fails `doctor` until the configuration is deliberately updated. The
+registry also requires the reported agent digest to match the CI-published
+guest-tool manifest at publication time and pins its paired Kino digest; later
+learner allocation uses those immutable digests rather than the mutable
+`current.json` pointer.
+
+The Platform Engineering revision carries a curated learner source tree and a
+reviewed external-image inventory. Its bootstrap starts from clean Debian 13,
+requires x86-64, installs the pinned toolchain, gates every registry on DNS,
+TLS, HTTPS, and manifest availability, and permits OCI pulls only by digest.
+The custom upstream Grafana package was not publicly retrievable when the lock
+was generated, so this revision explicitly uses stock Grafana with built-in
+Prometheus, Loki, and Jaeger datasources. This source/bundle validation is not
+a substitute for the production pilot: Talos-in-Docker, Cilium/eBPF,
+privileged BuildKit, all seven browser apps, recovery, and teardown still need
+to cold-boot and pass on a real CX43 learner server.
+
+## Dedicated authored-image contract
 
 The base disk must be Debian 13 and already contain:
 
 - the Intar `INTARBUILD` seed bootstrap service for the ephemeral SSH key;
 - `/usr/local/bin/kino` and the normal Intar runtime supervisor;
-- the pinned workshop toolchain, participant repository and offline images;
+- the pinned workshop toolchain and participant repository; `agent_kvm` may
+  carry its separately validated image cache, while direct-cloud proof disks
+  and runtime bundles carry no OCI layers;
 - the fixed sanitizer at the configured `execution.sanitizer_path`; and
 - any canonical solve helper only at the narrow paths listed in
   `guest_build_material_paths`.

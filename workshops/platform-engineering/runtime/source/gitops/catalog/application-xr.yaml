@@ -1,0 +1,43 @@
+# ArgoCD Application delivering the golden-path Application XR (PRD-0003):
+# the XRD + Composition + RBAC that let a developer declare a whole app
+# (workload + Postgres + bucket) in one manifest.
+#
+# DEPENDS ON, in sync-wave order:
+#   - crossplane (wave 2) + its function-patch-and-transform Function, and
+#   - platform-api (wave 5, module 04) which installs the WorkshopDatabase XRD
+#     this composition composes.
+# Hence wave 6 and SkipDryRunOnMissingResource (the CRDs may still be landing).
+#
+# Enable with:  cp gitops/catalog/application-xr.yaml gitops/apps/ && git add . && git commit -m 'enable application-xr' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: application-xr
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/application-xr
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      # The XRD/Composition CRDs come from the crossplane app, and the
+      # WorkshopDatabase XRD from platform-api — don't fail while those are
+      # still installing.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

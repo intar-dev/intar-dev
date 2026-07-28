@@ -1,11 +1,9 @@
-The hands-on outcome is the day-2 loop, not a model call. Inject scenario 1 twice (first
-seed, then fault), open the released Cloudbox Console app for the signal, collect evidence
-in the guest terminal, connect it to the exact Git diff, push a forward revert, and run
-the pinned verifier.
+The task: enable kagent.yaml from the catalog (same push-to-Gitea dance as every capability today), pick one of three scenarios and inject it (inject.sh 1|2|3 — a bad rollback, an OOMKilling "rightsizing" commit, or a Docker Hub image reference that ImagePullBackOffs at the rate-limited venue), then open the affected Application's detail page in the Console and click "Open investigation."
 
-Scenarios 2 and 3 use the same loop. Scenario 3's unmirrored external image is the fault:
-ImagePullBackOff is expected while offline, and the repair returns Git to the baked image.
+Beat 1 runs entirely digest-pinned against qwen3:4b on host-side Ollama (never in-cluster, so it doesn't compete with the cluster's memory) — the point isn't to get a right answer, it's to watch the previous slide's table happen live: a plausible first tool call, then a loop, a dropped thread, or a malformed follow-up. Write down how it fails — that's the deliverable, same spirit as module 05's "agent claimed X" exercise.
 
-External AI is an optional comparison only. It requires the learner's own connectivity
-and provider credential, is not timed or verified, and must never delay the offline hints,
-solution reveal, helper flow, or checkpoint recovery.
+Beat 2 is one git push: switch the same ModelConfig to the free OpenCode Zen key from the module 00 prep (or a personal Claude/OpenAI key as the documented fallback), and re-run the investigation — same fault, same Case file, now a real hypothesis with a kill-test. Verify it against the cluster, then fix it with the git revert the Case file hands you.
+
+16 GB laptop callout, say it out loud: the local model doesn't fit alongside the running cluster on the minimum spec — go straight to beat 2, the README says so plainly, no twenty minutes lost discovering it. And the standing fallback if Kagent itself misbehaves on the day: module 05's bring-your-own-agent flow works identically, no platform dependency.
+
+Screenshot note for whoever refreshes this deck: swap in a real Case file capture from the Console once the module-10 Console slice lands — the interactive prototype is the placeholder reference for now.

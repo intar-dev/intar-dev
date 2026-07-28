@@ -1,0 +1,22 @@
+# Workshop addition (not upstream): expose the NATS client port on a stable
+# NodePort so the `nats` CLI and apps on the laptop can connect without a
+# port-forward: nats://localhost:30422
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-client-nodeport
+  namespace: nats
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/instance: nats
+    app.kubernetes.io/component: client-nodeport
+spec:
+  type: NodePort
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+      nodePort: 30422
+  selector:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/instance: nats

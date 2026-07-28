@@ -1,0 +1,35 @@
+# VictoriaLogs 1.24.0 — single-node log database (observability rework, issue #57).
+# Logs backend for the Victoria stack: OTLP logs ingest at :9428
+# /insert/opentelemetry/v1/logs, LogsQL /select/logsql/query, Loki-compatible
+# query API for Grafana. In-cluster: victoria-logs.observability.svc:9428.
+# Sync-wave 0 (a storage backend). Part of the on-demand observability capability.
+#
+# Enable with:  cp gitops/catalog/victoria-logs.yaml gitops/apps/ && git add . && git commit -m 'enable victoria-logs' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: victoria-logs
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/victoria-logs
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

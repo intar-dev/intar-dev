@@ -63,6 +63,31 @@ fn assert_lab_invalid(markdown: &str, needle: &str) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[derive(Clone)]
+struct FakeHetznerResolver(std::result::Result<HetznerServerTypeObservation, &'static str>);
+
+impl HetznerServerTypeResolver for FakeHetznerResolver {
+    type Error = &'static str;
+
+    fn resolve_server_type(
+        &self,
+        _exact_name: &str,
+    ) -> std::result::Result<HetznerServerTypeObservation, Self::Error> {
+        self.0.clone()
+    }
+}
+
+fn cx43_observation() -> HetznerServerTypeObservation {
+    HetznerServerTypeObservation {
+        name: "cx43".to_owned(),
+        architecture: ProviderArchitecture::X86,
+        cores: 8,
+        memory_mib: 16_384,
+        disk_mib: 160 * 1_024,
+        deprecated: false,
+    }
+}
+
 #[test]
 fn reference_workshop_has_eleven_modules_and_a_derived_four_hour_agenda()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -74,12 +99,211 @@ fn reference_workshop_has_eleven_modules_and_a_derived_four_hour_agenda()
     assert_eq!(workshop.manifest.modules.len(), 11);
     assert_eq!(workshop.scheduled_duration_minutes, 240);
     assert_eq!(workshop.manifest.workshop.default_lobby_minutes, 30);
+    assert_eq!(
+        workshop.manifest.workspace.provider,
+        Some(WorkspaceProvider::HetznerCloud {
+            vm_id: "workspace".to_owned(),
+            server_type: "cx43".to_owned(),
+            system_image: "debian-13".to_owned(),
+        })
+    );
     assert!(
         workshop
             .source_files
             .windows(2)
             .all(|pair| pair[0] < pair[1])
     );
+    assert!(
+        workshop
+            .source_files
+            .iter()
+            .any(|path| path == "runtime/runtime.json")
+    );
+    assert!(
+        workshop
+            .source_files
+            .iter()
+            .any(|path| path == "runtime/source/fixture.txt")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinks_in_hetzner_runtime_source() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+
+    let root = editable_fixture()?;
+    symlink(
+        root.path().join("content/lab.md"),
+        root.path().join("runtime/source/leak"),
+    )?;
+    assert_invalid(load_and_validate(root.path()), "runtime source path");
+    Ok(())
+}
+
+#[test]
+fn validates_hetzner_provider_authoring_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let missing = editable_fixture()?;
+    replace_manifest(missing.path(), "    server_type  = \"cx43\"\n", "")?;
+    assert_invalid(
+        load_and_validate(missing.path()),
+        "missing required attribute 'server_type'",
+    );
+
+    let duplicate = editable_fixture()?;
+    replace_manifest(
+        duplicate.path(),
+        "  application \"gitea\" {",
+        "  provider \"hetzner_cloud\" {\n    vm_id = \"workspace\"\n    server_type = \"cx43\"\n    system_image = \"debian-13\"\n  }\n\n  application \"gitea\" {",
+    )?;
+    assert_invalid(
+        load_and_validate(duplicate.path()),
+        "only one workspace provider block is supported",
+    );
+
+    let bad_reference = editable_fixture()?;
+    replace_manifest(
+        bad_reference.path(),
+        "    vm_id        = \"workspace\"",
+        "    vm_id        = \"missing\"",
+    )?;
+    assert_invalid(
+        load_and_validate(bad_reference.path()),
+        "references unknown vm 'missing'",
+    );
+
+    let multiple_vms = editable_fixture()?;
+    replace_manifest(
+        multiple_vms.path(),
+        "  provider \"hetzner_cloud\" {",
+        "  vm \"second\" {\n    image = \"debian13\"\n    vcpu_millis = 1000\n    memory_mib = 1024\n    disk_gib = 10\n  }\n\n  provider \"hetzner_cloud\" {",
+    )?;
+    assert_invalid(
+        load_and_validate(multiple_vms.path()),
+        "requires exactly one vm block",
+    );
+    Ok(())
+}
+
+#[test]
+fn omitted_provider_retains_agent_kvm_without_catalog_resolution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = editable_fixture()?;
+    replace_manifest(
+        root.path(),
+        "  provider \"hetzner_cloud\" {\n    vm_id        = \"workspace\"\n    server_type  = \"cx43\"\n    system_image = \"debian-13\"\n  }\n\n",
+        "",
+    )?;
+    let workshop = load_and_validate(root.path())?;
+    assert_eq!(workshop.manifest.workspace.provider, None);
+    assert_eq!(
+        resolve_workspace_provider(&workshop, &FakeHetznerResolver(Err("must not be called")))?,
+        ResolvedWorkspaceProvider::AgentKvm
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_noncanonical_hetzner_provider_names() -> Result<(), Box<dyn std::error::Error>> {
+    for (source, replacement, needle) in [
+        (
+            "    server_type  = \"cx43\"",
+            "    server_type  = \"CX43\"",
+            "must start with a lowercase",
+        ),
+        (
+            "    server_type  = \"cx43\"",
+            "    server_type  = \"cx43-\"",
+            "must end with a lowercase",
+        ),
+        (
+            "    system_image = \"debian-13\"",
+            "    system_image = \"debian_13\"",
+            "may contain only lowercase",
+        ),
+    ] {
+        let root = editable_fixture()?;
+        replace_manifest(root.path(), source, replacement)?;
+        assert_invalid(load_and_validate(root.path()), needle);
+    }
+    Ok(())
+}
+
+#[test]
+fn resolves_and_serializes_immutable_hetzner_hardware() -> Result<(), Box<dyn std::error::Error>> {
+    let workshop = load_and_validate(fixture())?;
+    let resolved =
+        resolve_workspace_provider(&workshop, &FakeHetznerResolver(Ok(cx43_observation())))?;
+    assert_eq!(
+        serde_json::to_value(resolved)?,
+        serde_json::json!({
+            "kind": "hetzner_cloud",
+            "vmId": "workspace",
+            "serverType": "cx43",
+            "systemImage": "debian-13",
+            "hardware": {
+                "architecture": "x86",
+                "cores": 8,
+                "memoryMib": 16384,
+                "diskMib": 163840
+            },
+            "compatible": true
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_unresolvable_deprecated_arm_substituted_and_undersized_types()
+-> Result<(), Box<dyn std::error::Error>> {
+    let workshop = load_and_validate(fixture())?;
+    let cases = [
+        (
+            FakeHetznerResolver(Err("not found")),
+            "failed to resolve Hetzner server_type 'cx43': not found",
+        ),
+        (
+            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+                deprecated: true,
+                ..cx43_observation()
+            })),
+            "is deprecated",
+        ),
+        (
+            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+                architecture: ProviderArchitecture::Arm,
+                ..cx43_observation()
+            })),
+            "must use x86 architecture",
+        ),
+        (
+            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+                name: "cx53".to_owned(),
+                ..cx43_observation()
+            })),
+            "instead of exact requested type 'cx43'",
+        ),
+        (
+            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+                cores: 2,
+                memory_mib: 8_192,
+                disk_mib: 50 * 1_024,
+                ..cx43_observation()
+            })),
+            "is undersized: CPU 2000m < required 4000m, memory 8192 MiB < required 16384 MiB, disk 51200 MiB < required 65536 MiB",
+        ),
+    ];
+    for (resolver, needle) in cases {
+        let result = resolve_workspace_provider(&workshop, &resolver);
+        let Err(error) = result else {
+            panic!("expected provider resolution to fail with {needle:?}");
+        };
+        assert!(
+            error.to_string().contains(needle),
+            "expected {error:?} to contain {needle:?}"
+        );
+    }
     Ok(())
 }
 
@@ -413,8 +637,65 @@ fn rejects_application_protocols_without_a_runtime_transport()
 #[test]
 fn rejects_invalid_resource_increments() -> Result<(), Box<dyn std::error::Error>> {
     let root = editable_fixture()?;
-    replace_manifest(root.path(), "vcpu_millis = 4000", "vcpu_millis = 4100")?;
+    replace_manifest(root.path(), "cpu_millis  = 4000", "cpu_millis  = 4100")?;
     assert_invalid(load_and_validate(root.path()), "increments of 250");
+    Ok(())
+}
+
+#[test]
+fn accepts_legacy_workspace_resource_aliases() -> Result<(), Box<dyn std::error::Error>> {
+    let root = editable_fixture()?;
+    replace_manifest(root.path(), "cpu_millis  = 4000", "vcpu_millis = 4000")?;
+    replace_manifest(root.path(), "disk_mib     = 65536", "disk_gib     = 64")?;
+
+    let workshop = load_and_validate(root.path())?;
+    let workspace = workshop
+        .manifest
+        .workspace
+        .vms
+        .iter()
+        .find(|vm| vm.id == "workspace")
+        .expect("workspace VM");
+    assert_eq!(workspace.vcpu_millis, 4_000);
+    assert_eq!(workspace.disk_gib, 64);
+    Ok(())
+}
+
+#[test]
+fn rejects_duplicate_and_lossy_workspace_resource_aliases() -> Result<(), Box<dyn std::error::Error>>
+{
+    let duplicate_cpu = editable_fixture()?;
+    replace_manifest(
+        duplicate_cpu.path(),
+        "cpu_millis  = 4000",
+        "cpu_millis  = 4000\n    vcpu_millis = 4000",
+    )?;
+    assert_invalid(
+        load_and_validate(duplicate_cpu.path()),
+        "must not declare both 'cpu_millis' and legacy 'vcpu_millis'",
+    );
+
+    let duplicate_disk = editable_fixture()?;
+    replace_manifest(
+        duplicate_disk.path(),
+        "disk_mib     = 65536",
+        "disk_mib     = 65536\n    disk_gib     = 64",
+    )?;
+    assert_invalid(
+        load_and_validate(duplicate_disk.path()),
+        "must not declare both 'disk_mib' and legacy 'disk_gib'",
+    );
+
+    let lossy_disk = editable_fixture()?;
+    replace_manifest(
+        lossy_disk.path(),
+        "disk_mib     = 65536",
+        "disk_mib     = 65535",
+    )?;
+    assert_invalid(
+        load_and_validate(lossy_disk.path()),
+        "'disk_mib' must be a whole number of GiB",
+    );
     Ok(())
 }
 
@@ -460,6 +741,15 @@ fn bundles_are_byte_for_byte_deterministic() -> Result<(), Box<dyn std::error::E
     assert_eq!(
         compiled["manifest"]["workshop"]["default_lobby_minutes"],
         30
+    );
+    assert_eq!(
+        compiled["manifest"]["workspace"]["provider"],
+        serde_json::json!({
+            "kind": "hetzner_cloud",
+            "vm_id": "workspace",
+            "server_type": "cx43",
+            "system_image": "debian-13"
+        })
     );
     assert_eq!(
         compiled["manifest"]["modules"].as_array().map(Vec::len),

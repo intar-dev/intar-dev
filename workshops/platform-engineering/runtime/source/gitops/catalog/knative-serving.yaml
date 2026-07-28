@@ -1,0 +1,53 @@
+# Knative Serving v1.22.1 + Kourier v1.22.1 (module S1: serverless).
+# Also creates the kourier-system namespace (in kourier.yaml). Gateway on
+# NodePort 31080. Resource requests are halved vs upstream (small cluster).
+# SkipDryRun: serving-core ships CRs (caching Image) whose CRDs arrive in
+# the same sync.
+#
+# Enable with:  cp gitops/catalog/knative-serving.yaml gitops/apps/ && git add . && git commit -m 'enable knative-serving' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: knative-serving
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/knative-serving
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: knative-serving
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      # Without this, automated sync reverts the ignored fields every cycle
+      # and fights Knative's webhook controller → permanent OutOfSync.
+      - RespectIgnoreDifferences=true
+  # Knative's webhook injects the caBundle into its own webhook configs at
+  # runtime, so git (empty) never matches live → the app flaps OutOfSync
+  # forever and the health gate stalls app-of-apps. Ignore just that field.
+  # (Found by rehearsal-in-CI: knative-serving stuck OutOfSync Healthy.)
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - '.webhooks'
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - '.webhooks'

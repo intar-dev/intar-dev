@@ -18,4 +18,4 @@
 
 • every component open-source and pinned — nobody can discontinue them
 
-Same product. Same photo pipeline. A cloud they own — and the migration was ~9 open-source components in one reproducible workspace.
+Same product. Same photo pipeline. A cloud they own — and the migration was ~9 open-source components and a laptop.

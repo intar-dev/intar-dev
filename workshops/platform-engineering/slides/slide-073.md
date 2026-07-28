@@ -11,5 +11,3 @@
 - The drop is **~5–16×** for small models — ~2× for GPT-4o-class
 
 Source: BFCL v3 multi-turn — https://gorilla.cs.berkeley.edu/blogs/13_bfcl_v3_multi_turn.html; exact small-model figures via papers using BFCL v3 baselines (see issue #124 for the research trail — treat the digits as indicative, the cliff as robust)
-
-Architecture context only · no model call belongs to verified completion

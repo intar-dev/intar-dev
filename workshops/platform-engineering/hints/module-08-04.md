@@ -9,8 +9,8 @@ cp "$WORKSHOP/lab/08-portal/portal-access.yaml" gitops/components/demo/
 git add . && git commit -m "module 08: enable the cloudbox console + grant it demo access" && git push
 
 kubectl -n portal rollout status deploy/portal --timeout=300s
-# Open the released Cloudbox Console app in Intar, then:
-# Databases → New database → name: console-db, size: small → Create
+open http://localhost:30600            # explore, then: Databases → New database
+                                       # name: console-db, size: small → Create
 
 kubectl -n demo get workshopdatabase console-db -w    # until SYNCED + READY
 kubectl -n demo get cluster console-db-pg             # the real database behind the form

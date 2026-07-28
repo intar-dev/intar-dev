@@ -1,13 +1,8 @@
-Welcome! While people arrive, this slide directs them to the Intar lobby and the sealed
-workspace pre-flight.
+Welcome! While people trickle in, this slide does the most important job of the day: getting everyone to run the pre-flight check immediately.
 
-- Introduce yourselves briefly: Øyvind (NextGenTel, GDG Bergen) and Hans (platform
-  engineer in the Norwegian Government, CNCF Ambassador, co-host of Plattformpodden).
-- Ask learners to check in. Bulk-provision checked-in roster members from checkpoint 00.
-- The only learner action is to open the workspace terminal and run the pinned module-00
-  verifier. Nobody runs prework scripts, installs tools, or pulls images.
-- Point out **Need help** and explain that a helper must be granted temporary
-  browser-terminal access by the learner.
+- Introduce yourselves briefly: Øyvind (NextGenTel, GDG Bergen) and Hans (platform engineer in the Norwegian Government, CNCF Ambassador, co-host of Plattformpodden).
+- Point at the callout: "If you haven't run the three prework scripts, start `the Intar checkpoint bootstrap` RIGHT NOW — it pre-pulls several gigabytes of images and it's the only step that needs real bandwidth. Everything else today works digest-pinned."
+- Repo URL is at the bottom — it's public, everything (labs, solutions, slides) lives there, and it will keep working after today.
+- Helpers: point them out, explain the sticky notes briefly (more on that in a few slides).
 
-Timing: keep the cover + "why" section to ~15 minutes total. Module 00 belongs to the
-30-minute pre-session lobby; it must not consume the scheduled four hours.
+Timing: keep the cover + "why" section to ~15 minutes total. Hands on keyboards within the first 10 minutes is the goal — module 00 is running in the background for anyone who skipped the prework.
