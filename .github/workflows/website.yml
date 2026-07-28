@@ -7,6 +7,7 @@ on:
     paths:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
+      - ".github/workflows/hcloud-provider.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -14,6 +15,10 @@ on:
       - "build-tools.hcl"
       - "crates/intar-image-scenario/**"
       - "crates/intar-image-scenario-wasm/**"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-workspace-agent/**"
+      - "crates/kino/**"
+      - "hcloud-provider-worker/**"
       - "website/**"
 
 permissions:
@@ -28,6 +33,45 @@ defaults:
     working-directory: website
 
 jobs:
+  workspace-agent:
+    name: Build learner guest tools
+    runs-on: namespace-profile-intar-dev
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --profile minimal
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+          fallback: none
+
+      - name: Set up Rust cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          cache: rust
+
+      - name: Test and build guest tools
+        working-directory: ${{ github.workspace }}
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          cargo test --locked -p intar-workspace-agent -p kino
+          cargo clippy --locked -p intar-workspace-agent -p kino \
+            --all-targets -- -D warnings
+          cargo zigbuild --locked --release -p intar-workspace-agent -p kino \
+            --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/intar-workspace-agent \
+            | grep -E 'x86-64.*(static|statically linked)'
+          file target/x86_64-unknown-linux-musl/release/kino \
+            | grep -E 'x86-64.*(static|statically linked)'
+
   scenario-wasm:
     name: Build scenario Wasm
     runs-on: namespace-profile-intar-dev

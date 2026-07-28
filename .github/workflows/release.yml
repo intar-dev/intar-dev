@@ -342,6 +342,15 @@ jobs:
                 echo "Workshop checkpoint builders currently support x86_64 only." >&2
                 exit 1
               fi
+              CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release \
+                -p intar-workspace-agent --bin intar-workspace-agent --target "${target}"
+              cp "${target_dir}/${target}/release/intar-workspace-agent" \
+                "${workdir}/intar-workspace-agent"
+              chmod +x "${workdir}/intar-workspace-agent"
+              (
+                cd "${workdir}"
+                sha256sum intar-workspace-agent > intar-workspace-agent.sha256
+              )
               cp -R crates/intar-workshop-builder/deploy "${workdir}/deploy"
               cp crates/intar-workshop-builder/config.example.toml "${workdir}/workshop-builder.config.example.toml"
               chmod +x "${workdir}/deploy/intar-workshop-sanitize"
@@ -420,6 +429,8 @@ jobs:
           expected_files=(
             deploy/intar-workshop-builder.service
             deploy/intar-workshop-sanitize
+            intar-workspace-agent
+            intar-workspace-agent.sha256
             intar-workshop-builder
             workshop-builder.config.example.toml
           )
@@ -429,10 +440,16 @@ jobs:
           fi
 
           test -x "${extract_dir}/intar-workshop-builder"
+          test -x "${extract_dir}/intar-workspace-agent"
           test -x "${extract_dir}/deploy/intar-workshop-sanitize"
+          (
+            cd "${extract_dir}"
+            sha256sum --check --strict intar-workspace-agent.sha256
+          )
           test "$("${extract_dir}/intar-workshop-builder" --version)" = \
             "intar-workshop-builder ${VERSION}"
           "${extract_dir}/intar-workshop-builder" --help | grep -q 'run-once'
+          "${extract_dir}/intar-workspace-agent" --help | grep -q 'verify-bundle'
           bash -n "${extract_dir}/deploy/intar-workshop-sanitize"
           cmp crates/intar-workshop-builder/deploy/intar-workshop-builder.service \
             "${extract_dir}/deploy/intar-workshop-builder.service"
