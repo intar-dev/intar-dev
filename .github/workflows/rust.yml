@@ -16,6 +16,7 @@ on:
       - "crates/**"
       - "scripts/import-platform-engineering-workshop.ts"
       - "scripts/check-platform-engineering-workshop-import.ts"
+      - "scripts/check-platform-workshop-app-routing.ts"
       - "workshops/**"
       - "website/src/generated/**"
   push:
@@ -34,6 +35,7 @@ on:
       - "crates/**"
       - "scripts/import-platform-engineering-workshop.ts"
       - "scripts/check-platform-engineering-workshop-import.ts"
+      - "scripts/check-platform-workshop-app-routing.ts"
       - "workshops/**"
       - "website/src/generated/**"
   workflow_dispatch:
@@ -101,6 +103,8 @@ jobs:
           )
           bun scripts/check-platform-engineering-workshop-import.ts \
             "${regeneration_root}/workshops/platform-engineering" \
+            workshops/platform-engineering
+          bun scripts/check-platform-workshop-app-routing.ts \
             workshops/platform-engineering
 
           cargo run --locked -p intar-workshop-cli -- \

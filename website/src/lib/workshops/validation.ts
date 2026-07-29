@@ -91,10 +91,16 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
   if (!Array.isArray(manifest.agenda) || !manifest.agenda.length) {
     throw invalidManifest("manifest must define at least one agenda item");
   }
-  if (!isRecord(manifest.presentation) || !Array.isArray(manifest.presentation.slides)) {
+  if (
+    !isRecord(manifest.presentation) ||
+    !Array.isArray(manifest.presentation.slides)
+  ) {
     throw invalidManifest("manifest must define presentation slides");
   }
-  if (!Number.isInteger(manifest.durationMinutes) || manifest.durationMinutes <= 0) {
+  if (
+    !Number.isInteger(manifest.durationMinutes) ||
+    manifest.durationMinutes <= 0
+  ) {
     throw invalidManifest("durationMinutes must be a positive integer");
   }
 
@@ -154,7 +160,9 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
     const imageVmIds = new Set(checkpoint.vmImages.map((image) => image.vmId));
     for (const vmId of vmIds) {
       if (!imageVmIds.has(vmId)) {
-        throw invalidManifest(`checkpoint ${checkpoint.id} is missing VM ${vmId}`);
+        throw invalidManifest(
+          `checkpoint ${checkpoint.id} is missing VM ${vmId}`,
+        );
       }
     }
   }
@@ -185,7 +193,18 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
       application.port < 1 ||
       application.port > 65_535
     ) {
-      throw invalidManifest(`application ${application.id} has an invalid port`);
+      throw invalidManifest(
+        `application ${application.id} has an invalid port`,
+      );
+    }
+    if (
+      application.upstreamHost !== undefined &&
+      (typeof application.upstreamHost !== "string" ||
+        !isCanonicalWorkspaceAppUpstreamHost(application.upstreamHost))
+    ) {
+      throw invalidManifest(
+        `application ${application.id} has an invalid upstream host`,
+      );
     }
     if (
       application.releaseModuleId &&
@@ -228,6 +247,24 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
   return manifest;
 }
 
+function isCanonicalWorkspaceAppUpstreamHost(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 253 &&
+    !value.endsWith(".") &&
+    value.split(".").every((label) => {
+      if (!label || label.length > 63) return false;
+      const bytes = [...label];
+      const validEdge = (character: string) => /[a-z0-9]/.test(character);
+      return (
+        validEdge(bytes[0] ?? "") &&
+        validEdge(bytes.at(-1) ?? "") &&
+        bytes.every((character) => /[a-z0-9-]/.test(character))
+      );
+    })
+  );
+}
+
 export function validateSessionTitle(input: string): string {
   return validateWorkshopTitle(input);
 }
@@ -263,9 +300,7 @@ function uniqueIds(
   return ids;
 }
 
-function assertAcyclicModules(
-  modules: WorkshopManifestV1["modules"],
-): void {
+function assertAcyclicModules(modules: WorkshopManifestV1["modules"]): void {
   const dependencies = new Map(
     modules.map((module) => [module.id, module.dependsOn ?? []]),
   );

@@ -60,6 +60,8 @@ pub struct WorkspaceApplication {
     pub vm: String,
     pub port: u16,
     pub protocol: ApplicationProtocol,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
     pub release_module: String,
 }
 

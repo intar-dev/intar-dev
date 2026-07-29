@@ -170,6 +170,7 @@ pub fn hydrate_workshop_manifest(
                     vm_id: application.vm.clone(),
                     port: application.port,
                     protocol: application_protocol(application.protocol).to_owned(),
+                    upstream_host: application.upstream_host.clone(),
                     release_module_id: application.release_module.clone(),
                 })
                 .collect(),

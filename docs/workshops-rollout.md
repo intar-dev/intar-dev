@@ -436,6 +436,10 @@ For a real route, require:
   names removed;
 - canonical `X-Forwarded-Host`, `X-Forwarded-Proto: https`, and
   `X-Forwarded-Port: 443`, with client-supplied forwarding headers stripped;
+- the public route hostname preserved as upstream `Host` unless the immutable
+  workshop declaration supplies a validated `upstream_host`; when supplied,
+  only upstream `Host` changes and `X-Forwarded-Host` remains the public
+  `wa-*` hostname;
 - `Cache-Control: private, no-store` and
   `Cloudflare-CDN-Cache-Control: no-store`;
 - immediate HTTP and WebSocket failure after explicit route deletion.
@@ -514,13 +518,13 @@ It must also contain `workshop-guest-tools.provenance.json`. Retain that file
 with the builder release evidence; do not substitute locally rebuilt guest
 tools even if their source tree is identical.
 
-Use the existing x86_64 runner at `95.217.114.144` as the temporary trusted
-builder. The live capacity audit found 24 cores, 125 GiB RAM, about 1.1 TiB
-free, and KVM there, so the workshop build needs no disk resize. This host also
-runs scenario workloads: first drain every active scenario VM and route
-through the normal control plane, then stop admission, its privileged socket,
-and both builders. After verifying the downloaded release archive checksum,
-extract it on that host and run:
+Resolve the current x86_64 workshop builder from the production host inventory;
+do not use a hard-coded address or a previous capacity audit. Verify its disk,
+CPU, memory, KVM, and active workload state immediately before the rollout.
+The selected host may also run scenario workloads: first drain every active
+scenario VM and route through the normal control plane, then stop admission,
+its privileged socket, and both builders. After verifying the downloaded
+release archive checksum, extract it on that host and run:
 
 ```sh
 sudo systemctl stop intar-agent.service

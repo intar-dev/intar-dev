@@ -116,9 +116,9 @@ verify_migrations() {
   local successful
   table_exists _sqlx_migrations || die "SQLx migration table is missing"
   successful="$(database_scalar \
-    "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3) AND success = 1")"
-  [ "$successful" -eq 2 ] || die "workspace application migrations 2 and 3 are not successful"
-  log "workspace application migrations 2 and 3 are successful"
+    "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3, 4) AND success = 1")"
+  [ "$successful" -eq 3 ] || die "workspace application migrations 2, 3, and 4 are not successful"
+  log "workspace application migrations 2, 3, and 4 are successful"
 }
 
 backup_database() {
@@ -328,7 +328,7 @@ plan() {
     session_ttl="900"
   fi
   if table_exists _sqlx_migrations && \
-    [ "$(database_scalar "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3) AND success = 1")" -eq 2 ]; then
+    [ "$(database_scalar "SELECT count(*) FROM _sqlx_migrations WHERE version IN (2, 3, 4) AND success = 1")" -eq 3 ]; then
     migrations="ready"
   fi
 

@@ -200,7 +200,14 @@ fn parse_application(block: &hcl::Block) -> Result<WorkspaceApplication> {
     reject_nested(block, "workspace application")?;
     reject_unknown_attrs(
         block,
-        &["label", "vm", "port", "protocol", "release_module"],
+        &[
+            "label",
+            "vm",
+            "port",
+            "protocol",
+            "upstream_host",
+            "release_module",
+        ],
         "workspace application",
     )?;
     let port = u16::try_from(required_u32(block, "port", "workspace application")?)
@@ -220,6 +227,7 @@ fn parse_application(block: &hcl::Block) -> Result<WorkspaceApplication> {
         vm: required_string(block, "vm", "workspace application")?,
         port,
         protocol,
+        upstream_host: optional_string(block, "upstream_host", "workspace application")?,
         release_module: required_string(block, "release_module", "workspace application")?,
     })
 }

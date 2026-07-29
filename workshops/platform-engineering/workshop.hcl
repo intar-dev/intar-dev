@@ -51,8 +51,9 @@ workspace {
   application "knative" {
     label          = "Knative"
     vm             = "learner"
-    port           = 31081
+    port           = 31080
     protocol       = "http"
+    upstream_host  = "hello.demo.127.0.0.1.sslip.io"
     release_module = "06"
   }
 

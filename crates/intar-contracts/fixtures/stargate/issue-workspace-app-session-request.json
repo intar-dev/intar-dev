@@ -7,6 +7,7 @@
   "target_private_key_openssh": "-----BEGIN OPENSSH PRIVATE KEY-----\nfake-contract-fixture-only\n-----END OPENSSH PRIVATE KEY-----\n",
   "target_app_port": 30080,
   "protocol": "http",
+  "upstream_host": "argocd.internal",
   "route_expires_at": 1800000000,
   "metadata": {
     "host_id": "host-01",

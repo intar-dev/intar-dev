@@ -203,6 +203,7 @@ async fn proxy_workspace_app(
         &mut request,
         upstream_path,
         state.public_web.public_base_url.scheme(),
+        route.upstream_host.as_deref(),
     )?;
     let wants_upgrade = is_websocket_upgrade_request(request.method(), request.headers());
     let downstream_upgrade = wants_upgrade.then(|| hyper::upgrade::on(&mut request));
@@ -579,6 +580,7 @@ fn rewrite_request(
     request: &mut Request<Body>,
     upstream_path: Option<&str>,
     forwarded_proto: &str,
+    upstream_host: Option<&str>,
 ) -> Result<(), GatewayHttpError> {
     if let Some(path) = upstream_path {
         let path_and_query = match request.uri().query() {
@@ -628,7 +630,12 @@ fn rewrite_request(
         HeaderValue::from_str(&forwarded_port.to_string())
             .map_err(|error| StargateError::Internal(error.to_string()))?,
     );
-    request.headers_mut().insert(header::HOST, public_host);
+    let upstream_host = upstream_host
+        .map(HeaderValue::from_str)
+        .transpose()
+        .map_err(|error| StargateError::Internal(error.to_string()))?
+        .unwrap_or(public_host);
+    request.headers_mut().insert(header::HOST, upstream_host);
     Ok(())
 }
 
@@ -1089,7 +1096,7 @@ mod tests {
             .body(Body::empty())
             .expect("request");
 
-        rewrite_request(&mut request, None, "https").expect("rewrite");
+        rewrite_request(&mut request, None, "https", None).expect("rewrite");
 
         assert_eq!(request.headers()[header::HOST], "wa-123.example.test");
         assert_eq!(request.headers()["x-forwarded-host"], "wa-123.example.test");
@@ -1102,7 +1109,7 @@ mod tests {
             .header(header::HOST, "wa-123.example.test:443")
             .body(Body::empty())
             .expect("request");
-        rewrite_request(&mut explicit_default_port, None, "https").expect("rewrite");
+        rewrite_request(&mut explicit_default_port, None, "https", None).expect("rewrite");
         assert_eq!(
             explicit_default_port.headers()[header::HOST],
             "wa-123.example.test"
@@ -1112,6 +1119,29 @@ mod tests {
             "wa-123.example.test"
         );
         assert_eq!(explicit_default_port.headers()["x-forwarded-port"], "443");
+
+        let mut virtual_host = Request::builder()
+            .uri("/hello")
+            .header(header::HOST, "wa-123.example.test")
+            .body(Body::empty())
+            .expect("request");
+        rewrite_request(
+            &mut virtual_host,
+            None,
+            "https",
+            Some("hello.demo.127.0.0.1.sslip.io"),
+        )
+        .expect("rewrite");
+        assert_eq!(
+            virtual_host.headers()[header::HOST],
+            "hello.demo.127.0.0.1.sslip.io"
+        );
+        assert_eq!(
+            virtual_host.headers()["x-forwarded-host"],
+            "wa-123.example.test"
+        );
+        assert_eq!(virtual_host.headers()["x-forwarded-proto"], "https");
+        assert_eq!(virtual_host.headers()["x-forwarded-port"], "443");
     }
 
     #[test]

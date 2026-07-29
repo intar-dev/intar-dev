@@ -649,6 +649,50 @@ fn rejects_application_protocols_without_a_runtime_transport()
 }
 
 #[test]
+fn accepts_a_canonical_application_upstream_host() -> Result<(), Box<dyn std::error::Error>> {
+    let root = editable_fixture()?;
+    replace_manifest(
+        root.path(),
+        "port           = 8081",
+        "port           = 8081\n    upstream_host  = \"hello.demo.127.0.0.1.sslip.io\"",
+    )?;
+    let workshop = load_and_validate(root.path())?;
+    let application = workshop
+        .manifest
+        .workspace
+        .applications
+        .iter()
+        .find(|application| application.id == "knative")
+        .expect("knative application");
+    assert_eq!(
+        application.upstream_host.as_deref(),
+        Some("hello.demo.127.0.0.1.sslip.io")
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_unsafe_application_upstream_hosts() -> Result<(), Box<dyn std::error::Error>> {
+    for upstream_host in [
+        "Knative.internal",
+        "knative.internal.",
+        "https://knative.internal",
+        "knative.internal:8080",
+        "*.internal",
+        "knative..internal",
+    ] {
+        let root = editable_fixture()?;
+        replace_manifest(
+            root.path(),
+            "port           = 8081",
+            &format!("port           = 8081\n    upstream_host  = \"{upstream_host}\""),
+        )?;
+        assert_invalid(load_and_validate(root.path()), "upstream_host");
+    }
+    Ok(())
+}
+
+#[test]
 fn rejects_invalid_resource_increments() -> Result<(), Box<dyn std::error::Error>> {
     let root = editable_fixture()?;
     replace_manifest(root.path(), "cpu_millis  = 4000", "cpu_millis  = 4100")?;

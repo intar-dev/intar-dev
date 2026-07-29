@@ -63,6 +63,15 @@ workspace {
     protocol       = "http"
     release_module = "02"
   }
+
+  application "knative-demo" {
+    label          = "Knative demo"
+    vm             = "workspace"
+    port           = 31080
+    protocol       = "http"
+    upstream_host  = "hello.demo.127.0.0.1.sslip.io"
+    release_module = "06"
+  }
 }
 
 module "00" {
@@ -99,6 +108,13 @@ presentation {
   }
 }
 ```
+
+`upstream_host` is optional. Use it only for an existing guest service that
+selects a virtual host, such as a Knative ingress. Intar validates it as a
+lowercase DNS hostname, keeps the public `wa-*` hostname in
+`X-Forwarded-Host`, and replaces only the guest-facing `Host` header. It does
+not change the declared VM or port, expose another port, or rewrite responses.
+Applications that work with the public host should omit it.
 
 Supported module tiers are _gate_, _core_, and _stretch_. Supported agenda
 kinds are _briefing_, _lab_, _demo_, _break_, _explain_back_, _tinker_, and

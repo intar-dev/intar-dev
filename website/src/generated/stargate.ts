@@ -56,6 +56,7 @@ export interface IssueWorkspaceAppSessionRequest {
   target_private_key_openssh: string;
   target_app_port: number;
   protocol: WorkspaceAppProtocol;
+  upstream_host?: string;
   route_expires_at: number;
   metadata?: RouteMetadata;
 }

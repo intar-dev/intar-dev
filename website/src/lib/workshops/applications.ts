@@ -187,6 +187,9 @@ export async function issueWorkshopWorkspaceApplication(input: {
       targetHostKeyOpenssh: target.target.hostKeyOpenssh,
       targetPrivateKeyOpenssh: target.target.privateKeyOpenssh,
       targetAppPort: application.port,
+      ...(application.upstreamHost === undefined
+        ? {}
+        : { upstreamHost: application.upstreamHost }),
       expiresAt: new Date(requestedExpiresAt),
       metadata: {
         hostId: target.hostId,
@@ -308,6 +311,7 @@ export async function issueWorkshopWorkspaceApplication(input: {
       applicationId: application.id,
       vmId: application.vmId,
       port: application.port,
+      upstreamHost: application.upstreamHost ?? null,
       routeId: opened.routeId,
       expiresAt: opened.expiresAt,
     },

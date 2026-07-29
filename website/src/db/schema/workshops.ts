@@ -109,6 +109,7 @@ export interface WorkshopManifestV1 {
       vmId: string;
       port: number;
       protocol: "http" | "ws";
+      upstreamHost?: string;
       releaseModuleId?: string;
     }>;
   };
@@ -234,7 +235,10 @@ export const workshopSessions = sqliteTable(
         onDelete: "restrict",
       }),
     title: text("title").notNull(),
-    state: text("state").$type<WorkshopSessionState>().default("draft").notNull(),
+    state: text("state")
+      .$type<WorkshopSessionState>()
+      .default("draft")
+      .notNull(),
     version: integer("version").default(1).notNull(),
     scheduledStartAt: integer("scheduled_start_at").notNull(),
     lobbyOpensAt: integer("lobby_opens_at").notNull(),

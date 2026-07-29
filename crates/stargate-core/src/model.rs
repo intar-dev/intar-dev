@@ -12,6 +12,7 @@ use crate::{Result, StargateError};
 const ROUTE_USERNAME_MAX_LEN: usize = 128;
 const TARGET_USERNAME_MAX_LEN: usize = 64;
 const WORKSPACE_APP_ROUTE_ID_MAX_LEN: usize = 63;
+const WORKSPACE_APP_UPSTREAM_HOST_MAX_LEN: usize = 253;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegisteredRoute {
@@ -55,6 +56,7 @@ pub struct RegisteredWorkspaceAppRoute {
     pub target_private_key_openssh: String,
     pub target_app_port: u16,
     pub protocol: WorkspaceAppProtocol,
+    pub upstream_host: Option<String>,
     #[serde(with = "time::serde::timestamp")]
     pub expires_at: OffsetDateTime,
     pub metadata: RouteMetadata,
@@ -70,6 +72,7 @@ pub struct WorkspaceAppRouteRecord {
     pub target_private_key_openssh: String,
     pub target_app_port: u16,
     pub protocol: WorkspaceAppProtocol,
+    pub upstream_host: Option<String>,
     #[serde(with = "time::serde::timestamp")]
     pub expires_at: OffsetDateTime,
     pub metadata: RouteMetadata,
@@ -156,6 +159,9 @@ pub fn validate_workspace_app_session_request(
         &request.target_host_key_openssh,
         &request.target_private_key_openssh,
     )?;
+    if let Some(upstream_host) = request.upstream_host.as_deref() {
+        validate_workspace_app_upstream_host(upstream_host)?;
+    }
 
     Ok(RegisteredWorkspaceAppRoute {
         route_id: request.route_id,
@@ -166,6 +172,7 @@ pub fn validate_workspace_app_session_request(
         target_private_key_openssh: request.target_private_key_openssh,
         target_app_port: request.target_app_port,
         protocol: request.protocol,
+        upstream_host: request.upstream_host,
         expires_at,
         metadata: request.metadata,
     })
@@ -219,6 +226,32 @@ pub fn validate_workspace_app_route_id(route_id: &str) -> Result<()> {
         return Err(StargateError::Validation(
             "route_id suffix must be a lowercase DNS label".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_app_upstream_host(upstream_host: &str) -> Result<()> {
+    if upstream_host.is_empty()
+        || upstream_host.len() > WORKSPACE_APP_UPSTREAM_HOST_MAX_LEN
+        || upstream_host.ends_with('.')
+    {
+        return Err(StargateError::Validation(
+            "upstream_host must be a lowercase DNS hostname without a port".to_owned(),
+        ));
+    }
+    for label in upstream_host.split('.') {
+        let bytes = label.as_bytes();
+        let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+        if bytes.is_empty()
+            || bytes.len() > 63
+            || !valid_edge(bytes[0])
+            || !valid_edge(bytes[bytes.len() - 1])
+            || bytes.iter().any(|byte| !valid_edge(*byte) && *byte != b'-')
+        {
+            return Err(StargateError::Validation(
+                "upstream_host must be a lowercase DNS hostname without a port".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -331,7 +364,7 @@ mod tests {
 
     use super::{
         validate_route_username, validate_target_username, validate_terminal_session_request,
-        validate_workspace_app_route_id,
+        validate_workspace_app_route_id, validate_workspace_app_upstream_host,
     };
 
     // Profile keys are stored with their comment; the key a client offers
@@ -400,6 +433,32 @@ mod tests {
             );
         }
         assert!(validate_workspace_app_route_id(&format!("wa-{}", "a".repeat(61))).is_err());
+    }
+
+    #[test]
+    fn workspace_app_upstream_host_requires_a_canonical_dns_name() {
+        assert!(validate_workspace_app_upstream_host("hello.demo.127.0.0.1.sslip.io").is_ok());
+        assert!(validate_workspace_app_upstream_host("service-1.internal").is_ok());
+
+        for invalid in [
+            "",
+            "Service.internal",
+            "service.internal.",
+            "https://service.internal",
+            "service.internal:8080",
+            "*.internal",
+            "-service.internal",
+            "service_.internal",
+            "service..internal",
+        ] {
+            assert!(
+                validate_workspace_app_upstream_host(invalid).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
+        assert!(
+            validate_workspace_app_upstream_host(&format!("{}.internal", "a".repeat(64))).is_err()
+        );
     }
 
     #[test]

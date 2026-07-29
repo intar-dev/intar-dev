@@ -326,9 +326,7 @@ export function hydrateWorkshopManifest(params: {
         memoryMib: positiveInteger(vm.memory_mib, "workspace VM memory_mib"),
         diskMib: positiveInteger(vm.disk_gib, "workspace VM disk_gib") * 1_024,
       })),
-      ...(params.resolvedProvider
-        ? { provider: params.resolvedProvider }
-        : {}),
+      ...(params.resolvedProvider ? { provider: params.resolvedProvider } : {}),
       checkpoints: params.checkpoints.map((checkpoint) => ({
         id: checkpoint.checkpointId,
         label: checkpoint.checkpointId,
@@ -350,6 +348,14 @@ export function hydrateWorkshopManifest(params: {
         protocol: string(application.protocol, "application protocol") as
           | "http"
           | "ws",
+        ...(application.upstream_host === undefined
+          ? {}
+          : {
+              upstreamHost: string(
+                application.upstream_host,
+                "application upstream_host",
+              ),
+            }),
         releaseModuleId: string(
           application.release_module,
           "application release_module",
@@ -541,6 +547,13 @@ function validateCompiledManifest(
     const protocol = string(application.protocol, `application ${id} protocol`);
     if (!APPLICATION_PROTOCOLS.has(protocol)) {
       throw invalid(`application ${id} has an invalid protocol`);
+    }
+    if (
+      application.upstream_host !== undefined &&
+      (typeof application.upstream_host !== "string" ||
+        !isCanonicalWorkspaceAppUpstreamHost(application.upstream_host))
+    ) {
+      throw invalid(`application ${id} has an invalid upstream host`);
     }
     const releaseModule = string(
       application.release_module,
@@ -753,6 +766,24 @@ function string(value: unknown, label: string): string {
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value)) throw invalid(`${label} must be an array`);
   return value.map((entry, index) => string(entry, `${label}[${index}]`));
+}
+
+function isCanonicalWorkspaceAppUpstreamHost(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 253 &&
+    !value.endsWith(".") &&
+    value.split(".").every((label) => {
+      if (!label || label.length > 63) return false;
+      const characters = [...label];
+      const validEdge = (character: string) => /[a-z0-9]/.test(character);
+      return (
+        validEdge(characters[0] ?? "") &&
+        validEdge(characters.at(-1) ?? "") &&
+        characters.every((character) => /[a-z0-9-]/.test(character))
+      );
+    })
+  );
 }
 
 function positiveInteger(value: unknown, label: string): number {

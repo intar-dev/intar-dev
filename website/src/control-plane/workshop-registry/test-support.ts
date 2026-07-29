@@ -36,6 +36,7 @@ export function workshopCompiledFixture() {
             vm: "workspace",
             port: 30_300,
             protocol: "http",
+            upstream_host: "gitea.internal",
             release_module: "01-core",
           },
         ],
