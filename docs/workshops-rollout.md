@@ -53,6 +53,9 @@ is healthy. Enable only one exact pilot organization while commissioning.
   browser checks are green.
 - Production deployment is from the exact reviewed `main` SHA through
   `.github/workflows/website-deploy.yml`.
+- That successful production run retains one immutable GitHub Actions artifact
+  containing the exact workspace agent and Kino bytes uploaded to R2, their
+  checksums, and the run-bound manifest.
 - The production environment is main-only and uses either an independent
   reviewer with prevent-self-review and no administrator bypass, or the
   repository's short-lived single-operator commissioning guard.
@@ -94,6 +97,7 @@ Record identifiers and non-secret evidence in the release ticket:
 release commit and pull request:
 Website validation run:
 Website production run:
+production guest-tool artifact ID and digest:
 provider Worker deployment/version:
 pre-migration D1 Time Travel bookmark:
 applied migration IDs:
@@ -266,7 +270,18 @@ the only production orchestrator. It:
 4. rechecks the protected approval immediately before mutation;
 5. publishes content-addressed guest tools to R2;
 6. applies D1 migrations;
-7. deploys the website Worker with the provider service binding.
+7. deploys the website Worker with the provider service binding;
+8. advances the mutable guest-tool `current.json` only after D1 and the Worker
+   deployment succeed;
+9. retains the same guest-tool bytes and their canonical manifest in the
+   `production-workshop-guest-tools-<SOURCE_SHA>` Actions artifact.
+
+The final artifact step runs only after every production mutation succeeds and
+is part of the same protected job. A failed or re-run deployment is not valid
+builder input. Content-addressed uploads from an otherwise failed run are inert
+because its mutable pointer never advances. Record the successful run ID and
+artifact ID/digest; the artifact is retained for 90 days and is not a
+long-term release channel.
 
 Directly dispatching **Hetzner provider Worker** validates it but does not
 deploy it. Do not run a separate provider mutation or direct Wrangler command
@@ -386,9 +401,40 @@ Stargate's gateway router.
 ## 6. Install and prove the trusted workshop builder
 
 Release `intar-workshop-builder` through `.github/workflows/release.yml` from
-`main`. Verify the release checksum and install the CI artifact on the
-dedicated x86_64 Linux/KVM builder. Do not build or package it with local
-Docker.
+the same `main` source SHA as the successful Website production run:
+
+```sh
+gh workflow run release.yml --ref main \
+  -f project=intar-workshop-builder \
+  -f bump=patch \
+  -f production_run_id=<WEBSITE_PRODUCTION_RUN_ID>
+```
+
+`production_run_id` is mandatory for a new workshop-builder release and must
+be empty for every other project. The release verifies through the GitHub API
+that the referenced run is the completed, successful, first-attempt
+`website-deploy.yml` dispatch from `main` at the exact release source SHA. It
+then validates the unique immutable artifact ID/digest and manifest, and copies
+those exact workspace-agent and Kino bytes into the builder archive instead of
+rebuilding them.
+
+The resulting release payload remains bound to the annotated tag by its
+existing release-run, artifact-ID, artifact-name, artifact-digest, and
+source-SHA metadata. If publication fails after that tag exists, resume from
+the exact tag with `resume_tag` and leave `production_run_id` empty. Resume
+restores the tag-bound release payload, including guest-tool provenance,
+without depending on the 90-day production artifact. Rerunning the failed new
+release job is rejected so it cannot calculate and publish another version:
+
+```sh
+gh workflow run release.yml --ref workshop-builder/v<VERSION> \
+  -f project=intar-workshop-builder \
+  -f bump=patch \
+  -f resume_tag=workshop-builder/v<VERSION>
+```
+
+Verify the release checksum and install the CI artifact on the dedicated
+x86_64 Linux/KVM builder. Do not build or package it with local Docker.
 
 Configure:
 
@@ -397,10 +443,12 @@ Configure:
 - `[execution.runtime_bundle_verification]` with a minimal clean Debian 13
   disk, kernel, initrd, boot command line, and their exact SHA-256 values;
 - the exact statically linked `intar-workspace-agent` and checksum from the
-  workshop-builder release archive; its digest must match the guest-tool
-  manifest published by Website production;
-- the authored-image mapping required for the existing sealed KVM checkpoint
-  proof;
+  workshop-builder release archive, plus its paired Kino binary; their digests
+  must match `workshop-guest-tools.provenance.json`, which records the protected
+  Website run and immutable artifact ID/digest;
+- `[execution.authored_image_preparation]` with the CI-packaged deterministic
+  Platform bundle, Kino, sanitizer, their exact checksums, the selected image
+  mapping, and an absent atomic output directory;
 - the freshly initialized learner-safe workshop `.git` as build material and
   every build-only or known answer path as a forbidden participant path.
 
@@ -408,13 +456,111 @@ The clean direct-cloud proof disk contains only Debian 13 and the `INTARBUILD`
 seed/SSH bootstrap contract. It must not contain workshop source, solved state,
 pre-pulled OCI layers, or an installed agent copy.
 
+The workshop-builder release archive must contain and pass the included
+`deploy/SHA256SUMS` plus the focused checksum files for:
+
+- `intar-workspace-agent`;
+- `kino`;
+- `deploy/intar-workshop-sanitize`; and
+- `platform-engineering-workshop.tar.gz`.
+
+It must also contain `workshop-guest-tools.provenance.json`. Retain that file
+with the builder release evidence; do not substitute locally rebuilt guest
+tools even if their source tree is identical.
+
+Use the existing x86_64 runner at `95.217.114.144` as the temporary trusted
+builder. The live capacity audit found 24 cores, 125 GiB RAM, about 1.1 TiB
+free, and KVM there, so the workshop build needs no disk resize. This host also
+runs scenario workloads: first drain every active scenario VM and route
+through the normal control plane, then stop admission, its privileged socket,
+and both builders. After verifying the downloaded release archive checksum,
+extract it on that host and run:
+
+```sh
+sudo systemctl stop intar-agent.service
+sudo systemctl stop intar-jailerd.socket
+sudo systemctl stop intar-jailerd.service
+sudo systemctl stop intar-builder.service
+sudo systemctl stop intar-workshop-builder.service
+sudo ./deploy/install.sh --check
+sudo ./deploy/install.sh
+```
+
+`--check` changes nothing. The install mode is idempotent, creates or verifies
+the non-login `intar-builder` account and its `kvm` membership, and installs:
+
+- `/usr/local/bin/intar-workshop-builder`;
+- the workspace agent, Kino, and sanitizer under
+  `/usr/local/libexec/intar`;
+- the workshop bundle under `/usr/local/share/intar/workshops`;
+- `/etc/intar/workshop-builder.toml`; and
+- `/etc/systemd/system/intar-workshop-builder.service`.
+
+It creates the service-owned work roots under
+`/var/lib/intar-workshop-builder` with mode `0750`. The cache root is
+`root:intar-builder 0750`. The root-owned `clean` child holds the separately
+provisioned proof triple and is readable but not writable by the service
+account. The separate `authored` child is
+`intar-builder:intar-builder 0750`, so the preparer can atomically create its
+output without using a group/world-writable parent.
+
+An existing operator-edited config is not replaced. Its bytes are preserved
+and its metadata is normalized to `root:intar-builder 0640`. The installer
+reloads systemd unit metadata but never enables or starts the service and never
+runs `prepare-authored-image`. Review and replace every example token, digest,
+and host path before running `doctor`.
+
+All five units must remain stopped with no pending systemd jobs throughout the
+install and workshop build. The installer also fails closed if it finds any
+live Intar agent, jail daemon, legacy builder, workshop builder, QEMU, or Cloud
+Hypervisor executable. Keep the scenario runtime drained through authored-image
+preparation and the initial checkpoint publication/cold-boot proof. After those
+artifacts are safely retained and no builder/QEMU/Cloud Hypervisor process
+remains, restore the scenario host:
+
+```sh
+sudo systemctl start intar-jailerd.socket
+sudo systemctl start intar-agent.service
+sudo systemctl start intar-builder.service
+```
+
+`intar-jailerd.service` is socket-activated. Do not start the workshop-builder
+service merely to restore scenario capacity; its first publication remains the
+explicit `run-once` operation below.
+
+Install those exact files; do not regenerate the workshop bundle from a mutable
+checkout on the host. The Platform image's 64 GiB nominal disk requires a
+conservative two-disk peak for construction and later seal/restore work.
+Configure `minimum_free_space_bytes = 214748364800` (200 GiB) and prefer a
+200–256 GiB free-space budget. The selected runner's audited free space clears
+that preflight without resizing a filesystem or attaching another volume.
+
+Create a real, non-symlinked, non-group/world-writable output parent that the
+`intar-builder` user can write. Then stop publication work and prepare the base
+as that unprivileged user:
+
+```sh
+sudo systemctl stop intar-workshop-builder.service
+sudo -u intar-builder /usr/local/bin/intar-workshop-builder \
+  prepare-authored-image --config /etc/intar/workshop-builder.toml
+```
+
+The selected output directory must not already exist. Success atomically
+promotes `disk.raw`, `provenance.json`, `build.log`, `serial.log`, and
+`qemu.log`. Inspect and retain the provenance. It binds the output disk to the
+clean disk/kernel/initrd, workshop bundle, Kino, sanitizer, workspace agent,
+source tree, bootstrap, image lock, one-commit Git tree, and sole Talos host
+image. The command installs no workspace agent into the authored disk.
+
 Before claiming a publication:
 
 ```sh
 sudo -u intar-builder /usr/local/bin/intar-workshop-builder doctor \
   --config /etc/intar/workshop-builder.toml
-sudo systemctl stop intar-workshop-builder.service
 ```
+
+`doctor` re-hashes the full promoted disk and every pinned preparation input;
+do not start the service if it reports provenance drift.
 
 Use `run-once` for the first publication and retain the full direct-proof
 serial/build log. For every checkpoint, require both:

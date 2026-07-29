@@ -57,6 +57,7 @@ jobs:
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
+          test "${RUN_ATTEMPT}" = 1
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           case "${APPROVAL_MODE}" in
@@ -85,7 +86,6 @@ jobs:
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
-              test "${RUN_ATTEMPT}" = 1
               triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
               jq -e \
                 --arg login "${SINGLE_OPERATOR_LOGIN}" \
@@ -272,10 +272,22 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
+          set -euo pipefail
           cargo zigbuild --locked --release -p intar-workspace-agent -p kino \
             --target x86_64-unknown-linux-musl
-          agent_path="target/x86_64-unknown-linux-musl/release/intar-workspace-agent"
-          kino_path="target/x86_64-unknown-linux-musl/release/kino"
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          mkdir -p "${guest_tools_dir}"
+          cp \
+            "target/x86_64-unknown-linux-musl/release/intar-workspace-agent" \
+            "${guest_tools_dir}/intar-workspace-agent"
+          cp \
+            "target/x86_64-unknown-linux-musl/release/kino" \
+            "${guest_tools_dir}/kino"
+          chmod 0555 \
+            "${guest_tools_dir}/intar-workspace-agent" \
+            "${guest_tools_dir}/kino"
+          agent_path="${guest_tools_dir}/intar-workspace-agent"
+          kino_path="${guest_tools_dir}/kino"
           file "${agent_path}" | grep -E 'x86-64.*(static|statically linked)'
           file "${kino_path}" | grep -E 'x86-64.*(static|statically linked)'
           agent_sha="$(sha256sum "${agent_path}" | cut -d ' ' -f 1)"
@@ -290,6 +302,50 @@ jobs:
           echo "size_bytes=${agent_size}" >> "${GITHUB_OUTPUT}"
           echo "kino_sha256=${kino_sha}" >> "${GITHUB_OUTPUT}"
           echo "kino_size_bytes=${kino_size}" >> "${GITHUB_OUTPUT}"
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg workflow_path ".github/workflows/website-deploy.yml" \
+            --arg workflow_run_id "${GITHUB_RUN_ID}" \
+            --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg agent_sha256 "${agent_sha}" \
+            --argjson agent_size_bytes "${agent_size}" \
+            --arg agent_object_key \
+              "workspace-agent/releases/${agent_sha}/intar-workspace-agent" \
+            --arg kino_sha256 "${kino_sha}" \
+            --argjson kino_size_bytes "${kino_size}" \
+            --arg kino_object_key \
+              "workspace-agent/kino/releases/${kino_sha}/kino" \
+            '{
+              schema_version: 1,
+              repository: $repository,
+              source_sha: $source_sha,
+              workflow_path: $workflow_path,
+              workflow_run_id: $workflow_run_id,
+              workflow_run_attempt: $workflow_run_attempt,
+              event: $event,
+              ref: $ref,
+              architecture: "x86_64",
+              target: "x86_64-unknown-linux-musl",
+              tools: {
+                "intar-workspace-agent": {
+                  sha256: $agent_sha256,
+                  size_bytes: $agent_size_bytes,
+                  r2_object_key: $agent_object_key
+                },
+                kino: {
+                  sha256: $kino_sha256,
+                  size_bytes: $kino_size_bytes,
+                  r2_object_key: $kino_object_key
+                }
+              }
+            }' > "${guest_tools_dir}/manifest.json"
+          (
+            cd "${guest_tools_dir}"
+            sha256sum intar-workspace-agent kino > SHA256SUMS
+          )
 
       - name: Build deployment artifact
         run: bun run build:deploy
@@ -314,6 +370,7 @@ jobs:
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
+          test "${RUN_ATTEMPT}" = 1
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           case "${APPROVAL_MODE}" in
@@ -342,7 +399,6 @@ jobs:
               test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
               test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
-              test "${RUN_ATTEMPT}" = 1
               triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
               jq -e \
                 --arg login "${SINGLE_OPERATOR_LOGIN}" \
@@ -394,27 +450,32 @@ jobs:
           KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
           KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
         run: |
-          jq -n \
-            --arg sha256 "${AGENT_SHA256}" \
-            --argjson size_bytes "${AGENT_SIZE_BYTES}" \
-            --arg kino_sha256 "${KINO_SHA256}" \
-            --argjson kino_size_bytes "${KINO_SIZE_BYTES}" \
-            '{schema_version: 2, sha256: $sha256, size_bytes: $size_bytes, kino_sha256: $kino_sha256, kino_size_bytes: $kino_size_bytes}' \
-            > "${RUNNER_TEMP}/workspace-agent-current.json"
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          (
+            cd "${guest_tools_dir}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            sha256sum "${guest_tools_dir}/intar-workspace-agent" | cut -d ' ' -f 1
+          )" = "${AGENT_SHA256}"
+          test "$(
+            stat --format='%s' "${guest_tools_dir}/intar-workspace-agent"
+          )" = "${AGENT_SIZE_BYTES}"
+          test "$(
+            sha256sum "${guest_tools_dir}/kino" | cut -d ' ' -f 1
+          )" = "${KINO_SHA256}"
+          test "$(
+            stat --format='%s' "${guest_tools_dir}/kino"
+          )" = "${KINO_SIZE_BYTES}"
           bunx wrangler r2 object put \
             "intar-dev-vm-image-registry-20260709/workspace-agent/releases/${AGENT_SHA256}/intar-workspace-agent" \
-            --file "${GITHUB_WORKSPACE}/target/x86_64-unknown-linux-musl/release/intar-workspace-agent" \
+            --file "${RUNNER_TEMP}/production-workshop-guest-tools/intar-workspace-agent" \
             --jurisdiction eu \
             --remote
           bunx wrangler r2 object put \
             "intar-dev-vm-image-registry-20260709/workspace-agent/kino/releases/${KINO_SHA256}/kino" \
-            --file "${GITHUB_WORKSPACE}/target/x86_64-unknown-linux-musl/release/kino" \
-            --jurisdiction eu \
-            --remote
-          bunx wrangler r2 object put \
-            "intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json" \
-            --file "${RUNNER_TEMP}/workspace-agent-current.json" \
-            --content-type "application/json" \
+            --file "${RUNNER_TEMP}/production-workshop-guest-tools/kino" \
             --jurisdiction eu \
             --remote
 
@@ -437,3 +498,70 @@ jobs:
           chmod 600 "${secrets_file}"
           bunx wrangler deploy --config dist/server/wrangler.json \
             --secrets-file "${secrets_file}"
+
+      - name: Publish current learner guest-tool manifest
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
+          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
+          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
+          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg sha256 "${AGENT_SHA256}" \
+            --argjson size_bytes "${AGENT_SIZE_BYTES}" \
+            --arg kino_sha256 "${KINO_SHA256}" \
+            --argjson kino_size_bytes "${KINO_SIZE_BYTES}" \
+            '{schema_version: 2, sha256: $sha256, size_bytes: $size_bytes, kino_sha256: $kino_sha256, kino_size_bytes: $kino_size_bytes}' \
+            > "${RUNNER_TEMP}/workspace-agent-current.json"
+          bunx wrangler r2 object put \
+            "intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json" \
+            --file "${RUNNER_TEMP}/workspace-agent-current.json" \
+            --content-type "application/json" \
+            --jurisdiction eu \
+            --remote
+
+      - name: Recheck production guest tools before retention
+        env:
+          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
+          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
+          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
+          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
+        run: |
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          (
+            cd "${guest_tools_dir}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          test "$(
+            sha256sum "${guest_tools_dir}/intar-workspace-agent" | cut -d ' ' -f 1
+          )" = "${AGENT_SHA256}"
+          test "$(
+            stat --format='%s' "${guest_tools_dir}/intar-workspace-agent"
+          )" = "${AGENT_SIZE_BYTES}"
+          test "$(
+            sha256sum "${guest_tools_dir}/kino" | cut -d ' ' -f 1
+          )" = "${KINO_SHA256}"
+          test "$(
+            stat --format='%s' "${guest_tools_dir}/kino"
+          )" = "${KINO_SIZE_BYTES}"
+          chmod 0444 \
+            "${guest_tools_dir}/SHA256SUMS" \
+            "${guest_tools_dir}/manifest.json"
+          chmod 0555 \
+            "${guest_tools_dir}/intar-workspace-agent" \
+            "${guest_tools_dir}/kino" \
+            "${guest_tools_dir}"
+
+      - name: Preserve production guest tools for the workshop builder
+        id: production_guest_tools
+        uses: actions/upload-artifact@v7
+        with:
+          name: production-workshop-guest-tools-${{ github.sha }}
+          path: ${{ runner.temp }}/production-workshop-guest-tools/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
