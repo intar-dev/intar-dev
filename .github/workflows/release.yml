@@ -1299,7 +1299,7 @@ jobs:
             fi
           else
             if [ "${remote_main}" != "${GITHUB_SHA}" ]; then
-              echo "main advanced during release verification; rerun from ${remote_main}." >&2
+              echo "main advanced during release verification; start a fresh dispatch from ${remote_main}." >&2
               exit 1
             fi
             git tag -a "${TAG}" "${RELEASE_SHA}" \

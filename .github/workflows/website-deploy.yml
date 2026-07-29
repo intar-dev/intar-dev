@@ -499,30 +499,6 @@ jobs:
           bunx wrangler deploy --config dist/server/wrangler.json \
             --secrets-file "${secrets_file}"
 
-      - name: Publish current learner guest-tool manifest
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
-          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
-          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
-          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
-        run: |
-          set -euo pipefail
-          jq -n \
-            --arg sha256 "${AGENT_SHA256}" \
-            --argjson size_bytes "${AGENT_SIZE_BYTES}" \
-            --arg kino_sha256 "${KINO_SHA256}" \
-            --argjson kino_size_bytes "${KINO_SIZE_BYTES}" \
-            '{schema_version: 2, sha256: $sha256, size_bytes: $size_bytes, kino_sha256: $kino_sha256, kino_size_bytes: $kino_size_bytes}' \
-            > "${RUNNER_TEMP}/workspace-agent-current.json"
-          bunx wrangler r2 object put \
-            "intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json" \
-            --file "${RUNNER_TEMP}/workspace-agent-current.json" \
-            --content-type "application/json" \
-            --jurisdiction eu \
-            --remote
-
       - name: Recheck production guest tools before retention
         env:
           AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
@@ -565,3 +541,50 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 90
+
+      # Keep this the final fallible step. The immutable binaries, D1
+      # migrations, Worker, and retained provenance must all succeed before
+      # production allocation can discover the new guest tools.
+      - name: Publish current learner guest-tool manifest
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
+          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
+          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
+          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
+        run: |
+          set -euo pipefail
+          object_path="intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json"
+          desired="${RUNNER_TEMP}/workspace-agent-current.json"
+          observed="${RUNNER_TEMP}/workspace-agent-current-observed.json"
+          jq -n \
+            --arg sha256 "${AGENT_SHA256}" \
+            --argjson size_bytes "${AGENT_SIZE_BYTES}" \
+            --arg kino_sha256 "${KINO_SHA256}" \
+            --argjson kino_size_bytes "${KINO_SIZE_BYTES}" \
+            '{schema_version: 2, sha256: $sha256, size_bytes: $size_bytes, kino_sha256: $kino_sha256, kino_size_bytes: $kino_size_bytes}' \
+            > "${desired}"
+
+          pointer_verified=false
+          for attempt in 1 2 3; do
+            rm -f "${observed}"
+            bunx wrangler r2 object put "${object_path}" \
+              --file "${desired}" \
+              --content-type "application/json" \
+              --jurisdiction eu \
+              --remote || true
+            if bunx wrangler r2 object get "${object_path}" \
+              --file "${observed}" \
+              --jurisdiction eu \
+              --remote &&
+              cmp --silent "${desired}" "${observed}"; then
+              pointer_verified=true
+              break
+            fi
+            sleep "${attempt}"
+          done
+          if [ "${pointer_verified}" != true ]; then
+            echo "Failed to publish and read back the exact learner guest-tool pointer." >&2
+            exit 1
+          fi

@@ -271,17 +271,19 @@ the only production orchestrator. It:
 5. publishes content-addressed guest tools to R2;
 6. applies D1 migrations;
 7. deploys the website Worker with the provider service binding;
-8. advances the mutable guest-tool `current.json` only after D1 and the Worker
-   deployment succeed;
-9. retains the same guest-tool bytes and their canonical manifest in the
-   `production-workshop-guest-tools-<SOURCE_SHA>` Actions artifact.
+8. retains the same guest-tool bytes and their canonical manifest in the
+   `production-workshop-guest-tools-<SOURCE_SHA>` Actions artifact;
+9. advances and reads back the mutable guest-tool `current.json` as the final
+   step, only after D1, the Worker deployment, and retained evidence succeed.
 
-The final artifact step runs only after every production mutation succeeds and
-is part of the same protected job. A failed or re-run deployment is not valid
-builder input. Content-addressed uploads from an otherwise failed run are inert
-because its mutable pointer never advances. Record the successful run ID and
-artifact ID/digest; the artifact is retained for 90 days and is not a
-long-term release channel.
+The artifact and final pointer step run only after the preceding production
+mutations succeed and are part of the same protected job. A failed or re-run
+deployment is not valid builder input. A failure before the final step leaves
+only inert content-addressed objects. The final pointer update retries the same
+bytes and succeeds only after reading back an exact match. If it cannot attest
+the pointer, reconcile `current.json` before dispatching again. Record the
+successful run ID and artifact ID/digest; the artifact is retained for 90 days
+and is not a long-term release channel.
 
 Directly dispatching **Hetzner provider Worker** validates it but does not
 deploy it. Do not run a separate provider mutation or direct Wrangler command
