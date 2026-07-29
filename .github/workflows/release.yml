@@ -854,16 +854,16 @@ jobs:
             deploy/install.sh
             deploy/intar-workshop-builder.service
             deploy/intar-workshop-sanitize
-            intar-workspace-agent
-            intar-workspace-agent.sha256
             intar-workshop-builder
             intar-workshop-sanitize.sha256
+            intar-workspace-agent
+            intar-workspace-agent.sha256
             kino
             kino.sha256
             platform-engineering-workshop.tar.gz
             platform-engineering-workshop.tar.gz.sha256
-            workshop-guest-tools.provenance.json
             workshop-builder.config.example.toml
+            workshop-guest-tools.provenance.json
           )
           if [ "${packaged_files[*]}" != "${expected_files[*]}" ]; then
             echo "unexpected files in ${archive}: ${packaged_files[*]}" >&2
