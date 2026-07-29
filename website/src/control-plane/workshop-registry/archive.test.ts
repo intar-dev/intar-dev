@@ -102,6 +102,7 @@ describe("workshop source bundle validation", () => {
           id: "gitea",
           vmId: "workspace",
           port: 30_300,
+          upstreamHost: "gitea.internal",
           releaseModuleId: "01-core",
         },
       ],
@@ -126,7 +127,9 @@ describe("workshop source bundle validation", () => {
       checkpoint("checkpoint-00", "a"),
       checkpoint("checkpoint-01", "b"),
     ];
-    expect(hydrateWorkshopManifest({ source, checkpoints }).workspace.provider).toBeUndefined();
+    expect(
+      hydrateWorkshopManifest({ source, checkpoints }).workspace.provider,
+    ).toBeUndefined();
 
     const manifest = hydrateWorkshopManifest({
       source,
@@ -186,7 +189,9 @@ describe("workshop source bundle validation", () => {
       /exactly one VM/,
     ],
   ])("rejects a Hetzner declaration with %s", async (_label, mutate, error) => {
-    const fixture = await buildWorkshopBundleFixture({ mutateManifest: mutate });
+    const fixture = await buildWorkshopBundleFixture({
+      mutateManifest: mutate,
+    });
     await expect(validate(fixture)).rejects.toThrow(error);
   });
 
@@ -349,6 +354,18 @@ describe("workshop source bundle validation", () => {
           "missing-module";
       },
       error: /application gitea has an invalid release module/,
+    },
+    {
+      name: "unsafe application upstream host",
+      mutate: (
+        fixture: Awaited<
+          ReturnType<typeof buildWorkshopBundleFixture>
+        >["compiled"],
+      ) => {
+        fixture.manifest.workspace.applications[0]!.upstream_host =
+          "https://Gitea.internal:3000";
+      },
+      error: /application gitea has an invalid upstream host/,
     },
     {
       name: "unsupported encrypted application transport",

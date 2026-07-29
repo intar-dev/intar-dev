@@ -203,6 +203,12 @@ fn validate_workspace(
                 application.vm, application.port
             )));
         }
+        if let Some(upstream_host) = application.upstream_host.as_deref() {
+            validate_upstream_host(
+                &format!("application '{}' upstream_host", application.id),
+                upstream_host,
+            )?;
+        }
         if !module_ids.contains(application.release_module.as_str()) {
             return Err(invalid(format!(
                 "application '{}' references unknown release module '{}'",
@@ -640,6 +646,29 @@ fn validate_provider_name(context: &str, value: &str) -> Result<()> {
         return Err(invalid(format!(
             "{context} '{value}' may contain only lowercase ASCII letters, digits, and hyphens"
         )));
+    }
+    Ok(())
+}
+
+fn validate_upstream_host(context: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 253 || value.ends_with('.') {
+        return Err(invalid(format!(
+            "{context} must be a lowercase DNS hostname without a trailing dot"
+        )));
+    }
+    for label in value.split('.') {
+        let bytes = label.as_bytes();
+        let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+        if bytes.is_empty()
+            || bytes.len() > 63
+            || !valid_edge(bytes[0])
+            || !valid_edge(bytes[bytes.len() - 1])
+            || bytes.iter().any(|byte| !valid_edge(*byte) && *byte != b'-')
+        {
+            return Err(invalid(format!(
+                "{context} must be a lowercase DNS hostname without a port"
+            )));
+        }
     }
     Ok(())
 }

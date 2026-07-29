@@ -103,6 +103,10 @@ pub struct IssueWorkspaceAppSessionRequest {
     /// through an SSH direct-tcpip channel; it is never published on the host.
     pub target_app_port: u16,
     pub protocol: WorkspaceAppProtocol,
+    /// Optional virtual-host value sent only to the declared guest service.
+    /// The public route hostname remains available as X-Forwarded-Host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
     pub route_expires_at: i64,
     #[serde(default)]
     pub metadata: RouteMetadata,

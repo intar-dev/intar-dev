@@ -266,6 +266,53 @@ async fn workspace_app_http_and_websocket_are_forwarded_inside_ssh() -> Result<(
 }
 
 #[tokio::test]
+async fn workspace_app_can_override_only_the_guest_virtual_host() -> Result<()> {
+    let harness = Harness::start().await?;
+    let session = harness
+        .issue_workspace_app_session_with_options(
+            "wa-virtual-host",
+            Some("hello.demo.127.0.0.1.sslip.io"),
+        )
+        .await?;
+    let browser = harness.bootstrap_workspace_app(&session).await?;
+
+    let response = reqwest::Client::new()
+        .get(browser.base_url.join("hello")?)
+        .header(reqwest::header::COOKIE, &browser.cookie)
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response.text().await?,
+        format!(
+            "/hello|hello.demo.127.0.0.1.sslip.io||{}|http|{}|",
+            harness.public_addr,
+            harness.public_addr.port()
+        )
+    );
+
+    let rotated = harness
+        .issue_workspace_app_session_with_options("wa-virtual-host", None)
+        .await?;
+    let rotated_browser = harness.bootstrap_workspace_app(&rotated).await?;
+    let response = reqwest::Client::new()
+        .get(rotated_browser.base_url.join("hello")?)
+        .header(reqwest::header::COOKIE, &rotated_browser.cookie)
+        .send()
+        .await?;
+    assert_eq!(
+        response.text().await?,
+        format!(
+            "/hello|{}||{}|http|{}|",
+            harness.public_addr,
+            harness.public_addr,
+            harness.public_addr.port()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_app_route_reissue_rotates_browser_authorization() -> Result<()> {
     let harness = Harness::start().await?;
     let first = harness.issue_workspace_app_session().await?;
@@ -819,6 +866,15 @@ impl Harness {
         &self,
         route_id: &str,
     ) -> Result<IssueWorkspaceAppSessionResponse> {
+        self.issue_workspace_app_session_with_options(route_id, None)
+            .await
+    }
+
+    async fn issue_workspace_app_session_with_options(
+        &self,
+        route_id: &str,
+        upstream_host: Option<&str>,
+    ) -> Result<IssueWorkspaceAppSessionResponse> {
         let request = IssueWorkspaceAppSessionRequest {
             route_id: route_id.to_owned(),
             target_username: self.target_username.clone(),
@@ -828,6 +884,7 @@ impl Harness {
             target_private_key_openssh: self.target_private_key_openssh.clone(),
             target_app_port: self.app_addr.port(),
             protocol: WorkspaceAppProtocol::Http,
+            upstream_host: upstream_host.map(ToOwned::to_owned),
             route_expires_at: (OffsetDateTime::now_utc() + time::Duration::hours(1))
                 .unix_timestamp(),
             metadata: RouteMetadata {

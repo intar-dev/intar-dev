@@ -48,6 +48,13 @@
     },
     "target_username": {
       "type": "string"
+    },
+    "upstream_host": {
+      "description": "Optional virtual-host value sent only to the declared guest service.\nThe public route hostname remains available as X-Forwarded-Host.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

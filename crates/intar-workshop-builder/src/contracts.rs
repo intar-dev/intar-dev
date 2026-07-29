@@ -168,6 +168,8 @@ pub struct HydratedWorkspaceApplication {
     pub vm_id: String,
     pub port: u16,
     pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
     pub release_module_id: String,
 }
 

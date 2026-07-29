@@ -461,8 +461,11 @@ describe("workshop access revocation during organization membership removal", ()
       });
 
       const request = accessMocks.issueStargateWorkspaceAppSession.mock
-        .calls[0]?.[0] as { expiresAt: Date } | undefined;
+        .calls[0]?.[0] as
+        | { expiresAt: Date; upstreamHost?: string }
+        | undefined;
       expect(request?.expiresAt.getTime()).toBe(now + 15 * 60_000);
+      expect(request?.upstreamHost).toBe("gitea.internal");
       expect(opened.expiresAt).toBe(now + 15 * 60_000);
     } finally {
       nowSpy.mockRestore();
@@ -1251,6 +1254,7 @@ function workshopManifest(): WorkshopManifestV1 {
           vmId: "workshop",
           port: 3_000,
           protocol: "http",
+          upstreamHost: "gitea.internal",
         },
       ],
     },

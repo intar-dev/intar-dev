@@ -102,8 +102,10 @@ gitea:
       # ArgoCD polls anonymously — repos must be born public
       DEFAULT_PUSH_CREATE_PRIVATE: false
     server:
-      DOMAIN: gitea-http.gitea.svc.cluster.local
-      ROOT_URL: ${GITEA_CLUSTER_URL}/
+      DOMAIN: localhost
+      ROOT_URL: http://localhost:${NODEPORT_GITEA}/
+      LOCAL_ROOT_URL: ${GITEA_CLUSTER_URL}/
+      PUBLIC_URL_DETECTION: auto
 EOF
 
 # --- 3. ArgoCD ------------------------------------------------------------------------

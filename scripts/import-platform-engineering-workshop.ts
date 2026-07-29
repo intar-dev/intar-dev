@@ -615,11 +615,11 @@ function importModule(module: ModuleDefinition, allSlides: ImportedSlide[]) {
 }
 
 function renderVerifyScript(module: ModuleDefinition): string {
-  const module00Prelude = module.id === "00"
-    ? "readonly expected_crane_version=0.21.7\n"
-    : "";
-  const module00Check = module.id === "00"
-    ? `if (( status == 0 )); then
+  const module00Prelude =
+    module.id === "00" ? "readonly expected_crane_version=0.21.7\n" : "";
+  const module00Check =
+    module.id === "00"
+      ? `if (( status == 0 )); then
   crane_version="$(crane version 2>&1 || true)"
   if [[ "\${crane_version}" != *"\${expected_crane_version}"* ]]; then
     printf 'expected preinstalled crane %s, got: %s\\n' "\${expected_crane_version}" "\${crane_version}" >&2
@@ -627,7 +627,8 @@ function renderVerifyScript(module: ModuleDefinition): string {
   fi
 fi
 `
-    : "";
+      : "";
+  const workspaceAppCheck = renderWorkspaceAppProbe(module.id);
   return `#!/usr/bin/env bash
 set -uo pipefail
 ${module00Prelude}verifier=/opt/platform-engineering-workshop/lab/${module.directory}/verify.sh
@@ -636,13 +637,234 @@ output="$(${"${verifier}"} 2>&1)"
 status=$?
 set -e
 printf '%s\\n' "${"${output}"}"
-${module00Check}if (( status == 0 )); then
+${module00Check}${workspaceAppCheck}if (( status == 0 )); then
   printf 'INTAR_PROBE ${module.probe} pass\\n'
 else
   printf 'INTAR_PROBE ${module.probe} fail\\n'
 fi
 exit "${"${status}"}"
 `;
+}
+
+function renderWorkspaceAppProbe(moduleId: string): string {
+  switch (moduleId) {
+    case "02":
+      return `if (( status == 0 )); then
+  public_host=wa-workshop-probe.intar.app
+  if ! gitea_page="$(curl -fsS --max-time 15 \\
+    -H "Host: \${public_host}" \\
+    -H "X-Forwarded-Host: \${public_host}" \\
+    -H 'X-Forwarded-Proto: https' \\
+    -H 'X-Forwarded-Port: 443' \\
+    "http://localhost:30300/cloudbox/platform")"; then
+    printf 'Gitea did not answer through the declared workspace-app port\\n' >&2
+    status=1
+  elif [[ "\${gitea_page}" == *"gitea-http.gitea.svc.cluster.local"* ||
+          "\${gitea_page}" == *"localhost:30300"* ||
+          "\${gitea_page}" != *"\${public_host}"* ]]; then
+    printf 'Gitea did not derive its public URL from %s\\n' "\${public_host}" >&2
+    status=1
+  fi
+fi
+`;
+    case "03":
+      return `if (( status == 0 )); then
+  public_host=wa-workshop-probe.intar.app
+  if ! rustfs_probe_dir="$(mktemp -d)"; then
+    printf 'could not create temporary directory for RustFS workspace-app probe\\n' >&2
+    status=1
+  else
+    rustfs_console_body="\${rustfs_probe_dir}/console.html"
+    rustfs_console_headers="\${rustfs_probe_dir}/console.headers"
+    rustfs_asset_body="\${rustfs_probe_dir}/asset"
+    cleanup_rustfs_probe() {
+      rm -f \\
+        "\${rustfs_console_body}" \\
+        "\${rustfs_console_headers}" \\
+        "\${rustfs_asset_body}"
+      rmdir "\${rustfs_probe_dir}" 2>/dev/null || true
+    }
+    trap cleanup_rustfs_probe EXIT
+
+    rustfs_forwarded_curl() {
+      curl -sS --max-time 15 \\
+        -H "Host: \${public_host}" \\
+        -H "X-Forwarded-Host: \${public_host}" \\
+        -H 'X-Forwarded-Proto: https' \\
+        -H 'X-Forwarded-Port: 443' \\
+        "$@"
+    }
+
+    rustfs_console_path=/
+    if ! rustfs_console_meta="$(rustfs_forwarded_curl \\
+      --dump-header "\${rustfs_console_headers}" \\
+      --output "\${rustfs_console_body}" \\
+      --write-out '%{http_code}\\n%{content_type}' \\
+      http://localhost:30901/)"; then
+      printf 'RustFS console is not reachable on declared workspace-app port 30901\\n' >&2
+      status=1
+    else
+      rustfs_console_status="\${rustfs_console_meta%%$'\\n'*}"
+      rustfs_console_type="\${rustfs_console_meta#*$'\\n'}"
+      if [[ "\${rustfs_console_status}" == 3* ]]; then
+        rustfs_redirect_location="$(
+          awk '
+            tolower(substr($0, 1, 9)) == "location:" {
+              count += 1
+              sub(/^[^:]*:[[:space:]]*/, "")
+              sub(/[[:space:]]+$/, "")
+              location = $0
+            }
+            END {
+              if (count == 1) print location
+            }
+          ' "\${rustfs_console_headers}"
+        )"
+        if [[ -z "\${rustfs_redirect_location}" ||
+              "\${rustfs_redirect_location}" == *" "* ||
+              "\${rustfs_redirect_location}" == *$'\\t'* ||
+              "\${rustfs_redirect_location}" == *\\\\* ]]; then
+          printf 'RustFS console returned an unsafe, missing, or duplicate redirect location\\n' >&2
+          status=1
+        elif [[ "\${rustfs_redirect_location}" == "https://\${public_host}" ]]; then
+          rustfs_console_path=/
+        elif [[ "\${rustfs_redirect_location}" == "https://\${public_host}/"* ]]; then
+          rustfs_console_path="/\${rustfs_redirect_location#https://\${public_host}/}"
+        elif [[ "\${rustfs_redirect_location}" == "//\${public_host}" ]]; then
+          rustfs_console_path=/
+        elif [[ "\${rustfs_redirect_location}" == "//\${public_host}/"* ]]; then
+          rustfs_console_path="/\${rustfs_redirect_location#//\${public_host}/}"
+        elif [[ "\${rustfs_redirect_location}" == //* ||
+                "\${rustfs_redirect_location}" == http://* ||
+                "\${rustfs_redirect_location}" == https://* ||
+                "\${rustfs_redirect_location}" =~ ^[A-Za-z][A-Za-z0-9+.-]*: ]]; then
+          printf 'RustFS console referenced a cross-origin redirect: %s\\n' \\
+            "\${rustfs_redirect_location}" >&2
+          status=1
+        elif [[ "\${rustfs_redirect_location}" == /* ]]; then
+          rustfs_console_path="\${rustfs_redirect_location}"
+        else
+          rustfs_console_path="/\${rustfs_redirect_location#./}"
+        fi
+
+        if (( status == 0 )); then
+          if ! rustfs_console_meta="$(rustfs_forwarded_curl \\
+            --output "\${rustfs_console_body}" \\
+            --write-out '%{http_code}\\n%{content_type}' \\
+            "http://localhost:30901\${rustfs_console_path}")"; then
+            printf 'RustFS console redirect target is not reachable through workspace-app headers\\n' >&2
+            status=1
+          else
+            rustfs_console_status="\${rustfs_console_meta%%$'\\n'*}"
+            rustfs_console_type="\${rustfs_console_meta#*$'\\n'}"
+            if [[ "\${rustfs_console_status}" != 2* ]]; then
+              printf 'RustFS console redirect target returned HTTP %s instead of 2xx\\n' \\
+                "\${rustfs_console_status}" >&2
+              status=1
+            fi
+          fi
+        fi
+      elif [[ "\${rustfs_console_status}" != 2* ]]; then
+        printf 'RustFS console returned HTTP %s instead of 2xx or a safe same-origin redirect\\n' \\
+          "\${rustfs_console_status}" >&2
+        status=1
+      fi
+    fi
+
+    if (( status == 0 )); then
+      if [[ ! -s "\${rustfs_console_body}" ]] ||
+         ! grep -Eiq '<(!doctype[[:space:]]+html|html)([[:space:]>])' \\
+           "\${rustfs_console_body}" ||
+         [[ "\${rustfs_console_type,,}" != text/html* ]]; then
+        printf 'RustFS console did not return non-empty HTML (content-type: %s)\\n' \\
+          "\${rustfs_console_type:-missing}" >&2
+        status=1
+      fi
+    fi
+
+    if (( status == 0 )); then
+      rustfs_asset_ref="$(
+        sed -nE \\
+          "s@.*(src|href)[[:space:]]*=[[:space:]]*['\\"]([^'\\"]+\\\\.(js|css)(\\\\?[^'\\"]*)?)['\\"].*@\\\\2@p" \\
+          "\${rustfs_console_body}" |
+          sed -n '1p'
+      )"
+      if [[ -z "\${rustfs_asset_ref}" ]]; then
+        printf 'RustFS console HTML did not reference a JavaScript or CSS asset\\n' >&2
+        status=1
+      elif [[ "\${rustfs_asset_ref}" == "https://\${public_host}/"* ]]; then
+        rustfs_asset_path="/\${rustfs_asset_ref#https://\${public_host}/}"
+      elif [[ "\${rustfs_asset_ref}" == "//\${public_host}/"* ]]; then
+        rustfs_asset_path="/\${rustfs_asset_ref#//\${public_host}/}"
+      elif [[ "\${rustfs_asset_ref}" == http://* ||
+              "\${rustfs_asset_ref}" == https://* ||
+              "\${rustfs_asset_ref}" == //* ||
+              "\${rustfs_asset_ref}" =~ ^[A-Za-z][A-Za-z0-9+.-]*: ||
+              "\${rustfs_asset_ref}" == *" "* ||
+              "\${rustfs_asset_ref}" == *$'\\t'* ||
+              "\${rustfs_asset_ref}" == *\\\\* ]]; then
+        printf 'RustFS console referenced a cross-origin asset: %s\\n' \\
+          "\${rustfs_asset_ref}" >&2
+        status=1
+      elif [[ "\${rustfs_asset_ref}" == /* ]]; then
+        rustfs_asset_path="\${rustfs_asset_ref}"
+      else
+        rustfs_console_file_path="\${rustfs_console_path%%[?#]*}"
+        rustfs_console_dir="\${rustfs_console_file_path%/*}/"
+        rustfs_asset_path="\${rustfs_console_dir}\${rustfs_asset_ref#./}"
+      fi
+    fi
+
+    if (( status == 0 )); then
+      if ! rustfs_asset_meta="$(rustfs_forwarded_curl \\
+        --output "\${rustfs_asset_body}" \\
+        --write-out '%{http_code}\\n%{content_type}' \\
+        "http://localhost:30901\${rustfs_asset_path}")"; then
+        printf 'RustFS console asset is not reachable through the workspace-app headers: %s\\n' \\
+          "\${rustfs_asset_ref}" >&2
+        status=1
+      else
+        rustfs_asset_status="\${rustfs_asset_meta%%$'\\n'*}"
+        rustfs_asset_type="\${rustfs_asset_meta#*$'\\n'}"
+        if [[ "\${rustfs_asset_status}" != 2* ]]; then
+          printf 'RustFS console asset returned HTTP %s: %s\\n' \\
+            "\${rustfs_asset_status}" "\${rustfs_asset_ref}" >&2
+          status=1
+        elif [[ ! -s "\${rustfs_asset_body}" ||
+                "\${rustfs_asset_type,,}" == text/html* ]]; then
+          printf 'RustFS console asset is empty or returned HTML (content-type: %s): %s\\n' \\
+            "\${rustfs_asset_type:-missing}" "\${rustfs_asset_ref}" >&2
+          status=1
+        fi
+      fi
+    fi
+
+    cleanup_rustfs_probe
+    trap - EXIT
+  fi
+fi
+`;
+    case "06":
+      return `if (( status == 0 )); then
+  public_host=wa-workshop-probe.intar.app
+  upstream_host=hello.demo.127.0.0.1.sslip.io
+  if ! knative_page="$(curl -fsS --max-time 60 \\
+    -H "Host: \${upstream_host}" \\
+    -H "X-Forwarded-Host: \${public_host}" \\
+    -H 'X-Forwarded-Proto: https' \\
+    -H 'X-Forwarded-Port: 443' \\
+    http://localhost:31080/)"; then
+    printf 'Knative did not answer through the declared upstream-host contract\\n' >&2
+    status=1
+  elif [[ "\${knative_page,,}" != *"hello"* ]]; then
+    printf 'Knative upstream host did not route to demo/hello\\n' >&2
+    status=1
+  fi
+fi
+`;
+    default:
+      return "";
+  }
 }
 
 function renderCatchUpScript(module: ModuleDefinition): string {
@@ -764,13 +986,13 @@ function bundleModuleImages(
 
 function renderManifest(allSlides: ImportedSlide[]): string {
   const applications = [
-    ["gitea", "Gitea", 30300, "02"],
-    ["argocd", "Argo CD", 30080, "02"],
-    ["rustfs", "RustFS", 30901, "03"],
-    ["knative", "Knative", 31081, "06"],
-    ["zot", "Zot Registry", 30500, "07"],
-    ["cloudbox", "Cloudbox Console", 30600, "08"],
-    ["grafana", "Grafana", 30030, "09"],
+    ["gitea", "Gitea", 30300, "02", null],
+    ["argocd", "Argo CD", 30080, "02", null],
+    ["rustfs", "RustFS", 30901, "03", null],
+    ["knative", "Knative", 31080, "06", "hello.demo.127.0.0.1.sslip.io"],
+    ["zot", "Zot Registry", 30500, "07", null],
+    ["cloudbox", "Cloudbox Console", 30600, "08", null],
+    ["grafana", "Grafana", 30030, "09", null],
   ] as const;
   const assets = [...bundledAssets].sort();
 
@@ -823,13 +1045,13 @@ workspace {
   }
 
 `;
-  for (const [id, label, port, releaseModule] of applications) {
+  for (const [id, label, port, releaseModule, upstreamHost] of applications) {
     result += `  application ${quote(id)} {
     label          = ${quote(label)}
     vm             = "learner"
     port           = ${port}
     protocol       = "http"
-    release_module = ${quote(releaseModule)}
+${upstreamHost ? `    upstream_host  = ${quote(upstreamHost)}\n` : ""}    release_module = ${quote(releaseModule)}
   }
 
 `;
@@ -1173,6 +1395,8 @@ function copyRuntimePath(relativePath: string) {
       content = adaptGiteaDigestValues(content);
     } else if (relativePath === "scripts/seed-gitea.sh") {
       content = adaptSeedGiteaForSealedCheckpoints(content);
+    } else if (relativePath === "gitops/components/rustfs/service-nodeport.yaml") {
+      content = adaptRustfsWorkspaceAppService(content);
     } else if (relativePath === "gitops/components/grafana/grafana.yaml") {
       content = adaptStockGrafana(content);
     } else if (relativePath === "lab/07-ci/app/Dockerfile") {
@@ -1432,7 +1656,7 @@ info "Using digest-pinned external registries; no local mirror is configured"
   if (withoutMirror === value) {
     throw new Error("Talos registry-mirror block changed upstream");
   }
-  return withoutMirror
+  const adapted = withoutMirror
     .replace(
       /\n#\s+2\. Points the nodes'[\s\S]*?\n#\s+3\. Installs Cilium/u,
       "\n#   2. Pulls every Talos/Kubernetes workload from a reviewed external digest\n#   3. Installs Cilium",
@@ -1440,7 +1664,21 @@ info "Using digest-pinned external registries; no local mirror is configured"
     .replace(
       /# Environment overrides:[\s\S]*?# ={10,}/u,
       "# External image access is fixed by the signed runtime bundle; there is no mirror override.\n# =============================================================================",
+    )
+    .replace(
+      "${NODEPORT_RUSTFS_S3}:${NODEPORT_RUSTFS_S3}/tcp,${NODEPORT_GRAFANA}",
+      "${NODEPORT_RUSTFS_S3}:${NODEPORT_RUSTFS_S3}/tcp,${NODEPORT_RUSTFS_CONSOLE}:${NODEPORT_RUSTFS_CONSOLE}/tcp,${NODEPORT_GRAFANA}",
     );
+  if (
+    !adapted.includes(
+      "${NODEPORT_RUSTFS_CONSOLE}:${NODEPORT_RUSTFS_CONSOLE}/tcp",
+    )
+  ) {
+    throw new Error(
+      "Talos RustFS console exposed-port anchor changed upstream",
+    );
+  }
+  return adapted;
 }
 
 function adaptRuntimeVersions(value: string): string {
@@ -1448,6 +1686,10 @@ function adaptRuntimeVersions(value: string): string {
   if (!talosImage) throw new Error("Talos runtime digest is missing");
   const adapted = value
     .replace(/^TALOS_IMAGE=.*$/mu, `TALOS_IMAGE="${talosImage}"`)
+    .replace(
+      'NODEPORT_RUSTFS_S3="30900"',
+      'NODEPORT_RUSTFS_S3="30900"\nNODEPORT_RUSTFS_CONSOLE="30901"',
+    )
     .replace(
       /# Host-side Ollama model .*\n# see GitHub issues/u,
       "# Optional host-side Ollama model used only by the source workshop's high-memory path;\n# see GitHub issues",
@@ -1457,13 +1699,21 @@ function adaptRuntimeVersions(value: string): string {
       "# --- Legacy mirror constants (unused by the Intar direct-cloud path) -------",
     )
     .replace(/\n# --- kind fallback[\s\S]*?(?=\n# --- CNI)/u, "")
-    .replace(/\n# --- Legacy mirror constants[\s\S]*?(?=\n# --- Published minimum spec)/u, "")
+    .replace(
+      /\n# --- Legacy mirror constants[\s\S]*?(?=\n# --- Published minimum spec)/u,
+      "",
+    )
     .replace(
       /Tool versions \(talosctl, kubectl, helm, kind, crane, cilium-cli, jq, node\)/u,
       "Tool versions (talosctl, kubectl, helm, crane, cilium-cli, jq)",
     );
-  if (!adapted.includes(`TALOS_IMAGE="${talosImage}"`)) {
-    throw new Error("Talos image variable was not digest-pinned");
+  if (
+    !adapted.includes(`TALOS_IMAGE="${talosImage}"`) ||
+    !adapted.includes('NODEPORT_RUSTFS_CONSOLE="30901"')
+  ) {
+    throw new Error(
+      "runtime versions are missing image or RustFS console pins",
+    );
   }
   return adapted;
 }
@@ -1568,11 +1818,42 @@ function adaptGiteaDigestValues(value: string): string {
   const image = imageMappings.get("docker.gitea.com/gitea:1.26.1-rootless");
   if (!image) throw new Error("Gitea image pin is missing");
   const digest = image.split("@", 2)[1];
-  const adapted = value.replace(
+  const pinned = value.replace(
     "image:\n  rootless: true",
     `image:\n  registry: docker.gitea.com\n  repository: gitea\n  tag: \"\"\n  digest: ${digest}\n  rootless: true`,
   );
-  if (adapted === value) throw new Error("Gitea values anchor changed upstream");
+  if (pinned === value) throw new Error("Gitea values anchor changed upstream");
+  const adapted = pinned.replace(
+    `    server:
+      DOMAIN: gitea-http.gitea.svc.cluster.local
+      ROOT_URL: \${GITEA_CLUSTER_URL}/`,
+    `    server:
+      DOMAIN: localhost
+      ROOT_URL: http://localhost:\${NODEPORT_GITEA}/
+      LOCAL_ROOT_URL: \${GITEA_CLUSTER_URL}/
+      PUBLIC_URL_DETECTION: auto`,
+  );
+  if (adapted === pinned) {
+    throw new Error("Gitea dynamic public URL anchor changed upstream");
+  }
+  return adapted;
+}
+
+function adaptRustfsWorkspaceAppService(value: string): string {
+  const expected = `  ports:
+    - name: endpoint
+      port: 9000
+      targetPort: 9000
+      nodePort: 30900`;
+  const replacement = `${expected}
+    - name: console
+      port: 9001
+      targetPort: 9001
+      nodePort: 30901`;
+  const adapted = value.replace(expected, replacement);
+  if (adapted === value) {
+    throw new Error("RustFS NodePort service anchor changed upstream");
+  }
   return adapted;
 }
 

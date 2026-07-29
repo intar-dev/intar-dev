@@ -207,6 +207,7 @@ impl SqliteRouteStore {
                 target_private_key_openssh,
                 target_app_port,
                 protocol,
+                upstream_host,
                 expires_at,
                 bootstrap_token_sha256,
                 bootstrap_expires_at,
@@ -217,7 +218,7 @@ impl SqliteRouteStore {
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(route_id) DO UPDATE SET
                 target_username = excluded.target_username,
                 target_ip = excluded.target_ip,
@@ -226,6 +227,7 @@ impl SqliteRouteStore {
                 target_private_key_openssh = excluded.target_private_key_openssh,
                 target_app_port = excluded.target_app_port,
                 protocol = excluded.protocol,
+                upstream_host = excluded.upstream_host,
                 expires_at = excluded.expires_at,
                 bootstrap_token_sha256 = excluded.bootstrap_token_sha256,
                 bootstrap_expires_at = excluded.bootstrap_expires_at,
@@ -244,6 +246,7 @@ impl SqliteRouteStore {
         .bind(&route.target_private_key_openssh)
         .bind(i64::from(route.target_app_port))
         .bind(workspace_app_protocol_slug(route.protocol))
+        .bind(route.upstream_host.as_deref())
         .bind(route.expires_at.unix_timestamp())
         .bind(bootstrap_token_sha256)
         .bind(bootstrap_expires_at.unix_timestamp())
@@ -348,6 +351,7 @@ impl SqliteRouteStore {
                 route.target_private_key_openssh,
                 route.target_app_port,
                 route.protocol,
+                route.upstream_host,
                 route.expires_at,
                 route.host_id,
                 route.run_id,
@@ -410,6 +414,7 @@ impl SqliteRouteStore {
                 target_private_key_openssh,
                 target_app_port,
                 protocol,
+                upstream_host,
                 expires_at,
                 host_id,
                 run_id,
@@ -523,6 +528,7 @@ fn row_to_workspace_app_route(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceA
         target_private_key_openssh: row.get("target_private_key_openssh"),
         target_app_port: parse_port("target_app_port")?,
         protocol,
+        upstream_host: row.get("upstream_host"),
         expires_at: parse_time("expires_at")?,
         metadata: stargate_core::RouteMetadata {
             host_id: row.get("host_id"),

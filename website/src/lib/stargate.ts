@@ -11,8 +11,7 @@ const DEFAULT_STARGATE_ADMIN_ORIGIN = "http://stargate.internal";
 const STARGATE_ADMIN_CREATE_TIMEOUT_MS = 30_000;
 const WORKSPACE_APP_BOOTSTRAP_QUERY_PARAMETER = "__intar_bootstrap";
 const WORKSPACE_APP_BOOTSTRAP_TTL_MS = 60_000;
-const WORKSPACE_APP_ROUTE_ID_PATTERN =
-  /^wa-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const WORKSPACE_APP_ROUTE_ID_PATTERN = /^wa-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const textEncoder = new TextEncoder();
 
@@ -82,6 +81,7 @@ export interface IssueStargateWorkspaceAppSessionInput {
   targetHostKeyOpenssh: string;
   targetPrivateKeyOpenssh: string;
   targetAppPort: number;
+  upstreamHost?: string;
   expiresAt: Date;
   metadata: {
     hostId: string;
@@ -246,6 +246,9 @@ export async function issueStargateWorkspaceAppSession(
       target_private_key_openssh: input.targetPrivateKeyOpenssh,
       target_app_port: input.targetAppPort,
       protocol: "http",
+      ...(input.upstreamHost === undefined
+        ? {}
+        : { upstream_host: input.upstreamHost }),
       route_expires_at: Math.floor(input.expiresAt.getTime() / 1000),
       metadata: {
         host_id: input.metadata.hostId,
