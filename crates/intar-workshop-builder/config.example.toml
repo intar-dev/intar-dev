@@ -15,12 +15,13 @@ max_bundle_entries = 4096
 
 # Required for direct-cloud (for example Hetzner) workshop publications. The
 # file contains either the raw 32-byte Ed25519 seed or its standard-base64
-# encoding and is injected by CI as a root-owned runtime secret. Alternatively
-# set `private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"`; never put
-# key material in this TOML file.
+# encoding. Production uses root:intar-builder ownership with mode 0640 so the
+# unprivileged service can read but never replace it. Alternatively set
+# `private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"`; never put key
+# material in this TOML file.
 [worker.runtime_bundle_signing]
 key_id = "workshop-runtime-v1"
-private_key_file = "/run/secrets/intar-workshop-runtime-ed25519"
+private_key_file = "/etc/intar/workshop-runtime-ed25519"
 compression = "zstd"
 
 [execution]

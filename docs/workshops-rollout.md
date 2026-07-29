@@ -203,13 +203,20 @@ Configure these production variables:
 | `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID` | public identifier matching the trusted builder configuration |
 | `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` | JSON object mapping that ID to its canonical base64 32-byte Ed25519 public key |
 
-The builder keeps the corresponding 32-byte Ed25519 private seed in a
-root-owned, mode-restricted runtime secret file such as
-`/run/secrets/intar-workshop-runtime-ed25519`. It does not belong in GitHub
-Actions. The GitHub variable contains only public verification keys. Rotate by
-adding the new public key first, publishing and deploying the verifier, moving
-the builder to the new private seed/key ID, and retaining old public keys while
-any immutable revision may still reference them.
+The builder keeps the corresponding 32-byte Ed25519 private seed in
+`/etc/intar/workshop-runtime-ed25519`, owned by `root:intar-builder` with mode
+`0640` and exactly one link. The builder accepts that exact root-owned
+group-read boundary only when the group matches its non-root primary group,
+rejects access ACLs, group write/execute, and every permission for other
+users, and therefore lets the unprivileged service read without owning or
+replacing the seed. Provision and rotate it separately as root; the installer
+never generates or packages private key material and only validates an
+existing key. It also rejects foreign members of the `intar-builder` group.
+The seed does not belong in GitHub Actions. The GitHub variable contains only
+public verification keys. Rotate by adding the new public key first, publishing
+and deploying the verifier, moving the builder to the new private seed/key ID,
+and retaining old public keys while any immutable revision may still reference
+them.
 
 The Hetzner project token is deliberately absent from this table. It is BYOK
 data entered in the owner UI and envelope-encrypted by the provider Worker.

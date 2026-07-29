@@ -2432,6 +2432,7 @@ dependencies = [
  "intar-image-upload",
  "intar-workshop-manifest",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2443,6 +2444,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "xattr",
  "zstd",
 ]
 

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -633,14 +633,22 @@ fn write_tar<W: std::io::Write>(writer: W, entries: BTreeMap<String, Vec<u8>>) -
 }
 
 fn read_private_key_file(path: &Path) -> Result<[u8; 32]> {
-    let metadata = fs::symlink_metadata(path)
+    let path_metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect runtime signing key '{}'", path.display()))?;
-    if !metadata.file_type().is_file() {
+    if !path_metadata.file_type().is_file() {
         bail!(
             "runtime signing key '{}' is not a regular file",
             path.display()
         );
     }
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open runtime signing key '{}'", path.display()))?;
+    let metadata = file.metadata().with_context(|| {
+        format!(
+            "failed to inspect open runtime signing key '{}'",
+            path.display()
+        )
+    })?;
     if metadata.len() == 0 || metadata.len() > MAX_SIGNING_KEY_FILE_BYTES {
         bail!(
             "runtime signing key '{}' has an invalid size",
@@ -649,15 +657,47 @@ fn read_private_key_file(path: &Path) -> Result<[u8; 32]> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        if path_metadata.dev() != metadata.dev() || path_metadata.ino() != metadata.ino() {
             bail!(
-                "runtime signing key '{}' must not be accessible by group or other users",
+                "runtime signing key '{}' changed while it was being opened",
+                path.display()
+            );
+        }
+        let caller_uid = rustix::process::getuid().as_raw();
+        let caller_gid = rustix::process::getgid().as_raw();
+        #[cfg(target_os = "linux")]
+        let has_access_acl = {
+            use xattr::FileExt as _;
+
+            file.get_xattr("system.posix_acl_access")
+                .with_context(|| {
+                    format!(
+                        "failed to inspect runtime signing key ACLs '{}'",
+                        path.display()
+                    )
+                })?
+                .is_some()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let has_access_acl = false;
+        if !private_key_permissions_are_safe(
+            metadata.permissions().mode(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.nlink(),
+            caller_uid,
+            caller_gid,
+            has_access_acl,
+        ) {
+            bail!(
+                "runtime signing key '{}' must have one link and no access ACL, and be caller-owned mode 0600 or root-owned mode 0640 for the caller's non-root primary group",
                 path.display()
             );
         }
     }
-    let bytes = fs::read(path)
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or_default());
+    file.read_to_end(&mut bytes)
         .with_context(|| format!("failed to read runtime signing key '{}'", path.display()))?;
     if bytes.len() == 32 {
         return bytes
@@ -666,6 +706,24 @@ fn read_private_key_file(path: &Path) -> Result<[u8; 32]> {
     }
     decode_base64_seed(trim_ascii(&bytes))
         .with_context(|| format!("runtime signing key '{}' is invalid", path.display()))
+}
+
+#[cfg(unix)]
+fn private_key_permissions_are_safe(
+    mode: u32,
+    owner_uid: u32,
+    owner_gid: u32,
+    link_count: u64,
+    caller_uid: u32,
+    caller_gid: u32,
+    has_access_acl: bool,
+) -> bool {
+    if link_count != 1 || has_access_acl {
+        return false;
+    }
+    let permissions = mode & 0o777;
+    (owner_uid == caller_uid && permissions == 0o600)
+        || (owner_uid == 0 && caller_gid != 0 && owner_gid == caller_gid && permissions == 0o640)
 }
 
 fn decode_base64_seed(encoded: &[u8]) -> Result<[u8; 32]> {
@@ -930,6 +988,39 @@ mod tests {
         assert_eq!(read_private_key_file(&path).unwrap(), [9; 32]);
         fs::write(&path, [8; 32]).unwrap();
         assert_eq!(read_private_key_file(&path).unwrap(), [8; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_only_owner_or_root_group_read_signing_key_modes() {
+        assert!(private_key_permissions_are_safe(
+            0o600, 1_000, 1_000, 1, 1_000, 1_000, false
+        ));
+        assert!(private_key_permissions_are_safe(
+            0o640, 0, 1_000, 1, 1_000, 1_000, false
+        ));
+
+        assert!(!private_key_permissions_are_safe(
+            0o640, 0, 2_000, 1, 1_000, 1_000, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o640, 0, 0, 1, 0, 0, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o640, 1_000, 1_000, 1, 1_000, 1_000, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o660, 0, 1_000, 1, 1_000, 1_000, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o604, 1_000, 1_000, 1, 1_000, 1_000, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o600, 1_000, 1_000, 2, 1_000, 1_000, false
+        ));
+        assert!(!private_key_permissions_are_safe(
+            0o600, 1_000, 1_000, 1, 1_000, 1_000, true
+        ));
     }
 
     #[test]
