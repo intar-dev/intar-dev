@@ -57,10 +57,10 @@ output.
 
 Before cloning, both the output and execution-work filesystems must have at
 least `minimum_free_space_bytes`, and never less than twice the workshop's
-nominal disk size. Use 200 GiB for the 64 GiB Platform image; 256 GiB leaves
-more operational margin for publication artifacts. A host with only about
-64 GiB free is intentionally rejected before creating a disk. This check does
-not replace normal capacity monitoring.
+nominal disk size. Use 80 GiB for the 32 GiB Platform image, leaving 16 GiB
+beyond the conservative two-disk peak for publication artifacts. A host with
+less than that configured budget is rejected before creating a disk. This
+check does not replace normal capacity monitoring.
 
 The execution mapping is deliberately operator-owned. Each
 `workspace.vm.image` resolves to one absolute raw base disk, kernel, initrd and

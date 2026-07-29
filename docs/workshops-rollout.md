@@ -18,7 +18,7 @@ learner server: Debian 13 → Docker → Talos-in-Docker → Kubernetes applicat
 ```
 
 The immutable Platform Engineering revision requires 4000 millicores, 16 GiB
-RAM, and 64 GiB disk and pins the exact x86 server type `cx43`. The resolved
+RAM, and 32 GiB disk and pins the exact x86 server type `cx43`. The resolved
 Hetzner shape may provide more disk; the workshop no longer requires a 100 GiB
 Intar runner reservation. There is no provider-side server-type substitution.
 
@@ -76,7 +76,7 @@ is healthy. Enable only one exact pilot organization while commissioning.
   owner. Intar creates only its persistent sentinel firewall at connection
   time.
 - The live Hetzner catalog still reports the pinned `cx43` as non-deprecated,
-  x86, and at least 4000 millicores, 16 GiB RAM, and 64 GiB disk.
+  x86, and at least 4000 millicores, 16 GiB RAM, and 32 GiB disk.
 - A fresh cost forecast is below the configured organization ceiling, or an
   owner has explicitly recorded the session override.
 - The one-user pilot ends with confirmed deletion of its server, Primary IPv4,
@@ -157,7 +157,7 @@ authoring contract:
 test "$(find workshops/platform-engineering/slides -maxdepth 1 -name 'slide-*.md' | wc -l | tr -d ' ')" = 85
 test "$(find workshops/platform-engineering/slides/notes -maxdepth 1 -name 'slide-*.md' | wc -l | tr -d ' ')" = 85
 test "$(rg -c '^module "' workshops/platform-engineering/workshop.hcl)" = 11
-rg -n 'cpu_millis  = 4000|memory_mib  = 16384|disk_mib    = 65536' \
+rg -n 'cpu_millis  = 4000|memory_mib  = 16384|disk_mib    = 32768' \
   workshops/platform-engineering/workshop.hcl
 rg -n 'server_type  = "cx43"|system_image = "debian-13"' \
   workshops/platform-engineering/workshop.hcl
@@ -639,30 +639,29 @@ a scenario image or locally rebuilt disk for these bytes. Set the
 kernel/initrd hashes from the corresponding entries in `proof.json` before
 `doctor`.
 
-All five units must remain stopped with no pending systemd jobs throughout the
-install and workshop build. The installer also fails closed if it finds any
-live Intar agent, jail daemon, legacy builder, workshop builder, QEMU, or Cloud
-Hypervisor executable. Keep the scenario runtime drained through authored-image
-preparation and the initial checkpoint publication/cold-boot proof. After those
-artifacts are safely retained and no builder/QEMU/Cloud Hypervisor process
-remains, restore the scenario host:
+On the shared image-builder host, both builder services must remain stopped
+with no pending systemd jobs throughout installation. The installer fails
+closed if it finds a live legacy builder, workshop builder, QEMU, Cloud
+Hypervisor, agent, or jail daemon. Keep `intar-builder.service` drained through
+authored-image preparation and the initial checkpoint publication/cold-boot
+proof. After those artifacts are safely retained and no builder or QEMU process
+remains, restore the existing image builder:
 
 ```sh
-sudo systemctl start intar-jailerd.socket
-sudo systemctl start intar-agent.service
 sudo systemctl start intar-builder.service
 ```
 
-`intar-jailerd.service` is socket-activated. Do not start the workshop-builder
-service merely to restore scenario capacity; its first publication remains the
-explicit `run-once` operation below.
+Do not run the two builder services concurrently. Do not start the
+workshop-builder service merely to restore scenario-image build capacity; its
+first publication remains the explicit `run-once` operation below.
 
 Install those exact files; do not regenerate the workshop bundle from a mutable
-checkout on the host. The Platform image's 64 GiB nominal disk requires a
+checkout on the host. The Platform image's 32 GiB nominal disk requires a
 conservative two-disk peak for construction and later seal/restore work.
-Configure `minimum_free_space_bytes = 214748364800` (200 GiB) and prefer a
-200–256 GiB free-space budget. The selected runner's audited free space clears
-that preflight without resizing a filesystem or attaching another volume.
+Configure `minimum_free_space_bytes = 85899345920` (80 GiB). The current
+builder must have at least that much audited free space before the drain; stale
+scratch/output caches may be removed only after D1 and host state prove there
+are no active builds.
 
 Create a real, non-symlinked, non-group/world-writable output parent that the
 `intar-builder` user can write. Then stop publication work and prepare the base
@@ -811,7 +810,7 @@ verified, and 11 immutable `hetzner_cloud` artifacts with:
 
 Inspect the revision manifest and require 240 minutes, 11 modules, 85 slides,
 Apache-2.0 attribution, `cx43`, Debian 13, x86, and resolved hardware satisfying
-4000 millicores, 16 GiB RAM, and 64 GiB disk.
+4000 millicores, 16 GiB RAM, and 32 GiB disk.
 
 ## 10. Create the one-user session and approve its forecast
 
