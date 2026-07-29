@@ -15,7 +15,7 @@ import {
   type WorkshopSessionRole,
   type WorkshopSessionState,
 } from "@/db/schema";
-import { appError } from "@/lib/app-error";
+import { AppError, appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   isOrganizationAdminRole,
@@ -863,12 +863,63 @@ async function cleanupWorkshopSessionWithAudit(params: {
   try {
     await closeWorkshopSessionResources(params);
   } catch (error) {
+    if (
+      error instanceof AppError &&
+      error.code === "workshop_provider_cleanup_pending"
+    ) {
+      await appendWorkshopCleanupEvent(params, "session.cleanup_pending");
+      return;
+    }
     await appendWorkshopCleanupEvent(params, "session.cleanup_failed", {
       error: workshopCleanupErrorMessage(error),
     });
     throw error;
   }
-  await appendWorkshopCleanupEvent(params, "session.cleanup_completed");
+  await appendWorkshopCleanupCompletedEvent(params);
+}
+
+async function appendWorkshopCleanupCompletedEvent(params: {
+  db: ReturnType<typeof workshopDb>;
+  organizationId: string;
+  sessionId: string;
+  actorUserId: string;
+  terminalState: "ended" | "cancelled";
+  now: number;
+}): Promise<void> {
+  try {
+    const existing = await params.db
+      .select({ id: workshopEvents.id })
+      .from(workshopEvents)
+      .where(
+        and(
+          eq(workshopEvents.sessionId, params.sessionId),
+          eq(workshopEvents.type, "session.cleanup_completed"),
+        ),
+      )
+      .limit(1);
+    if (existing.length > 0) return;
+    await params.db
+      .insert(workshopEvents)
+      .values({
+        id: `workshop-cleanup-completed-${params.sessionId}`,
+        organizationId: params.organizationId,
+        sessionId: params.sessionId,
+        actorUserId: params.actorUserId,
+        type: "session.cleanup_completed",
+        payloadJson: { terminalState: params.terminalState },
+        createdAt: params.now,
+      })
+      .onConflictDoNothing();
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "workshop_session_cleanup_audit_failed",
+        sessionId: params.sessionId,
+        type: "session.cleanup_completed",
+        error: workshopCleanupErrorMessage(error),
+      }),
+    );
+  }
 }
 
 async function appendWorkshopCleanupEvent(
