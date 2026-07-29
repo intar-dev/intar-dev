@@ -1,4 +1,5 @@
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -472,6 +473,17 @@ fn allocate_loopback_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+fn block_on_timeout<F>(
+    runtime: &tokio::runtime::Runtime,
+    duration: Duration,
+    future: F,
+) -> std::result::Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
+    runtime.block_on(async move { tokio::time::timeout(duration, future).await })
+}
+
 fn prove_guest(
     config: &QemuBuildConfig,
     qemu: &mut Child,
@@ -492,15 +504,13 @@ fn prove_guest(
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let attempt_timeout = SSH_ATTEMPT_TIMEOUT.min(remaining);
-        match runtime.block_on(tokio::time::timeout(
+        match block_on_timeout(
+            &runtime,
             attempt_timeout,
             BuildSshSession::connect(SSH_HOST, port, SSH_USERNAME, &ssh_key.private_key),
-        )) {
+        ) {
             Ok(Ok(mut ssh)) => {
-                match runtime.block_on(tokio::time::timeout(
-                    attempt_timeout,
-                    ssh.run("true", false),
-                )) {
+                match block_on_timeout(&runtime, attempt_timeout, ssh.run("true", false)) {
                     Ok(Ok(())) => break ssh,
                     Ok(Err(error)) => last_error = error,
                     Err(_) => {
@@ -517,35 +527,31 @@ fn prove_guest(
         thread::sleep(Duration::from_secs(2));
     };
 
-    runtime
-        .block_on(tokio::time::timeout(
-            SSH_OPERATION_TIMEOUT,
-            session.run(GUEST_PROOF_COMMAND, false),
-        ))
-        .context("clean-base guest absence proof timed out")?
-        .context("clean-base guest identity or absence proof failed")?;
-    runtime
-        .block_on(tokio::time::timeout(
-            SSH_OPERATION_TIMEOUT,
-            session.download_file_limited(
-                "/tmp/intar-clean-base-proof.json",
-                guest_proof_path,
-                4096,
-            ),
-        ))
-        .context("clean-base guest proof download timed out")?
-        .context("failed to download clean-base guest proof")?;
-    runtime
-        .block_on(tokio::time::timeout(
-            SSH_OPERATION_TIMEOUT,
-            session.download_file_limited(
-                "/tmp/intar-clean-base-packages.txt",
-                inventory_path,
-                MAX_INVENTORY_BYTES,
-            ),
-        ))
-        .context("clean-base package inventory download timed out")?
-        .context("failed to download clean-base package inventory")?;
+    block_on_timeout(
+        &runtime,
+        SSH_OPERATION_TIMEOUT,
+        session.run(GUEST_PROOF_COMMAND, false),
+    )
+    .context("clean-base guest absence proof timed out")?
+    .context("clean-base guest identity or absence proof failed")?;
+    block_on_timeout(
+        &runtime,
+        SSH_OPERATION_TIMEOUT,
+        session.download_file_limited("/tmp/intar-clean-base-proof.json", guest_proof_path, 4096),
+    )
+    .context("clean-base guest proof download timed out")?
+    .context("failed to download clean-base guest proof")?;
+    block_on_timeout(
+        &runtime,
+        SSH_OPERATION_TIMEOUT,
+        session.download_file_limited(
+            "/tmp/intar-clean-base-packages.txt",
+            inventory_path,
+            MAX_INVENTORY_BYTES,
+        ),
+    )
+    .context("clean-base package inventory download timed out")?
+    .context("failed to download clean-base package inventory")?;
     let proof_bytes =
         fs::read(guest_proof_path).context("failed to read clean-base guest proof")?;
     ensure!(
@@ -664,8 +670,20 @@ fn write_checksums(payload: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::time::Duration;
 
-    use super::{GUEST_PROOF_COMMAND, GuestProof, validate_artifact_file};
+    use super::{GUEST_PROOF_COMMAND, GuestProof, block_on_timeout, validate_artifact_file};
+
+    #[test]
+    fn timeout_enters_the_runtime_before_creating_the_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create test runtime");
+        let value = block_on_timeout(&runtime, Duration::from_secs(1), async { 7_u8 })
+            .expect("complete test future");
+        assert_eq!(value, 7);
+    }
 
     #[test]
     fn guest_proof_rejects_unknown_fields() {
