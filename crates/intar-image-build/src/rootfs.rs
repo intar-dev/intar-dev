@@ -459,7 +459,7 @@ fn render_customize_hook(build_service: &str, build_start_script: &str) -> Strin
         r#"#!/bin/sh
 set -eu
 root="$1"
-mkdir -p "$root/etc/acpi/events" "$root/etc/modules-load.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system/ssh.service.d" "$root/usr/local/sbin"
+mkdir -p "$root/etc/acpi/events" "$root/etc/modules-load.d" "$root/etc/pam.d" "$root/etc/systemd/journald.conf.d" "$root/etc/ssh/sshd_config.d" "$root/etc/systemd/system/ssh.service.d" "$root/usr/local/sbin"
 cat > "$root{intar_acpi_event_path}" <<'EOF_INTAR_ACPI_EVENT'
 {intar_acpi_event_rule}EOF_INTAR_ACPI_EVENT
 cat > "$root{intar_acpi_poweroff_path}" <<'EOF_INTAR_ACPI_POWEROFF'
@@ -481,6 +481,18 @@ KbdInteractiveAuthentication no
 PermitRootLogin no
 HostKey /etc/ssh/ssh_host_ed25519_key
 EOF
+cat > "$root/etc/pam.d/intar-build" <<'EOF'
+#%PAM-1.0
+# Authentication is fixed to publickey by the build-only sshd. pam_unix keeps
+# this policy fail-closed if that daemon's authentication method ever drifts.
+auth required pam_unix.so
+# The ephemeral daemon starts before the normal login stack, so its locked
+# build account must not inherit boot/session gates such as pam_nologin.
+account required pam_permit.so
+password required pam_deny.so
+session required pam_permit.so
+EOF
+chmod 0644 "$root/etc/pam.d/intar-build"
 cat > "$root/etc/systemd/system/ssh.service.d/10-intar-gate.conf" <<'EOF'
 [Unit]
 ConditionPathExists=/run/intar/ssh-ready
@@ -624,16 +636,22 @@ if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
   ssh-keygen -q -N '' -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
 fi
 install -d -o root -g root -m 0755 /run/sshd
-/usr/sbin/sshd -t
+set -- \
+  -o UsePAM=yes \
+  -o PAMServiceName=intar-build \
+  -o AuthenticationMethods=publickey \
+  -o PerSourcePenalties=no \
+  -o MaxStartups=100:30:200 \
+  -o LoginGraceTime=30
+/usr/sbin/sshd -t "$@"
 configure_network
 
 # This sshd is reachable only through QEMU's loopback host forward. The
 # builder's readiness probes must not poison OpenSSH's production-oriented
-# per-source penalty state while the guest is still starting.
-exec /usr/sbin/sshd -D -e \
-  -o PerSourcePenalties=no \
-  -o MaxStartups=100:30:200 \
-  -o LoginGraceTime=30
+# per-source penalty state while the guest is still starting. Its dedicated
+# PAM service keeps the shadow-locked build account while omitting normal
+# boot/session gates. The same fixed options are validated above.
+exec /usr/sbin/sshd -D -e "$@"
 "#
     .to_string()
 }
@@ -818,7 +836,38 @@ base_image "trixie" {
             plan.build_start_script
                 .contains("install -d -o root -g root -m 0755 /run/sshd")
         );
-        assert!(plan.build_start_script.contains("/usr/sbin/sshd -t"));
+        assert!(
+            plan.customize_hook
+                .contains("cat > \"$root/etc/pam.d/intar-build\"")
+        );
+        assert!(plan.customize_hook.contains("auth required pam_unix.so"));
+        assert!(
+            plan.customize_hook
+                .contains("account required pam_permit.so")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("password required pam_deny.so")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("session required pam_permit.so")
+        );
+        assert!(
+            plan.customize_hook
+                .contains("chmod 0644 \"$root/etc/pam.d/intar-build\"")
+        );
+        assert!(plan.build_start_script.contains("/usr/sbin/sshd -t \"$@\""));
+        assert!(plan.build_start_script.contains("-o UsePAM=yes"));
+        assert!(
+            plan.build_start_script
+                .contains("-o PAMServiceName=intar-build")
+        );
+        assert!(
+            plan.build_start_script
+                .contains("-o AuthenticationMethods=publickey")
+        );
+        assert!(!plan.build_start_script.contains("-o UsePAM=no"));
         assert!(plan.build_start_script.contains("-o PerSourcePenalties=no"));
         assert!(
             plan.build_start_script

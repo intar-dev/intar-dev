@@ -792,6 +792,7 @@ rm -f -- /tmp/intar-runtime-bootstrap.sh /tmp/intar-runtime-images.lock
 rm -f -- /tmp/intar-kino /tmp/intar-workshop-sanitize
 rm -f -- /tmp/intar-prepare-authored-image /tmp/intar-authored-image-proof.json
 rm -f -- /root/.ssh/authorized_keys /home/ubuntu/.ssh/authorized_keys
+rm -f -- /etc/pam.d/intar-build
 rm -f -- /etc/ssh/ssh_host_*
 find /tmp /var/tmp -mindepth 1 -maxdepth 1 -xdev -exec rm -rf -- {} +
 sync
@@ -1273,6 +1274,10 @@ mod tests {
     fn fixed_cleanup_script_has_valid_shell_syntax() {
         let staged = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(staged.path(), cleanup_script_source()).unwrap();
+        assert!(
+            cleanup_script_source().contains("rm -f -- /etc/pam.d/intar-build"),
+            "authored images must not retain the build-only PAM policy"
+        );
         assert!(
             std::process::Command::new("bash")
                 .arg("-n")

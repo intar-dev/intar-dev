@@ -304,7 +304,7 @@ fn append_scenario_image_finalization(script: &mut String) -> Result<()> {
     .context("format error")?;
     writeln!(
         script,
-        "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start"
+        "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
     )
     .context("format error")?;
     writeln!(
