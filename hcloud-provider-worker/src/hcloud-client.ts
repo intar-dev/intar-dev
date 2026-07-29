@@ -677,10 +677,10 @@ export class HcloudClient {
     const maxAttempts = method === "GET" ? 2 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const startedAt = Date.now();
-      let response: Response;
-      try {
-        response = await this.#requestLimiter.run(() =>
-          this.#fetcher(`${this.#apiBase}${path}`, {
+      const result = await this.#requestLimiter.run(async () => {
+        let response: Response;
+        try {
+          response = await this.#fetcher(`${this.#apiBase}${path}`, {
             method,
             headers: {
               Authorization: `Bearer ${this.#token}`,
@@ -689,16 +689,59 @@ export class HcloudClient {
             },
             signal: AbortSignal.timeout(HCLOUD_API_TIMEOUT_MS),
             ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-          }),
-        );
-      } catch (error) {
+          });
+        } catch (error) {
+          return {
+            kind: "transport_failure",
+            failureKind:
+              isRecord(error) && error.name === "TimeoutError"
+                ? "timeout"
+                : "transport",
+          } as const;
+        }
+
+        if (!response.ok) {
+          let providerCode = "api_error";
+          try {
+            const parsed = (await response.json()) as ApiErrorBody;
+            if (parsed.error?.code) providerCode = parsed.error.code;
+          } catch {
+            // Provider bodies are intentionally not surfaced.
+          }
+          const retryAfterHeader = response.headers.get("retry-after");
+          const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+          const providerRequestId = response.headers.get("x-request-id");
+          throw new HcloudApiError({
+            status: response.status,
+            providerCode,
+            ...(providerRequestId ? { requestId: providerRequestId } : {}),
+            ...(typeof retryAfter === "number" && Number.isFinite(retryAfter)
+              ? { retryAfterSeconds: retryAfter }
+              : {}),
+          });
+        }
+
+        if (response.status === 204) {
+          return { kind: "success" as const, value: undefined as T };
+        }
+        try {
+          return { kind: "success" as const, value: (await response.json()) as T };
+        } catch {
+          throw new ProviderServiceError({
+            code: "hcloud_invalid_response",
+            message: "Hetzner API returned an invalid response",
+            retryable: true,
+          });
+        }
+      });
+
+      if (result.kind === "transport_failure") {
         this.#onTransportFailure({
           event: "hcloud_transport_failure",
           method,
           endpoint: transportEndpoint(path),
           attempt,
-          failureKind:
-            isRecord(error) && error.name === "TimeoutError" ? "timeout" : "transport",
+          failureKind: result.failureKind,
           elapsedMs: Math.max(0, Date.now() - startedAt),
         });
         if (attempt < maxAttempts) {
@@ -711,38 +754,7 @@ export class HcloudClient {
           retryable: true,
         });
       }
-
-      if (!response.ok) {
-        let providerCode = "api_error";
-        try {
-          const parsed = (await response.json()) as ApiErrorBody;
-          if (parsed.error?.code) providerCode = parsed.error.code;
-        } catch {
-          // Provider bodies are intentionally not surfaced.
-        }
-        const retryAfterHeader = response.headers.get("retry-after");
-        const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : undefined;
-        const providerRequestId = response.headers.get("x-request-id");
-        throw new HcloudApiError({
-          status: response.status,
-          providerCode,
-          ...(providerRequestId ? { requestId: providerRequestId } : {}),
-          ...(typeof retryAfter === "number" && Number.isFinite(retryAfter)
-            ? { retryAfterSeconds: retryAfter }
-            : {}),
-        });
-      }
-
-      if (response.status === 204) return undefined as T;
-      try {
-        return (await response.json()) as T;
-      } catch {
-        throw new ProviderServiceError({
-          code: "hcloud_invalid_response",
-          message: "Hetzner API returned an invalid response",
-          retryable: true,
-        });
-      }
+      return result.value;
     }
     throw new Error("unreachable Hetzner request state");
   }

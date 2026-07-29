@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -55,6 +55,7 @@ import {
   workshopSessions,
   workshopTemplateRevisions,
   workshopTemplates,
+  workshopEvents,
   workshopWorkspaceGenerations,
   workshopWorkspaces,
   type ProviderPriceObservation,
@@ -63,7 +64,9 @@ import {
 import { appError } from "@/lib/app-error";
 import { createRuntimeExecution } from "@/lib/runtime-executions";
 import { resetD1Database } from "@/test/d1-migrations";
+import { performWorkshopSessionAction } from "./actions";
 import { provisionWorkshopRequest } from "./runtime-orchestrator";
+import { updateWorkshopSession } from "./sessions";
 import { getWorkshopCostProjection } from "./cost-storage";
 import {
   allocateHetznerWorkshopRuntime,
@@ -985,6 +988,488 @@ describe("Hetzner workshop runtime provider", () => {
     ]);
   });
 
+  it("accepts one restore action and provisions the queued replacement after cleanup", async () => {
+    const fixture = await seedRuntimeFixture({ maxConcurrentServers: 1 });
+    const initial = await allocateHetznerWorkshopRuntime(fixture.request);
+    const db = drizzle(env.DB);
+    const reportedAt = fixture.now + 1_000;
+    await Promise.all([
+      db
+        .update(hetznerAllocations)
+        .set({
+          state: "ready",
+          lastReportAt: reportedAt,
+          updatedAt: reportedAt,
+        })
+        .where(eq(hetznerAllocations.executionId, initial.executionId)),
+      db
+        .update(workshopWorkspaceGenerations)
+        .set({ state: "ready", readyAt: reportedAt, updatedAt: reportedAt })
+        .where(
+          eq(workshopWorkspaceGenerations.id, fixture.request.generationId),
+        ),
+      db
+        .update(workshopWorkspaces)
+        .set({ state: "ready", updatedAt: reportedAt })
+        .where(eq(workshopWorkspaces.id, fixture.request.workspaceId)),
+      db
+        .update(workshopSessionMembers)
+        .set({
+          provisionState: "ready",
+          provisionError: null,
+          updatedAt: reportedAt,
+        })
+        .where(eq(workshopSessionMembers.userId, "learner-a")),
+    ]);
+    providerMocks.operations.length = 0;
+
+    const accepted = await performWorkshopSessionAction({
+      sessionId: fixture.request.sessionId,
+      actorUserId: fixture.request.participantUserId,
+      action: "restore_checkpoint",
+      payload: { checkpointId: "checkpoint-00", confirmed: true },
+    });
+    const generationsAfterAction = await db
+      .select({
+        id: workshopWorkspaceGenerations.id,
+        ordinal: workshopWorkspaceGenerations.ordinal,
+        state: workshopWorkspaceGenerations.state,
+        runtimeExecutionId: workshopWorkspaceGenerations.runtimeExecutionId,
+      })
+      .from(workshopWorkspaceGenerations)
+      .orderBy(asc(workshopWorkspaceGenerations.ordinal));
+    expect(accepted).toEqual({
+      kind: "provisioning",
+      generationIds: [generationsAfterAction[1]?.id],
+    });
+    expect(generationsAfterAction).toEqual([
+      expect.objectContaining({
+        ordinal: 1,
+        state: "archiving",
+        runtimeExecutionId: initial.executionId,
+      }),
+      expect.objectContaining({
+        ordinal: 2,
+        state: "queued",
+        runtimeExecutionId: null,
+      }),
+    ]);
+    const [draining] = await db
+      .select()
+      .from(hetznerAllocations)
+      .where(eq(hetznerAllocations.executionId, initial.executionId));
+    expect(draining).toMatchObject({
+      state: "draining",
+      recordingDrainRequestedAt: expect.any(Number),
+      deletionConfirmedAt: null,
+    });
+    expect(
+      providerMocks.operations.filter(
+        (operation) => operation.kind === "delete_resource",
+      ),
+    ).toEqual([]);
+    await expect(db.select().from(activeRuntimeSlots)).resolves.toEqual([
+      expect.objectContaining({ executionId: initial.executionId }),
+    ]);
+
+    const drainCompletedAt = (draining?.recordingDrainRequestedAt ?? 0) + 1;
+    await db
+      .update(hetznerAllocations)
+      .set({
+        recordingDrainCompletedAt: drainCompletedAt,
+        updatedAt: drainCompletedAt,
+      })
+      .where(eq(hetznerAllocations.executionId, initial.executionId));
+    let serverDeleteRequested = false;
+    let slotDuringReplacementCreate: string | null = null;
+    providerMocks.run.mockImplementation(
+      async (request: RunOperationRequest) => {
+        if (
+          request.operation.kind === "delete_resource" &&
+          request.operation.resourceKind === "server" &&
+          !serverDeleteRequested
+        ) {
+          serverDeleteRequested = true;
+          providerMocks.operations.push(
+            request.operation as unknown as Record<string, unknown>,
+          );
+          return operationResult({
+            ...canonicalWrite(
+              request,
+              "server",
+              request.operation.externalId,
+              "resource_deletion_requested",
+            ),
+            actionIds: [903],
+          });
+        }
+        if (
+          request.operation.kind === "get_action" &&
+          request.operation.actionId === 903
+        ) {
+          providerMocks.operations.push(
+            request.operation as unknown as Record<string, unknown>,
+          );
+          return actionResult(903, "running");
+        }
+        if (
+          request.operation.kind === "reconcile" &&
+          serverDeleteRequested
+        ) {
+          providerMocks.operations.push(
+            request.operation as unknown as Record<string, unknown>,
+          );
+          const deletedServer = request.operation.resources.find(
+            (resource) =>
+              resource.resourceKind === "server" &&
+              resource.externalId !== undefined,
+          );
+          const canonicalWrites = deletedServer
+            ? [
+                canonicalWrite(
+                  request,
+                  "server",
+                  Number(deletedServer.externalId),
+                  "resource_deleted",
+                ),
+              ]
+            : [];
+          const data = {
+            observedAt: providerTime(),
+            resources: request.operation.resources.map((ref) => ({
+              ref,
+              status:
+                ref.resourceKind === "server"
+                  ? ("missing" as const)
+                  : ("present" as const),
+              ...(ref.externalId === undefined
+                ? {}
+                : { externalId: ref.externalId }),
+            })),
+            actions: request.operation.actionIds.map((actionId) =>
+              action(actionId, "success"),
+            ),
+            canonicalWrites,
+          };
+          return {
+            data,
+            canonicalWrites,
+            mustPersistBeforeNextOperation: canonicalWrites.length > 0,
+          };
+        }
+        if (request.operation.kind === "create_ssh_key") {
+          const [slot] = await db.select().from(activeRuntimeSlots);
+          slotDuringReplacementCreate = slot?.executionId ?? null;
+        }
+        return defaultProviderOperation(request);
+      },
+    );
+    await expect(
+      archiveHetznerWorkshopRuntime({
+        executionId: initial.executionId,
+        expectedGeneration: 1,
+        now: drainCompletedAt + 1,
+      }),
+    ).resolves.toBe(false);
+    await expect(db.select().from(activeRuntimeSlots)).resolves.toEqual([
+      expect.objectContaining({ executionId: initial.executionId }),
+    ]);
+    await expect(
+      db
+        .select({
+          state: runtimeExecutions.state,
+        })
+        .from(runtimeExecutions)
+        .where(eq(runtimeExecutions.id, initial.executionId)),
+    ).resolves.toEqual([expect.objectContaining({ state: "archiving" })]);
+    await expect(
+      db
+        .select({
+          state: workshopWorkspaceGenerations.state,
+        })
+        .from(workshopWorkspaceGenerations)
+        .where(
+          eq(workshopWorkspaceGenerations.id, fixture.request.generationId),
+        ),
+    ).resolves.toEqual([expect.objectContaining({ state: "archiving" })]);
+
+    const swept = await sweepHetznerWorkshopRuntimes({
+      now: drainCompletedAt + 2,
+    });
+    expect(swept).toMatchObject({
+      inspected: 1,
+      replacementsProvisioned: 1,
+      replacementFailures: 0,
+      terminalCleanupsCompleted: 0,
+    });
+
+    const [executions, allocations, generations, slots, restoreEvents] =
+      await Promise.all([
+        db
+          .select({
+            id: runtimeExecutions.id,
+            generation: runtimeExecutions.generation,
+            sourceExecutionId: runtimeExecutions.sourceExecutionId,
+            state: runtimeExecutions.state,
+          })
+          .from(runtimeExecutions)
+          .orderBy(asc(runtimeExecutions.generation)),
+        db
+          .select({
+            executionId: hetznerAllocations.executionId,
+            state: hetznerAllocations.state,
+            deletionConfirmedAt: hetznerAllocations.deletionConfirmedAt,
+          })
+          .from(hetznerAllocations)
+          .orderBy(asc(hetznerAllocations.createdAt)),
+        db
+          .select({
+            ordinal: workshopWorkspaceGenerations.ordinal,
+            state: workshopWorkspaceGenerations.state,
+            runtimeExecutionId: workshopWorkspaceGenerations.runtimeExecutionId,
+          })
+          .from(workshopWorkspaceGenerations)
+          .orderBy(asc(workshopWorkspaceGenerations.ordinal)),
+        db.select().from(activeRuntimeSlots),
+        db
+          .select({ type: workshopEvents.type })
+          .from(workshopEvents)
+          .where(
+            eq(workshopEvents.type, "workspace.checkpoint_restore_requested"),
+          ),
+      ]);
+    expect(executions).toEqual([
+      expect.objectContaining({
+        id: initial.executionId,
+        generation: 1,
+        state: "archived",
+      }),
+      expect.objectContaining({
+        generation: 2,
+        sourceExecutionId: initial.executionId,
+        state: "provisioning",
+      }),
+    ]);
+    expect(allocations).toEqual([
+      expect.objectContaining({
+        executionId: initial.executionId,
+        state: "deleted",
+        deletionConfirmedAt: drainCompletedAt + 2,
+      }),
+      expect.objectContaining({
+        executionId: executions[1]?.id,
+        state: "bootstrapping",
+        deletionConfirmedAt: null,
+      }),
+    ]);
+    expect(generations).toEqual([
+      expect.objectContaining({ ordinal: 1, state: "archived" }),
+      expect.objectContaining({
+        ordinal: 2,
+        state: "provisioning",
+        runtimeExecutionId: executions[1]?.id,
+      }),
+    ]);
+    expect(slots).toEqual([
+      expect.objectContaining({ executionId: executions[1]?.id }),
+    ]);
+    expect(slotDuringReplacementCreate).toBe(executions[1]?.id);
+    expect(restoreEvents).toHaveLength(1);
+    expect(
+      providerMocks.operations
+        .filter((operation) => operation.kind === "delete_resource")
+        .map((operation) => operation.resourceKind),
+    ).toEqual(["server", "primary_ip", "ssh_key"]);
+  });
+
+  it("blocks a replacement when a lowered limit is still full after retiring its source", async () => {
+    const fixture = await seedRuntimeFixture({
+      maxConcurrentServers: 2,
+      seedOtherParticipant: true,
+    });
+    await allocateHetznerWorkshopRuntime(fixture.request);
+    const other = await createRuntimeExecution({
+      executionId: "execution-other",
+      userId: "learner-b",
+      organizationId: "org-a",
+      hostId: null,
+      providerKind: "hetzner_cloud",
+      providerConnectionId: PROVIDER_CONNECTION_ID,
+      domainKind: "workshop",
+      domainId: "workspace-other",
+      checkpointId: "checkpoint-00",
+      vms: [runtimeVm("execution-other")],
+      now: fixture.now + 1,
+    });
+    const db = drizzle(env.DB);
+    await db.insert(hetznerAllocations).values({
+      id: "allocation-other",
+      executionId: other.executionId,
+      connectionId: PROVIDER_CONNECTION_ID,
+      deterministicName: "intar-execution-other",
+      serverType: "cx43",
+      systemImage: "debian-13",
+      location: "nbg1",
+      state: "ready",
+      createdAt: fixture.now + 1,
+      updatedAt: fixture.now + 1,
+    });
+    await db
+      .update(organizationProviderConnections)
+      .set({ maxConcurrentServers: 1, updatedAt: fixture.now + 2 })
+      .where(eq(organizationProviderConnections.id, PROVIDER_CONNECTION_ID));
+
+    await expect(
+      preflightHetznerWorkshopRuntime(
+        {
+          ...fixture.request,
+          generationId: "generation-a-replacement",
+          generationOrdinal: 2,
+        },
+        fixture.now + 60_000,
+      ),
+    ).rejects.toMatchObject({ code: "hcloud_concurrency_limit_reached" });
+  });
+
+  it("accepts terminal teardown once and records completion after sweep convergence", async () => {
+    const fixture = await seedRuntimeFixture();
+    const execution = await allocateHetznerWorkshopRuntime(fixture.request);
+    const db = drizzle(env.DB);
+    const reportedAt = fixture.now + 1_000;
+    await Promise.all([
+      db
+        .update(hetznerAllocations)
+        .set({
+          state: "ready",
+          lastReportAt: reportedAt,
+          updatedAt: reportedAt,
+        })
+        .where(eq(hetznerAllocations.executionId, execution.executionId)),
+      db
+        .update(workshopWorkspaceGenerations)
+        .set({ state: "ready", readyAt: reportedAt, updatedAt: reportedAt })
+        .where(
+          eq(workshopWorkspaceGenerations.id, fixture.request.generationId),
+        ),
+      db
+        .update(workshopWorkspaces)
+        .set({ state: "ready", updatedAt: reportedAt })
+        .where(eq(workshopWorkspaces.id, fixture.request.workspaceId)),
+      db
+        .update(workshopSessions)
+        .set({
+          state: "live",
+          version: 2,
+          startedAt: reportedAt,
+          updatedAt: reportedAt,
+        })
+        .where(eq(workshopSessions.id, fixture.request.sessionId)),
+    ]);
+    providerMocks.operations.length = 0;
+
+    const ended = await updateWorkshopSession({
+      sessionId: fixture.request.sessionId,
+      actorUserId: "owner-a",
+      expectedVersion: 2,
+      state: "ended",
+    });
+    expect(ended).toMatchObject({ state: "ended", version: 3 });
+    const [pendingAllocation] = await db.select().from(hetznerAllocations);
+    expect(pendingAllocation).toMatchObject({
+      state: "draining",
+      recordingDrainRequestedAt: expect.any(Number),
+      deletionConfirmedAt: null,
+    });
+    await expect(db.select().from(activeRuntimeSlots)).resolves.toHaveLength(1);
+    const pendingEvents = await db
+      .select({ type: workshopEvents.type })
+      .from(workshopEvents)
+      .where(eq(workshopEvents.sessionId, fixture.request.sessionId));
+    expect(
+      pendingEvents.filter((event) => event.type === "session.cleanup_pending"),
+    ).toHaveLength(1);
+    expect(
+      pendingEvents.filter(
+        (event) => event.type === "session.cleanup_completed",
+      ),
+    ).toHaveLength(0);
+
+    const drainCompletedAt =
+      (pendingAllocation?.recordingDrainRequestedAt ?? 0) + 1;
+    await db.update(hetznerAllocations).set({
+      recordingDrainCompletedAt: drainCompletedAt,
+      updatedAt: drainCompletedAt,
+    });
+    const swept = await sweepHetznerWorkshopRuntimes({
+      now: drainCompletedAt + 1,
+    });
+    expect(swept).toMatchObject({
+      inspected: 1,
+      replacementsProvisioned: 0,
+      replacementFailures: 0,
+      terminalCleanupsCompleted: 1,
+    });
+
+    const [allocation, runtime, generation, workspace, slots, summary, events] =
+      await Promise.all([
+        db.select().from(hetznerAllocations),
+        db.select().from(runtimeExecutions),
+        db.select().from(workshopWorkspaceGenerations),
+        db.select().from(workshopWorkspaces),
+        db.select().from(activeRuntimeSlots),
+        db.select().from(workshopSessionCostSummaries),
+        db
+          .select({ type: workshopEvents.type })
+          .from(workshopEvents)
+          .where(eq(workshopEvents.sessionId, fixture.request.sessionId)),
+      ]);
+    expect(allocation[0]).toMatchObject({
+      state: "deleted",
+      deletionConfirmedAt: drainCompletedAt + 1,
+    });
+    expect(runtime[0]?.state).toBe("archived");
+    expect(generation[0]?.state).toBe("archived");
+    expect(workspace[0]?.state).toBe("ended");
+    expect(slots).toEqual([]);
+    expect(summary[0]).toMatchObject({
+      generationCount: 1,
+      restoreCount: 0,
+      finalizedAt: drainCompletedAt + 1,
+    });
+    expect(
+      events.filter((event) => event.type === "session.cleanup_pending"),
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.type === "session.cleanup_completed"),
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.type === "session.cleanup_failed"),
+    ).toHaveLength(0);
+    expect(
+      providerMocks.operations
+        .filter((operation) => operation.kind === "delete_resource")
+        .map((operation) => operation.resourceKind),
+    ).toEqual(["server", "primary_ip", "ssh_key"]);
+
+    await expect(
+      updateWorkshopSession({
+        sessionId: fixture.request.sessionId,
+        actorUserId: "owner-a",
+        expectedVersion: 3,
+        state: "ended",
+      }),
+    ).resolves.toMatchObject({ state: "ended", version: 3 });
+    const eventsAfterRetry = await db
+      .select({ type: workshopEvents.type })
+      .from(workshopEvents)
+      .where(eq(workshopEvents.sessionId, fixture.request.sessionId));
+    expect(
+      eventsAfterRetry.filter(
+        (event) => event.type === "session.cleanup_completed",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("reconciles an ambiguous create by deterministic ownership before creating the dependent server", async () => {
     const fixture = await seedRuntimeFixture();
     let primaryIpCreateAttempts = 0;
@@ -1239,6 +1724,131 @@ describe("Hetzner workshop runtime provider", () => {
       expect.objectContaining({ kind: "reboot_server", serverId: 401 }),
     ]);
     await expect(db.select().from(activeRuntimeSlots)).resolves.toHaveLength(1);
+  });
+
+  it("converges an automatic replacement after its source recording drain", async () => {
+    const fixture = await seedRuntimeFixture({ maxConcurrentServers: 1 });
+    const source = await allocateHetznerWorkshopRuntime(fixture.request);
+    const db = drizzle(env.DB);
+    await db
+      .update(hetznerAllocations)
+      .set({
+        state: "rebooting",
+        retryCount: 1,
+        lastReportAt: fixture.now,
+        updatedAt: fixture.now,
+      })
+      .where(eq(hetznerAllocations.executionId, source.executionId));
+    providerMocks.operations.length = 0;
+
+    const recoveryAt = fixture.now + 3 * 60_000 + 1;
+    await expect(
+      sweepHetznerWorkshopRuntimes({ now: recoveryAt, limit: 1 }),
+    ).resolves.toMatchObject({
+      inspected: 1,
+      recoveryRequested: 1,
+      cleanupPending: 0,
+      replacementsProvisioned: 0,
+      replacementFailures: 0,
+    });
+    const [draining] = await db
+      .select()
+      .from(hetznerAllocations)
+      .where(eq(hetznerAllocations.executionId, source.executionId));
+    expect(draining).toMatchObject({
+      state: "draining",
+      recordingDrainRequestedAt: recoveryAt,
+      deletionConfirmedAt: null,
+    });
+    await expect(
+      db.select().from(organizationProviderConnections),
+    ).resolves.toEqual([expect.objectContaining({ state: "active" })]);
+    await expect(
+      db
+        .select({
+          ordinal: workshopWorkspaceGenerations.ordinal,
+          state: workshopWorkspaceGenerations.state,
+          runtimeExecutionId:
+            workshopWorkspaceGenerations.runtimeExecutionId,
+        })
+        .from(workshopWorkspaceGenerations)
+        .orderBy(asc(workshopWorkspaceGenerations.ordinal)),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        ordinal: 1,
+        state: "archiving",
+        runtimeExecutionId: source.executionId,
+      }),
+      expect.objectContaining({
+        ordinal: 2,
+        state: "queued",
+        runtimeExecutionId: null,
+      }),
+    ]);
+
+    await db
+      .update(hetznerAllocations)
+      .set({
+        recordingDrainCompletedAt: recoveryAt + 1,
+        updatedAt: recoveryAt + 1,
+      })
+      .where(eq(hetznerAllocations.executionId, source.executionId));
+    await expect(
+      sweepHetznerWorkshopRuntimes({ now: recoveryAt + 2, limit: 1 }),
+    ).resolves.toMatchObject({
+      inspected: 1,
+      cleanupPending: 0,
+      replacementsProvisioned: 1,
+      replacementFailures: 0,
+    });
+
+    const [allocations, generations, slots] = await Promise.all([
+      db
+        .select({
+          executionId: hetznerAllocations.executionId,
+          state: hetznerAllocations.state,
+          deletionConfirmedAt: hetznerAllocations.deletionConfirmedAt,
+        })
+        .from(hetznerAllocations)
+        .orderBy(asc(hetznerAllocations.createdAt)),
+      db
+        .select({
+          ordinal: workshopWorkspaceGenerations.ordinal,
+          state: workshopWorkspaceGenerations.state,
+          runtimeExecutionId:
+            workshopWorkspaceGenerations.runtimeExecutionId,
+        })
+        .from(workshopWorkspaceGenerations)
+        .orderBy(asc(workshopWorkspaceGenerations.ordinal)),
+      db.select().from(activeRuntimeSlots),
+    ]);
+    expect(allocations).toEqual([
+      expect.objectContaining({
+        executionId: source.executionId,
+        state: "deleted",
+        deletionConfirmedAt: recoveryAt + 2,
+      }),
+      expect.objectContaining({
+        state: "bootstrapping",
+        deletionConfirmedAt: null,
+      }),
+    ]);
+    expect(generations).toEqual([
+      expect.objectContaining({ ordinal: 1, state: "archived" }),
+      expect.objectContaining({
+        ordinal: 2,
+        state: "provisioning",
+        runtimeExecutionId: allocations[1]?.executionId,
+      }),
+    ]);
+    expect(slots).toEqual([
+      expect.objectContaining({ executionId: allocations[1]?.executionId }),
+    ]);
+    expect(
+      providerMocks.operations
+        .filter((operation) => operation.kind === "delete_resource")
+        .map((operation) => operation.resourceKind),
+    ).toEqual(["server", "primary_ip", "ssh_key"]);
   });
 
   it("name-reconciles and deletes failed allocations with no recorded resource IDs", async () => {

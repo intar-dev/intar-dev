@@ -240,20 +240,36 @@ export async function preflightHetznerWorkshopRuntime(
       "the Hetzner forecast or live projection exceeds the organization limit",
     );
   }
-  const existing = await env.DB.prepare(
-    `SELECT 1 AS present
+  const seat = await env.DB.prepare(
+    `SELECT
+       max(CASE WHEN execution.generation = ? THEN 1 ELSE 0 END)
+         AS exact_generation,
+       max(CASE
+         WHEN execution.generation < ?
+          AND allocation.deletion_confirmed_at IS NULL THEN 1
+         ELSE 0
+       END) AS counted_source
      FROM hetzner_allocations allocation
      INNER JOIN runtime_executions execution ON execution.id = allocation.execution_id
      WHERE execution.domain_kind = 'workshop'
        AND execution.domain_id = ?
-       AND execution.generation = ?
-     LIMIT 1`,
+       AND execution.provider_kind = 'hetzner_cloud'
+       AND allocation.connection_id = ?`,
   )
-    .bind(request.workspaceId, request.generationOrdinal)
-    .first<{ present: number }>();
-  if (!existing) {
+    .bind(
+      request.generationOrdinal,
+      request.generationOrdinal,
+      request.workspaceId,
+      connection.id,
+    )
+    .first<{
+      exact_generation: number | null;
+      counted_source: number | null;
+    }>();
+  if (!seat?.exact_generation) {
     const live = await countLiveHetznerAllocations(connection.id);
-    if (live >= connection.maxConcurrentServers) {
+    const replacementSourceSeats = seat?.counted_source ? 1 : 0;
+    if (live - replacementSourceSeats >= connection.maxConcurrentServers) {
       throw appError(
         409,
         "hcloud_concurrency_limit_reached",
@@ -456,17 +472,27 @@ export async function allocateHetznerWorkshopRuntime(
         // The first preflight gives the caller an early, descriptive failure.
         // Repeat the admission count while holding the organization allocation
         // lock so two learners cannot both observe the final free seat.
+        const previous = await previousExecution(request);
+        const previousAllocation = previous
+          ? await allocationForExecution(previous.executionId)
+          : null;
+        const sourceOwnsCountedSeat =
+          previousAllocation !== null &&
+          previousAllocation.connection_id === preflight.connection.id &&
+          previousAllocation.deletion_confirmed_at === null;
         const liveAllocations = await countLiveHetznerAllocations(
           preflight.connection.id,
         );
-        if (liveAllocations >= preflight.connection.maxConcurrentServers) {
+        if (
+          liveAllocations - (sourceOwnsCountedSeat ? 1 : 0) >=
+          preflight.connection.maxConcurrentServers
+        ) {
           throw appError(
             409,
             "hcloud_concurrency_limit_reached",
             "the organization Hetzner learner-server limit is reached",
           );
         }
-        const previous = await previousExecution(request);
         if (previous) {
           const deleted = await archiveHetznerWorkshopRuntime({
             executionId: previous.executionId,
@@ -663,6 +689,11 @@ export async function allocateHetznerWorkshopRuntime(
     return execution;
   } catch (error) {
     if (execution && isProvisioningSuperseded(error)) return execution;
+    // A reporting workspace first enters the bounded recording-drain phase.
+    // That is an accepted asynchronous replacement, not a failed generation:
+    // keep the queued generation intact so the minute sweep can provision it
+    // immediately after the source allocation is confirmed deleted.
+    if (isReplacementCleanupPending(error)) throw error;
     if (execution) {
       try {
         await archiveHetznerWorkshopRuntime({
@@ -709,6 +740,9 @@ export async function archiveHetznerWorkshopRuntime(input: {
       "runtime execution generation changed",
     );
   }
+  const shouldArchiveExecution = async () =>
+    input.archiveExecution ??
+    !(await hasQueuedHetznerReplacement(execution.executionId));
   // Fence new terminal and application routes before any asynchronous drain
   // or provider cleanup starts. A route already in flight must observe either
   // the non-ready generation or execution in its final canonical write and
@@ -733,7 +767,7 @@ export async function archiveHetznerWorkshopRuntime(input: {
       generation: input.expectedGeneration,
       now,
     });
-    if (input.archiveExecution !== false) {
+    if (await shouldArchiveExecution()) {
       await archiveRuntimeExecution({
         executionId: execution.executionId,
         expectedGeneration: input.expectedGeneration,
@@ -748,7 +782,10 @@ export async function archiveHetznerWorkshopRuntime(input: {
       generation: input.expectedGeneration,
       now,
     });
-    if (input.archiveExecution !== false && execution.state !== "archived") {
+    if (
+      execution.state !== "archived" &&
+      (await shouldArchiveExecution())
+    ) {
       await archiveRuntimeExecution({
         executionId: execution.executionId,
         expectedGeneration: input.expectedGeneration,
@@ -873,7 +910,7 @@ export async function archiveHetznerWorkshopRuntime(input: {
       .bind(now, now, row.id)
       .run();
     await restoreConnectionAfterConfirmedCleanup(row.connection_id, now);
-    if (input.archiveExecution !== false) {
+    if (await shouldArchiveExecution()) {
       await archiveRuntimeExecution({
         executionId: execution.executionId,
         expectedGeneration: input.expectedGeneration,
@@ -994,7 +1031,10 @@ export async function reconcileHetznerWorkshopRuntime(input: {
           .run();
         await restoreConnectionAfterConfirmedCleanup(row.connection_id, now);
         const execution = await loadRuntimeExecutionHandle(row.execution_id);
-        if (execution.state !== "archived") {
+        if (
+          execution.state !== "archived" &&
+          !(await hasQueuedHetznerReplacement(execution.executionId))
+        ) {
           await archiveRuntimeExecution({
             executionId: execution.executionId,
             expectedGeneration: execution.generation,
@@ -1090,6 +1130,9 @@ export async function sweepHetznerWorkshopRuntimes(
   degraded: number;
   recoveryRequested: number;
   cleanupPending: number;
+  replacementsProvisioned: number;
+  replacementFailures: number;
+  terminalCleanupsCompleted: number;
 }> {
   const now = input.now ?? Date.now();
   const limit = Math.max(1, Math.min(100, input.limit ?? 25));
@@ -1278,6 +1321,9 @@ export async function sweepHetznerWorkshopRuntimes(
       }
     }
   }
+  const replacements = await resumeQueuedHetznerReplacements({ now, limit });
+  const terminalCleanupsCompleted =
+    await finalizePendingTerminalSessionCleanups({ now, limit });
   return {
     inspected: rows.results.length,
     leaseExpired,
@@ -1285,6 +1331,9 @@ export async function sweepHetznerWorkshopRuntimes(
     degraded,
     recoveryRequested,
     cleanupPending,
+    replacementsProvisioned: replacements.provisioned,
+    replacementFailures: replacements.failed,
+    terminalCleanupsCompleted,
   };
 }
 
@@ -1505,6 +1554,242 @@ async function loadStaleProvisioningRequest(
     checkpointId: row.checkpoint_id ?? manifest.workspace.initialCheckpointId,
     manifest,
   };
+}
+
+async function loadQueuedHetznerReplacementRequests(limit: number): Promise<
+  Array<{
+    sourceExecutionId: string;
+    request: WorkshopProvisioningRequest;
+  }>
+> {
+  const rows = await env.DB.prepare(
+    `SELECT source.id AS source_execution_id,
+            source.organization_id,
+            source.domain_id AS workspace_id,
+            generation.id AS generation_id,
+            generation.ordinal,
+            generation.checkpoint_id,
+            workspace.session_id,
+            workspace.user_id,
+            session.template_revision_id,
+            revision.manifest_json
+     FROM runtime_executions source
+     INNER JOIN hetzner_allocations allocation
+       ON allocation.execution_id = source.id
+      AND allocation.state = 'deleted'
+      AND allocation.deletion_confirmed_at IS NOT NULL
+     INNER JOIN workshop_workspaces workspace
+       ON source.domain_kind = 'workshop'
+      AND workspace.id = source.domain_id
+     INNER JOIN workshop_workspace_generations generation
+       ON generation.id = workspace.current_generation_id
+      AND generation.workspace_id = workspace.id
+      AND generation.ordinal = source.generation + 1
+      AND generation.runtime_execution_id IS NULL
+      AND generation.state = 'queued'
+     INNER JOIN workshop_sessions session
+       ON session.id = workspace.session_id
+      AND session.state IN ('lobby', 'live')
+     INNER JOIN workshop_template_revisions revision
+       ON revision.id = session.template_revision_id
+     INNER JOIN workshop_session_runtime_providers provider
+       ON provider.session_id = session.id
+      AND provider.provider_kind = 'hetzner_cloud'
+     WHERE source.provider_kind = 'hetzner_cloud'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM runtime_executions replacement
+         WHERE replacement.domain_kind = source.domain_kind
+           AND replacement.domain_id = source.domain_id
+           AND replacement.generation >= generation.ordinal
+       )
+     ORDER BY generation.requested_at ASC, generation.id ASC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{
+      source_execution_id: string;
+      organization_id: string;
+      workspace_id: string;
+      generation_id: string;
+      ordinal: number;
+      checkpoint_id: string | null;
+      session_id: string;
+      user_id: string;
+      template_revision_id: string;
+      manifest_json: string | WorkshopManifestV1;
+    }>();
+  return rows.results.map((row) => {
+    const manifest = parseManifest(row.manifest_json);
+    return {
+      sourceExecutionId: row.source_execution_id,
+      request: {
+        organizationId: row.organization_id,
+        sessionId: row.session_id,
+        templateRevisionId: row.template_revision_id,
+        participantUserId: row.user_id,
+        workspaceId: row.workspace_id,
+        generationId: row.generation_id,
+        generationOrdinal: row.ordinal,
+        checkpointId:
+          row.checkpoint_id ?? manifest.workspace.initialCheckpointId,
+        manifest,
+      },
+    };
+  });
+}
+
+async function hasQueuedHetznerReplacement(
+  sourceExecutionId: string,
+): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS present
+     FROM runtime_executions source
+     INNER JOIN workshop_workspaces workspace
+       ON source.domain_kind = 'workshop'
+      AND workspace.id = source.domain_id
+     INNER JOIN workshop_workspace_generations generation
+       ON generation.id = workspace.current_generation_id
+      AND generation.workspace_id = workspace.id
+      AND generation.ordinal = source.generation + 1
+      AND generation.runtime_execution_id IS NULL
+      AND generation.state = 'queued'
+     INNER JOIN workshop_sessions session
+       ON session.id = workspace.session_id
+      AND session.state IN ('lobby', 'live')
+     WHERE source.id = ?
+       AND source.provider_kind = 'hetzner_cloud'
+     LIMIT 1`,
+  )
+    .bind(sourceExecutionId)
+    .first<{ present: number }>();
+  return row !== null;
+}
+
+async function resumeQueuedHetznerReplacements(input: {
+  now: number;
+  limit: number;
+}): Promise<{ provisioned: number; failed: number }> {
+  const queued = await loadQueuedHetznerReplacementRequests(input.limit);
+  let provisioned = 0;
+  let failed = 0;
+  for (const replacement of queued) {
+    try {
+      await allocateHetznerWorkshopRuntime(replacement.request, {
+        now: input.now,
+      });
+      provisioned += 1;
+    } catch (error) {
+      // Another cleanup pass may still own the source. Leave the queued
+      // generation retryable without projecting a false provisioning failure.
+      if (isReplacementCleanupPending(error)) continue;
+      failed += 1;
+      console.error(
+        JSON.stringify({
+          event: "workshop_hcloud_replacement_resume_failed",
+          sourceExecutionId: replacement.sourceExecutionId,
+          workspaceId: replacement.request.workspaceId,
+          generationId: replacement.request.generationId,
+          code:
+            error instanceof AppError
+              ? error.code
+              : "hcloud_replacement_resume_failed",
+        }),
+      );
+    }
+  }
+  return { provisioned, failed };
+}
+
+async function finalizePendingTerminalSessionCleanups(input: {
+  now: number;
+  limit: number;
+}): Promise<number> {
+  const sessions = await env.DB.prepare(
+    `SELECT session.id, session.organization_id, session.state
+     FROM workshop_sessions session
+     WHERE session.state IN ('ended', 'cancelled')
+       AND EXISTS (
+         SELECT 1
+         FROM workshop_events pending
+         WHERE pending.session_id = session.id
+           AND pending.type = 'session.cleanup_pending'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_events completed
+         WHERE completed.session_id = session.id
+           AND completed.type = 'session.cleanup_completed'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_workspaces workspace
+         INNER JOIN workshop_workspace_generations generation
+           ON generation.workspace_id = workspace.id
+         WHERE workspace.session_id = session.id
+           AND generation.state != 'archived'
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_workspaces workspace
+         INNER JOIN runtime_executions execution
+           ON execution.domain_kind = 'workshop'
+          AND execution.domain_id = workspace.id
+          AND execution.provider_kind = 'hetzner_cloud'
+         LEFT JOIN hetzner_allocations allocation
+           ON allocation.execution_id = execution.id
+         WHERE workspace.session_id = session.id
+           AND (
+             execution.state != 'archived'
+             OR (
+               allocation.id IS NOT NULL
+               AND (
+                 allocation.state != 'deleted'
+                 OR allocation.deletion_confirmed_at IS NULL
+               )
+             )
+           )
+       )
+     ORDER BY session.updated_at ASC, session.id ASC
+     LIMIT ?`,
+  )
+    .bind(input.limit)
+    .all<{
+      id: string;
+      organization_id: string;
+      state: "ended" | "cancelled";
+    }>();
+  let completed = 0;
+  for (const session of sessions.results) {
+    const result = await env.DB.prepare(
+      `INSERT INTO workshop_events (
+         id, organization_id, session_id, actor_user_id, type, payload_json,
+         created_at
+       )
+       SELECT ?, ?, ?, NULL, 'session.cleanup_completed', ?, ?
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM workshop_events existing
+         WHERE existing.session_id = ?
+           AND existing.type = 'session.cleanup_completed'
+       )
+       ON CONFLICT(id) DO NOTHING`,
+    )
+      .bind(
+        `workshop-cleanup-completed-${session.id}`,
+        session.organization_id,
+        session.id,
+        JSON.stringify({
+          terminalState: session.state,
+          asynchronous: true,
+        }),
+        input.now,
+        session.id,
+      )
+      .run();
+    completed += result.meta.changes;
+  }
+  return completed;
 }
 
 async function reconcileResumedProvisioning(input: {
@@ -1974,20 +2259,27 @@ async function recreateUnhealthyHetznerGeneration(
   if (mutations[0]?.meta.changes !== 1 || mutations[2]?.meta.changes !== 1) {
     return;
   }
-  await allocateHetznerWorkshopRuntime(
-    {
-      organizationId: source.organization_id,
-      sessionId: source.session_id,
-      templateRevisionId: source.template_revision_id,
-      participantUserId: source.user_id,
-      workspaceId: source.workspace_id,
-      generationId,
-      generationOrdinal: ordinal,
-      checkpointId,
-      manifest,
-    },
-    { recoveryMessage: message },
-  );
+  try {
+    await allocateHetznerWorkshopRuntime(
+      {
+        organizationId: source.organization_id,
+        sessionId: source.session_id,
+        templateRevisionId: source.template_revision_id,
+        participantUserId: source.user_id,
+        workspaceId: source.workspace_id,
+        generationId,
+        generationOrdinal: ordinal,
+        checkpointId,
+        manifest,
+      },
+      { recoveryMessage: message, now },
+    );
+  } catch (error) {
+    // A reporting source must finish its bounded recording drain before the
+    // replacement is allocated. Keep that accepted transition as `draining`;
+    // the minute sweep will delete it and resume this queued generation.
+    if (!isReplacementCleanupPending(error)) throw error;
+  }
 }
 
 async function latestRecoveryCheckpoint(input: {
@@ -2621,9 +2913,12 @@ async function markWorkshopGenerationArchivedForExecution(
   now: number,
 ): Promise<void> {
   const row = await env.DB.prepare(
-    `SELECT id, state
-     FROM workshop_workspace_generations
-     WHERE runtime_execution_id = ?
+    `SELECT generation.id, generation.state
+     FROM workshop_workspace_generations generation
+     INNER JOIN runtime_executions execution
+       ON execution.id = generation.runtime_execution_id
+      AND execution.state = 'archived'
+     WHERE generation.runtime_execution_id = ?
      LIMIT 1`,
   )
     .bind(executionId)
@@ -3038,6 +3333,13 @@ function isLocationFallbackProviderError(error: unknown): boolean {
     error instanceof AppError &&
     error.status === 503 &&
     error.code === "hcloud_resource_unavailable"
+  );
+}
+
+function isReplacementCleanupPending(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    error.code === "hcloud_replacement_cleanup_pending"
   );
 }
 

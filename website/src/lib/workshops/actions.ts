@@ -4,7 +4,7 @@ import {
   workshopSessions,
   workshopWorkspaces,
 } from "@/db/schema";
-import { appError } from "@/lib/app-error";
+import { AppError, appError } from "@/lib/app-error";
 import {
   claimWorkshopHelpRequest,
   closeWorkshopHelpRequest,
@@ -207,7 +207,7 @@ export async function performWorkshopSessionAction(params: {
         checkpointId,
         actorUserId: params.actorUserId,
       });
-      await provisionWorkshopRequest(request);
+      await provisionWorkshopRequestOrDeferReplacement(request);
       return { kind: "provisioning", generationIds: [request.generationId] };
     }
   }
@@ -304,7 +304,7 @@ export async function performWorkshopSessionAction(params: {
           "checkpointId",
         ),
       });
-      await provisionWorkshopRequest(request);
+      await provisionWorkshopRequestOrDeferReplacement(request);
       return { kind: "provisioning", generationIds: [request.generationId] };
     }
     case "release_module": {
@@ -843,6 +843,22 @@ async function activeHelpRequestForParticipant(
     );
   }
   return row;
+}
+
+async function provisionWorkshopRequestOrDeferReplacement(
+  request: Parameters<typeof provisionWorkshopRequest>[0],
+): Promise<void> {
+  try {
+    await provisionWorkshopRequest(request);
+  } catch (error) {
+    if (
+      error instanceof AppError &&
+      error.code === "hcloud_replacement_cleanup_pending"
+    ) {
+      return;
+    }
+    throw error;
+  }
 }
 
 function requireVersion(value: number | undefined): number {
