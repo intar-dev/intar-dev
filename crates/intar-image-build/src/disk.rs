@@ -1,4 +1,5 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -62,14 +63,7 @@ pub fn prepare_scenario_disk(plan: &ScenarioDiskPlan) -> Result<()> {
             plan.root_disk_path.display()
         )
     })?;
-    fs::set_permissions(&plan.root_disk_path, fs::Permissions::from_mode(0o600)).with_context(
-        || {
-            format!(
-                "failed to make copied root disk '{}' privately writable",
-                plan.root_disk_path.display()
-            )
-        },
-    )?;
+    make_copied_disk_writable(&plan.root_disk_path)?;
     let root_disk = fs::OpenOptions::new()
         .write(true)
         .open(&plan.root_disk_path)
@@ -88,6 +82,26 @@ pub fn prepare_scenario_disk(plan: &ScenarioDiskPlan) -> Result<()> {
         run_command(command)?;
     }
     Ok(())
+}
+
+fn make_copied_disk_writable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let permissions = fs::Permissions::from_mode(0o600);
+    #[cfg(not(unix))]
+    let permissions = {
+        let mut permissions = fs::metadata(path)
+            .with_context(|| format!("failed to inspect copied root disk '{}'", path.display()))?
+            .permissions();
+        permissions.set_readonly(false);
+        permissions
+    };
+
+    fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "failed to make copied root disk '{}' privately writable",
+            path.display()
+        )
+    })
 }
 
 fn run_command(command: &ScenarioDiskCommand) -> Result<()> {
@@ -111,6 +125,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
@@ -141,6 +156,7 @@ mod tests {
         assert_eq!(plan.commands[1].args, vec!["/work/root.raw"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn copied_read_only_base_becomes_a_private_writable_root_disk() {
         let root = tempfile::tempdir().unwrap();
