@@ -775,7 +775,7 @@ packages = ["nginx"]
             assert!(script.contains("initial_boot_files=\"$(find /boot"));
             assert!(script.contains("systemctl disable intar-build.service"));
             assert!(script.contains(
-                "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start"
+                "rm -f /etc/systemd/system/intar-build.service /usr/local/sbin/intar-build-start /etc/pam.d/intar-build"
             ));
             assert!(script.contains("rm -f /home/${bootstrap_username}/.ssh/authorized_keys"));
             assert!(script.contains("final_boot_files=\"$(find /boot"));
