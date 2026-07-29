@@ -12,7 +12,7 @@ mod seed;
 mod ssh;
 
 pub use artifact::{
-    RawZstdArtifact, expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel,
+    RawZstdArtifact, expand_raw_zstd_sparse, expand_raw_zstd_sparse_with_cancel, sha256_file_hex,
     write_raw_zstd_artifact, write_raw_zstd_artifact_with_cancel,
 };
 pub use config::{BuildConfig, ConfigError, QemuBuildConfig, RawUploadConfig};

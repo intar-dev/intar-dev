@@ -98,6 +98,8 @@ release commit and pull request:
 Website validation run:
 Website production run:
 production guest-tool artifact ID and digest:
+clean-base workflow run, artifact ID, and artifact digest:
+clean-base proof raw/kernel/initrd SHA-256:
 provider Worker deployment/version:
 pre-migration D1 Time Travel bookmark:
 applied migration IDs:
@@ -329,6 +331,41 @@ probes, artifacts, desired state, teardown, and active slot must behave as
 before. No Scenario may gain an organization provider connection or Hetzner
 allocation.
 
+Build the separate clean Debian proof input from the same successful
+first-attempt Website production run and exact source SHA:
+
+```sh
+gh workflow run workshop-clean-base.yml --ref main \
+  -f production_run_id=<WEBSITE_PRODUCTION_RUN_ID> \
+  -f confirmation='BUILD WORKSHOP CLEAN BASE' \
+  -f single_operator_confirmation='SINGLE OPERATOR WORKSHOP CLEAN BASE'
+gh run watch <CLEAN_BASE_RUN_ID> --exit-status
+```
+
+Omit the single-operator confirmation in reviewed mode. The protected workflow
+uses no Docker daemon or container build. It creates the Debian rootfs with
+`mmdebstrap`, boots only a disposable clone with a fresh `INTARBUILD` seed
+under KVM, proves Debian 13/x86_64 and SSH readiness, rejects workshop,
+Intar-agent, Docker/OCI, Kubernetes, and Talos state, requires acknowledged
+QMP shutdown and offline filesystem checks, and then publishes the untouched
+source as:
+
+```text
+production-workshop-clean-base-<SOURCE_SHA>/
+  clean-debian13.raw.zst
+  clean-debian13-vmlinuz
+  clean-debian13-initrd.img
+  package-inventory.txt
+  proof.json
+  SHA256SUMS
+```
+
+The workflow rejects reruns, any existing artifact with the same name, and any
+Website run that is not successful, first-attempt, dispatched
+from `main`, and at the exact current SHA. Record the clean-base run ID and the
+immutable Actions artifact ID/digest. This 90-day artifact is an installation
+handoff and retained evidence, not an unversioned image channel.
+
 ## 5. Verify first-level workspace application routing
 
 The existing application-routing design remains authoritative:
@@ -518,6 +555,89 @@ and its metadata is normalized to `root:intar-builder 0640`. The installer
 reloads systemd unit metadata but never enables or starts the service and never
 runs `prepare-authored-image`. Review and replace every example token, digest,
 and host path before running `doctor`.
+
+Download the exact clean-base artifact from the recorded protected run, verify
+its outer Actions artifact identity and inner checksums, then expand and
+install it as a separate root-owned input after the installer has created the
+`intar-builder` group:
+
+```sh
+repository=intar-dev/intar-dev
+source_sha=<SOURCE_SHA>
+production_run_id=<WEBSITE_PRODUCTION_RUN_ID>
+clean_base_run_id=<CLEAN_BASE_RUN_ID>
+clean_base_artifact_id=<RECORDED_ARTIFACT_ID>
+clean_base_artifact_digest=<RECORDED_SHA256_DIGEST>
+clean_base_artifact_name="production-workshop-clean-base-${source_sha}"
+run_json="$(gh api \
+  "repos/${repository}/actions/runs/${clean_base_run_id}")"
+jq -e \
+  --arg source_sha "${source_sha}" '
+    .event == "workflow_dispatch" and
+    .status == "completed" and
+    .conclusion == "success" and
+    .head_branch == "main" and
+    .head_sha == $source_sha and
+    .run_attempt == 1 and
+    .path == ".github/workflows/workshop-clean-base.yml"
+  ' <<<"${run_json}" >/dev/null
+artifacts_json="$(gh api \
+  "repos/${repository}/actions/runs/${clean_base_run_id}/artifacts?per_page=100")"
+jq -e \
+  --arg artifact_id "${clean_base_artifact_id}" \
+  --arg artifact_digest "${clean_base_artifact_digest}" \
+  --arg artifact_name "${clean_base_artifact_name}" '
+    .total_count == 1 and
+    (.artifacts | length) == 1 and
+    (.artifacts[0].id | tostring) == $artifact_id and
+    .artifacts[0].name == $artifact_name and
+    .artifacts[0].digest == $artifact_digest and
+    .artifacts[0].expired == false
+  ' <<<"${artifacts_json}" >/dev/null
+clean_base_stage="$(mktemp -d)"
+chmod 0700 "${clean_base_stage}"
+gh run download "${clean_base_run_id}" \
+  --repo "${repository}" \
+  --name "${clean_base_artifact_name}" \
+  --dir "${clean_base_stage}"
+(cd "${clean_base_stage}" && sha256sum --check --strict SHA256SUMS)
+jq -e \
+  --arg repository "${repository}" \
+  --arg source_sha "${source_sha}" \
+  --arg production_run_id "${production_run_id}" \
+  --arg workflow_run_id "${clean_base_run_id}" '
+    .schema_version == 1 and
+    .repository == $repository and
+    .source_sha == $source_sha and
+    (.production_run_id | tostring) == $production_run_id and
+    (.workflow_run_id | tostring) == $workflow_run_id and
+    .workflow_run_attempt == 1 and
+    .system_image == "debian-13" and
+    .architecture == "x86_64"
+  ' "${clean_base_stage}/proof.json" >/dev/null
+zstd --decompress --sparse \
+  --output "${clean_base_stage}/clean-debian13.raw" \
+  "${clean_base_stage}/clean-debian13.raw.zst"
+test "$(
+  sha256sum "${clean_base_stage}/clean-debian13.raw" | cut -d ' ' -f 1
+)" = "$(jq -r .raw_disk_sha256 "${clean_base_stage}/proof.json")"
+sudo install -o root -g intar-builder -m 0440 \
+  "${clean_base_stage}/clean-debian13.raw" \
+  /var/cache/intar-workshop-builder/clean/clean-debian13.raw
+sudo install -o root -g intar-builder -m 0440 \
+  "${clean_base_stage}/clean-debian13-vmlinuz" \
+  /var/cache/intar-workshop-builder/clean/clean-debian13-vmlinuz
+sudo install -o root -g intar-builder -m 0440 \
+  "${clean_base_stage}/clean-debian13-initrd.img" \
+  /var/cache/intar-workshop-builder/clean/clean-debian13-initrd.img
+```
+
+Use a private temporary directory in production and remove it after the
+installed files and configuration hashes have been verified. Never substitute
+a scenario image or locally rebuilt disk for these bytes. Set the
+`runtime_bundle_verification` disk hash from `raw_disk_sha256` and the
+kernel/initrd hashes from the corresponding entries in `proof.json` before
+`doctor`.
 
 All five units must remain stopped with no pending systemd jobs throughout the
 install and workshop build. The installer also fails closed if it finds any

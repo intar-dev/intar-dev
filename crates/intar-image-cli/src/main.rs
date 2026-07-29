@@ -16,6 +16,8 @@ use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use std::{fs, process::Command as ProcessCommand};
 
+mod clean_base_command;
+
 const BASE_IMAGES_PATH: &str = "base-images.hcl";
 const BUILD_TOOLS_PATH: &str = "build-tools.hcl";
 const COURSES_PATH: &str = "courses.hcl";
@@ -76,6 +78,7 @@ enum Command {
     Render(RenderCommand),
     Build(BuildCommand),
     BuildAll(BuildAllCommand),
+    BuildBase(clean_base_command::BuildBaseCommand),
     Hash(HashCommand),
     Bundle(BundleCommand),
 }
@@ -162,6 +165,7 @@ fn main() -> Result<()> {
         Command::Render(args) => render_command(&args),
         Command::Build(args) => build_command(&args),
         Command::BuildAll(args) => build_all_command(&args),
+        Command::BuildBase(args) => clean_base_command::build_base_command(&args),
         Command::Hash(args) => hash_command(&args),
         Command::Bundle(args) => bundle_command(&args),
     }
