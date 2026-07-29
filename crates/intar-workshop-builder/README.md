@@ -33,6 +33,35 @@ intar-workshop-builder doctor --config /etc/intar/workshop-builder.toml
 intar-workshop-builder run --config /etc/intar/workshop-builder.toml
 ```
 
+The same binary has an explicit, one-shot authored-base workflow:
+
+```console
+intar-workshop-builder prepare-authored-image \
+  --config /etc/intar/workshop-builder.toml
+```
+
+It is never invoked by `run`, `run-once`, or publication claiming. The
+protected release archive carries the deterministic Platform workshop bundle,
+Kino, the sanitizer, their checksum files, and the exact workspace agent.
+`[execution.authored_image_preparation]` pins the first three inputs by
+SHA-256, selects one image mapping, and names a previously absent output
+directory. Preparation clones and expands the separately pinned clean Debian
+proof disk, boots it through KVM with a fresh `INTARBUILD` seed, installs only
+the curated `runtime/source`, runs the pinned bootstrap and module-00 verifier,
+proves the one-commit Git tree and sole Talos host image, sanitizes caches and
+machine identity, shuts down through acknowledged QMP, runs repairing and
+read-only `e2fsck`, and hashes the complete disk. `disk.raw`,
+`provenance.json`, and the three build logs become visible together through
+one atomic directory rename. The command refuses to overwrite any existing
+output.
+
+Before cloning, both the output and execution-work filesystems must have at
+least `minimum_free_space_bytes`, and never less than twice the workshop's
+nominal disk size. Use 200 GiB for the 64 GiB Platform image; 256 GiB leaves
+more operational margin for publication artifacts. A host with only about
+64 GiB free is intentionally rejected before creating a disk. This check does
+not replace normal capacity monitoring.
+
 The execution mapping is deliberately operator-owned. Each
 `workspace.vm.image` resolves to one absolute raw base disk, kernel, initrd and
 boot command line in `config.example.toml`. V1 accepts only x86_64. The host rejects symlinked or
@@ -108,7 +137,8 @@ to cold-boot and pass on a real CX43 learner server.
 
 ## Dedicated authored-image contract
 
-The base disk must be Debian 13 and already contain:
+The supported preparer starts from the pinned clean Debian 13 proof triple and
+constructs a base that contains:
 
 - the Intar `INTARBUILD` seed bootstrap service for the ephemeral SSH key;
 - `/usr/local/bin/kino` and the normal Intar runtime supervisor;
@@ -180,11 +210,35 @@ directories, nested paths, and unrelated operator data. A forced kill can
 therefore leave bounded staging data, which the next start validates and
 removes without widening the recursive deletion target.
 
-Install the unit and sanitizer from `deploy/`, install the example config as
-`/etc/intar/workshop-builder.toml`, create a non-login `intar-builder` user in
-the `kvm` group, and make `/var/lib/intar-workshop-builder` owned by that user
-with mode `0750`. The base disk/kernel/initrd should be root-owned, readable
-but not writable by the service user. Start only after `doctor` passes.
+The protected release archive includes `deploy/install.sh` and an internal
+`deploy/SHA256SUMS`. Stop and drain the existing service, then run
+`sudo ./deploy/install.sh --check` followed by the installer as root. It
+verifies
+QEMU, e2fsprogs, systemd, KVM, the service account, and every packaged file
+before changing the host. The idempotent installer creates a non-login
+`intar-builder` user in the `kvm` group; installs the builder, workspace agent,
+Kino, sanitizer, workshop bundle, unit, and example config at their configured
+absolute paths; and makes `/var/lib/intar-workshop-builder` owned by that user
+with mode `0750`.
+
+An existing `/etc/intar/workshop-builder.toml` is never replaced: its bytes are
+preserved while ownership and mode are normalized to
+`root:intar-builder 0640`. The installer refuses an active service or any live
+agent, jail daemon, legacy builder, workshop builder, QEMU, or Cloud Hypervisor
+process. On a co-located scenario host, drain active learner VMs, stop
+`intar-agent.service`, `intar-jailerd.socket`, `intar-jailerd.service`,
+`intar-builder.service`, and `intar-workshop-builder.service`, and verify that
+none has a pending systemd job. The installer reloads systemd metadata but
+never enables or starts a service and never invokes image preparation.
+
+The installer also creates `/var/cache/intar-workshop-builder` as
+`root:intar-builder 0750`. Its `clean` child is also root-owned and
+non-writable by the service account; separately provisioned proof
+disk/kernel/initrd files stay there as root-owned, read-only inputs. Its
+`authored` child is `intar-builder:intar-builder 0750`, allowing atomic output
+promotion while satisfying the preparer's rejection of group/world-writable
+output parents. Start only after an operator reviews the preserved config and
+`doctor` passes.
 
 Unit tests use a fake guest/process seam to verify typed lifecycle ordering,
 the author-material scrub boundary, cancellation without terminal failure, and

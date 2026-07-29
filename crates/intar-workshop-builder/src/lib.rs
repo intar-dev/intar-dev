@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod authored_image;
 mod backend;
 mod bundle;
 mod client;
@@ -13,6 +14,7 @@ mod runtime_bundle;
 mod staging;
 
 pub use agent::{run_forever, run_forever_until_cancelled};
+pub use authored_image::{AuthoredImageProvenance, prepare_authored_image};
 pub use backend::{
     BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, CheckpointImageTarget,
     RuntimeBundleColdBoot, RuntimeBundleColdBootProof, SealCheckpoint, SealedVmArtifact,
@@ -23,7 +25,7 @@ pub use client::{
     WorkshopRegistryClient,
 };
 pub use config::{
-    KvmExecutionConfig, RegistryConfig, RuntimeBundleSigningConfig,
+    AuthoredImagePreparationConfig, KvmExecutionConfig, RegistryConfig, RuntimeBundleSigningConfig,
     RuntimeBundleVerificationConfig, WorkerConfig, WorkshopBaseImageConfig, WorkshopBuilderConfig,
     load, parse,
 };

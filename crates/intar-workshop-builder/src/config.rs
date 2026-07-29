@@ -107,7 +107,33 @@ pub struct KvmExecutionConfig {
     /// workshop build images.
     #[serde(default)]
     pub runtime_bundle_verification: Option<RuntimeBundleVerificationConfig>,
+    /// Optional, operator-only workflow that creates one configured authored
+    /// image from the separately pinned clean Debian proof triple. Normal
+    /// publication never invokes this workflow implicitly.
+    #[serde(default)]
+    pub authored_image_preparation: Option<AuthoredImagePreparationConfig>,
     pub images: Vec<WorkshopBaseImageConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredImagePreparationConfig {
+    /// Exact deterministic workshop source bundle produced by protected CI.
+    pub workshop_bundle: PathBuf,
+    pub workshop_bundle_sha256: String,
+    /// Must select exactly one `execution.images` entry.
+    pub image_name: String,
+    /// Learner-safe verifier inside runtime/source, relative to install_root.
+    pub image_verifier: String,
+    /// The complete disk/provenance/log directory is promoted here atomically.
+    pub output_directory: PathBuf,
+    /// Fail before cloning the base when either the output filesystem or the
+    /// execution-work filesystem has less than this conservative peak budget.
+    pub minimum_free_space_bytes: u64,
+    pub kino_binary: PathBuf,
+    pub kino_sha256: String,
+    pub sanitizer_binary: PathBuf,
+    pub sanitizer_sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +334,9 @@ fn validate_execution(config: &KvmExecutionConfig) -> Result<()> {
             bail!("execution.runtime_bundle_verification.boot_cmdline is invalid");
         }
     }
+    if let Some(preparation) = &config.authored_image_preparation {
+        validate_authored_image_preparation(config, preparation)?;
+    }
     let mut names = BTreeSet::new();
     for image in &config.images {
         if config
@@ -405,6 +434,88 @@ fn validate_execution(config: &KvmExecutionConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_authored_image_preparation(
+    execution: &KvmExecutionConfig,
+    preparation: &AuthoredImagePreparationConfig,
+) -> Result<()> {
+    for (label, path) in [
+        ("workshop_bundle", &preparation.workshop_bundle),
+        ("output_directory", &preparation.output_directory),
+        ("kino_binary", &preparation.kino_binary),
+        ("sanitizer_binary", &preparation.sanitizer_binary),
+    ] {
+        if !path.is_absolute() || path == Path::new("/") {
+            bail!("execution.authored_image_preparation.{label} must be an absolute non-root path");
+        }
+    }
+    for (label, digest) in [
+        (
+            "workshop_bundle_sha256",
+            preparation.workshop_bundle_sha256.as_str(),
+        ),
+        ("kino_sha256", preparation.kino_sha256.as_str()),
+        ("sanitizer_sha256", preparation.sanitizer_sha256.as_str()),
+    ] {
+        if !is_sha256(digest) {
+            bail!(
+                "execution.authored_image_preparation.{label} must be 64 lowercase hexadecimal characters"
+            );
+        }
+    }
+    if !is_safe_id(&preparation.image_name) {
+        bail!("execution.authored_image_preparation.image_name is invalid");
+    }
+    if !is_safe_relative_payload_path(&preparation.image_verifier) {
+        bail!("execution.authored_image_preparation.image_verifier is invalid");
+    }
+    if preparation.minimum_free_space_bytes == 0 {
+        bail!("execution.authored_image_preparation.minimum_free_space_bytes must be positive");
+    }
+    let proof = execution
+        .runtime_bundle_verification
+        .as_ref()
+        .context("execution.authored_image_preparation requires runtime_bundle_verification")?;
+    let image = execution
+        .images
+        .iter()
+        .find(|image| image.name == preparation.image_name)
+        .with_context(|| {
+            format!(
+                "execution.authored_image_preparation selects unknown image '{}'",
+                preparation.image_name
+            )
+        })?;
+    let expected_disk = preparation.output_directory.join("disk.raw");
+    if image.disk != expected_disk {
+        bail!(
+            "execution image '{}' disk must be '{}' for atomic authored-image promotion",
+            image.name,
+            expected_disk.display()
+        );
+    }
+    if image.kernel != proof.kernel
+        || image.initrd != proof.initrd
+        || image.boot_cmdline != proof.boot_cmdline
+    {
+        bail!(
+            "execution image '{}' must use the clean proof kernel, initrd, and boot_cmdline",
+            image.name
+        );
+    }
+    if preparation
+        .output_directory
+        .starts_with(&execution.work_root)
+        || execution
+            .work_root
+            .starts_with(&preparation.output_directory)
+    {
+        bail!(
+            "execution.authored_image_preparation.output_directory must be separate from execution.work_root"
+        );
+    }
+    Ok(())
+}
+
 pub fn load(path: &Path) -> Result<WorkshopBuilderConfig> {
     let source = std::fs::read_to_string(path).with_context(|| {
         format!(
@@ -490,6 +601,24 @@ fn is_absolute_guest_path(value: &str) -> bool {
     value.starts_with('/')
         && !value.contains(['\n', '\r', '\0'])
         && !value.split('/').any(|component| component == "..")
+}
+
+fn is_safe_relative_payload_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && !value.contains(['\n', '\r', '\0', '\t'])
+        && path.components().all(|component| {
+            let std::path::Component::Normal(value) = component else {
+                return false;
+            };
+            value.to_str().is_some_and(|value| {
+                !value.is_empty()
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+        })
 }
 
 fn is_broad_guest_path(value: &str) -> bool {
@@ -651,6 +780,17 @@ surprise = true
                 .iter()
                 .any(|path| path.contains("catch-up.sh") || path.contains("solutions"))
         );
+        let preparation = config
+            .execution
+            .authored_image_preparation
+            .as_ref()
+            .unwrap();
+        assert_eq!(preparation.image_name, image.name);
+        assert_eq!(
+            preparation.minimum_free_space_bytes,
+            200 * 1024 * 1024 * 1024
+        );
+        assert_eq!(image.disk, preparation.output_directory.join("disk.raw"));
     }
 
     #[test]

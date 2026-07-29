@@ -46,15 +46,35 @@ probe_timeout_seconds = 120
 [execution.runtime_bundle_verification]
 system_image = "debian-13"
 architecture = "x86_64"
-disk = "/var/cache/intar-workshop-builder/bases/clean-debian13.raw"
+disk = "/var/cache/intar-workshop-builder/clean/clean-debian13.raw"
 disk_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-kernel = "/var/cache/intar-workshop-builder/bases/clean-debian13-vmlinuz"
+kernel = "/var/cache/intar-workshop-builder/clean/clean-debian13-vmlinuz"
 kernel_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-initrd = "/var/cache/intar-workshop-builder/bases/clean-debian13-initrd.img"
+initrd = "/var/cache/intar-workshop-builder/clean/clean-debian13-initrd.img"
 initrd_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
 workspace_agent_binary = "/usr/local/libexec/intar/intar-workspace-agent"
 workspace_agent_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Explicit one-shot preparation input. Protected release CI packages the
+# deterministic workshop bundle and exact Kino/sanitizer artifacts; replace
+# the placeholder hashes from that release before running:
+#   intar-workshop-builder prepare-authored-image --config ...
+# The command never overwrites output_directory. It promotes disk.raw,
+# provenance.json, and build logs together with one atomic directory rename.
+[execution.authored_image_preparation]
+workshop_bundle = "/usr/local/share/intar/workshops/platform-engineering-workshop.tar.gz"
+workshop_bundle_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+image_name = "platform-engineering-workshop-debian13-1b6fad4"
+image_verifier = "lab/00-setup/verify.sh"
+output_directory = "/var/cache/intar-workshop-builder/authored/platform-engineering-debian13"
+# 200 GiB: enough for the 64 GiB authored disk plus later checkpoint
+# clone/seal/restore work without depending on sparse-file behavior.
+minimum_free_space_bytes = 214748364800
+kino_binary = "/usr/local/libexec/intar/kino"
+kino_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sanitizer_binary = "/usr/local/libexec/intar/intar-workshop-sanitize"
+sanitizer_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
 # The image name must exactly match workspace.vm.image in workshop.hcl. This
 # is a dedicated, operator-built Debian disk with the Intar build-seed service,
@@ -62,9 +82,9 @@ workspace_agent_sha256 = "000000000000000000000000000000000000000000000000000000
 [[execution.images]]
 name = "platform-engineering-workshop-debian13-1b6fad4"
 architecture = "x86_64"
-disk = "/var/cache/intar-workshop-builder/bases/platform-engineering-debian13.raw"
-kernel = "/var/cache/intar-workshop-builder/bases/vmlinuz-6.12-intar"
-initrd = "/var/cache/intar-workshop-builder/bases/initrd.img-6.12-intar"
+disk = "/var/cache/intar-workshop-builder/authored/platform-engineering-debian13/disk.raw"
+kernel = "/var/cache/intar-workshop-builder/clean/clean-debian13-vmlinuz"
+initrd = "/var/cache/intar-workshop-builder/clean/clean-debian13-initrd.img"
 boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
 # These paths must exist in the authored image. They are archived once on the
 # trusted build generation, removed before every seal, absent during cold-boot

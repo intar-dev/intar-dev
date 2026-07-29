@@ -49,15 +49,15 @@ enum GuestMode {
 }
 
 #[derive(Debug, Clone)]
-struct GuestBootRequest {
-    generation_root: PathBuf,
-    root_disk: PathBuf,
-    seed_disk: PathBuf,
-    kernel: PathBuf,
-    initrd: PathBuf,
-    boot_cmdline: String,
-    cpu_count: u32,
-    memory_mib: u32,
+pub(crate) struct GuestBootRequest {
+    pub(crate) generation_root: PathBuf,
+    pub(crate) root_disk: PathBuf,
+    pub(crate) seed_disk: PathBuf,
+    pub(crate) kernel: PathBuf,
+    pub(crate) initrd: PathBuf,
+    pub(crate) boot_cmdline: String,
+    pub(crate) cpu_count: u32,
+    pub(crate) memory_mib: u32,
 }
 
 /// Narrow process seam: workshop author input can only select validated files
@@ -162,9 +162,27 @@ impl KvmWorkshopBackend {
     /// publication claiming. `prepare` creates the private work root for `run`;
     /// doctor mode can pass false for a read-only inspection of an existing root.
     pub fn preflight(config: &KvmExecutionConfig, prepare: bool) -> Result<()> {
+        Self::preflight_impl(config, prepare, true)?;
+        crate::authored_image::verify_prepared_authored_image(config)
+    }
+
+    /// Preflight the trusted host and clean proof inputs without requiring the
+    /// authored output disk to exist yet.
+    pub(crate) fn preflight_for_authored_image(
+        config: &KvmExecutionConfig,
+        prepare: bool,
+    ) -> Result<()> {
+        Self::preflight_impl(config, prepare, false)
+    }
+
+    fn preflight_impl(
+        config: &KvmExecutionConfig,
+        prepare: bool,
+        require_authored_images: bool,
+    ) -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (config, prepare);
+            let _ = (config, prepare, require_authored_images);
             bail!("the workshop KVM backend is supported only on Linux builder hosts");
         }
 
@@ -186,15 +204,17 @@ impl KvmWorkshopBackend {
             ] {
                 validate_executable(path).with_context(|| format!("{label} preflight failed"))?;
             }
-            for image in &config.images {
-                for (label, path) in [
-                    ("disk", &image.disk),
-                    ("kernel", &image.kernel),
-                    ("initrd", &image.initrd),
-                ] {
-                    validate_regular_file(path).with_context(|| {
-                        format!("trusted image '{}' {label} preflight failed", image.name)
-                    })?;
+            if require_authored_images {
+                for image in &config.images {
+                    for (label, path) in [
+                        ("disk", &image.disk),
+                        ("kernel", &image.kernel),
+                        ("initrd", &image.initrd),
+                    ] {
+                        validate_regular_file(path).with_context(|| {
+                            format!("trusted image '{}' {label} preflight failed", image.name)
+                        })?;
+                    }
                 }
             }
             if let Some(proof) = &config.runtime_bundle_verification {
@@ -1161,10 +1181,8 @@ impl QemuGuestLauncher {
             cancellation,
         }
     }
-}
 
-impl GuestLauncher for QemuGuestLauncher {
-    fn boot(&mut self, request: GuestBootRequest) -> Result<Box<dyn BuildGuest>> {
+    fn boot_concrete(&mut self, request: GuestBootRequest) -> Result<QemuBuildGuest> {
         ensure!(
             !self.cancellation.is_cancelled(),
             "workshop build cancelled"
@@ -1232,7 +1250,7 @@ impl GuestLauncher for QemuGuestLauncher {
             let _ = terminate_child(&mut child);
             return Err(error);
         }
-        Ok(Box::new(QemuBuildGuest {
+        Ok(QemuBuildGuest {
             child: Some(child),
             ssh_port,
             ssh_username: self.config.ssh_username.clone(),
@@ -1243,7 +1261,13 @@ impl GuestLauncher for QemuGuestLauncher {
             script_timeout: Duration::from_secs(self.config.script_timeout_seconds),
             shutdown_timeout: Duration::from_secs(self.config.shutdown_timeout_seconds),
             cancellation: self.cancellation.clone(),
-        }))
+        })
+    }
+}
+
+impl GuestLauncher for QemuGuestLauncher {
+    fn boot(&mut self, request: GuestBootRequest) -> Result<Box<dyn BuildGuest>> {
+        Ok(Box::new(self.boot_concrete(request)?))
     }
 }
 
@@ -1258,6 +1282,43 @@ struct QemuBuildGuest {
     script_timeout: Duration,
     shutdown_timeout: Duration,
     cancellation: CancellationToken,
+}
+
+pub(crate) struct AuthoredImageGuest {
+    inner: QemuBuildGuest,
+}
+
+impl AuthoredImageGuest {
+    pub(crate) fn upload(&self, local: &Path, remote: &str, mode: u32) -> Result<()> {
+        self.inner.upload(local, remote, mode)
+    }
+
+    pub(crate) fn run_fixed(&self, command: &str) -> Result<()> {
+        self.inner.run_fixed(command)
+    }
+
+    pub(crate) fn download(&self, remote: &str, local: &Path) -> Result<()> {
+        self.inner.download(remote, local)
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<()> {
+        self.inner.shutdown()
+    }
+
+    pub(crate) fn kill(&mut self) {
+        self.inner.kill();
+    }
+}
+
+pub(crate) fn boot_authored_image_guest(
+    config: &KvmExecutionConfig,
+    request: GuestBootRequest,
+    cancellation: CancellationToken,
+) -> Result<AuthoredImageGuest> {
+    let mut launcher = QemuGuestLauncher::new(config.clone(), cancellation);
+    Ok(AuthoredImageGuest {
+        inner: launcher.boot_concrete(request)?,
+    })
 }
 
 impl QemuBuildGuest {
@@ -1827,6 +1888,7 @@ mod tests {
             probe_every_seconds: 10,
             probe_timeout_seconds: 120,
             runtime_bundle_verification: None,
+            authored_image_preparation: None,
             images: vec![WorkshopBaseImageConfig {
                 name: "platform-workshop-debian13".to_string(),
                 architecture: ImageArchitecture::X86_64,

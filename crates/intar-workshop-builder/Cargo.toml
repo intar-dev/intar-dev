@@ -12,6 +12,7 @@ base64.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
+fs2.workspace = true
 intar-contracts = { path = "../intar-contracts" }
 intar-image-build = { path = "../intar-image-build" }
 intar-image-upload = { path = "../intar-image-upload" }

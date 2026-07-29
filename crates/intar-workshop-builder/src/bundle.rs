@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Write as _};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -11,10 +13,59 @@ use crate::config::WorkerConfig;
 use crate::contracts::WorkshopPublicationClaim;
 use crate::staging::mark_staging_directory;
 
+#[derive(Debug)]
 pub struct PreparedWorkshopBundle {
     _temporary_root: tempfile::TempDir,
     pub root: PathBuf,
     pub workshop: ValidatedWorkshop,
+}
+
+pub(crate) fn prepare_local_bundle(
+    path: &Path,
+    expected_sha256: &str,
+    worker: &WorkerConfig,
+) -> Result<PreparedWorkshopBundle> {
+    let compressed = fs::read(path)
+        .with_context(|| format!("failed to read workshop bundle '{}'", path.display()))?;
+    let compressed_len = u64::try_from(compressed.len()).context("bundle length overflow")?;
+    if compressed_len == 0 || compressed_len > worker.max_compressed_bundle_bytes {
+        bail!(
+            "workshop bundle is empty or exceeds the {} byte compressed limit",
+            worker.max_compressed_bundle_bytes
+        );
+    }
+    let actual_hash = intar_image_build::sha256_bytes_hex(&compressed);
+    if actual_hash != expected_sha256 {
+        bail!(
+            "workshop bundle hash mismatch: configured {}, local {}",
+            expected_sha256,
+            actual_hash
+        );
+    }
+
+    fs::create_dir_all(&worker.work_root).with_context(|| {
+        format!(
+            "failed to create workshop builder work root '{}'",
+            worker.work_root.display()
+        )
+    })?;
+    let temporary_root = tempfile::Builder::new()
+        .prefix("publication-authored-source-")
+        .tempdir_in(&worker.work_root)
+        .context("failed to create authored-image source work directory")?;
+    mark_staging_directory(temporary_root.path())?;
+    let root = temporary_root.path().join("source");
+    fs::create_dir(&root).context("failed to create workshop source directory")?;
+    extract_archive(&compressed, &root, worker)?;
+    let workshop = intar_workshop_manifest::load_and_validate(&root)
+        .context("local workshop bundle failed source validation")?;
+    verify_compiled_manifest(&root, &workshop)?;
+
+    Ok(PreparedWorkshopBundle {
+        _temporary_root: temporary_root,
+        root,
+        workshop,
+    })
 }
 
 pub fn prepare_bundle(
@@ -182,6 +233,28 @@ fn extract_archive(compressed: &[u8], destination: &Path, worker: &WorkerConfig)
             .with_context(|| format!("failed to extract '{}'", relative.display()))?;
         file.flush()
             .with_context(|| format!("failed to flush '{}'", output.display()))?;
+        #[cfg(unix)]
+        {
+            // The deterministic bundle compiler emits only regular 0644 and
+            // executable 0755 files. Preserve executable intent while
+            // normalizing every other permission bit (including set-id).
+            let archived_mode = entry
+                .header()
+                .mode()
+                .context("failed to read workshop tar entry mode")?;
+            let normalized_mode = if archived_mode & 0o111 == 0 {
+                0o644
+            } else {
+                0o755
+            };
+            file.set_permissions(fs::Permissions::from_mode(normalized_mode))
+                .with_context(|| {
+                    format!(
+                        "failed to set normalized permissions on '{}'",
+                        output.display()
+                    )
+                })?;
+        }
     }
     Ok(())
 }
@@ -252,7 +325,9 @@ mod tests {
     use flate2::{Compression, GzBuilder};
     use tar::{Builder, EntryType, Header};
 
-    use super::{extract_archive, safe_relative_path, verify_compiled_manifest};
+    use super::{
+        extract_archive, prepare_local_bundle, safe_relative_path, verify_compiled_manifest,
+    };
     use crate::config::WorkerConfig;
 
     #[test]
@@ -325,5 +400,38 @@ mod tests {
 
         let error = verify_compiled_manifest(destination.path(), &workshop).unwrap_err();
         assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn local_bundle_requires_the_exact_configured_digest() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let bundle = intar_workshop_manifest::build_bundle(&fixture).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("workshop.tar.gz");
+        std::fs::write(&path, &bundle.bytes).unwrap();
+        let worker = WorkerConfig {
+            work_root: temporary.path().join("work"),
+            ..WorkerConfig::default()
+        };
+
+        let prepared = prepare_local_bundle(&path, &bundle.sha256, &worker).unwrap();
+        assert_eq!(
+            prepared.workshop.manifest.workshop.id,
+            bundle.workshop.manifest.workshop.id
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode =
+                std::fs::metadata(prepared.root.join("runtime/source/lab/00-setup/verify.sh"))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+        let error = prepare_local_bundle(&path, &"0".repeat(64), &worker).unwrap_err();
+        assert!(error.to_string().contains("hash mismatch"));
     }
 }
