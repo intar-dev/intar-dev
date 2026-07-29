@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -61,6 +63,7 @@ pub fn prepare_scenario_disk(plan: &ScenarioDiskPlan) -> Result<()> {
             plan.root_disk_path.display()
         )
     })?;
+    make_copied_disk_writable(&plan.root_disk_path)?;
     let root_disk = fs::OpenOptions::new()
         .write(true)
         .open(&plan.root_disk_path)
@@ -79,6 +82,26 @@ pub fn prepare_scenario_disk(plan: &ScenarioDiskPlan) -> Result<()> {
         run_command(command)?;
     }
     Ok(())
+}
+
+fn make_copied_disk_writable(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let permissions = fs::Permissions::from_mode(0o600);
+    #[cfg(not(unix))]
+    let permissions = {
+        let mut permissions = fs::metadata(path)
+            .with_context(|| format!("failed to inspect copied root disk '{}'", path.display()))?
+            .permissions();
+        permissions.set_readonly(false);
+        permissions
+    };
+
+    fs::set_permissions(path, permissions).with_context(|| {
+        format!(
+            "failed to make copied root disk '{}' privately writable",
+            path.display()
+        )
+    })
 }
 
 fn run_command(command: &ScenarioDiskCommand) -> Result<()> {
@@ -101,9 +124,12 @@ fn run_command(command: &ScenarioDiskCommand) -> Result<()> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
-    use super::render_scenario_disk_plan;
+    use super::{ScenarioDiskPlan, prepare_scenario_disk, render_scenario_disk_plan};
     use crate::config::QemuBuildConfig;
 
     #[test]
@@ -128,5 +154,33 @@ mod tests {
         assert_eq!(plan.commands[0].args, vec!["-fy", "/work/root.raw"]);
         assert_eq!(plan.commands[1].program, Path::new("/sbin/resize2fs"));
         assert_eq!(plan.commands[1].args, vec!["/work/root.raw"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_read_only_base_becomes_a_private_writable_root_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base.ext4");
+        let disk = root.path().join("root.raw");
+        fs::write(&base, b"intar").unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o440)).unwrap();
+
+        prepare_scenario_disk(&ScenarioDiskPlan {
+            base_ext4_path: base.clone(),
+            root_disk_path: disk.clone(),
+            virtual_size_bytes: 8,
+            commands: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            0o440
+        );
+        assert_eq!(
+            fs::metadata(&disk).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read(&disk).unwrap(), b"intar\0\0\0");
     }
 }
