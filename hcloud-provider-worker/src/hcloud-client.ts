@@ -680,7 +680,11 @@ export class HcloudClient {
       const result = await this.#requestLimiter.run(async () => {
         let response: Response;
         try {
-          response = await this.#fetcher(`${this.#apiBase}${path}`, {
+          // Workers' built-in fetch rejects an arbitrary method receiver with
+          // "Illegal invocation". Capture it first so the call remains a
+          // standalone function invocation rather than `client.#fetcher(...)`.
+          const fetcher = this.#fetcher;
+          response = await fetcher(`${this.#apiBase}${path}`, {
             method,
             headers: {
               Authorization: `Bearer ${this.#token}`,
