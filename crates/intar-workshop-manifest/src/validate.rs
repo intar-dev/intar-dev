@@ -245,6 +245,14 @@ fn include_hetzner_runtime(root: &Path, source_files: &mut BTreeSet<String>) -> 
             "runtime/source must contain at least one learner runtime file",
         ));
     }
+    let source_image_lock = "runtime/source/scripts/images.lock";
+    if read_regular_source(root, "runtime/images.lock")?
+        != read_bundle_source(root, source_image_lock)?
+    {
+        return Err(invalid(format!(
+            "runtime/images.lock must exactly match {source_image_lock}"
+        )));
+    }
     Ok(())
 }
 

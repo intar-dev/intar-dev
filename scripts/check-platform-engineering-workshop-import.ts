@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "b448e378fc3aa164c2c736ec07b5d7bdcb9da94bb2af747bc10bafca9a14f336";
+  "c07d3174af150e59dadca9817279dd63740edb17bcbb31272bac1ec91f187938";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "b448e378fc3aa164c2c736ec07b5d7bdcb9da94bb2af747bc10bafca9a14f336";
+  "c07d3174af150e59dadca9817279dd63740edb17bcbb31272bac1ec91f187938";
 const EXPECTED_OVERLAY_SHA256 =
   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const EXPECTED_CHANGED_FILES = 0;

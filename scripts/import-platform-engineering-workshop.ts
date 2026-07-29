@@ -1092,14 +1092,10 @@ function writeRuntimeSource() {
   const externalImages = new Set(upstreamExternalImages);
   for (const image of collectRuntimeDigestReferences()) externalImages.add(image);
   const lockedImages = [...externalImages].sort();
-  writeText(
-    "runtime/images.lock",
-    `# External OCI manifests. Every runtime pull is content-addressed.\n${lockedImages.join("\n")}`,
-  );
-  writeText(
-    "runtime/source/scripts/images.lock",
-    `# Same reviewed inventory used by the signed reconstruction manifest.\n${lockedImages.join("\n")}`,
-  );
+  const imageLock =
+    `# External OCI manifests. Every runtime pull is content-addressed.\n${lockedImages.join("\n")}`;
+  writeText("runtime/images.lock", imageLock);
+  writeText("runtime/source/scripts/images.lock", imageLock);
 }
 
 function collectRuntimeDigestReferences(): string[] {
