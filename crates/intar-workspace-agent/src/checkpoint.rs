@@ -15,6 +15,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PROBE_VERIFIER_ROOT: &str = "/var/lib/intar-workspace-agent/probes";
+const RECONSTRUCTION_SHELL: &str = "/bin/bash";
 
 pub struct StagedCheckpoint {
     _temporary: TempDir,
@@ -815,7 +816,12 @@ async fn run_reconstruction_script(
     checkpoint: &StagedCheckpoint,
     label: &str,
 ) -> Result<(), CheckpointError> {
-    let status = tokio::process::Command::new(&program)
+    // Checkpoint bytes stay on the required noexec tmpfs. The scripts are
+    // signed workshop inputs, so pass their paths to the fixed guest shell
+    // instead of asking the kernel to execute them from that mount.
+    let status = tokio::process::Command::new(RECONSTRUCTION_SHELL)
+        .arg("--")
+        .arg(&program)
         // Reconstruction scripts are workshop-authored. Keep the workspace
         // agent's report/bootstrap credentials and process configuration out
         // of their environment, and expose only the deterministic execution
@@ -1320,6 +1326,9 @@ pub enum CheckpointError {
 
 #[cfg(test)]
 mod tests {
+    use super::ReconstructionManifest;
+    use super::StagedCheckpoint;
+    use super::run_reconstruction_script;
     use super::stage_local_checkpoint;
     use super::{extract_archive, verify_digest, verify_signature};
     use crate::model::{CheckpointCompression, CheckpointDescriptor};
@@ -1329,7 +1338,53 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconstruction_shell_runs_a_readable_non_executable_script() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TempDir::new().expect("temp dir");
+        let root = temporary.path().join("root");
+        let install_root = temporary.path().join("install");
+        fs::create_dir_all(root.join("runtime")).expect("runtime directory");
+        fs::create_dir(&install_root).expect("install root");
+        let script = root.join("runtime/bootstrap.sh");
+        fs::write(
+            &script,
+            b"#!/usr/bin/env bash\nset -euo pipefail\nprintf applied > invocation.ok\n",
+        )
+        .expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644))
+            .expect("non-executable script mode");
+
+        let checkpoint = StagedCheckpoint {
+            _temporary: temporary,
+            checkpoint_id: "checkpoint-00".to_owned(),
+            root,
+        };
+        let manifest = ReconstructionManifest {
+            schema_version: 3,
+            workshop_slug: "test-workshop".to_owned(),
+            checkpoint_id: checkpoint.checkpoint_id().to_owned(),
+            install_root: install_root.clone(),
+            bootstrap_script: PathBuf::from("runtime/bootstrap.sh"),
+            runtime_files: Vec::new(),
+            apply_steps: Vec::new(),
+            probe_verifiers: Vec::new(),
+            external_images: Vec::new(),
+        };
+
+        run_reconstruction_script(script, &manifest, &checkpoint, "bootstrap")
+            .await
+            .expect("fixed shell must run a signed script from a noexec-compatible path");
+        assert_eq!(
+            fs::read(install_root.join("invocation.ok")).expect("execution marker"),
+            b"applied"
+        );
+    }
 
     #[test]
     fn digest_mismatch_is_rejected() {
