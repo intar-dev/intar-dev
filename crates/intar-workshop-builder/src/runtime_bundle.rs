@@ -850,6 +850,7 @@ mod tests {
             "runtime/images.lock".to_owned(),
             "runtime/root/LICENSE".to_owned(),
             "runtime/root/fixture.txt".to_owned(),
+            "runtime/root/scripts/images.lock".to_owned(),
             "scripts/00/catch-up.sh".to_owned(),
             "scripts/01/catch-up.sh".to_owned(),
         ]);
