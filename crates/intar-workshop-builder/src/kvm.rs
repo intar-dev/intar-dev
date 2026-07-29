@@ -1462,7 +1462,7 @@ impl BuildGuest for QemuBuildGuest {
         self.run_fixed(&command)?;
         self.run_fixed("sudo -- /usr/bin/chmod 0644 /tmp/intar-workshop-build-material.tar.gz")?;
         self.download("/tmp/intar-workshop-build-material.tar.gz", destination)?;
-        self.run_fixed("rm -f -- /tmp/intar-workshop-build-material.tar.gz")
+        self.run_fixed(captured_build_material_cleanup_command())
     }
 
     fn restore_build_material(&mut self, guest_paths: &[String], source: &Path) -> Result<()> {
@@ -1718,6 +1718,12 @@ fn terminate_child(child: &mut Child) -> Result<ExitStatus> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn captured_build_material_cleanup_command() -> &'static str {
+    // The capture archive is created by sudo tar and remains root-owned in
+    // sticky /tmp even after chmod makes it readable by the SSH user.
+    "sudo -- /usr/bin/rm -f -- /tmp/intar-workshop-build-material.tar.gz"
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -2421,6 +2427,14 @@ mod tests {
         assert_eq!(
             shell_quote("/opt/intar's sanitizer"),
             "'/opt/intar'\\''s sanitizer'"
+        );
+    }
+
+    #[test]
+    fn captured_root_owned_build_material_archive_is_removed_with_sudo() {
+        assert_eq!(
+            captured_build_material_cleanup_command(),
+            "sudo -- /usr/bin/rm -f -- /tmp/intar-workshop-build-material.tar.gz"
         );
     }
 }
