@@ -32,6 +32,9 @@ pub struct BuiltVmImage {
 #[serde(deny_unknown_fields)]
 pub struct CheckpointBuildResult {
     pub checkpoint_id: String,
+    /// Exact ordered module prefix reconstructed by this checkpoint. The
+    /// registry compares this with the source manifest before publishing.
+    pub covered_module_ids: Vec<String>,
     pub vm_images: Vec<BuiltVmImage>,
     pub sanitized: bool,
     pub cold_boot_verified: bool,

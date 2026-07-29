@@ -49,6 +49,7 @@ export interface ValidatedWorkshopSourceBundle {
 
 export interface WorkshopCheckpointBuildReport {
   checkpointId: string;
+  coveredModuleIds: string[];
   vmImages: Array<{
     vmId: string;
     imageKey: Record<string, unknown>;

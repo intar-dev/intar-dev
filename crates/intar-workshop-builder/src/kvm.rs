@@ -2154,6 +2154,15 @@ mod tests {
         let source = fs::read_to_string(&bootstrap).unwrap();
         assert!(source.contains(r#"awk 'NF {sub(/\/.*/, "", $1); print $1}'"#));
         assert!(source.contains("host=registry-1.docker.io"));
+        let install_packages = source
+            .lines()
+            .find(|line| line.starts_with("apt-get install "))
+            .unwrap();
+        assert!(
+            install_packages
+                .split_ascii_whitespace()
+                .any(|package| package == "docker-cli")
+        );
         assert!(
             Command::new("bash")
                 .arg("-n")

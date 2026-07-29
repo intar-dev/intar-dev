@@ -444,6 +444,10 @@ function checkpoint(
 ): WorkshopCheckpointBuildReport {
   return {
     checkpointId,
+    coveredModuleIds:
+      checkpointId === "checkpoint-00"
+        ? ["00-setup"]
+        : ["00-setup", "01-core"],
     sanitized: true,
     coldBootVerified: true,
     vmImages: [

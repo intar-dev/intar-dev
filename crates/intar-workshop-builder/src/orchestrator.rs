@@ -235,8 +235,11 @@ where
             })?;
         let vm_images =
             hash_and_upload_artifacts(registry, &artifacts, &mut uploaded_artifacts, cancellation)?;
-        let runtime_bundle = if let Some((signer, compression, system_image)) =
-            &runtime_bundle_signer
+        let (runtime_bundle, covered_module_ids) = if let Some((
+            signer,
+            compression,
+            system_image,
+        )) = &runtime_bundle_signer
         {
             ensure_running(cancellation)?;
             let mut bundle = produce_runtime_bundle(
@@ -305,12 +308,19 @@ where
                         .map_err(anyhow::Error::from)?,
                 )?;
             }
-            Some(bundle.artifact)
+            (Some(bundle.artifact), bundle.covered_module_ids)
         } else {
-            None
+            (
+                None,
+                modules[..=index]
+                    .iter()
+                    .map(|module| module.id.clone())
+                    .collect(),
+            )
         };
         checkpoints.push(CheckpointBuildResult {
             checkpoint_id: module.checkpoint.clone(),
+            covered_module_ids,
             vm_images,
             sanitized: true,
             cold_boot_verified: true,

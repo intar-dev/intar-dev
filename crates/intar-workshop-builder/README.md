@@ -91,12 +91,14 @@ match this `key_id`, and the protected
 Each bundle contains a generated `checkpoint.json`, the exact workshop-root
 `LICENSE`, the explicitly allowlisted `runtime/source` learner tree,
 `runtime/bootstrap.sh`, `runtime/images.lock`,
-and the declared catch-up and verify scripts for the target module's dependency
-closure. Every installed file has a digest, mode, and normalized path in the
-generated manifest. Source traversal rejects symlinks, oversized files,
-solution/facilitator/presentation paths, answer-key filenames, tag-only OCI
-references, and digest references absent from the image lock. Participant and
-facilitator Markdown, presenter notes, hints, solution files, undeclared secret
+and the declared catch-up and verify scripts for every ordered module through
+the target checkpoint. Every installed file has a digest, mode, and normalized
+path in the generated manifest. The completion report names that exact covered
+module prefix so the registry can reject mismatched checkpoint claims. Source
+traversal rejects symlinks, oversized files, solution/facilitator/presentation
+paths, answer-key filenames, tag-only OCI references, and digest references
+absent from the image lock. Participant and facilitator Markdown, presenter
+notes, hints, solution files, undeclared secret
 files, and OCI layer blobs therefore cannot enter a learner bundle. Entries,
 metadata, JSON, and compression are deterministic.
 The Ed25519 signature covers the exact compressed bytes whose SHA-256 is used

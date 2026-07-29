@@ -321,6 +321,17 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
         checkpoints[0].vm_images[0].image_key.scenario,
         "workshop-publication-01-checkpoint-00"
     );
+    assert_eq!(checkpoints[0].covered_module_ids, ["00"]);
+    assert_eq!(
+        checkpoints[9].covered_module_ids,
+        ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09"]
+    );
+    assert_eq!(
+        checkpoints[10].covered_module_ids,
+        [
+            "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"
+        ]
+    );
     assert_eq!(checkpoints[0].vm_images[0].image_key.vm, "workspace");
     assert!(checkpoints.iter().all(|checkpoint| checkpoint.sanitized));
     assert!(
@@ -366,6 +377,10 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle_cold_boot_verified"],
         true
+    );
+    assert_eq!(
+        json["checkpoints"][0]["covered_module_ids"],
+        serde_json::json!(["00"])
     );
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle"]["signing_key_id"],
