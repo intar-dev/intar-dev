@@ -1212,6 +1212,7 @@ export function createMockApiState(input?: {
       })),
       templates: empty ? [] : [workshopTemplate],
       sessions: empty ? [] : [workshopSummary, workshopDraftSummary],
+      providerConnections: [],
       capacity: empty ? null : workshopSession.capacity,
     },
     hosts: empty ? [] : [host],
