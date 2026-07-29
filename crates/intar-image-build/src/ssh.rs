@@ -89,6 +89,29 @@ impl BuildSshSession {
     /// The remote path is shell-quoted and the local destination must not
     /// already exist.
     pub async fn download_file(&mut self, remote_path: &str, local_path: &Path) -> Result<()> {
+        self.download_file_inner(remote_path, local_path, None)
+            .await
+    }
+
+    /// Download one guest file while rejecting a response larger than
+    /// `maximum_bytes`. A failed or oversized transfer removes the incomplete
+    /// local destination.
+    pub async fn download_file_limited(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        maximum_bytes: u64,
+    ) -> Result<()> {
+        self.download_file_inner(remote_path, local_path, Some(maximum_bytes))
+            .await
+    }
+
+    async fn download_file_inner(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        maximum_bytes: Option<u64>,
+    ) -> Result<()> {
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create '{}'", parent.display()))?;
@@ -116,11 +139,25 @@ impl BuildSshSession {
                 .context("failed to close build SSH download stdin")?;
             let mut exit_status = None;
             let mut error_tail = Vec::new();
+            let mut bytes_written = 0_u64;
             while let Some(message) = channel.wait().await {
                 match message {
-                    ChannelMsg::Data { data } => output
-                        .write_all(&data)
-                        .context("failed to write downloaded guest file")?,
+                    ChannelMsg::Data { data } => {
+                        let chunk_len = u64::try_from(data.len())
+                            .context("downloaded guest file chunk length does not fit in u64")?;
+                        let next_size = bytes_written
+                            .checked_add(chunk_len)
+                            .context("downloaded guest file size overflowed")?;
+                        if let Some(maximum) = maximum_bytes
+                            && next_size > maximum
+                        {
+                            bail!("build SSH download {remote} exceeded the {maximum}-byte limit");
+                        }
+                        output
+                            .write_all(&data)
+                            .context("failed to write downloaded guest file")?;
+                        bytes_written = next_size;
+                    }
                     ChannelMsg::ExtendedData { data, .. } => {
                         append_limited(&mut error_tail, &data);
                     }

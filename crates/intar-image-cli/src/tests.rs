@@ -116,6 +116,32 @@ fn parses_course_roots_and_explicit_catalog_paths() {
 }
 
 #[test]
+fn parses_provenance_bound_clean_base_command() {
+    let parsed = Cli::try_parse_from([
+        "intar-image-cli",
+        "build-base",
+        "--base-images",
+        "/config/base-images.hcl",
+        "--config",
+        "/config/builder.hcl",
+        "--output",
+        "/artifacts/clean-base",
+        "--repository",
+        "intar-dev/intar-dev",
+        "--source-sha",
+        "0123456789abcdef0123456789abcdef01234567",
+        "--production-run-id",
+        "123",
+        "--workflow-run-id",
+        "456",
+        "--workflow-run-attempt",
+        "1",
+    ])
+    .unwrap();
+    assert!(matches!(parsed.command, Command::BuildBase(_)));
+}
+
+#[test]
 fn discovers_legacy_and_nested_scenarios_in_scenario_id_order() {
     let temp = tempfile::tempdir().unwrap();
     let legacy_root = temp.path().join("scenarios");
