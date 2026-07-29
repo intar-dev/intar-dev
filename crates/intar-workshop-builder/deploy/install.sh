@@ -356,8 +356,9 @@ validate_existing_group() {
   case "${group_gid}" in
     ""|*[!0-9]*) die "existing ${service_group} GID is malformed" ;;
   esac
-  [ "${group_gid}" -gt 0 ] && [ "${group_gid}" -lt 1000 ] ||
+  if [ "${group_gid}" -le 0 ] || [ "${group_gid}" -ge 1000 ]; then
     die "existing ${service_group} must have a non-root system GID"
+  fi
   duplicate_group=$(getent group | awk -F: \
     -v name="${service_group}" \
     -v gid="${group_gid}" \
@@ -399,12 +400,15 @@ validate_existing_account() {
   case "${user_uid}:${user_gid}" in
     *[!0-9:]*|:|:*|*:) die "existing ${service_user} numeric identity is malformed" ;;
   esac
-  [ "${user_uid}" -gt 0 ] && [ "${user_uid}" -lt 1000 ] ||
+  if [ "${user_uid}" -le 0 ] || [ "${user_uid}" -ge 1000 ]; then
     die "existing ${service_user} must have a non-root system UID"
-  [ "${user_gid}" -gt 0 ] && [ "${user_gid}" -lt 1000 ] ||
+  fi
+  if [ "${user_gid}" -le 0 ] || [ "${user_gid}" -ge 1000 ]; then
     die "existing ${service_user} must have a non-root system primary GID"
-  [ -n "${user_uid}" ] && [ -n "${user_gid}" ] ||
+  fi
+  if [ -z "${user_uid}" ] || [ -z "${user_gid}" ]; then
     die "existing ${service_user} account is malformed"
+  fi
   [ "${user_home}" = "${state_root}" ] ||
     die "existing ${service_user} home must be ${state_root}"
   case "${user_shell}" in
@@ -638,8 +642,9 @@ assert_file() {
   source=$1
   destination=$2
   expected_mode=$3
-  [ -f "${destination}" ] && [ ! -L "${destination}" ] ||
+  if [ ! -f "${destination}" ] || [ -L "${destination}" ]; then
     die "installed file is not regular: ${destination}"
+  fi
   [ "$(stat -c '%u:%g:%a:%h' "${destination}")" = "0:0:${expected_mode}:1" ] ||
     die "installed file has unsafe ownership or mode: ${destination}"
   cmp -s "${source}" "${destination}" ||
