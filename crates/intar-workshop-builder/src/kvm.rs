@@ -1612,10 +1612,12 @@ fn current_thread_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 /// Run one asynchronous guest operation from the synchronous execution
-/// backend. The production builder invokes this code from Tokio's multi-thread
+/// backend. Run and run-once invoke this code from Tokio's multi-thread
 /// runtime, where starting a nested runtime would panic. `block_in_place`
 /// hands the worker thread back to Tokio before using the existing runtime
-/// handle. Unit callers outside a runtime retain a small local runtime.
+/// handle. Authored-image preparation and unit callers outside a runtime retain
+/// a small local runtime for only the supplied future. Runtime-backed tasks or
+/// handles must therefore never escape that future.
 fn run_guest_future<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
@@ -1651,24 +1653,8 @@ fn wait_for_guest_ssh(
                 serial_log.display()
             );
         }
-        let connect = async {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => bail!("workshop build cancelled"),
-                result = BuildSshSession::connect(SSH_HOST, port, username, &key.private_key) => result,
-            }
-        };
-        match run_guest_future(connect) {
-            Ok(mut ssh) => match run_guest_future(async {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => bail!("workshop build cancelled"),
-                    result = ssh.run("true", false) => result,
-                }
-            }) {
-                Ok(()) => return Ok(()),
-                Err(error) => last_error = Some(error),
-            },
+        match run_guest_future(probe_guest_ssh(port, username, key, cancellation)) {
+            Ok(()) => return Ok(()),
             Err(error) => last_error = Some(error),
         }
         thread::sleep(SSH_POLL_INTERVAL);
@@ -1683,6 +1669,32 @@ fn wait_for_guest_ssh(
         "timed out waiting for workshop build SSH; serial log: {}",
         serial_log.display()
     )
+}
+
+async fn probe_guest_ssh(
+    port: u16,
+    username: &str,
+    key: &BuildSshKey,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => bail!("workshop build cancelled"),
+        result = async {
+            // Russh owns a connection-driver task on the runtime used by
+            // `connect`. Keep the readiness command in the same bridged future
+            // so synchronous callers do not drop that runtime between
+            // authentication and opening the session channel.
+            let mut ssh = BuildSshSession::connect(
+                SSH_HOST,
+                port,
+                username,
+                &key.private_key,
+            )
+            .await?;
+            ssh.run("true", false).await
+        } => result,
+    }
 }
 
 fn terminate_child(child: &mut Child) -> Result<ExitStatus> {
@@ -1724,8 +1736,65 @@ mod tests {
 
     use intar_contracts::catalog::ImageKey;
     use intar_workshop_manifest::ValidatedWorkshop;
+    use russh::{
+        Channel, ChannelId,
+        server::{self, Auth, Msg, Server as _, Session},
+    };
 
     use super::*;
+
+    #[derive(Clone)]
+    struct ReadinessSshServer {
+        allowed_public_key: russh::keys::ssh_key::PublicKey,
+        host_key: russh::keys::PrivateKey,
+    }
+
+    impl server::Server for ReadinessSshServer {
+        type Handler = Self;
+
+        fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+            self.clone()
+        }
+    }
+
+    impl server::Handler for ReadinessSshServer {
+        type Error = anyhow::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            user: &str,
+            public_key: &russh::keys::ssh_key::PublicKey,
+        ) -> std::result::Result<Auth, Self::Error> {
+            if user == "ubuntu" && public_key == &self.allowed_public_key {
+                Ok(Auth::Accept)
+            } else {
+                Ok(Auth::reject())
+            }
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> std::result::Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> std::result::Result<(), Self::Error> {
+            ensure!(data == b"true", "unexpected readiness command");
+            session.channel_success(channel)?;
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
 
     #[derive(Clone)]
     struct FakeLauncher {
@@ -2127,6 +2196,54 @@ mod tests {
     async fn guest_future_bridge_does_not_start_a_nested_runtime() {
         let value = run_guest_future(async { Ok::<_, anyhow::Error>(42) }).unwrap();
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn synchronous_ssh_wait_keeps_russh_driver_runtime_alive() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let key = generate_build_ssh_key().unwrap();
+        let mut rng = russh::keys::key::safe_rng();
+        let host_key =
+            russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)
+                .unwrap();
+        let server = ReadinessSshServer {
+            allowed_public_key: key.private_key.public_key().clone(),
+            host_key,
+        };
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let server_thread = thread::spawn(move || {
+            current_thread_runtime().unwrap().block_on(async move {
+                let listener = tokio::net::TcpListener::bind((SSH_HOST, 0)).await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut config = russh::server::Config::default();
+                config.keys.push(server.host_key.clone());
+                let mut server = server;
+                let running = server.run_on_socket(Arc::new(config), &listener);
+                let handle = running.handle();
+                ready_tx.send((address, handle)).unwrap();
+                running.await.unwrap();
+            });
+        });
+        let (address, server_handle) = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("readiness SSH server did not start");
+
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let serial_root = tempfile::tempdir().unwrap();
+        let result = wait_for_guest_ssh(
+            &mut child,
+            address.port(),
+            "ubuntu",
+            &key,
+            5,
+            &serial_root.path().join("serial.log"),
+            &CancellationToken::new(),
+        );
+
+        terminate_child(&mut child).unwrap();
+        server_handle.shutdown("test complete".to_owned());
+        server_thread.join().unwrap();
+        result.unwrap();
     }
 
     #[test]

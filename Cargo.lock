@@ -2433,6 +2433,7 @@ dependencies = [
  "intar-image-upload",
  "intar-workshop-manifest",
  "reqwest",
+ "russh",
  "rustix",
  "serde",
  "serde_json",
