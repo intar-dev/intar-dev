@@ -683,6 +683,10 @@ mod tests {
         let value = block_on_timeout(&runtime, Duration::from_secs(1), async { 7_u8 })
             .expect("complete test future");
         assert_eq!(value, 7);
+        let timed_out = block_on_timeout(&runtime, Duration::from_millis(1), async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        assert!(timed_out.is_err());
     }
 
     #[test]
