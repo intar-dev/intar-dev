@@ -1,0 +1,199 @@
+---
+# OTel Collector AGENT — a DaemonSet, one pod per node (issue #57, Stage 2).
+# Collects the two signals that are node-local and can't be gathered centrally:
+#   - filelog     → every pod's stdout/stderr from /var/log/pods → VictoriaLogs
+#                   (this is what fills the empty Loki/logs backend today)
+#   - kubeletstats→ per-node & per-pod CPU/memory from the local kubelet → VM
+#                   (the infra metrics missing today; also powers RAM inventory)
+# The gateway Deployment (collector-gateway.yaml) handles the cluster-singleton
+# receivers (k8s_cluster, prometheus scrape, OTLP).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-agent
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/instance: otel-collector-agent
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      # Persist filelog read offsets across restarts so we don't re-ingest
+      # (or skip) logs on a pod bounce. Backed by a hostPath (see volumes).
+      file_storage:
+        directory: /var/lib/otelcol
+
+    receivers:
+      # Tail container logs. The `container` operator parses the runtime log
+      # format and derives k8s.namespace.name / k8s.pod.name / k8s.container.name
+      # from the file path — no k8sattributes processor (and its extra RBAC)
+      # needed for logs to be stream-labelled.
+      filelog:
+        # persist read offsets in the file_storage extension (below) so a pod
+        # restart resumes where it left off instead of re-reading or skipping.
+        storage: file_storage
+        include: [ /var/log/pods/*/*/*.log ]
+        exclude:
+          # never tail our own agent's logs — that would be a feedback loop
+          - /var/log/pods/observability_otel-collector-agent*/*/*.log
+        # only new lines from startup; file_storage remembers the offset after
+        # that. Avoids a boot-time RAM spike from replaying all history.
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        retry_on_failure:
+          enabled: true
+        operators:
+          # auto-detect the runtime log format (containerd on Talos) — the valid
+          # explicit values are containerd/crio/docker; omitting lets it detect.
+          - type: container
+      # Scrape the local kubelet's /stats/summary. auth_type: serviceAccount
+      # sends our SA token; the kubelet authorizes it against nodes/stats (see
+      # rbac.yaml). insecure_skip_verify because the kubelet's serving cert
+      # isn't in our trust store (Talos-issued).
+      kubeletstats:
+        collection_interval: 30s
+        auth_type: serviceAccount
+        endpoint: https://${env:K8S_NODE_IP}:10250
+        insecure_skip_verify: true
+        metric_groups: [ node, pod ]
+
+    processors:
+      # Guardrail against the module-09 RAM ceiling: shed load before the
+      # container hits its memory limit rather than getting OOM-killed.
+      # Explicit MiB (not percentage) so behaviour is deterministic across the
+      # varied cgroup setups on attendee laptops. ~80% of the 256Mi limit.
+      memory_limiter:
+        check_interval: 5s
+        limit_mib: 200
+        spike_limit_mib: 50
+      batch:
+        timeout: 10s
+
+    exporters:
+      # VictoriaMetrics OTLP metrics ingest (explicit full path — no guessing
+      # about endpoint-suffix appending).
+      otlphttp/metrics:
+        metrics_endpoint: http://victoria-metrics.observability.svc.cluster.local:8428/opentelemetry/v1/metrics
+      # VictoriaLogs OTLP logs ingest. VL-Stream-Fields tells VLogs which
+      # resource attributes partition the log streams (like Loki labels).
+      otlphttp/logs:
+        logs_endpoint: http://victoria-logs.observability.svc.cluster.local:9428/insert/opentelemetry/v1/logs
+        headers:
+          VL-Stream-Fields: k8s.namespace.name,k8s.pod.name,k8s.container.name
+
+    service:
+      extensions: [ health_check, file_storage ]
+      pipelines:
+        logs:
+          receivers: [ filelog ]
+          processors: [ memory_limiter, batch ]
+          exporters: [ otlphttp/logs ]
+        metrics:
+          receivers: [ kubeletstats ]
+          processors: [ memory_limiter, batch ]
+          exporters: [ otlphttp/metrics ]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector-agent
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/instance: otel-collector-agent
+    app.kubernetes.io/version: "0.149.0"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+      app.kubernetes.io/instance: otel-collector-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/instance: otel-collector-agent
+      annotations:
+        # roll the pods when the config changes (ConfigMap edits don't restart
+        # a DaemonSet on their own)
+        checksum/config: "stage2-v1"
+    spec:
+      serviceAccountName: otel-collector
+      # Run on every node, control-plane included, so their pod logs + node
+      # metrics are collected too.
+      tolerations:
+        - operator: Exists
+      securityContext:
+        # Root: /var/log/pods/**/*.log are root-owned. The agent only READS
+        # them (read-only mount); it mutates nothing on the host.
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otel-collector
+          image: "docker.io/otel/opentelemetry-collector-contrib@sha256:0fba96233274f6d665ac8831ad99dfe6479a9a20459f6e2719c0d20945773b46"
+          imagePullPolicy: IfNotPresent
+          args: [ "--config=/etc/otelcol/config.yaml" ]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+            readOnlyRootFilesystem: true
+          env:
+            - name: K8S_NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - name: health
+              containerPort: 13133
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+              readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: storage
+              mountPath: /var/lib/otelcol
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-agent
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        # filelog offset checkpoints — hostPath so they survive a pod restart.
+        - name: storage
+          hostPath:
+            path: /var/lib/otelcol
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}

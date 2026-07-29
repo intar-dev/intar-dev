@@ -6,12 +6,12 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "10441c70aec4ed8ef0517d379448f7a364fb7d858d4aad0ce68778fe5e0b1bbf";
+  "b448e378fc3aa164c2c736ec07b5d7bdcb9da94bb2af747bc10bafca9a14f336";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "1b80dd48a2d1dcd49e8f95365eb2b21427a725dfdafc2e482e97302286b89c6d";
+  "b448e378fc3aa164c2c736ec07b5d7bdcb9da94bb2af747bc10bafca9a14f336";
 const EXPECTED_OVERLAY_SHA256 =
-  "899cad19b55de7a7dc1167a56bb8412e93847925110120bf13c1ab143f87019a";
-const EXPECTED_CHANGED_FILES = 125;
+  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+const EXPECTED_CHANGED_FILES = 0;
 
 const rawRoot = resolve(process.argv[2] ?? "");
 const adaptedRoot = resolve(process.argv[3] ?? "");

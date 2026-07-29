@@ -10,10 +10,10 @@ JavaZone 2026 · 4-hour hands-on workshop
 
   **Hans Kristian Flaatten** — Platform Engineer in Norwegian Government, CNCF Ambassador
 
-  **Checked in to the Intar lobby?**
+  **Did you run the prework?**
 
-  Open your workspace terminal; the sealed image is already prepared.
+  `cd lab/00-setup && ./verify.sh` must be all green.
 
-  Not green? Use **Need help** — never install or pull.
+  Not green? Start **now** — or grab a helper.
 
   github.com/randax/Platform-Engineering-Workshop

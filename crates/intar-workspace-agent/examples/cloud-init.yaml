@@ -1,0 +1,224 @@
+#cloud-config
+# Rendered by Intar. This file intentionally contains no Hetzner credential.
+packages:
+  - ca-certificates
+  - curl
+  - openssh-server
+  - procps
+
+users:
+  - name: intar
+    gecos: Intar Stargate
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - __INTAR_SSH_PUBLIC_KEY__
+
+write_files:
+  - path: /etc/intar/workspace-agent.toml
+    owner: root:root
+    permissions: "0600"
+    content: |
+      identity = { execution_id = "__EXECUTION_ID__", workspace_id = "__WORKSPACE_ID__", generation = __GENERATION__ }
+      control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+      bootstrap_capability_path = "/run/intar-workspace-agent/bootstrap"
+      state_path = "/var/lib/intar-workspace-agent/state.json"
+      checkpoint_tmpfs_dir = "/run/intar-workspace-agent/checkpoints"
+      checkpoint_signing_keys = { "workshop-runtime-v1" = "__RUNTIME_SIGNING_PUBLIC_KEY_BASE64__" }
+      kino_url = "http://127.0.0.1:18081/probes"
+      max_checkpoint_bytes = 536870912
+      max_artifact_bytes = 134217728
+      recording_dir = "/var/lib/kino-recordings"
+      recording_upload_staging_dir = "/var/lib/intar-workspace-agent/recording-upload-staging"
+      recording_drain_program = "/usr/libexec/intar-workspace-recording-drain"
+      require_checkpoint_tmpfs = true
+
+  - path: /run/intar-workspace-agent/bootstrap
+    owner: root:root
+    permissions: "0600"
+    encoding: b64
+    content: __ONE_USE_BOOTSTRAP_CAPABILITY_BASE64__
+
+  - path: /run/intar-workspace-agent/agent.sha256
+    owner: root:root
+    permissions: "0600"
+    content: "__AGENT_BINARY_SHA256__  /usr/local/sbin/intar-workspace-agent.new\n"
+
+  - path: /run/intar-workspace-agent/kino.sha256
+    owner: root:root
+    permissions: "0600"
+    content: "__KINO_BINARY_SHA256__  /usr/local/sbin/kino.new\n"
+
+  - path: /etc/kino/kino.hcl
+    owner: root:root
+    permissions: "0644"
+    content: |
+      server {
+        bind = "tcp://127.0.0.1:18081"
+      }
+      defaults {
+        every_seconds = 5
+        timeout_seconds = 120
+      }
+      probe "__MODULE_00_PROBE_ID__" {
+        kind = "command_json_path"
+        argv = ["/usr/libexec/intar-workshop-run-probe", "/var/lib/intar-workspace-agent/probes/00.sh"]
+        json_path = "$.passed"
+        expected = true
+      }
+
+  - path: /etc/kino/recording.hcl
+    owner: root:root
+    permissions: "0644"
+    content: |
+      server {
+        bind = "tcp://127.0.0.1:0"
+      }
+      recording {
+        output_dir = "/var/lib/kino-recordings"
+        real_shell = "/bin/bash"
+      }
+
+  - path: /etc/ssh/sshd_config.d/90-intar-workshop.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      AllowUsers intar
+      AllowTcpForwarding yes
+      GatewayPorts no
+      X11Forwarding no
+      PermitTunnel no
+      AllowAgentForwarding no
+
+  - path: /usr/libexec/intar-workshop-run-probe
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -u
+      verifier="${1:?missing verifier}"
+      set +e
+      "${verifier}" </dev/null >/dev/null 2>&1
+      status="$?"
+      set -e
+      if [ "${status}" -eq 0 ]; then
+        printf '{"passed":true}\n'
+      else
+        printf '{"passed":false}\n'
+      fi
+
+  - path: /usr/local/sbin/intar-kino-shell
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      config=/etc/kino/recording.hcl
+      if [ "${SSH_ORIGINAL_COMMAND+x}" = x ]; then
+        exec /usr/local/sbin/kino record-ssh --config "${config}" --shell-startup interactive --command "${SSH_ORIGINAL_COMMAND}"
+      fi
+      if [ "${1:-}" = -c ]; then
+        exec /usr/local/sbin/kino record-ssh --config "${config}" --shell-startup interactive --command "${2:-}"
+      fi
+      exec /usr/local/sbin/kino record-ssh --config "${config}" --shell-startup interactive
+
+  - path: /usr/libexec/intar-workspace-recording-drain
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      systemctl stop ssh.service
+      pkill -HUP -u intar -x kino 2>/dev/null || true
+      remaining=300
+      while pgrep -u intar -x kino >/dev/null 2>&1; do
+        [ "${remaining}" -gt 0 ] || exit 1
+        sleep 0.1
+        remaining="$((remaining - 1))"
+      done
+
+  - path: /etc/systemd/system/kino.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Intar Kino workshop probe service
+      Wants=network-online.target
+      After=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      Group=root
+      UMask=0077
+      ExecStart=/usr/local/sbin/kino --config /etc/kino/kino.hcl
+      Restart=on-failure
+      RestartSec=2s
+      NoNewPrivileges=true
+      PrivateTmp=true
+      ProtectControlGroups=true
+      RestrictSUIDSGID=true
+      LockPersonality=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/intar-workspace-agent.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Intar Workshop learner workspace agent
+      Wants=network-online.target ssh.service kino.service
+      After=network-online.target ssh.service kino.service
+      ConditionPathExists=/etc/intar/workspace-agent.toml
+      StartLimitIntervalSec=300
+      StartLimitBurst=10
+
+      [Service]
+      Type=simple
+      User=root
+      Group=root
+      UMask=0077
+      Environment=RUST_LOG=intar_workspace_agent=info
+      ExecStart=/usr/local/sbin/intar-workspace-agent --config /etc/intar/workspace-agent.toml
+      Restart=on-failure
+      RestartSec=5s
+      TimeoutStopSec=30s
+      PrivateTmp=true
+      ProtectHome=true
+      ProtectControlGroups=true
+      RestrictSUIDSGID=true
+      LockPersonality=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+bootcmd:
+  - [mkdir, -p, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent, /var/lib/kino-recordings, /etc/kino]
+  - [chmod, "0700", /run/intar-workspace-agent, /run/intar-workspace-agent/checkpoints, /var/lib/intar-workspace-agent]
+
+runcmd:
+  # The binary URL and digest refer to an Intar CI release artifact. Checkpoint
+  # reconstruction is separate and starts only after bootstrap succeeds.
+  - [curl, --fail, --silent, --show-error, --location, __AGENT_BINARY_URL__, --output, /usr/local/sbin/intar-workspace-agent.new]
+  - [curl, --fail, --silent, --show-error, --location, __KINO_BINARY_URL__, --output, /usr/local/sbin/kino.new]
+  - [sha256sum, --check, --status, /run/intar-workspace-agent/agent.sha256]
+  - [sha256sum, --check, --status, /run/intar-workspace-agent/kino.sha256]
+  - [install, --owner=root, --group=root, --mode=0755, /usr/local/sbin/intar-workspace-agent.new, /usr/local/sbin/intar-workspace-agent]
+  - [install, --owner=root, --group=root, --mode=0755, /usr/local/sbin/kino.new, /usr/local/sbin/kino]
+  - [rm, --force, /usr/local/sbin/intar-workspace-agent.new]
+  - [rm, --force, /usr/local/sbin/kino.new]
+  - [chown, intar:intar, /var/lib/kino-recordings]
+  - [chmod, "0700", /var/lib/kino-recordings]
+  - [sh, -c, "grep -qxF /usr/local/sbin/intar-kino-shell /etc/shells || printf '%s\\n' /usr/local/sbin/intar-kino-shell >> /etc/shells"]
+  - [usermod, --shell, /usr/local/sbin/intar-kino-shell, intar]
+  - [sshd, -t]
+  - [systemctl, restart, ssh.service]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, kino.service, intar-workspace-agent.service]

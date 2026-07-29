@@ -1,4 +1,4 @@
-Say this clearly: using an AI assistant is fine in every module, but never required. The live path assumes no external network, account, model, or API key. We designed outcome-based labs because copying 12 commands, yourself or via an LLM, teaches nothing.
+Say this clearly because attendees will otherwise hide their terminals: using an AI assistant is explicitly fine in every module. We designed for it — the labs state outcomes rather than command lists precisely because copying 12 commands, yourself or via an LLM, teaches nothing.
 
 The goal was never "typed the commands yourself". It's a running platform PLUS your ability to explain it. Two house rules:
 1. verify.sh and the explain-back are the finish line, not the last command an agent ran.

@@ -1,0 +1,39 @@
+# Argo Workflows v4.0.7, namespace-install (module S2: in-cluster CI).
+# Server/controller in `argo`, workflow pods in the PSA-privileged `builds`
+# namespace (--managed-namespace), incl. the rootless-BuildKit
+# build-and-push WorkflowTemplate. UI: kubectl -n argo port-forward
+# svc/argo-server 2746 (auth-mode=server, no login).
+# ServerSideApply: the Workflow CRDs are >1MB.
+# SkipDryRun: the WorkflowTemplate's CRD arrives in the same sync.
+#
+# Enable with:  cp gitops/catalog/argo-workflows.yaml gitops/apps/ && git add . && git commit -m 'enable argo-workflows' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/argo-workflows
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true

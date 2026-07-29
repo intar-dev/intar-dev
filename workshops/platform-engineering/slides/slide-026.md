@@ -1,4 +1,4 @@
-Module 00 · 30 min pre-session lobby · gate
+Module 00 · 15 min · gate
 
 # Setup & pre-flight
 

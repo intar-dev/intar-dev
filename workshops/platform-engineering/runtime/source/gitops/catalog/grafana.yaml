@@ -1,0 +1,36 @@
+# Grafana 12.4.5 — dashboards for the Victoria stack (observability rework,
+# issue #57). Datasources pre-provisioned: VictoriaMetrics (Prometheus, default)
+# and VictoriaLogs (Loki). Anonymous read (Viewer). Browser: http://localhost:30031
+# (NodePort 30030 — the canonical observability port, freed when otel-lgtm was
+# retired in the #57 rework). On-demand: enabled with the rest of the Victoria
+# observability capability, not wave-0.
+#
+# Enable with:  cp gitops/catalog/grafana.yaml gitops/apps/ && git add . && git commit -m 'enable grafana' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/grafana
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

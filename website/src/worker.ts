@@ -4,7 +4,9 @@ import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifac
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { handleWorkshopRegistryRequest } from "@/control-plane/workshop-registry";
+import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
 import { openDueWorkshopLobbies } from "@/lib/workshops/auto-lobby";
+import { sweepHetznerWorkshopRuntimes } from "@/lib/workshops/hcloud-runtime";
 
 export default {
   async fetch(request, env, ctx) {
@@ -22,6 +24,12 @@ export default {
       url.pathname === "/api/agent/connect"
     ) {
       return handleAgentConnect(request, env);
+    }
+
+    const workspaceAgentResponse =
+      await handleWorkspaceAgentControlPlaneRequest(request, env);
+    if (workspaceAgentResponse) {
+      return workspaceAgentResponse;
     }
 
     const registryResponse = await handleImageRegistryRequest(request, env);
@@ -47,10 +55,17 @@ export default {
     return handle(request, env, ctx);
   },
   async scheduled(controller) {
-    const result = await openDueWorkshopLobbies({
-      now: controller.scheduledTime,
-    });
-    console.info(JSON.stringify({ event: "workshop_auto_lobby", ...result }));
+    const [lobbies, hcloud] = await Promise.all([
+      openDueWorkshopLobbies({ now: controller.scheduledTime }),
+      sweepHetznerWorkshopRuntimes({ now: controller.scheduledTime }),
+    ]);
+    console.info(
+      JSON.stringify({
+        event: "workshop_minute_sweep",
+        lobbies,
+        hcloud,
+      }),
+    );
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
 

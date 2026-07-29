@@ -68,23 +68,23 @@ Backstage earns its weight when you need: the plugin ecosystem (ArgoCD, PagerDut
 
 The costs are real too: roughly 2 GB of Node.js plus a Postgres, YAML-heavy configuration, and — the big one — typically a team that owns it. The closing line, verbatim from the lab: a portal is a PRODUCT decision, not a default.
 
-Next slide: trace the Backstage integration loop and compare every hop with the live Cloudbox path, so this isn't a straw man. V1 deliberately exposes no Backstage app route.
+Next slide: we look at Backstage live, so this isn't a straw man.
 
 
 ---
 
-Presenter architecture walkthrough, ~5 minutes. V1 intentionally declares no Backstage workspace application, so do not enable `backstage.yaml`, expose port 30700, or invent an undeclared route.
+Presenter demo, ~5 minutes, on the projector cluster (backstage.yaml was pre-enabled during the second break — first boot is slow: ~2 GB CNOE image plus a CNPG database, which is precisely why this is a demo and not the hands-on).
 
-Trace the loop on the slide: catalog entity → software template → new in-cluster Gitea repo → Argo CD Application → running pods. Open the released Gitea and Argo CD apps only if you want to ground those two hops in the live platform.
+The loop to show: guest sign-in at :30700 → catalog entities fed from Gitea → run a software template → chase the result through Gitea (:30300, a new repo appeared) → ArgoCD (:30080, a new Application) → pods running.
 
 Narrate what to watch for: the template wires together git, CI/CD, and the catalog — that integration glue is the real, ongoing work of operating Backstage. The demo is deliberately placed AFTER attendees built the same self-service loop themselves in 04 and saw it fronted by a form minutes ago: same shape, industrial strength, industrial weight.
 
-The fair test of the build-vs-buy slide is architectural here: the Backstage path is preserved in the narrative without adding an eighth browser route or a network/runtime prerequisite.
+backstage.yaml stays in the catalog — anyone with RAM to spare can run this exact loop at home. That's the fair test of the build-vs-buy slide.
 
 
 ---
 
-The task: enable portal.yaml (lands in ns portal in seconds — one small Go binary), open the released **Cloudbox Console** app, and for each page answer "which Kubernetes API is this?" — they installed every one of them today.
+The task: enable portal.yaml (lands in ns portal in seconds — one small Go binary), explore the Console at :30600, and for each page answer "which Kubernetes API is this?" — they installed every one of them today.
 
 Star task: create console-db (size small) via the New database form, then prove it with kubectl: the WorkshopDatabase XR, and the composed CNPG cluster booting with -w. Then the governance question: this one didn't go through git — find the evidence, keep the thought for the explain-back.
 

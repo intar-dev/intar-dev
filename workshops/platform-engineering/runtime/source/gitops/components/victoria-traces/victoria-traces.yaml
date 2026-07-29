@@ -1,0 +1,135 @@
+---
+# VictoriaTraces 0.9.4 — single-node trace database (observability rework, #57).
+# The traces third of the Victoria stack; replaces otel-lgtm's Tempo. Built on
+# top of VictoriaLogs internally (spans stored as structured logs), but exposes
+# a Jaeger-compatible query API — so Grafana talks to it with the built-in
+# Jaeger datasource (no plugin, offline-safe; same trick as VLogs↔Loki).
+# Listens on :10428:
+#   - OTLP traces ingest → POST /insert/opentelemetry/v1/traces
+#   - Jaeger Query API   → GET  /select/jaeger/api/*  (Grafana Jaeger datasource)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victoria-traces-data
+  namespace: observability
+  annotations:
+    # Prune=false so disabling the app doesn't wipe stored traces mid-workshop —
+    # same curation as victoria-logs / nats-jetstream.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    app.kubernetes.io/name: victoria-traces
+    app.kubernetes.io/instance: victoria-traces
+spec:
+  accessModes: [ ReadWriteOnce ]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-traces
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-traces
+    app.kubernetes.io/instance: victoria-traces
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 10428
+      targetPort: 10428
+  selector:
+    app.kubernetes.io/name: victoria-traces
+    app.kubernetes.io/instance: victoria-traces
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria-traces
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: victoria-traces
+    app.kubernetes.io/instance: victoria-traces
+    app.kubernetes.io/version: "0.9.4"
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): the data PVC is ReadWriteOnce, so a second
+  # pod can't attach the volume during a rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victoria-traces
+      app.kubernetes.io/instance: victoria-traces
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victoria-traces
+        app.kubernetes.io/instance: victoria-traces
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # fsGroup makes kubelet chown the PVC to gid 1000 on mount, so the
+        # binary writes its store under /victoria-traces-data directly (no
+        # initContainer needed) — same trick as victoria-logs.
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: victoria-traces
+          image: "docker.io/victoriametrics/victoria-traces@sha256:de1f0ce3916692236a711b58e48c65cc4138bfaa4e36324cfa25206e5485b187"
+          imagePullPolicy: IfNotPresent
+          args:
+            - -storageDataPath=/victoria-traces-data
+            - -httpListenAddr=:10428
+            # Workshop-sized retention (a 4-hour lab, not prod).
+            - -retentionPeriod=7d
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+            # VT only writes the mounted data path, so the rest of the fs is
+            # read-only.
+            readOnlyRootFilesystem: true
+          ports:
+            - name: http
+              containerPort: 10428
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 10428
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 10428
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /victoria-traces-data
+            # VT writes search/sort buffers to /tmp; readOnlyRootFilesystem
+            # blocks that under load (not at boot), so give it a writable emptyDir.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: victoria-traces-data
+        - name: tmp
+          emptyDir: {}

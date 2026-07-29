@@ -1,6 +1,6 @@
 # Canonical solution for module 08
 
-This is adapted from the pinned upstream `solve.sh` for Intar's declared app surface. Reveal it only after the learner has chosen to see the solution.
+This is adapted from the pinned upstream `solve.sh` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.
 
 ```bash
 #!/usr/bin/env bash
@@ -33,7 +33,7 @@ until curl -fsS --max-time 5 -o /dev/null http://localhost:30600/ 2>/dev/null; d
   [ "$WAITED" -ge 300 ] && { echo "timed out waiting for the console UI" >&2; exit 1; }
   sleep 10; WAITED=$((WAITED + 10))
 done
-echo "Cloudbox Console is up — open the released Intar app"
+echo "Cloudbox Console is up: http://localhost:30600"
 
 # The star task, non-UI path: same object the "New database" form creates.
 kubectl -n demo apply -f - &lt;&lt;'EOF'
@@ -46,5 +46,5 @@ spec:
 EOF
 
 kubectl -n demo wait --for=condition=Ready workshopdatabase/console-db --timeout=600s
-echo "console-db is Ready — see it in Intar's Cloudbox Console app"
+echo "console-db is Ready — see it on http://localhost:30600/databases"
 ```

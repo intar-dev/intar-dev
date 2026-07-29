@@ -2422,8 +2422,11 @@ name = "intar-workshop-builder"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
+ "ed25519-dalek 2.2.0",
  "flate2",
+ "fs2",
  "intar-contracts",
  "intar-image-build",
  "intar-image-upload",
@@ -2440,6 +2443,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "zstd",
 ]
 
 [[package]]
@@ -2467,6 +2471,37 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "intar-workspace-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base16ct 1.0.0",
+ "base64",
+ "clap",
+ "ed25519-dalek 2.2.0",
+ "flate2",
+ "futures-util",
+ "intar-kino-proto",
+ "prost",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zstd",
 ]
 
 [[package]]

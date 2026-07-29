@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::future::Future;
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
 use std::net::TcpListener;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
@@ -20,12 +22,13 @@ use intar_image_build::{
     render_scenario_disk_plan, write_build_seed, write_raw_zstd_artifact_with_cancel,
 };
 use intar_workshop_manifest::{WorkshopManifest, WorkspaceVm};
+use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::backend::{
-    BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, SealCheckpoint, SealedVmArtifact,
-    WorkshopExecutionBackend,
+    BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, RuntimeBundleColdBoot,
+    RuntimeBundleColdBootProof, SealCheckpoint, SealedVmArtifact, WorkshopExecutionBackend,
 };
 use crate::config::{KvmExecutionConfig, WorkshopBaseImageConfig};
 use crate::staging::mark_staging_directory;
@@ -46,15 +49,15 @@ enum GuestMode {
 }
 
 #[derive(Debug, Clone)]
-struct GuestBootRequest {
-    generation_root: PathBuf,
-    root_disk: PathBuf,
-    seed_disk: PathBuf,
-    kernel: PathBuf,
-    initrd: PathBuf,
-    boot_cmdline: String,
-    cpu_count: u32,
-    memory_mib: u32,
+pub(crate) struct GuestBootRequest {
+    pub(crate) generation_root: PathBuf,
+    pub(crate) root_disk: PathBuf,
+    pub(crate) seed_disk: PathBuf,
+    pub(crate) kernel: PathBuf,
+    pub(crate) initrd: PathBuf,
+    pub(crate) boot_cmdline: String,
+    pub(crate) cpu_count: u32,
+    pub(crate) memory_mib: u32,
 }
 
 /// Narrow process seam: workshop author input can only select validated files
@@ -80,6 +83,11 @@ trait BuildGuest: Send {
         &mut self,
         module_ids: &[String],
         guest_forbidden_participant_paths: &[String],
+    ) -> Result<()>;
+    fn verify_runtime_bundle(
+        &mut self,
+        agent_binary: &Path,
+        request: &RuntimeBundleColdBoot<'_>,
     ) -> Result<()>;
     fn sanitize(&mut self, sanitizer_path: &str) -> Result<()>;
     fn shutdown(&mut self) -> Result<()>;
@@ -154,9 +162,27 @@ impl KvmWorkshopBackend {
     /// publication claiming. `prepare` creates the private work root for `run`;
     /// doctor mode can pass false for a read-only inspection of an existing root.
     pub fn preflight(config: &KvmExecutionConfig, prepare: bool) -> Result<()> {
+        Self::preflight_impl(config, prepare, true)?;
+        crate::authored_image::verify_prepared_authored_image(config)
+    }
+
+    /// Preflight the trusted host and clean proof inputs without requiring the
+    /// authored output disk to exist yet.
+    pub(crate) fn preflight_for_authored_image(
+        config: &KvmExecutionConfig,
+        prepare: bool,
+    ) -> Result<()> {
+        Self::preflight_impl(config, prepare, false)
+    }
+
+    fn preflight_impl(
+        config: &KvmExecutionConfig,
+        prepare: bool,
+        require_authored_images: bool,
+    ) -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (config, prepare);
+            let _ = (config, prepare, require_authored_images);
             bail!("the workshop KVM backend is supported only on Linux builder hosts");
         }
 
@@ -178,16 +204,38 @@ impl KvmWorkshopBackend {
             ] {
                 validate_executable(path).with_context(|| format!("{label} preflight failed"))?;
             }
-            for image in &config.images {
-                for (label, path) in [
-                    ("disk", &image.disk),
-                    ("kernel", &image.kernel),
-                    ("initrd", &image.initrd),
+            if require_authored_images {
+                for image in &config.images {
+                    for (label, path) in [
+                        ("disk", &image.disk),
+                        ("kernel", &image.kernel),
+                        ("initrd", &image.initrd),
+                    ] {
+                        validate_regular_file(path).with_context(|| {
+                            format!("trusted image '{}' {label} preflight failed", image.name)
+                        })?;
+                    }
+                }
+            }
+            if let Some(proof) = &config.runtime_bundle_verification {
+                for (label, path, expected) in [
+                    ("disk", &proof.disk, proof.disk_sha256.as_str()),
+                    ("kernel", &proof.kernel, proof.kernel_sha256.as_str()),
+                    ("initrd", &proof.initrd, proof.initrd_sha256.as_str()),
+                    (
+                        "workspace agent",
+                        &proof.workspace_agent_binary,
+                        proof.workspace_agent_sha256.as_str(),
+                    ),
                 ] {
-                    validate_regular_file(path).with_context(|| {
-                        format!("trusted image '{}' {label} preflight failed", image.name)
+                    validate_regular_file(path)
+                        .with_context(|| format!("direct-cloud proof {label} preflight failed"))?;
+                    verify_file_sha256(path, expected).with_context(|| {
+                        format!("direct-cloud proof {label} digest preflight failed")
                     })?;
                 }
+                validate_executable(&proof.workspace_agent_binary)
+                    .context("direct-cloud proof workspace agent preflight failed")?;
             }
             if config.require_kvm {
                 let metadata = fs::metadata("/dev/kvm").context("/dev/kvm is unavailable")?;
@@ -613,6 +661,138 @@ impl WorkshopExecutionBackend for KvmWorkshopBackend {
         Ok(())
     }
 
+    fn cold_boot_runtime_bundle(
+        &mut self,
+        request: &RuntimeBundleColdBoot<'_>,
+    ) -> Result<RuntimeBundleColdBootProof> {
+        ensure!(
+            !self.cancellation.is_cancelled(),
+            "workshop build cancelled"
+        );
+        ensure!(
+            is_safe_id(request.checkpoint_id),
+            "runtime-bundle checkpoint ID is unsafe"
+        );
+        ensure!(
+            !request.bytes.is_empty()
+                && u64::try_from(request.bytes.len()).unwrap_or(u64::MAX)
+                    <= request.max_checkpoint_bytes,
+            "runtime bundle is outside the configured proof size limit"
+        );
+        ensure!(
+            sha256_bytes(request.bytes) == request.artifact.sha256,
+            "runtime bundle bytes do not match their signed artifact digest"
+        );
+        let proof =
+            self.config.runtime_bundle_verification.clone().context(
+                "direct-cloud publication requires execution.runtime_bundle_verification",
+            )?;
+        ensure!(
+            proof.system_image == request.system_image,
+            "direct-cloud proof base '{}' does not match workshop system image '{}'",
+            proof.system_image,
+            request.system_image
+        );
+        // Freeze the comparatively small boot and verifier inputs into this
+        // private generation before QEMU opens them. Preflight already checks
+        // the operator-pinned files before claiming work; hashing the exact
+        // bytes again here closes the long-build window for the guest agent
+        // whose digest is recorded in the immutable publication.
+        let workspace_agent_bytes = fs::read(&proof.workspace_agent_binary)
+            .context("failed to stage direct-cloud proof workspace agent")?;
+        ensure!(
+            sha256_bytes(&workspace_agent_bytes) == proof.workspace_agent_sha256,
+            "direct-cloud proof workspace agent changed after preflight"
+        );
+        let kernel_bytes =
+            fs::read(&proof.kernel).context("failed to stage direct-cloud proof kernel")?;
+        ensure!(
+            sha256_bytes(&kernel_bytes) == proof.kernel_sha256,
+            "direct-cloud proof kernel changed after preflight"
+        );
+        let initrd_bytes =
+            fs::read(&proof.initrd).context("failed to stage direct-cloud proof initrd")?;
+        ensure!(
+            sha256_bytes(&initrd_bytes) == proof.initrd_sha256,
+            "direct-cloud proof initrd changed after preflight"
+        );
+
+        let mut job = self
+            .job
+            .take()
+            .context("workshop backend has no active job")?;
+        let result = (|| {
+            ensure!(job.active.is_none(), "a workshop guest is already running");
+            ensure!(
+                job.mode == GuestMode::ColdProof && job.stopped_for_seal,
+                "sealed checkpoint cold proof must finish before direct-cloud proof"
+            );
+            ensure!(
+                proof.disk != job.image.disk,
+                "direct-cloud proof must use a separate clean base disk"
+            );
+            job.generation = job.generation.saturating_add(1);
+            let generation_root = job.root.join(format!(
+                "runtime-bundle-proof-{}-{}",
+                request.checkpoint_id, job.generation
+            ));
+            fs::create_dir(&generation_root).with_context(|| {
+                format!(
+                    "failed to create direct-cloud proof directory '{}'",
+                    generation_root.display()
+                )
+            })?;
+            let root_disk = generation_root.join("clean-debian.raw");
+            let seed_disk = generation_root.join("intarbuild.img");
+            let staged_agent = generation_root.join("intar-workspace-agent");
+            let staged_kernel = generation_root.join("vmlinuz");
+            let staged_initrd = generation_root.join("initrd.img");
+            fs::write(&staged_agent, &workspace_agent_bytes)
+                .context("failed to write staged direct-cloud proof workspace agent")?;
+            fs::write(&staged_kernel, &kernel_bytes)
+                .context("failed to write staged direct-cloud proof kernel")?;
+            fs::write(&staged_initrd, &initrd_bytes)
+                .context("failed to write staged direct-cloud proof initrd")?;
+            let qemu = qemu_config(&self.config, &generation_root, &job.vm, &proof.architecture);
+            let disk_plan =
+                render_scenario_disk_plan(&proof.disk, &root_disk, job.vm.disk_gib, &qemu);
+            prepare_scenario_disk(&disk_plan)
+                .context("failed to clone and size clean direct-cloud proof disk")?;
+            let mut guest = self.launcher.boot(GuestBootRequest {
+                generation_root,
+                root_disk: root_disk.clone(),
+                seed_disk,
+                kernel: staged_kernel,
+                initrd: staged_initrd,
+                boot_cmdline: proof.boot_cmdline.clone(),
+                cpu_count: job.vm.vcpu_millis.div_ceil(1_000).max(1),
+                memory_mib: job.vm.memory_mib,
+            })?;
+            if let Err(error) = guest.verify_runtime_bundle(&staged_agent, request) {
+                guest.kill();
+                return Err(error).context(
+                    "workspace agent rejected or failed to apply the exact reconstruction bundle",
+                );
+            }
+            if let Err(error) = guest.shutdown() {
+                guest.kill();
+                return Err(error).context("failed to stop direct-cloud proof guest");
+            }
+            fs::remove_file(&root_disk)
+                .context("failed to remove clean direct-cloud proof disk after shutdown")?;
+            Ok(RuntimeBundleColdBootProof {
+                workspace_agent_sha256: proof.workspace_agent_sha256.clone(),
+            })
+        })();
+        self.job = Some(job);
+        result.with_context(|| {
+            format!(
+                "failed to cold-boot exact runtime bundle for checkpoint '{}'",
+                request.checkpoint_id
+            )
+        })
+    }
+
     fn resume_from_checkpoint(
         &mut self,
         checkpoint_id: &str,
@@ -941,6 +1121,36 @@ fn validate_regular_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn verify_file_sha256(path: &Path, expected: &str) -> Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open '{}' for hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to hash '{}'", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    ensure!(
+        actual == expected,
+        "'{}' SHA-256 mismatch: expected {}, received {}",
+        path.display(),
+        expected,
+        actual
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn validate_executable(path: &Path) -> Result<()> {
     validate_regular_file(path)?;
     let metadata = fs::metadata(path)?;
@@ -971,10 +1181,8 @@ impl QemuGuestLauncher {
             cancellation,
         }
     }
-}
 
-impl GuestLauncher for QemuGuestLauncher {
-    fn boot(&mut self, request: GuestBootRequest) -> Result<Box<dyn BuildGuest>> {
+    fn boot_concrete(&mut self, request: GuestBootRequest) -> Result<QemuBuildGuest> {
         ensure!(
             !self.cancellation.is_cancelled(),
             "workshop build cancelled"
@@ -1042,7 +1250,7 @@ impl GuestLauncher for QemuGuestLauncher {
             let _ = terminate_child(&mut child);
             return Err(error);
         }
-        Ok(Box::new(QemuBuildGuest {
+        Ok(QemuBuildGuest {
             child: Some(child),
             ssh_port,
             ssh_username: self.config.ssh_username.clone(),
@@ -1053,7 +1261,13 @@ impl GuestLauncher for QemuGuestLauncher {
             script_timeout: Duration::from_secs(self.config.script_timeout_seconds),
             shutdown_timeout: Duration::from_secs(self.config.shutdown_timeout_seconds),
             cancellation: self.cancellation.clone(),
-        }))
+        })
+    }
+}
+
+impl GuestLauncher for QemuGuestLauncher {
+    fn boot(&mut self, request: GuestBootRequest) -> Result<Box<dyn BuildGuest>> {
+        Ok(Box::new(self.boot_concrete(request)?))
     }
 }
 
@@ -1068,6 +1282,43 @@ struct QemuBuildGuest {
     script_timeout: Duration,
     shutdown_timeout: Duration,
     cancellation: CancellationToken,
+}
+
+pub(crate) struct AuthoredImageGuest {
+    inner: QemuBuildGuest,
+}
+
+impl AuthoredImageGuest {
+    pub(crate) fn upload(&self, local: &Path, remote: &str, mode: u32) -> Result<()> {
+        self.inner.upload(local, remote, mode)
+    }
+
+    pub(crate) fn run_fixed(&self, command: &str) -> Result<()> {
+        self.inner.run_fixed(command)
+    }
+
+    pub(crate) fn download(&self, remote: &str, local: &Path) -> Result<()> {
+        self.inner.download(remote, local)
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<()> {
+        self.inner.shutdown()
+    }
+
+    pub(crate) fn kill(&mut self) {
+        self.inner.kill();
+    }
+}
+
+pub(crate) fn boot_authored_image_guest(
+    config: &KvmExecutionConfig,
+    request: GuestBootRequest,
+    cancellation: CancellationToken,
+) -> Result<AuthoredImageGuest> {
+    let mut launcher = QemuGuestLauncher::new(config.clone(), cancellation);
+    Ok(AuthoredImageGuest {
+        inner: launcher.boot_concrete(request)?,
+    })
 }
 
 impl QemuBuildGuest {
@@ -1266,6 +1517,55 @@ impl BuildGuest for QemuBuildGuest {
         self.run_fixed("sudo -- /usr/bin/test ! -e /tmp/intar-workshop-build-material.tar.gz")
     }
 
+    fn verify_runtime_bundle(
+        &mut self,
+        agent_binary: &Path,
+        request: &RuntimeBundleColdBoot<'_>,
+    ) -> Result<()> {
+        let compression = match request.artifact.compression {
+            crate::contracts::RuntimeBundleCompression::None => "none",
+            crate::contracts::RuntimeBundleCompression::Gzip => "gzip",
+            crate::contracts::RuntimeBundleCompression::Zstd => "zstd",
+        };
+        let bundle = tempfile::NamedTempFile::new()
+            .context("failed to stage exact runtime bundle for guest upload")?;
+        fs::write(bundle.path(), request.bytes)
+            .context("failed to write exact runtime bundle for guest upload")?;
+        ensure!(
+            sha256_bytes(&fs::read(bundle.path())?) == request.artifact.sha256,
+            "staged runtime bundle changed before guest upload"
+        );
+        self.upload(
+            agent_binary,
+            "/tmp/intar-workspace-agent-runtime-proof",
+            0o700,
+        )?;
+        self.upload(bundle.path(), "/tmp/intar-workshop-runtime-bundle", 0o600)?;
+        let command = format!(
+            "sudo -- /tmp/intar-workspace-agent-runtime-proof verify-bundle \
+             --bundle-path {} --checkpoint-id {} --sha256 {} --size-bytes {} \
+             --compression {} --signature-b64 {} --signing-key-id {} \
+             --signing-public-key-b64 {} --tmpfs-root {} --max-checkpoint-bytes {}",
+            shell_quote("/tmp/intar-workshop-runtime-bundle"),
+            shell_quote(request.checkpoint_id),
+            shell_quote(&request.artifact.sha256),
+            request.bytes.len(),
+            compression,
+            shell_quote(&request.artifact.signature_b64),
+            shell_quote(&request.artifact.signing_key_id),
+            shell_quote(request.signing_public_key_b64),
+            shell_quote("/run/intar-workshop-runtime-proof"),
+            request.max_checkpoint_bytes,
+        );
+        self.run_fixed(&command)?;
+        self.run_fixed(
+            "sudo -- /usr/bin/rm -f -- /tmp/intar-workspace-agent-runtime-proof /tmp/intar-workshop-runtime-bundle",
+        )?;
+        self.run_fixed(
+            "sudo -- /usr/bin/test ! -e /tmp/intar-workspace-agent-runtime-proof && sudo -- /usr/bin/test ! -e /tmp/intar-workshop-runtime-bundle",
+        )
+    }
+
     fn sanitize(&mut self, sanitizer_path: &str) -> Result<()> {
         self.run_fixed(&format!("sudo -- {}", shell_quote(sanitizer_path)))
     }
@@ -1408,10 +1708,18 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn sha256_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::io::Write as _;
     use std::sync::{Arc, Mutex};
 
     use intar_contracts::catalog::ImageKey;
@@ -1525,6 +1833,18 @@ mod tests {
             Ok(())
         }
 
+        fn verify_runtime_bundle(
+            &mut self,
+            _agent_binary: &Path,
+            request: &RuntimeBundleColdBoot<'_>,
+        ) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("runtime-proof:{}", request.checkpoint_id));
+            Ok(())
+        }
+
         fn sanitize(&mut self, _sanitizer_path: &str) -> Result<()> {
             self.events.lock().unwrap().push("sanitize".to_string());
             Ok(())
@@ -1567,6 +1887,8 @@ mod tests {
             shutdown_timeout_seconds: 1,
             probe_every_seconds: 10,
             probe_timeout_seconds: 120,
+            runtime_bundle_verification: None,
+            authored_image_preparation: None,
             images: vec![WorkshopBaseImageConfig {
                 name: "platform-workshop-debian13".to_string(),
                 architecture: ImageArchitecture::X86_64,
@@ -1574,16 +1896,37 @@ mod tests {
                 kernel,
                 initrd,
                 boot_cmdline: "root=/dev/vda rw console=ttyS0".to_string(),
-                guest_build_material_paths: vec![
-                    "/opt/debian13-workshop/canonical-catch-up".to_string(),
-                ],
+                guest_build_material_paths: vec!["/opt/debian13-workshop/.git".to_string()],
                 guest_forbidden_participant_paths: vec![
                     "/opt/debian13-workshop/.git".to_string(),
-                    "/opt/debian13-workshop/canonical-catch-up".to_string(),
                     "/opt/debian13-workshop/solutions".to_string(),
                 ],
             }],
         }
+    }
+
+    fn enable_runtime_bundle_proof(config: &mut KvmExecutionConfig, root: &Path) {
+        let disk = root.join("clean-debian13.raw");
+        let kernel = root.join("clean-debian13-kernel");
+        let initrd = root.join("clean-debian13-initrd");
+        let agent = root.join("intar-workspace-agent");
+        fs::write(&disk, vec![1_u8; 4096]).unwrap();
+        fs::write(&kernel, b"clean-kernel").unwrap();
+        fs::write(&initrd, b"clean-initrd").unwrap();
+        fs::write(&agent, b"workspace-agent").unwrap();
+        config.runtime_bundle_verification = Some(crate::config::RuntimeBundleVerificationConfig {
+            system_image: "debian-13".to_owned(),
+            architecture: ImageArchitecture::X86_64,
+            disk_sha256: sha256_bytes(&fs::read(&disk).unwrap()),
+            kernel_sha256: sha256_bytes(&fs::read(&kernel).unwrap()),
+            initrd_sha256: sha256_bytes(&fs::read(&initrd).unwrap()),
+            workspace_agent_sha256: sha256_bytes(&fs::read(&agent).unwrap()),
+            disk,
+            kernel,
+            initrd,
+            boot_cmdline: "root=/dev/vda rw console=ttyS0".to_owned(),
+            workspace_agent_binary: agent,
+        });
     }
 
     #[test]
@@ -1641,12 +1984,12 @@ mod tests {
         }
         assert!(events.iter().any(|event| event == "verify-retained:00"));
         assert!(events.iter().any(|event| event == "capture-build"));
-        assert!(events[scrub].contains("canonical-catch-up"));
+        assert!(events[scrub].contains("/opt/debian13-workshop/.git"));
         assert!(scrub < sanitize && sanitize < shutdown);
     }
 
     #[test]
-    fn reference_catch_ups_are_pinned_and_offline() {
+    fn reference_catch_ups_reconstruct_from_external_digests() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
         let workshop = intar_workshop_manifest::load_and_validate(&root).unwrap();
@@ -1677,35 +2020,29 @@ mod tests {
         let catch_up_00 = fs::read_to_string(root.join(&module_00.catch_up_script)).unwrap();
         let catch_up_01 = fs::read_to_string(root.join(&module_01.catch_up_script)).unwrap();
 
-        // Upstream's cumulative GitOps helper requires solutions/module-NN/apps
-        // and starts at module 02. These two checkpoints have their own pinned
-        // contracts: immutable image preflight, then Talos cluster creation.
         assert!(!catch_up_00.contains("/scripts/catch-up.sh"));
-        assert!(catch_up_00.contains("./scripts/install.sh --check"));
-        assert!(catch_up_00.contains("export MISE_OFFLINE=1"));
-        assert!(catch_up_00.contains("expected_crane_version=0.21.7"));
+        assert!(catch_up_00.contains("registry-preflight.ok"));
+        assert!(catch_up_00.contains("docker info"));
+        assert!(!catch_up_00.contains("test -d .git"));
+        assert!(!catch_up_00.contains("MISE_OFFLINE"));
         assert!(!catch_up_01.contains("/scripts/catch-up.sh"));
-        assert!(catch_up_01.contains("./scripts/create-cluster.sh"));
+        assert!(catch_up_01.contains("scripts/create-cluster.sh"));
         assert!(catch_up_01.contains("kubectl wait --for=condition=Ready nodes --all"));
+        let module_00_verifier =
+            fs::read_to_string(root.join("runtime/source/lab/00-setup/verify.sh")).unwrap();
+        assert!(!module_00_verifier.contains("platform-engineering-workshop/.git"));
+        let seed_gitea =
+            fs::read_to_string(root.join("runtime/source/scripts/seed-gitea.sh")).unwrap();
+        assert!(seed_gitea.contains("if [[ ! -d .git ]]"));
+        assert!(seed_gitea.contains("git init --initial-branch=main --quiet"));
+        assert!(seed_gitea.contains("git add -A"));
 
         for module in &workshop.manifest.modules {
             let source = fs::read_to_string(root.join(&module.catch_up_script)).unwrap();
-            for forbidden in [
-                "docker.io/",
-                "ghcr.io/",
-                "quay.io/",
-                "registry.k8s.io/",
-                "public.ecr.aws/",
-                "docker pull",
-                "podman pull",
-                "nerdctl pull",
-                "curl https://",
-                "wget https://",
-                "mise x ",
-            ] {
+            for forbidden in ["MISE_OFFLINE", "localhost:5001", "/solutions/", "mise x "] {
                 assert!(
                     !source.contains(forbidden),
-                    "module {} catch-up contains forbidden network source '{forbidden}'",
+                    "module {} catch-up contains legacy source '{forbidden}'",
                     module.id
                 );
             }
@@ -1718,14 +2055,15 @@ mod tests {
             .find(|module| module.id == "07")
             .unwrap();
         let catch_up_07 = fs::read_to_string(root.join(&module_07.catch_up_script)).unwrap();
-        assert!(catch_up_07.contains("localhost:5001/library/busybox:1.37.0"));
-        assert!(catch_up_07.contains("chmod a-x \"${upstream_post}\""));
-        assert!(catch_up_07.contains("export MISE_OFFLINE=1"));
+        assert!(catch_up_07.contains(
+            "docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+        ));
+        assert!(catch_up_07.contains("localhost:30500/library/busybox:1.37.0"));
         assert!(catch_up_07.contains("crane copy --insecure"));
         assert!(!catch_up_07.contains("mise x"));
 
         let verifier_00 = fs::read_to_string(root.join(&module_00.verify_script)).unwrap();
-        assert!(verifier_00.contains("export MISE_OFFLINE=1"));
+        assert!(!verifier_00.contains("MISE_OFFLINE"));
         assert!(verifier_00.contains("expected_crane_version=0.21.7"));
 
         let importer = fs::read_to_string(
@@ -1733,10 +2071,44 @@ mod tests {
                 .join("../../scripts/import-platform-engineering-workshop.ts"),
         )
         .unwrap();
-        assert!(importer.contains("renderCatchUpScript(module.id)"));
-        assert!(importer.contains("PINNED_MODULE_07_BUSYBOX_SOURCE"));
-        assert!(importer.contains("busyboxSourceOccurrences !== 1"));
-        assert!(importer.contains("localhost:5001/library/busybox:1.37.0"));
+        assert!(importer.contains("renderCatchUpScript(module)"));
+        assert!(importer.contains("runtime/images.lock"));
+        assert!(importer.contains("renderRuntimeBootstrap"));
+        assert!(importer.contains("adaptDigestPinnedFault01"));
+    }
+
+    #[test]
+    fn reference_runtime_bootstrap_has_valid_shell_and_registry_awk() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let bootstrap = root.join("runtime/bootstrap.sh");
+        let source = fs::read_to_string(&bootstrap).unwrap();
+        assert!(source.contains(r#"awk 'NF {sub(/\/.*/, "", $1); print $1}'"#));
+        assert!(source.contains("host=registry-1.docker.io"));
+        assert!(
+            Command::new("bash")
+                .arg("-n")
+                .arg(&bootstrap)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let mut child = Command::new("awk")
+            .arg(r#"NF {sub(/\/.*/, "", $1); print $1}"#)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"ghcr.io/siderolabs/talos@sha256:abc\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "ghcr.io\n");
     }
 
     #[test]
@@ -1861,6 +2233,61 @@ mod tests {
         assert!(events[1].starts_with("assert-participant-boundary:"));
         assert!(events[1].contains("/opt/debian13-workshop/.git"));
         assert!(events[1].contains("/opt/debian13-workshop/solutions"));
+    }
+
+    #[test]
+    fn direct_cloud_proof_uses_a_fresh_clean_disk_and_exact_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path());
+        enable_runtime_bundle_proof(&mut config, temp.path());
+        fs::create_dir(&config.work_root).unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let launcher = FakeLauncher {
+            events: Arc::clone(&events),
+        };
+        let mut backend = KvmWorkshopBackend::with_launcher(config.clone(), Box::new(launcher));
+        let work = tempfile::tempdir_in(&config.work_root).unwrap();
+        let root = work.path().to_path_buf();
+        let workshop = fixture().manifest;
+        backend.job = Some(JobState {
+            _work: work,
+            root,
+            bundle_root: PathBuf::from("/bundle"),
+            vm: workshop.workspace.vms[0].clone(),
+            image: config.images[0].clone(),
+            allowed_scripts: BTreeMap::new(),
+            module_ids: vec!["00".to_string()],
+            build_material_archive: None,
+            active: None,
+            mode: GuestMode::ColdProof,
+            mutable_disk: PathBuf::from("unused"),
+            generation: 1,
+            stopped_for_seal: true,
+        });
+        let bytes = b"exact-signed-runtime-bundle";
+        let sha256 = sha256_bytes(bytes);
+        let artifact = crate::contracts::RuntimeBundleArtifact {
+            sha256,
+            compression: crate::contracts::RuntimeBundleCompression::Zstd,
+            signature_b64: "signature".to_owned(),
+            signing_key_id: "runtime-test-v1".to_owned(),
+            workspace_agent_sha256: None,
+        };
+        backend
+            .cold_boot_runtime_bundle(&RuntimeBundleColdBoot {
+                checkpoint_id: "checkpoint-00",
+                system_image: "debian-13",
+                bytes,
+                artifact: &artifact,
+                signing_public_key_b64: "public-key",
+                max_checkpoint_bytes: 1024,
+            })
+            .unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events[0], "boot:4:16384");
+        assert_eq!(events[1], "runtime-proof:checkpoint-00");
+        assert_eq!(events[2], "shutdown");
     }
 
     #[test]

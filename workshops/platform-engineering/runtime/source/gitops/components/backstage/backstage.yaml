@@ -1,0 +1,337 @@
+# Backstage developer portal — CNOE prebuilt image, adapted for this workshop.
+# Derived from cnoe-io/stacks ref-implementation/backstage/manifests/install.yaml
+# (see VENDOR.md for exactly what changed): Keycloak/external-secrets removed
+# (guest sign-in instead), the plain Postgres StatefulSet replaced with a
+# CloudNativePG Cluster, Service exposed on NodePort 30700, and all
+# integrations pointed at the in-cluster Gitea + ArgoCD.
+#
+# Requires (module order): cnpg-operator (CNPG Cluster CRD) — hence
+# SkipDryRunOnMissingResource=true on this Application.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backstage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backstage
+  namespace: backstage
+---
+# Backstage's Kubernetes plugin reads cluster state; the scaffolder may submit
+# Argo Workflows. Read-all + workflow-create mirrors the CNOE reference.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backstage-read-all
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backstage-argo-workflows
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflows]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-read-all
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backstage-read-all
+subjects:
+  - kind: ServiceAccount
+    name: backstage
+    namespace: backstage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backstage-argo-workflows
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backstage-argo-workflows
+subjects:
+  - kind: ServiceAccount
+    name: backstage
+    namespace: backstage
+---
+# WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral lab sandbox).
+# MUST match the Gitea admin user created by scripts/bootstrap-gitops.sh —
+# if the bootstrap uses different credentials, change either side and git push.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gitea-credentials
+  namespace: backstage
+type: Opaque
+stringData:
+  GITEA_USERNAME: gitea_admin
+  GITEA_PASSWORD: cloudbox123
+---
+# MUST match an ArgoCD local account. The workshop bootstrap is expected to
+# create a read-only `backstage` account in argocd-cm/argocd-secret
+# (accounts.backstage: apiKey, login + RBAC role:readonly). Falls back to
+# nothing gracefully: the portal works, the ArgoCD cards show errors.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argocd-credentials
+  namespace: backstage
+type: Opaque
+stringData:
+  ARGOCD_USERNAME: backstage
+  ARGOCD_ADMIN_PASSWORD: cloudbox123
+---
+# In-cluster Kubernetes plugin config, mounted next to app-config.yaml
+# ($include from there). Same mechanism as the CNOE reference.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: k8s-config
+  namespace: backstage
+type: Opaque
+stringData:
+  k8s-config.yaml: |
+    type: 'config'
+    clusters:
+      - url: https://kubernetes.default.svc.cluster.local
+        name: local
+        authProvider: 'serviceAccount'
+        skipTLSVerify: true
+        skipMetricsLookup: true
+        serviceAccountToken:
+          $file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        caData:
+          $file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backstage-config
+  namespace: backstage
+data:
+  app-config.yaml: |
+    app:
+      title: Cloudbox Portal
+      baseUrl: http://localhost:30700
+    organization:
+      name: Cloudbox
+    backend:
+      baseUrl: http://localhost:30700
+      listen:
+        port: 7007
+      csp:
+        connect-src: ["'self'", 'http:', 'https:']
+      cors:
+        origin: http://localhost:30700
+        methods: [GET, HEAD, PATCH, POST, PUT, DELETE]
+        credentials: true
+      database:
+        client: pg
+        connection:
+          host: ${POSTGRES_HOST}
+          port: ${POSTGRES_PORT}
+          user: ${POSTGRES_USER}
+          password: ${POSTGRES_PASSWORD}
+      cache:
+        store: memory
+    integrations:
+      gitea:
+        - baseUrl: http://gitea-http.gitea.svc.cluster.local:3000
+          host: gitea-http.gitea.svc.cluster.local:3000
+          username: ${GITEA_USERNAME}
+          password: ${GITEA_PASSWORD}
+    techdocs:
+      builder: 'local'
+      generator:
+        runIn: 'local'
+      publisher:
+        type: 'local'
+    auth:
+      # 'local' makes the CNOE frontend render the guest sign-in (auto).
+      environment: local
+      session:
+        # Workshop-grade static session secret; fine for a lab sandbox.
+        secret: cloudbox-workshop-session-secret
+      providers:
+        guest:
+          # The image runs with NODE_ENV=production; guest auth must opt in.
+          dangerouslyAllowOutsideDevelopment: true
+    scaffolder:
+      defaultAuthor:
+        name: backstage-scaffolder
+        email: scaffolder@cloudbox.local
+      defaultCommitMessage: "scaffolded by backstage"
+    catalog:
+      import:
+        entityFilename: catalog-info.yaml
+        pullRequestBranchName: backstage-integration
+      rules:
+        - allow: [Component, System, API, Resource, Location, Template]
+      locations: []
+      # Module S3: after seeding software templates into Gitea, register them
+      # here (edit + git push, ArgoCD does the rest), e.g.:
+      #   - type: url
+      #     target: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/backstage-templates/raw/branch/main/catalog-info.yaml
+      #     rules:
+      #       - allow: [Component, System, API, Resource, Location, Template, User, Group]
+    kubernetes:
+      serviceLocatorMethod:
+        type: 'multiTenant'
+      clusterLocatorMethods:
+        - $include: k8s-config.yaml
+    argocd:
+      username: ${ARGOCD_USERNAME}
+      password: ${ARGOCD_ADMIN_PASSWORD}
+      appLocatorMethods:
+        - type: 'config'
+          instances:
+            - name: in-cluster
+              # Plain HTTP: the bootstrap runs argocd-server with
+              # server.insecure=true (the Service maps 443 -> 8080 with no
+              # TLS, so an https:// URL would fail the handshake).
+              url: http://argocd-server.argocd.svc.cluster.local
+              username: ${ARGOCD_USERNAME}
+              password: ${ARGOCD_ADMIN_PASSWORD}
+---
+# Backstage's database, delivered the same way the platform delivers every
+# database: as a CloudNativePG Cluster. Superuser access is enabled because
+# Backstage creates one database per plugin at startup (CREATEDB).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: backstage-db
+  namespace: backstage
+spec:
+  instances: 1
+  # Pinned to the default image of cnpg-operator 1.28.4, so the pre-pulled
+  # image list stays deterministic.
+  imageName: ghcr.io/cloudnative-pg/postgresql@sha256:9287ce030c6f3ce822e383b019ae4aaf1e8370bff3b39f9c51dc10d69dc97219
+  enableSuperuserAccess: true
+  storage:
+    size: 2Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backstage
+  namespace: backstage
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 7007
+      targetPort: http
+      nodePort: 30700
+  selector:
+    app: backstage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backstage
+  namespace: backstage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backstage
+  template:
+    metadata:
+      labels:
+        app: backstage
+    spec:
+      serviceAccountName: backstage
+      containers:
+        - name: backstage
+          # Tag pinned to the commit the CNOE ref-implementation deploys.
+          # NOTE: this image is linux/amd64 only — Apple Silicon runs it under
+          # emulation (works on Docker Desktop/OrbStack, slower startup).
+          image: ghcr.io/cnoe-io/backstage-app@sha256:960dcd8b68ba8fed3685727c63b5221e5f95392694d887a12e14d792834636de
+          command:
+            - node
+            - packages/backend
+            - --config
+            - config/app-config.yaml
+          env:
+            - name: LOG_LEVEL
+              value: info
+            # Kept from the CNOE reference setup. The ArgoCD integration is
+            # plain HTTP (server.insecure=true), so nothing in-cluster needs
+            # TLS today — harmless belt-and-braces for a lab sandbox.
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+            - name: POSTGRES_HOST
+              value: backstage-db-rw.backstage.svc.cluster.local
+            - name: POSTGRES_PORT
+              value: "5432"
+            # CNPG generates and owns this secret for the cluster above.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-db-superuser
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-db-superuser
+                  key: password
+          envFrom:
+            - secretRef:
+                name: gitea-credentials
+            - secretRef:
+                name: argocd-credentials
+          ports:
+            - containerPort: 7007
+              name: http
+          # TCP probe on purpose: the new Backstage backend serves health at
+          # /.backstage/health/v1/* (old backends used /healthcheck) — a port
+          # check works for either and the CNOE reference ships no probe at
+          # all. Generous windows: first boot runs DB migrations and, on
+          # Apple Silicon, amd64 emulation.
+          readinessProbe:
+            tcpSocket:
+              port: 7007
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /app/config
+              name: backstage-config
+              readOnly: true
+      volumes:
+        - name: backstage-config
+          projected:
+            sources:
+              - configMap:
+                  items:
+                    - key: app-config.yaml
+                      path: app-config.yaml
+                  name: backstage-config
+              - secret:
+                  items:
+                    - key: k8s-config.yaml
+                      path: k8s-config.yaml
+                  name: k8s-config

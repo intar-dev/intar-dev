@@ -9,7 +9,7 @@ The concept: what you're buying from a hyperscaler's managed database is softwar
 
 CloudNativePG specifically: CNCF project, originally from EDB, arguably the most production-adopted Postgres operator. This isn't a toy pick.
 
-Same story for object storage: S3 is an API, and RustFS implements it — buckets, multipart, presigned URLs. In the lab they'll create a bucket, upload a file, prove a presigned URL from the guest terminal, and inspect the object through Intar's RustFS app button: handing someone a download link with zero AWS involved.
+Same story for object storage: S3 is an API, and RustFS implements it — buckets, multipart, presigned URLs. In the lab they'll create a bucket, upload a file, and generate a presigned URL that works in their browser: handing someone a download link with zero AWS involved.
 
 Everything arrives via the module-02 loop: enable cnpg-operator and rustfs from the catalog, then deliver a Cluster manifest through the demo component in git. psql into your own DBaaS is the visible win.
 
@@ -32,9 +32,9 @@ The meta-lesson connects back to the "why" section: the roadmap risk from slide 
 The task in three beats, all through the git loop from module 02:
 1. Enable cnpg-operator.yaml and rustfs.yaml from the catalog (copy → commit → push).
 2. Deliver the provided CNPG Cluster manifest (app-db) into the demo namespace via the repo; wait for "Cluster in healthy state"; get a psql prompt inside it and run SELECT 1.
-3. RustFS speaks S3 on guest-local NodePort 30900 (access key cloudbox / secret cloudbox123): create a bucket, upload a file, generate a presigned URL, prove it with terminal `curl`, then inspect it through the released RustFS app.
+3. RustFS speaks S3 on NodePort 30900 (access key cloudbox / secret cloudbox123): create a bucket, upload a file, generate a presigned URL, open it in the browser.
 
-Wins to celebrate: the psql prompt (module win #1) and a presigned URL returning the object (win #2 — "you just handed out a download link with zero AWS").
+Wins to celebrate: the psql prompt (module win #1) and a presigned URL opening in a browser (win #2 — "you just handed out a download link with zero AWS").
 
 Helper notes: the most common stall is pushing the Cluster manifest to the wrong directory — the README asks "where did module 02 put demo-namespace manifests?" on purpose. Presigned URL failures are usually a clock-skew or wrong-endpoint issue; hints cover both.
 
@@ -45,6 +45,6 @@ BREAK after this module — 10 minutes. Announce it now so people pace themselve
 
 First break, roughly the 2-hour mark. Fill in the actual return time on the projector (or say it twice).
 
-While people are away, this is a good moment to bring the Intar facilitator control room up — by now most rows for 00–03 should be turning green across the roster.
+While people are away, this is a good moment to bring the Cloudbox Console's Workshop page up on the projector — by now most rows for 00–03 should be turning green across the room.
 
-Helpers: sweep the **Need help** queue during the break; break time is catch-up time for anyone behind, and checkpoint 03 gets them fully current without claiming the skipped work was verified.
+Helpers: sweep for red stickies during the break; break time is catch-up time for anyone behind, and catch-up.sh 3 gets them fully current in ~2 minutes.

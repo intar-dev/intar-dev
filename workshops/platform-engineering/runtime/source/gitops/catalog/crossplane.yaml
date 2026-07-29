@@ -1,0 +1,47 @@
+# Crossplane v2.3.3 + workshop config (module 4: self-service compositions).
+# config/ adds the aggregated ClusterRole (CNPG/batch/core) and the pinned
+# patch-and-transform function. The XRD/Composition live in lab 04, not here.
+# ServerSideApply: Crossplane CRDs blow the annotation limit.
+# SkipDryRun: the Function CR's CRD is created by this same app.
+# ignoreDifferences: crossplane-init writes generated TLS certs into the
+# (empty-in-git) webhook secrets; without this selfHeal would fight it.
+#
+# Enable with:  cp gitops/catalog/crossplane.yaml gitops/apps/ && git add . && git commit -m 'enable crossplane' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: crossplane
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/crossplane
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: crossplane-system
+  ignoreDifferences:
+    - kind: Secret
+      namespace: crossplane-system
+      jsonPointers:
+        - /data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+      - RespectIgnoreDifferences=true

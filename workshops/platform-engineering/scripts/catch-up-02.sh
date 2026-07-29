@@ -1,3 +1,35 @@
 #!/usr/bin/env bash
+# Trusted checkpoint reconstruction adapted from pinned module 02.
+# Module 02 — full solution: bootstrap GitOps and make the first change via git.
 set -euo pipefail
-exec /opt/platform-engineering-workshop/scripts/catch-up.sh 02
+
+LAB_DIR="/opt/platform-engineering-workshop/lab/02-gitops"
+REPO_ROOT="/opt/platform-engineering-workshop"
+# shellcheck source=../common.sh
+source "$REPO_ROOT/lab/common.sh"
+
+# 1. Bootstrap Gitea + ArgoCD and seed the repo (skip if already done).
+# Marker for "bootstrap already ran" is the ArgoCD server Deployment — the
+# `platform` Application only appears later, when seed-gitea.sh creates it.
+if ! kubectl -n argocd get deploy argocd-server >/dev/null 2>&1; then
+  "$REPO_ROOT/scripts/bootstrap-gitops.sh"
+fi
+if ! curl -fsS --max-time 5 -u gitea_admin:cloudbox123 \
+     http://localhost:30300/api/v1/repos/cloudbox/platform >/dev/null 2>&1; then
+  "$REPO_ROOT/scripts/seed-gitea.sh"
+fi
+
+wait_app platform
+wait_app local-path-provisioner
+
+# 2. The GitOps change: demo Application + welcome ConfigMap, via git push.
+CLONE="$(gitops_clone)"
+cp "$LAB_DIR/demo-app.yaml" "$CLONE/gitops/apps/demo.yaml"
+mkdir -p "$CLONE/gitops/components/demo"
+sed 's/CHANGE ME/Cloudbox Attendee/' "$LAB_DIR/welcome.yaml" \
+  > "$CLONE/gitops/components/demo/welcome.yaml"
+gitops_push "$CLONE" "module 02: demo app with welcome configmap"
+
+# 3. Watch it converge.
+wait_app demo
+kubectl -n demo get configmap welcome -o jsonpath='{.data.owner}'; echo

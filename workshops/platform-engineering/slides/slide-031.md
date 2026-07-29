@@ -7,4 +7,4 @@
 cd lab/01-cluster && ./verify.sh
 ```
 
-35 min · guest/kernel failure: **Need help**, restore, or reprovision
+35 min · fallback: `./scripts/kind-fallback.sh`

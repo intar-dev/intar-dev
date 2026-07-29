@@ -1,9 +1,11 @@
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import {
   organization,
+  organizationProviderConnections,
   runtimeVmActualState,
   runtimeVms,
   workshopSessionMembers,
+  workshopSessionRuntimeProviders,
   workshopTemplateRevisions,
   workshopWorkspaceGenerations,
   workshopWorkspaces,
@@ -47,6 +49,8 @@ import {
 } from "./templates";
 import { getWorkshopCapacityPreflight } from "./capacity";
 import { workshopPresenceState } from "./presence";
+import { getWorkshopCostProjection } from "./cost-storage";
+import { listHetznerProviderConnections } from "./provider-connections";
 import type {
   WorkshopModuleProgressRecord,
   WorkshopSessionRecord,
@@ -102,7 +106,7 @@ export async function getOrganizationWorkshopsProjection(params: {
     userId: params.userId,
   });
   const isAdmin = isOrganizationAdminRole(role);
-  const [templates, sessions] = await Promise.all([
+  const [templates, sessions, providerConnections] = await Promise.all([
     isAdmin ? listWorkshopTemplates(params) : Promise.resolve([]),
     isAdmin
       ? listOrganizationWorkshopSessions(params)
@@ -111,10 +115,32 @@ export async function getOrganizationWorkshopsProjection(params: {
             .filter((entry) => entry.session.organizationId === detail.id)
             .map((entry) => entry.session),
         ),
+    isAdmin
+      ? listHetznerProviderConnections({
+          organizationId: detail.id,
+          actorUserId: params.userId,
+        }).then((connections) =>
+          connections.map((connection) => ({
+            id: connection.id,
+            displayName: connection.displayName,
+            state: connection.state,
+            approvedLocations: connection.approvedLocations,
+            maxConcurrentServers: connection.maxConcurrentServers,
+            maxSessionGrossMicros: connection.maxSessionGrossMicros,
+            currency: connection.currency,
+            credential: connection.credential,
+            lastValidatedAt: connection.lastValidatedAt,
+            cleanupAcknowledgement: connection.cleanupAcknowledgement,
+            ...(role === "owner"
+              ? { cleanupResources: connection.cleanupResources ?? [] }
+              : {}),
+          })),
+        )
+      : Promise.resolve([]),
   ]);
   const sessionSummaries = await Promise.all(
     sessions.map(async (session) => {
-      const [roster, draftRoster] = await Promise.all([
+      const [roster, draftRoster, managerOperations] = await Promise.all([
         workshopDb()
           .select({
             role: workshopSessionMembers.role,
@@ -132,14 +158,17 @@ export async function getOrganizationWorkshopsProjection(params: {
         session.state === "draft"
           ? listWorkshopRoster(session.id)
           : Promise.resolve([]),
+        isAdmin
+          ? projectWorkshopManagerOperations(session.id)
+          : Promise.resolve(null),
       ]);
       return {
         ...(await projectWorkshopSummary({
-        session,
-        userId: params.userId,
-        role: roster[0]?.role ?? "facilitator",
-        checkedInAt: roster[0]?.checkedInAt ?? null,
-        provisionState: roster[0]?.provisionState ?? "not_ready",
+          session,
+          userId: params.userId,
+          role: roster[0]?.role ?? "facilitator",
+          checkedInAt: roster[0]?.checkedInAt ?? null,
+          provisionState: roster[0]?.provisionState ?? "not_ready",
         })),
         draftRoster:
           session.state === "draft"
@@ -148,6 +177,7 @@ export async function getOrganizationWorkshopsProjection(params: {
                 role: entry.role,
               }))
             : null,
+        ...(managerOperations ?? {}),
       };
     }),
   );
@@ -182,6 +212,18 @@ export async function getOrganizationWorkshopsProjection(params: {
           moduleCount: revision.manifest.modules.length,
           publishedAt: revision.publishedAt,
           current: revision.id === template.currentRevisionId,
+          runtimeProvider: revision.manifest.workspace.provider
+            ? {
+                kind: "hetzner_cloud" as const,
+                serverType:
+                  revision.manifest.workspace.provider.serverType,
+                systemImage:
+                  revision.manifest.workspace.provider.systemImage,
+                hardware: revision.manifest.workspace.provider.hardware,
+                compatible:
+                  revision.manifest.workspace.provider.compatible,
+              }
+            : null,
         })),
       };
     }),
@@ -189,7 +231,16 @@ export async function getOrganizationWorkshopsProjection(params: {
   const capacitySession = sessions.find(
     (session) => session.state === "lobby" || session.state === "live",
   );
-  const capacity = capacitySession
+  const capacityProviderRows = capacitySession
+    ? await workshopDb()
+        .select({ kind: workshopSessionRuntimeProviders.providerKind })
+        .from(workshopSessionRuntimeProviders)
+        .where(eq(workshopSessionRuntimeProviders.sessionId, capacitySession.id))
+        .limit(1)
+    : [];
+  const capacity =
+    capacitySession &&
+    capacityProviderRows[0]?.kind !== "hetzner_cloud"
     ? await getWorkshopCapacityPreflight({ sessionId: capacitySession.id })
     : null;
   return {
@@ -206,6 +257,7 @@ export async function getOrganizationWorkshopsProjection(params: {
     })),
     templates: templateProjections,
     sessions: sessionSummaries,
+    providerConnections,
     capacity: projectCapacity(capacity),
   };
 }
@@ -217,7 +269,15 @@ export async function getWorkshopSessionProjection(params: {
 }) {
   const access = await requireWorkshopSessionMember(params);
   const projectorView = params.view === "projector";
-  const [session, context, roster, allProgress, workspaces, organizationRows] =
+  const [
+    session,
+    context,
+    roster,
+    allProgress,
+    workspaces,
+    organizationRows,
+    runtimeProviderRows,
+  ] =
     await Promise.all([
       loadWorkshopSession(params.sessionId),
       loadWorkshopManifestForSession(params.sessionId),
@@ -228,6 +288,11 @@ export async function getWorkshopSessionProjection(params: {
         .select({ name: organization.name })
         .from(organization)
         .where(eq(organization.id, access.organizationId))
+        .limit(1),
+      workshopDb()
+        .select({ kind: workshopSessionRuntimeProviders.providerKind })
+        .from(workshopSessionRuntimeProviders)
+        .where(eq(workshopSessionRuntimeProviders.sessionId, params.sessionId))
         .limit(1),
     ]);
   const organizationName = organizationRows[0]?.name;
@@ -301,7 +366,8 @@ export async function getWorkshopSessionProjection(params: {
     activeGrants.find((entry) => entry.learnerUserId === params.userId) ?? null;
   const capacity =
     !projectorView &&
-    (session.state === "lobby" || session.state === "live")
+    (session.state === "lobby" || session.state === "live") &&
+    runtimeProviderRows[0]?.kind !== "hetzner_cloud"
       ? await getWorkshopCapacityPreflight({ sessionId: params.sessionId })
       : null;
   const probeReports = canSeeRoomProgress
@@ -316,6 +382,13 @@ export async function getWorkshopSessionProjection(params: {
     canFacilitate,
   );
   const projectedAt = Date.now();
+  const canSeeManagerOperations =
+    !projectorView &&
+    access.organizationRole !== null &&
+    isOrganizationAdminRole(access.organizationRole);
+  const managerOperations = canSeeManagerOperations
+    ? await projectWorkshopManagerOperations(params.sessionId, projectedAt)
+    : null;
 
   return {
     session: {
@@ -460,7 +533,91 @@ export async function getWorkshopSessionProjection(params: {
           )
         : [],
       capacity: projectCapacity(capacity),
+      ...(managerOperations ?? {}),
     },
+  };
+}
+
+async function projectWorkshopManagerOperations(
+  sessionId: string,
+  observedAt = Date.now(),
+) {
+  const rows = await workshopDb()
+    .select({
+      kind: workshopSessionRuntimeProviders.providerKind,
+      connectionId: workshopSessionRuntimeProviders.connectionId,
+      serverType: workshopSessionRuntimeProviders.serverType,
+      hardware: workshopSessionRuntimeProviders.hardwareJson,
+      permittedLocations:
+        workshopSessionRuntimeProviders.permittedLocationsJson,
+      initialPriceObservation:
+        workshopSessionRuntimeProviders.initialPriceObservationJson,
+      grossCeilingOverrideAt:
+        workshopSessionRuntimeProviders.grossCeilingOverrideAt,
+      connectionDisplayName: organizationProviderConnections.displayName,
+      connectionState: organizationProviderConnections.state,
+      connectionCurrency: organizationProviderConnections.currency,
+      connectionLastValidatedAt:
+        organizationProviderConnections.lastValidatedAt,
+      maxConcurrentServers:
+        organizationProviderConnections.maxConcurrentServers,
+      maxSessionGrossMicros:
+        organizationProviderConnections.maxSessionGrossMicros,
+    })
+    .from(workshopSessionRuntimeProviders)
+    .leftJoin(
+      organizationProviderConnections,
+      eq(
+        organizationProviderConnections.id,
+        workshopSessionRuntimeProviders.connectionId,
+      ),
+    )
+    .where(eq(workshopSessionRuntimeProviders.sessionId, sessionId))
+    .limit(1);
+  const row = rows[0];
+  if (!row || row.kind === "agent_kvm") {
+    return {
+      runtimeProvider: { kind: "agent_kvm" as const },
+      cost: null,
+    };
+  }
+  if (
+    !row.connectionId ||
+    !row.serverType ||
+    !row.hardware ||
+    !row.connectionDisplayName ||
+    !row.connectionState ||
+    !row.connectionCurrency ||
+    row.connectionLastValidatedAt === null ||
+    row.connectionLastValidatedAt === undefined ||
+    row.maxConcurrentServers === null ||
+    row.maxConcurrentServers === undefined
+  ) {
+    throw appError(
+      409,
+      "workshop_runtime_provider_invalid",
+      "workshop runtime provider configuration is incomplete",
+    );
+  }
+  return {
+    runtimeProvider: {
+      kind: "hetzner_cloud" as const,
+      connection: {
+        id: row.connectionId,
+        displayName: row.connectionDisplayName,
+        state: row.connectionState,
+        currency: row.connectionCurrency,
+        lastValidatedAt: row.connectionLastValidatedAt,
+      },
+      serverType: row.serverType,
+      hardware: row.hardware,
+      permittedLocations: row.permittedLocations,
+      initialPriceObservedAt: row.initialPriceObservation?.observedAt ?? null,
+      maxConcurrentServers: row.maxConcurrentServers,
+      maxSessionGrossMicros: row.maxSessionGrossMicros,
+      grossCeilingOverrideAt: row.grossCeilingOverrideAt,
+    },
+    cost: await getWorkshopCostProjection({ sessionId, now: observedAt }),
   };
 }
 

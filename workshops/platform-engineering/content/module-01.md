@@ -2,8 +2,8 @@
 
 ## The goal
 
-At the end of this module a two-node Kubernetes cluster called **cloudbox** runs inside
-your Intar guest: Talos Linux nodes (in Docker), networked by Cilium's eBPF datapath, with **no
+At the end of this module a two-node Kubernetes cluster called **cloudbox** runs on your
+laptop: Talos Linux nodes (in Docker), networked by Cilium's eBPF datapath, with **no
 kube-proxy and no SSH anywhere**. You can prove it with `kubectl get nodes` showing two
 Ready nodes and `./verify.sh` green — and, more importantly, you can explain what's
 *missing* from these nodes and why.
@@ -15,7 +15,7 @@ that layer. Talos Linux is an immutable, API-only operating system built solely 
 Kubernetes: no shell, no SSH, no package manager — the entire machine is one declarative
 config document managed over a gRPC API (`talosctl`). Cilium replaces both the CNI *and*
 kube-proxy with eBPF programs in the kernel. This combination is what "production-grade"
-looks like in 2026 — and it fits in the dedicated 16 GiB workspace.
+looks like in 2026 — and it fits in Docker on your laptop.
 
 ## The task
 
@@ -71,9 +71,8 @@ changed what").
 ## If it goes wrong
 
 The cluster is cattle: `./scripts/destroy-cluster.sh && ./scripts/create-cluster.sh` is
-safe and takes ~5 minutes because the images are local. If Talos-in-Docker, Cilium/eBPF,
-or a privileged workload fails in the Intar guest, click **Need help**. That is a
-dedicated image/kernel contract failure; restore the checkpoint or reprovision instead
-of changing the lab to a kind fallback.
+always safe and takes ~5 minutes (images are already local). If Talos-in-Docker fights
+your machine specifically, `./scripts/kind-fallback.sh` gives you a kind+Cilium cluster —
+you lose the Talos exploration but every later module works the same.
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/01-cluster/verify.sh`. Layered hints and the solution are released separately by Intar.

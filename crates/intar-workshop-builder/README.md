@@ -15,7 +15,11 @@ metadata. The crate:
   shutdown, sealed raw-zstd artifacts, and a new cold-boot verification for
   every checkpoint;
 - independently hashes and multipart-uploads every image/kernel/initrd before
-  posting one success result; and
+  posting one success result;
+- for a `hetzner_cloud` workshop, emits exactly one deterministic,
+  content-addressed reconstruction bundle per checkpoint through that same
+  generic artifact upload path and separately cold-boots that exact bundle on
+  a pinned clean Debian 13 base; and
 - posts one terminal failure and aborts the guest workflow on any non-shutdown
   error. Operator shutdown leaves the claim resumable instead of publishing a
   false terminal failure.
@@ -29,6 +33,35 @@ intar-workshop-builder doctor --config /etc/intar/workshop-builder.toml
 intar-workshop-builder run --config /etc/intar/workshop-builder.toml
 ```
 
+The same binary has an explicit, one-shot authored-base workflow:
+
+```console
+intar-workshop-builder prepare-authored-image \
+  --config /etc/intar/workshop-builder.toml
+```
+
+It is never invoked by `run`, `run-once`, or publication claiming. The
+protected release archive carries the deterministic Platform workshop bundle,
+Kino, the sanitizer, their checksum files, and the exact workspace agent.
+`[execution.authored_image_preparation]` pins the first three inputs by
+SHA-256, selects one image mapping, and names a previously absent output
+directory. Preparation clones and expands the separately pinned clean Debian
+proof disk, boots it through KVM with a fresh `INTARBUILD` seed, installs only
+the curated `runtime/source`, runs the pinned bootstrap and module-00 verifier,
+proves the one-commit Git tree and sole Talos host image, sanitizes caches and
+machine identity, shuts down through acknowledged QMP, runs repairing and
+read-only `e2fsck`, and hashes the complete disk. `disk.raw`,
+`provenance.json`, and the three build logs become visible together through
+one atomic directory rename. The command refuses to overwrite any existing
+output.
+
+Before cloning, both the output and execution-work filesystems must have at
+least `minimum_free_space_bytes`, and never less than twice the workshop's
+nominal disk size. Use 200 GiB for the 64 GiB Platform image; 256 GiB leaves
+more operational margin for publication artifacts. A host with only about
+64 GiB free is intentionally rejected before creating a disk. This check does
+not replace normal capacity monitoring.
+
 The execution mapping is deliberately operator-owned. Each
 `workspace.vm.image` resolves to one absolute raw base disk, kernel, initrd and
 boot command line in `config.example.toml`. V1 accepts only x86_64. The host rejects symlinked or
@@ -36,16 +69,85 @@ missing files, an unsafe work root, missing KVM access, missing filesystem
 tools, architecture mismatches, and workshops with anything other than one VM
 before a build starts. V1 rejects multi-VM workshops explicitly.
 
-## Dedicated guest contract
+## Direct-cloud reconstruction bundles
 
-The base disk must be Debian 13 and already contain:
+A workshop whose HCL selects `hetzner_cloud` additionally requires
+`[worker.runtime_bundle_signing]`. `key_id` is public metadata. The Ed25519
+private seed is supplied either by an absolute `private_key_file` or by the
+named `private_key_env`; the latter contains standard-base64 for exactly 32
+bytes. The key itself must never be written into TOML. Unix key files must be
+regular files inaccessible to group and other users. `doctor`, `run`, and
+`run-once` validate a configured key before registry authentication.
+Production's protected `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID` must exactly
+match this `key_id`, and the protected
+`WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` public-key map must contain it.
+
+Each bundle contains a generated `checkpoint.json`, the exact workshop-root
+`LICENSE`, the explicitly allowlisted `runtime/source` learner tree,
+`runtime/bootstrap.sh`, `runtime/images.lock`,
+and the declared catch-up and verify scripts for the target module's dependency
+closure. Every installed file has a digest, mode, and normalized path in the
+generated manifest. Source traversal rejects symlinks, oversized files,
+solution/facilitator/presentation paths, answer-key filenames, tag-only OCI
+references, and digest references absent from the image lock. Participant and
+facilitator Markdown, presenter notes, hints, solution files, undeclared secret
+files, and OCI layer blobs therefore cannot enter a learner bundle. Entries,
+metadata, JSON, and compression are deterministic.
+The Ed25519 signature covers the exact compressed bytes whose SHA-256 is used
+by the generic artifact registry; the terminal checkpoint report sends
+`sha256`, `compression`, `signature_b64`, and `signing_key_id`.
+
+Signing alone is not a Hetzner compatibility proof. Direct-cloud publishing
+also requires `[execution.runtime_bundle_verification]`. It pins a separate
+minimal Debian 13 raw disk, kernel, initrd, and the exact statically linked
+`intar-workspace-agent` by SHA-256. `doctor` hashes every configured artifact
+before registry authentication. For every checkpoint, the builder clones that
+clean disk instead of the authored KVM checkpoint, boots it with a fresh seed
+and SSH key, uploads the exact just-signed bundle and pinned agent, and invokes
+the agent's `verify-bundle` path. That path verifies the digest and
+Ed25519 signature, requires tmpfs staging, safely extracts the bundle, applies
+the bootstrap and catch-up steps, installs the probe mappings, and runs the
+included verifiers. Only an acknowledged shutdown after success produces
+`runtime_bundle_cold_boot_verified = true`; the registry independently requires
+that explicit field for every `hetzner_cloud` artifact. A legacy sealed-disk
+`cold_boot_verified` value can never stand in for it.
+
+The proof disk contains only Debian 13 plus Intar's `INTARBUILD` seed/SSH
+bootstrap contract. It must not be the authored workshop image and must not
+contain workshop source, pre-pulled OCI layers, or an installed agent copy. The
+release archive carries `intar-workspace-agent` and its checksum; install that
+exact binary at the configured path. Record the clean disk/kernel/initrd
+digests from the operator-controlled image promotion job. Changing any pinned
+input fails `doctor` until the configuration is deliberately updated. The
+registry also requires the reported agent digest to match the CI-published
+guest-tool manifest at publication time and pins its paired Kino digest; later
+learner allocation uses those immutable digests rather than the mutable
+`current.json` pointer.
+
+The Platform Engineering revision carries a curated learner source tree and a
+reviewed external-image inventory. Its bootstrap starts from clean Debian 13,
+requires x86-64, installs the pinned toolchain, gates every registry on DNS,
+TLS, HTTPS, and manifest availability, and permits OCI pulls only by digest.
+The custom upstream Grafana package was not publicly retrievable when the lock
+was generated, so this revision explicitly uses stock Grafana with built-in
+Prometheus, Loki, and Jaeger datasources. This source/bundle validation is not
+a substitute for the production pilot: Talos-in-Docker, Cilium/eBPF,
+privileged BuildKit, all seven browser apps, recovery, and teardown still need
+to cold-boot and pass on a real CX43 learner server.
+
+## Dedicated authored-image contract
+
+The supported preparer starts from the pinned clean Debian 13 proof triple and
+constructs a base that contains:
 
 - the Intar `INTARBUILD` seed bootstrap service for the ephemeral SSH key;
 - `/usr/local/bin/kino` and the normal Intar runtime supervisor;
-- the pinned workshop toolchain, participant repository and offline images;
+- the pinned workshop toolchain and participant repository; `agent_kvm` may
+  carry its separately validated image cache, while direct-cloud proof disks
+  and runtime bundles carry no OCI layers;
 - the fixed sanitizer at the configured `execution.sanitizer_path`; and
-- any canonical solve helper only at the narrow paths listed in
-  `guest_build_material_paths`.
+- any build-only repository metadata or canonical solve helper only at the
+  narrow paths listed in `guest_build_material_paths`.
 
 The backend captures those configured build-only paths once into its private
 host work directory. A mutable generation receives them, but the backend
@@ -63,11 +165,20 @@ at `/usr/local/lib/intar-workshop/verifiers` before checkpoint 00 is sealed and
 is retained in all checkpoints; the builder generates `/etc/kino/kino.hcl.tpl`
 so every declared probe runs the matching retained verifier.
 
-The dedicated base must not contain a `.git` directory, package cache, backup,
-or second repository copy from which a learner could recover a removed solve
-helper. `guest_build_material_paths` must enumerate every canonical catch-up,
-solution, answer-key, and facilitator-only path needed during the build. A
-missing helper fails publication. Every build-material path must also appear in
+The dedicated base must not contain an upstream or otherwise unreviewed `.git`
+directory, package cache, backup, or second repository copy from which a
+learner could recover a removed solve helper. The Platform Engineering image
+preparer copies only the runtime bundle's learner-safe source allowlist, runs
+its bootstrap, and creates a fresh one-commit `.git` from that curated tree.
+That exact `.git` is declared as build material: canonical mutable generations
+can seed Gitea, but it is removed before every seal and is absent from every KVM
+participant checkpoint. The learner-side seed script recreates an equivalent
+fresh repository from the filtered participant tree when module 02 needs it.
+
+`guest_build_material_paths` must enumerate every repository-metadata,
+canonical catch-up, solution, answer-key, and facilitator-only path needed
+during the build. Every listed path must exist in the authored image, so a
+missing path fails publication. Every build-material path must also appear in
 the required `guest_forbidden_participant_paths`; that second list must include
 the workshop `.git` path and additionally names all lab `solve.sh` and source
 README files, facilitator slides, and known backup or duplicate repository
@@ -99,11 +210,35 @@ directories, nested paths, and unrelated operator data. A forced kill can
 therefore leave bounded staging data, which the next start validates and
 removes without widening the recursive deletion target.
 
-Install the unit and sanitizer from `deploy/`, install the example config as
-`/etc/intar/workshop-builder.toml`, create a non-login `intar-builder` user in
-the `kvm` group, and make `/var/lib/intar-workshop-builder` owned by that user
-with mode `0750`. The base disk/kernel/initrd should be root-owned, readable
-but not writable by the service user. Start only after `doctor` passes.
+The protected release archive includes `deploy/install.sh` and an internal
+`deploy/SHA256SUMS`. Stop and drain the existing service, then run
+`sudo ./deploy/install.sh --check` followed by the installer as root. It
+verifies
+QEMU, e2fsprogs, systemd, KVM, the service account, and every packaged file
+before changing the host. The idempotent installer creates a non-login
+`intar-builder` user in the `kvm` group; installs the builder, workspace agent,
+Kino, sanitizer, workshop bundle, unit, and example config at their configured
+absolute paths; and makes `/var/lib/intar-workshop-builder` owned by that user
+with mode `0750`.
+
+An existing `/etc/intar/workshop-builder.toml` is never replaced: its bytes are
+preserved while ownership and mode are normalized to
+`root:intar-builder 0640`. The installer refuses an active service or any live
+agent, jail daemon, legacy builder, workshop builder, QEMU, or Cloud Hypervisor
+process. On a co-located scenario host, drain active learner VMs, stop
+`intar-agent.service`, `intar-jailerd.socket`, `intar-jailerd.service`,
+`intar-builder.service`, and `intar-workshop-builder.service`, and verify that
+none has a pending systemd job. The installer reloads systemd metadata but
+never enables or starts a service and never invokes image preparation.
+
+The installer also creates `/var/cache/intar-workshop-builder` as
+`root:intar-builder 0750`. Its `clean` child is also root-owned and
+non-writable by the service account; separately provisioned proof
+disk/kernel/initrd files stay there as root-owned, read-only inputs. Its
+`authored` child is `intar-builder:intar-builder 0750`, allowing atomic output
+promotion while satisfying the preparer's rejection of group/world-writable
+output parents. Start only after an operator reviews the preserved config and
+`doctor` passes.
 
 Unit tests use a fake guest/process seam to verify typed lifecycle ordering,
 the author-material scrub boundary, cancellation without terminal failure, and

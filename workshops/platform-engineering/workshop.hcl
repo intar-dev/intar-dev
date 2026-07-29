@@ -11,16 +11,22 @@ workspace {
   lease_grace_minutes = 60
   initial_checkpoint  = "checkpoint-00"
 
-  vm "workspace" {
-    image        = "platform-engineering-workshop-debian13-1b6fad4"
-    vcpu_millis = 4000
-    memory_mib   = 16384
-    disk_gib     = 100
+  vm "learner" {
+    image       = "platform-engineering-workshop-debian13-1b6fad4"
+    cpu_millis  = 4000
+    memory_mib  = 16384
+    disk_mib    = 65536
+  }
+
+  provider "hetzner_cloud" {
+    vm_id        = "learner"
+    server_type  = "cx43"
+    system_image = "debian-13"
   }
 
   application "gitea" {
     label          = "Gitea"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30300
     protocol       = "http"
     release_module = "02"
@@ -28,7 +34,7 @@ workspace {
 
   application "argocd" {
     label          = "Argo CD"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30080
     protocol       = "http"
     release_module = "02"
@@ -36,7 +42,7 @@ workspace {
 
   application "rustfs" {
     label          = "RustFS"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30901
     protocol       = "http"
     release_module = "03"
@@ -44,7 +50,7 @@ workspace {
 
   application "knative" {
     label          = "Knative"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 31081
     protocol       = "http"
     release_module = "06"
@@ -52,7 +58,7 @@ workspace {
 
   application "zot" {
     label          = "Zot Registry"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30500
     protocol       = "http"
     release_module = "07"
@@ -60,7 +66,7 @@ workspace {
 
   application "cloudbox" {
     label          = "Cloudbox Console"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30600
     protocol       = "http"
     release_module = "08"
@@ -68,7 +74,7 @@ workspace {
 
   application "grafana" {
     label          = "Grafana"
-    vm             = "workspace"
+    vm             = "learner"
     port           = 30030
     protocol       = "http"
     release_module = "09"
@@ -78,13 +84,13 @@ workspace {
 
 module "00" {
   tier              = "gate"
-  outcome           = "Prove the pre-baked Debian 13 workspace, pinned toolchain, and offline image cache are ready."
+  outcome           = "Prove the Debian 13 workspace, pinned toolchain, outbound registry path, and digest-pinned image contract are ready."
   depends_on        = []
   content           = "content/module-00.md"
   facilitator_notes = "facilitator/module-00.md"
-  hints             = ["hints/module-00-01.md", "hints/module-00-02.md", "hints/module-00-03.md", "hints/module-00-04.md"]
+  hints             = ["hints/module-00-01.md", "hints/module-00-02.md", "hints/module-00-03.md"]
   solution          = "content/module-00-solution.md"
-  explain_back      = "Tell your neighbor: why does this workshop refuse to install tools or pull images during\nthe session? (One reason is reliability; the other is the platform-sovereignty message.)"
+  explain_back      = "Explain why digest pins prevent tag drift but still require DNS, TLS, HTTPS, and registry-availability preflight."
   verify_script     = "scripts/verify-00.sh"
   catch_up_script   = "scripts/catch-up-00.sh"
   checkpoint        = "checkpoint-00"
@@ -189,7 +195,7 @@ module "07" {
   facilitator_notes = "facilitator/module-07.md"
   hints             = ["hints/module-07-01.md", "hints/module-07-02.md", "hints/module-07-03.md", "hints/module-07-04.md"]
   solution          = "content/module-07-solution.md"
-  explain_back      = "Tell your neighbor: list every network hop in your pipeline (git clone from ? → build\nruns where? → push to ? → kubelet pulls from ?). How many of those left your Intar\nworkspace? That's the sovereignty argument in one answer."
+  explain_back      = "Tell your neighbor: list every network hop in your pipeline (git clone from ? → build\nruns where? → push to ? → kubelet pulls from ?). How many of those left your laptop?\nThat's the sovereignty argument in one answer."
   verify_script     = "scripts/verify-07.sh"
   catch_up_script   = "scripts/catch-up-07.sh"
   checkpoint        = "checkpoint-07"

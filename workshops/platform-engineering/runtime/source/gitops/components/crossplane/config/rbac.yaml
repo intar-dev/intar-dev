@@ -1,0 +1,33 @@
+# Workshop addition: extra permissions for the Crossplane pod.
+#
+# Crossplane v2 compositions emit arbitrary Kubernetes resources directly
+# (lab 04 composes a CloudNativePG `Cluster` plus supporting core/batch
+# resources). Crossplane itself only gets RBAC over its own types, so every
+# third-party API group a composition touches must be granted explicitly.
+# The chart's `crossplane` ClusterRole aggregates any ClusterRole carrying
+# the label below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crossplane-aggregate-cloudbox-compositions
+  labels:
+    app: crossplane
+    rbac.crossplane.io/aggregate-to-crossplane: "true"
+rules:
+  # CloudNativePG: compositions create/manage Postgres clusters directly.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Jobs (e.g. bucket-provisioning job against RustFS).
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core resources compositions are allowed to compose.
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - secrets
+      - services
+      - serviceaccounts
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

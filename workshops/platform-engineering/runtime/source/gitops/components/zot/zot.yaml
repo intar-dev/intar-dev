@@ -1,0 +1,161 @@
+---
+# Source: zot/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zot
+  namespace: zot
+  labels:
+    helm.sh/chart: zot-0.1.122
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+    app.kubernetes.io/version: "v2.1.18"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: zot/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-config
+  namespace: zot
+data:
+  config.json: "{\n  \"storage\": { \"rootDirectory\": \"/var/lib/registry\" },\n  \"http\": {\n    \"address\": \"0.0.0.0\",\n    \"port\": \"5000\",\n    \"accessControl\": {\n      \"repositories\": {\n        \"**\": {\n          \"anonymousPolicy\": [\"read\", \"create\", \"update\", \"delete\", \"detectManifestCollision\"],\n          \"defaultPolicy\": []\n        }\n      }\n    }\n  },\n  \"log\": { \"level\": \"info\" },\n  \"extensions\": {\n    \"search\": { \"enable\": true },\n    \"ui\": { \"enable\": true }\n  }\n}"
+---
+# Source: zot/templates/headless-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot-headless
+  namespace: zot
+  labels:
+    helm.sh/chart: zot-0.1.122
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+    app.kubernetes.io/version: "v2.1.18"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: 5000
+      targetPort: zot
+      protocol: TCP
+      name: zot
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+---
+# Source: zot/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot
+  namespace: zot
+  labels:
+    helm.sh/chart: zot-0.1.122
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+    app.kubernetes.io/version: "v2.1.18"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: NodePort
+  ports:
+    - port: 5000
+      targetPort: zot
+      protocol: TCP
+      name: zot
+      nodePort: 30500
+  selector:
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+---
+# Source: zot/templates/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zot
+  namespace: zot
+  labels:
+    helm.sh/chart: zot-0.1.122
+    app.kubernetes.io/name: zot
+    app.kubernetes.io/instance: zot
+    app.kubernetes.io/version: "v2.1.18"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  serviceName: zot-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zot
+      app.kubernetes.io/instance: zot
+  minReadySeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: zot-pvc
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+        storageClassName: "local-path"
+  template:
+    metadata:
+      annotations:
+        checksum/config: 560709ccd6fff6e7f7f1e4c450c73c023a8dff6cad051101537e72d1e3757eef
+      labels:
+        app.kubernetes.io/name: zot
+        app.kubernetes.io/instance: zot
+    spec:
+      serviceAccountName: zot
+      securityContext:
+        null
+      containers:
+        - name: zot
+          securityContext:
+            null
+          image: "ghcr.io/project-zot/zot@sha256:6f7bf2b8e43437c7c3a121bc80214845c85f27321e66f2ff4be6bf4220775fd7"
+          imagePullPolicy: IfNotPresent
+          env:
+            null
+          ports:
+            - name: zot
+              containerPort: 5000
+              protocol: TCP
+          volumeMounts:
+            - mountPath: '/var/lib/registry'
+              name: zot-pvc
+            - mountPath: '/etc/zot'
+              name: zot-config
+          livenessProbe:
+            initialDelaySeconds: 5
+            httpGet:
+              path: /livez
+              port: 5000
+              scheme: HTTP
+          readinessProbe:
+            initialDelaySeconds: 5
+            httpGet:
+              path: /readyz
+              port: 5000
+              scheme: HTTP
+          startupProbe:
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            httpGet:
+              path: /startupz
+              port: 5000
+              scheme: HTTP
+          # Workshop curation: small requests so the scheduler accounts for
+          # the registry on the 2-node lab cluster (chart default is none).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: zot-config
+          configMap:
+            name: zot-config
+      dnsPolicy: ClusterFirst

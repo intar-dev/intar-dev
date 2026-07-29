@@ -1,0 +1,58 @@
+# The console's "New Function" permission (issue #58): the portal needs to
+# CREATE two things the read-only portal-read ClusterRole can't — an Argo
+# Workflow (to build the image) and a Knative Service (to run it). Same lesson
+# as portal-access.yaml: the portal cannot grant itself anything; YOU, the
+# platform owner, hand it exactly these two scoped write grants. Copy both files
+# into gitops/components/demo/ and push. Each verb is the minimum the flow uses
+# (create to submit; get/list so the Builds/Services pages can read back).
+#
+# Scoped tight on purpose: Workflows only in `builds` (where builds run),
+# Services only in `demo` (where functions land) — not a cluster-wide grant.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: portal-functions-build
+  namespace: builds
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflows]
+    verbs: [create, get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: portal-functions-build
+  namespace: builds
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: portal-functions-build
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: portal-functions-serve
+  namespace: demo
+rules:
+  - apiGroups: [serving.knative.dev]
+    resources: [services]
+    verbs: [create, get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: portal-functions-serve
+  namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: portal-functions-serve
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal

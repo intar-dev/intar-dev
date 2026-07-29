@@ -1,0 +1,42 @@
+# Run the image you built in-cluster. Copy to gitops/components/demo/hello-site.yaml
+# and push AFTER the build workflow has succeeded (the image must exist in Zot).
+#
+# Note the image host: the build PUSHED to zot.zot.svc.cluster.local:5000 (cluster
+# DNS — resolvable from pods), but the KUBELET pulls images from the node, where
+# cluster DNS doesn't exist. localhost:30500 is Zot's NodePort as seen from the
+# node itself (containerd treats localhost registries as plain-HTTP-allowed).
+# Same registry, same artifact, two vantage points — a classic platform gotcha.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-site
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-site
+  template:
+    metadata:
+      labels:
+        app: hello-site
+    spec:
+      containers:
+        - name: web
+          image: localhost:30500/hello-site:v1
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-site
+spec:
+  selector:
+    app: hello-site
+  ports:
+    - port: 80
+      targetPort: 8080

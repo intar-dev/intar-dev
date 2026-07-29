@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 const MANIFEST_PATH: &str = "workshop.hcl";
 const MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RUNTIME_SOURCE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub fn load_and_validate(root: impl AsRef<Path>) -> Result<ValidatedWorkshop> {
     let root = root.as_ref();
@@ -100,8 +101,8 @@ fn include_optional_license(root: &Path, source_files: &mut BTreeSet<String>) ->
 
 fn validate_workspace(
     manifest: &WorkshopManifest,
-    _source_files: &mut BTreeSet<String>,
-    _root: &Path,
+    source_files: &mut BTreeSet<String>,
+    root: &Path,
 ) -> Result<()> {
     let workspace = &manifest.workspace;
     if !(1..=1440).contains(&workspace.lease_grace_minutes) {
@@ -147,6 +148,27 @@ fn validate_workspace(
         }
     }
 
+    if let Some(WorkspaceProvider::HetznerCloud {
+        vm_id,
+        server_type,
+        system_image,
+    }) = &workspace.provider
+    {
+        if workspace.vms.len() != 1 {
+            return Err(invalid(
+                "workspace provider 'hetzner_cloud' requires exactly one vm block",
+            ));
+        }
+        if !vm_ids.contains(vm_id.as_str()) {
+            return Err(invalid(format!(
+                "workspace provider 'hetzner_cloud' references unknown vm '{vm_id}'"
+            )));
+        }
+        validate_provider_name("Hetzner server_type", server_type)?;
+        validate_provider_name("Hetzner system_image", system_image)?;
+        include_hetzner_runtime(root, source_files)?;
+    }
+
     let module_ids: HashSet<_> = manifest
         .modules
         .iter()
@@ -187,6 +209,95 @@ fn validate_workspace(
                 application.id, application.release_module
             )));
         }
+    }
+    Ok(())
+}
+
+/// Direct-cloud checkpoints are reconstruction bundles, not disk images. Keep
+/// the reviewed learner runtime in the immutable workshop source bundle so the
+/// trusted builder can produce and sign one reconstruction artifact per
+/// checkpoint. Reject links and special files before upload; the builder then
+/// applies the stricter learner-content and OCI-inventory policy.
+fn include_hetzner_runtime(root: &Path, source_files: &mut BTreeSet<String>) -> Result<()> {
+    for required in [
+        "runtime/runtime.json",
+        "runtime/bootstrap.sh",
+        "runtime/images.lock",
+    ] {
+        let _ = read_regular_source(root, required)?;
+        source_files.insert(required.to_owned());
+    }
+
+    let source_root = root.join("runtime/source");
+    let metadata =
+        fs::symlink_metadata(&source_root).map_err(|source| WorkshopManifestError::Read {
+            path: source_root.clone(),
+            source,
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(invalid("runtime/source must be a real directory"));
+    }
+
+    let before = source_files.len();
+    include_runtime_directory(root, &source_root, source_files)?;
+    if source_files.len() == before {
+        return Err(invalid(
+            "runtime/source must contain at least one learner runtime file",
+        ));
+    }
+    Ok(())
+}
+
+fn include_runtime_directory(
+    root: &Path,
+    directory: &Path,
+    source_files: &mut BTreeSet<String>,
+) -> Result<()> {
+    let entries = fs::read_dir(directory).map_err(|source| WorkshopManifestError::Read {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| WorkshopManifestError::Read {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| WorkshopManifestError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid(format!(
+                "runtime source path '{}' must not be a symlink",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            include_runtime_directory(root, &path, source_files)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(invalid(format!(
+                "runtime source path '{}' is not a regular file",
+                path.display()
+            )));
+        }
+        let relative = path.strip_prefix(root).map_err(|_| {
+            invalid(format!(
+                "runtime source path '{}' escapes the workshop root",
+                path.display()
+            ))
+        })?;
+        let relative = relative.to_str().ok_or_else(|| {
+            invalid(format!(
+                "runtime source path '{}' is not valid UTF-8",
+                relative.display()
+            ))
+        })?;
+        let _ = read_bundle_source(root, relative)?;
+        source_files.insert(relative.to_owned());
     }
     Ok(())
 }
@@ -497,6 +608,34 @@ fn validate_id(context: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_provider_name(context: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.len() > 63 {
+        return Err(invalid(format!(
+            "{context} must contain between 1 and 63 characters"
+        )));
+    }
+    let bytes = value.as_bytes();
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return Err(invalid(format!(
+            "{context} '{value}' must start with a lowercase ASCII letter or digit"
+        )));
+    }
+    if !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit() {
+        return Err(invalid(format!(
+            "{context} '{value}' must end with a lowercase ASCII letter or digit"
+        )));
+    }
+    if bytes
+        .iter()
+        .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && *byte != b'-')
+    {
+        return Err(invalid(format!(
+            "{context} '{value}' may contain only lowercase ASCII letters, digits, and hyphens"
+        )));
+    }
+    Ok(())
+}
+
 fn nonempty(context: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         Err(invalid(format!("{context} may not be empty")))
@@ -651,6 +790,19 @@ fn require_extension(relative: &str, allowed: &[&str], context: &str) -> Result<
 }
 
 pub(crate) fn read_regular_source(root: &Path, relative: &str) -> Result<Vec<u8>> {
+    read_regular_source_with_limit(root, relative, MAX_SOURCE_FILE_BYTES)
+}
+
+pub(crate) fn read_bundle_source(root: &Path, relative: &str) -> Result<Vec<u8>> {
+    let limit = if Path::new(relative).starts_with("runtime/source") {
+        MAX_RUNTIME_SOURCE_FILE_BYTES
+    } else {
+        MAX_SOURCE_FILE_BYTES
+    };
+    read_regular_source_with_limit(root, relative, limit)
+}
+
+fn read_regular_source_with_limit(root: &Path, relative: &str, max_bytes: u64) -> Result<Vec<u8>> {
     validate_relative_path(relative)?;
     let mut candidate = PathBuf::from(root);
     for component in Path::new(relative).components() {
@@ -680,10 +832,10 @@ pub(crate) fn read_regular_source(root: &Path, relative: &str) -> Result<Vec<u8>
             "source path '{relative}' is not a regular file"
         )));
     }
-    if metadata.len() > MAX_SOURCE_FILE_BYTES {
+    if metadata.len() > max_bytes {
         return Err(invalid(format!(
             "source path '{relative}' exceeds the {} byte limit",
-            MAX_SOURCE_FILE_BYTES
+            max_bytes
         )));
     }
     fs::read(&candidate).map_err(|source| WorkshopManifestError::Read {

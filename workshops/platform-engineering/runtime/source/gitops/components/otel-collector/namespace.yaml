@@ -1,0 +1,25 @@
+---
+# The OTel Collector AGENT (DaemonSet) mounts hostPath /var/log/pods to tail
+# container logs (and /var/lib/otelcol for filelog offsets) — both forbidden by
+# PodSecurity "baseline", which Talos enforces by DEFAULT on non-system
+# namespaces. A log-collector DaemonSet legitimately needs host log access —
+# every fluent-bit / vector / promtail agent does the same — so the
+# observability namespace runs "privileged".
+#
+# We own the Namespace here (rather than leaning on the observability apps'
+# CreateNamespace=true) so we can set the label. ArgoCD applies namespaces
+# before other kinds, so the label lands before the DaemonSet's pods are
+# admitted; the DaemonSet controller retries FailedCreate until it does.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  annotations:
+    # observability is SHARED (VM/VLogs/VTraces/Grafana live here too) — never
+    # let disabling the collector prune the whole namespace out from under them.
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+    app.kubernetes.io/name: otel-collector

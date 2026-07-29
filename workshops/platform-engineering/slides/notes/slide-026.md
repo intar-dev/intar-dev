@@ -1,6 +1,3 @@
-Module 00 runs in the Intar lobby. Ask learners to check in, then bulk-provision them from
-checkpoint 00 while watching capacity and image-cache readiness in the control room.
+This is the safety net, not the plan — the prework email asked everyone to do this at home. The next 15 minutes exist for those who didn't, and for machines that changed since.
 
-The learner opens the workspace terminal and runs the pinned verifier. Nobody installs
-Docker, tools, packages, or images. A red check is an image/runner incident: use **Need
-help**, restore checkpoint 00, or reprovision on another eligible organization runner.
+While the room runs checks, the presenters circulate. Anyone whose laptop fundamentally can't run it goes straight to a lifeboat (pair up, or devcontainer/Codespaces) — do NOT let anyone burn 45 minutes fighting their Docker install.

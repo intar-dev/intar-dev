@@ -6,4 +6,4 @@ Backstage earns its weight when you need: the plugin ecosystem (ArgoCD, PagerDut
 
 The costs are real too: roughly 2 GB of Node.js plus a Postgres, YAML-heavy configuration, and — the big one — typically a team that owns it. The closing line, verbatim from the lab: a portal is a PRODUCT decision, not a default.
 
-Next slide: trace the Backstage integration loop and compare every hop with the live Cloudbox path, so this isn't a straw man. V1 deliberately exposes no Backstage app route.
+Next slide: we look at Backstage live, so this isn't a straw man.

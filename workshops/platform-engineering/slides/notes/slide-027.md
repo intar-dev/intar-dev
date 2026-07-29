@@ -1,10 +1,5 @@
-The offline rule is the first platform-engineering lesson of the day. If the platform
-cannot recover without reaching the internet, it is a client of someone else's platform.
+The digest-pinned rule isn't just conference pragmatism — it's the first platform-engineering lesson of the day. If your platform can't stand up without reaching the internet, it isn't your platform; it's a client of someone else's.
 
-Intar's trusted publication builder puts the pinned repository, toolchain, and all
-non-optional images into checkpoint 00, cold-boots it, and verifies it before a session
-may use the revision. Learners never run setup scripts or compensate for a missing image.
+Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server will live in-cluster; ArgoCD never points at GitHub. Once images are pulled, the whole workshop works in airplane mode.
 
-The fixed guest contract is Debian 13, 4 vCPU, 16 GiB RAM, and 100 GiB disk. Talos in
-Docker, Cilium/eBPF, privileged build workloads, and every declared browser adapter must
-work in that actual guest kernel.
+Hardware honesty, one more time: 16 GB RAM minimum with at least 10 GB allocatable to Docker; 32 GB is comfortable. The full platform idles around 8 GB inside the cluster. On 16 GB machines: close the Electron zoo. macOS: OrbStack or Docker Desktop with a raised memory limit. WSL2: raise it in .wslconfig — and WSL2 is our least-tested platform, so lifeboats apply.

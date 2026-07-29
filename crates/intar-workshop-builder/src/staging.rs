@@ -18,6 +18,11 @@ pub(crate) fn mark_staging_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to mark staging directory '{}'", path.display()))
 }
 
+pub(crate) fn unmark_staging_directory(path: &Path) -> Result<()> {
+    fs::remove_file(path.join(STAGING_MARKER))
+        .with_context(|| format!("failed to remove staging marker from '{}'", path.display()))
+}
+
 /// Remove direct-child staging directories left by a previous builder process.
 /// A candidate must have both a tempfile-style publication name and the exact
 /// marker written by this binary. Symlinks, nested paths, and unmarked content

@@ -1,0 +1,34 @@
+# CloudNativePG operator 1.28.4 (module 3: Postgres-as-a-service).
+# ServerSideApply: the CNPG CRDs exceed the 262KB annotation limit of
+# client-side apply.
+#
+# Enable with:  cp gitops/catalog/cnpg-operator.yaml gitops/apps/ && git add . && git commit -m 'enable cnpg-operator' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cnpg-operator
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/cnpg-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cnpg-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

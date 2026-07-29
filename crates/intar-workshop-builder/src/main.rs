@@ -7,8 +7,8 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use intar_workshop_builder::{
     KvmWorkshopBackend, WorkshopBuilderConfig, WorkshopExecutionBackend, WorkshopRegistryClient,
-    cleanup_stale_staging_directories, load, process_next_until_cancelled,
-    run_forever_until_cancelled,
+    cleanup_stale_staging_directories, load, preflight_runtime_bundle_signing,
+    prepare_authored_image, process_next_until_cancelled, run_forever_until_cancelled,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -31,6 +31,8 @@ enum Command {
     Run(ConfigArgs),
     /// Claim and process at most one publication, then exit.
     RunOnce(ConfigArgs),
+    /// Build and atomically promote the configured authored workshop base.
+    PrepareAuthoredImage(ConfigArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -46,6 +48,7 @@ async fn main() -> Result<()> {
         Command::Doctor(args) => doctor(args),
         Command::Run(args) => run(args).await,
         Command::RunOnce(args) => run_once(args).await,
+        Command::PrepareAuthoredImage(args) => prepare_authored(args).await,
     }
 }
 
@@ -53,6 +56,7 @@ fn doctor(args: ConfigArgs) -> Result<()> {
     let config = load(&args.config)?;
     KvmWorkshopBackend::preflight(&config.execution, true)?;
     KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+    preflight_runtime_bundle_signing(&config.worker)?;
     info!(
         images = config.execution.images.len(),
         work_root = %config.execution.work_root.display(),
@@ -73,11 +77,52 @@ async fn run_once(args: ConfigArgs) -> Result<()> {
     run_worker(config, WorkerMode::Once).await
 }
 
+async fn prepare_authored(args: ConfigArgs) -> Result<()> {
+    let config = load(&args.config)?;
+    let cancellation = CancellationToken::new();
+    let worker_cancellation = cancellation.clone();
+    let thread = thread::Builder::new()
+        .name("intar-authored-image".to_owned())
+        .spawn(move || prepare_authored_image(&config, worker_cancellation))
+        .context("failed to start dedicated authored-image worker")?;
+    let mut joined = tokio::task::spawn_blocking(move || match thread.join() {
+        Ok(result) => result,
+        Err(_) => bail!("dedicated authored-image worker panicked"),
+    });
+
+    tokio::select! {
+        result = &mut joined => {
+            let provenance = result
+                .context("failed to join authored-image worker")??;
+            info!(
+                image = %provenance.image_name,
+                workshop = %provenance.workshop_slug,
+                disk_sha256 = %provenance.output_disk_sha256,
+                "authored-image preparation completed"
+            );
+            Ok(())
+        }
+        signal = shutdown_signal() => {
+            if signal.is_ok() {
+                info!("authored-image preparation received shutdown signal; cancelling");
+            }
+            cancellation.cancel();
+            let worker_result = (&mut joined)
+                .await
+                .context("failed to join authored-image worker after shutdown")?;
+            signal?;
+            worker_result?;
+            Ok(())
+        }
+    }
+}
+
 fn prepare_run_host(config: &WorkshopBuilderConfig) -> Result<()> {
     // Preflight and stale cleanup happen before authentication and therefore
     // before a new publication can be claimed.
     KvmWorkshopBackend::preflight(&config.execution, true)?;
     KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+    preflight_runtime_bundle_signing(&config.worker)?;
     for root in [&config.execution.work_root, &config.worker.work_root] {
         let removed = cleanup_stale_staging_directories(root)?;
         if removed > 0 {

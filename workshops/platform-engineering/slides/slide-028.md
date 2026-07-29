@@ -1,10 +1,10 @@
 # GO — Module 00
 
-**Outcome:** your sealed Debian 13 workspace is provably ready.
+**Outcome:** your laptop is provably ready.
 
 ```bash
-cd /opt/platform-engineering-workshop/lab/00-setup
-./verify.sh
+cd lab/00-setup && ./verify.sh     # all green?
+cd lab/00-setup && ./verify.sh
 ```
 
-30 min lobby · **Need help** if anything is red
+15 min · red sticky if anything is

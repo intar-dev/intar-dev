@@ -1,0 +1,40 @@
+# Picture pipeline — the module 09 capstone: upload → RustFS → CloudEvent →
+# resize. An in-memory Broker, two cluster-local Knative Services (uploader,
+# resizer — built from apps/ in this repo), a Trigger routing
+# dev.cloudbox.image.uploaded events, and a Job that creates the `images`
+# bucket on RustFS. Nothing is exposed outside the cluster — the Cloudbox
+# Console (portal, NodePort 30600) is the way in.
+# Requires: knative-serving + knative-eventing (wave 2) and rustfs — hence
+# SkipDryRun (Broker/Trigger/ksvc CRs may land while eventing is still
+# syncing in the same push).
+#
+# Enable with:  cp gitops/catalog/picture-pipeline.yaml gitops/apps/ && git add . && git commit -m 'enable picture-pipeline' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: picture-pipeline
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/picture-pipeline
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pipeline
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true

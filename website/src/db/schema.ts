@@ -74,6 +74,28 @@ export {
   workshopWorkspaces,
 } from "./schema/workshops";
 export {
+  hetznerAllocations,
+  organizationProviderConnections,
+  providerAuditEvents,
+  providerCredentialVersions,
+  runtimeProviderArtifactUploadGrants,
+  runtimeProviderActualState,
+  runtimeProviderCheckpointArtifacts,
+  runtimeProviderGuestCredentials,
+  runtimeProviderCostLedger,
+  workshopSessionCostForecasts,
+  workshopSessionCostSummaries,
+  workshopSessionRuntimeProviders,
+} from "./schema/providers";
+export type {
+  HetznerAllocationState,
+  ProviderConnectionState,
+  ProviderHardwareShape,
+  ProviderPriceObservation,
+  RuntimeProviderKind,
+  WorkshopCostScenarioJson,
+} from "./schema/providers";
+export {
   workshopPublicationCheckpoints,
   workshopPublications,
   workshopRegistryTokens,

@@ -1,0 +1,39 @@
+# The platform API you are offering your developers: a WorkshopDatabase.
+# Crossplane v2 CompositeResourceDefinition — note scope: Namespaced and NO
+# claim names: v2 XRs are created directly in namespaces, Claims are gone.
+#
+# Copy (with composition.yaml) to gitops/components/platform-api/ in your
+# platform repo and push.
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: workshopdatabases.platform.cloudbox.io
+spec:
+  scope: Namespaced
+  group: platform.cloudbox.io
+  names:
+    kind: WorkshopDatabase
+    plural: workshopdatabases
+    singular: workshopdatabase
+    shortNames:
+      - wdb
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                size:
+                  type: string
+                  description: >-
+                    T-shirt size — the ONLY knob. Bundles compute, storage, and
+                    HA instances (small 1 · medium 2 · large 3) so a developer
+                    expresses intent, not implementation (PRD-0006). The platform
+                    team owns what each size means, in the Composition.
+                  enum: ["small", "medium", "large"]
+                  default: small

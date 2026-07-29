@@ -1,0 +1,32 @@
+# The console's self-service permission: full lifecycle of WorkshopDatabase XRs
+# (Crossplane v2 namespaced XR, see lab/04-self-service/platform/xrd.yaml —
+# group platform.cloudbox.io, plural workshopdatabases), scoped to the `demo`
+# namespace only. This lives in gitops/components/demo/ (not in the portal
+# component) because the grant belongs to the namespace that receives the
+# databases: YOU, the platform owner, hand the portal its keys — the portal
+# cannot grant itself anything. Copy this file there and push.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: portal-workshopdatabases
+  namespace: demo
+rules:
+  - apiGroups: [platform.cloudbox.io]
+    resources: [workshopdatabases]
+    # patch/update let the console *resize* a database (merge-patch spec.size);
+    # create/delete are the rest of the lifecycle. Still scoped to `demo` only.
+    verbs: [create, get, list, patch, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: portal-workshopdatabases
+  namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: portal-workshopdatabases
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal

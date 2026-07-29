@@ -1,0 +1,22 @@
+# Workshop addition (not part of the upstream chart): expose the S3 endpoint
+# on a stable NodePort so attendees can use presigned URLs and S3 clients from
+# the laptop without a port-forward: http://localhost:30900
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-s3-nodeport
+  namespace: rustfs
+  labels:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs
+    app.kubernetes.io/component: s3-nodeport
+spec:
+  type: NodePort
+  ports:
+    - name: endpoint
+      port: 9000
+      targetPort: 9000
+      nodePort: 30900
+  selector:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs

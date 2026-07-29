@@ -42,6 +42,11 @@ import { recordWorkshopGenerationState } from "./provisioning";
 import { revokeWorkshopRouteIssuanceIntents } from "./route-issuance-intents";
 import { loadWorkshopManifestForSession, workshopDb } from "./shared";
 import type { WorkshopProvisioningRequest } from "./types";
+import {
+  allocateHetznerWorkshopRuntime,
+  archiveHetznerWorkshopRuntime,
+  workshopRuntimeProviderKind,
+} from "./hcloud-runtime";
 
 const DEFAULT_FAILED_HOST_RECOVERY_BATCH_SIZE = 8;
 const MAX_FAILED_HOST_RECOVERY_BATCH_SIZE = 32;
@@ -82,6 +87,24 @@ export async function provisionWorkshopRequests(
 }
 
 export async function provisionWorkshopRequest(
+  request: WorkshopProvisioningRequest,
+  options: {
+    excludedHostIds?: readonly string[];
+    recoveryMessage?: string;
+  } = {},
+): Promise<RuntimeExecutionHandle> {
+  const providerKind = await workshopRuntimeProviderKind(request.sessionId);
+  if (providerKind === "hetzner_cloud") {
+    return allocateHetznerWorkshopRuntime(request, {
+      ...(options.recoveryMessage === undefined
+        ? {}
+        : { recoveryMessage: options.recoveryMessage }),
+    });
+  }
+  return provisionAgentWorkshopRequest(request, options);
+}
+
+async function provisionAgentWorkshopRequest(
   request: WorkshopProvisioningRequest,
   options: {
     excludedHostIds?: readonly string[];
@@ -330,7 +353,8 @@ export async function teardownWorkshopSessionRuntimes(input: {
             generation.id AS generation_id,
             generation.ordinal,
             coalesce(generation.runtime_execution_id, domain_execution.id)
-              AS runtime_execution_id
+              AS runtime_execution_id,
+            domain_execution.provider_kind
      FROM workshop_workspaces workspace
      LEFT JOIN workshop_workspace_generations generation
        ON generation.workspace_id = workspace.id
@@ -345,7 +369,8 @@ export async function teardownWorkshopSessionRuntimes(input: {
             workspace.application_route_ids_json,
             NULL AS generation_id,
             domain_execution.generation AS ordinal,
-            domain_execution.id AS runtime_execution_id
+            domain_execution.id AS runtime_execution_id,
+            domain_execution.provider_kind
      FROM workshop_workspaces workspace
      JOIN runtime_executions domain_execution
        ON domain_execution.domain_kind = 'workshop'
@@ -367,9 +392,11 @@ export async function teardownWorkshopSessionRuntimes(input: {
       generation_id: string | null;
       ordinal: number | null;
       runtime_execution_id: string | null;
+      provider_kind: "agent_kvm" | "hetzner_cloud" | null;
     }>();
 
   const revokedWorkspaceIds = new Set<string>();
+  let providerCleanupPending = false;
   for (const row of rows.results) {
     if (!revokedWorkspaceIds.has(row.workspace_id)) {
       await revokeWorkshopWorkspaceRoutes({
@@ -381,13 +408,37 @@ export async function teardownWorkshopSessionRuntimes(input: {
       revokedWorkspaceIds.add(row.workspace_id);
     }
     if (row.runtime_execution_id && row.ordinal) {
-      await markRuntimeExecutionDesiredAbsent(row.runtime_execution_id, now);
-      try {
-        await archiveRuntimeExecution({
+      if (row.provider_kind === "hetzner_cloud") {
+        const deleted = await archiveHetznerWorkshopRuntime({
           executionId: row.runtime_execution_id,
           expectedGeneration: row.ordinal,
-          endedAt: now,
+          now,
         });
+        if (!deleted) {
+          providerCleanupPending = true;
+          if (row.generation_id) {
+            await recordWorkshopGenerationState({
+              generationId: row.generation_id,
+              update: {
+                state: "archiving",
+                runtimeExecutionId: row.runtime_execution_id,
+                observedAt: now,
+              },
+            });
+          }
+          continue;
+        }
+      } else {
+        await markRuntimeExecutionDesiredAbsent(row.runtime_execution_id, now);
+      }
+      try {
+        if (row.provider_kind !== "hetzner_cloud") {
+          await archiveRuntimeExecution({
+            executionId: row.runtime_execution_id,
+            expectedGeneration: row.ordinal,
+            endedAt: now,
+          });
+        }
       } catch (error) {
         if (
           !(
@@ -416,6 +467,13 @@ export async function teardownWorkshopSessionRuntimes(input: {
         update: { state: "archived", observedAt: now },
       });
     }
+  }
+  if (providerCleanupPending) {
+    throw appError(
+      503,
+      "workshop_provider_cleanup_pending",
+      "one or more Hetzner learner servers are still being deleted",
+    );
   }
 }
 
@@ -785,7 +843,8 @@ async function loadRuntimeHandle(
 ): Promise<RuntimeExecutionHandle> {
   const execution = await env.DB.prepare(
     `SELECT
-       id, user_id, organization_id, host_id, domain_kind, domain_id,
+       id, user_id, organization_id, host_id, provider_kind,
+       provider_connection_id, domain_kind, domain_id,
        generation, source_execution_id, checkpoint_id, state,
        lease_expires_at, created_at
      FROM runtime_executions WHERE id = ?`,
@@ -796,6 +855,8 @@ async function loadRuntimeHandle(
       user_id: string;
       organization_id: string | null;
       host_id: string | null;
+      provider_kind: RuntimeExecutionHandle["providerKind"];
+      provider_connection_id: string | null;
       domain_kind: "scenario" | "workshop";
       domain_id: string;
       generation: number;
@@ -849,6 +910,8 @@ async function loadRuntimeHandle(
     userId: execution.user_id,
     organizationId: execution.organization_id,
     hostId: execution.host_id,
+    providerKind: execution.provider_kind,
+    providerConnectionId: execution.provider_connection_id,
     domainKind: execution.domain_kind,
     domainId: execution.domain_id,
     generation: execution.generation,

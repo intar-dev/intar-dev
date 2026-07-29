@@ -9,6 +9,7 @@ import {
   workshopFeatureToggleService,
 } from "./feature-flag";
 import { appendWorkshopEvent, workshopDb } from "./shared";
+import { refreshWorkshopSessionProviderPreflight } from "./session-provider";
 
 const MAX_DUE_LOBBIES_PER_TICK = 100;
 
@@ -17,6 +18,7 @@ export interface WorkshopAutoLobbyResult {
   opened: number;
   disabled: number;
   conflicted: number;
+  providerBlocked: number;
 }
 
 /**
@@ -62,6 +64,7 @@ export async function openDueWorkshopLobbies(options: {
     opened: 0,
     disabled: 0,
     conflicted: 0,
+    providerBlocked: 0,
   };
   for (const session of due) {
     if (
@@ -71,6 +74,15 @@ export async function openDueWorkshopLobbies(options: {
       ))
     ) {
       result.disabled += 1;
+      continue;
+    }
+    try {
+      await refreshWorkshopSessionProviderPreflight({
+        sessionId: session.id,
+        trigger: "lobby_refresh",
+      });
+    } catch {
+      result.providerBlocked += 1;
       continue;
     }
     const gateModuleIds = session.manifest.modules

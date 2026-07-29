@@ -61,6 +61,7 @@ describe("workshop automatic lobby", () => {
       opened: 0,
       disabled: 1,
       conflicted: 0,
+      providerBlocked: 0,
     });
 
     const opened = await openDueWorkshopLobbies({
@@ -72,6 +73,7 @@ describe("workshop automatic lobby", () => {
       opened: 1,
       disabled: 0,
       conflicted: 0,
+      providerBlocked: 0,
     });
     const db = drizzle(env.DB);
     const [sessions, events] = await Promise.all([
@@ -114,6 +116,7 @@ describe("workshop automatic lobby", () => {
       opened: 0,
       disabled: 0,
       conflicted: 0,
+      providerBlocked: 0,
     });
   });
 
@@ -127,6 +130,7 @@ describe("workshop automatic lobby", () => {
       opened: 0,
       disabled: 0,
       conflicted: 0,
+      providerBlocked: 0,
     });
     await expect(
       drizzle(env.DB)

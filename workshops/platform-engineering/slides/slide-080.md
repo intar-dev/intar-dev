@@ -1,6 +1,6 @@
 # The box, now full
 
-    **docker** Your persistent Intar workspace · Docker — yours for the session
+    **docker** Your laptop · Docker — still yours when the lid closes
 
       **talos** **cilium** ✅ Talos + Cilium · Kubernetes — running (01)
 

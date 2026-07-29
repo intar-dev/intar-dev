@@ -91,10 +91,16 @@ fn parse_workspace(block: &hcl::Block) -> Result<Workspace> {
         "workspace",
     )?;
     let mut vms = Vec::new();
+    let mut provider = None;
     let mut applications = Vec::new();
     for nested in block.body.blocks() {
         match nested.identifier.as_str() {
             "vm" => vms.push(parse_vm(nested)?),
+            "provider" => set_once(
+                &mut provider,
+                parse_workspace_provider(nested)?,
+                "workspace provider",
+            )?,
             "application" => applications.push(parse_application(nested)?),
             other => {
                 return Err(invalid(format!(
@@ -107,8 +113,39 @@ fn parse_workspace(block: &hcl::Block) -> Result<Workspace> {
         lease_grace_minutes: required_u32(block, "lease_grace_minutes", "workspace")?,
         initial_checkpoint: required_string(block, "initial_checkpoint", "workspace")?,
         vms,
+        provider,
         applications,
     })
+}
+
+fn parse_workspace_provider(block: &hcl::Block) -> Result<WorkspaceProvider> {
+    let kind = single_label(block, "workspace provider")?;
+    reject_nested(block, "workspace provider")?;
+    match kind.as_str() {
+        "hetzner_cloud" => {
+            reject_unknown_attrs(
+                block,
+                &["vm_id", "server_type", "system_image"],
+                "workspace provider 'hetzner_cloud'",
+            )?;
+            Ok(WorkspaceProvider::HetznerCloud {
+                vm_id: required_string(block, "vm_id", "workspace provider 'hetzner_cloud'")?,
+                server_type: required_string(
+                    block,
+                    "server_type",
+                    "workspace provider 'hetzner_cloud'",
+                )?,
+                system_image: required_string(
+                    block,
+                    "system_image",
+                    "workspace provider 'hetzner_cloud'",
+                )?,
+            })
+        }
+        other => Err(invalid(format!(
+            "workspace provider '{other}' is unsupported"
+        ))),
+    }
 }
 
 fn parse_vm(block: &hcl::Block) -> Result<WorkspaceVm> {
@@ -116,15 +153,45 @@ fn parse_vm(block: &hcl::Block) -> Result<WorkspaceVm> {
     reject_nested(block, "workspace vm")?;
     reject_unknown_attrs(
         block,
-        &["image", "vcpu_millis", "memory_mib", "disk_gib"],
+        &[
+            "image",
+            "cpu_millis",
+            "vcpu_millis",
+            "memory_mib",
+            "disk_mib",
+            "disk_gib",
+        ],
         "workspace vm",
     )?;
+    let vcpu_millis = required_aliased_u32(block, "cpu_millis", "vcpu_millis", "workspace vm")?;
+    let disk_gib = match (
+        optional_u32(block, "disk_mib", "workspace vm")?,
+        optional_u32(block, "disk_gib", "workspace vm")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(
+                "workspace vm must not declare both 'disk_mib' and legacy 'disk_gib'",
+            ));
+        }
+        (Some(disk_mib), None) if disk_mib % 1_024 == 0 => disk_mib / 1_024,
+        (Some(_), None) => {
+            return Err(invalid(
+                "workspace vm attribute 'disk_mib' must be a whole number of GiB",
+            ));
+        }
+        (None, Some(disk_gib)) => disk_gib,
+        (None, None) => {
+            return Err(invalid(
+                "workspace vm is missing required attribute 'disk_mib'",
+            ));
+        }
+    };
     Ok(WorkspaceVm {
         id,
         image: required_string(block, "image", "workspace vm")?,
-        vcpu_millis: required_u32(block, "vcpu_millis", "workspace vm")?,
+        vcpu_millis,
         memory_mib: required_u32(block, "memory_mib", "workspace vm")?,
-        disk_gib: required_u32(block, "disk_gib", "workspace vm")?,
+        disk_gib,
     })
 }
 
@@ -392,15 +459,40 @@ fn optional_string(block: &hcl::Block, key: &str, context: &str) -> Result<Optio
 }
 
 fn required_u32(block: &hcl::Block, key: &str, context: &str) -> Result<u32> {
-    let expression = attribute(block, key, context)?
-        .ok_or_else(|| invalid(format!("{context} is missing required attribute '{key}'")))?;
-    match expression {
-        hcl::Expression::Number(number) => number
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| invalid(format!("{context} attribute '{key}' must be a u32"))),
-        other => Err(invalid(format!(
-            "{context} attribute '{key}' must be a number, got {other:?}"
+    optional_u32(block, key, context)?
+        .ok_or_else(|| invalid(format!("{context} is missing required attribute '{key}'")))
+}
+
+fn optional_u32(block: &hcl::Block, key: &str, context: &str) -> Result<Option<u32>> {
+    attribute(block, key, context)?
+        .map(|expression| match expression {
+            hcl::Expression::Number(number) => number
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| invalid(format!("{context} attribute '{key}' must be a u32"))),
+            other => Err(invalid(format!(
+                "{context} attribute '{key}' must be a number, got {other:?}"
+            ))),
+        })
+        .transpose()
+}
+
+fn required_aliased_u32(
+    block: &hcl::Block,
+    key: &str,
+    legacy_key: &str,
+    context: &str,
+) -> Result<u32> {
+    match (
+        optional_u32(block, key, context)?,
+        optional_u32(block, legacy_key, context)?,
+    ) {
+        (Some(_), Some(_)) => Err(invalid(format!(
+            "{context} must not declare both '{key}' and legacy '{legacy_key}'"
+        ))),
+        (Some(value), None) | (None, Some(value)) => Ok(value),
+        (None, None) => Err(invalid(format!(
+            "{context} is missing required attribute '{key}'"
         ))),
     }
 }

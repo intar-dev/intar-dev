@@ -1,0 +1,152 @@
+# Cloudbox Console — bespoke workshop portal (module 08). First-party app:
+# source lives in apps/portal of this repo, image built by CI on GitHub.
+# It reads platform state via the Kubernetes API (read-only ClusterRole),
+# shows the picture gallery straight from RustFS and hands uploads to the
+# uploader Knative Service from picture-pipeline.
+#
+# XR self-service (the Databases page) requires the module-08 Role in
+# gitops/components/demo/ — it ships alongside the `demo` namespace so this
+# component never references a namespace from a later sync wave (module 08
+# teaches pushing that Role as a one-file change). Until it lands, the
+# Databases page shows a friendly forbidden error.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: portal
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal
+  namespace: portal
+---
+# Read-only view of exactly the platform surfaces the console renders:
+# ArgoCD Applications, CNPG database Clusters, Knative Services, pods and
+# namespaces. Deliberately NOT read-all (contrast with the Backstage demo).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-read
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [applications]
+    verbs: [get, list, watch]
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters]
+    verbs: [get, list, watch]
+  - apiGroups: [serving.knative.dev]
+    resources: [services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes, events]
+    verbs: [get, list, watch]
+  # Workload readiness for the /components status page and /workshop checklist.
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-read
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portal
+  template:
+    metadata:
+      labels:
+        app: portal
+    spec:
+      serviceAccountName: portal
+      containers:
+        - name: portal
+          # Built by CI from apps/portal (multi-arch). Must be in the
+          # pre-pull list (scripts/images.txt).
+          image: ghcr.io/randax/cloudbox-portal@sha256:f460aaf70c4c69c28ca0bd1c958f2fd77ceefb0a6acd7362615545ba7a232e73
+          env:
+            # The uploader is a cluster-local Knative Service in the
+            # pipeline namespace — this is its ksvc cluster-local URL
+            # (Knative answers on the service's root domain, no port).
+            - name: UPLOADER_URL
+              value: http://uploader.pipeline.svc.cluster.local
+            # WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral
+            # lab sandbox) — must match the rustfs component.
+            - name: S3_ENDPOINT
+              value: http://rustfs-svc.rustfs.svc.cluster.local:9000
+            - name: S3_ACCESS_KEY
+              value: cloudbox
+            - name: S3_SECRET_KEY
+              value: cloudbox123
+            # Created by the picture-pipeline component's setup Job — the
+            # gallery is empty (but the page loads) until that is enabled.
+            - name: S3_BUCKET
+              value: images
+            # Host the BROWSER uses for presigned URLs (the RustFS NodePort
+            # as seen from the attendee's machine). Matches NODEPORT_RUSTFS_S3.
+            - name: S3_PUBLIC_ENDPOINT
+              value: localhost:30900
+            # Browser-facing Grafana (NodePort 30030, the Victoria-stack
+            # Grafana) — used for the portal's observability deep-links.
+            - name: GRAFANA_URL
+              value: http://localhost:30030
+            # Gitea credentials for the scaffold bridge (PRD-0012): the console
+            # calls Gitea's generate API to create a tenant repo from a template.
+            # The lab's fixed gitea_admin (versions.env) — committed on purpose,
+            # like the S3 creds above (ephemeral lab sandbox). When GITEA_USER is
+            # unset the "start from a template" option is simply not offered.
+            - name: GITEA_USER
+              value: gitea_admin
+            - name: GITEA_PASSWORD
+              value: cloudbox123
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: portal
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30600
+  selector:
+    app: portal

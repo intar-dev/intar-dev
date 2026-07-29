@@ -1,0 +1,46 @@
+---
+# The kagent controller ships with AUTH_MODE=unsecure (upstream 0.9.11 default:
+# identity is a bare X-User-ID header, no authentication). The workshop posture
+# is documented in VENDOR.md: the Cloudbox Console is the ONLY intended caller.
+# This policy makes that intent enforceable — controller ingress is allowed
+# only from the kagent namespace itself (UI/agents/tools talk to their control
+# plane) and from the portal namespace (the Console's Case file, module 10).
+# Everything else in the cluster is denied.
+#
+# Notes:
+# - Selecting the controller pods makes ALL other ingress to them
+#   default-deny; kubelet health probes are host-originated and unaffected
+#   under Cilium.
+# - If kagent controller metrics are ever scraped from the observability
+#   namespace, add it to the allowlist below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kagent-controller-ingress
+  namespace: kagent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kagent
+      app.kubernetes.io/instance: kagent
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    # Intra-namespace: UI/agents/tools talk to their control plane — all ports,
+    # so upstream's internal wiring keeps working across chart bumps.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kagent
+    # The Console: only portal-labeled pods, only the A2A/API port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: portal
+          podSelector:
+            matchLabels:
+              app: portal
+      ports:
+        - protocol: TCP
+          port: 8083

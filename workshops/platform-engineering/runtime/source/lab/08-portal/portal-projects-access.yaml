@@ -1,0 +1,58 @@
+# The console's "Projects" permission (PRD-0011): let the portal PROVISION a
+# project — a namespace + the tenant grant bound into it — so a developer can
+# create projects from the console instead of asking the platform team. This is
+# the "grant via git; act via console" pattern (DR-0004): YOU hand the portal a
+# TIGHTLY scoped, auditable grant here; the portal then does the console-direct
+# create. It still cannot grant itself anything broader than portal-tenant.
+# Copy this file into gitops/components/demo/ and push.
+#
+# Two ClusterRoles:
+#   portal-tenant   — the self-service verbs, bound PER PROJECT by the portal
+#                     when it creates one (so it can manage that namespace).
+#   portal-projects — the project-management grant, bound to the portal SA:
+#                     create namespaces + rolebindings, and `bind` ONLY
+#                     portal-tenant (the RBAC escalation guard — the portal can
+#                     bind that one ClusterRole, nothing else).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-tenant
+rules:
+  - apiGroups: [platform.cloudbox.io]
+    resources: [workshopdatabases, applications]
+    verbs: [create, get, list, patch, update, delete]
+  - apiGroups: [serving.knative.dev]
+    resources: [services]
+    verbs: [create, get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-projects
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, list, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create, get, list]
+  # The escalation guard: the portal may bind ONLY portal-tenant into the
+  # namespaces it creates — not cluster-admin, not itself anything else.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    resourceNames: [portal-tenant]
+    verbs: [bind]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-projects
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-projects
+subjects:
+  - kind: ServiceAccount
+    name: portal
+    namespace: portal

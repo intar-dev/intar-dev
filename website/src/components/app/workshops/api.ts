@@ -1,5 +1,6 @@
 import type {
   OrganizationWorkshopsResponse,
+  WorkshopCostProjection,
   WorkshopListResponse,
   WorkshopPresenceState,
   WorkshopSessionResponse,
@@ -130,10 +131,109 @@ export function createWorkshopSession(
       userId: string;
       role: "participant" | "helper" | "facilitator";
     }>;
+    runtimeProvider?:
+      | { kind: "agent_kvm" }
+      | { kind: "hetzner_cloud"; connectionId: string };
   },
 ): Promise<WorkshopSessionResponse> {
   return workshopRequest(
     `/api/organizations/${encodeURIComponent(organizationId)}/workshop-sessions`,
     { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function connectWorkshopHetznerProject(
+  organizationId: string,
+  input: {
+    token: string;
+    displayName: string;
+    approvedLocations: string[];
+    maxConcurrentServers: number;
+  },
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function updateWorkshopHetznerGuardrails(
+  organizationId: string,
+  connectionId: string,
+  input: {
+    approvedLocations: string[];
+    maxConcurrentServers: number;
+    maxSessionGrossMicros: number | null;
+  },
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner/${encodeURIComponent(connectionId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export function rotateWorkshopHetznerCredential(
+  organizationId: string,
+  connectionId: string,
+  token: string,
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner/${encodeURIComponent(connectionId)}/rotate`,
+    { method: "POST", body: JSON.stringify({ token }) },
+  );
+}
+
+export function rebindWorkshopHetznerProject(
+  organizationId: string,
+  connectionId: string,
+  token: string,
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner/${encodeURIComponent(connectionId)}/rebind`,
+    { method: "POST", body: JSON.stringify({ token }) },
+  );
+}
+
+export function disconnectWorkshopHetznerProject(
+  organizationId: string,
+  connectionId: string,
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner/${encodeURIComponent(connectionId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function acknowledgeWorkshopHetznerManualCleanup(
+  organizationId: string,
+  connectionId: string,
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/hetzner/${encodeURIComponent(connectionId)}/manual-cleanup`,
+    { method: "POST" },
+  );
+}
+
+export function refreshWorkshopHetznerCostForecast(
+  organizationId: string,
+  sessionId: string,
+): Promise<WorkshopCostProjection> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-sessions/${encodeURIComponent(sessionId)}/cost/refresh`,
+    { method: "POST" },
+  );
+}
+
+export function overrideWorkshopHetznerGrossCeiling(
+  organizationId: string,
+  sessionId: string,
+): Promise<{
+  sessionId: string;
+  overriddenAt: number;
+  overriddenBy: string;
+}> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-sessions/${encodeURIComponent(sessionId)}/cost/override`,
+    { method: "POST" },
   );
 }

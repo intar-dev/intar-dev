@@ -1,11 +1,7 @@
-The workshop history is learner-owned even after the facilitator ends the live session
-and Intar tears down the execution. Verification, explain-back, caught-up state, help
-events, and generation history remain visible without leaving a VM or route running.
+The platform survives the room — that was the design goal, so make the path home concrete:
 
-Canonical checkpoints are the reproducible continuation path: a facilitator may restore
-the latest applicable predecessor checkpoint, preserving progress while explicitly
-reporting work lost since that checkpoint. Restored skipped work is caught up, never
-retroactively verified.
-
-The stretch modules remain available as independent branches during the tinker window.
-None needs conference infrastructure or an undeclared browser port.
+- The repo (github.com/randax/Platform-Engineering-Workshop) contains labs, hints, solutions, scripts, and these slides. Apache 2.0: take it, fork it, run your cloud on your terms.
+- catch-up.sh  works on a fresh cluster at home exactly like it did here — you can rebuild to any module's end-state in minutes and continue from there. The solutions/ directory holds every canonical end-state.
+- The stretch modules were designed for the couch as much as for the room: Knative, in-cluster CI, the portal source, the capstone. Nothing needs conference infrastructure.
+- The javazone-2026 tag freezes today's exact versions — in a year, when everything has drifted, the tag still builds.
+- And genuinely: broken prereqs or labs are OUR bug — issues welcome.

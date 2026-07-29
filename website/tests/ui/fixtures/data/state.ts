@@ -865,7 +865,7 @@ export function createMockApiState(input?: {
       seatResources: {
         cpuMillis: 4_000,
         memoryMib: 16_384,
-        worstCaseDiskMib: 102_400,
+        worstCaseDiskMib: 65_536,
       },
       runners: [
         {
@@ -1212,6 +1212,7 @@ export function createMockApiState(input?: {
       })),
       templates: empty ? [] : [workshopTemplate],
       sessions: empty ? [] : [workshopSummary, workshopDraftSummary],
+      providerConnections: [],
       capacity: empty ? null : workshopSession.capacity,
     },
     hosts: empty ? [] : [host],

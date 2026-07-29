@@ -1,35 +1,25 @@
 # Facilitator notes — module 00
 
-This is an Intar capacity and image-contract gate, not laptop setup. Open the lobby 30
-minutes before the scheduled start, ask learners to check in, then bulk-provision the
-checked-in roster from checkpoint 00. The guest is Debian 13 with 4 vCPU, 16 GiB RAM,
-100 GiB disk, the pinned toolchain, repository, and all non-optional images already
-baked and cold-boot verified.
+This is the safety net, not the plan — the prework email asked everyone to do this at home. The next 15 minutes exist for those who didn't, and for machines that changed since.
 
-Learners do not run `dev-setup.sh`, `cloudbox-init.sh`, `apt`, or image pulls. Their only
-setup work is opening the Intar workspace terminal and running the pinned verifier at
-`/opt/platform-engineering-workshop/lab/00-setup/verify.sh`.
+While the room runs checks, the presenters circulate. Anyone whose laptop fundamentally can't run it goes straight to a lifeboat (pair up, or devcontainer/Codespaces) — do NOT let anyone burn 45 minutes fighting their Docker install.
+
 
 ---
 
-The offline rule remains the first platform-engineering lesson: if a platform cannot
-recover without reaching the internet, it is a client of someone else's platform. Here
-the trusted publication builder performs the expensive networked assembly once;
-checkpoint 00 makes the live learner path deterministic and offline.
+The digest-pinned rule isn't just conference pragmatism — it's the first platform-engineering lesson of the day. If your platform can't stand up without reaching the internet, it isn't your platform; it's a client of someone else's.
 
-Use the control room while provisioning. Treat allocation failures, missing cached
-images, a failed verifier, or a missing guest capability as platform incidents. Helpers
-can inspect via a learner-approved browser-terminal grant; they should not install a
-workaround. Restore checkpoint 00 or reprovision on an eligible organization runner.
+Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server will live in-cluster; ArgoCD never points at GitHub. Once images are pulled, the whole workshop works in airplane mode.
+
+Hardware honesty, one more time: 16 GB RAM minimum with at least 10 GB allocatable to Docker; 32 GB is comfortable. The full platform idles around 8 GB inside the cluster. On 16 GB machines: close the Electron zoo. macOS: OrbStack or Docker Desktop with a raised memory limit. WSL2: raise it in .wslconfig — and WSL2 is our least-tested platform, so lifeboats apply.
+
 
 ---
 
-Set the pre-flight timer visibly. Ask learners to prove four things: the expected tools
-exist, Docker sees the declared resources, the local mirror answers, and `verify.sh` is
-green. Learners already green can inspect module 01 or help a neighbor through Intar's
-**Need help** queue.
+Set the timer visibly. The task: run the pre-flight, fix what it flags (most common: Docker not running, or Docker memory limit below 10 GB), and run the module's verify.sh.
 
-Do not advance until the control room shows enough verified workspaces for the core
-session. A learner who joins late was already on the roster: provision them from
-checkpoint 00, or from a facilitator-selected predecessor checkpoint and record the
-skipped technical work as caught up.
+Already green because you did the prework? Perfect — you have 15 minutes of head start: skim lab/01-cluster/README.md, or help a neighbor. Helping a neighbor is the fastest way to learn this material.
+
+Triage guidance for presenters/helpers: image pulls not done is the only unfixable-in-room problem (bandwidth) — those people pair up or go to Codespaces immediately. Everything else (memory limits, missing tools) is a 2-minute fix.
+
+When ~90% of the room is green, move on — stragglers keep pulling in the background and module 01 doesn't need the images immediately.

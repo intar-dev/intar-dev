@@ -27,9 +27,7 @@ magic-looking cloud product there is.
      `curl -H "Host: " http://localhost:31080/`
 
    Watch the first request *create* a pod (cold start — how long did it take?), repeat
-   requests hit it warm, and ~60–90s of silence make it disappear. Once the service is
-   warm, open the released **Knative** app button in the workshop room to see the same
-   response through Intar's fixed browser adapter.
+   requests hit it warm, and ~60–90s of silence make it disappear.
 4. Run `./verify.sh`.
 
 ## Hints
@@ -59,8 +57,5 @@ buffered your request while the pod started?)
   — watch the autoscaler add pods. What controls the max?
 - Set `autoscaling.knative.dev/min-scale: "1"` and explain when you'd pay that cost on
   purpose (hint: what did your first curl's latency look like?).
-
-`localhost` in the commands above is guest-local terminal traffic. Browser traffic uses
-the declared **Knative** app; learners never open arbitrary workspace ports.
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/06-serverless/verify.sh`. Layered hints and the solution are released separately by Intar.

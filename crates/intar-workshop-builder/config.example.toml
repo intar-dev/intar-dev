@@ -13,6 +13,16 @@ max_compressed_bundle_bytes = 67108864
 max_expanded_bundle_bytes = 536870912
 max_bundle_entries = 4096
 
+# Required for direct-cloud (for example Hetzner) workshop publications. The
+# file contains either the raw 32-byte Ed25519 seed or its standard-base64
+# encoding and is injected by CI as a root-owned runtime secret. Alternatively
+# set `private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"`; never put
+# key material in this TOML file.
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_file = "/run/secrets/intar-workshop-runtime-ed25519"
+compression = "zstd"
+
 [execution]
 work_root = "/var/lib/intar-workshop-builder/executions"
 qemu_binary = "/usr/bin/qemu-system-x86_64"
@@ -28,22 +38,62 @@ sanitizer_path = "/usr/local/sbin/intar-workshop-sanitize"
 probe_every_seconds = 10
 probe_timeout_seconds = 120
 
+# Mandatory together with runtime_bundle_signing. This is a minimal,
+# provider-equivalent Debian 13 disk with only the INTARBUILD seed/SSH
+# bootstrap contract; it must not contain workshop content or pre-pulled OCI
+# layers. CI installs the same statically linked workspace-agent artifact that
+# cloud-init uses. Replace every digest below with the exact artifact SHA-256.
+[execution.runtime_bundle_verification]
+system_image = "debian-13"
+architecture = "x86_64"
+disk = "/var/cache/intar-workshop-builder/clean/clean-debian13.raw"
+disk_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+kernel = "/var/cache/intar-workshop-builder/clean/clean-debian13-vmlinuz"
+kernel_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+initrd = "/var/cache/intar-workshop-builder/clean/clean-debian13-initrd.img"
+initrd_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
+workspace_agent_binary = "/usr/local/libexec/intar/intar-workspace-agent"
+workspace_agent_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Explicit one-shot preparation input. Protected release CI packages the
+# deterministic workshop bundle and exact Kino/sanitizer artifacts; replace
+# the placeholder hashes from that release before running:
+#   intar-workshop-builder prepare-authored-image --config ...
+# The command never overwrites output_directory. It promotes disk.raw,
+# provenance.json, and build logs together with one atomic directory rename.
+[execution.authored_image_preparation]
+workshop_bundle = "/usr/local/share/intar/workshops/platform-engineering-workshop.tar.gz"
+workshop_bundle_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+image_name = "platform-engineering-workshop-debian13-1b6fad4"
+image_verifier = "lab/00-setup/verify.sh"
+output_directory = "/var/cache/intar-workshop-builder/authored/platform-engineering-debian13"
+# 200 GiB: enough for the 64 GiB authored disk plus later checkpoint
+# clone/seal/restore work without depending on sparse-file behavior.
+minimum_free_space_bytes = 214748364800
+kino_binary = "/usr/local/libexec/intar/kino"
+kino_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+sanitizer_binary = "/usr/local/libexec/intar/intar-workshop-sanitize"
+sanitizer_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
 # The image name must exactly match workspace.vm.image in workshop.hcl. This
 # is a dedicated, operator-built Debian disk with the Intar build-seed service,
 # workshop toolchain/repository/offline images, Kino, and the fixed sanitizer.
 [[execution.images]]
 name = "platform-engineering-workshop-debian13-1b6fad4"
 architecture = "x86_64"
-disk = "/var/cache/intar-workshop-builder/bases/platform-engineering-debian13.raw"
-kernel = "/var/cache/intar-workshop-builder/bases/vmlinuz-6.12-intar"
-initrd = "/var/cache/intar-workshop-builder/bases/initrd.img-6.12-intar"
+disk = "/var/cache/intar-workshop-builder/authored/platform-engineering-debian13/disk.raw"
+kernel = "/var/cache/intar-workshop-builder/clean/clean-debian13-vmlinuz"
+initrd = "/var/cache/intar-workshop-builder/clean/clean-debian13-initrd.img"
 boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
-# These paths are archived once on the trusted build generation, removed before
-# every seal, absent during cold-boot proof, and restored only after the next
-# mutable generation starts. Never list participant lab/content paths here.
+# These paths must exist in the authored image. They are archived once on the
+# trusted build generation, removed before every seal, absent during cold-boot
+# proof, and restored only after the next mutable generation starts. The
+# curated Git repository is needed only while canonical checkpoints are built;
+# the learner-safe seed script recreates it from the participant tree when a
+# learner reaches module 02.
 guest_build_material_paths = [
-  "/opt/platform-engineering-workshop/scripts/catch-up.sh",
-  "/opt/platform-engineering-workshop/solutions",
+  "/opt/platform-engineering-workshop/.git",
 ]
 # Cold-boot proof checks every exact path below. Build material must be repeated
 # here, and participant-only image construction must omit all other answer,

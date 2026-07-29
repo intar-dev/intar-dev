@@ -105,6 +105,45 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
   uniqueIds(manifest.workspace.applications, "workspace application", true);
   uniqueIds(manifest.agenda, "agenda item");
 
+  const provider = manifest.workspace.provider;
+  if (provider !== undefined) {
+    if (
+      !isRecord(provider) ||
+      provider.kind !== "hetzner_cloud" ||
+      typeof provider.vmId !== "string" ||
+      !vmIds.has(provider.vmId) ||
+      typeof provider.serverType !== "string" ||
+      !/^[a-z0-9][a-z0-9-]{0,62}$/.test(provider.serverType) ||
+      typeof provider.systemImage !== "string" ||
+      !/^[a-z0-9][a-z0-9-]{0,62}$/.test(provider.systemImage) ||
+      provider.compatible !== true ||
+      !isRecord(provider.hardware) ||
+      provider.hardware.architecture !== "x86" ||
+      !Number.isSafeInteger(provider.hardware.cores) ||
+      provider.hardware.cores <= 0 ||
+      !Number.isSafeInteger(provider.hardware.memoryMib) ||
+      provider.hardware.memoryMib <= 0 ||
+      !Number.isSafeInteger(provider.hardware.diskMib) ||
+      provider.hardware.diskMib <= 0 ||
+      manifest.workspace.vms.length !== 1
+    ) {
+      throw invalidManifest(
+        "Hetzner provider metadata must pin one compatible x86 VM shape",
+      );
+    }
+    const vm = manifest.workspace.vms[0]!;
+    if (
+      vm.id !== provider.vmId ||
+      provider.hardware.cores * 1_000 < vm.cpuMillis ||
+      provider.hardware.memoryMib < vm.memoryMib ||
+      provider.hardware.diskMib < vm.diskMib
+    ) {
+      throw invalidManifest(
+        "Hetzner provider hardware does not satisfy the workspace requirements",
+      );
+    }
+  }
+
   if (!checkpointIds.has(manifest.workspace.initialCheckpointId)) {
     throw invalidManifest("initial checkpoint does not exist");
   }

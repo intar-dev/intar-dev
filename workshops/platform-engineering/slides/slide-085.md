@@ -1,6 +1,6 @@
 # Thank you
 
-**Your workspace. Your cloud. Your terms.**
+**Your laptop. Your cloud. Your terms.**
 
   **Øyvind Randa** — Software Architect, NextGenTel · GDG Bergen
 

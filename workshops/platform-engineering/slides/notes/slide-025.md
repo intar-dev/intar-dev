@@ -1,11 +1,7 @@
-Intar's learner room is the workshop authority: the dominant **Now** surface, released
-slides, layered hints, explain-back, agenda, technical progress, current probe health,
-and persistent **Need help** action all live there.
+Once the platform's portal is running (it arrives via the catalog; you'll meet it properly in module 08), its Workshop page shows a checklist of all ten modules — each row inferred from your live cluster state: nodes ready, kube-proxy absent, Gitea healthy, a CNPG cluster in demo, WorkshopDatabases present, thumbnails in the images bucket, and so on.
 
-Technical completion latches when verified; a later regression stays visible as current
-health without erasing the achievement. A checkpoint catch-up records skipped work as
-caught up, never verified. The Cloudbox Console's own Workshop page remains an
-interesting cluster-state view for module 08, but it does not replace Intar progress.
+Two honest caveats to mention: it's a hint, not a judge — verify.sh in each lab folder is the authoritative check; and module 05 (fault-fixing) can't be inferred from end-state at all.
 
-The projector shows only the shared slide, outcome, and server-timed clock—never learner
-identity or roster state. Now move to the pre-session gate: module 00.
+We'll keep it on the projector between modules as the room's shared progress board. It's also a nice teaser: the page itself is ~100 lines of Go reading the Kubernetes API — you'll read its source in module 08.
+
+Now — let's make sure everyone's laptop is ready. Module 00.

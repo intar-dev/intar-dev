@@ -5,8 +5,8 @@ In your Gitea clone:
 ```bash
 cp gitops/catalog/crossplane.yaml gitops/apps/
 mkdir -p gitops/components/platform-api
-cp /opt/platform-engineering-workshop/lab/04-self-service/platform/*.yaml gitops/components/platform-api/
-cp /opt/platform-engineering-workshop/lab/04-self-service/platform-api-app.yaml gitops/apps/platform-api.yaml
+cp /lab/04-self-service/platform/*.yaml gitops/components/platform-api/
+cp /lab/04-self-service/platform-api-app.yaml gitops/apps/platform-api.yaml
 git add . && git commit -m "platform API: WorkshopDatabase" && git push
 ```
 

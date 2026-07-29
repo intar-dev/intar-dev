@@ -1,6 +1,6 @@
 # Your cloud, in a box
 
-    **docker** Your Intar workspace · Docker — the "datacenter"
+    **docker** Your laptop · Docker — the "datacenter"
 
       **talos** **cilium** Talos + Cilium · Kubernetes — no kube-proxy
 

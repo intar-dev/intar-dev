@@ -197,6 +197,7 @@ export function checkpointResult(
     checkpoint_id: checkpointId,
     sanitized: true,
     cold_boot_verified: true,
+    runtime_bundle_cold_boot_verified: true,
     vm_images: [
       {
         vm_id: "workspace",

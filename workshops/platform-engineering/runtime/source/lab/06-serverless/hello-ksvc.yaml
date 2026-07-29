@@ -1,0 +1,24 @@
+# A Knative Service — copy to gitops/components/demo/hello-ksvc.yaml and push.
+#
+# Image: pin by digest before the workshop (rehearsal task) — ghcr.io/knative/
+# helloworld-go only publishes :latest upstream — pinned by digest (pre-pull list).
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  template:
+    metadata:
+      annotations:
+        # Small window so you can watch scale-to-zero happen within a minute.
+        autoscaling.knative.dev/window: "30s"
+    spec:
+      containers:
+        - image: ghcr.io/knative/helloworld-go@sha256:c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba
+          env:
+            - name: TARGET
+              value: "your own cloud"
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 25m

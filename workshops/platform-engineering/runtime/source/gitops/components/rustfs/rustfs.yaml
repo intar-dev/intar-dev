@@ -1,0 +1,209 @@
+---
+# Source: rustfs/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustfs
+  namespace: rustfs
+  labels:
+    helm.sh/chart: rustfs-0.8.0
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs
+    app.kubernetes.io/version: "1.0.0-beta.8"
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: true
+---
+# Source: rustfs/templates/secret.yaml
+# WORKSHOP-GRADE CREDENTIALS: cloudbox / cloudbox123, committed to git on
+# purpose. This is an ephemeral lab sandbox on your own laptop — never do
+# this for anything reachable from a real network.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-secret
+  namespace: rustfs
+  labels:
+    {}
+type: Opaque
+data:
+  RUSTFS_ACCESS_KEY: "Y2xvdWRib3g="
+  RUSTFS_SECRET_KEY: "Y2xvdWRib3gxMjM="
+---
+# Source: rustfs/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustfs-config
+  namespace: rustfs
+  labels:
+    {}
+data:
+  RUSTFS_ADDRESS: ":9000"
+  RUSTFS_CONSOLE_ADDRESS: ":9001"
+  RUSTFS_CONSOLE_ENABLE: "true"
+  RUSTFS_OBS_LOG_DIRECTORY: ""
+  RUSTFS_OBS_LOGGER_LEVEL: "info"
+  RUSTFS_OBS_ENVIRONMENT: "development"
+  RUSTFS_REGION: "us-east-1"
+  RUSTFS_VOLUMES: "/data"
+---
+# Source: rustfs/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    # Both keep-annotations on purpose: helm.sh/resource-policy is what the
+    # chart ships (honored by Helm, ignored by ArgoCD); the ArgoCD one below
+    # is the workshop curation that actually protects the volume — without
+    # it, disabling the rustfs app (git rm + push, prune: true) would delete
+    # the PVC and every uploaded image with it.
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+  name: rustfs-data
+  namespace: rustfs
+  labels:
+    {}
+spec:
+  accessModes: [ ReadWriteOnce ]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+# Source: rustfs/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-svc
+  namespace: rustfs
+  labels:
+    helm.sh/chart: rustfs-0.8.0
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs
+    app.kubernetes.io/version: "1.0.0-beta.8"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - name: endpoint
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
+  selector:
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs
+---
+# Source: rustfs/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs
+  namespace: rustfs
+  labels:
+    helm.sh/chart: rustfs-0.8.0
+    app.kubernetes.io/name: rustfs
+    app.kubernetes.io/instance: rustfs
+    app.kubernetes.io/version: "1.0.0-beta.8"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs
+      app.kubernetes.io/instance: rustfs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs
+        app.kubernetes.io/instance: rustfs
+    spec:
+      imagePullSecrets:
+        []
+      affinity:
+      priorityClassName: 
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsUser: 10001
+      initContainers:
+        - name: init-step
+          image: "docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: rustfs
+          image: "docker.io/rustfs/rustfs@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3"
+          command: ["/usr/bin/rustfs"]
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+          ports:
+            - name: endpoint
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          envFrom:
+            - configMapRef:
+                name: rustfs-config
+            - secretRef:
+                name: rustfs-secret
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rustfs-data

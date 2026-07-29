@@ -1,6 +1,6 @@
 # Canonical solution for module 09
 
-This is adapted from the pinned upstream `solve.sh` for Intar's declared app surface. Reveal it only after the learner has chosen to see the solution.
+This is adapted from the pinned upstream `solve.sh` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.
 
 ```bash
 #!/usr/bin/env bash
@@ -61,7 +61,7 @@ done
 # A 1x1 PNG, embedded so the solve needs no local image file.
 PNG_B64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 TMP_PNG="$(mktemp).png"
-# Keep the upstream portable fallback even though the Intar guest uses GNU base64.
+# shellcheck disable=SC2015  # macOS base64 wants -D on older releases
 echo "$PNG_B64" | base64 -d > "$TMP_PNG" 2>/dev/null || echo "$PNG_B64" | base64 -D > "$TMP_PNG"
 
 echo "uploading test image through the portal (cold-starts the uploader)..."
@@ -77,7 +77,7 @@ s3() {
       aws --endpoint-url http://localhost:30900 "$@" 2>/dev/null
   else
     kubectl -n pipeline run "solve-s3-$$-${RANDOM}" --rm -i --restart=Never --quiet \
-      --image=public.ecr.aws/aws-cli/aws-cli:2.27.49 \
+      --image=public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581 \
       --env AWS_ACCESS_KEY_ID=cloudbox --env AWS_SECRET_ACCESS_KEY=cloudbox123 \
       --env AWS_REGION=us-east-1 \
       -- --endpoint-url http://rustfs-svc.rustfs.svc.cluster.local:9000 "$@" 2>/dev/null
@@ -91,5 +91,5 @@ until s3 s3api list-objects-v2 --bucket images --prefix thumbs/ \
   [ "$WAITED" -ge 240 ] && { echo "no thumbnail after ${WAITED}s — check: kubectl -n pipeline logs -l serving.knative.dev/service=resizer -c user-container" >&2; exit 1; }
   sleep 10; WAITED=$((WAITED + 10))
 done
-echo "thumbnail produced after ~${WAITED}s — open Intar's Cloudbox Console app, then Gallery"
+echo "thumbnail produced after ~${WAITED}s — see http://localhost:30600/gallery"
 ```

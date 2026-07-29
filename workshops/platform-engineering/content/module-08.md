@@ -2,16 +2,16 @@
 
 ## The goal
 
-At the end of this module your platform has a front door: the **Cloudbox Console**,
-opened through its released Intar app button, showing — live — the ArgoCD apps, Postgres
-clusters, and Knative services *you built today*. The trophy: you create a database
-through its "New database" form and prove with `kubectl` that a real
-`WorkshopDatabase` XR and a real CNPG cluster appeared. Then you read the portal's
-entire source code, because it's small enough that you can.
+At the end of this module your platform has a front door: the **Cloudbox Console** at
+http://localhost:30600, showing — live — the ArgoCD apps, Postgres clusters, and Knative
+services *you built today*. The trophy: you create a database through its "New database"
+form and prove with `kubectl` that a real `WorkshopDatabase` XR and a real CNPG cluster
+appeared. Then you read the portal's entire source code, because it's small enough that
+you can.
 
   ![Cloudbox Console — a component](../assets/modules/08/console-component-monitoring-dark.png)
 
-*This is what you're building: the Cloudbox Console — Go + htmx, server-rendered, offline, with per-component metrics/logs/traces from your OTel stack. Light + dark themes.*
+*This is what you're building: the Cloudbox Console — Go + htmx, server-rendered, digest-pinned, with per-component metrics/logs/traces from your OTel stack. Light + dark themes.*
 
 It isn't just component health, either — every capability you stood up gets its own
 page with a live **Monitoring** panel fed by the same OTel stack:
@@ -41,14 +41,12 @@ most portals.
 
 1. Enable `portal.yaml` from the catalog. It lands in ns `portal` and takes seconds — it's
    one small Go binary (compare that to what module 08 used to be…).
-2. Open **Cloudbox Console** from the workshop app buttons and explore. The nav groups the pages into **Platform**
+2. Open **http://localhost:30600** and explore. The nav groups the pages into **Platform**
    (Overview, Components, Access, Workshop, Activity, Billing), **Services** (Applications,
    Databases, Buckets, Functions, Streams, Builds — Applications, Databases and Functions
    each have a detail page, and Buckets uses an in-page object browser), and **Capstone** (Gallery) — and none of them is a mock: every row is a live read
    from your cluster (the Workshop page even tracks your module progress, live). For each
-   page, answer: *which Kubernetes API is this?* (You installed all of them today.) The
-   Console's Workshop page is its own cluster-state view; Intar's room and verifier
-   results remain the authoritative workshop progress.
+   page, answer: *which Kubernetes API is this?* (You installed all of them today.)
 3. **Hand your portal the keys.** The console can *read* everything, but creating
    databases needs a write grant it deliberately doesn't ship with: grant your portal
    access to the self-service API — copy [`portal-access.yaml`](portal-access.yaml)
@@ -113,14 +111,16 @@ audience is you. Backstage earns its weight when you need:
 The costs are real too: ~2 GB of Node.js + Postgres, YAML-heavy configuration, and
 typically a team that owns it. A portal is a *product decision*, not a default.
 
-> **Presenter architecture walkthrough (~5 min):** trace the classic Backstage loop on
-> the slide: catalog → software template → new Gitea repo → ArgoCD app → pods. Watch
-> for what the template must wire together — that integration glue is the real work of
-> running Backstage.
+> **Presenter demo (~5 min):** the presenter now enables `backstage.yaml` from the
+> catalog on the projector cluster and runs the classic loop: catalog → software template
+> → new Gitea repo → ArgoCD app → pods. Watch for what the template wires together —
+> that integration glue is the real work of running Backstage.
 >
-> *Presenter notes:* v1 intentionally declares no Backstage workspace app route. Do not
-> expose port 30700 or enable an undeclared browser surface. Use the bundled architecture
-> slide and compare it with the live Cloudbox, Gitea, and Argo CD app buttons instead.
+> *Presenter notes:* pre-enable `backstage.yaml` before the module (first boot is slow,
+> ~2 GB image + CNPG database — it's why this is a demo, not the lab). Show: guest
+> sign-in at :30700, catalog entities fed from Gitea, run the template, then chase it
+> through Gitea (:30300) and ArgoCD (:30080). `backstage.yaml` stays in the catalog —
+> attendees with RAM to spare can run the same loop at home.
 
 ## Hints
 
@@ -172,9 +172,8 @@ git instead?
   cp "$WORKSHOP/lab/08-portal/portal-applications-access.yaml" gitops/components/demo/
   git add . && git commit -m "grant portal: create Applications" && git push
   ```
-  Deploy `my-app`, watch it turn Ready, and prove its Service from the guest terminal —
-  the apex of the self-service arc, from a form. V1 does not expose arbitrary workload
-  URLs; browser access remains limited to the workshop's declared app buttons.
+  Deploy `my-app`, watch it turn Ready, and open its `*.sslip.io` URL — the apex of the
+  self-service arc, from a form.
 - **Read _why_ something is broken (Diagnostics, DR-0005).** When an Application or Function
   isn't Ready, open its **detail page**: instead of a bare red dot, the console shows the
   cause a `kubectl describe` would — the failing conditions, the offending pods' container
@@ -187,15 +186,14 @@ git instead?
   **Source → Build from a repo** and give an in-cluster Gitea repo (`/` + branch +
   path with a `Dockerfile`). A ready one is seeded for you: **`cloudbox/demo-app`** — a real
   Go service that uses its composed Postgres (a live visit counter) and S3 bucket, so the page
-  proves the wiring rather than ignoring it. This is an optional extension and only runs
-  offline when the publication image includes its Golang base in the local mirror. Copy it
-  mirror-to-Zot, never from a public registry during the session:
-  `crane copy --insecure localhost:5001/library/golang:1.25-alpine localhost:30500/library/golang:1.25-alpine`.
+  proves the wiring rather than ignoring it. Its Dockerfile builds `FROM` a golang base in Zot,
+  so seed that base once first (same move as module 07's busybox):
+  `crane copy --insecure public.ecr.aws/docker/library/golang@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 localhost:30500/library/golang:1.25-alpine`.
   The console runs the module-07 `build-and-push` Workflow (clone →
   BuildKit → Zot) **and** creates the Application at the built image — so `git push → build →
   deploy` is the app team's counterpart to the platform team's `git push → ArgoCD → converge`.
   It needs **both** grants (the functions/workflows one from step 3 *and* the applications one
-  above); repos are restricted to the in-cluster Gitea (offline + no arbitrary-URL builds).
+  above); repos are restricted to the in-cluster Gitea (digest-pinned + no arbitrary-URL builds).
   Then close the loop: change the code, push again, and hit **Redeploy** on the app's **detail
   page** — it rebuilds the repo at a fresh image tag and rolls the running app forward (a mutable tag would
   leave it pinned to the old image). That's `push → build → deploy` end to end, in the console.

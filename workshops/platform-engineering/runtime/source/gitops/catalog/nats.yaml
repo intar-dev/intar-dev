@@ -1,0 +1,34 @@
+# NATS 2.12.12 + JetStream — durable messaging (PRD-0001). Single-node broker
+# with persistent JetStream: client nats://localhost:30422, monitoring :8222.
+# The durable counterpart to Knative's in-memory broker, and the queue backing
+# the golden-path Application XR (PRD-0003, spec.queue).
+#
+# Enable with:  cp gitops/catalog/nats.yaml gitops/apps/ && git add . && git commit -m 'enable nats' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nats
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/nats
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nats
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

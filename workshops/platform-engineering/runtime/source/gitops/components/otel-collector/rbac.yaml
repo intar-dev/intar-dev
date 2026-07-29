@@ -1,0 +1,72 @@
+---
+# OTel Collector — shared ServiceAccount + read-only cluster RBAC (issue #57,
+# Stage 2). One SA is used by BOTH collectors (the agent DaemonSet and the
+# gateway Deployment); the grants are the union of what their receivers need:
+#   - kubeletstats (agent)  → nodes/stats (the kubelet authorizes the SA token
+#                             against this when we hit hostIP:10250 directly)
+#   - k8s_cluster (gateway) → get/list/watch across core object types for
+#                             cluster-state metrics
+#   - prometheus  (gateway) → pod service-discovery (role: pod)
+# Everything here is READ-only — the collector observes the cluster, never
+# mutates it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/instance: otel-collector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/instance: otel-collector
+rules:
+  # Core objects — k8s_cluster state, prometheus pod SD, and the kubelet's
+  # nodes/stats authorization check for kubeletstats.
+  - apiGroups: [""]
+    resources:
+      - events
+      - namespaces
+      - namespaces/status
+      - nodes
+      - nodes/spec
+      - nodes/stats
+      - nodes/proxy
+      - pods
+      - pods/status
+      - replicationcontrollers
+      - replicationcontrollers/status
+      - resourcequotas
+      - services
+      - endpoints
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [daemonsets, deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/instance: otel-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: observability

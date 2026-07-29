@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   member,
+  runtimeExecutions,
   workshopSessions,
   workshopWorkspaceGenerations,
   workshopWorkspaces,
@@ -195,7 +196,10 @@ export async function issueWorkshopWorkspaceApplication(input: {
       },
     });
   } catch (error) {
-    await markWorkshopRouteIssuanceIntentIssued({ intentId, routeKey: routeId });
+    await markWorkshopRouteIssuanceIntentIssued({
+      intentId,
+      routeKey: routeId,
+    });
     await deleteStargateWorkspaceAppRoute(routeId);
     await completeWorkshopRouteIssuanceIntent(intentId);
     throw error;
@@ -255,6 +259,19 @@ export async function issueWorkshopWorkspaceApplication(input: {
         eq(workshopWorkspaces.userId, input.actorUserId),
         eq(workshopWorkspaces.currentGenerationId, workspace.generationId),
         eq(workshopWorkspaces.state, "ready"),
+        sql`exists (
+          select 1
+          from ${workshopWorkspaceGenerations}
+          join ${runtimeExecutions}
+            on ${runtimeExecutions.id} = ${workshopWorkspaceGenerations.runtimeExecutionId}
+          where ${workshopWorkspaceGenerations.id} = ${workspace.generationId}
+            and ${workshopWorkspaceGenerations.workspaceId} = ${workspace.workspaceId}
+            and ${workshopWorkspaceGenerations.state} = 'ready'
+            and ${runtimeExecutions.id} = ${target.executionId}
+            and ${runtimeExecutions.domainKind} = 'workshop'
+            and ${runtimeExecutions.domainId} = ${workspace.workspaceId}
+            and ${runtimeExecutions.state} = 'ready'
+        )`,
         sql`exists (
           select 1
           from ${workshopSessions}

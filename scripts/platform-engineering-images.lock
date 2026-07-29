@@ -1,0 +1,47 @@
+# Pinned from upstream commit 1b6fad43551a720b143d7a52799f81c4c89455cb.
+# Format: mutable-source-reference<TAB>immutable-runtime-reference
+# Refresh with resolve-oci-image-digests.ts, review, then update this file.
+ghcr.io/siderolabs/talos:v1.13.6	ghcr.io/siderolabs/talos@sha256:f2e2b7e5812b2b59c1acfe6af7516231aeeef79fb1ffff6b57ad987f8dd47a6e
+docker.io/library/registry:3.1.1	docker.io/library/registry@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+ghcr.io/siderolabs/kubelet:v1.36.2	ghcr.io/siderolabs/kubelet@sha256:e594fcc880e6d2816b3334e4ddfd586b420ca8c3a4dd2b40e9de1571e69e559a
+registry.k8s.io/kube-apiserver:v1.36.2	registry.k8s.io/kube-apiserver@sha256:0535dde1a857029209d7effe681c919a1580d2eb24eda4bd122d24e9a372e1b8
+registry.k8s.io/kube-controller-manager:v1.36.2	registry.k8s.io/kube-controller-manager@sha256:b3add29a00c3c4763c75a09ec94915e3d0d590b93b3850a97d52970fbd2b2c12
+registry.k8s.io/kube-scheduler:v1.36.2	registry.k8s.io/kube-scheduler@sha256:94dfc9f285718a06bb873947959b8514ed95dddaa7c74d765cc346fdfa684859
+registry.k8s.io/etcd:v3.6.12	registry.k8s.io/etcd@sha256:3c2ced08f23b1183e8bd4613064c3fb6b8db5057a4d1f13c3518c76e357a07a8
+registry.k8s.io/coredns/coredns:v1.14.2	registry.k8s.io/coredns/coredns@sha256:e7e6440cfd1e919280958f5b5a6ab2b184d385bba774c12ad2a9e1e4183f90d9
+registry.k8s.io/pause:3.10.1	registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
+registry.k8s.io/networking/kube-network-policies:v1.0.0	registry.k8s.io/networking/kube-network-policies@sha256:1e3e79625828c8fdc9a579e3e587abaaadbb0eed317abc6912badb1b92f76135
+docker.gitea.com/gitea:1.26.1-rootless	docker.gitea.com/gitea@sha256:4c4256497e2e237ddebdd30986c7ce52cb6f936b3e90c34bb9f4665714599f62
+quay.io/argoproj/argocd:v3.4.5	quay.io/argoproj/argocd@sha256:224e454cfd8c1818fec3ed17b72b2034c9a3915fa819e1dcccafc753776d446a
+ghcr.io/dexidp/dex:v2.45.0	ghcr.io/dexidp/dex@sha256:b8469881d3cb3a73001506f0d3aaefecb9c45d2311c1e0f405d8ac538316c59d
+public.ecr.aws/docker/library/redis:8.2.3-alpine	public.ecr.aws/docker/library/redis@sha256:08ad0b1d280850169a790dba1393ff7a90aef951fc19632cf4d3ce4f78e679ba
+docker.io/rancher/local-path-provisioner:v0.0.36	docker.io/rancher/local-path-provisioner@sha256:1eba82e9c386038b4af6d69cca7519fac738c28c42735ed48ce70c882ad0d80f
+docker.io/library/busybox:1.37.0	docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+ghcr.io/cloudnative-pg/cloudnative-pg:1.28.4	ghcr.io/cloudnative-pg/cloudnative-pg@sha256:c83a866a7f2c8b2def04bf7a8e6a7f0e9a5c2736a1c710e24e29edf12e03fcd9
+ghcr.io/cloudnative-pg/postgresql:18.4-system-trixie	ghcr.io/cloudnative-pg/postgresql@sha256:9287ce030c6f3ce822e383b019ae4aaf1e8370bff3b39f9c51dc10d69dc97219
+ghcr.io/crossplane-contrib/function-patch-and-transform:v0.10.7	ghcr.io/crossplane-contrib/function-patch-and-transform@sha256:1c2f7ae4cab30f92177f5cea82732cbb86e015c1b8b3997ba4d4f000605feb57
+docker.io/rustfs/rustfs:1.0.0-beta.8	docker.io/rustfs/rustfs@sha256:fa19210ac4697c79d7ccca1ec9b0eb91aebacc6691991ffb14014bb3c67e6cc3
+ghcr.io/project-zot/zot:v2.1.18	ghcr.io/project-zot/zot@sha256:6f7bf2b8e43437c7c3a121bc80214845c85f27321e66f2ff4be6bf4220775fd7
+xpkg.crossplane.io/crossplane/crossplane:v2.3.3	xpkg.crossplane.io/crossplane/crossplane@sha256:f1c88a98f113a5cb78d75c7e94e2a7fefdf86ffb3353c63f01697dc5ad855b19
+docker.io/envoyproxy/envoy:v1.37.2	docker.io/envoyproxy/envoy@sha256:c5e8a68e52f4d4697a9adb280dbe415d77fedf1257e183dcb86205bd438f18bd
+quay.io/argoproj/workflow-controller:v4.0.7	quay.io/argoproj/workflow-controller@sha256:8e3ca93350c18348e50cdb1899f37d672f9995d9bf51412d86dee52da22fff19
+quay.io/argoproj/argoexec:v4.0.7	quay.io/argoproj/argoexec@sha256:eb2a7ca4d678a0c8c4f2de44f815f02d9eb12ac4609855f897744139aef220b4
+quay.io/argoproj/argocli:v4.0.7	quay.io/argoproj/argocli@sha256:8c141b1acd26df3de70724aedaae0ee5a7d361cdf744a1daa6a1596f205cee50
+docker.io/moby/buildkit:v0.31.1-rootless	docker.io/moby/buildkit@sha256:946cf909534b789c9b84af75e6d4f8cb23c3b9cb387daec5ba0f4878a3e4647c
+ghcr.io/kagent-dev/kagent/controller:0.9.11	ghcr.io/kagent-dev/kagent/controller@sha256:2f6a4da1650883c9a7961d24bb881f443627b86e2c1d4de0d28f812a44d57ca2
+ghcr.io/kagent-dev/kagent/tools:0.2.1	ghcr.io/kagent-dev/kagent/tools@sha256:50b431281d3e32666f27a292962fd486aabaac157083a844d037c12137e353aa
+ghcr.io/kagent-dev/kagent/ui:0.9.11	ghcr.io/kagent-dev/kagent/ui@sha256:e659d3c89f9025c87732d892fbc3c7d2c8967af71d84ff47d85fa08efe3ee70a
+docker.io/library/postgres:18.3-alpine	docker.io/library/postgres@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7
+ghcr.io/kagent-dev/kagent/app:0.9.11	ghcr.io/kagent-dev/kagent/app@sha256:e2d28b8f4dfc49364590b7de48effeda2627dec9cb89d170ac10839f0cfe712d
+ghcr.io/kagent-dev/kagent/skills-init:0.9.11	ghcr.io/kagent-dev/kagent/skills-init@sha256:4999d4d0a250cf1abbae5df4060581f10e76086d94f3b4816fa10da7f18d3011
+public.ecr.aws/aws-cli/aws-cli:2.27.49	public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581
+public.ecr.aws/docker/library/golang:1.25-alpine	public.ecr.aws/docker/library/golang@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587
+docker.io/library/postgres:18-alpine	docker.io/library/postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+ghcr.io/randax/cloudbox-portal:v0.1.0	ghcr.io/randax/cloudbox-portal@sha256:f460aaf70c4c69c28ca0bd1c958f2fd77ceefb0a6acd7362615545ba7a232e73
+ghcr.io/randax/cloudbox-uploader:v0.1.0	ghcr.io/randax/cloudbox-uploader@sha256:7f92e34249ccf95a1c9880ad205149459712aa4d4160548cd9e3c5c083eebc1d
+ghcr.io/randax/cloudbox-resizer:v0.1.0	ghcr.io/randax/cloudbox-resizer@sha256:08ccc66e6e3aa4070104bef93cf7904a64376539ac1ecdaa8a5c4e888a2ed58c
+# The pinned custom image is not publicly pullable (GHCR returns 403). The
+# direct-cloud adaptation uses stock Grafana with built-in Prometheus/Loki/
+# Jaeger datasources until the custom package is published and digest-pinned.
+ghcr.io/randax/cloudbox-grafana:v0.1.0	docker.io/grafana/grafana@sha256:26b8f35a9e4e4431995cf64c3f396505a4faf17bcfc19f9ed84943ec6bfd5ecd
+ghcr.io/cnoe-io/backstage-app:9232d633b2698fffa6d0a73b715e06640d170162	ghcr.io/cnoe-io/backstage-app@sha256:960dcd8b68ba8fed3685727c63b5221e5f95392694d887a12e14d792834636de

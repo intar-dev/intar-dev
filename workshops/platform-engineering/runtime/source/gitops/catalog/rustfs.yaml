@@ -1,0 +1,33 @@
+# RustFS 1.0.0-beta.8, standalone single-pod S3 (module 3: object storage).
+# S3 endpoint: rustfs-svc.rustfs:9000 (NodePort http://localhost:30900),
+# console :9001. Credentials (workshop-grade): cloudbox / cloudbox123.
+#
+# Enable with:  cp gitops/catalog/rustfs.yaml gitops/apps/ && git add . && git commit -m 'enable rustfs' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rustfs
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/rustfs
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rustfs
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

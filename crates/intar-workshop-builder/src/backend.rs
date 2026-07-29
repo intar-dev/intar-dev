@@ -4,7 +4,7 @@ use anyhow::Result;
 use intar_contracts::catalog::{ImageArchitecture, ImageFormat, ImageKey};
 use intar_workshop_manifest::WorkshopManifest;
 
-use crate::contracts::BuiltVmImage;
+use crate::contracts::{BuiltVmImage, RuntimeBundleArtifact};
 
 /// Purpose of a canonical source-bundle script. Implementations upload this
 /// exact file into the isolated build guest and execute it there; callers
@@ -40,6 +40,24 @@ pub struct CheckpointImageTarget {
 pub struct SealCheckpoint<'a> {
     pub checkpoint_id: &'a str,
     pub targets: &'a [CheckpointImageTarget],
+}
+
+/// Exact direct-cloud reconstruction artifact that must be proven on a fresh
+/// provider-equivalent base. The public key is derived from the same signer
+/// that produced `artifact`; no private material crosses into the guest.
+#[derive(Debug, Clone)]
+pub struct RuntimeBundleColdBoot<'a> {
+    pub checkpoint_id: &'a str,
+    pub system_image: &'a str,
+    pub bytes: &'a [u8],
+    pub artifact: &'a RuntimeBundleArtifact,
+    pub signing_public_key_b64: &'a str,
+    pub max_checkpoint_bytes: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RuntimeBundleColdBootProof {
+    pub workspace_agent_sha256: String,
 }
 
 /// Files and immutable boot metadata emitted by the trusted guest workflow.
@@ -107,6 +125,15 @@ pub trait WorkshopExecutionBackend {
     /// Shut down the cold-boot proof generation. When another checkpoint
     /// follows, the backend must leave the sealed state resumable.
     fn finish_cold_boot(&mut self, checkpoint_id: &str) -> Result<()>;
+
+    /// Clone the configured clean direct-cloud base, boot it as a new guest,
+    /// upload the exact signed bundle and configured workspace-agent binary,
+    /// and require the agent's built-in apply + verifier path to succeed.
+    /// Implementations must not reuse the sealed KVM checkpoint disk.
+    fn cold_boot_runtime_bundle(
+        &mut self,
+        request: &RuntimeBundleColdBoot<'_>,
+    ) -> Result<RuntimeBundleColdBootProof>;
 
     /// Start the next mutable build generation from the previous canonical
     /// checkpoint. This keeps checkpoint creation sequential and cumulative.

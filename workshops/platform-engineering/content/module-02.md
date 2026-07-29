@@ -11,8 +11,8 @@ your name in it — materialize without you touching `kubectl apply`.
 
 This is the architectural heart of the workshop. Everything from here on — databases,
 platform APIs, serverless — arrives as a git commit that ArgoCD converges. Note the git
-server is *inside* the cluster: your platform doesn't depend on GitHub, live internet,
-or anyone's SaaS. That's "cloud on your terms" in one design decision. The pattern
+server is *inside* the cluster: your platform doesn't depend on GitHub, on the venue WiFi,
+or on anyone's SaaS. That's "cloud on your terms" in one design decision. The pattern
 (app-of-apps: one root Application that deploys other Applications) is exactly how real
 platform teams bootstrap clusters.
 
@@ -25,12 +25,12 @@ platform teams bootstrap clusters.
    ./scripts/seed-gitea.sh         # pushes this repository into your in-cluster Gitea
    ```
 
-2. Look around your cloud's control room. In the workshop room, open the released
-   **Gitea** app button, log in as `gitea_admin` / `cloudbox123`, and find the
-   `cloudbox/platform` repo. Then open **Argo CD**; the username is `admin` and its
-   password comes from the cluster (hint 1). Find the root `platform` Application. What
-   path in the repo does it watch? What single Application did it already create, and
-   why is that directory called "wave 0"?
+2. Look around your cloud's control room:
+   - Gitea: http://localhost:30300 — log in as `gitea_admin` / `cloudbox123`, find the
+     `cloudbox/platform` repo.
+   - ArgoCD: http://localhost:30080 — username `admin`; get the password from the cluster
+     (hint 1). Find the root `platform` Application. What path in the repo does it watch?
+     What single Application did it already create, and why is that dir called "wave 0"?
 
 3. **Make a real change through git.** Clone the repo *from your Gitea* and, using the two
    template files in this lab directory:
@@ -83,10 +83,9 @@ being in-cluster a sovereignty feature and not just a demo trick?
 - Read the root app's manifest: `kubectl -n argocd get app platform -o yaml`. Find the
   sync-wave annotations on the children. What orders what?
 
-## Optional AI assistance
+## AI assistants welcome
 
 Good module for it: ask your assistant to explain any manifest you push before you push it
-— "what will ArgoCD do when this lands?" is exactly the review muscle GitOps needs. The
-module remains complete offline; do not install a client or create an account for it.
+— "what will ArgoCD do when this lands?" is exactly the review muscle GitOps needs.
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/02-gitops/verify.sh`. Layered hints and the solution are released separately by Intar.

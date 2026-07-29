@@ -32,6 +32,7 @@ import {
   agentHosts,
   member,
   organization,
+  organizationProviderConnections,
   runtimeExecutions,
   runtimeVmActualState,
   runtimeVms,
@@ -41,10 +42,13 @@ import {
   workshopEvents,
   workshopHelpRequests,
   workshopSessionMembers,
+  workshopSessionCostSummaries,
+  workshopSessionRuntimeProviders,
   workshopSessions,
   workshopTemplateRevisions,
   workshopWorkspaceGenerations,
   workshopWorkspaces,
+  type ProviderPriceObservation,
   type WorkshopManifestV1,
 } from "@/db/schema";
 import type { VmActualStateV2 } from "@/generated/bridge";
@@ -60,6 +64,7 @@ import {
   requireActiveWorkshopAssistGrant,
   revokeWorkshopAssist,
 } from "./assistance";
+import { createWorkshopCostForecast } from "./cost-storage";
 import { performWorkshopSessionAction } from "./actions";
 import { issueWorkshopWorkspaceApplication } from "./applications";
 import {
@@ -68,10 +73,7 @@ import {
   recordWorkshopGenerationState,
 } from "./provisioning";
 import { recordWorkshopModuleObservation } from "./progress";
-import {
-  recordWorkshopPresence,
-  workshopPresenceState,
-} from "./presence";
+import { recordWorkshopPresence, workshopPresenceState } from "./presence";
 import {
   getOrganizationWorkshopsProjection,
   getWorkshopListProjection,
@@ -390,6 +392,157 @@ describe("standalone workshops", () => {
     });
   });
 
+  it("projects pinned provider and estimated costs only to organization managers", async () => {
+    const setup = await createSessionFixture();
+    const now = Date.now();
+    const prices: ProviderPriceObservation = {
+      currency: "EUR",
+      observedAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1_000,
+      serverType: "cx43",
+      locations: ["nbg1", "fsn1", "hel1"].map((location, index) => ({
+        location,
+        available: true,
+        serverHourlyNet: `0.0${index + 4}`,
+        serverHourlyGross: `0.0${index + 5}`,
+        serverMonthlyNet: "20.00",
+        serverMonthlyGross: "24.00",
+        ipv4HourlyNet: "0.001",
+        ipv4HourlyGross: "0.0012",
+        ipv4MonthlyNet: "0.50",
+        ipv4MonthlyGross: "0.60",
+      })),
+    };
+    const db = drizzle(env.DB);
+    await db.insert(organizationProviderConnections).values({
+      id: "hcloud-connection-a",
+      organizationId: "org-a",
+      providerKind: "hetzner_cloud",
+      displayName: "Workshop learner project",
+      state: "active",
+      projectFingerprint: "project-fingerprint-a",
+      sentinelFirewallId: "1234",
+      approvedLocationsJson: ["nbg1", "fsn1", "hel1"],
+      maxConcurrentServers: 5,
+      maxSessionGrossMicros: 10_000_000,
+      currency: "EUR",
+      lastValidatedAt: now,
+      createdBy: "owner-a",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db
+      .update(workshopSessionRuntimeProviders)
+      .set({
+        providerKind: "hetzner_cloud",
+        connectionId: "hcloud-connection-a",
+        serverType: "cx43",
+        hardwareJson: {
+          architecture: "x86",
+          cores: 8,
+          memoryMib: 16_384,
+          diskMib: 160 * 1_024,
+        },
+        permittedLocationsJson: ["nbg1", "fsn1", "hel1"],
+        initialPriceObservationJson: prices,
+        updatedAt: now,
+      })
+      .where(eq(workshopSessionRuntimeProviders.sessionId, setup.sessionId));
+    await createWorkshopCostForecast({
+      sessionId: setup.sessionId,
+      priceObservation: prices,
+      trigger: "session_created",
+      actorUserId: "owner-a",
+      now,
+    });
+    await db.insert(workshopSessionCostSummaries).values({
+      sessionId: setup.sessionId,
+      currency: "EUR",
+      finalNetMicros: 45_000,
+      finalGrossMicros: 54_000,
+      forecastNetVarianceMicros: 1_000,
+      forecastGrossVarianceMicros: 1_200,
+      generationCount: 2,
+      restoreCount: 1,
+      cleanupPendingCount: 0,
+      manualCleanupUnverified: false,
+      finalizedAt: now,
+      updatedAt: now,
+    });
+
+    const ownerOrganization = await getOrganizationWorkshopsProjection({
+      organizationId: "org-a",
+      userId: "owner-a",
+    });
+    expect(ownerOrganization.sessions[0]).toMatchObject({
+      runtimeProvider: {
+        kind: "hetzner_cloud",
+        connection: {
+          id: "hcloud-connection-a",
+          displayName: "Workshop learner project",
+          state: "active",
+          currency: "EUR",
+        },
+        serverType: "cx43",
+        permittedLocations: ["nbg1", "fsn1", "hel1"],
+      },
+      cost: {
+        label: "estimated Hetzner cost",
+        latestForecast: { version: 1, participantCount: 1 },
+        live: { currency: "EUR" },
+        final: {
+          currency: "EUR",
+          netMicros: 45_000,
+          grossMicros: 54_000,
+          generationCount: 2,
+          restoreCount: 1,
+          manualCleanupUnverified: false,
+        },
+      },
+    });
+    const ownerRoom = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+    });
+    expect(ownerRoom).toMatchObject({
+      session: {
+        runtimeProvider: {
+          kind: "hetzner_cloud",
+          serverType: "cx43",
+        },
+        cost: { latestForecast: { version: 1 } },
+      },
+    });
+
+    const participantOrganization = await getOrganizationWorkshopsProjection({
+      organizationId: "org-a",
+      userId: "learner-a",
+    });
+    expect(participantOrganization.sessions[0]).not.toHaveProperty(
+      "runtimeProvider",
+    );
+    expect(participantOrganization.sessions[0]).not.toHaveProperty("cost");
+    const participantRoom = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "learner-a",
+    });
+    expect(participantRoom.session).not.toHaveProperty("runtimeProvider");
+    expect(participantRoom.session).not.toHaveProperty("cost");
+    const helperRoom = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "helper-a",
+    });
+    expect(helperRoom.session).not.toHaveProperty("runtimeProvider");
+    expect(helperRoom.session).not.toHaveProperty("cost");
+    const ownerProjector = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+      view: "projector",
+    });
+    expect(ownerProjector.session).not.toHaveProperty("runtimeProvider");
+    expect(ownerProjector.session).not.toHaveProperty("cost");
+  });
+
   it("atomically rolls back invalid roster edits and allows one concurrent CAS winner", async () => {
     const setup = await createSessionFixture();
     await expect(
@@ -439,9 +592,9 @@ describe("standalone workshops", () => {
         },
       }),
     ]);
-    expect(edits.filter((result) => result.status === "fulfilled")).toHaveLength(
-      1,
-    );
+    expect(
+      edits.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
     expect(edits.find((result) => result.status === "rejected")).toMatchObject({
       reason: {
         status: 409,
@@ -474,9 +627,7 @@ describe("standalone workshops", () => {
       title: "Manifest default",
       scheduledStartAt,
     });
-    expect(defaulted.lobbyOpensAt).toBe(
-      scheduledStartAt - 17 * 60 * 1_000,
-    );
+    expect(defaulted.lobbyOpensAt).toBe(scheduledStartAt - 17 * 60 * 1_000);
 
     const explicitLobbyOpensAt = scheduledStartAt - 5 * 60 * 1_000;
     const overridden = await createWorkshopSession({
@@ -574,8 +725,9 @@ describe("standalone workshops", () => {
         }),
       },
     ]);
-    expect(events.some((event) => event.type === "module.gates_released"))
-      .toBe(false);
+    expect(events.some((event) => event.type === "module.gates_released")).toBe(
+      false,
+    );
   });
 
   it("withholds unreleased slide bodies from participants and helpers", async () => {
@@ -807,8 +959,9 @@ describe("standalone workshops", () => {
       userId: "owner-a",
       view: "projector",
     });
-    expect(waitingProjector.session.slides.every((slide) => !slide.released))
-      .toBe(true);
+    expect(
+      waitingProjector.session.slides.every((slide) => !slide.released),
+    ).toBe(true);
 
     await performWorkshopSessionAction({
       sessionId: setup.sessionId,
@@ -832,9 +985,7 @@ describe("standalone workshops", () => {
       notesMarkdown: null,
     });
     expect(
-      participant.session.agenda.find(
-        (item) => item.id === "facilitated-demo",
-      ),
+      participant.session.agenda.find((item) => item.id === "facilitated-demo"),
     ).toMatchObject({ released: true });
 
     const projector = await getWorkshopSessionProjection({
@@ -1393,10 +1544,7 @@ describe("standalone workshops", () => {
   it("blocks participant module actions and restores until release", async () => {
     const setup = await readyWorkspaceFixture();
     for (const [action, payload] of [
-      [
-        "reveal_hint",
-        { moduleId: "01-core", hintId: "inspect-events" },
-      ],
+      ["reveal_hint", { moduleId: "01-core", hintId: "inspect-events" }],
       ["complete_explain_back", { moduleId: "01-core" }],
     ] as const) {
       await expect(
@@ -1974,6 +2122,7 @@ describe("standalone workshops", () => {
 
   it("issues owner and consent-bounded helper browser routes and deletes them on revoke", async () => {
     const setup = await readyWorkspaceFixture();
+    await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
     terminalMocks.loadCurrentRuntimeVmTerminalTarget.mockResolvedValue({
       executionId: `runtime-${setup.generationId}`,
       generation: 1,
@@ -2080,6 +2229,86 @@ describe("standalone workshops", () => {
     });
   });
 
+  it("deletes a terminal route when archival wins the final recording race", async () => {
+    const setup = await readyWorkspaceFixture();
+    await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
+    const executionId = `runtime-${setup.generationId}`;
+    terminalMocks.loadCurrentRuntimeVmTerminalTarget.mockResolvedValue({
+      executionId,
+      generation: 1,
+      domainKind: "workshop",
+      domainId: setup.workspaceId,
+      userId: "learner-a",
+      organizationId: "org-a",
+      hostId: "host-a",
+      vmId: "workshop",
+      runtimeVmName: "workshop",
+      target: {
+        host: "192.0.2.10",
+        port: 22,
+        username: "learner",
+        hostKeyOpenssh: "ssh-ed25519 host-key",
+        privateKeyOpenssh: "private-key",
+        observedAt: Date.now(),
+      },
+    });
+    terminalMocks.issueStargateTerminalSession.mockImplementationOnce(
+      async (input: {
+        routeUsername: string;
+        expiresAt: Date;
+        mode: "browser" | "native";
+      }) => {
+        const now = Date.now();
+        const db = drizzle(env.DB);
+        await db.batch([
+          db
+            .update(workshopWorkspaceGenerations)
+            .set({
+              state: "archiving",
+              archiveRequestedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(workshopWorkspaceGenerations.id, setup.generationId)),
+          db
+            .update(runtimeExecutions)
+            .set({
+              state: "archiving",
+              archiveRequestedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(runtimeExecutions.id, executionId)),
+        ]);
+        return {
+          routeUsername: input.routeUsername,
+          expiresAt: input.expiresAt.getTime(),
+          browser: { websocketUrl: "wss://terminal.example.test/session" },
+        };
+      },
+    );
+
+    await expect(
+      issueWorkshopBrowserTerminalSession({
+        sessionId: setup.sessionId,
+        workspaceId: setup.workspaceId,
+        actorUserId: "learner-a",
+      }),
+    ).rejects.toMatchObject({
+      code: "workshop_terminal_authorization_changed",
+    });
+
+    const routeUsername = terminalMocks.issueStargateTerminalSession.mock
+      .calls[0]?.[0]?.routeUsername as string;
+    expect(terminalMocks.deleteStargateRoute).toHaveBeenCalledWith(
+      routeUsername,
+    );
+    await expect(
+      drizzle(env.DB)
+        .select({ routes: workshopWorkspaces.terminalRouteUsernamesJson })
+        .from(workshopWorkspaces)
+        .where(eq(workshopWorkspaces.id, setup.workspaceId)),
+    ).resolves.toEqual([{ routes: [] }]);
+  });
+
   it("revokes learner-granted assistance when the learner lowers their hand", async () => {
     const setup = await readyWorkspaceFixture();
     const help = await createWorkshopHelpRequest({
@@ -2124,6 +2353,7 @@ describe("standalone workshops", () => {
 
   it("keeps a failed assist-route revoke denied and retryable", async () => {
     const setup = await readyWorkspaceFixture();
+    await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
     terminalMocks.loadCurrentRuntimeVmTerminalTarget.mockResolvedValue({
       executionId: `runtime-${setup.generationId}`,
       generation: 1,
@@ -2234,6 +2464,7 @@ describe("standalone workshops", () => {
 
   it("issues native SSH only to the workspace participant using profile keys", async () => {
     const setup = await readyWorkspaceFixture();
+    await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
     terminalMocks.loadCurrentRuntimeVmTerminalTarget.mockResolvedValue({
       executionId: `runtime-${setup.generationId}`,
       generation: 1,
@@ -2446,6 +2677,26 @@ async function readyWorkspaceFixture() {
     workspaceId: request.workspaceId,
     generationId: request.generationId,
   };
+}
+
+async function seedReadyRuntimeExecution(
+  workspaceId: string,
+  generationId: string,
+) {
+  const now = Date.now();
+  await drizzle(env.DB)
+    .insert(runtimeExecutions)
+    .values({
+      id: `runtime-${generationId}`,
+      userId: "learner-a",
+      organizationId: "org-a",
+      domainKind: "workshop",
+      domainId: workspaceId,
+      generation: 1,
+      state: "ready",
+      createdAt: now,
+      updatedAt: now,
+    });
 }
 
 async function seedWorkshopProbeReports(params: {
@@ -2855,9 +3106,7 @@ function stretchModule(
   };
 }
 
-function stretchAgenda(
-  moduleId: string,
-): WorkshopManifestV1["agenda"][number] {
+function stretchAgenda(moduleId: string): WorkshopManifestV1["agenda"][number] {
   return {
     id: `${moduleId}-agenda`,
     kind: "tinker",

@@ -4,7 +4,7 @@ Module 02's `demo` Application syncs everything under `gitops/components/demo/` 
 `demo` namespace — so:
 
 ```bash
-cp /opt/platform-engineering-workshop/lab/03-data/postgres-cluster.yaml gitops/components/demo/
+cp /lab/03-data/postgres-cluster.yaml gitops/components/demo/
 git add . && git commit -m "app-db postgres cluster" && git push
 ```
 

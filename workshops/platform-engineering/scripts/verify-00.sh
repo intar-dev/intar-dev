@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -uo pipefail
-export MISE_OFFLINE=1
 readonly expected_crane_version=0.21.7
 verifier=/opt/platform-engineering-workshop/lab/00-setup/verify.sh
 set +e

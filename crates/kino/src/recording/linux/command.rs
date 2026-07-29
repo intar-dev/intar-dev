@@ -270,7 +270,7 @@ pub(super) fn join_command_output_forwarder(handle: thread::JoinHandle<()>) -> R
 pub(super) fn create_session_file(
     output_dir: &Path,
     start_ts_unix_ms: u64,
-) -> io::Result<(File, PathBuf)> {
+) -> io::Result<(File, PathBuf, PathBuf)> {
     let pid = std::process::id();
 
     for attempt in 0..1000_u32 {
@@ -279,10 +279,22 @@ pub(super) fn create_session_file(
         } else {
             format!("-{attempt}")
         };
-        let path = output_dir.join(format!("ssh-session-{start_ts_unix_ms}-{pid}{suffix}.krec"));
+        let final_path =
+            output_dir.join(format!("ssh-session-{start_ts_unix_ms}-{pid}{suffix}.krec"));
+        let partial_path = output_dir.join(format!(
+            "ssh-session-{start_ts_unix_ms}-{pid}{suffix}.krec.partial"
+        ));
 
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((file, path)),
+        if final_path.exists() {
+            continue;
+        }
+
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial_path)
+        {
+            Ok(file) => return Ok((file, partial_path, final_path)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }

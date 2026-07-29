@@ -1,7 +1,7 @@
 # Getting help
 
-- Green verifier + current probe health — "I'm fine"
-- **Need help** — persistent request in the Intar room
-- Helpers claim requests; terminal access needs consent
+-  green sticky — "I'm fine"
+-  red sticky — "come by, please"
+- Helpers roam; no hand-raising needed
 - Pairing is encouraged — arguably better
-- Broken workspace? Restore or reprovision
+- Laptop says no? Devcontainer lifeboat

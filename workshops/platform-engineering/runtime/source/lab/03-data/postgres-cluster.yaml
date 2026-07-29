@@ -1,0 +1,34 @@
+# A CloudNativePG PostgreSQL cluster, sized for a laptop.
+# Copy to gitops/components/demo/postgres-cluster.yaml in your platform repo and push.
+#
+# CNPG picks its default (pre-pulled) postgres image when imageName is unset —
+# leave it unset in this workshop so nothing downloads at runtime.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: app-db
+spec:
+  instances: 1            # HA needs 3 — try it at home, your laptop RAM pays here
+
+  bootstrap:
+    initdb:
+      database: app
+      owner: app
+      # No secret specified: CNPG generates one named "app-db-app" for us.
+
+  storage:
+    size: 1Gi
+    storageClass: local-path   # must exist — wave 0 installed this provisioner
+
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+
+  postgresql:
+    parameters:
+      max_connections: "100"
+      shared_buffers: 64MB

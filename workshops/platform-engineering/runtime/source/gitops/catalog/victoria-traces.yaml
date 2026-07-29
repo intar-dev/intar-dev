@@ -1,0 +1,35 @@
+# VictoriaTraces 0.9.4 — single-node trace database (observability rework, #57).
+# Traces backend for the Victoria stack: OTLP ingest at :10428
+# /insert/opentelemetry/v1/traces, Jaeger query API at /select/jaeger.
+# In-cluster: victoria-traces.observability.svc:10428. Replaces otel-lgtm's Tempo.
+# Sync-wave 0 (a storage backend, like victoria-metrics / victoria-logs).
+#
+# Enable with:  cp gitops/catalog/victoria-traces.yaml gitops/apps/ && git add . && git commit -m 'enable victoria-traces' && git push
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: victoria-traces
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: http://gitea-http.gitea.svc.cluster.local:3000/cloudbox/platform.git
+    targetRevision: main
+    path: gitops/components/victoria-traces
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+    syncOptions:
+      - CreateNamespace=true

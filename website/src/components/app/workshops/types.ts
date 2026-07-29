@@ -66,6 +66,8 @@ export interface WorkshopSessionSummary {
     userId: string;
     role: WorkshopMemberRole;
   }> | null;
+  runtimeProvider?: WorkshopRuntimeProvider;
+  cost?: WorkshopCostProjection | null;
 }
 
 export interface WorkshopModuleHint {
@@ -263,6 +265,98 @@ export interface WorkshopCapacity {
   allocationFailures: WorkshopAllocationFailure[];
 }
 
+export interface WorkshopProviderHardware {
+  architecture: "x86";
+  cores: number;
+  memoryMib: number;
+  diskMib: number;
+}
+
+export type WorkshopRuntimeProvider =
+  | { kind: "agent_kvm" }
+  | {
+      kind: "hetzner_cloud";
+      connection: {
+        id: string;
+        displayName: string;
+        state: "active" | "rotation_required" | "cleanup_pending" | "disconnected";
+        currency: string;
+        lastValidatedAt: number;
+      };
+      serverType: string;
+      hardware: WorkshopProviderHardware;
+      permittedLocations: string[];
+      initialPriceObservedAt: number | null;
+      maxConcurrentServers: number;
+      maxSessionGrossMicros: number | null;
+      grossCeilingOverrideAt: number | null;
+    };
+
+export interface WorkshopCostScenario {
+  lifetimeSeconds: number;
+  billableHours: number;
+  generationBillableHours: number[];
+  location: string;
+  participantCount: number;
+  serverNetMicrosPerLearner: number;
+  serverGrossMicrosPerLearner: number;
+  ipv4NetMicrosPerLearner: number;
+  ipv4GrossMicrosPerLearner: number;
+  totalNetMicros: number;
+  totalGrossMicros: number;
+}
+
+export interface WorkshopCostProjection {
+  label: "estimated Hetzner cost";
+  latestForecast: {
+    id: string;
+    version: number;
+    currency: string;
+    participantCount: number;
+    preferredLocation: string;
+    trigger: string;
+    priceObservation: {
+      observedAt: number;
+      expiresAt: number;
+    };
+    expected: WorkshopCostScenario;
+    leaseCeiling: WorkshopCostScenario;
+    oneRestore: WorkshopCostScenario;
+    exceedsGrossCeiling: boolean;
+    assumptions: string[];
+    exclusions: string[];
+    expiresAt: number;
+    createdAt: number;
+  } | null;
+  live: {
+    currency: string;
+    accruedNetMicros: number;
+    accruedGrossMicros: number;
+    scheduledEndNetMicros: number;
+    scheduledEndGrossMicros: number;
+    leaseCeilingNetMicros: number;
+    leaseCeilingGrossMicros: number;
+    forecastNetVarianceMicros: number;
+    forecastGrossVarianceMicros: number;
+    cleanupPendingResources: number;
+    accumulatingResources: number;
+    grossCeilingMicros: number | null;
+    grossCeilingUsageMicros: number;
+    overGrossCeiling: boolean;
+  } | null;
+  final: {
+    currency: string;
+    netMicros: number;
+    grossMicros: number;
+    netVarianceMicros: number;
+    grossVarianceMicros: number;
+    generationCount: number;
+    restoreCount: number;
+    manualCleanupUnverified: boolean;
+    finalizedAt: number;
+  } | null;
+}
+
 export interface WorkshopViewer {
   userId: string;
   role: WorkshopMemberRole;
@@ -300,6 +394,8 @@ export interface WorkshopSessionDetail {
   assistGrant: WorkshopAssistGrant | null;
   roster: WorkshopRosterMember[];
   capacity: WorkshopCapacity | null;
+  runtimeProvider?: WorkshopRuntimeProvider;
+  cost?: WorkshopCostProjection | null;
 }
 
 export interface WorkshopListResponse {
@@ -331,6 +427,13 @@ export interface OrganizationWorkshopTemplate {
     moduleCount: number;
     publishedAt: number;
     current: boolean;
+    runtimeProvider: {
+      kind: "hetzner_cloud";
+      serverType: string;
+      systemImage: string;
+      hardware: WorkshopProviderHardware;
+      compatible: true;
+    } | null;
   }>;
 }
 
@@ -350,6 +453,39 @@ export interface OrganizationWorkshopsResponse {
   }>;
   templates: OrganizationWorkshopTemplate[];
   sessions: WorkshopSessionSummary[];
+  providerConnections: Array<{
+    id: string;
+    displayName: string;
+    state: "active" | "rotation_required" | "cleanup_pending" | "disconnected";
+    approvedLocations: string[];
+    maxConcurrentServers: number;
+    maxSessionGrossMicros: number | null;
+    currency: string;
+    credential: {
+      version: number;
+      fingerprint: string;
+      activatedAt: number;
+    } | null;
+    lastValidatedAt: number;
+    cleanupAcknowledgement: {
+      acknowledgedAt: number;
+      acknowledgedBy: string;
+      verified: false;
+    } | null;
+    cleanupResources?: Array<{
+      allocationId: string;
+      executionId: string;
+      deterministicName: string;
+      state: string;
+      serverId: string | null;
+      primaryIpId: string | null;
+      primaryIpv4: string | null;
+      sshKeyId: string | null;
+      createActionId: string | null;
+      deleteActionId: string | null;
+      deletionConfirmedAt: number | null;
+    }>;
+  }>;
   capacity: WorkshopCapacity | null;
 }
 

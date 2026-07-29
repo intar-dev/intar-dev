@@ -29,6 +29,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     startsAt?: unknown;
     lobbyOpensAt?: unknown;
     members?: unknown;
+    runtimeProvider?: unknown;
   } | null;
   try {
     await requireWorkshopsEnabledForOrganization(organizationId);
@@ -81,6 +82,7 @@ export const POST: APIRoute = async ({ request, params }) => {
         "workshop template not found",
       );
     }
+    const runtimeProvider = parseRuntimeProvider(body?.runtimeProvider);
     const session = await createWorkshopSession({
       organizationId,
       actorUserId: authz.context.userId,
@@ -96,6 +98,7 @@ export const POST: APIRoute = async ({ request, params }) => {
                 ? body.lobbyOpensAt
                 : Number.NaN,
           }),
+      ...(runtimeProvider === undefined ? {} : { runtimeProvider }),
     });
     await replaceWorkshopRoster({
       sessionId: session.id,
@@ -153,4 +156,37 @@ function parseRoster(value: unknown): Array<{
     }
     return { userId, role };
   });
+}
+
+function parseRuntimeProvider(
+  value: unknown,
+):
+  | { kind: "agent_kvm" }
+  | { kind: "hetzner_cloud"; connectionId: string }
+  | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object" || !("kind" in value)) {
+    throw appError(
+      400,
+      "workshop_runtime_provider_invalid",
+      "workshop runtime provider is invalid",
+    );
+  }
+  if (value.kind === "agent_kvm") return { kind: "agent_kvm" };
+  if (
+    value.kind === "hetzner_cloud" &&
+    "connectionId" in value &&
+    typeof value.connectionId === "string" &&
+    value.connectionId.trim()
+  ) {
+    return {
+      kind: "hetzner_cloud",
+      connectionId: value.connectionId.trim(),
+    };
+  }
+  throw appError(
+    400,
+    "workshop_runtime_provider_invalid",
+    "workshop runtime provider is invalid",
+  );
 }
