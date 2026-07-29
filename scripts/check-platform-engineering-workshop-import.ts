@@ -8,10 +8,10 @@ const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
   "c07d3174af150e59dadca9817279dd63740edb17bcbb31272bac1ec91f187938";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "c07d3174af150e59dadca9817279dd63740edb17bcbb31272bac1ec91f187938";
+  "5bef3d92c4b4c633719f3e1a581c13eb278ebe1b431bade1e582f78268e5dd15";
 const EXPECTED_OVERLAY_SHA256 =
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-const EXPECTED_CHANGED_FILES = 0;
+  "5b57156cdb8540e4071ff22a8a6e9e2da093a61c0e4013b2f88bafc08a46b861";
+const EXPECTED_CHANGED_FILES = 1;
 
 const rawRoot = resolve(process.argv[2] ?? "");
 const adaptedRoot = resolve(process.argv[3] ?? "");

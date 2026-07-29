@@ -15,7 +15,7 @@ workspace {
     image       = "platform-engineering-workshop-debian13-1b6fad4"
     cpu_millis  = 4000
     memory_mib  = 16384
-    disk_mib    = 65536
+    disk_mib    = 32768
   }
 
   provider "hetzner_cloud" {

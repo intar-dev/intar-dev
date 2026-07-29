@@ -788,7 +788,7 @@ surprise = true
         assert_eq!(preparation.image_name, image.name);
         assert_eq!(
             preparation.minimum_free_space_bytes,
-            200 * 1024 * 1024 * 1024
+            80 * 1024 * 1024 * 1024
         );
         assert_eq!(image.disk, preparation.output_directory.join("disk.raw"));
     }

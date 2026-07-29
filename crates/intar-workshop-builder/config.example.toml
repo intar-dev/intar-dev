@@ -69,9 +69,9 @@ workshop_bundle_sha256 = "000000000000000000000000000000000000000000000000000000
 image_name = "platform-engineering-workshop-debian13-1b6fad4"
 image_verifier = "lab/00-setup/verify.sh"
 output_directory = "/var/cache/intar-workshop-builder/authored/platform-engineering-debian13"
-# 200 GiB: enough for the 64 GiB authored disk plus later checkpoint
+# 80 GiB: enough for the 32 GiB authored disk plus later checkpoint
 # clone/seal/restore work without depending on sparse-file behavior.
-minimum_free_space_bytes = 214748364800
+minimum_free_space_bytes = 85899345920
 kino_binary = "/usr/local/libexec/intar/kino"
 kino_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 sanitizer_binary = "/usr/local/libexec/intar/intar-workshop-sanitize"
