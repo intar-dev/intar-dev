@@ -244,6 +244,47 @@ describe("HcloudClient", () => {
     expect(maxInFlight).toBe(4);
   });
 
+  it("keeps at most four response bodies outstanding after fetch resolves", async () => {
+    const listKeys = new Map([
+      ["/v1/servers", "servers"],
+      ["/v1/primary_ips", "primary_ips"],
+      ["/v1/floating_ips", "floating_ips"],
+      ["/v1/firewalls", "firewalls"],
+      ["/v1/networks", "networks"],
+      ["/v1/volumes", "volumes"],
+      ["/v1/placement_groups", "placement_groups"],
+      ["/v1/images", "images"],
+      ["/v1/ssh_keys", "ssh_keys"],
+      ["/v1/load_balancers", "load_balancers"],
+      ["/v1/certificates", "certificates"],
+    ]);
+    let outstandingBodies = 0;
+    let maxOutstandingBodies = 0;
+    const client = new HcloudClient("body-limit-token-".repeat(4), {
+      fetcher: mockFetch((request) => {
+        const key = listKeys.get(new URL(request.url).pathname);
+        if (!key) throw new Error("unexpected inventory endpoint");
+        const payload = { [key]: [], meta: { pagination: { next_page: null } } };
+        const response = json(payload);
+        Object.defineProperty(response, "json", {
+          configurable: true,
+          value: async () => {
+            outstandingBodies += 1;
+            maxOutstandingBodies = Math.max(maxOutstandingBodies, outstandingBodies);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            outstandingBodies -= 1;
+            return payload;
+          },
+        });
+        return response;
+      }),
+    });
+
+    await expect(client.inventory()).resolves.toEqual(emptyInventory());
+    expect(outstandingBodies).toBe(0);
+    expect(maxOutstandingBodies).toBe(4);
+  });
+
   it("bounds concurrent reconciliation reads across the whole client", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
