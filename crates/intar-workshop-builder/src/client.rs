@@ -10,6 +10,8 @@ use url::Url;
 use crate::config::RegistryConfig;
 use crate::contracts::{WorkshopPublicationClaim, WorkshopPublicationResult};
 
+const AGENT_BOOTSTRAP_PATH: &str = "/api/agent/bootstrap";
+
 #[allow(async_fn_in_trait)]
 pub trait PublicationRegistry {
     async fn refresh_auth(&self) -> Result<()>;
@@ -80,7 +82,7 @@ impl WorkshopRegistryClient {
     }
 
     pub async fn authenticate(&self) -> Result<AuthenticatedWorkshopRegistry> {
-        let url = endpoint(&self.base_url, "/agent/bridge/bootstrap")?;
+        let url = endpoint(&self.base_url, AGENT_BOOTSTRAP_PATH)?;
         let response = self
             .client
             .post(url.clone())
@@ -119,7 +121,7 @@ impl WorkshopRegistryClient {
 
 impl PublicationRegistry for AuthenticatedWorkshopRegistry {
     async fn refresh_auth(&self) -> Result<()> {
-        let url = endpoint(&self.base_url, "/agent/bridge/bootstrap")?;
+        let url = endpoint(&self.base_url, AGENT_BOOTSTRAP_PATH)?;
         let response = self
             .client
             .post(url.clone())
@@ -308,7 +310,10 @@ fn body_excerpt(body: &[u8]) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{endpoint, same_origin};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::{AGENT_BOOTSTRAP_PATH, WorkshopRegistryClient, endpoint, same_origin};
+    use crate::config::RegistryConfig;
 
     #[test]
     fn endpoints_are_root_relative() {
@@ -319,6 +324,49 @@ mod tests {
                 .as_str(),
             "https://intar.dev/agent/registry/workshop-publications/next"
         );
+    }
+
+    #[tokio::test]
+    async fn authentication_uses_the_canonical_agent_bootstrap_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1_024];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0, "client closed before sending request headers");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() <= 16 * 1_024, "request headers are too large");
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert_eq!(
+                request.lines().next(),
+                Some("POST /api/agent/bootstrap HTTP/1.1")
+            );
+            let body = r#"{"accessToken":"test-access-token"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = WorkshopRegistryClient::new(&RegistryConfig {
+            base_url: format!("http://{address}/nested/"),
+            host_id: "builder-01".to_owned(),
+            bootstrap_token: "bootstrap-token".to_owned(),
+            http_timeout_seconds: 5,
+        })
+        .unwrap();
+        let authenticated = client.authenticate().await.unwrap();
+        assert_eq!(authenticated.access_token().unwrap(), "test-access-token");
+        server.await.unwrap();
+        assert_eq!(AGENT_BOOTSTRAP_PATH, "/api/agent/bootstrap");
     }
 
     #[test]
