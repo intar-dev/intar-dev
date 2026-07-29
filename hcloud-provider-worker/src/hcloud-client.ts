@@ -22,6 +22,9 @@ import { ProviderServiceError, redactString } from "./redaction";
 const DEFAULT_API_BASE = "https://api.hetzner.cloud/v1";
 const MAX_CLOUD_INIT_BYTES = 32 * 1024;
 const HCLOUD_API_TIMEOUT_MS = 10_000;
+const HCLOUD_READ_CONCURRENCY = 4;
+const HCLOUD_GET_RETRY_BASE_MS = 100;
+const HCLOUD_GET_RETRY_JITTER_MS = 100;
 const encoder = new TextEncoder();
 
 const EXPOSED_PROVIDER_CODES = new Set([
@@ -67,6 +70,16 @@ export interface HcloudClientOptions {
   apiBase?: string;
   now?: () => Date;
   delay?: (milliseconds: number) => Promise<void>;
+  onTransportFailure?: (event: HcloudTransportFailureEvent) => void;
+}
+
+export interface HcloudTransportFailureEvent {
+  event: "hcloud_transport_failure";
+  method: "GET" | "POST" | "DELETE";
+  endpoint: string;
+  attempt: number;
+  failureKind: "timeout" | "transport";
+  elapsedMs: number;
 }
 
 export interface EnsureSentinelResult {
@@ -99,6 +112,49 @@ export interface DeleteResourceResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function transportEndpoint(path: string): string {
+  const [pathname = "/"] = path.split("?", 1);
+  return pathname.replace(/\/\d+(?=\/|$)/gu, "/:id");
+}
+
+function getRetryDelay(path: string): number {
+  let hash = 0;
+  for (const character of transportEndpoint(path)) {
+    hash = (hash * 31 + character.codePointAt(0)!) % HCLOUD_GET_RETRY_JITTER_MS;
+  }
+  return HCLOUD_GET_RETRY_BASE_MS + hash;
+}
+
+type TaskResults<T extends readonly (() => Promise<unknown>)[]> = {
+  [K in keyof T]: T[K] extends () => Promise<infer R> ? R : never;
+};
+
+async function allWithConcurrency<const T extends readonly (() => Promise<unknown>)[]>(
+  tasks: T,
+  concurrency: number,
+): Promise<TaskResults<T>> {
+  const results: unknown[] = new Array(tasks.length);
+  let nextIndex = 0;
+  let failed = false;
+  const workerCount = Math.min(concurrency, tasks.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (!failed) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const task = tasks[index];
+      if (!task) return;
+      try {
+        results[index] = await task();
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results as TaskResults<T>;
 }
 
 function assertPositiveId(value: number, field: string): void {
@@ -580,6 +636,7 @@ export class HcloudClient {
   readonly #apiBase: string;
   readonly #now: () => Date;
   readonly #delay: (milliseconds: number) => Promise<void>;
+  readonly #onTransportFailure: (event: HcloudTransportFailureEvent) => void;
 
   constructor(token: string, options: HcloudClientOptions = {}) {
     const tokenBytes = encoder.encode(token);
@@ -604,6 +661,11 @@ export class HcloudClient {
     this.#delay =
       options.delay ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.#onTransportFailure =
+      options.onTransportFailure ??
+      ((event) => {
+        console.warn(JSON.stringify(event));
+      });
   }
 
   async #request<T>(
@@ -618,57 +680,75 @@ export class HcloudClient {
         retryable: false,
       });
     }
-    let response: Response;
-    try {
-      response = await this.#fetcher(`${this.#apiBase}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.#token}`,
-          Accept: "application/json",
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        signal: AbortSignal.timeout(HCLOUD_API_TIMEOUT_MS),
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-    } catch {
-      throw new ProviderServiceError({
-        code: "hcloud_transport_error",
-        message: "Hetzner API transport failed before the operation was confirmed",
-        retryable: true,
-      });
-    }
-
-    if (!response.ok) {
-      let providerCode = "api_error";
+    const maxAttempts = method === "GET" ? 2 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const startedAt = Date.now();
+      let response: Response;
       try {
-        const parsed = (await response.json()) as ApiErrorBody;
-        if (parsed.error?.code) providerCode = parsed.error.code;
-      } catch {
-        // Provider bodies are intentionally not surfaced.
+        response = await this.#fetcher(`${this.#apiBase}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.#token}`,
+            Accept: "application/json",
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          },
+          signal: AbortSignal.timeout(HCLOUD_API_TIMEOUT_MS),
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+      } catch (error) {
+        this.#onTransportFailure({
+          event: "hcloud_transport_failure",
+          method,
+          endpoint: transportEndpoint(path),
+          attempt,
+          failureKind:
+            isRecord(error) && error.name === "TimeoutError" ? "timeout" : "transport",
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+        });
+        if (attempt < maxAttempts) {
+          await this.#delay(getRetryDelay(path));
+          continue;
+        }
+        throw new ProviderServiceError({
+          code: "hcloud_transport_error",
+          message: "Hetzner API transport failed before the operation was confirmed",
+          retryable: true,
+        });
       }
-      const retryAfterHeader = response.headers.get("retry-after");
-      const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : undefined;
-      const providerRequestId = response.headers.get("x-request-id");
-      throw new HcloudApiError({
-        status: response.status,
-        providerCode,
-        ...(providerRequestId ? { requestId: providerRequestId } : {}),
-        ...(typeof retryAfter === "number" && Number.isFinite(retryAfter)
-          ? { retryAfterSeconds: retryAfter }
-          : {}),
-      });
-    }
 
-    if (response.status === 204) return undefined as T;
-    try {
-      return (await response.json()) as T;
-    } catch {
-      throw new ProviderServiceError({
-        code: "hcloud_invalid_response",
-        message: "Hetzner API returned an invalid response",
-        retryable: true,
-      });
+      if (!response.ok) {
+        let providerCode = "api_error";
+        try {
+          const parsed = (await response.json()) as ApiErrorBody;
+          if (parsed.error?.code) providerCode = parsed.error.code;
+        } catch {
+          // Provider bodies are intentionally not surfaced.
+        }
+        const retryAfterHeader = response.headers.get("retry-after");
+        const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+        const providerRequestId = response.headers.get("x-request-id");
+        throw new HcloudApiError({
+          status: response.status,
+          providerCode,
+          ...(providerRequestId ? { requestId: providerRequestId } : {}),
+          ...(typeof retryAfter === "number" && Number.isFinite(retryAfter)
+            ? { retryAfterSeconds: retryAfter }
+            : {}),
+        });
+      }
+
+      if (response.status === 204) return undefined as T;
+      try {
+        return (await response.json()) as T;
+      } catch {
+        throw new ProviderServiceError({
+          code: "hcloud_invalid_response",
+          message: "Hetzner API returned an invalid response",
+          retryable: true,
+        });
+      }
     }
+    throw new Error("unreachable Hetzner request state");
   }
 
   async #list<T>(path: string, key: string, params: URLSearchParams = new URLSearchParams()): Promise<T[]> {
@@ -711,19 +791,27 @@ export class HcloudClient {
       sshKeys,
       loadBalancers,
       certificates,
-    ] = await Promise.all([
-      this.#list<HcloudServer>("/servers", "servers"),
-      this.#list<HcloudPrimaryIp>("/primary_ips", "primary_ips"),
-      this.#list<NamedHcloudResource>("/floating_ips", "floating_ips"),
-      this.#list<HcloudFirewall>("/firewalls", "firewalls"),
-      this.#list<NamedHcloudResource>("/networks", "networks"),
-      this.#list<NamedHcloudResource>("/volumes", "volumes"),
-      this.#list<NamedHcloudResource>("/placement_groups", "placement_groups"),
-      this.#list<HcloudImage>("/images", "images", new URLSearchParams({ type: "snapshot" })),
-      this.#list<HcloudSshKey>("/ssh_keys", "ssh_keys"),
-      this.#list<NamedHcloudResource>("/load_balancers", "load_balancers"),
-      this.#list<NamedHcloudResource>("/certificates", "certificates"),
-    ]);
+    ] = await allWithConcurrency(
+      [
+        () => this.#list<HcloudServer>("/servers", "servers"),
+        () => this.#list<HcloudPrimaryIp>("/primary_ips", "primary_ips"),
+        () => this.#list<NamedHcloudResource>("/floating_ips", "floating_ips"),
+        () => this.#list<HcloudFirewall>("/firewalls", "firewalls"),
+        () => this.#list<NamedHcloudResource>("/networks", "networks"),
+        () => this.#list<NamedHcloudResource>("/volumes", "volumes"),
+        () => this.#list<NamedHcloudResource>("/placement_groups", "placement_groups"),
+        () =>
+          this.#list<HcloudImage>(
+            "/images",
+            "images",
+            new URLSearchParams({ type: "snapshot" }),
+          ),
+        () => this.#list<HcloudSshKey>("/ssh_keys", "ssh_keys"),
+        () => this.#list<NamedHcloudResource>("/load_balancers", "load_balancers"),
+        () => this.#list<NamedHcloudResource>("/certificates", "certificates"),
+      ],
+      HCLOUD_READ_CONCURRENCY,
+    );
     return {
       servers,
       primaryIps,
@@ -778,23 +866,28 @@ export class HcloudClient {
     permittedLocations: string[];
     systemImage: string;
   }): Promise<CatalogObservation> {
-    const [allServerTypes, allLocations, systemImages, pricing] = await Promise.all([
-      this.#list<HcloudServerType>("/server_types", "server_types"),
-      this.#list<HcloudLocation>("/locations", "locations"),
-      this.#list<HcloudImage>(
-        "/images",
-        "images",
-        new URLSearchParams({
-          type: "system",
-          name: input.systemImage,
-          architecture: "x86",
-          include_deprecated: "true",
-        }),
-      ),
-      this.#request<{ pricing: unknown }>("GET", "/pricing").then(
-        (response) => response.pricing,
-      ),
-    ]);
+    const [allServerTypes, allLocations, systemImages, pricing] = await allWithConcurrency(
+      [
+        () => this.#list<HcloudServerType>("/server_types", "server_types"),
+        () => this.#list<HcloudLocation>("/locations", "locations"),
+        () =>
+          this.#list<HcloudImage>(
+            "/images",
+            "images",
+            new URLSearchParams({
+              type: "system",
+              name: input.systemImage,
+              architecture: "x86",
+              include_deprecated: "true",
+            }),
+          ),
+        () =>
+          this.#request<{ pricing: unknown }>("GET", "/pricing").then(
+            (response) => response.pricing,
+          ),
+      ],
+      HCLOUD_READ_CONCURRENCY,
+    );
     const locations = allLocations.filter((location) => input.permittedLocations.includes(location.name));
     if (locations.length !== new Set(input.permittedLocations).size) {
       throw new ProviderServiceError({

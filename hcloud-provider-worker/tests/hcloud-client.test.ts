@@ -121,10 +121,14 @@ describe("HcloudClient", () => {
 
   it("classifies ambiguous transport failures as retryable without leaking details", async () => {
     const token = "transport-secret-".repeat(4);
+    let attempts = 0;
+    const transportEvents: unknown[] = [];
     const client = new HcloudClient(token, {
       fetcher: mockFetch(() => {
+        attempts += 1;
         throw new Error(`socket closed after create for ${token}`);
       }),
+      onTransportFailure: (event) => transportEvents.push(event),
     });
 
     let caught: unknown;
@@ -143,7 +147,101 @@ describe("HcloudClient", () => {
         retryable: true,
       },
     });
+    expect(attempts).toBe(1);
+    expect(transportEvents).toEqual([
+      expect.objectContaining({
+        event: "hcloud_transport_failure",
+        method: "POST",
+        endpoint: "/primary_ips",
+        attempt: 1,
+        failureKind: "transport",
+      }),
+    ]);
     expect(JSON.stringify(caught)).not.toContain(token);
+    expect(JSON.stringify(transportEvents)).not.toContain(token);
+  });
+
+  it("retries one idempotent GET with a sanitized transport event", async () => {
+    const token = "read-retry-secret-".repeat(4);
+    const retryDelays: number[] = [];
+    const transportEvents: unknown[] = [];
+    let attempts = 0;
+    const client = new HcloudClient(token, {
+      fetcher: mockFetch(() => {
+        attempts += 1;
+        if (attempts === 1) throw new Error(`temporary failure for ${token}`);
+        return json({
+          action: {
+            id: 1,
+            status: "success",
+            command: "create_server",
+            progress: 100,
+            started: "2026-07-22T12:00:00Z",
+            finished: "2026-07-22T12:00:01Z",
+            error: null,
+            resources: [],
+          },
+        });
+      }),
+      delay: async (milliseconds) => {
+        retryDelays.push(milliseconds);
+      },
+      onTransportFailure: (event) => transportEvents.push(event),
+    });
+
+    await expect(client.getAction(9_001)).resolves.toMatchObject({
+      id: 1,
+      status: "success",
+    });
+    expect(attempts).toBe(2);
+    expect(retryDelays).toHaveLength(1);
+    expect(retryDelays[0]).toBeGreaterThanOrEqual(100);
+    expect(retryDelays[0]).toBeLessThan(200);
+    expect(transportEvents).toEqual([
+      expect.objectContaining({
+        event: "hcloud_transport_failure",
+        method: "GET",
+        endpoint: "/actions/:id",
+        attempt: 1,
+        failureKind: "transport",
+      }),
+    ]);
+    expect(JSON.stringify(transportEvents)).not.toContain(token);
+  });
+
+  it("bounds project inventory reads to four concurrent requests", async () => {
+    const listKeys = new Map([
+      ["/v1/servers", "servers"],
+      ["/v1/primary_ips", "primary_ips"],
+      ["/v1/floating_ips", "floating_ips"],
+      ["/v1/firewalls", "firewalls"],
+      ["/v1/networks", "networks"],
+      ["/v1/volumes", "volumes"],
+      ["/v1/placement_groups", "placement_groups"],
+      ["/v1/images", "images"],
+      ["/v1/ssh_keys", "ssh_keys"],
+      ["/v1/load_balancers", "load_balancers"],
+      ["/v1/certificates", "certificates"],
+    ]);
+    let requests = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client = new HcloudClient("inventory-token-".repeat(4), {
+      fetcher: mockFetch(async (request) => {
+        const key = listKeys.get(new URL(request.url).pathname);
+        if (!key) throw new Error("unexpected inventory endpoint");
+        requests += 1;
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        inFlight -= 1;
+        return json({ [key]: [], meta: { pagination: { next_page: null } } });
+      }),
+    });
+
+    await expect(client.inventory()).resolves.toEqual(emptyInventory());
+    expect(requests).toBe(11);
+    expect(maxInFlight).toBe(4);
   });
 
   it("rejects malformed provider creation timestamps", async () => {
