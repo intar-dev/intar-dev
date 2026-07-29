@@ -36,6 +36,7 @@ pub(crate) struct RuntimeBundleSigner {
 pub(crate) struct ProducedRuntimeBundle {
     pub bytes: Vec<u8>,
     pub artifact: RuntimeBundleArtifact,
+    pub covered_module_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -136,7 +137,8 @@ pub(crate) fn produce_runtime_bundle(
     let target = ordered_modules
         .get(target_index)
         .context("runtime bundle target module is outside the ordered module set")?;
-    let included = dependency_closure(ordered_modules, target)?;
+    let included = &ordered_modules[..=target_index];
+    let covered_module_ids = included.iter().map(|module| module.id.clone()).collect();
     let mut entries = BTreeMap::new();
     let mut steps = Vec::with_capacity(included.len());
     let mut probe_verifiers = Vec::with_capacity(ordered_modules.len());
@@ -206,6 +208,7 @@ pub(crate) fn produce_runtime_bundle(
             signing_key_id: signer.key_id.clone(),
             workspace_agent_sha256: None,
         },
+        covered_module_ids,
     })
 }
 
@@ -500,32 +503,6 @@ fn validate_runtime_image_references(source: &str, inventory: &BTreeSet<&str>) -
         }
     }
     Ok(())
-}
-
-fn dependency_closure<'a>(
-    ordered_modules: &'a [&'a Module],
-    target: &Module,
-) -> Result<Vec<&'a Module>> {
-    let by_id = ordered_modules
-        .iter()
-        .map(|module| (module.id.as_str(), *module))
-        .collect::<BTreeMap<_, _>>();
-    let mut required = BTreeSet::new();
-    let mut pending = vec![target.id.as_str()];
-    while let Some(module_id) = pending.pop() {
-        if !required.insert(module_id) {
-            continue;
-        }
-        let module = by_id
-            .get(module_id)
-            .with_context(|| format!("runtime bundle references unknown module '{module_id}'"))?;
-        pending.extend(module.depends_on.iter().map(String::as_str));
-    }
-    Ok(ordered_modules
-        .iter()
-        .copied()
-        .filter(|module| required.contains(module.id.as_str()))
-        .collect())
 }
 
 fn read_runtime_script(root: &Path, relative: &str) -> Result<Vec<u8>> {
@@ -901,12 +878,44 @@ mod tests {
     }
 
     #[test]
-    fn platform_reference_bundle_is_reconstructible_and_inventory_closed() {
+    fn platform_reference_bundles_reconstruct_ordered_checkpoint_prefixes() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
         let workshop = intar_workshop_manifest::load_and_validate(&root).unwrap();
         let modules = workshop.manifest.modules.iter().collect::<Vec<_>>();
-        let produced = produce_runtime_bundle(
+        let checkpoint_09_index = modules
+            .iter()
+            .position(|module| module.checkpoint == "checkpoint-09")
+            .unwrap();
+        let checkpoint_09 = produce_runtime_bundle(
+            &root,
+            &workshop,
+            &modules,
+            checkpoint_09_index,
+            RuntimeBundleCompression::None,
+            &signer(),
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint_09.covered_module_ids,
+            ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09"]
+        );
+        let checkpoint_09_entries = unpack(&checkpoint_09.bytes, RuntimeBundleCompression::None);
+        let checkpoint_09_manifest: serde_json::Value =
+            serde_json::from_slice(checkpoint_09_entries.get("checkpoint.json").unwrap()).unwrap();
+        let checkpoint_09_steps = checkpoint_09_manifest["apply_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["module_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoint_09_steps,
+            ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09"]
+        );
+        assert!(checkpoint_09_entries.contains_key("scripts/07/catch-up.sh"));
+
+        let checkpoint_10 = produce_runtime_bundle(
             &root,
             &workshop,
             &modules,
@@ -915,15 +924,38 @@ mod tests {
             &signer(),
         )
         .unwrap();
+        assert_eq!(
+            checkpoint_10.covered_module_ids,
+            [
+                "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"
+            ]
+        );
 
-        assert!(produced.bytes.len() > 1_000_000);
-        assert_eq!(produced.artifact.sha256.len(), 64);
-        assert_eq!(produced.artifact.signing_key_id, "runtime-test-v1");
-        let entries = unpack(&produced.bytes, RuntimeBundleCompression::None);
+        assert!(checkpoint_10.bytes.len() > 1_000_000);
+        assert_eq!(checkpoint_10.artifact.sha256.len(), 64);
+        assert_eq!(checkpoint_10.artifact.signing_key_id, "runtime-test-v1");
+        let entries = unpack(&checkpoint_10.bytes, RuntimeBundleCompression::None);
         assert_eq!(
             entries.get("runtime/root/LICENSE").unwrap(),
             &fs::read(root.join("LICENSE")).unwrap()
         );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(entries.get("checkpoint.json").unwrap()).unwrap();
+        let checkpoint_10_steps = manifest["apply_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["module_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoint_10_steps,
+            [
+                "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"
+            ]
+        );
+        for module_id in ["03", "04", "05", "06", "07", "08", "09"] {
+            assert!(entries.contains_key(&format!("scripts/{module_id}/catch-up.sh")));
+        }
     }
 
     #[test]

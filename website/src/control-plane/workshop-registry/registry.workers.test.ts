@@ -781,6 +781,19 @@ describe("workshop registry publication lifecycle", () => {
         "checkpoint checkpoint-00 must be sanitized and cold-boot verified",
     });
 
+    const wrongCoverage = checkpointResult(receipt.publicationId);
+    wrongCoverage[0]!.covered_module_ids = ["01-core"];
+    const coverageResult = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: wrongCoverage,
+    });
+    expect(coverageResult.status).toBe(400);
+    await expect(coverageResult.json()).resolves.toEqual({
+      error:
+        "checkpoint checkpoint-00 covered module prefix does not match the source manifest",
+    });
+
     const wrongNamespace = checkpointResult(receipt.publicationId);
     wrongNamespace[0]!.vm_images[0]!.image_key.scenario =
       "workshop-a-different-publication-checkpoint-00";

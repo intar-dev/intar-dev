@@ -1097,6 +1097,21 @@ async function verifyCheckpointReports(params: {
   const requiredVmIds = sourceVms.map((vm) =>
     readRequiredString(vm.id, "VM id"),
   );
+  const sourceModules = asRecordArray(
+    sourceManifest.modules,
+    "manifest.modules",
+  );
+  const expectedCoverageByCheckpoint = new Map<string, string[]>();
+  const modulePrefix: string[] = [];
+  for (const module of sourceModules) {
+    const moduleId = readRequiredString(module.id, "module id");
+    const checkpointId = readRequiredString(
+      module.checkpoint,
+      `module ${moduleId} checkpoint`,
+    );
+    modulePrefix.push(moduleId);
+    expectedCoverageByCheckpoint.set(checkpointId, [...modulePrefix]);
+  }
   const requiredCheckpoints = new Set(params.source.requiredCheckpointIds);
   const requiresProviderArtifact = workshopUsesHetznerProvider(params.source);
   const seen = new Set<string>();
@@ -1111,6 +1126,33 @@ async function verifyCheckpointReports(params: {
       throw new Error(`checkpoint ${checkpointId} is unexpected or duplicated`);
     }
     seen.add(checkpointId);
+    const expectedCoverage = expectedCoverageByCheckpoint.get(checkpointId);
+    const rawCoverage =
+      checkpoint.covered_module_ids ?? checkpoint.coveredModuleIds;
+    if (
+      !expectedCoverage ||
+      !Array.isArray(rawCoverage) ||
+      rawCoverage.some(
+        (moduleId) => typeof moduleId !== "string" || !moduleId.trim(),
+      )
+    ) {
+      throw new Error(
+        `checkpoint ${checkpointId} covered module prefix is invalid`,
+      );
+    }
+    const coveredModuleIds = rawCoverage.map((moduleId) =>
+      (moduleId as string).trim(),
+    );
+    if (
+      coveredModuleIds.length !== expectedCoverage.length ||
+      coveredModuleIds.some(
+        (moduleId, index) => moduleId !== expectedCoverage[index],
+      )
+    ) {
+      throw new Error(
+        `checkpoint ${checkpointId} covered module prefix does not match the source manifest`,
+      );
+    }
     if (
       checkpoint.sanitized !== true ||
       (checkpoint.cold_boot_verified ?? checkpoint.coldBootVerified) !== true
@@ -1241,6 +1283,7 @@ async function verifyCheckpointReports(params: {
       : undefined;
     reports.push({
       checkpointId,
+      coveredModuleIds,
       vmImages,
       rawVmImages: images,
       sanitized: true,

@@ -196,6 +196,7 @@ export function checkpointResult(
 ) {
   return checkpointIds.map((checkpointId, index) => ({
     checkpoint_id: checkpointId,
+    covered_module_ids: ["00-setup", "01-core"].slice(0, index + 1),
     sanitized: true,
     cold_boot_verified: true,
     runtime_bundle_cold_boot_verified: true,
