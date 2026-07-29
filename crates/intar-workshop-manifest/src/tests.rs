@@ -143,6 +143,20 @@ fn rejects_symlinks_in_hetzner_runtime_source() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn rejects_mismatched_hetzner_runtime_image_locks() -> Result<(), Box<dyn std::error::Error>> {
+    let root = editable_fixture()?;
+    fs::write(
+        root.path().join("runtime/source/scripts/images.lock"),
+        "registry.example.invalid/intar/other@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+    )?;
+    assert_invalid(
+        load_and_validate(root.path()),
+        "runtime/images.lock must exactly match runtime/source/scripts/images.lock",
+    );
+    Ok(())
+}
+
+#[test]
 fn validates_hetzner_provider_authoring_contract() -> Result<(), Box<dyn std::error::Error>> {
     let missing = editable_fixture()?;
     replace_manifest(missing.path(), "    server_type  = \"cx43\"\n", "")?;
