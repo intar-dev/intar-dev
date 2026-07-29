@@ -15,6 +15,7 @@ service_unit=intar-workshop-builder.service
 state_root=/var/lib/intar-workshop-builder
 cache_root=/var/cache/intar-workshop-builder
 config_path=/etc/intar/workshop-builder.toml
+signing_key_path=/etc/intar/workshop-runtime-ed25519
 builder_path=/usr/local/bin/intar-workshop-builder
 libexec_root=/usr/local/libexec/intar
 share_root=/usr/local/share/intar/workshops
@@ -221,6 +222,14 @@ for directory in \
   "${cache_root}/authored"; do
   validate_owned_directory "${directory}"
 done
+if [ -d /etc/intar ]; then
+  [ "$(stat -c '%u:%g' /etc/intar)" = "0:0" ] ||
+    die "/etc/intar must be owned by root:root"
+  intar_config_mode=$(stat -c '%a' /etc/intar)
+  intar_config_mode_numeric=$((0${intar_config_mode}))
+  [ $((intar_config_mode_numeric & 0022)) -eq 0 ] ||
+    die "/etc/intar must not be writable by group or other users"
+fi
 
 validate_existing_target() {
   path=$1
@@ -355,6 +364,26 @@ validate_existing_group() {
     '$3 == gid && $1 != name { print $1; exit }')
   [ -z "${duplicate_group}" ] ||
     die "${service_group} shares GID ${group_gid} with ${duplicate_group}"
+  unexpected_member=$(echo "${group_entry}" |
+    awk -F: -v expected="${service_user}" '
+      {
+        count = split($4, members, ",")
+        for (index = 1; index <= count; index++) {
+          if (members[index] != "" && members[index] != expected) {
+            print members[index]
+            exit
+          }
+        }
+      }
+    ')
+  [ -z "${unexpected_member}" ] ||
+    die "${service_group} has unexpected explicit member ${unexpected_member}"
+  unexpected_primary_user=$(getent passwd | awk -F: \
+    -v expected="${service_user}" \
+    -v gid="${group_gid}" \
+    '$4 == gid && $1 != expected { print $1; exit }')
+  [ -z "${unexpected_primary_user}" ] ||
+    die "${unexpected_primary_user} unexpectedly uses ${service_group} as its primary group"
 }
 
 validate_existing_account() {
@@ -420,6 +449,48 @@ else
     fi
   fi
 fi
+
+validate_existing_signing_key() {
+  if [ ! -e "${signing_key_path}" ] && [ ! -L "${signing_key_path}" ]; then
+    return
+  fi
+  id "${service_user}" >/dev/null 2>&1 ||
+    die "remove or defer ${signing_key_path} until ${service_user} exists"
+  [ -f "${signing_key_path}" ] ||
+    die "runtime signing key must be a regular file"
+  [ ! -L "${signing_key_path}" ] ||
+    die "runtime signing key must not be a symlink"
+  service_gid=$(id -g "${service_user}")
+  [ "$(stat -c '%u:%g:%a:%h' "${signing_key_path}")" = "0:${service_gid}:640:1" ] ||
+    die "runtime signing key must be root:${service_group} 0640 with exactly one link"
+  if python3 - "${signing_key_path}" <<'PY'
+import errno
+import os
+import sys
+
+try:
+    os.getxattr(sys.argv[1], "system.posix_acl_access", follow_symlinks=False)
+except OSError as error:
+    if error.errno in {errno.ENODATA, errno.ENOTSUP}:
+        raise SystemExit(1)
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+  then
+    die "runtime signing key must not have a POSIX access ACL"
+  else
+    acl_status=$?
+    [ "${acl_status}" -eq 1 ] ||
+      die "failed to inspect runtime signing key access ACL"
+  fi
+  runuser -u "${service_user}" -- /usr/bin/test -r "${signing_key_path}" ||
+    die "${service_user} cannot read the runtime signing key"
+  if runuser -u "${service_user}" -- /usr/bin/test -w "${signing_key_path}"; then
+    die "${service_user} must not be able to write the runtime signing key"
+  fi
+}
+
+validate_existing_signing_key
 
 report_directory_plan() {
   path=$1
@@ -487,6 +558,7 @@ runuser -u "${service_user}" -- /usr/bin/test -w /dev/kvm ||
   die "${service_user} cannot write /dev/kvm"
 
 service_gid=$(id -g "${service_user}")
+validate_existing_signing_key
 
 install -d -o root -g root -m 0755 \
   /etc/intar \

@@ -76,7 +76,13 @@ A workshop whose HCL selects `hetzner_cloud` additionally requires
 private seed is supplied either by an absolute `private_key_file` or by the
 named `private_key_env`; the latter contains standard-base64 for exactly 32
 bytes. The key itself must never be written into TOML. Unix key files must be
-regular files inaccessible to group and other users. `doctor`, `run`, and
+regular caller-owned files with mode `0600`, or root-owned files with one link,
+no access ACL, mode `0640`, and a group matching the caller's non-root primary
+group. Production separately provisions
+`/etc/intar/workshop-runtime-ed25519` as `root:intar-builder 0640`; that lets
+the service account read the seed without owning or replacing it. The
+installer never generates or packages this key, validates it when present, and
+rejects foreign members of the `intar-builder` group. `doctor`, `run`, and
 `run-once` validate a configured key before registry authentication.
 Production's protected `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID` must exactly
 match this `key_id`, and the protected
