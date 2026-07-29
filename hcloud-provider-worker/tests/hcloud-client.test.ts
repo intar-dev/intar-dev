@@ -244,6 +244,37 @@ describe("HcloudClient", () => {
     expect(maxInFlight).toBe(4);
   });
 
+  it("bounds concurrent reconciliation reads across the whole client", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client = new HcloudClient("reconcile-token-".repeat(4), {
+      fetcher: mockFetch(async (request) => {
+        const actionId = Number(new URL(request.url).pathname.split("/").at(-1));
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        inFlight -= 1;
+        return json({
+          action: {
+            id: actionId,
+            status: "success",
+            command: "create_server",
+            progress: 100,
+            started: "2026-07-22T12:00:00Z",
+            finished: "2026-07-22T12:00:01Z",
+            error: null,
+            resources: [],
+          },
+        });
+      }),
+    });
+
+    await expect(
+      Promise.all(Array.from({ length: 10 }, (_, index) => client.getAction(index + 1))),
+    ).resolves.toHaveLength(10);
+    expect(maxInFlight).toBe(4);
+  });
+
   it("rejects malformed provider creation timestamps", async () => {
     const client = new HcloudClient("t".repeat(64), {
       fetcher: mockFetch(() =>
