@@ -209,6 +209,42 @@ describe("HcloudClient", () => {
     expect(JSON.stringify(transportEvents)).not.toContain(token);
   });
 
+  it("calls the fetcher without using the client as its receiver", async () => {
+    const fetcher = function (
+      this: unknown,
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> {
+      if (this !== undefined) {
+        throw new TypeError("Illegal invocation");
+      }
+      const request = new Request(input, init);
+      expect(new URL(request.url).pathname).toBe("/v1/actions/9001");
+      return Promise.resolve(
+        json({
+          action: {
+            id: 9_001,
+            status: "success",
+            command: "create_server",
+            progress: 100,
+            started: "2026-07-22T12:00:00Z",
+            finished: "2026-07-22T12:00:01Z",
+            error: null,
+            resources: [],
+          },
+        }),
+      );
+    } as typeof fetch;
+    const client = new HcloudClient("receiver-safe-token-".repeat(4), {
+      fetcher,
+    });
+
+    await expect(client.getAction(9_001)).resolves.toMatchObject({
+      id: 9_001,
+      status: "success",
+    });
+  });
+
   it("bounds project inventory reads to four concurrent requests", async () => {
     const listKeys = new Map([
       ["/v1/servers", "servers"],
