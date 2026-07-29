@@ -727,7 +727,7 @@ mv -- "${{staging}}" "${{install_root}}"
 printf '%s  %s\n' '{kino_sha256}' /tmp/intar-kino | sha256sum --check --strict
 printf '%s  %s\n' '{sanitizer_sha256}' /tmp/intar-workshop-sanitize | sha256sum --check --strict
 install -o root -g root -m 0755 /tmp/intar-kino /usr/local/bin/kino
-install -o root -g root -m 0755 /tmp/intar-workshop-sanitize {sanitizer_path}
+install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize {sanitizer_path}
 /usr/local/bin/kino --help >/dev/null
 /bin/bash -n {sanitizer_path}
 cmp --silent /tmp/intar-runtime-images.lock "${{install_root}}/scripts/images.lock"
@@ -1207,13 +1207,13 @@ mod tests {
     }
 
     #[test]
-    fn preparation_script_keeps_build_material_and_rejects_other_forbidden_paths() {
+    fn preparation_script_creates_sanitizer_parent_and_preserves_material_boundaries() {
         let script = render_prepare_script(
             "/opt/workshop",
             "lab/00/verify.sh",
             &"1".repeat(64),
             &"2".repeat(64),
-            "/usr/local/sbin/intar-workshop-sanitize",
+            "/usr/local/libexec/intar/intar-workshop-sanitize",
             &["/opt/workshop/.git".to_owned()],
             &[
                 "/opt/workshop/.git".to_owned(),
@@ -1225,6 +1225,10 @@ mod tests {
         assert!(!script.contains("test ! -e '/opt/workshop/.git'"));
         assert!(script.contains("docker images --all --no-trunc --quiet"));
         assert!(script.contains("--same-permissions"));
+        assert!(script.contains(
+            "install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize \
+             '/usr/local/libexec/intar/intar-workshop-sanitize'"
+        ));
         let staged = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(staged.path(), &script).unwrap();
         assert!(
