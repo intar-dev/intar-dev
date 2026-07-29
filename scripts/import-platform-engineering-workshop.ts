@@ -653,7 +653,6 @@ set -euo pipefail
 readonly workshop_root=/opt/platform-engineering-workshop
 cd "\${workshop_root}"
 test -f /var/lib/intar-workshop/registry-preflight.ok
-test -d .git
 docker info >/dev/null
 for tool in talosctl kubectl helm crane cilium jq git curl; do
   command -v "\${tool}" >/dev/null
@@ -1176,6 +1175,8 @@ function copyRuntimePath(relativePath: string) {
       content = adaptDestroyCluster(content);
     } else if (relativePath === "scripts/bootstrap-gitops.sh") {
       content = adaptGiteaDigestValues(content);
+    } else if (relativePath === "scripts/seed-gitea.sh") {
+      content = adaptSeedGiteaForSealedCheckpoints(content);
     } else if (relativePath === "gitops/components/grafana/grafana.yaml") {
       content = adaptStockGrafana(content);
     } else if (relativePath === "lab/07-ci/app/Dockerfile") {
@@ -1361,7 +1362,6 @@ check docker info
 check test "$(docker info --format '{{.NCPU}}')" -ge 4
 check test "$(( $(docker info --format '{{.MemTotal}}') / 1024 / 1024 ))" -ge 15000
 check test -f /var/lib/intar-workshop/registry-preflight.ok
-check test -d /opt/platform-engineering-workshop/.git
 while IFS= read -r image; do
   image="\${image%%#*}"; image="\${image//[[:space:]]/}"; [[ -z "\${image}" ]] && continue
   [[ "\${image}" =~ @sha256:[a-f0-9]{64}$ ]] || { echo "FAIL tag-only image \${image}" >&2; failed=1; }
@@ -1371,6 +1371,32 @@ for tool in talosctl kubectl helm crane cilium jq git curl; do
 done
 exit "\${failed}"
 `;
+}
+
+function adaptSeedGiteaForSealedCheckpoints(value: string): string {
+  const anchor = `# --- 3. Push -----------------------------------------------------------------------
+cd "\${REPO_ROOT}"
+`;
+  const replacement = `# --- 3. Push -----------------------------------------------------------------------
+cd "\${REPO_ROOT}"
+# Canonical KVM checkpoints deliberately omit source-control metadata because
+# Git objects can retain removed author-only files. Recreate a fresh repository
+# from the already filtered participant tree when a learner reaches module 02.
+# Direct-cloud reconstruction already creates this same curated repository in
+# bootstrap.sh, so this branch is idempotent across both runtime providers.
+if [[ ! -d .git ]]; then
+  git init --initial-branch=main --quiet
+  printf '.intar-runtime-owner\\n' >> .git/info/exclude
+  git add -A
+  git -c user.name=Intar -c user.email=workshop@intar.dev \\
+    commit --quiet -m 'Pinned learner source ${PINNED_REVISION}'
+fi
+`;
+  const adapted = value.replace(anchor, replacement);
+  if (adapted === value) {
+    throw new Error("Gitea seed push anchor changed upstream");
+  }
+  return adapted;
 }
 
 function adaptTalosSystemImagePins(value: string): string {

@@ -1834,12 +1834,9 @@ mod tests {
                 kernel,
                 initrd,
                 boot_cmdline: "root=/dev/vda rw console=ttyS0".to_string(),
-                guest_build_material_paths: vec![
-                    "/opt/debian13-workshop/canonical-catch-up".to_string(),
-                ],
+                guest_build_material_paths: vec!["/opt/debian13-workshop/.git".to_string()],
                 guest_forbidden_participant_paths: vec![
                     "/opt/debian13-workshop/.git".to_string(),
-                    "/opt/debian13-workshop/canonical-catch-up".to_string(),
                     "/opt/debian13-workshop/solutions".to_string(),
                 ],
             }],
@@ -1925,7 +1922,7 @@ mod tests {
         }
         assert!(events.iter().any(|event| event == "verify-retained:00"));
         assert!(events.iter().any(|event| event == "capture-build"));
-        assert!(events[scrub].contains("canonical-catch-up"));
+        assert!(events[scrub].contains("/opt/debian13-workshop/.git"));
         assert!(scrub < sanitize && sanitize < shutdown);
     }
 
@@ -1964,10 +1961,19 @@ mod tests {
         assert!(!catch_up_00.contains("/scripts/catch-up.sh"));
         assert!(catch_up_00.contains("registry-preflight.ok"));
         assert!(catch_up_00.contains("docker info"));
+        assert!(!catch_up_00.contains("test -d .git"));
         assert!(!catch_up_00.contains("MISE_OFFLINE"));
         assert!(!catch_up_01.contains("/scripts/catch-up.sh"));
         assert!(catch_up_01.contains("scripts/create-cluster.sh"));
         assert!(catch_up_01.contains("kubectl wait --for=condition=Ready nodes --all"));
+        let module_00_verifier =
+            fs::read_to_string(root.join("runtime/source/lab/00-setup/verify.sh")).unwrap();
+        assert!(!module_00_verifier.contains("platform-engineering-workshop/.git"));
+        let seed_gitea =
+            fs::read_to_string(root.join("runtime/source/scripts/seed-gitea.sh")).unwrap();
+        assert!(seed_gitea.contains("if [[ ! -d .git ]]"));
+        assert!(seed_gitea.contains("git init --initial-branch=main --quiet"));
+        assert!(seed_gitea.contains("git add -A"));
 
         for module in &workshop.manifest.modules {
             let source = fs::read_to_string(root.join(&module.catch_up_script)).unwrap();

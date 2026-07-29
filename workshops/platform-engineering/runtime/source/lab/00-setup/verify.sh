@@ -10,7 +10,6 @@ check docker info
 check test "$(docker info --format '{{.NCPU}}')" -ge 4
 check test "$(( $(docker info --format '{{.MemTotal}}') / 1024 / 1024 ))" -ge 15000
 check test -f /var/lib/intar-workshop/registry-preflight.ok
-check test -d /opt/platform-engineering-workshop/.git
 while IFS= read -r image; do
   image="${image%%#*}"; image="${image//[[:space:]]/}"; [[ -z "${image}" ]] && continue
   [[ "${image}" =~ @sha256:[a-f0-9]{64}$ ]] || { echo "FAIL tag-only image ${image}" >&2; failed=1; }

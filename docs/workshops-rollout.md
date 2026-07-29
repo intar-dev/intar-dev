@@ -401,7 +401,8 @@ Configure:
   manifest published by Website production;
 - the authored-image mapping required for the existing sealed KVM checkpoint
   proof;
-- all build-only catch-up/solve paths as forbidden participant paths.
+- the freshly initialized learner-safe workshop `.git` as build material and
+  every build-only or known answer path as a forbidden participant path.
 
 The clean direct-cloud proof disk contains only Debian 13 and the `INTARBUILD`
 seed/SSH bootstrap contract. It must not contain workshop source, solved state,

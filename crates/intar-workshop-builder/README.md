@@ -116,8 +116,8 @@ The base disk must be Debian 13 and already contain:
   carry its separately validated image cache, while direct-cloud proof disks
   and runtime bundles carry no OCI layers;
 - the fixed sanitizer at the configured `execution.sanitizer_path`; and
-- any canonical solve helper only at the narrow paths listed in
-  `guest_build_material_paths`.
+- any build-only repository metadata or canonical solve helper only at the
+  narrow paths listed in `guest_build_material_paths`.
 
 The backend captures those configured build-only paths once into its private
 host work directory. A mutable generation receives them, but the backend
@@ -135,11 +135,20 @@ at `/usr/local/lib/intar-workshop/verifiers` before checkpoint 00 is sealed and
 is retained in all checkpoints; the builder generates `/etc/kino/kino.hcl.tpl`
 so every declared probe runs the matching retained verifier.
 
-The dedicated base must not contain a `.git` directory, package cache, backup,
-or second repository copy from which a learner could recover a removed solve
-helper. `guest_build_material_paths` must enumerate every canonical catch-up,
-solution, answer-key, and facilitator-only path needed during the build. A
-missing helper fails publication. Every build-material path must also appear in
+The dedicated base must not contain an upstream or otherwise unreviewed `.git`
+directory, package cache, backup, or second repository copy from which a
+learner could recover a removed solve helper. The Platform Engineering image
+preparer copies only the runtime bundle's learner-safe source allowlist, runs
+its bootstrap, and creates a fresh one-commit `.git` from that curated tree.
+That exact `.git` is declared as build material: canonical mutable generations
+can seed Gitea, but it is removed before every seal and is absent from every KVM
+participant checkpoint. The learner-side seed script recreates an equivalent
+fresh repository from the filtered participant tree when module 02 needs it.
+
+`guest_build_material_paths` must enumerate every repository-metadata,
+canonical catch-up, solution, answer-key, and facilitator-only path needed
+during the build. Every listed path must exist in the authored image, so a
+missing path fails publication. Every build-material path must also appear in
 the required `guest_forbidden_participant_paths`; that second list must include
 the workshop `.git` path and additionally names all lab `solve.sh` and source
 README files, facilitator slides, and known backup or duplicate repository

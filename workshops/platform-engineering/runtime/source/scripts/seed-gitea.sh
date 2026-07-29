@@ -57,6 +57,18 @@ fi
 
 # --- 3. Push -----------------------------------------------------------------------
 cd "${REPO_ROOT}"
+# Canonical KVM checkpoints deliberately omit source-control metadata because
+# Git objects can retain removed author-only files. Recreate a fresh repository
+# from the already filtered participant tree when a learner reaches module 02.
+# Direct-cloud reconstruction already creates this same curated repository in
+# bootstrap.sh, so this branch is idempotent across both runtime providers.
+if [[ ! -d .git ]]; then
+  git init --initial-branch=main --quiet
+  printf '.intar-runtime-owner\n' >> .git/info/exclude
+  git add -A
+  git -c user.name=Intar -c user.email=workshop@intar.dev \
+    commit --quiet -m 'Pinned learner source 1b6fad43551a720b143d7a52799f81c4c89455cb'
+fi
 # Gitea rejects pushes from shallow clones ("shallow update not allowed").
 if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
   die "This clone is shallow — run 'git fetch --unshallow' first, then re-run."

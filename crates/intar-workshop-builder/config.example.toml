@@ -66,12 +66,14 @@ disk = "/var/cache/intar-workshop-builder/bases/platform-engineering-debian13.ra
 kernel = "/var/cache/intar-workshop-builder/bases/vmlinuz-6.12-intar"
 initrd = "/var/cache/intar-workshop-builder/bases/initrd.img-6.12-intar"
 boot_cmdline = "root=/dev/vda rw console=ttyS0 quiet loglevel=4 systemd.show_status=false"
-# These paths are archived once on the trusted build generation, removed before
-# every seal, absent during cold-boot proof, and restored only after the next
-# mutable generation starts. Never list participant lab/content paths here.
+# These paths must exist in the authored image. They are archived once on the
+# trusted build generation, removed before every seal, absent during cold-boot
+# proof, and restored only after the next mutable generation starts. The
+# curated Git repository is needed only while canonical checkpoints are built;
+# the learner-safe seed script recreates it from the participant tree when a
+# learner reaches module 02.
 guest_build_material_paths = [
-  "/opt/platform-engineering-workshop/scripts/catch-up.sh",
-  "/opt/platform-engineering-workshop/solutions",
+  "/opt/platform-engineering-workshop/.git",
 ]
 # Cold-boot proof checks every exact path below. Build material must be repeated
 # here, and participant-only image construction must omit all other answer,

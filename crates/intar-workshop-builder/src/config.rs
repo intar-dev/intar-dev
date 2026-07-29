@@ -634,7 +634,23 @@ surprise = true
 
     #[test]
     fn parses_example_config() {
-        parse(include_str!("../config.example.toml")).unwrap();
+        let config = parse(include_str!("../config.example.toml")).unwrap();
+        let image = &config.execution.images[0];
+        assert_eq!(
+            image.guest_build_material_paths,
+            ["/opt/platform-engineering-workshop/.git"]
+        );
+        assert!(
+            image
+                .guest_forbidden_participant_paths
+                .contains(&"/opt/platform-engineering-workshop/.git".to_owned())
+        );
+        assert!(
+            !image
+                .guest_build_material_paths
+                .iter()
+                .any(|path| path.contains("catch-up.sh") || path.contains("solutions"))
+        );
     }
 
     #[test]
