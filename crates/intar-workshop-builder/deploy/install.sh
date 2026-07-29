@@ -369,9 +369,10 @@ validate_existing_group() {
     awk -F: -v expected="${service_user}" '
       {
         count = split($4, members, ",")
-        for (index = 1; index <= count; index++) {
-          if (members[index] != "" && members[index] != expected) {
-            print members[index]
+        # Keep the loop variable distinct from awk built-ins for mawk.
+        for (member_index = 1; member_index <= count; member_index++) {
+          if (members[member_index] != "" && members[member_index] != expected) {
+            print members[member_index]
             exit
           }
         }
