@@ -144,16 +144,16 @@ metadata:
   name: local-path-config
   namespace: local-path-storage
 data:
-  # Workshop curation: Talos has an immutable root filesystem — /opt is not
-  # writable. /var/local-path-provisioner is the Talos-supported location and
-  # MUST be bind-mounted into the kubelet via a machine-config patch
-  # (machine.kubelet.extraMounts). See scripts/create-cluster.sh.
+  # Workshop curation: Talos already bind-mounts /var/lib/kubelet into its
+  # kubelet system container with recursive shared propagation. Keeping
+  # workshop PVs below that existing mount avoids a second self-recursive
+  # kubelet extra mount while preserving hostPath visibility.
   config.json: |-
     {
             "nodePathMap":[
             {
                     "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
-                    "paths":["/var/local-path-provisioner"]
+                    "paths":["/var/lib/kubelet/local-path-provisioner"]
             }
             ]
     }

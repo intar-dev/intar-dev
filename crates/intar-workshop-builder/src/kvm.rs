@@ -2372,6 +2372,29 @@ mod tests {
     }
 
     #[test]
+    fn reference_talos_reuses_kubelets_existing_shared_mount_for_local_storage() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let create_cluster =
+            fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
+        let local_path = fs::read_to_string(root.join(
+            "runtime/source/gitops/components/local-path-provisioner/local-path-storage.yaml",
+        ))
+        .unwrap();
+
+        assert!(!create_cluster.contains("extraMounts:"));
+        assert!(!create_cluster.contains("rshared"));
+        assert!(!create_cluster.contains("/var/local-path-provisioner"));
+        assert!(local_path.contains(r#""paths":["/var/lib/kubelet/local-path-provisioner"]"#));
+        assert!(!local_path.contains(r#""paths":["/var/lib/local-path-provisioner"]"#));
+        assert!(!local_path.contains("/var/local-path-provisioner"));
+        assert!(create_cluster.contains("df -Pk /var/lib/docker"));
+        assert!(create_cluster.contains("df -Pi /var/lib/docker"));
+        assert!(create_cluster.contains("/proc/self/mountinfo"));
+        assert!(create_cluster.contains("/proc/sys/fs/mount-max"));
+    }
+
+    #[test]
     fn reference_talos_bootstrap_recovery_is_narrow_and_valid_shell() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
