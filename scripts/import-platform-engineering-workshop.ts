@@ -1629,17 +1629,35 @@ function adaptTalosSystemImagePins(value: string): string {
     image: ${pin("registry.k8s.io/kube-controller-manager:v1.36.2")}
   scheduler:
     image: ${pin("registry.k8s.io/kube-scheduler:v1.36.2")}
-  etcd:
-    image: ${pin("registry.k8s.io/etcd:v3.6.12")}
   coreDNS:
     image: ${pin("registry.k8s.io/coredns/coredns:v1.14.2")}
   network:`;
   const adapted = value.replace("cluster:\n  network:", clusterImages);
   if (adapted === value) throw new Error("Talos machine patch anchor changed upstream");
-  return adapted.replace(
+  const withKubeletImages = adapted.replace(
     "  kubelet:\n    extraMounts:",
     `  kubelet:\n    image: ${pin("ghcr.io/siderolabs/kubelet:v1.36.2")}\n    extraArgs:\n      pod-infra-container-image: ${pin("registry.k8s.io/pause:3.10.1")}\n    extraMounts:`,
   );
+  const withControlPlaneEtcd = withKubeletImages.replace(
+    `patches=(--config-patch "\${CNI_PATCH}")`,
+    `# Talos rejects cluster.etcd configuration on worker machine configs, so
+# keep its digest pin in a control-plane-only patch.
+CONTROL_PLANE_PATCH="$(cat <<'EOF'
+cluster:
+  etcd:
+    image: ${pin("registry.k8s.io/etcd:v3.6.12")}
+EOF
+)"
+
+patches=(
+  --config-patch "\${CNI_PATCH}"
+  --config-patch-controlplanes "\${CONTROL_PLANE_PATCH}"
+)`,
+  );
+  if (withControlPlaneEtcd === withKubeletImages) {
+    throw new Error("Talos role-specific patch anchor changed upstream");
+  }
+  return withControlPlaneEtcd;
 }
 
 function adaptCreateClusterForExternalRegistries(value: string): string {

@@ -2196,6 +2196,42 @@ mod tests {
     }
 
     #[test]
+    fn reference_talos_config_scopes_etcd_to_control_plane() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let source =
+            fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
+        let common_patch = source
+            .split_once("CNI_PATCH=\"$(cat <<'EOF'\n")
+            .unwrap()
+            .1
+            .split_once("\nEOF\n)\"")
+            .unwrap()
+            .0;
+        let control_plane_patch = source
+            .split_once("CONTROL_PLANE_PATCH=\"$(cat <<'EOF'\n")
+            .unwrap()
+            .1
+            .split_once("\nEOF\n)\"")
+            .unwrap()
+            .0;
+
+        assert!(!common_patch.contains("\n  etcd:"));
+        assert!(control_plane_patch.contains(
+            "cluster:\n  etcd:\n    image: registry.k8s.io/etcd@sha256:\
+             3c2ced08f23b1183e8bd4613064c3fb6b8db5057a4d1f13c3518c76e357a07a8"
+        ));
+        assert!(source.contains(
+            "patches=(\n  --config-patch \"${CNI_PATCH}\"\n  \
+             --config-patch-controlplanes \"${CONTROL_PLANE_PATCH}\"\n)"
+        ));
+        assert!(!source.split_ascii_whitespace().any(|token| matches!(
+            token,
+            "--config-patch-workers" | "--config-patch-control-plane"
+        )));
+    }
+
+    #[test]
     fn reference_talos_bootstrap_recovery_is_narrow_and_valid_shell() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
