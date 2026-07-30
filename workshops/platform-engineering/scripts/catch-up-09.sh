@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Trusted checkpoint reconstruction adapted from pinned module 09.
-# Module 09 — full solution: enable eventing + the picture pipeline, then
-# upload a tiny test PNG through the portal (plain curl — the gallery form is
-# just a multipart POST) so the outcome check in verify.sh is unconditional.
+# Module 09 — full solution: enable eventing, the picture pipeline, and the
+# complete observability capability, then upload a tiny test PNG through the
+# portal so the trace and image outcome checks are unconditional.
 set -euo pipefail
 
 LAB_DIR="/opt/platform-engineering-workshop/lab/09-capstone"
@@ -15,8 +15,11 @@ CLONE="$(gitops_clone)"
 # modules' apps; re-copying is a no-op when they're already enabled, and makes
 # this module solvable standalone (the ksvcs need Serving, the upload goes
 # through the portal).
-enable_catalog "$CLONE" knative-serving.yaml portal.yaml knative-eventing.yaml picture-pipeline.yaml
-gitops_push "$CLONE" "module 09: knative-eventing + picture pipeline"
+enable_catalog "$CLONE" \
+  knative-serving.yaml portal.yaml knative-eventing.yaml picture-pipeline.yaml \
+  victoria-metrics.yaml victoria-logs.yaml victoria-traces.yaml grafana.yaml \
+  otel-collector.yaml
+gitops_push "$CLONE" "module 09: eventing, picture pipeline, and observability"
 
 wait_app knative-serving 600
 wait_app knative-eventing 600
@@ -46,6 +49,42 @@ kubectl -n pipeline annotate trigger/resize-on-upload \
 kubectl -n pipeline wait --for=condition=Ready trigger/resize-on-upload --timeout=300s
 wait_exists pipeline job/create-images-bucket
 kubectl -n pipeline wait --for=condition=Complete job/create-images-bucket --timeout=300s
+
+# The three storage backends and Grafana are ArgoCD wave 0. The collector is
+# wave 1, so prove the whole first wave before waiting for its two workloads.
+wait_app victoria-metrics 600
+wait_app victoria-logs 600
+wait_app victoria-traces 600
+wait_app grafana 600
+
+wait_exists observability service/victoria-metrics 600
+wait_exists observability deployment/victoria-metrics 600
+kubectl -n observability rollout status deployment/victoria-metrics --timeout=600s
+wait_exists observability service/victoria-logs 600
+wait_exists observability deployment/victoria-logs 600
+kubectl -n observability rollout status deployment/victoria-logs --timeout=600s
+wait_exists observability service/victoria-traces 600
+wait_exists observability deployment/victoria-traces 600
+kubectl -n observability rollout status deployment/victoria-traces --timeout=600s
+wait_exists observability service/grafana-nodeport 600
+wait_exists observability deployment/grafana 600
+kubectl -n observability rollout status deployment/grafana --timeout=600s
+
+wait_app otel-collector 600
+wait_exists observability service/otel-collector 600
+wait_exists observability deployment/otel-collector-gateway 600
+wait_exists observability daemonset/otel-collector-agent 600
+kubectl -n observability rollout status deployment/otel-collector-gateway --timeout=600s
+kubectl -n observability rollout status daemonset/otel-collector-agent --timeout=600s
+
+# Rollout readiness proves the pod's /api/health probe. Also prove the declared
+# browser-facing NodePort before creating the fresh trace used by verification.
+WAITED=0
+until grafana_health="$(curl -fsS --max-time 5 http://localhost:30030/api/health 2>/dev/null)" &&
+      jq -e '.database == "ok"' <<<"$grafana_health" >/dev/null 2>&1; do
+  [ "$WAITED" -ge 300 ] && { echo "timed out waiting for Grafana on :30030" >&2; exit 1; }
+  sleep 10; WAITED=$((WAITED + 10))
+done
 
 # Wait for the portal UI (the upload path goes browser → portal → uploader).
 WAITED=0

@@ -2137,6 +2137,88 @@ mod tests {
         assert!(catch_up_07.contains("crane copy --insecure"));
         assert!(!catch_up_07.contains("mise x"));
 
+        let module_09 = workshop
+            .manifest
+            .modules
+            .iter()
+            .find(|module| module.id == "09")
+            .unwrap();
+        let catch_up_09 = fs::read_to_string(root.join(&module_09.catch_up_script)).unwrap();
+        let verifier_09 = fs::read_to_string(root.join(&module_09.verify_script)).unwrap();
+        let mut previous = 0;
+        for expected in [
+            "victoria-metrics.yaml",
+            "victoria-logs.yaml",
+            "victoria-traces.yaml",
+            "grafana.yaml",
+            "otel-collector.yaml",
+            "wait_app victoria-metrics 600",
+            "wait_app victoria-logs 600",
+            "wait_app victoria-traces 600",
+            "wait_app grafana 600",
+            "rollout status deployment/grafana --timeout=600s",
+            "wait_app otel-collector 600",
+            "rollout status deployment/otel-collector-gateway --timeout=600s",
+            "rollout status daemonset/otel-collector-agent --timeout=600s",
+            "http://localhost:30030/api/health",
+            "uploading test image through the portal",
+        ] {
+            let position = catch_up_09[previous..].find(expected).unwrap_or_else(|| {
+                panic!("module 09 catch-up is missing ordered text '{expected}'")
+            }) + previous;
+            previous = position + expected.len();
+        }
+        for expected in [
+            "victoria-metrics victoria-logs victoria-traces grafana otel-collector",
+            "deployment/otel-collector-gateway",
+            "daemonset/otel-collector-agent",
+            "services/${backend}:http/proxy/health",
+            "http://localhost:30030/api/health",
+            "/api/datasources/proxy/uid/victoriametrics/api/v1/query?query=up",
+            "/api/datasources/uid/victorialogs/health",
+            "/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20",
+            r#"["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"]"#,
+            "[.processes[]?.serviceName]",
+            "VictoriaTraces datasource did not expose one connected upload trace",
+        ] {
+            assert!(
+                verifier_09.contains(expected),
+                "module 09 verifier is missing '{expected}'"
+            );
+        }
+        for script in [&module_09.catch_up_script, &module_09.verify_script] {
+            assert!(
+                Command::new("bash")
+                    .arg("-n")
+                    .arg(root.join(script))
+                    .status()
+                    .unwrap()
+                    .success(),
+                "module 09 script '{}' has invalid shell syntax",
+                script
+            );
+        }
+        let grafana_source =
+            fs::read_to_string(root.join("runtime/source/gitops/components/grafana/grafana.yaml"))
+                .unwrap();
+        assert!(
+            grafana_source
+                .contains("url: http://victoria-logs.observability.svc.cluster.local:9428")
+        );
+        assert!(grafana_source.contains("type: victoriametrics-logs-datasource"));
+        assert!(grafana_source.contains("install-victorialogs-datasource"));
+        assert!(
+            grafana_source
+                .contains("34935dcb7c19107f86a7703ee0a24f40363e0c02483206f3cc9a5de2f5fa4918")
+        );
+        assert!(!grafana_source.contains("type: loki"));
+        assert!(!grafana_source.contains("GF_INSTALL_PLUGINS"));
+        assert!(!grafana_source.contains("/select/logsql/query"));
+        let grafana_catalog =
+            fs::read_to_string(root.join("runtime/source/gitops/catalog/grafana.yaml")).unwrap();
+        assert!(grafana_catalog.contains("Browser: http://localhost:30030"));
+        assert!(!grafana_catalog.contains("localhost:30031"));
+
         let verifier_00 = fs::read_to_string(root.join(&module_00.verify_script)).unwrap();
         assert!(!verifier_00.contains("MISE_OFFLINE"));
         assert!(verifier_00.contains("expected_crane_version=0.21.7"));

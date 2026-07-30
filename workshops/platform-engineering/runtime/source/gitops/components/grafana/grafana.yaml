@@ -1,10 +1,9 @@
 ---
 # Grafana 12.4.5 — dashboards for the Victoria stack (observability rework,
-# issue #57). Pre-wired with three provisioned datasources, all built-in types
-# (no plugins — offline rule):
-#   - VictoriaMetrics (Prometheus type, default) → PromQL/metrics
-#   - VictoriaLogs    (Loki type)                → logs   (see VENDOR.md caveat)
-#   - VictoriaTraces  (Jaeger type)              → traces (see VENDOR.md caveat)
+# issue #57). Pre-wired with three provisioned datasources:
+#   - VictoriaMetrics (built-in Prometheus type) → PromQL/metrics
+#   - VictoriaLogs    (signed plugin 0.29.0)      → LogsQL/logs
+#   - VictoriaTraces  (built-in Jaeger type)      → traces
 # Anonymous read (Viewer) is on — workshop-grade. NodePort 30030
 # (service-nodeport.yaml), the canonical observability port freed when otel-lgtm
 # was retired; the portal's deep-links point here.
@@ -20,10 +19,8 @@ data:
   datasources.yaml: |
     apiVersion: 1
     datasources:
-      # VictoriaMetrics via its NATIVE Grafana datasource plugin (#65), baked
-      # into the image (see apps/grafana/Dockerfile) — the MetricsQL query editor
-      # instead of the Prometheus shim. Same uid, so nothing that references it
-      # by uid breaks.
+      # VictoriaMetrics supports Grafana's built-in Prometheus datasource.
+      # Keep the stable uid so workshop deep links and dashboards remain valid.
       - name: VictoriaMetrics
         uid: victoriametrics
         type: prometheus
@@ -38,12 +35,11 @@ data:
       # /select suffix here, unlike the old Loki datasource).
       - name: VictoriaLogs
         uid: victorialogs
-        type: loki
+        type: victoriametrics-logs-datasource
         access: proxy
-        url: http://victoria-logs.observability.svc.cluster.local:9428/select/logsql/query
-      # VictoriaTraces exposes a Jaeger-compatible query API, so we use the
-      # built-in Jaeger datasource (offline rule: no plugin at boot) pointed at
-      # its /select/jaeger base. Replaces otel-lgtm's Tempo. See VENDOR.md.
+        url: http://victoria-logs.observability.svc.cluster.local:9428
+      # VictoriaTraces exposes a Jaeger-compatible query API, so the built-in
+      # Jaeger datasource points at its /select/jaeger base.
       - name: VictoriaTraces
         uid: victoriatraces
         type: jaeger
@@ -107,10 +103,35 @@ spec:
         fsGroup: 472
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: install-victorialogs-datasource
+          image: "docker.io/grafana/grafana@sha256:26b8f35a9e4e4431995cf64c3f396505a4faf17bcfc19f9ed84943ec6bfd5ecd"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              archive=/tmp/victoriametrics-logs-datasource-v0.29.0.tar.gz
+              curl -fsSL --output "${archive}" \
+                https://github.com/VictoriaMetrics/victorialogs-datasource/releases/download/v0.29.0/victoriametrics-logs-datasource-v0.29.0.tar.gz
+              echo "34935dcb7c19107f86a7703ee0a24f40363e0c02483206f3cc9a5de2f5fa4918  ${archive}" |
+                sha256sum -c -
+              tar -xzf "${archive}" -C /opt/grafana-plugins
+              test -f /opt/grafana-plugins/victoriametrics-logs-datasource/plugin.json
+              rm -f "${archive}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: plugins
+              mountPath: /opt/grafana-plugins
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: grafana
-          # Custom image: stock Grafana 12.4.5 + the native VictoriaMetrics
-          # datasource plugins baked in (apps/grafana/Dockerfile, #65).
+          # Stock Grafana. A checksum-pinned, signed VictoriaLogs plugin is
+          # staged by the init container into a read-only shared volume.
           image: "docker.io/grafana/grafana@sha256:26b8f35a9e4e4431995cf64c3f396505a4faf17bcfc19f9ed84943ec6bfd5ecd"
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -134,12 +155,9 @@ spec:
               value: "false"
             - name: GF_ANALYTICS_CHECK_FOR_UPDATES
               value: "false"
-            # No plugins fetched at boot — they're BAKED into the image (#65).
-            - name: GF_INSTALL_PLUGINS
-              value: ""
-            # Load the baked-in native VictoriaMetrics plugins from here. NOT the
-            # default /var/lib/grafana/plugins — the data emptyDir below mounts
-            # over /var/lib/grafana and would shadow it.
+            # The init container populates this checksum-verified volume.
+            - name: GF_PATHS_PLUGINS
+              value: /opt/grafana-plugins
           ports:
             - name: http
               containerPort: 3000
@@ -166,6 +184,9 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 3
           volumeMounts:
+            - name: plugins
+              mountPath: /opt/grafana-plugins
+              readOnly: true
             - name: datasources
               mountPath: /etc/grafana/provisioning/datasources
               readOnly: true
@@ -174,6 +195,8 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: plugins
+          emptyDir: {}
         - name: datasources
           configMap:
             name: grafana-datasources

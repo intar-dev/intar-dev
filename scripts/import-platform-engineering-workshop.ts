@@ -408,6 +408,18 @@ function sanitizeMarkdown(value: string): string {
 function adaptExternalRuntimeNarrative(value: string): string {
   return value
     .replace(
+      /\*\*VictoriaLogs\*\* \(Loki API\)/g,
+      "**VictoriaLogs** (LogsQL through its native datasource)",
+    )
+    .replace(
+      /fronted by \*\*Grafana\*\* with \*built-in\* datasources — no plugins to fetch, so it stays offline\./g,
+      "fronted by **Grafana** with built-in Prometheus and Jaeger datasources plus a checksum-pinned signed VictoriaLogs plugin.",
+    )
+    .replace(
+      /Grafana wiring them as Prometheus\/Loki\/Jaeger datasources/g,
+      "Grafana wiring them as Prometheus/native VictoriaLogs/Jaeger datasources",
+    )
+    .replace(
       /\.\/scripts\/dev-setup\.sh[\s\S]*?\.\/scripts\/install\.sh --check/gu,
       "the Intar checkpoint bootstrap installs the pinned tools and validates every external image manifest",
     )
@@ -868,6 +880,129 @@ fi
   fi
 fi
 `;
+    case "09":
+      return `if (( status == 0 )); then
+  observability_status=0
+
+  for app in victoria-metrics victoria-logs victoria-traces grafana otel-collector; do
+    app_state=
+    for attempt in $(seq 1 36); do
+      app_state="$(kubectl -n argocd get application "\${app}" \\
+        -o jsonpath='{.status.sync.status} {.status.health.status}' 2>/dev/null || true)"
+      if [[ "\${app_state##* }" == "Healthy" ]]; then
+        break
+      fi
+      if [[ -z "\${app_state}" && "\${attempt}" -ge 2 ]]; then
+        break
+      fi
+      sleep 5
+    done
+    if [[ "\${app_state##* }" != "Healthy" ]]; then
+      printf 'observability app %s is not Healthy (state: %s)\\n' \\
+        "\${app}" "\${app_state:-missing}" >&2
+      observability_status=1
+    fi
+  done
+
+  for workload in \\
+    deployment/victoria-metrics \\
+    deployment/victoria-logs \\
+    deployment/victoria-traces \\
+    deployment/grafana \\
+    deployment/otel-collector-gateway \\
+    daemonset/otel-collector-agent; do
+    if ! kubectl -n observability rollout status "\${workload}" \\
+      --timeout=180s >/dev/null 2>&1; then
+      printf 'observability workload %s is not ready\\n' "\${workload}" >&2
+      observability_status=1
+    fi
+  done
+
+  for backend in victoria-metrics victoria-logs victoria-traces; do
+    if ! kubectl get --request-timeout=15s \\
+      --raw="/api/v1/namespaces/observability/services/\${backend}:http/proxy/health" \\
+      >/dev/null 2>&1; then
+      printf 'observability backend %s did not pass its service health check\\n' \\
+        "\${backend}" >&2
+      observability_status=1
+    fi
+  done
+
+  grafana_node_port="$(
+    kubectl -n observability get service grafana-nodeport \\
+      -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}' 2>/dev/null || true
+  )"
+  if [[ "\${grafana_node_port}" != "30030" ]]; then
+    printf 'Grafana NodePort is %s instead of 30030\\n' \\
+      "\${grafana_node_port:-missing}" >&2
+    observability_status=1
+  fi
+
+  if ! grafana_health="$(
+    curl -fsS --max-time 15 http://localhost:30030/api/health
+  )"; then
+    printf 'Grafana did not answer through the declared workspace-app port 30030\\n' >&2
+    observability_status=1
+  elif ! jq -e '.database == "ok"' <<<"\${grafana_health}" >/dev/null; then
+    printf 'Grafana API health did not report database=ok: %s\\n' \\
+      "\${grafana_health}" >&2
+    observability_status=1
+  fi
+
+  check_grafana_datasource() {
+    local name="$1" url="$2" filter="$3" response
+    if ! response="$(curl -fsS --max-time 15 "\${url}")"; then
+      printf 'Grafana datasource %s is not queryable through the workspace-app port\\n' \\
+        "\${name}" >&2
+      observability_status=1
+    elif ! jq -e "\${filter}" <<<"\${response}" >/dev/null; then
+      printf 'Grafana datasource %s returned an unexpected response: %s\\n' \\
+        "\${name}" "\${response}" >&2
+      observability_status=1
+    fi
+  }
+
+  check_grafana_datasource \\
+    VictoriaMetrics \\
+    'http://localhost:30030/api/datasources/proxy/uid/victoriametrics/api/v1/query?query=up' \\
+    '.status == "success"'
+  check_grafana_datasource \\
+    VictoriaLogs \\
+    'http://localhost:30030/api/datasources/uid/victorialogs/health' \\
+    '((.status // "") | ascii_downcase) == "ok"'
+
+  connected_trace=
+  for _ in $(seq 1 24); do
+    connected_trace="$(
+      curl -fsS --max-time 15 \\
+        'http://localhost:30030/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20' \\
+        2>/dev/null || true
+    )"
+    if jq -e \\
+      'any(.data[]?;
+        ([.processes[]?.serviceName] | unique) as $services |
+        (["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"] -
+          $services | length == 0))' \\
+      <<<"\${connected_trace}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+  if ! jq -e \\
+    'any(.data[]?;
+      ([.processes[]?.serviceName] | unique) as $services |
+      (["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"] -
+        $services | length == 0))' \\
+    <<<"\${connected_trace}" >/dev/null 2>&1; then
+    printf 'Grafana VictoriaTraces datasource did not expose one connected upload trace\\n' >&2
+    observability_status=1
+  fi
+
+  if (( observability_status != 0 )); then
+    status=1
+  fi
+fi
+`;
     default:
       return "";
   }
@@ -910,12 +1045,101 @@ exec ./lab/00-setup/verify.sh
     `#!/usr/bin/env bash\n# Trusted checkpoint reconstruction adapted from pinned module ${module.id}.\n`,
   );
   script = adaptExternalRuntimeNarrative(script);
+  if (module.id === "09") {
+    script = adaptModule09ObservabilityCatchUp(script);
+  }
   if (/\/solutions(?:\/|\b)/u.test(script)) {
     throw new Error(
       `module ${module.id} catch-up still references upstream solutions`,
     );
   }
   return script;
+}
+
+function adaptModule09ObservabilityCatchUp(value: string): string {
+  let adapted = value;
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `module 09 ${label} anchor occurred ${occurrences} times upstream`,
+      );
+    }
+    adapted = adapted.replace(anchor, replacement);
+  };
+
+  replaceOnce(
+    `# Module 09 — full solution: enable eventing + the picture pipeline, then
+# upload a tiny test PNG through the portal (plain curl — the gallery form is
+# just a multipart POST) so the outcome check in verify.sh is unconditional.`,
+    `# Module 09 — full solution: enable eventing, the picture pipeline, and the
+# complete observability capability, then upload a tiny test PNG through the
+# portal so the trace and image outcome checks are unconditional.`,
+    "description",
+  );
+  replaceOnce(
+    `enable_catalog "$CLONE" knative-serving.yaml portal.yaml knative-eventing.yaml picture-pipeline.yaml
+gitops_push "$CLONE" "module 09: knative-eventing + picture pipeline"`,
+    `enable_catalog "$CLONE" \\
+  knative-serving.yaml portal.yaml knative-eventing.yaml picture-pipeline.yaml \\
+  victoria-metrics.yaml victoria-logs.yaml victoria-traces.yaml grafana.yaml \\
+  otel-collector.yaml
+gitops_push "$CLONE" "module 09: eventing, picture pipeline, and observability"`,
+    "catalog push",
+  );
+  replaceOnce(
+    `wait_exists pipeline job/create-images-bucket
+kubectl -n pipeline wait --for=condition=Complete job/create-images-bucket --timeout=300s
+
+# Wait for the portal UI (the upload path goes browser → portal → uploader).`,
+    `wait_exists pipeline job/create-images-bucket
+kubectl -n pipeline wait --for=condition=Complete job/create-images-bucket --timeout=300s
+
+# The three storage backends and Grafana are ArgoCD wave 0. The collector is
+# wave 1, so prove the whole first wave before waiting for its two workloads.
+wait_app victoria-metrics 600
+wait_app victoria-logs 600
+wait_app victoria-traces 600
+wait_app grafana 600
+
+wait_exists observability service/victoria-metrics 600
+wait_exists observability deployment/victoria-metrics 600
+kubectl -n observability rollout status deployment/victoria-metrics --timeout=600s
+wait_exists observability service/victoria-logs 600
+wait_exists observability deployment/victoria-logs 600
+kubectl -n observability rollout status deployment/victoria-logs --timeout=600s
+wait_exists observability service/victoria-traces 600
+wait_exists observability deployment/victoria-traces 600
+kubectl -n observability rollout status deployment/victoria-traces --timeout=600s
+wait_exists observability service/grafana-nodeport 600
+wait_exists observability deployment/grafana 600
+kubectl -n observability rollout status deployment/grafana --timeout=600s
+
+wait_app otel-collector 600
+wait_exists observability service/otel-collector 600
+wait_exists observability deployment/otel-collector-gateway 600
+wait_exists observability daemonset/otel-collector-agent 600
+kubectl -n observability rollout status deployment/otel-collector-gateway --timeout=600s
+kubectl -n observability rollout status daemonset/otel-collector-agent --timeout=600s
+
+# Rollout readiness proves the pod's /api/health probe. Also prove the declared
+# browser-facing NodePort before creating the fresh trace used by verification.
+WAITED=0
+until grafana_health="$(curl -fsS --max-time 5 http://localhost:30030/api/health 2>/dev/null)" &&
+      jq -e '.database == "ok"' <<<"$grafana_health" >/dev/null 2>&1; do
+  [ "$WAITED" -ge 300 ] && { echo "timed out waiting for Grafana on :30030" >&2; exit 1; }
+  sleep 10; WAITED=$((WAITED + 10))
+done
+
+# Wait for the portal UI (the upload path goes browser → portal → uploader).`,
+    "observability readiness",
+  );
+
+  return adapted;
 }
 
 function extractDetails(raw: string): Array<{ title: string; body: string }> {
@@ -1187,10 +1411,10 @@ reaches declared guest applications by SSH direct forwarding; no application
 port is exposed directly on the Hetzner server.
 
 The upstream custom Grafana image was not publicly pullable while this lock was
-created. The direct-cloud adaptation therefore pins stock Grafana and uses its
-built-in Prometheus, Loki, and Jaeger datasources. The lock resolver must replace
-that reviewed fallback with the custom image digest before native Victoria
-plugins can be claimed.
+created. The direct-cloud adaptation therefore pins stock Grafana, uses its
+built-in Prometheus and Jaeger datasources, and installs the signed VictoriaLogs
+datasource plugin from its exact release archive after verifying the reviewed
+SHA-256 digest. Plugin retrieval fails closed if the archive or digest changes.
 
 The source importer intentionally converts Slidev HTML/Vue presentation syntax
 to Intar's finite native Markdown layouts and separates every HTML speaker-note
@@ -1418,6 +1642,13 @@ function copyRuntimePath(relativePath: string) {
       content = adaptSeedGiteaForSealedCheckpoints(content);
     } else if (relativePath === "gitops/components/rustfs/service-nodeport.yaml") {
       content = adaptRustfsWorkspaceAppService(content);
+    } else if (
+      relativePath === "gitops/catalog/victoria-logs.yaml" ||
+      relativePath === "gitops/components/victoria-logs/victoria-logs.yaml"
+    ) {
+      content = adaptVictoriaLogsNarrative(relativePath, content);
+    } else if (relativePath === "gitops/catalog/grafana.yaml") {
+      content = adaptGrafanaCatalog(content);
     } else if (relativePath === "gitops/components/grafana/grafana.yaml") {
       content = adaptStockGrafana(content);
     } else if (relativePath === "lab/07-ci/app/Dockerfile") {
@@ -1896,21 +2127,184 @@ function adaptRustfsWorkspaceAppService(value: string): string {
   return adapted;
 }
 
+function adaptVictoriaLogsNarrative(relativePath: string, value: string): string {
+  const [expected, replacement] =
+    relativePath === "gitops/catalog/victoria-logs.yaml"
+      ? [
+          `# /insert/opentelemetry/v1/logs, LogsQL /select/logsql/query, Loki-compatible
+# query API for Grafana. In-cluster: victoria-logs.observability.svc:9428.`,
+          `# /insert/opentelemetry/v1/logs and LogsQL /select/logsql/query. Grafana
+# uses the checksum-pinned native VictoriaLogs plugin. In-cluster:
+# victoria-logs.observability.svc:9428.`,
+        ]
+      : [
+          `#   - Loki-compatible query API (used by Grafana's Loki datasource, see
+#     grafana/VENDOR.md) under /select/loki/api/v1/*`,
+          `#   - Grafana queries through the checksum-pinned native VictoriaLogs
+#     datasource plugin; VictoriaLogs does not expose a Loki query API.`,
+        ];
+  const occurrences = value.split(expected).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `VictoriaLogs narrative anchor occurred ${occurrences} times in ${relativePath}`,
+    );
+  }
+  return value.replace(expected, replacement);
+}
+
 function adaptStockGrafana(value: string): string {
-  const adapted = value
-    .replaceAll("type: victoriametrics-metrics-datasource", "type: prometheus")
-    .replaceAll("type: victoriametrics-logs-datasource", "type: loki")
-    .replace(
-      "url: http://victoria-logs.observability.svc.cluster.local:9428",
-      "url: http://victoria-logs.observability.svc.cluster.local:9428/select/logsql/query",
-    )
-    .replace(/\n\s*- name: GF_PATHS_PLUGINS\n\s*value: \/opt\/grafana-plugins/u, "");
+  const victoriaLogsUrl =
+    "url: http://victoria-logs.observability.svc.cluster.local:9428";
+  const victoriaLogsOccurrences = value.split(victoriaLogsUrl).length - 1;
+  if (victoriaLogsOccurrences !== 1) {
+    throw new Error(
+      `stock Grafana VictoriaLogs URL occurred ${victoriaLogsOccurrences} times upstream`,
+    );
+  }
+  let adapted = value.replaceAll(
+    "type: victoriametrics-metrics-datasource",
+    "type: prometheus",
+  );
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `stock Grafana ${label} anchor occurred ${occurrences} times upstream`,
+      );
+    }
+    adapted = adapted.replace(anchor, replacement);
+  };
+  replaceOnce(
+    `# issue #57). Pre-wired with three provisioned datasources, all built-in types
+# (no plugins — offline rule):
+#   - VictoriaMetrics (Prometheus type, default) → PromQL/metrics
+#   - VictoriaLogs    (Loki type)                → logs   (see VENDOR.md caveat)
+#   - VictoriaTraces  (Jaeger type)              → traces (see VENDOR.md caveat)`,
+    `# issue #57). Pre-wired with three provisioned datasources:
+#   - VictoriaMetrics (built-in Prometheus type) → PromQL/metrics
+#   - VictoriaLogs    (signed plugin 0.29.0)      → LogsQL/logs
+#   - VictoriaTraces  (built-in Jaeger type)      → traces`,
+    "summary",
+  );
+  replaceOnce(
+    `      # VictoriaMetrics via its NATIVE Grafana datasource plugin (#65), baked
+      # into the image (see apps/grafana/Dockerfile) — the MetricsQL query editor
+      # instead of the Prometheus shim. Same uid, so nothing that references it
+      # by uid breaks.`,
+    `      # VictoriaMetrics supports Grafana's built-in Prometheus datasource.
+      # Keep the stable uid so workshop deep links and dashboards remain valid.`,
+    "VictoriaMetrics comment",
+  );
+  replaceOnce(
+    `      # VictoriaTraces exposes a Jaeger-compatible query API, so we use the
+      # built-in Jaeger datasource (offline rule: no plugin at boot) pointed at
+      # its /select/jaeger base. Replaces otel-lgtm's Tempo. See VENDOR.md.`,
+    `      # VictoriaTraces exposes a Jaeger-compatible query API, so the built-in
+      # Jaeger datasource points at its /select/jaeger base.`,
+    "VictoriaTraces comment",
+  );
+  replaceOnce(
+    `          # Custom image: stock Grafana 12.4.5 + the native VictoriaMetrics
+          # datasource plugins baked in (apps/grafana/Dockerfile, #65).`,
+    `          # Stock Grafana. A checksum-pinned, signed VictoriaLogs plugin is
+          # staged by the init container into a read-only shared volume.`,
+    "image comment",
+  );
+  replaceOnce(
+    `            # No plugins fetched at boot — they're BAKED into the image (#65).
+            - name: GF_INSTALL_PLUGINS
+              value: ""
+            # Load the baked-in native VictoriaMetrics plugins from here. NOT the
+            # default /var/lib/grafana/plugins — the data emptyDir below mounts
+            # over /var/lib/grafana and would shadow it.
+            - name: GF_PATHS_PLUGINS
+              value: /opt/grafana-plugins`,
+    `            # The init container populates this checksum-verified volume.
+            - name: GF_PATHS_PLUGINS
+              value: /opt/grafana-plugins`,
+    "plugin installation",
+  );
+  replaceOnce(
+    `      containers:
+        - name: grafana`,
+    `      initContainers:
+        - name: install-victorialogs-datasource
+          image: "docker.io/grafana/grafana@sha256:26b8f35a9e4e4431995cf64c3f396505a4faf17bcfc19f9ed84943ec6bfd5ecd"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              archive=/tmp/victoriametrics-logs-datasource-v0.29.0.tar.gz
+              curl -fsSL --output "\${archive}" \\
+                https://github.com/VictoriaMetrics/victorialogs-datasource/releases/download/v0.29.0/victoriametrics-logs-datasource-v0.29.0.tar.gz
+              echo "34935dcb7c19107f86a7703ee0a24f40363e0c02483206f3cc9a5de2f5fa4918  \${archive}" |
+                sha256sum -c -
+              tar -xzf "\${archive}" -C /opt/grafana-plugins
+              test -f /opt/grafana-plugins/victoriametrics-logs-datasource/plugin.json
+              rm -f "\${archive}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ ALL ]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: plugins
+              mountPath: /opt/grafana-plugins
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: grafana`,
+    "plugin init container",
+  );
+  replaceOnce(
+    `          volumeMounts:
+            - name: datasources`,
+    `          volumeMounts:
+            - name: plugins
+              mountPath: /opt/grafana-plugins
+              readOnly: true
+            - name: datasources`,
+    "plugin volume mount",
+  );
+  replaceOnce(
+    `      volumes:
+        - name: datasources`,
+    `      volumes:
+        - name: plugins
+          emptyDir: {}
+        - name: datasources`,
+    "plugin volume",
+  );
   if (adapted.includes("victoriametrics-metrics-datasource") ||
-      adapted.includes("victoriametrics-logs-datasource") ||
-      adapted.includes("GF_PATHS_PLUGINS")) {
+      !adapted.includes("type: victoriametrics-logs-datasource") ||
+      !adapted.includes(victoriaLogsUrl) ||
+      !adapted.includes(
+        "install-victorialogs-datasource",
+      ) ||
+      !adapted.includes(
+        "34935dcb7c19107f86a7703ee0a24f40363e0c02483206f3cc9a5de2f5fa4918",
+      ) ||
+      !adapted.includes(
+        "GF_PATHS_PLUGINS\n              value: /opt/grafana-plugins",
+      ) ||
+      adapted.includes("type: loki") ||
+      adapted.includes("GF_INSTALL_PLUGINS") ||
+      adapted.includes("GF_PLUGINS_PREINSTALL")) {
     throw new Error("stock Grafana adaptation is incomplete");
   }
   return adapted;
+}
+
+function adaptGrafanaCatalog(value: string): string {
+  const expected = "Browser: http://localhost:30031";
+  if (value.split(expected).length - 1 !== 1) {
+    throw new Error("Grafana catalog browser-port anchor changed upstream");
+  }
+  return value.replace(expected, "Browser: http://localhost:30030");
 }
 
 function read(relative: string): string {

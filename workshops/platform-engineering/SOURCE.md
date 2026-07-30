@@ -16,10 +16,10 @@ reaches declared guest applications by SSH direct forwarding; no application
 port is exposed directly on the Hetzner server.
 
 The upstream custom Grafana image was not publicly pullable while this lock was
-created. The direct-cloud adaptation therefore pins stock Grafana and uses its
-built-in Prometheus, Loki, and Jaeger datasources. The lock resolver must replace
-that reviewed fallback with the custom image digest before native Victoria
-plugins can be claimed.
+created. The direct-cloud adaptation therefore pins stock Grafana, uses its
+built-in Prometheus and Jaeger datasources, and installs the signed VictoriaLogs
+datasource plugin from its exact release archive after verifying the reviewed
+SHA-256 digest. Plugin retrieval fails closed if the archive or digest changes.
 
 The source importer intentionally converts Slidev HTML/Vue presentation syntax
 to Intar's finite native Markdown layouts and separates every HTML speaker-note
