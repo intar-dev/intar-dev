@@ -44,8 +44,6 @@ cluster:
     image: registry.k8s.io/kube-controller-manager@sha256:b3add29a00c3c4763c75a09ec94915e3d0d590b93b3850a97d52970fbd2b2c12
   scheduler:
     image: registry.k8s.io/kube-scheduler@sha256:94dfc9f285718a06bb873947959b8514ed95dddaa7c74d765cc346fdfa684859
-  etcd:
-    image: registry.k8s.io/etcd@sha256:3c2ced08f23b1183e8bd4613064c3fb6b8db5057a4d1f13c3518c76e357a07a8
   coreDNS:
     image: registry.k8s.io/coredns/coredns@sha256:e7e6440cfd1e919280958f5b5a6ab2b184d385bba774c12ad2a9e1e4183f90d9
   network:
@@ -72,7 +70,19 @@ machine:
 EOF
 )"
 
-patches=(--config-patch "${CNI_PATCH}")
+# Talos rejects cluster.etcd configuration on worker machine configs, so
+# keep its digest pin in a control-plane-only patch.
+CONTROL_PLANE_PATCH="$(cat <<'EOF'
+cluster:
+  etcd:
+    image: registry.k8s.io/etcd@sha256:3c2ced08f23b1183e8bd4613064c3fb6b8db5057a4d1f13c3518c76e357a07a8
+EOF
+)"
+
+patches=(
+  --config-patch "${CNI_PATCH}"
+  --config-patch-controlplanes "${CONTROL_PLANE_PATCH}"
+)
 
 # The controlplane always gets the first host address of TALOS_SUBNET (.2;
 # .1 is the Docker bridge gateway).
