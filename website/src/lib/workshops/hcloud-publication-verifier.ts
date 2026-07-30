@@ -41,6 +41,9 @@ const REPORT_TTL_MS = 2 * 60 * 60_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
 const ACTION_POLL_MS = 15_000;
 const MAX_CANDIDATES_PER_SWEEP = 32;
+const LEGACY_VERIFIER_NAME_ERROR =
+  "Provider resource name must be a canonical Intar DNS label";
+const LEGACY_VERIFIER_NAME_PATTERN = /^iwpv-[a-z0-9]+$/u;
 
 type ResolvedProvider = NonNullable<
   WorkshopManifestV1["workspace"]["provider"]
@@ -83,7 +86,15 @@ interface ProviderAttemptRow {
   state: string;
   bootstrap_expires_at: number;
   bootstrap_consumed_at: number | null;
+  report_credential_hash: string | null;
+  report_credential_issued_at: number | null;
   report_credential_expires_at: number;
+  checkpoint_download_token_hash: string | null;
+  checkpoint_download_expires_at: number | null;
+  checkpoint_first_downloaded_at: number | null;
+  last_report_sequence: number;
+  last_report_at: number | null;
+  proof_report_sequence: number | null;
   proof_verified_at: number | null;
   deletion_requested_at: number | null;
   deletion_confirmed_at: number | null;
@@ -424,7 +435,7 @@ async function allocatePendingCheckpoint(
           "the selected verification location is no longer approved",
         );
       }
-      const deterministicName = `iwpv-${attemptId}`;
+      const deterministicName = `intar-wpv-${attemptId}`;
       const bootstrapCapability = randomCapability("iwpv_bootstrap");
       const bootstrapTokenHash = await sha256Hex(bootstrapCapability);
       const keyPair = generateSshEd25519KeyPair(`${deterministicName}@intar`);
@@ -795,6 +806,9 @@ async function cleanupAttempt(
     );
     return "cleanup_pending";
   }
+  if (await recoverLegacyVerifierNameFailure(candidate, attempt, now)) {
+    return "deleting";
+  }
   let context: ProviderContext;
   try {
     context = await providerContext(candidate, true);
@@ -1009,6 +1023,243 @@ async function cleanupAttempt(
     now,
   );
   return "failed";
+}
+
+/**
+ * Releases verifier attempts created before resource names used the canonical
+ * `intar-` prefix. The exact provider error is raised by local name validation
+ * before any Hetzner request, so this is safe only while every provider and
+ * action identity is still absent.
+ */
+async function recoverLegacyVerifierNameFailure(
+  candidate: ProviderCheckpointRow,
+  attempt: ProviderAttemptRow,
+  now: number,
+): Promise<boolean> {
+  if (!isRecoverableLegacyVerifierNameFailure(attempt)) return false;
+  const deletionConfirmedAt = attempt.deletion_confirmed_at ?? now;
+
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_attempts
+       SET state = 'deleted',
+           deletion_requested_at = coalesce(deletion_requested_at, ?),
+           deletion_confirmed_at = ?,
+           report_credential_revoked_at =
+             coalesce(report_credential_revoked_at, ?),
+           updated_at = ?
+       WHERE id = ? AND provider_checkpoint_id = ? AND connection_id = ?
+         AND state IN ('deleting', 'cleanup_pending')
+         AND deterministic_name = ?
+         AND ordinal < ?
+         AND last_error_code = 'invalid_provider_request' AND error = ?
+         AND server_id IS NULL AND primary_ip_id IS NULL
+         AND primary_ipv4 IS NULL AND ssh_key_id IS NULL
+         AND create_action_id IS NULL AND delete_action_id IS NULL
+         AND bootstrap_consumed_at IS NULL
+         AND report_credential_hash IS NULL
+         AND report_credential_issued_at IS NULL
+         AND checkpoint_download_token_hash IS NULL
+         AND checkpoint_download_expires_at IS NULL
+         AND checkpoint_first_downloaded_at IS NULL
+         AND last_report_sequence = 0 AND last_report_at IS NULL
+         AND proof_report_sequence IS NULL AND proof_verified_at IS NULL
+         AND deletion_confirmed_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_cost_ledger ledger
+           WHERE ledger.attempt_id =
+             workshop_publication_provider_attempts.id
+         )
+         AND EXISTS (
+           SELECT 1
+           FROM organization_provider_connections connection
+           WHERE connection.id = ?
+             AND connection.state IN ('active', 'cleanup_pending')
+             AND connection.active_credential_version_id IS NOT NULL
+             AND connection.cleanup_acknowledged_at IS NULL
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM hetzner_allocations allocation
+           WHERE allocation.connection_id = ?
+             AND allocation.deletion_confirmed_at IS NULL
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_attempts other
+           WHERE other.connection_id = ?
+             AND other.id <> ?
+             AND other.deletion_confirmed_at IS NULL
+         )`,
+    ).bind(
+      now,
+      now,
+      now,
+      now,
+      attempt.id,
+      candidate.id,
+      candidate.connection_id,
+      attempt.deterministic_name,
+      MAX_PROVIDER_ATTEMPTS,
+      LEGACY_VERIFIER_NAME_ERROR,
+      candidate.connection_id,
+      candidate.connection_id,
+      candidate.connection_id,
+      attempt.id,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET verification_status = 'pending', deletion_confirmed_at = NULL,
+           error = NULL, updated_at = ?
+       WHERE id = ? AND publication_id = ? AND connection_id = ?
+         AND verification_status IN ('deleting', 'cleanup_pending')
+         AND EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_attempts attempt
+           WHERE attempt.id = ?
+             AND attempt.provider_checkpoint_id =
+               workshop_publication_provider_checkpoints.id
+             AND attempt.connection_id = ?
+             AND attempt.state = 'deleted'
+             AND attempt.deterministic_name = ?
+             AND attempt.ordinal < ?
+             AND attempt.last_error_code = 'invalid_provider_request'
+             AND attempt.error = ?
+             AND attempt.server_id IS NULL
+             AND attempt.primary_ip_id IS NULL
+             AND attempt.primary_ipv4 IS NULL
+             AND attempt.ssh_key_id IS NULL
+             AND attempt.create_action_id IS NULL
+             AND attempt.delete_action_id IS NULL
+             AND attempt.bootstrap_consumed_at IS NULL
+             AND attempt.report_credential_hash IS NULL
+             AND attempt.report_credential_issued_at IS NULL
+             AND attempt.checkpoint_download_token_hash IS NULL
+             AND attempt.checkpoint_download_expires_at IS NULL
+             AND attempt.checkpoint_first_downloaded_at IS NULL
+             AND attempt.last_report_sequence = 0
+             AND attempt.last_report_at IS NULL
+             AND attempt.proof_report_sequence IS NULL
+             AND attempt.proof_verified_at IS NULL
+             AND attempt.deletion_confirmed_at = ?
+             AND NOT EXISTS (
+               SELECT 1
+               FROM workshop_publication_provider_cost_ledger ledger
+               WHERE ledger.attempt_id = attempt.id
+             )
+             AND EXISTS (
+               SELECT 1
+               FROM organization_provider_connections connection
+               WHERE connection.id = ?
+                 AND connection.state IN ('active', 'cleanup_pending')
+                 AND connection.active_credential_version_id IS NOT NULL
+                 AND connection.cleanup_acknowledged_at IS NULL
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM hetzner_allocations allocation
+               WHERE allocation.connection_id = ?
+                 AND allocation.deletion_confirmed_at IS NULL
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM workshop_publication_provider_attempts other
+               WHERE other.connection_id = ?
+                 AND other.id <> attempt.id
+                 AND other.deletion_confirmed_at IS NULL
+             )
+         )`,
+    ).bind(
+      now,
+      candidate.id,
+      candidate.publication_id,
+      candidate.connection_id,
+      attempt.id,
+      candidate.connection_id,
+      attempt.deterministic_name,
+      MAX_PROVIDER_ATTEMPTS,
+      LEGACY_VERIFIER_NAME_ERROR,
+      deletionConfirmedAt,
+      candidate.connection_id,
+      candidate.connection_id,
+      candidate.connection_id,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_publications
+       SET provider_verification_state = 'verifying', error = NULL,
+           updated_at = ?
+       WHERE id = ? AND status = 'building'
+         AND provider_verification_state = 'cleanup_pending'
+         AND NOT EXISTS (
+           SELECT 1 FROM workshop_publication_provider_checkpoints
+           WHERE publication_id = ? AND verification_status = 'cleanup_pending'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_attempts attempt
+           INNER JOIN workshop_publication_provider_checkpoints checkpoint
+             ON checkpoint.id = attempt.provider_checkpoint_id
+           WHERE checkpoint.publication_id = ?
+             AND attempt.state = 'cleanup_pending'
+             AND attempt.deletion_confirmed_at IS NULL
+         )`,
+    ).bind(
+      now,
+      candidate.publication_id,
+      candidate.publication_id,
+      candidate.publication_id,
+    ),
+  ]);
+
+  const refreshedAttempt = await requireAttempt(attempt.id);
+  const refreshedCheckpoint = await checkpointById(candidate.id);
+  const recovered =
+    refreshedAttempt.state === "deleted" &&
+    refreshedAttempt.deletion_confirmed_at !== null &&
+    refreshedCheckpoint?.verification_status === "pending";
+  if (!recovered) {
+    // Never send a locally terminalized legacy name back to the provider. If a
+    // later statement lost its fence, the next sweep can resume this helper
+    // from the persisted deletion marker.
+    return (
+      results.some((result) => result.meta.changes > 0) ||
+      refreshedAttempt.state === "deleted"
+    );
+  }
+  await maybeRestoreConnection(candidate.connection_id, now);
+  return true;
+}
+
+function isRecoverableLegacyVerifierNameFailure(
+  attempt: ProviderAttemptRow,
+): boolean {
+  const recoverableState =
+    ((attempt.state === "deleting" || attempt.state === "cleanup_pending") &&
+      attempt.deletion_confirmed_at === null) ||
+    (attempt.state === "deleted" && attempt.deletion_confirmed_at !== null);
+  return (
+    recoverableState &&
+    LEGACY_VERIFIER_NAME_PATTERN.test(attempt.deterministic_name) &&
+    attempt.deterministic_name === `iwpv-${attempt.id}` &&
+    attempt.ordinal < MAX_PROVIDER_ATTEMPTS &&
+    attempt.last_error_code === "invalid_provider_request" &&
+    attempt.error === LEGACY_VERIFIER_NAME_ERROR &&
+    attempt.server_id === null &&
+    attempt.primary_ip_id === null &&
+    attempt.primary_ipv4 === null &&
+    attempt.ssh_key_id === null &&
+    attempt.create_action_id === null &&
+    attempt.delete_action_id === null &&
+    attempt.bootstrap_consumed_at === null &&
+    attempt.report_credential_hash === null &&
+    attempt.report_credential_issued_at === null &&
+    attempt.checkpoint_download_token_hash === null &&
+    attempt.checkpoint_download_expires_at === null &&
+    attempt.checkpoint_first_downloaded_at === null &&
+    attempt.last_report_sequence === 0 &&
+    attempt.last_report_at === null &&
+    attempt.proof_report_sequence === null &&
+    attempt.proof_verified_at === null
+  );
 }
 
 async function runOperation(

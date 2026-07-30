@@ -34,6 +34,7 @@ import type {
   HcloudOperationResult,
   RunOperationRequest,
 } from "../../../../hcloud-provider-worker/src/contracts";
+import { assertDeterministicName } from "../../../../hcloud-provider-worker/src/hcloud-client";
 import { appError } from "@/lib/app-error";
 import { resetD1Database } from "@/test/d1-migrations";
 import { sweepHetznerWorkshopPublicationVerifiers } from "./hcloud-publication-verifier";
@@ -76,6 +77,9 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       "org-verifier",
     );
     expect(provider.run).not.toHaveBeenCalled();
+    await expect(
+      count("workshop_publication_provider_cost_ledger"),
+    ).resolves.toBe(0);
     expect(provider.operations).toEqual([]);
     expect(await currentAttempt()).toBeNull();
     await expect(checkpointStatus()).resolves.toBe("pending");
@@ -98,6 +102,137 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     expect(
       provider.operations.some((operation) => operation.kind === "reconcile"),
     ).toBe(true);
+  });
+
+  it("uses provider-canonical Intar names for every verifier resource", async () => {
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW }),
+    ).resolves.toMatchObject({ state: "allocating" });
+
+    const creates = provider.operations.filter((operation) =>
+      ["create_ssh_key", "create_primary_ip", "create_server"].includes(
+        String(operation.kind),
+      ),
+    );
+    expect(creates).toHaveLength(3);
+    expect(creates.map((operation) => String(operation.name))).toEqual([
+      expect.stringMatching(/^intar-wpv-[a-z0-9]+-key$/),
+      expect.stringMatching(/^intar-wpv-[a-z0-9]+-ip-nbg1$/),
+      expect.stringMatching(/^intar-wpv-[a-z0-9]+$/),
+    ]);
+    for (const operation of creates) {
+      expect(() =>
+        assertDeterministicName(String(operation.name)),
+      ).not.toThrow();
+    }
+    await expect(currentAttempt()).resolves.toMatchObject({
+      deterministic_name: creates.at(-1)?.name,
+    });
+  });
+
+  it("recovers the legacy no-resource name failure without a provider call", async () => {
+    await seedLegacyNameFailure();
+    provider.operations.length = 0;
+    provider.run.mockClear();
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 }),
+    ).resolves.toMatchObject({ state: "deleting" });
+    expect(provider.run).not.toHaveBeenCalled();
+    await expect(currentAttempt()).resolves.toMatchObject({
+      ordinal: 1,
+      state: "deleted",
+      deterministic_name: "iwpv-legacyattempt",
+      server_id: null,
+      primary_ip_id: null,
+      ssh_key_id: null,
+      create_action_id: null,
+      delete_action_id: null,
+      deletion_confirmed_at: NOW + 1,
+    });
+    await expect(checkpointStatus()).resolves.toBe("pending");
+    await expect(publicationAndConnectionState()).resolves.toEqual({
+      publication: "verifying",
+      connection: "active",
+    });
+
+    provider.run.mockImplementation(async (request: RunOperationRequest) => {
+      if (request.operation.kind === "catalog") {
+        const serverType = request.operation.requiredServerTypes[0] ?? "cpx42";
+        return {
+          data: catalog({ serverType }),
+          canonicalWrites: [],
+          mustPersistBeforeNextOperation: false,
+        };
+      }
+      return providerOperation(request);
+    });
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 2 }),
+    ).resolves.toMatchObject({ state: "allocating" });
+    const replacement = await currentAttempt();
+    expect(replacement).toMatchObject({
+      ordinal: 2,
+      state: "allocating",
+      server_type: "cpx42",
+      deterministic_name: expect.stringMatching(/^intar-wpv-[a-z0-9]+$/),
+    });
+    expect(
+      provider.operations.find(
+        (operation) => operation.kind === "create_server",
+      ),
+    ).toMatchObject({
+      name: replacement?.deterministic_name,
+      serverType: "cpx42",
+    });
+  });
+
+  it("resumes a partially persisted legacy recovery without provider access", async () => {
+    await seedLegacyNameFailure();
+    await env.DB.prepare(
+      `UPDATE workshop_publication_provider_attempts
+       SET state = 'deleted', deletion_confirmed_at = ?, updated_at = ?
+       WHERE id = 'legacyattempt'`,
+    )
+      .bind(NOW, NOW)
+      .run();
+    provider.run.mockClear();
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 }),
+    ).resolves.toMatchObject({ state: "deleting" });
+    expect(provider.run).not.toHaveBeenCalled();
+    await expect(checkpointStatus()).resolves.toBe("pending");
+    await expect(publicationAndConnectionState()).resolves.toEqual({
+      publication: "verifying",
+      connection: "active",
+    });
+  });
+
+  it("does not bypass provider reconciliation for an unsafe legacy attempt", async () => {
+    await seedLegacyNameFailure({ sshKeyId: "201" });
+    provider.run.mockRejectedValue(
+      appError(
+        400,
+        "invalid_provider_request",
+        "Provider resource name must be a canonical Intar DNS label",
+      ),
+    );
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 }),
+    ).resolves.toMatchObject({ state: "cleanup_pending" });
+    expect(provider.run).toHaveBeenCalledTimes(1);
+    await expect(currentAttempt()).resolves.toMatchObject({
+      state: "cleanup_pending",
+      ssh_key_id: "201",
+      deletion_confirmed_at: null,
+    });
+    await expect(checkpointStatus()).resolves.toBe("cleanup_pending");
+    await expect(publicationAndConnectionState()).resolves.toEqual({
+      publication: "cleanup_pending",
+      connection: "cleanup_pending",
+    });
   });
 
   it("does not let an older flag-off organization block a later enabled publication", async () => {
@@ -685,9 +820,7 @@ function providerTime(): string {
   return new Date(NOW).toISOString();
 }
 
-function catalog(
-  options: { serverType?: string; available?: boolean } = {},
-) {
+function catalog(options: { serverType?: string; available?: boolean } = {}) {
   const serverType = options.serverType ?? "cx43";
   const available = options.available ?? true;
   const prices = ["nbg1", "fsn1", "hel1"].map((location, index) => ({
@@ -860,6 +993,60 @@ async function insertSecondCheckpoint(): Promise<void> {
     checkpointId: "01",
     ordinal: 1,
   });
+}
+
+async function seedLegacyNameFailure(
+  input: { sshKeyId?: string } = {},
+): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET resolved_provider_json = json_set(
+             resolved_provider_json, '$.serverType', 'cpx42'
+           ),
+           price_observation_json = json_set(
+             price_observation_json, '$.serverType', 'cpx42'
+           ),
+           verification_status = 'cleanup_pending',
+           error = 'Provider resource name must be a canonical Intar DNS label',
+           updated_at = ?
+       WHERE id = ?`,
+    ).bind(NOW, CHECKPOINT_ID),
+    env.DB.prepare(
+      `INSERT INTO workshop_publication_provider_attempts (
+         id, provider_checkpoint_id, connection_id, ordinal,
+         deterministic_name, server_type, system_image, location, ssh_key_id,
+         state, control_plane_base_url, bootstrap_token_hash,
+         bootstrap_expires_at, report_credential_expires_at,
+         deletion_requested_at, last_error_code, error, created_at, updated_at
+       ) VALUES (
+         'legacyattempt', ?, ?, 1, 'iwpv-legacyattempt', 'cpx42',
+         'debian-13', 'nbg1', ?, 'cleanup_pending', 'https://intar.dev/',
+         ?, ?, ?, ?, 'invalid_provider_request',
+         'Provider resource name must be a canonical Intar DNS label', ?, ?
+       )`,
+    ).bind(
+      CHECKPOINT_ID,
+      CONNECTION_ID,
+      input.sshKeyId ?? null,
+      "9".repeat(64),
+      NOW + 30 * 60_000,
+      NOW + 2 * 60 * 60_000,
+      NOW,
+      NOW,
+      NOW,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_publications
+       SET provider_verification_state = 'cleanup_pending',
+           error = 'Provider resource name must be a canonical Intar DNS label',
+           updated_at = ? WHERE id = ?`,
+    ).bind(NOW, PUBLICATION_ID),
+    env.DB.prepare(
+      `UPDATE organization_provider_connections
+       SET state = 'cleanup_pending', updated_at = ? WHERE id = ?`,
+    ).bind(NOW, CONNECTION_ID),
+  ]);
 }
 
 async function insertProviderCheckpoint(input: {
