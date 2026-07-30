@@ -252,6 +252,13 @@ mount_capacity_sampler_file=""
 mount_capacity_peak_count=0
 mount_capacity_peak_snapshot="unavailable"
 mount_capacity_sampler_failed=0
+readonly TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB=65536
+cluster_create_pid=""
+cluster_create_log=""
+cluster_create_tail="unavailable"
+cluster_create_state="not_started"
+bootstrap_kubeconfig_dir=""
+bootstrap_kubeconfig=""
 
 start_mount_capacity_sampler() {
   local initial_snapshot
@@ -325,35 +332,132 @@ stop_mount_capacity_sampler() {
   fi
 }
 
-trap stop_mount_capacity_sampler EXIT
+capture_cluster_create_tail() {
+  local captured
+
+  captured=""
+  if [[ -n "${cluster_create_log}" && -f "${cluster_create_log}" ]]; then
+    captured="$(
+      tail -c 65536 "${cluster_create_log}" 2>/dev/null \
+        | LC_ALL=C tr -cd '\11\12\15\40-\176' \
+        | redact_talos_diagnostic_line \
+        | cut -c1-500 \
+        | tail -n 80 \
+        || true
+    )"
+  fi
+  if [[ -n "${captured}" ]]; then
+    cluster_create_tail="${captured}"
+  fi
+  return 0
+}
+
+report_cluster_create_tail() {
+  warn "Last Talos cluster-create lines (credentials redacted):"
+  printf '%s\n' "${cluster_create_tail}" >&2
+}
+
+cluster_create_child_is_running() {
+  local job_pid process_state
+
+  [[ "${cluster_create_state}" == "running" && -n "${cluster_create_pid}" ]] \
+    || return 1
+
+  # `kill -0` alone also succeeds for an unreaped zombie and, after reaping,
+  # could observe an unrelated process which reused the PID. Require Bash to
+  # still own a running job with this PID, then reject Linux zombie/dead state.
+  while IFS= read -r job_pid; do
+    [[ "${job_pid}" == "${cluster_create_pid}" ]] || continue
+    if [[ -r "/proc/${cluster_create_pid}/stat" ]]; then
+      process_state="$(
+        awk 'NR == 1 { print $3 }' "/proc/${cluster_create_pid}/stat" 2>/dev/null || true
+      )"
+      [[ "${process_state}" != "Z" && "${process_state}" != "X" ]] || return 1
+    fi
+    return 0
+  done < <(jobs -pr)
+  return 1
+}
+
+stop_cluster_create_child() {
+  local stop_deadline
+
+  [[ -n "${cluster_create_pid}" ]] || return 0
+  if cluster_create_child_is_running; then
+    kill "${cluster_create_pid}" >/dev/null 2>&1 || true
+    stop_deadline=$((SECONDS + 10))
+    while cluster_create_child_is_running \
+      && (( SECONDS < stop_deadline )); do
+      sleep 1
+    done
+    if cluster_create_child_is_running; then
+      kill -KILL "${cluster_create_pid}" >/dev/null 2>&1 || true
+    fi
+  fi
+  wait "${cluster_create_pid}" >/dev/null 2>&1 || true
+  cluster_create_pid=""
+  [[ "${cluster_create_state}" != "running" ]] || cluster_create_state="stopped"
+}
+
+cleanup_cluster_bootstrap_files() {
+  if [[ -n "${bootstrap_kubeconfig}" ]]; then
+    rm -f -- "${bootstrap_kubeconfig}"
+    bootstrap_kubeconfig=""
+  fi
+  if [[ -n "${bootstrap_kubeconfig_dir}" ]]; then
+    rmdir -- "${bootstrap_kubeconfig_dir}" >/dev/null 2>&1 || true
+    bootstrap_kubeconfig_dir=""
+  fi
+  if [[ -n "${cluster_create_log}" ]]; then
+    rm -f -- "${cluster_create_log}"
+    cluster_create_log=""
+  fi
+}
+
+cleanup_cluster_bootstrap() {
+  stop_cluster_create_child
+  stop_mount_capacity_sampler
+  cleanup_cluster_bootstrap_files
+}
+
+trap cleanup_cluster_bootstrap EXIT
 
 collect_failed_cluster_logs() {
+  local -a destroy_command
   local archive archive_members destroy_status failure_capacity
 
+  stop_cluster_create_child
+  capture_cluster_create_tail
   stop_mount_capacity_sampler
   failure_capacity="$(host_capacity_snapshot 2>/dev/null || true)"
   [[ -n "${failure_capacity}" ]] || failure_capacity="unavailable"
   warn "Host capacity at failure: ${failure_capacity}"
   warn "Peak host capacity during cluster bootstrap: ${mount_capacity_peak_snapshot}"
+  report_cluster_create_tail
 
+  archive=""
   archive="$(
     umask 077
     mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-failure.XXXXXX"
-  )" || {
+  )" || archive=""
+  destroy_command=(
+    timeout --signal=KILL 120s
+    talosctl cluster destroy
+    --name "${CLUSTER_NAME}"
+  )
+  if [[ -n "${archive}" ]]; then
+    destroy_command+=(--save-cluster-logs-archive-path "${archive}")
+  else
     warn "Could not reserve a private Talos log archive path"
-    warn "Host capacity captured before cleanup: ${failure_capacity}; cluster_bootstrap_peak: ${mount_capacity_peak_snapshot}"
-    return 0
-  }
+  fi
 
   warn "Collecting Talos logs and removing the failed cluster"
   destroy_status=0
-  timeout --signal=KILL 120s talosctl cluster destroy \
-    --name "${CLUSTER_NAME}" \
-    --save-cluster-logs-archive-path "${archive}" \
-    || destroy_status=$?
+  "${destroy_command[@]}" || destroy_status=$?
 
   archive_members=""
-  if archive_members="$(tar -tzf "${archive}" 2>/dev/null)" \
+  if [[ -n "${archive}" ]] \
+    && archive_members="$(tar -tzf "${archive}" 2>/dev/null)" \
     && grep -Eq '(^|/)[^/]+\.log$' <<<"${archive_members}"; then
     warn "Last high-signal Talos log lines (credentials redacted):"
     tar -xOzf "${archive}" 2>/dev/null \
@@ -367,7 +471,7 @@ collect_failed_cluster_logs() {
     warn "Talos did not produce a valid log archive"
   fi
 
-  rm -f "${archive}"
+  [[ -z "${archive}" ]] || rm -f "${archive}"
 
   if (( destroy_status == 0 )); then
     cleanup_destroyed_cluster_contexts
@@ -376,7 +480,8 @@ collect_failed_cluster_logs() {
   fi
 
   # The checkpoint runner retains a bounded output tail. Repeat the captured
-  # pre-cleanup values last so lengthy Talos logs cannot evict the evidence.
+  # command and capacity evidence last so lengthy Talos logs cannot evict it.
+  report_cluster_create_tail
   warn "Host capacity captured before cleanup: ${failure_capacity}; cluster_bootstrap_peak: ${mount_capacity_peak_snapshot}"
 }
 
@@ -473,7 +578,8 @@ retry_transient_talos_bootstrap() {
     fi
 
     fail "Talos bootstrap retry returned a non-transient error:"
-    printf '%s\n' "${bootstrap_output}" >&2
+    printf '%s\n' "${bootstrap_output}" \
+      | redact_talos_diagnostic_line >&2
     return 1
   done
 
@@ -487,85 +593,210 @@ retry_transient_talos_bootstrap() {
 # registry manifest availability for the full signed image lock.
 info "Using digest-pinned external registries; no local mirror is configured"
 
+recover_cluster_create_handshake() {
+  local cluster_create_output exited_status="${1:-0}"
+
+  (( exited_status != 0 )) || return 1
+  cluster_create_output="$(
+    tail -c 65536 "${cluster_create_log}" 2>/dev/null || true
+  )"
+  is_initial_talos_bootstrap_unavailable_eof "${cluster_create_output}" \
+    || return 1
+  if retry_transient_talos_bootstrap; then
+    cluster_create_state="recovered"
+    warn "Recovered the Talos v1.13 bootstrap handshake race; continuing without a cluster-create child"
+    return 0
+  fi
+  return 1
+}
+
+require_cluster_create_running() {
+  local exited_status
+
+  if [[ "${cluster_create_state}" == "recovered" ]]; then
+    return 0
+  fi
+  [[ "${cluster_create_state}" == "running" && -n "${cluster_create_pid}" ]] \
+    || die "Internal error: Talos cluster-create child is not registered."
+  if cluster_create_child_is_running; then
+    return 0
+  fi
+
+  exited_status=0
+  if wait "${cluster_create_pid}"; then
+    exited_status=0
+  else
+    exited_status=$?
+  fi
+  cluster_create_pid=""
+  if recover_cluster_create_handshake "${exited_status}"; then
+    return 0
+  fi
+  cluster_create_state="failed"
+  collect_failed_cluster_logs
+  die "Talos cluster creation exited early with status ${exited_status}"
+}
+
+wait_for_cluster_create_success() {
+  local completion_deadline exited_status
+
+  if [[ "${cluster_create_state}" == "recovered" ]]; then
+    return 0
+  fi
+  [[ "${cluster_create_state}" == "running" && -n "${cluster_create_pid}" ]] \
+    || die "Internal error: Talos cluster-create child is not available for completion."
+  completion_deadline=$((SECONDS + 180))
+  while cluster_create_child_is_running \
+    && (( SECONDS < completion_deadline )); do
+    sleep 2
+  done
+  if cluster_create_child_is_running; then
+    collect_failed_cluster_logs
+    die "Talos cluster creation did not finish within 3 minutes after node readiness"
+  fi
+
+  exited_status=0
+  if wait "${cluster_create_pid}"; then
+    exited_status=0
+  else
+    exited_status=$?
+  fi
+  cluster_create_pid=""
+  if (( exited_status == 0 )); then
+    cluster_create_state="succeeded"
+    return 0
+  fi
+  if recover_cluster_create_handshake "${exited_status}"; then
+    return 0
+  fi
+  cluster_create_state="failed"
+  collect_failed_cluster_logs
+  die "Talos cluster creation failed with status ${exited_status}"
+}
+
 # --- 1. Create the cluster --------------------------------------------------------
 step "Creating Talos cluster '${CLUSTER_NAME}' (Talos ${TALOS_VERSION}, Kubernetes ${KUBERNETES_VERSION})"
 info "1 controlplane (${TALOS_MEMORY_CONTROLPLANE} MB) + 1 worker (${TALOS_MEMORY_WORKER} MB)"
 
 # NodePorts are published on the controlplane container; Cilium's
 # kube-proxy replacement makes every NodePort answer on every node.
-cluster_create_log="$(mktemp)"
-cluster_create_status=0
+cluster_create_log="$(
+  umask 077
+  mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-cluster-create.XXXXXX"
+)" || die "Could not reserve a private Talos cluster-create log."
+bootstrap_kubeconfig_dir="$(
+  umask 077
+  mktemp -d "${TMPDIR:-/tmp}/${CLUSTER_NAME}-bootstrap-kubeconfig.XXXXXX"
+)" || die "Could not reserve a private bootstrap kubeconfig directory."
+bootstrap_kubeconfig="${bootstrap_kubeconfig_dir}/config"
 start_mount_capacity_sampler
-talosctl cluster create docker \
-  --name "${CLUSTER_NAME}" \
-  --image "${TALOS_IMAGE}" \
-  --kubernetes-version "${KUBERNETES_VERSION}" \
-  --workers 1 \
-  --memory-controlplanes "${TALOS_MEMORY_CONTROLPLANE}" \
-  --memory-workers "${TALOS_MEMORY_WORKER}" \
-  --subnet "${TALOS_SUBNET}" \
-  --exposed-ports "${NODEPORT_GITEA}:${NODEPORT_GITEA}/tcp,${NODEPORT_ARGOCD}:${NODEPORT_ARGOCD}/tcp,${NODEPORT_ZOT}:${NODEPORT_ZOT}/tcp,${NODEPORT_PORTAL}:${NODEPORT_PORTAL}/tcp,${NODEPORT_BACKSTAGE}:${NODEPORT_BACKSTAGE}/tcp,${NODEPORT_RUSTFS_S3}:${NODEPORT_RUSTFS_S3}/tcp,${NODEPORT_RUSTFS_CONSOLE}:${NODEPORT_RUSTFS_CONSOLE}/tcp,${NODEPORT_GRAFANA}:${NODEPORT_GRAFANA}/tcp,${NODEPORT_KOURIER}:${NODEPORT_KOURIER}/tcp,${NODEPORT_NATS}:${NODEPORT_NATS}/tcp" \
-  "${patches[@]}" \
-  2>&1 | tee "${cluster_create_log}" || {
-    cluster_create_pipeline_status=("${PIPESTATUS[@]}")
-    cluster_create_status="${cluster_create_pipeline_status[0]}"
-    if (( cluster_create_status == 0 )); then
-      cluster_create_status="${cluster_create_pipeline_status[1]}"
-    fi
-  }
+(
+  # Bash expresses RLIMIT_FSIZE in KiB. A Talos create command should emit
+  # kilobytes, not megabytes; fail closed instead of filling a learner disk.
+  ulimit -f "${TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB}"
+  exec talosctl cluster create docker \
+    --name "${CLUSTER_NAME}" \
+    --image "${TALOS_IMAGE}" \
+    --kubernetes-version "${KUBERNETES_VERSION}" \
+    --workers 1 \
+    --memory-controlplanes "${TALOS_MEMORY_CONTROLPLANE}" \
+    --memory-workers "${TALOS_MEMORY_WORKER}" \
+    --subnet "${TALOS_SUBNET}" \
+    --exposed-ports "${NODEPORT_GITEA}:${NODEPORT_GITEA}/tcp,${NODEPORT_ARGOCD}:${NODEPORT_ARGOCD}/tcp,${NODEPORT_ZOT}:${NODEPORT_ZOT}/tcp,${NODEPORT_PORTAL}:${NODEPORT_PORTAL}/tcp,${NODEPORT_BACKSTAGE}:${NODEPORT_BACKSTAGE}/tcp,${NODEPORT_RUSTFS_S3}:${NODEPORT_RUSTFS_S3}/tcp,${NODEPORT_RUSTFS_CONSOLE}:${NODEPORT_RUSTFS_CONSOLE}/tcp,${NODEPORT_GRAFANA}:${NODEPORT_GRAFANA}/tcp,${NODEPORT_KOURIER}:${NODEPORT_KOURIER}/tcp,${NODEPORT_NATS}:${NODEPORT_NATS}/tcp" \
+    "${patches[@]}"
+) >"${cluster_create_log}" 2>&1 &
+cluster_create_pid=$!
+cluster_create_state="running"
 
-cluster_create_output="$(tail -c 65536 "${cluster_create_log}")"
-rm -f "${cluster_create_log}"
-
-if (( cluster_create_status != 0 )); then
-  if is_initial_talos_bootstrap_unavailable_eof "${cluster_create_output}" \
-    && retry_transient_talos_bootstrap; then
-    warn "Recovered the Talos v1.13 bootstrap handshake race"
-  else
-    collect_failed_cluster_logs
-    die "Talos cluster creation failed"
+# Talos v1.13 waits for Kubernetes node readiness before it merges the normal
+# kubeconfig. With CNI set to none, the nodes cannot become Ready until Cilium
+# is installed. Keep the supported cluster-create command running, obtain a
+# dedicated kubeconfig through the Talos API, and satisfy that readiness gate.
+step "Waiting for the Talos context and API"
+talos_context_ready=0
+talos_context_deadline=$((SECONDS + 600))
+while (( SECONDS < talos_context_deadline )); do
+  if talosctl config contexts 2>/dev/null \
+    | awk 'NR > 1 { if ($1 == "*") print $2; else print $1 }' \
+    | grep -Fxq "${CLUSTER_NAME}"; then
+    talos_context_ready=1
+    break
   fi
+  require_cluster_create_running
+  sleep 2
+done
+if (( talos_context_ready == 0 )); then
+  collect_failed_cluster_logs
+  die "Talos context '${CLUSTER_NAME}' did not appear within 10 minutes"
 fi
 
-# --- 2. kubeconfig ------------------------------------------------------------------
-step "Merging kubeconfig"
-# Set the controlplane as the context's default node so every later
-# talosctl command (yours included) works without a -n flag; on a fresh
-# machine `talosctl kubeconfig` fails without this (found by rehearsal-in-CI).
+# Set the controlplane as the context's default node so every later talosctl
+# command (yours included) works without a -n flag.
 if ! talosctl --context "${CLUSTER_NAME}" config node "${TALOS_CP_IP}"; then
   collect_failed_cluster_logs
   die "Could not select the Talos controlplane node"
 fi
 
-kubeconfig_ready=0
-kubeconfig_deadline=$((SECONDS + 120))
-while (( SECONDS < kubeconfig_deadline )); do
-  if timeout --signal=KILL 10s talosctl --context "${CLUSTER_NAME}" kubeconfig --force; then
-    kubeconfig_ready=1
+talos_api_ready=0
+talos_api_deadline=$((SECONDS + 600))
+while (( SECONDS < talos_api_deadline )); do
+  if timeout --signal=KILL 10s talosctl \
+    --context "${CLUSTER_NAME}" \
+    --nodes "${TALOS_CP_IP}" \
+    version >/dev/null 2>&1; then
+    talos_api_ready=1
     break
   fi
-  sleep 5
+  require_cluster_create_running
+  sleep 2
 done
-if (( kubeconfig_ready == 0 )); then
+if (( talos_api_ready == 0 )); then
   collect_failed_cluster_logs
-  die "Could not retrieve kubeconfig from the Talos controlplane within 2 minutes"
+  die "Talos API did not become reachable within 10 minutes"
 fi
-if ! kubectl config use-context "admin@${CLUSTER_NAME}" >/dev/null; then
+ok "Talos API is answering"
+
+# --- 2. Temporary kubeconfig -------------------------------------------------------
+step "Retrieving a dedicated bootstrap kubeconfig"
+bootstrap_kubeconfig_ready=0
+bootstrap_kubeconfig_deadline=$((SECONDS + 180))
+while (( SECONDS < bootstrap_kubeconfig_deadline )); do
+  if timeout --signal=KILL 10s talosctl \
+    --context "${CLUSTER_NAME}" \
+    --nodes "${TALOS_CP_IP}" \
+    kubeconfig "${bootstrap_kubeconfig}" \
+    --merge=false \
+    --force >/dev/null 2>&1; then
+    bootstrap_kubeconfig_ready=1
+    break
+  fi
+  require_cluster_create_running
+  sleep 2
+done
+if (( bootstrap_kubeconfig_ready == 0 )); then
   collect_failed_cluster_logs
-  die "Could not select the Kubernetes context"
+  die "Could not retrieve a dedicated kubeconfig within 3 minutes"
 fi
-ok "kubectl context: admin@${CLUSTER_NAME}"
+if ! chmod 0600 "${bootstrap_kubeconfig}"; then
+  collect_failed_cluster_logs
+  die "Could not protect the dedicated bootstrap kubeconfig"
+fi
 
 step "Waiting for the Kubernetes API readyz and node list"
 kubernetes_api_ready=0
 kubernetes_api_deadline=$((SECONDS + 300))
 while (( SECONDS < kubernetes_api_deadline )); do
-  if timeout --signal=KILL 10s kubectl get --raw=/readyz >/dev/null 2>&1 \
-    && timeout --signal=KILL 10s kubectl get nodes >/dev/null 2>&1; then
+  if timeout --signal=KILL 10s kubectl \
+    --kubeconfig "${bootstrap_kubeconfig}" \
+    get --raw=/readyz >/dev/null 2>&1 \
+    && timeout --signal=KILL 10s kubectl \
+      --kubeconfig "${bootstrap_kubeconfig}" \
+      get nodes >/dev/null 2>&1; then
     kubernetes_api_ready=1
     break
   fi
-  sleep 5
+  require_cluster_create_running
+  sleep 2
 done
 if (( kubernetes_api_ready == 0 )); then
   collect_failed_cluster_logs
@@ -580,23 +811,57 @@ step "Installing Cilium ${CILIUM_VERSION} (CNI + kube-proxy replacement)"
 # Values from the official Talos Cilium guide:
 # https://docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium
 # k8sServiceHost=localhost:7445 is KubePrism, Talos' local API server balancer.
-helm upgrade --install cilium \
-  "${SCRIPT_DIR}/manifests/cilium-${CILIUM_VERSION}.tgz" \
-  --namespace kube-system \
-  --set ipam.mode=kubernetes \
-  --set kubeProxyReplacement=true \
-  --set k8sServiceHost=localhost \
-  --set k8sServicePort=7445 \
-  --set cgroup.autoMount.enabled=false \
-  --set cgroup.hostRoot=/sys/fs/cgroup \
-  --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}" \
-  --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"
+if ! KUBECONFIG="${bootstrap_kubeconfig}" helm upgrade --install cilium \
+    "${SCRIPT_DIR}/manifests/cilium-${CILIUM_VERSION}.tgz" \
+    --namespace kube-system \
+    --set ipam.mode=kubernetes \
+    --set kubeProxyReplacement=true \
+    --set k8sServiceHost=localhost \
+    --set k8sServicePort=7445 \
+    --set cgroup.autoMount.enabled=false \
+    --set cgroup.hostRoot=/sys/fs/cgroup \
+    --set securityContext.capabilities.ciliumAgent="{CHOWN,KILL,NET_ADMIN,NET_RAW,IPC_LOCK,SYS_ADMIN,SYS_RESOURCE,DAC_OVERRIDE,FOWNER,SETGID,SETUID}" \
+    --set securityContext.capabilities.cleanCiliumState="{NET_ADMIN,SYS_ADMIN,SYS_RESOURCE}"; then
+  collect_failed_cluster_logs
+  die "Could not install the vendored Cilium chart"
+fi
 
 # --- 4. Wait for Ready -------------------------------------------------------------------
 step "Waiting for nodes to become Ready (Cilium rollout)"
-wait_rollout kube-system daemonset/cilium
-kubectl wait --for=condition=Ready nodes --all --timeout=300s
-kubectl get nodes -o wide
+if ! KUBECONFIG="${bootstrap_kubeconfig}" \
+  wait_rollout kube-system daemonset/cilium; then
+  collect_failed_cluster_logs
+  die "Cilium did not become ready"
+fi
+if ! kubectl --kubeconfig "${bootstrap_kubeconfig}" \
+  wait --for=condition=Ready nodes --all --timeout=300s; then
+  collect_failed_cluster_logs
+  die "Talos nodes did not become Ready after Cilium installation"
+fi
+if ! kubectl --kubeconfig "${bootstrap_kubeconfig}" get nodes -o wide; then
+  collect_failed_cluster_logs
+  die "Could not report the Ready Talos nodes"
+fi
+
+# Once Cilium makes both nodes Ready, the original supported cluster-create
+# command must complete successfully and merge its kubeconfig normally.
+step "Completing Talos cluster creation"
+wait_for_cluster_create_success
+if [[ "${cluster_create_state}" == "recovered" ]]; then
+  if ! talosctl \
+    --context "${CLUSTER_NAME}" \
+    --nodes "${TALOS_CP_IP}" \
+    kubeconfig --force >/dev/null; then
+    collect_failed_cluster_logs
+    die "Could not merge the normal kubeconfig after Talos bootstrap recovery"
+  fi
+fi
+if ! kubectl config use-context "admin@${CLUSTER_NAME}" >/dev/null; then
+  collect_failed_cluster_logs
+  die "Talos cluster creation succeeded without merging the normal kubeconfig context"
+fi
+ok "kubectl context: admin@${CLUSTER_NAME}"
+cleanup_cluster_bootstrap_files
 
 stop_mount_capacity_sampler
 final_capacity="$(host_capacity_snapshot)" \

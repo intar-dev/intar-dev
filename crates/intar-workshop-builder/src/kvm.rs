@@ -2426,7 +2426,7 @@ mod tests {
         assert!(
             create_cluster.rfind("stop_mount_capacity_sampler").unwrap()
                 > create_cluster
-                    .find("kubectl wait --for=condition=Ready")
+                    .find("wait --for=condition=Ready nodes --all")
                     .unwrap()
         );
         assert!(create_cluster.contains("Host capacity captured before cleanup:"));
@@ -2443,14 +2443,14 @@ mod tests {
                 .find("Could not prepare Linux mount namespace capacity for Talos-in-Docker")
                 .unwrap()
                 < create_cluster
-                    .find("\ntalosctl cluster create docker \\")
+                    .find("\n  exec talosctl cluster create docker \\")
                     .unwrap()
         );
         assert!(!create_cluster.contains("/etc/sysctl.d"));
     }
 
     #[test]
-    fn reference_talos_bootstrap_recovery_is_narrow_and_valid_shell() {
+    fn reference_talos_cni_bootstrap_is_async_bounded_and_valid_shell() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
         let create_cluster = root.join("runtime/source/scripts/create-cluster.sh");
@@ -2458,8 +2458,6 @@ mod tests {
         let source = fs::read_to_string(&create_cluster).unwrap();
 
         assert!(source.contains("--save-cluster-logs-archive-path"));
-        assert!(source.contains("retry_transient_talos_bootstrap"));
-        assert!(source.contains("talosctl cluster show --name"));
         assert!(source.contains("umask 077"));
         assert!(source.contains("mktemp"));
         assert!(source.contains("tar -tzf"));
@@ -2467,26 +2465,170 @@ mod tests {
         assert!(source.contains("rm -f \"${archive}\""));
         assert!(source.contains("talosctl config context"));
         assert!(source.contains("talosctl config remove \"${CLUSTER_NAME}\" -y"));
-        assert!(source.contains("kubectl get --raw=/readyz"));
-        assert!(source.contains("deadline=$((SECONDS + 600))"));
-        assert!(source.contains("while (( SECONDS < deadline ))"));
-        assert!(source.contains("remaining=$((deadline - SECONDS))"));
-        assert!(source.contains("timeout --signal=KILL \"${request_timeout}s\""));
-        assert!(source.contains("if (( remaining < retry_sleep ))"));
-        assert!(source.contains(
-            "if is_retryable_talos_bootstrap_timeout_status \"${bootstrap_status}\"; then"
-        ));
-        assert!(!source.contains("Talos bootstrap retry exceeded its"));
-        assert!(!source.contains("for attempt in $(seq 1 60)"));
+        assert!(source.contains("get --raw=/readyz"));
+        assert!(source.contains("talos_context_deadline=$((SECONDS + 600))"));
+        assert!(source.contains("talos_api_deadline=$((SECONDS + 600))"));
+        assert!(source.contains("bootstrap_kubeconfig_deadline=$((SECONDS + 180))"));
+        assert!(source.contains("TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB=65536"));
+        assert!(source.contains("ulimit -f \"${TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB}\""));
+        assert!(source.contains("exec talosctl cluster create docker \\"));
+        assert!(source.contains(") >\"${cluster_create_log}\" 2>&1 &"));
+        assert!(source.contains("cluster_create_pid=$!"));
+        assert!(source.contains("cluster_create_child_is_running"));
+        assert!(source.contains("done < <(jobs -pr)"));
+        assert!(source.contains("\"/proc/${cluster_create_pid}/stat\""));
+        assert!(source.contains("\"${process_state}\" != \"Z\""));
+        assert!(source.contains("kill \"${cluster_create_pid}\""));
+        assert!(source.contains("kill -KILL \"${cluster_create_pid}\""));
+        assert!(source.contains("wait \"${cluster_create_pid}\""));
+        assert!(!source.contains("pkill"));
+        assert!(source.contains("retry_transient_talos_bootstrap"));
+        assert!(source.contains("recover_cluster_create_handshake"));
+        assert!(source.contains("cluster_create_state=\"running\""));
+        assert!(source.contains("cluster_create_state=\"recovered\""));
+        assert!(source.contains("cluster_create_state=\"succeeded\""));
+        assert!(source.contains("continuing without a cluster-create child"));
+        assert!(!source.contains("2>&1 | tee \"${cluster_create_log}\""));
+        assert!(source.contains("kubeconfig \"${bootstrap_kubeconfig}\" \\"));
+        assert!(source.contains("--merge=false"));
+        assert!(source.contains("KUBECONFIG=\"${bootstrap_kubeconfig}\" helm upgrade"));
+        assert!(source.contains("if [[ \"${cluster_create_state}\" == \"recovered\" ]]; then"));
         assert!(
-            !source
-                .lines()
-                .any(|line| line.trim_start().starts_with("--force"))
+            source.contains("Could not merge the normal kubeconfig after Talos bootstrap recovery")
         );
+        assert!(source.contains("cleanup_cluster_bootstrap_files"));
+        assert!(source.contains("trap cleanup_cluster_bootstrap EXIT"));
+        assert_eq!(source.matches("report_cluster_create_tail").count(), 3);
+        assert!(
+            source
+                .find("cluster_create_pid=\"\"\n  if recover_cluster_create_handshake")
+                .unwrap()
+                < source
+                    .find("cluster_create_state=\"failed\"\n  collect_failed_cluster_logs")
+                    .unwrap()
+        );
+
+        let create_start = source
+            .find("exec talosctl cluster create docker \\")
+            .unwrap();
+        let create_end = source[create_start..]
+            .find("cluster_create_pid=$!")
+            .map(|offset| create_start + offset)
+            .unwrap();
+        assert!(!source[create_start..create_end].contains("--wait"));
+        assert!(!source[create_start..create_end].contains("--force"));
+        let temporary_kubeconfig = source.find("--merge=false").unwrap();
+        let cilium_install = source
+            .find("KUBECONFIG=\"${bootstrap_kubeconfig}\" helm upgrade")
+            .unwrap();
+        let nodes_ready = source
+            .find("wait --for=condition=Ready nodes --all")
+            .unwrap();
+        let require_create_success = source.find("wait_for_cluster_create_success\n").unwrap();
+        let normal_context = source
+            .rfind("kubectl config use-context \"admin@${CLUSTER_NAME}\"")
+            .unwrap();
+        assert!(create_start < temporary_kubeconfig);
+        assert!(temporary_kubeconfig < cilium_install);
+        assert!(cilium_install < nodes_ready);
+        assert!(nodes_ready < require_create_success);
+        assert!(require_create_success < normal_context);
         assert!(
             Command::new("bash")
                 .arg("-n")
                 .arg(&create_cluster)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let child_detector = source
+            .split_once("cluster_create_child_is_running() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\nstop_cluster_create_child()")
+            .unwrap()
+            .0;
+        let child_lifecycle_test = [
+            r#"
+set -euo pipefail
+cluster_create_state=running
+bash -c 'sleep 0.1; exit 23' &
+cluster_create_pid=$!
+"#,
+            "cluster_create_child_is_running() {\n",
+            child_detector,
+            "\n}\n",
+            r#"
+cluster_create_child_is_running
+sleep 0.2
+! cluster_create_child_is_running
+child_status=0
+if wait "${cluster_create_pid}" >/dev/null 2>&1; then
+  child_status=0
+else
+  child_status=$?
+fi
+(( child_status == 23 ))
+cluster_create_pid=""
+
+cluster_create_state=running
+true &
+cluster_create_pid=$!
+sleep 0.1
+! cluster_create_child_is_running
+if wait "${cluster_create_pid}" >/dev/null 2>&1; then
+  child_status=0
+else
+  child_status=$?
+fi
+(( child_status == 0 ))
+"#,
+        ]
+        .concat();
+        assert!(
+            Command::new("bash")
+                .arg("-c")
+                .arg(child_lifecycle_test)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let tail_capture = source
+            .split_once("capture_cluster_create_tail() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\nreport_cluster_create_tail()")
+            .unwrap()
+            .0;
+        let missing_tail_test = [
+            r#"
+set -euo pipefail
+redact_talos_diagnostic_line() { cat; }
+cluster_create_tail=unavailable
+tail_test_root="$(mktemp -d)"
+trap 'rm -rf -- "${tail_test_root}"' EXIT
+"#,
+            "capture_cluster_create_tail() {\n",
+            tail_capture,
+            "\n}\n",
+            r#"
+cluster_create_log="${tail_test_root}/missing"
+capture_cluster_create_tail
+[[ "${cluster_create_tail}" == "unavailable" ]]
+
+cluster_create_log="${tail_test_root}/empty"
+: >"${cluster_create_log}"
+capture_cluster_create_tail
+[[ "${cluster_create_tail}" == "unavailable" ]]
+"#,
+        ]
+        .concat();
+        assert!(
+            Command::new("bash")
+                .arg("-c")
+                .arg(missing_tail_test)
                 .status()
                 .unwrap()
                 .success()
