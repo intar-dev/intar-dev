@@ -524,20 +524,73 @@ describe("workspace agent guest control plane", () => {
       "/usr/libexec/intar-workshop-run-probe",
     );
     expect(probeRunner).toContain(
-      `/usr/bin/setpriv \\
-        --reuid=intar \\
-        --regid=intar \\
-        --init-groups \\
-        -- \\
-        /usr/bin/env -i \\`,
+      `/usr/bin/env -i \\
+        HOME=/home/intar \\
+        USER=intar \\
+        LOGNAME=intar \\
+        SHELL=/bin/bash \\
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+        LANG=C.UTF-8 \\
+        LC_ALL=C.UTF-8 \\
+        /bin/bash --noprofile --norc -c \\
+          'umask 0022; exec /bin/bash -- "$1"' \\
+          intar-probe \\
+          "\${verifier}" </dev/null >/dev/null 2>&1`,
     );
     expect(probeRunner).toContain("HOME=/home/intar");
     expect(probeRunner).toContain("USER=intar");
     expect(probeRunner).toContain("LOGNAME=intar");
+    expect(probeRunner).not.toContain("setpriv");
     expect(probeRunner).not.toContain("runuser");
     expect(probeRunner).toMatch(
       /status="\$\?"[\s\S]*printf '\{"passed":false\}\\n'[\s\S]*exit "\$\{status\}"/,
     );
+    const checkpointWaiter = cloudInitWriteFile(
+      cloudInit,
+      "/usr/libexec/intar-workspace-wait-checkpoint",
+    );
+    expect(checkpointWaiter).toContain(
+      `until /usr/bin/grep -Fq '"checkpoint_applied":true' "\${state}" 2>/dev/null; do`,
+    );
+    expect(checkpointWaiter).toContain("/usr/bin/sleep 1");
+    expect(checkpointWaiter).toContain(
+      `state=/var/lib/intar-workspace-agent/state.json`,
+    );
+    const kinoService = cloudInitWriteFile(
+      cloudInit,
+      "/etc/systemd/system/kino.service",
+    );
+    expect(kinoService).toContain("User=intar");
+    expect(kinoService).toContain("Group=intar");
+    expect(kinoService).toContain(
+      "ExecStartPre=+/usr/libexec/intar-workspace-wait-checkpoint",
+    );
+    expect(kinoService).toContain("TimeoutStartSec=100min");
+    expect(kinoService).toContain("TimeoutStopSec=5s");
+    expect(kinoService).toContain("KillMode=control-group");
+    expect(kinoService).toContain("NoNewPrivileges=true");
+    expect(kinoService).toContain("Restart=on-failure");
+    expect(kinoService).not.toContain("User=root");
+    const recordingDrain = cloudInitWriteFile(
+      cloudInit,
+      "/usr/libexec/intar-workspace-recording-drain",
+    );
+    expect(recordingDrain).toContain(
+      `systemctl stop ssh.service
+      systemctl stop kino.service
+      pkill -HUP -u intar -x kino 2>/dev/null || true`,
+    );
+    const agentService = cloudInitWriteFile(
+      cloudInit,
+      "/etc/systemd/system/intar-workspace-agent.service",
+    );
+    expect(agentService).toContain(
+      "Wants=network-online.target ssh.service",
+    );
+    expect(agentService).toContain(
+      "After=network-online.target ssh.service",
+    );
+    expect(agentService).not.toContain("kino.service");
     expect(cloudInit).toContain("/var/lib/intar-workshop-probes/00.sh");
     expect(cloudInit).toContain("HOME=/home/intar");
     expect(cloudInit).toContain("ProtectHome=read-only");
@@ -549,6 +602,15 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).toContain("AllowUsers intar");
     expect(cloudInit).toContain("AllowTcpForwarding yes");
     expect(cloudInit).toContain("[systemctl, restart, ssh.service]");
+    expect(cloudInit).toContain(
+      "[systemctl, enable, kino.service, intar-workspace-agent.service]",
+    );
+    expect(cloudInit).toContain(
+      "[systemctl, start, --no-block, kino.service, intar-workspace-agent.service]",
+    );
+    expect(cloudInit).not.toContain(
+      "[systemctl, enable, --now, kino.service, intar-workspace-agent.service]",
+    );
     expect(cloudInit).not.toContain("PermitRootLogin yes");
     expect(cloudInit).not.toContain("Hetzner-Token");
     expect(cloudInit).not.toContain("hcloud_token");
@@ -558,8 +620,12 @@ describe("workspace agent guest control plane", () => {
 function cloudInitWriteFile(cloudInit: string, path: string): string {
   const start = cloudInit.indexOf(`  - path: ${path}\n`);
   expect(start).toBeGreaterThanOrEqual(0);
-  const end = cloudInit.indexOf("\n  - path: ", start + 1);
-  return cloudInit.slice(start, end < 0 ? undefined : end);
+  const nextFile = cloudInit.indexOf("\n  - path: ", start + 1);
+  const writeFilesEnd = cloudInit.indexOf("\nbootcmd:", start + 1);
+  const end = [nextFile, writeFilesEnd]
+    .filter((candidate) => candidate >= 0)
+    .reduce((nearest, candidate) => Math.min(nearest, candidate), cloudInit.length);
+  return cloudInit.slice(start, end);
 }
 
 async function seedGeneration() {

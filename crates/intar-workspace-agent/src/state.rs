@@ -331,6 +331,22 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_applied_marker_is_persisted_for_the_service_gate() {
+        let temp = TempDir::new().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let store = StateStore::new(state_path.clone(), identity(1));
+        let mut state = store.install_bootstrap(response()).expect("bootstrap");
+
+        store
+            .mark_checkpoint_applied(&mut state)
+            .expect("checkpoint marker");
+
+        let raw = std::fs::read_to_string(state_path).expect("persisted state");
+        assert!(raw.contains("\"checkpoint_applied\":true"));
+        assert!(!raw.contains("signed=yes"));
+    }
+
+    #[test]
     fn state_from_old_generation_is_rejected() {
         let temp = TempDir::new().expect("temp dir");
         let old = StateStore::new(temp.path().join("state.json"), identity(1));
