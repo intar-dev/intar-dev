@@ -27,6 +27,7 @@ const TALOS_KUBERNETES_IMAGE_SOURCES = new Set([
   "registry.k8s.io/kube-controller-manager:v1.36.2",
   "registry.k8s.io/kube-scheduler:v1.36.2",
 ]);
+const REVIEWED_MISE_LOCK = join(import.meta.dir, "platform-engineering-mise.lock");
 const sourceRoot = resolve(process.argv[2] ?? "");
 const outputRoot = resolve(process.argv[3] ?? "workshops/platform-engineering");
 
@@ -1556,6 +1557,10 @@ function writeRuntimeSource() {
   for (const relative of ["mise.toml", "apps", "gitops", "lab", "scripts"]) {
     copyRuntimePath(relative);
   }
+  writeText(
+    "runtime/source/mise.lock",
+    readFileSync(REVIEWED_MISE_LOCK, "utf8"),
+  );
   const externalImages = new Set(upstreamExternalImages);
   for (const image of collectRuntimeDigestReferences()) externalImages.add(image);
   const lockedImages = [...externalImages].sort();
@@ -1701,9 +1706,11 @@ set -euo pipefail
 
 readonly root="\${INTAR_WORKSHOP_INSTALL_ROOT:?missing install root}"
 readonly image_lock="\${INTAR_WORKSHOP_IMAGE_LOCK:?missing image lock}"
+readonly learner_user="\${INTAR_WORKSHOP_LEARNER_USER:?missing learner user}"
 readonly mise_version=v2026.7.3
 readonly mise_sha256=06088e84e4514b59fd2b6b17927bcc37aa0ab10020a270868871fb010b92069b
 
+umask 0022
 [[ "$(id -u)" == 0 ]] || { echo "runtime bootstrap requires root" >&2; exit 1; }
 [[ "$(uname -m)" == x86_64 ]] || { echo "runtime requires x86_64" >&2; exit 1; }
 . /etc/os-release
@@ -1743,6 +1750,12 @@ sed -i -e 's|http://deb.debian.org|https://deb.debian.org|g' \
 apt-get update
 apt-get install --yes --no-install-recommends ca-certificates curl docker-cli docker.io git jq xz-utils
 systemctl enable --now docker
+getent passwd "\${learner_user}" >/dev/null
+if [[ "\${learner_user}" != root ]]; then
+  readonly container_group="$(stat --format=%G /var/run/docker.sock)"
+  getent group "\${container_group}" >/dev/null
+  usermod --append --groups "\${container_group}" "\${learner_user}"
+fi
 
 mise_tmp="$(mktemp)"
 trap 'rm -f "\${mise_tmp}"' EXIT
@@ -1757,7 +1770,7 @@ export MISE_CACHE_DIR=/var/cache/intar-mise
 export MISE_YES=1
 cd "\${root}"
 mise trust "\${root}/mise.toml"
-mise install
+mise install --locked
 for tool in talosctl kubectl helm crane cilium jq; do
   target="$(mise which "\${tool}")"
   ln -sfn "\${target}" "/usr/local/bin/\${tool}"

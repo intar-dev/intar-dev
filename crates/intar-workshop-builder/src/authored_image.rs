@@ -56,6 +56,12 @@ struct SourcePayload {
     size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PrepareScriptGuest<'a> {
+    learner_user: &'a str,
+    sanitizer_path: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GuestProof {
@@ -267,9 +273,12 @@ pub fn prepare_authored_image(
         render_prepare_script(
             &runtime_config.install_root,
             &verifier_relative,
+            PrepareScriptGuest {
+                learner_user: &config.execution.ssh_username,
+                sanitizer_path: &config.execution.sanitizer_path,
+            },
             &preparation.kino_sha256,
             &preparation.sanitizer_sha256,
-            &config.execution.sanitizer_path,
             &image.guest_build_material_paths,
             &image.guest_forbidden_participant_paths,
         ),
@@ -696,15 +705,16 @@ fn source_mode(_metadata: &fs::Metadata) -> u32 {
 fn render_prepare_script(
     install_root: &str,
     verifier_relative: &str,
+    guest: PrepareScriptGuest<'_>,
     kino_sha256: &str,
     sanitizer_sha256: &str,
-    sanitizer_path: &str,
     build_material_paths: &[String],
     forbidden_paths: &[String],
 ) -> String {
     let verifier = shell_quote(&format!("{install_root}/{verifier_relative}"));
     let install_root = shell_quote(install_root);
-    let sanitizer_path = shell_quote(sanitizer_path);
+    let learner_user = shell_quote(guest.learner_user);
+    let sanitizer_path = shell_quote(guest.sanitizer_path);
     let mut script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -740,6 +750,7 @@ env -i \
   HOME=/root LANG=C.UTF-8 \
   INTAR_WORKSHOP_INSTALL_ROOT="${{install_root}}" \
   INTAR_WORKSHOP_IMAGE_LOCK=/tmp/intar-runtime-images.lock \
+  INTAR_WORKSHOP_LEARNER_USER={learner_user} \
   /bin/bash -- /tmp/intar-runtime-bootstrap.sh
 {verifier}
 /usr/local/bin/kino --help >/dev/null
@@ -1177,7 +1188,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        cleanup_script_source, render_prepare_script, validate_guest_proof,
+        PrepareScriptGuest, cleanup_script_source, render_prepare_script, validate_guest_proof,
         validate_image_verifier, validate_install_root, verify_free_space,
     };
 
@@ -1215,9 +1226,12 @@ mod tests {
         let script = render_prepare_script(
             "/opt/workshop",
             "lab/00/verify.sh",
+            PrepareScriptGuest {
+                learner_user: "ubuntu",
+                sanitizer_path: "/usr/local/libexec/intar/intar-workshop-sanitize",
+            },
             &"1".repeat(64),
             &"2".repeat(64),
-            "/usr/local/libexec/intar/intar-workshop-sanitize",
             &["/opt/workshop/.git".to_owned()],
             &[
                 "/opt/workshop/.git".to_owned(),
@@ -1229,6 +1243,7 @@ mod tests {
         assert!(!script.contains("test ! -e '/opt/workshop/.git'"));
         assert!(script.contains("docker images --all --no-trunc --quiet"));
         assert!(script.contains("--same-permissions"));
+        assert!(script.contains("INTAR_WORKSHOP_LEARNER_USER='ubuntu'"));
         assert!(script.contains(
             "install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize \
              '/usr/local/libexec/intar/intar-workshop-sanitize'"

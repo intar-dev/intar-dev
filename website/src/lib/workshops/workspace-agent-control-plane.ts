@@ -373,6 +373,7 @@ packages:
   - curl
   - openssh-server
   - procps
+  - util-linux
 
 users:
   - name: intar
@@ -394,6 +395,8 @@ write_files:
       state_path = "/var/lib/intar-workspace-agent/state.json"
       checkpoint_tmpfs_dir = "/run/intar-workspace-agent/checkpoints"
 ${checkpointApplyProgram ? `      checkpoint_apply_program = ${toml(checkpointApplyProgram)}\n` : ""}      checkpoint_signing_keys = ${signingKeysToml}
+      reconstruction_user = "intar"
+      reconstruction_home = "/home/intar"
       kino_url = ${toml(kinoUrl)}
       max_checkpoint_bytes = ${maxCheckpointBytes}
       max_artifact_bytes = ${maxArtifactBytes}
@@ -460,7 +463,16 @@ ${indentCloudInit(kinoConfig, 6)}
       set -u
       verifier="\${1:?missing verifier}"
       set +e
-      "\${verifier}" </dev/null >/dev/null 2>&1
+      /usr/sbin/runuser --user intar -- \
+        /usr/bin/env -i \
+          HOME=/home/intar \
+          USER=intar \
+          LOGNAME=intar \
+          SHELL=/bin/bash \
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          LANG=C.UTF-8 \
+          LC_ALL=C.UTF-8 \
+          "\${verifier}" </dev/null >/dev/null 2>&1
       status="\$?"
       set -e
       if [ "\${status}" -eq 0 ]; then
@@ -549,7 +561,8 @@ ${indentCloudInit(kinoConfig, 6)}
       RestartSec=5s
       TimeoutStopSec=30s
       PrivateTmp=true
-      ProtectHome=true
+      ProtectHome=read-only
+      ReadWritePaths=/home/intar
       ProtectControlGroups=true
       RestrictSUIDSGID=true
       LockPersonality=true
@@ -619,7 +632,7 @@ function renderDirectGuestKinoConfig(
       "",
       `probe ${JSON.stringify(probe.probeId)} {`,
       '  kind = "command_json_path"',
-      `  argv = ["/usr/libexec/intar-workshop-run-probe", ${JSON.stringify(`/var/lib/intar-workspace-agent/probes/${probe.moduleId}.sh`)}]`,
+      `  argv = ["/usr/libexec/intar-workshop-run-probe", ${JSON.stringify(`/var/lib/intar-workshop-probes/${probe.moduleId}.sh`)}]`,
       '  json_path = "$.passed"',
       "  expected = true",
       "}",

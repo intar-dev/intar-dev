@@ -15,6 +15,7 @@ ed25519-dalek.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 intar-kino-proto = { path = "../intar-kino-proto" }
+nix = { workspace = true, features = ["signal", "user"] }
 prost.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-no-provider", "stream"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }

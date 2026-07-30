@@ -2232,6 +2232,17 @@ mod tests {
         assert!(importer.contains("runtime/images.lock"));
         assert!(importer.contains("renderRuntimeBootstrap"));
         assert!(importer.contains("adaptDigestPinnedFault01"));
+        assert!(importer.contains("platform-engineering-mise.lock"));
+        assert!(importer.contains("INTAR_WORKSHOP_LEARNER_USER"));
+        assert!(importer.contains("mise install --locked"));
+
+        let reviewed_mise_lock = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/platform-engineering-mise.lock"),
+        )
+        .unwrap();
+        let runtime_mise_lock = fs::read_to_string(root.join("runtime/source/mise.lock")).unwrap();
+        assert_eq!(runtime_mise_lock, reviewed_mise_lock);
     }
 
     #[test]
@@ -2242,6 +2253,20 @@ mod tests {
         let source = fs::read_to_string(&bootstrap).unwrap();
         assert!(source.contains(r#"awk 'NF {sub(/\/.*/, "", $1); print $1}'"#));
         assert!(source.contains("host=registry-1.docker.io"));
+        assert!(source.contains(
+            r#"readonly learner_user="${INTAR_WORKSHOP_LEARNER_USER:?missing learner user}""#
+        ));
+        assert!(source.contains(r#"getent passwd "${learner_user}" >/dev/null"#));
+        assert!(source.contains(r#"if [[ "${learner_user}" != root ]]; then"#));
+        assert!(
+            source
+                .contains(r#"readonly container_group="$(stat --format=%G /var/run/docker.sock)""#)
+        );
+        assert!(
+            source.contains(r#"usermod --append --groups "${container_group}" "${learner_user}""#)
+        );
+        assert!(source.contains("mise install --locked"));
+        assert!(source.contains("umask 0022"));
         let install_packages = source
             .lines()
             .find(|line| line.starts_with("apt-get install "))

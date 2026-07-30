@@ -1,4 +1,5 @@
 use crate::model::{CheckpointCompression, CheckpointDescriptor};
+use crate::secrets::SanitizedError;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use futures_util::StreamExt;
@@ -10,12 +11,16 @@ use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const PROBE_VERIFIER_ROOT: &str = "/var/lib/intar-workspace-agent/probes";
+const PROBE_VERIFIER_ROOT: &str = "/var/lib/intar-workshop-probes";
 const RECONSTRUCTION_SHELL: &str = "/bin/bash";
+const LEARNER_RUNNER: &str = "/usr/sbin/runuser";
+const COMMAND_DIAGNOSTIC_TAIL_BYTES: usize = 96;
+const COMMAND_DIAGNOSTIC_MAX_BYTES: usize = 256;
+const RECONSTRUCTION_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 pub struct StagedCheckpoint {
     _temporary: TempDir,
@@ -45,8 +50,72 @@ pub struct CommandCheckpointApplier {
     program: PathBuf,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct BuiltinCheckpointApplier;
+#[derive(Clone, Debug)]
+pub struct BuiltinCheckpointApplier {
+    reconstruction_identity: ReconstructionIdentity,
+}
+
+#[derive(Clone, Debug)]
+struct ReconstructionIdentity {
+    user: String,
+    home: PathBuf,
+}
+
+enum ScriptIdentity<'a> {
+    Root {
+        home: &'a Path,
+        learner_user: &'a str,
+    },
+    Reconstruction(&'a ReconstructionIdentity),
+}
+
+struct CommandOutcome {
+    status: ExitStatus,
+    stdout_tail: Vec<u8>,
+    stderr_tail: Vec<u8>,
+}
+
+struct ProcessGroupGuard {
+    #[cfg(unix)]
+    pid: Option<nix::unistd::Pid>,
+}
+
+impl ProcessGroupGuard {
+    fn new(child: &tokio::process::Child) -> Self {
+        #[cfg(unix)]
+        {
+            let pid = child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .map(nix::unistd::Pid::from_raw);
+            Self { pid }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            Self {}
+        }
+    }
+
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.take() {
+            let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+struct LearnerExecutionMaterial {
+    _temporary: TempDir,
+    root: PathBuf,
+    image_lock: PathBuf,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,31 +162,43 @@ impl CommandCheckpointApplier {
     }
 }
 
+impl BuiltinCheckpointApplier {
+    pub fn new(user: String, home: PathBuf) -> Self {
+        Self {
+            reconstruction_identity: ReconstructionIdentity { user, home },
+        }
+    }
+
+    pub fn root() -> Self {
+        Self::new("root".to_owned(), PathBuf::from("/root"))
+    }
+}
+
 impl CheckpointApplier for CommandCheckpointApplier {
     fn apply<'a>(
         &'a self,
         checkpoint: &'a StagedCheckpoint,
     ) -> Pin<Box<dyn Future<Output = Result<(), CheckpointError>> + Send + 'a>> {
         Box::pin(async move {
-            let status = tokio::process::Command::new(&self.program)
+            let mut command = tokio::process::Command::new(&self.program);
+            command
                 .arg("--checkpoint-id")
                 .arg(checkpoint.checkpoint_id())
                 .arg("--staged-root")
                 .arg(checkpoint.root())
                 .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .status()
+                .kill_on_drop(true);
+            let outcome = run_command_with_bounded_output(&mut command)
                 .await
                 .map_err(|source| CheckpointError::ApplyStart {
                     program: self.program.clone(),
                     source,
                 })?;
-            if !status.success() {
+            if !outcome.status.success() {
                 return Err(CheckpointError::ApplyFailed {
                     program: self.program.clone(),
-                    status: status.to_string(),
+                    status: outcome.status.to_string(),
+                    diagnostic: command_diagnostic(&outcome),
                 });
             }
             Ok(())
@@ -130,7 +211,9 @@ impl CheckpointApplier for BuiltinCheckpointApplier {
         &'a self,
         checkpoint: &'a StagedCheckpoint,
     ) -> Pin<Box<dyn Future<Output = Result<(), CheckpointError>> + Send + 'a>> {
-        Box::pin(async move { apply_reconstruction_bundle(checkpoint).await })
+        Box::pin(async move {
+            apply_reconstruction_bundle(checkpoint, &self.reconstruction_identity).await
+        })
     }
 }
 
@@ -417,7 +500,10 @@ fn verify_signature(
         })
 }
 
-async fn apply_reconstruction_bundle(checkpoint: &StagedCheckpoint) -> Result<(), CheckpointError> {
+async fn apply_reconstruction_bundle(
+    checkpoint: &StagedCheckpoint,
+    reconstruction_identity: &ReconstructionIdentity,
+) -> Result<(), CheckpointError> {
     let manifest_path = checkpoint.root().join("checkpoint.json");
     let manifest_bytes = fs::read(&manifest_path).map_err(|source| CheckpointError::ApplyIo {
         operation: "read reconstruction manifest",
@@ -435,26 +521,82 @@ async fn apply_reconstruction_bundle(checkpoint: &StagedCheckpoint) -> Result<()
     install_runtime_source(checkpoint, &manifest)?;
     install_probe_verifiers_at(checkpoint, &manifest, Path::new(PROBE_VERIFIER_ROOT))?;
 
+    let bootstrap_home = tempfile::Builder::new()
+        .prefix("intar-root-reconstruction-")
+        .tempdir()
+        .map_err(|source| CheckpointError::ApplyIo {
+            operation: "create private root reconstruction home",
+            path: std::env::temp_dir(),
+            source,
+        })?;
     run_reconstruction_script(
         checkpoint.root().join(&manifest.bootstrap_script),
         &manifest,
-        checkpoint,
+        checkpoint.root().join("runtime/images.lock"),
         "bootstrap",
+        ScriptIdentity::Root {
+            home: bootstrap_home.path(),
+            learner_user: &reconstruction_identity.user,
+        },
     )
     .await?;
+
+    if reconstruction_identity.user != "root" {
+        handoff_tree(&manifest.install_root, reconstruction_identity)?;
+        handoff_tree(Path::new(PROBE_VERIFIER_ROOT), reconstruction_identity)?;
+        let execution = LearnerExecutionMaterial::new(checkpoint, reconstruction_identity)?;
+        for step in &manifest.apply_steps {
+            let catch_up = execution.stage_script(
+                &checkpoint.root().join(&step.catch_up_script),
+                &format!("catch-up-{}", step.module_id),
+                reconstruction_identity,
+            )?;
+            run_reconstruction_script(
+                catch_up,
+                &manifest,
+                execution.image_lock.clone(),
+                &format!("module {} catch-up", step.module_id),
+                ScriptIdentity::Reconstruction(reconstruction_identity),
+            )
+            .await?;
+            let verifier = execution.stage_script(
+                &checkpoint.root().join(&step.verify_script),
+                &format!("verify-{}", step.module_id),
+                reconstruction_identity,
+            )?;
+            run_reconstruction_script(
+                verifier,
+                &manifest,
+                execution.image_lock.clone(),
+                &format!("module {} verifier", step.module_id),
+                ScriptIdentity::Reconstruction(reconstruction_identity),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
     for step in &manifest.apply_steps {
         run_reconstruction_script(
             checkpoint.root().join(&step.catch_up_script),
             &manifest,
-            checkpoint,
+            checkpoint.root().join("runtime/images.lock"),
             &format!("module {} catch-up", step.module_id),
+            ScriptIdentity::Root {
+                home: bootstrap_home.path(),
+                learner_user: &reconstruction_identity.user,
+            },
         )
         .await?;
         run_reconstruction_script(
             checkpoint.root().join(&step.verify_script),
             &manifest,
-            checkpoint,
+            checkpoint.root().join("runtime/images.lock"),
             &format!("module {} verifier", step.module_id),
+            ScriptIdentity::Root {
+                home: bootstrap_home.path(),
+                learner_user: &reconstruction_identity.user,
+            },
         )
         .await?;
     }
@@ -789,9 +931,19 @@ fn install_runtime_source(
             .sync_all()
             .map_err(|source| CheckpointError::ApplyIo {
                 operation: "sync runtime source file",
-                path: destination,
+                path: destination.clone(),
                 source,
             })?;
+        #[cfg(unix)]
+        fs::set_permissions(
+            &destination,
+            std::os::unix::fs::PermissionsExt::from_mode(file.mode),
+        )
+        .map_err(|source| CheckpointError::ApplyIo {
+            operation: "set declared runtime source mode",
+            path: destination,
+            source,
+        })?;
     }
     fs::write(
         staging.path().join(".intar-runtime-owner"),
@@ -802,6 +954,12 @@ fn install_runtime_source(
         path: staging.path().join(".intar-runtime-owner"),
         source,
     })?;
+    #[cfg(unix)]
+    set_directory_tree_mode(staging.path(), 0o755).map_err(|source| CheckpointError::ApplyIo {
+        operation: "set runtime source directory modes",
+        path: staging.path().to_path_buf(),
+        source,
+    })?;
     let staging_path = staging.keep();
     fs::rename(&staging_path, &manifest.install_root).map_err(|source| CheckpointError::ApplyIo {
         operation: "activate runtime source",
@@ -810,54 +968,383 @@ fn install_runtime_source(
     })
 }
 
+#[cfg(unix)]
+fn set_directory_tree_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime directory mode update refuses non-directories and symlinks",
+        ));
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    for child in fs::read_dir(path)? {
+        let child = child?.path();
+        let metadata = fs::symlink_metadata(&child)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime directory mode update refuses symlinks",
+            ));
+        }
+        if metadata.is_dir() {
+            set_directory_tree_mode(&child, mode)?;
+        }
+    }
+    Ok(())
+}
+
+impl LearnerExecutionMaterial {
+    fn new(
+        checkpoint: &StagedCheckpoint,
+        identity: &ReconstructionIdentity,
+    ) -> Result<Self, CheckpointError> {
+        let temporary = tempfile::Builder::new()
+            .prefix("intar-learner-reconstruction-")
+            .tempdir()
+            .map_err(|source| CheckpointError::ApplyIo {
+                operation: "create private learner reconstruction directory",
+                path: std::env::temp_dir(),
+                source,
+            })?;
+        let root = temporary.path().to_path_buf();
+        let image_lock = root.join("images.lock");
+        write_private_execution_file(
+            &image_lock,
+            &read_staged_regular(&checkpoint.root().join("runtime/images.lock"))?,
+            0o400,
+        )?;
+        handoff_tree(&root, identity)?;
+        Ok(Self {
+            _temporary: temporary,
+            root,
+            image_lock,
+        })
+    }
+
+    fn stage_script(
+        &self,
+        source: &Path,
+        label: &str,
+        identity: &ReconstructionIdentity,
+    ) -> Result<PathBuf, CheckpointError> {
+        validate_identifier("execution script label", label)?;
+        let destination = self.root.join(format!("{label}.sh"));
+        write_private_execution_file(&destination, &read_staged_regular(source)?, 0o500)?;
+        handoff_tree(&destination, identity)?;
+        Ok(destination)
+    }
+}
+
+fn write_private_execution_file(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), CheckpointError> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(mode);
+    }
+    let mut output = options
+        .open(path)
+        .map_err(|source| CheckpointError::ApplyIo {
+            operation: "create private reconstruction file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    output
+        .write_all(bytes)
+        .and_then(|()| output.sync_all())
+        .map_err(|source| CheckpointError::ApplyIo {
+            operation: "write private reconstruction file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    #[cfg(unix)]
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).map_err(
+        |source| CheckpointError::ApplyIo {
+            operation: "set private reconstruction file mode",
+            path: path.to_path_buf(),
+            source,
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn handoff_tree(path: &Path, identity: &ReconstructionIdentity) -> Result<(), CheckpointError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let account = nix::unistd::User::from_name(&identity.user)
+        .map_err(|_| {
+            CheckpointError::InvalidExecutionIdentity(format!(
+                "reconstruction user '{}' could not be resolved",
+                identity.user
+            ))
+        })?
+        .ok_or_else(|| {
+            CheckpointError::InvalidExecutionIdentity(format!(
+                "reconstruction user '{}' does not exist",
+                identity.user
+            ))
+        })?;
+    if account.uid.is_root() || account.gid.as_raw() == 0 {
+        return Err(CheckpointError::InvalidExecutionIdentity(format!(
+            "reconstruction user '{}' must have a non-root UID and primary GID",
+            identity.user
+        )));
+    }
+    if account.dir != identity.home {
+        return Err(CheckpointError::InvalidExecutionIdentity(format!(
+            "reconstruction user '{}' has home '{}', expected '{}'",
+            identity.user,
+            account.dir.display(),
+            identity.home.display()
+        )));
+    }
+    let home = fs::symlink_metadata(&identity.home).map_err(|source| CheckpointError::ApplyIo {
+        operation: "inspect reconstruction home",
+        path: identity.home.clone(),
+        source,
+    })?;
+    if !home.is_dir()
+        || home.file_type().is_symlink()
+        || home.uid() != account.uid.as_raw()
+        || home.gid() != account.gid.as_raw()
+    {
+        return Err(CheckpointError::InvalidExecutionIdentity(format!(
+            "reconstruction home '{}' must be a real directory owned by '{}'",
+            identity.home.display(),
+            identity.user
+        )));
+    }
+    chown_tree(path, account.uid.as_raw(), account.gid.as_raw()).map_err(|source| {
+        CheckpointError::ApplyIo {
+            operation: "hand reconstruction files to the learner",
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+#[cfg(unix)]
+fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    use std::os::unix::fs::chown;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reconstruction ownership handoff refuses symlinks",
+        ));
+    }
+    if metadata.is_dir() {
+        for child in fs::read_dir(path)? {
+            chown_tree(&child?.path(), uid, gid)?;
+        }
+    }
+    chown(path, Some(uid), Some(gid))
+}
+
+#[cfg(not(unix))]
+fn handoff_tree(path: &Path, _identity: &ReconstructionIdentity) -> Result<(), CheckpointError> {
+    Err(CheckpointError::InvalidExecutionIdentity(format!(
+        "reconstruction ownership handoff is unsupported for '{}'",
+        path.display()
+    )))
+}
+
 async fn run_reconstruction_script(
     program: PathBuf,
     manifest: &ReconstructionManifest,
-    checkpoint: &StagedCheckpoint,
+    image_lock: PathBuf,
     label: &str,
+    identity: ScriptIdentity<'_>,
 ) -> Result<(), CheckpointError> {
     // Checkpoint bytes stay on the required noexec tmpfs. The scripts are
     // signed workshop inputs, so pass their paths to the fixed guest shell
     // instead of asking the kernel to execute them from that mount.
-    let status = tokio::process::Command::new(RECONSTRUCTION_SHELL)
-        .arg("--")
-        .arg(&program)
-        // Reconstruction scripts are workshop-authored. Keep the workspace
-        // agent's report/bootstrap credentials and process configuration out
-        // of their environment, and expose only the deterministic execution
-        // contract required by the signed bundle.
-        .env_clear()
-        .env(
-            "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        )
-        .env("HOME", "/root")
-        .env("LANG", "C.UTF-8")
-        .env("LC_ALL", "C.UTF-8")
-        .env("INTAR_WORKSHOP_INSTALL_ROOT", &manifest.install_root)
-        .env(
-            "INTAR_WORKSHOP_IMAGE_LOCK",
-            checkpoint.root().join("runtime/images.lock"),
-        )
-        .env("INTAR_WORKSHOP_CHECKPOINT_ID", checkpoint.checkpoint_id())
+    // Reconstruction scripts are workshop-authored. Keep the workspace
+    // agent's report/bootstrap credentials and process configuration out of
+    // their environment, and expose only the deterministic execution
+    // contract required by the signed bundle. Bootstrap remains privileged;
+    // every catch-up and verifier runs as the configured learner identity.
+    let checkpoint_id = manifest.checkpoint_id.as_str();
+    let install_root = manifest.install_root.to_string_lossy();
+    let image_lock = image_lock.to_string_lossy();
+    let shell_program = program.to_string_lossy();
+    let mut command = match identity {
+        ScriptIdentity::Root { home, learner_user } => {
+            let mut command = tokio::process::Command::new(RECONSTRUCTION_SHELL);
+            command
+                .arg("--noprofile")
+                .arg("--norc")
+                .arg("-c")
+                .arg("umask 0022; exec /bin/bash -- \"$1\"")
+                .arg("intar-reconstruction")
+                .arg(&program)
+                .env_clear()
+                .env("PATH", RECONSTRUCTION_PATH)
+                .env("HOME", home)
+                .env("USER", "root")
+                .env("LOGNAME", "root")
+                .env("SHELL", RECONSTRUCTION_SHELL)
+                .env("LANG", "C.UTF-8")
+                .env("LC_ALL", "C.UTF-8")
+                .env("INTAR_WORKSHOP_INSTALL_ROOT", &manifest.install_root)
+                .env("INTAR_WORKSHOP_IMAGE_LOCK", image_lock.as_ref())
+                .env("INTAR_WORKSHOP_CHECKPOINT_ID", checkpoint_id)
+                .env("INTAR_WORKSHOP_LEARNER_USER", learner_user);
+            command
+        }
+        ScriptIdentity::Reconstruction(identity) => {
+            let mut command = tokio::process::Command::new(LEARNER_RUNNER);
+            command
+                .arg("--user")
+                .arg(&identity.user)
+                .arg("--")
+                .arg("/usr/bin/env")
+                .arg("-i")
+                .arg(format!("HOME={}", identity.home.display()))
+                .arg(format!("USER={}", identity.user))
+                .arg(format!("LOGNAME={}", identity.user))
+                .arg(format!("SHELL={RECONSTRUCTION_SHELL}"))
+                .arg(format!("PATH={RECONSTRUCTION_PATH}"))
+                .arg("LANG=C.UTF-8")
+                .arg("LC_ALL=C.UTF-8")
+                .arg(format!("INTAR_WORKSHOP_INSTALL_ROOT={install_root}"))
+                .arg(format!("INTAR_WORKSHOP_IMAGE_LOCK={image_lock}"))
+                .arg(format!("INTAR_WORKSHOP_CHECKPOINT_ID={checkpoint_id}"))
+                .arg(format!("INTAR_WORKSHOP_LEARNER_USER={}", identity.user))
+                .arg(RECONSTRUCTION_SHELL)
+                .arg("--noprofile")
+                .arg("--norc")
+                .arg("-c")
+                .arg("umask 0022; exec /bin/bash -- \"$1\"")
+                .arg("intar-reconstruction")
+                .arg(shell_program.as_ref())
+                .env_clear()
+                .env("PATH", RECONSTRUCTION_PATH)
+                .env("LANG", "C.UTF-8")
+                .env("LC_ALL", "C.UTF-8");
+            command
+        }
+    };
+    command
         .current_dir(&manifest.install_root)
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .status()
+        .kill_on_drop(true);
+    let outcome = run_command_with_bounded_output(&mut command)
         .await
         .map_err(|source| CheckpointError::ApplyStart {
             program: program.clone(),
             source,
         })?;
-    if !status.success() {
+    if !outcome.status.success() {
         return Err(CheckpointError::ApplyFailed {
             program: PathBuf::from(label),
-            status: status.to_string(),
+            status: outcome.status.to_string(),
+            diagnostic: command_diagnostic(&outcome),
         });
     }
     Ok(())
+}
+
+async fn run_command_with_bounded_output(
+    command: &mut tokio::process::Command,
+) -> io::Result<CommandOutcome> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let mut process_group = ProcessGroupGuard::new(&child);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("checkpoint command stdout pipe was not created"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("checkpoint command stderr pipe was not created"))?;
+    let wait = async {
+        let result = child.wait().await;
+        // A reconstruction script must leave durable services through the
+        // service manager or container runtime, never as inherited children.
+        // Reap any remaining descendants before waiting for pipe EOF.
+        process_group.terminate();
+        result
+    };
+    let (status, stdout_tail, stderr_tail) =
+        tokio::try_join!(wait, read_bounded_tail(stdout), read_bounded_tail(stderr))?;
+    Ok(CommandOutcome {
+        status,
+        stdout_tail,
+        stderr_tail,
+    })
+}
+
+async fn read_bounded_tail(mut stream: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(COMMAND_DIAGNOSTIC_TAIL_BYTES);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        tail.extend_from_slice(&buffer[..read]);
+        if tail.len() > COMMAND_DIAGNOSTIC_TAIL_BYTES {
+            let excess = tail.len() - COMMAND_DIAGNOSTIC_TAIL_BYTES;
+            tail.drain(..excess);
+        }
+    }
+    Ok(tail)
+}
+
+fn command_diagnostic(outcome: &CommandOutcome) -> String {
+    let mut raw = String::new();
+    for (label, bytes) in [
+        ("stderr", outcome.stderr_tail.as_slice()),
+        ("stdout", outcome.stdout_tail.as_slice()),
+    ] {
+        let value = String::from_utf8_lossy(bytes)
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        let value = value.trim();
+        if !value.is_empty() {
+            raw.push_str("; ");
+            raw.push_str(label);
+            raw.push_str(" tail: ");
+            raw.push_str(value);
+        }
+    }
+    let mut diagnostic = SanitizedError::new(raw, &[]).as_str().to_owned();
+    if diagnostic.len() > COMMAND_DIAGNOSTIC_MAX_BYTES {
+        diagnostic.truncate(floor_char_boundary(
+            &diagnostic,
+            COMMAND_DIAGNOSTIC_MAX_BYTES,
+        ));
+    }
+    diagnostic
+}
+
+fn floor_char_boundary(value: &str, index: usize) -> usize {
+    let mut boundary = index.min(value.len());
+    while !value.is_char_boundary(boundary) {
+        boundary = boundary.saturating_sub(1);
+    }
+    boundary
 }
 
 fn validate_identifier(name: &str, value: &str) -> Result<(), CheckpointError> {
@@ -1311,10 +1798,18 @@ pub enum CheckpointError {
         #[source]
         source: io::Error,
     },
-    #[error("checkpoint apply program {program} exited with {status}")]
-    ApplyFailed { program: PathBuf, status: String },
+    #[error("checkpoint apply program {program} exited with {status}{diagnostic}")]
+    ApplyFailed {
+        program: PathBuf,
+        status: String,
+        diagnostic: String,
+    },
+    #[error("checkpoint download and apply exceeded {seconds} seconds")]
+    ApplyTimedOut { seconds: u64 },
     #[error("invalid checkpoint reconstruction manifest: {0}")]
     InvalidManifest(String),
+    #[error("invalid checkpoint reconstruction identity: {0}")]
+    InvalidExecutionIdentity(String),
     #[error("failed to {operation} at {path}: {source}")]
     ApplyIo {
         operation: &'static str,
@@ -1326,8 +1821,13 @@ pub enum CheckpointError {
 
 #[cfg(test)]
 mod tests {
+    use super::CommandOutcome;
     use super::ReconstructionManifest;
+    use super::ScriptIdentity;
     use super::StagedCheckpoint;
+    use super::command_diagnostic;
+    #[cfg(target_os = "linux")]
+    use super::run_command_with_bounded_output;
     use super::run_reconstruction_script;
     use super::stage_local_checkpoint;
     use super::{extract_archive, verify_digest, verify_signature};
@@ -1338,7 +1838,11 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
     use std::path::PathBuf;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -1351,10 +1855,11 @@ mod tests {
         let install_root = temporary.path().join("install");
         fs::create_dir_all(root.join("runtime")).expect("runtime directory");
         fs::create_dir(&install_root).expect("install root");
+        fs::write(root.join("runtime/images.lock"), b"image lock").expect("image lock");
         let script = root.join("runtime/bootstrap.sh");
         fs::write(
             &script,
-            b"#!/usr/bin/env bash\nset -euo pipefail\nprintf applied > invocation.ok\n",
+            b"#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s' \"${INTAR_WORKSHOP_LEARNER_USER}\" > learner-user.ok\nprintf applied > invocation.ok\n",
         )
         .expect("script");
         fs::set_permissions(&script, fs::Permissions::from_mode(0o644))
@@ -1365,6 +1870,7 @@ mod tests {
             checkpoint_id: "checkpoint-00".to_owned(),
             root,
         };
+        let reconstruction_home = TempDir::new().expect("reconstruction home");
         let manifest = ReconstructionManifest {
             schema_version: 3,
             workshop_slug: "test-workshop".to_owned(),
@@ -1377,13 +1883,162 @@ mod tests {
             external_images: Vec::new(),
         };
 
-        run_reconstruction_script(script, &manifest, &checkpoint, "bootstrap")
-            .await
-            .expect("fixed shell must run a signed script from a noexec-compatible path");
+        run_reconstruction_script(
+            script,
+            &manifest,
+            checkpoint.root().join("runtime/images.lock"),
+            "bootstrap",
+            ScriptIdentity::Root {
+                home: reconstruction_home.path(),
+                learner_user: "root",
+            },
+        )
+        .await
+        .expect("fixed shell must run a signed script from a noexec-compatible path");
         assert_eq!(
             fs::read(install_root.join("invocation.ok")).expect("execution marker"),
             b"applied"
         );
+        assert_eq!(
+            fs::read(install_root.join("learner-user.ok")).expect("learner-user marker"),
+            b"root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconstruction_failure_drains_noisy_output_and_keeps_bounded_tails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = TempDir::new().expect("temp dir");
+        let root = temporary.path().join("root");
+        let install_root = temporary.path().join("install");
+        fs::create_dir_all(root.join("runtime")).expect("runtime directory");
+        fs::create_dir(&install_root).expect("install root");
+        fs::write(root.join("runtime/images.lock"), b"image lock").expect("image lock");
+        let script = root.join("runtime/bootstrap.sh");
+        fs::write(
+            &script,
+            br#"#!/usr/bin/env bash
+set -euo pipefail
+for _ in $(seq 1 100000); do printf x; done
+printf '\nuseful-stderr-marker\n' >&2
+exit 17
+"#,
+        )
+        .expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o400))
+            .expect("readable script mode");
+
+        let checkpoint = StagedCheckpoint {
+            _temporary: TempDir::new().expect("checkpoint owner"),
+            checkpoint_id: "checkpoint-00".to_owned(),
+            root: root.clone(),
+        };
+        let manifest = ReconstructionManifest {
+            schema_version: 3,
+            workshop_slug: "test-workshop".to_owned(),
+            checkpoint_id: checkpoint.checkpoint_id().to_owned(),
+            install_root,
+            bootstrap_script: PathBuf::from("runtime/bootstrap.sh"),
+            runtime_files: Vec::new(),
+            apply_steps: Vec::new(),
+            probe_verifiers: Vec::new(),
+            external_images: Vec::new(),
+        };
+
+        let error = run_reconstruction_script(
+            script,
+            &manifest,
+            root.join("runtime/images.lock"),
+            "bootstrap",
+            ScriptIdentity::Root {
+                home: temporary.path(),
+                learner_user: "root",
+            },
+        )
+        .await
+        .expect_err("script must fail");
+        let message = error.to_string();
+        assert!(message.contains("useful-stderr-marker"));
+        assert!(message.contains("stdout tail:"));
+        assert!(message.len() <= 500);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelling_a_checkpoint_command_kills_its_process_group() {
+        let temporary = TempDir::new().expect("temp dir");
+        let pid_file = temporary.path().join("descendant.pid");
+        let pid_file_for_command = pid_file.clone();
+        let task = tokio::spawn(async move {
+            let mut command = tokio::process::Command::new("/bin/bash");
+            command
+                .arg("--noprofile")
+                .arg("--norc")
+                .arg("-c")
+                .arg("sleep 300 & printf '%s' \"$!\" > \"$1\"; wait")
+                .arg("intar-process-group-test")
+                .arg(pid_file_for_command);
+            run_command_with_bounded_output(&mut command).await
+        });
+
+        let raw_pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(value) = fs::read_to_string(&pid_file)
+                    && !value.is_empty()
+                {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant PID must be written");
+        let pid = nix::unistd::Pid::from_raw(
+            raw_pid
+                .parse::<i32>()
+                .expect("descendant PID must be numeric"),
+        );
+
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if nix::sys::signal::kill(pid, None)
+                    .is_err_and(|error| error == nix::errno::Errno::ESRCH)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("process-group descendant must be killed on cancellation");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_diagnostics_are_sanitized_and_utf8_safely_bounded() {
+        let mut stdout_tail = "🙂".repeat(128).into_bytes();
+        stdout_tail.extend_from_slice(b"\0\x1b[31m");
+        let outcome = CommandOutcome {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout_tail,
+            stderr_tail: b"failed at https://store.example/bundle?token=super-secret\r\ncredential=also-secret"
+                .to_vec(),
+        };
+
+        let diagnostic = command_diagnostic(&outcome);
+        assert!(diagnostic.len() <= super::COMMAND_DIAGNOSTIC_MAX_BYTES);
+        assert!(diagnostic.is_char_boundary(diagnostic.len()));
+        assert!(!diagnostic.contains("super-secret"));
+        assert!(!diagnostic.contains("also-secret"));
+        assert!(!diagnostic.contains("?token="));
+        assert!(!diagnostic.contains('\0'));
+        assert!(!diagnostic.contains('\u{1b}'));
+        assert!(!diagnostic.contains('\n'));
+        assert!(diagnostic.contains("[REDACTED]"));
     }
 
     #[test]

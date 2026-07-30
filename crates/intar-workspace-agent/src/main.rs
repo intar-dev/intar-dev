@@ -143,7 +143,7 @@ async fn verify_bundle(args: &VerifyBundleArgs) -> Result<()> {
     )
     .await
     .context("failed to stage exact signed checkpoint bundle")?;
-    BuiltinCheckpointApplier
+    BuiltinCheckpointApplier::root()
         .apply(&staged)
         .await
         .context("failed to apply exact signed checkpoint bundle")?;

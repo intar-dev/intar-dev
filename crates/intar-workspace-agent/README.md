@@ -21,13 +21,22 @@ The built-in applier then validates the schema-v3 `checkpoint.json`, exact
 archive file set, install root below `/opt`, per-file digest and mode, external
 image lock, ordered reconstruction steps, and the complete module-to-probe
 mapping. It atomically installs only the declared learner files, installs each
-manual verifier under a root-owned stable path for Kino, and runs bootstrap,
-catch-up, and verification programs directly from tmpfs with a controlled
-environment. Solution and facilitator material is never installed. An explicitly configured
-`checkpoint_apply_program` remains only as a compatibility seam.
+manual verifier under a dedicated stable path for Kino, and runs the privileged
+bootstrap with a private temporary home. It then hands the learner source and
+probe copies to the configured reconstruction identity and runs every catch-up,
+verification, and ongoing probe in that identity's home and supplementary
+groups. Signed catch-up material executes from a service-private temporary
+directory and is removed before the learner route becomes ready. A bounded,
+sanitized stdout/stderr tail is included in a failed report, so workshop
+reconstruction scripts must not print secrets. Provider credentials are never
+available to those scripts. Solution and facilitator material is never
+installed. An explicitly configured `checkpoint_apply_program` remains only as
+a compatibility seam.
 
-After apply, the agent polls the separately pinned Kino binary's loopback
-`/probes` protobuf endpoint and sends a report every ten seconds. Runtime health
+During download and apply, the agent sends an applying heartbeat every ten
+seconds and fails reconstruction after 90 minutes. After apply, it polls the
+separately pinned Kino binary's loopback `/probes` protobuf endpoint and sends a
+report every ten seconds. Runtime health
 is distinct from module verification: an unreleased module may fail without
 blocking the workspace, while every named probe remains visible in module
 progress. Terminal readiness additionally requires checkpoint completion, an
@@ -79,6 +88,11 @@ If the compatibility apply program is configured, it is invoked directly as:
 The agent contains no cloud-provider credential or provider API logic. The
 built-in bootstrap may install and use Docker inside the learner server; the
 agent itself does not synthesize a container-runtime command.
+
+For Docker-based workshops, the learner's Docker access is root-equivalent.
+Guest probe reports are therefore operational progress evidence, not a
+tamper-resistant security attestation. Provider credentials remain outside the
+guest regardless.
 
 See [`examples/intar-workspace-agent.service`](examples/intar-workspace-agent.service)
 and [`examples/cloud-init.yaml`](examples/cloud-init.yaml). Values surrounded by

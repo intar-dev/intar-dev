@@ -2490,6 +2490,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "intar-kino-proto",
+ "nix",
  "prost",
  "reqwest",
  "rustls",
