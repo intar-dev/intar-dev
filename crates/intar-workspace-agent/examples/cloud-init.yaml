@@ -5,6 +5,7 @@ packages:
   - curl
   - openssh-server
   - procps
+  - util-linux
 
 users:
   - name: intar
@@ -26,6 +27,8 @@ write_files:
       state_path = "/var/lib/intar-workspace-agent/state.json"
       checkpoint_tmpfs_dir = "/run/intar-workspace-agent/checkpoints"
       checkpoint_signing_keys = { "workshop-runtime-v1" = "__RUNTIME_SIGNING_PUBLIC_KEY_BASE64__" }
+      reconstruction_user = "intar"
+      reconstruction_home = "/home/intar"
       kino_url = "http://127.0.0.1:18081/probes"
       max_checkpoint_bytes = 536870912
       max_artifact_bytes = 134217728
@@ -63,7 +66,7 @@ write_files:
       }
       probe "__MODULE_00_PROBE_ID__" {
         kind = "command_json_path"
-        argv = ["/usr/libexec/intar-workshop-run-probe", "/var/lib/intar-workspace-agent/probes/00.sh"]
+        argv = ["/usr/libexec/intar-workshop-run-probe", "/var/lib/intar-workshop-probes/00.sh"]
         json_path = "$.passed"
         expected = true
       }
@@ -103,7 +106,16 @@ write_files:
       set -u
       verifier="${1:?missing verifier}"
       set +e
-      "${verifier}" </dev/null >/dev/null 2>&1
+      /usr/sbin/runuser --user intar -- \
+        /usr/bin/env -i \
+          HOME=/home/intar \
+          USER=intar \
+          LOGNAME=intar \
+          SHELL=/bin/bash \
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          LANG=C.UTF-8 \
+          LC_ALL=C.UTF-8 \
+          "${verifier}" </dev/null >/dev/null 2>&1
       status="$?"
       set -e
       if [ "${status}" -eq 0 ]; then
@@ -191,7 +203,8 @@ write_files:
       RestartSec=5s
       TimeoutStopSec=30s
       PrivateTmp=true
-      ProtectHome=true
+      ProtectHome=read-only
+      ReadWritePaths=/home/intar
       ProtectControlGroups=true
       RestrictSUIDSGID=true
       LockPersonality=true

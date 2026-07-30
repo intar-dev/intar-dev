@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
+const CHECKPOINT_APPLY_TIMEOUT_SECONDS: u64 = 90 * 60;
+
 pub struct WorkspaceAgent {
     config: AgentConfig,
     control_plane: Arc<dyn ControlPlane>,
@@ -38,7 +40,10 @@ impl WorkspaceAgent {
             if let Some(program) = &config.checkpoint_apply_program {
                 Arc::new(CommandCheckpointApplier::new(program.clone()))
             } else {
-                Arc::new(BuiltinCheckpointApplier)
+                Arc::new(BuiltinCheckpointApplier::new(
+                    config.reconstruction_user.clone(),
+                    config.reconstruction_home.clone(),
+                ))
             };
         Ok(Self {
             config,
@@ -221,19 +226,58 @@ impl WorkspaceAgent {
         )
         .await?;
 
-        let staged = match download_and_stage(
-            &self.download_client,
-            state.checkpoint(),
-            &self.config.checkpoint_tmpfs_dir,
-            self.config.max_checkpoint_bytes,
-            &self.config.checkpoint_signing_keys,
+        let checkpoint = state.checkpoint().clone();
+        let checkpoint_work = async {
+            let staged = download_and_stage(
+                &self.download_client,
+                &checkpoint,
+                &self.config.checkpoint_tmpfs_dir,
+                self.config.max_checkpoint_bytes,
+                &self.config.checkpoint_signing_keys,
+            )
+            .await?;
+            self.checkpoint_applier.apply(&staged).await
+        };
+        let apply_result = tokio::time::timeout(
+            Duration::from_secs(CHECKPOINT_APPLY_TIMEOUT_SECONDS),
+            async {
+                let mut checkpoint_work = Box::pin(checkpoint_work);
+                let mut heartbeat =
+                    tokio::time::interval(Duration::from_secs(REPORT_INTERVAL_SECONDS));
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // The applying report above is the initial heartbeat; make the
+                // first interval tick wait instead of sending a duplicate.
+                heartbeat.tick().await;
+                loop {
+                    tokio::select! {
+                        result = &mut checkpoint_work => break result,
+                        _ = heartbeat.tick() => {
+                            if let Err(error) = self.send_report(
+                                state,
+                                AgentPhase::ApplyingCheckpoint,
+                                HealthStatus::Unknown,
+                                false,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                                false,
+                            ).await {
+                                let safe = self.sanitize_error(state, &error.to_string());
+                                warn!(
+                                    error = %safe.as_str(),
+                                    "checkpoint apply heartbeat failed; reconstruction continues"
+                                );
+                            }
+                        }
+                    }
+                }
+            },
         )
         .await
-        {
-            Ok(staged) => staged,
-            Err(error) => return Err(self.checkpoint_failed(state, error).await),
-        };
-        if let Err(error) = self.checkpoint_applier.apply(&staged).await {
+        .unwrap_or(Err(CheckpointError::ApplyTimedOut {
+            seconds: CHECKPOINT_APPLY_TIMEOUT_SECONDS,
+        }));
+        if let Err(error) = apply_result {
             return Err(self.checkpoint_failed(state, error).await);
         }
         self.state_store

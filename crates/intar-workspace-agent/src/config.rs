@@ -23,6 +23,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub checkpoint_apply_program: Option<PathBuf>,
     pub checkpoint_signing_keys: BTreeMap<String, String>,
+    pub reconstruction_user: String,
+    pub reconstruction_home: PathBuf,
     #[serde(default = "default_kino_url")]
     pub kino_url: Url,
     #[serde(default = "default_max_checkpoint_bytes")]
@@ -92,6 +94,7 @@ impl AgentConfig {
             ("bootstrap_capability_path", &self.bootstrap_capability_path),
             ("state_path", &self.state_path),
             ("checkpoint_tmpfs_dir", &self.checkpoint_tmpfs_dir),
+            ("reconstruction_home", &self.reconstruction_home),
             ("recording_dir", &self.recording_dir),
             (
                 "recording_upload_staging_dir",
@@ -111,6 +114,24 @@ impl AgentConfig {
             return Err(ConfigError::Validation(
                 "checkpoint_apply_program must be an absolute path".to_owned(),
             ));
+        }
+        if !valid_user_name(&self.reconstruction_user) {
+            return Err(ConfigError::Validation(
+                "reconstruction_user must be a canonical local user name".to_owned(),
+            ));
+        }
+        if self.reconstruction_user == "root" {
+            return Err(ConfigError::Validation(
+                "reconstruction_user must be an unprivileged learner identity".to_owned(),
+            ));
+        }
+        let expected_home = PathBuf::from("/home").join(&self.reconstruction_user);
+        if self.reconstruction_home != expected_home {
+            return Err(ConfigError::Validation(format!(
+                "reconstruction_home must be {} for reconstruction_user '{}'",
+                expected_home.display(),
+                self.reconstruction_user
+            )));
         }
         if self.checkpoint_signing_keys.is_empty() || self.checkpoint_signing_keys.len() > 16 {
             return Err(ConfigError::Validation(
@@ -166,6 +187,18 @@ impl AgentConfig {
 
 fn is_loopback_host(url: &Url) -> bool {
     matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+}
+
+fn valid_user_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
 }
 
 fn default_kino_url() -> Url {
@@ -234,10 +267,59 @@ mod tests {
                 state_path = "/var/lib/intar/state.json"
                 checkpoint_tmpfs_dir = "/run/intar/checkpoints"
                 checkpoint_signing_keys = { runtime_v1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+                reconstruction_user = "intar"
+                reconstruction_home = "/home/intar"
                 kino_url = "http://kino.example/probes"
             "#,
         )
         .expect("config TOML should deserialize");
         assert!(parsed.validate().is_err());
+    }
+
+    #[test]
+    fn validates_the_configured_reconstruction_identity() {
+        let valid = toml::from_str::<AgentConfig>(
+            r#"
+                identity = { execution_id = "exec-1", workspace_id = "ws-1", generation = 1 }
+                control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+                bootstrap_capability_path = "/run/intar/bootstrap"
+                state_path = "/var/lib/intar/state.json"
+                checkpoint_tmpfs_dir = "/run/intar/checkpoints"
+                checkpoint_signing_keys = { runtime_v1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+                reconstruction_user = "intar"
+                reconstruction_home = "/home/intar"
+            "#,
+        )
+        .expect("config TOML should deserialize");
+        valid.validate().expect("canonical learner identity");
+
+        let invalid = AgentConfig {
+            reconstruction_home: "/home/someone-else".into(),
+            ..valid.clone()
+        };
+        assert!(invalid.validate().is_err());
+
+        let root = AgentConfig {
+            reconstruction_user: "root".to_owned(),
+            reconstruction_home: "/root".into(),
+            ..valid
+        };
+        assert!(root.validate().is_err());
+    }
+
+    #[test]
+    fn reconstruction_identity_is_required() {
+        let error = toml::from_str::<AgentConfig>(
+            r#"
+                identity = { execution_id = "exec-1", workspace_id = "ws-1", generation = 1 }
+                control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+                bootstrap_capability_path = "/run/intar/bootstrap"
+                state_path = "/var/lib/intar/state.json"
+                checkpoint_tmpfs_dir = "/run/intar/checkpoints"
+                checkpoint_signing_keys = { runtime_v1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+            "#,
+        )
+        .expect_err("missing learner identity must fail closed");
+        assert!(error.to_string().contains("reconstruction_user"));
     }
 }

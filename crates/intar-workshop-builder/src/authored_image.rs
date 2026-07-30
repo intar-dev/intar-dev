@@ -267,6 +267,7 @@ pub fn prepare_authored_image(
         render_prepare_script(
             &runtime_config.install_root,
             &verifier_relative,
+            &config.execution.ssh_username,
             &preparation.kino_sha256,
             &preparation.sanitizer_sha256,
             &config.execution.sanitizer_path,
@@ -696,6 +697,7 @@ fn source_mode(_metadata: &fs::Metadata) -> u32 {
 fn render_prepare_script(
     install_root: &str,
     verifier_relative: &str,
+    learner_user: &str,
     kino_sha256: &str,
     sanitizer_sha256: &str,
     sanitizer_path: &str,
@@ -704,6 +706,7 @@ fn render_prepare_script(
 ) -> String {
     let verifier = shell_quote(&format!("{install_root}/{verifier_relative}"));
     let install_root = shell_quote(install_root);
+    let learner_user = shell_quote(learner_user);
     let sanitizer_path = shell_quote(sanitizer_path);
     let mut script = format!(
         r#"#!/usr/bin/env bash
@@ -740,6 +743,7 @@ env -i \
   HOME=/root LANG=C.UTF-8 \
   INTAR_WORKSHOP_INSTALL_ROOT="${{install_root}}" \
   INTAR_WORKSHOP_IMAGE_LOCK=/tmp/intar-runtime-images.lock \
+  INTAR_WORKSHOP_LEARNER_USER={learner_user} \
   /bin/bash -- /tmp/intar-runtime-bootstrap.sh
 {verifier}
 /usr/local/bin/kino --help >/dev/null
@@ -1215,6 +1219,7 @@ mod tests {
         let script = render_prepare_script(
             "/opt/workshop",
             "lab/00/verify.sh",
+            "ubuntu",
             &"1".repeat(64),
             &"2".repeat(64),
             "/usr/local/libexec/intar/intar-workshop-sanitize",
@@ -1229,6 +1234,7 @@ mod tests {
         assert!(!script.contains("test ! -e '/opt/workshop/.git'"));
         assert!(script.contains("docker images --all --no-trunc --quiet"));
         assert!(script.contains("--same-permissions"));
+        assert!(script.contains("INTAR_WORKSHOP_LEARNER_USER='ubuntu'"));
         assert!(script.contains(
             "install -D -o root -g root -m 0755 /tmp/intar-workshop-sanitize \
              '/usr/local/libexec/intar/intar-workshop-sanitize'"

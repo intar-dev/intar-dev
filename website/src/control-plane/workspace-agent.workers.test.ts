@@ -515,8 +515,19 @@ describe("workspace agent guest control plane", () => {
       "https://intar.test/api/runtime/workspace-agent/",
     );
     expect(cloudInit).toContain("require_checkpoint_tmpfs = true");
+    expect(cloudInit).toContain('reconstruction_user = "intar"');
+    expect(cloudInit).toContain('reconstruction_home = "/home/intar"');
     expect(cloudInit).toContain('probe "module-00-workspace-ready"');
     expect(cloudInit).toContain("intar-kino-shell");
+    expect(cloudInit).toContain(
+      "/usr/sbin/runuser --user intar --",
+    );
+    expect(cloudInit).toContain(
+      "/var/lib/intar-workshop-probes/00.sh",
+    );
+    expect(cloudInit).toContain("HOME=/home/intar");
+    expect(cloudInit).toContain("ProtectHome=read-only");
+    expect(cloudInit).toContain("ReadWritePaths=/home/intar");
     expect(cloudInit).toContain("/var/lib/kino-recordings");
     expect(cloudInit).toContain("PermitRootLogin no");
     expect(cloudInit).toContain("PasswordAuthentication no");
