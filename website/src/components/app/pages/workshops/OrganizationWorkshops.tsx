@@ -37,6 +37,7 @@ import type {
   WorkshopSessionSummary,
 } from "@/components/app/workshops/types";
 import { workshopSessionStateLabel } from "@/components/app/workshops/types";
+import { WorkshopPublisherTokens } from "@/components/app/workshops/WorkshopPublisherTokens";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -127,6 +128,9 @@ export function OrganizationWorkshops() {
         </Button>
       </header>
 
+      {data.organization.role === "owner" ? (
+        <WorkshopPublisherTokens organizationId={data.organization.id} />
+      ) : null}
       <CapacityLedger data={data} />
       {data.organization.role !== "member" ? (
         <ProviderConnectionLedger

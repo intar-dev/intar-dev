@@ -1,8 +1,10 @@
 import type {
+  CreatedWorkshopRegistryToken,
   OrganizationWorkshopsResponse,
   WorkshopCostProjection,
   WorkshopListResponse,
   WorkshopPresenceState,
+  WorkshopRegistryTokenSummary,
   WorkshopSessionResponse,
 } from "./types";
 
@@ -60,6 +62,34 @@ export function getOrganizationWorkshops(
 ): Promise<OrganizationWorkshopsResponse> {
   return workshopRequest(
     `/api/organizations/${encodeURIComponent(organizationId)}/workshops`,
+  );
+}
+
+export function listWorkshopRegistryTokens(
+  organizationId: string,
+): Promise<{ tokens: WorkshopRegistryTokenSummary[] }> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshops/tokens`,
+  );
+}
+
+export function createWorkshopRegistryToken(
+  organizationId: string,
+  input: { name: string; expiresAfterMinutes: number },
+): Promise<CreatedWorkshopRegistryToken> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshops/tokens`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function revokeWorkshopRegistryToken(
+  organizationId: string,
+  tokenId: string,
+): Promise<void> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshops/tokens/${encodeURIComponent(tokenId)}`,
+    { method: "DELETE" },
   );
 }
 

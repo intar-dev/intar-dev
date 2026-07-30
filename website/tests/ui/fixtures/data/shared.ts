@@ -45,6 +45,7 @@ export interface MockApiState {
   workshopSessions: Array<Record<string, unknown>>;
   workshopSession: Record<string, unknown>;
   organizationWorkshops: Record<string, unknown>;
+  workshopRegistryTokens: Array<Record<string, unknown>>;
   hosts: Array<Record<string, unknown>>;
   hostRuns: Record<string, unknown>;
   adminScenarios: Array<Record<string, unknown>>;

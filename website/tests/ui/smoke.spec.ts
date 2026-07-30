@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures/test";
+import { FIXED_NOW } from "./fixtures/data";
 import { routeCase } from "./routes";
 
 test("public workshop entry keeps sign in focused and sponsors prominent", async ({
@@ -268,6 +269,112 @@ test("organization owner edits a versioned draft workshop roster", async ({
   expect(ui.server.requests).toContain(
     "POST /api/workshops/workshop-upcoming/actions",
   );
+});
+
+test("organization owner creates and revokes a workshop publisher token", async ({
+  page,
+  ui,
+}) => {
+  const token = `intar_ws_${"d".repeat(64)}`;
+  const tokenPrefix = token.slice(0, "intar_ws_".length + 10);
+
+  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
+  await expect(
+    page.getByRole("heading", { name: "Publisher access" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Create publisher token" })
+    .click();
+
+  const createDialog = page.getByRole("dialog");
+  await createDialog.getByLabel("Token name").fill("Pilot publisher");
+  await createDialog.getByLabel("Expires after").selectOption("30");
+  await createDialog
+    .getByRole("button", { name: "Create publisher token" })
+    .click();
+
+  await expect(
+    createDialog.getByRole("heading", { name: "Copy this token now" }),
+  ).toBeVisible();
+  await expect(createDialog.getByText(token, { exact: true })).toBeVisible();
+  await expect(
+    createDialog.getByRole("button", { name: "Copy token" }),
+  ).toBeVisible();
+  await createDialog
+    .getByRole("button", { name: "I have stored it" })
+    .click();
+
+  await expect(page.getByText(token, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(tokenPrefix, { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Revoke", exact: true }).click();
+
+  const revokeDialog = page.getByRole("dialog");
+  await expect(
+    revokeDialog.getByRole("heading", { name: "Revoke publisher token" }),
+  ).toBeVisible();
+  await revokeDialog.getByRole("button", { name: "Revoke token" }).click();
+  await expect(revokeDialog).toHaveCount(0);
+
+  expect(ui.server.requests).toContain(
+    "POST /api/organizations/org-platform/workshops/tokens",
+  );
+  expect(ui.server.requests).toContain(
+    "DELETE /api/organizations/org-platform/workshops/tokens/workshop-registry-token-created",
+  );
+});
+
+test("organization admins cannot see or request workshop publisher tokens", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
+  const organization = ui.server.state.organizationWorkshops.organization as {
+    role: string;
+  };
+  organization.role = "admin";
+  ui.server.requests.length = 0;
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  await expect(
+    page.getByRole("heading", { name: "Publisher access" }),
+  ).toHaveCount(0);
+  expect(
+    ui.server.requests.some((request) =>
+      request.includes("/workshops/tokens"),
+    ),
+  ).toBe(false);
+});
+
+test("workshop publisher token status updates at its expiry", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
+  ui.server.state.workshopRegistryTokens = [
+    {
+      id: "workshop-registry-token-expiring",
+      name: "Expiry test",
+      tokenPrefix: "intar_ws_1234567890",
+      lastUsedAt: null,
+      expiresAt: FIXED_NOW + 1_000,
+      revokedAt: null,
+      createdAt: FIXED_NOW,
+    },
+  ];
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ui.settle();
+
+  const tokenCard = page.getByRole("article").filter({ hasText: "Expiry test" });
+  await expect(tokenCard.getByText("Active", { exact: true })).toBeVisible();
+  await page.clock.setFixedTime(FIXED_NOW + 1_100);
+  await page.clock.fastForward(1_100);
+  await expect(tokenCard.getByText("Expired", { exact: true })).toBeVisible();
+  await expect(
+    tokenCard.getByRole("button", { name: "Revoke", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("workshop list teaches empty and recovery states", async ({
