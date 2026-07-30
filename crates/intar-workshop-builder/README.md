@@ -152,7 +152,7 @@ was generated, so this revision explicitly uses stock Grafana with built-in
 Prometheus, Loki, and Jaeger datasources. This source/bundle validation is not
 a substitute for the production pilot: Talos-in-Docker, Cilium/eBPF,
 privileged BuildKit, all seven browser apps, recovery, and teardown still need
-to cold-boot and pass on a real CX43 learner server.
+to cold-boot and pass on a real CPX42 learner server.
 
 ## Dedicated authored-image contract
 

@@ -95,7 +95,7 @@ diagnose, prove, and Git-revert loop using their own setup-table commands and hi
 
 ### Scenario 3: Docker Hub sneaks in
 
-## Optional agent-assisted investigation on the CX43 path
+## Optional agent-assisted investigation on the CPX42 path
 
 Every scenario above has a fourth rung on the escalation ladder, beyond the three hints:
 Kagent, the platform's own read-only agent, streaming a live investigation into a "Case
@@ -110,7 +110,7 @@ that actually fits your machine.
 
 ### Use the hosted-model path
 
-CX43 has 16 GiB RAM, so Intar intentionally omits the source workshop's
+CPX42 has 16 GiB RAM, so Intar intentionally omits the source workshop's
 host-side Ollama beat. Enable Kagent through the GitOps catalog as described,
 then replace its default ModelConfig with the hosted provider configuration in
 Beat 2 before opening an investigation. The human-only fault diagnosis and

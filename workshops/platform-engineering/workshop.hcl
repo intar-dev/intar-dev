@@ -20,7 +20,7 @@ workspace {
 
   provider "hetzner_cloud" {
     vm_id        = "learner"
-    server_type  = "cx43"
+    server_type  = "cpx42"
     system_image = "debian-13"
   }
 
