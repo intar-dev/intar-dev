@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "intar-workshop-builder"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "base64",
