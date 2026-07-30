@@ -2328,6 +2328,7 @@ function retryableAttemptFailure(code: string | null): boolean {
     code === "publication_verifier_allocation_interrupted" ||
     code === "publication_verifier_bootstrap_expired" ||
     code === "publication_verifier_report_expired" ||
+    code === "publication_verifier_probe_persisted" ||
     code === "publication_verifier_create_action_failed"
   );
 }

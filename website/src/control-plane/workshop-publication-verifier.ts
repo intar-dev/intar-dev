@@ -3,6 +3,11 @@ import { createAppId } from "@/lib/id";
 const CONTRACT_VERSION = 1;
 const MAX_REQUEST_BYTES = 512 * 1024;
 const CHECKPOINT_DOWNLOAD_TTL_MS = 20 * 60_000;
+// Kino starts before checkpoint reconstruction and may retain the result of a
+// 120-second run that began just before readiness. Allow that run, one full
+// post-ready run, scheduling, and report jitter before declaring it stuck.
+const PROBE_FAILURE_PERSISTENCE_MS = 5 * 60_000;
+const PROBE_FAILURE_SINCE_KEY = "_intar_probe_failure_since_unix_ms";
 const PHASES = new Set([
   "bootstrapping",
   "applying_checkpoint",
@@ -36,12 +41,11 @@ interface BootstrapRow {
 }
 
 interface AuthenticatedAttempt extends BootstrapRow {
-  expected_probes_json:
-    | string
-    | Array<{ moduleId: string; probeId: string }>;
+  expected_probes_json: string | Array<{ moduleId: string; probeId: string }>;
   checkpoint_first_downloaded_at: number | null;
   state: string;
   last_report_sequence: number;
+  report_json: string | Record<string, unknown> | null;
 }
 
 interface VerifierProbe {
@@ -274,6 +278,7 @@ async function handleReport(
        attempt.checkpoint_first_downloaded_at,
        attempt.state,
        attempt.last_report_sequence,
+       attempt.report_json,
        checkpoint.checkpoint_id,
        checkpoint.r2_key,
        checkpoint.sha256,
@@ -313,17 +318,69 @@ async function handleReport(
     (probe) => probe.probeId,
   );
   const probeById = new Map(report.probes.map((probe) => [probe.id, probe]));
+  const previousReport = parseStoredReport(attempt.report_json);
+  const failedProbeIds = failedExpectedProbeIds(report, expectedProbeIds);
+  const previousFailedProbeIds = new Set(
+    previousReport
+      ? failedExpectedProbeIds(previousReport, expectedProbeIds)
+      : [],
+  );
+  const previousFailureSince = parseStoredFailureSince(
+    attempt.report_json,
+    expectedProbeIds,
+    now,
+  );
+  const failureSince = new Map<string, number>();
+  // The workspace agent awaits each report before reserving the next one.
+  // Sequence gaps can still follow a transport failure, so a gap must never
+  // inherit a failure window from a report the control plane did not observe.
+  const adjacentReport = report.sequence === attempt.last_report_sequence + 1;
+  if (
+    attempt.checkpoint_first_downloaded_at !== null &&
+    readyForProof(report)
+  ) {
+    for (const probeId of failedProbeIds) {
+      failureSince.set(
+        probeId,
+        adjacentReport &&
+          previousReport !== null &&
+          readyForProof(previousReport) &&
+          previousFailedProbeIds.has(probeId)
+          ? (previousFailureSince.get(probeId) ?? now)
+          : now,
+      );
+    }
+  }
+  const persistentFailedProbeIds = failedProbeIds.filter(
+    (probeId) =>
+      now - (failureSince.get(probeId) ?? now) >= PROBE_FAILURE_PERSISTENCE_MS,
+  );
+  const persistentProbeFailure =
+    attempt.checkpoint_first_downloaded_at !== null &&
+    readyForProof(report) &&
+    persistentFailedProbeIds.length > 0;
   const proofSucceeded =
     attempt.checkpoint_first_downloaded_at !== null &&
-    report.phase === "ready" &&
-    report.health === "healthy" &&
-    report.terminal_ready &&
-    report.ssh_host_keys_openssh.length > 0 &&
+    readyForProof(report) &&
     expectedProbeIds.length > 0 &&
-    expectedProbeIds.every((probeId) => probeById.get(probeId)?.status === "pass");
+    expectedProbeIds.every(
+      (probeId) => probeById.get(probeId)?.status === "pass",
+    );
   const proofFailed =
-    report.phase === "failed" || report.health === "failed";
-  const safeError = report.error?.slice(0, 500) ?? null;
+    report.phase === "failed" ||
+    report.health === "failed" ||
+    persistentProbeFailure;
+  const failureCode = persistentProbeFailure
+    ? "publication_verifier_probe_persisted"
+    : proofFailed
+      ? "guest_reported_failure"
+      : null;
+  const safeError = persistentProbeFailure
+    ? `required workshop probes remained failed after readiness: ${persistentFailedProbeIds.join(", ")}`.slice(
+        0,
+        500,
+      )
+    : (report.error?.slice(0, 500) ?? null);
   const attemptState = proofSucceeded
     ? "proof_succeeded"
     : proofFailed
@@ -340,9 +397,9 @@ async function handleReport(
          last_report_health = ?, last_report_at = ?, report_json = ?,
          state = ?, proof_report_sequence = CASE WHEN ? = 1 THEN ? ELSE proof_report_sequence END,
          proof_verified_at = CASE WHEN ? = 1 THEN ? ELSE proof_verified_at END,
-         last_error_code = CASE WHEN ? = 1 THEN 'guest_reported_failure' ELSE last_error_code END,
+         last_error_code = CASE WHEN ? IS NOT NULL THEN ? ELSE last_error_code END,
          error = coalesce(?, error), updated_at = ?
-     WHERE id = ? AND last_report_sequence < ?
+     WHERE id = ? AND last_report_sequence = ?
        AND (? = 0 OR checkpoint_first_downloaded_at IS NOT NULL)
        AND state IN ('applying', 'bootstrapping')`,
   )
@@ -351,17 +408,21 @@ async function handleReport(
       report.phase,
       report.health,
       now,
-      JSON.stringify(report),
+      JSON.stringify({
+        ...report,
+        [PROBE_FAILURE_SINCE_KEY]: Object.fromEntries(failureSince),
+      }),
       attemptState,
       proofSucceeded ? 1 : 0,
       report.sequence,
       proofSucceeded ? 1 : 0,
       now,
-      proofFailed ? 1 : 0,
+      failureCode,
+      failureCode,
       safeError,
       now,
       attempt.attempt_id,
-      report.sequence,
+      attempt.last_report_sequence,
       proofSucceeded ? 1 : 0,
     )
     .run();
@@ -450,6 +511,74 @@ function parseReport(value: unknown): VerifierReport | null {
   };
 }
 
+function parseStoredReport(
+  value: string | Record<string, unknown> | null,
+): VerifierReport | null {
+  const stored = parseStoredObject(value);
+  return stored ? parseReport(stored) : null;
+}
+
+function parseStoredFailureSince(
+  value: string | Record<string, unknown> | null,
+  expectedProbeIds: string[],
+  now: number,
+): Map<string, number> {
+  const stored = parseStoredObject(value);
+  const raw = stored?.[PROBE_FAILURE_SINCE_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return new Map();
+  }
+  const input = raw as Record<string, unknown>;
+  const result = new Map<string, number>();
+  for (const probeId of expectedProbeIds) {
+    const timestamp = input[probeId];
+    if (
+      Number.isSafeInteger(timestamp) &&
+      Number(timestamp) >= 0 &&
+      Number(timestamp) <= now
+    ) {
+      result.set(probeId, Number(timestamp));
+    }
+  }
+  return result;
+}
+
+function parseStoredObject(
+  value: string | Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (value === null) return null;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readyForProof(report: VerifierReport): boolean {
+  return (
+    report.phase === "ready" &&
+    report.health === "healthy" &&
+    report.terminal_ready &&
+    report.ssh_host_keys_openssh.length > 0
+  );
+}
+
+function failedExpectedProbeIds(
+  report: VerifierReport,
+  expectedProbeIds: string[],
+): string[] {
+  const byId = new Map(report.probes.map((probe) => [probe.id, probe.status]));
+  return [
+    ...new Set(
+      expectedProbeIds.filter((probeId) => byId.get(probeId) === "fail"),
+    ),
+  ];
+}
+
 function parseIdentity(value: unknown): VerificationIdentity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const identity = value as Record<string, unknown>;
@@ -504,10 +633,7 @@ async function readJson(
   }
 }
 
-function parseAuthorization(
-  request: Request,
-  scheme: string,
-): string | null {
+function parseAuthorization(request: Request, scheme: string): string | null {
   const value = request.headers.get("authorization");
   const prefix = `${scheme} `;
   if (
