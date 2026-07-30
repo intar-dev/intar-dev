@@ -21,6 +21,12 @@ const ADDITIONAL_RUNTIME_IMAGE_SOURCES = new Set([
   "ghcr.io/crossplane-contrib/function-patch-and-transform:v0.10.7",
   "public.ecr.aws/docker/library/golang:1.25-alpine",
 ]);
+const TALOS_KUBERNETES_IMAGE_SOURCES = new Set([
+  "ghcr.io/siderolabs/kubelet:v1.36.2",
+  "registry.k8s.io/kube-apiserver:v1.36.2",
+  "registry.k8s.io/kube-controller-manager:v1.36.2",
+  "registry.k8s.io/kube-scheduler:v1.36.2",
+]);
 const sourceRoot = resolve(process.argv[2] ?? "");
 const outputRoot = resolve(process.argv[3] ?? "workshops/platform-engineering");
 
@@ -1207,6 +1213,14 @@ function loadImageMappings(): Map<string, string> {
     }
     const [source, target] = fields as [string, string];
     assertDigestPinnedImage(target, `image lock line ${index + 1}`);
+    if (
+      TALOS_KUBERNETES_IMAGE_SOURCES.has(source) &&
+      !target.startsWith(`${source}@sha256:`)
+    ) {
+      throw new Error(
+        `Talos Kubernetes image ${source} must retain its version tag before the digest`,
+      );
+    }
     if (mappings.has(source)) {
       throw new Error(`duplicate image lock source ${source}`);
     }
@@ -1277,8 +1291,15 @@ function replaceRuntimeImageReferences(value: string): string {
 
 function canonicalizeDigestReferences(value: string): string {
   return value.replace(
-    /([a-z0-9][a-z0-9.-]*(?::[0-9]+)?\/[a-z0-9._/-]+):[^@\s"'<>]+(@sha256:[a-f0-9]{64})/gu,
-    "$1$2",
+    /(([a-z0-9][a-z0-9.-]*(?::[0-9]+)?\/[a-z0-9._/-]+):[^@\s"'<>]+)(@sha256:[a-f0-9]{64})/gu,
+    (
+      reference: string,
+      taggedReference: string,
+      repository: string,
+      digest: string,
+    ) => TALOS_KUBERNETES_IMAGE_SOURCES.has(taggedReference)
+      ? reference
+      : `${repository}${digest}`,
   );
 }
 
@@ -1323,7 +1344,7 @@ function writeRuntimeSource() {
 function collectRuntimeDigestReferences(): string[] {
   const registries = "(?:docker\\.io|ghcr\\.io|quay\\.io|registry\\.k8s\\.io|gcr\\.io|public\\.ecr\\.aws|xpkg\\.crossplane\\.io|docker\\.gitea\\.com)";
   const pattern = new RegExp(
-    `${registries}/[a-z0-9._/-]+@sha256:[a-f0-9]{64}`,
+    `${registries}/[a-z0-9._/-]+(?::[a-z0-9._-]+)?@sha256:[a-f0-9]{64}`,
     "gu",
   );
   const images = new Set<string>();

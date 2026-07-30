@@ -2201,6 +2201,7 @@ mod tests {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
         let source =
             fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
+        let image_lock = fs::read_to_string(root.join("runtime/images.lock")).unwrap();
         let common_patch = source
             .split_once("CNI_PATCH=\"$(cat <<'EOF'\n")
             .unwrap()
@@ -2215,6 +2216,38 @@ mod tests {
             .split_once("\nEOF\n)\"")
             .unwrap()
             .0;
+
+        let kubernetes_images = [
+            (
+                "ghcr.io/siderolabs/kubelet:v1.36.2@sha256:\
+                 e594fcc880e6d2816b3334e4ddfd586b420ca8c3a4dd2b40e9de1571e69e559a",
+                "ghcr.io/siderolabs/kubelet@sha256:",
+            ),
+            (
+                "registry.k8s.io/kube-apiserver:v1.36.2@sha256:\
+                 0535dde1a857029209d7effe681c919a1580d2eb24eda4bd122d24e9a372e1b8",
+                "registry.k8s.io/kube-apiserver@sha256:",
+            ),
+            (
+                "registry.k8s.io/kube-controller-manager:v1.36.2@sha256:\
+                 b3add29a00c3c4763c75a09ec94915e3d0d590b93b3850a97d52970fbd2b2c12",
+                "registry.k8s.io/kube-controller-manager@sha256:",
+            ),
+            (
+                "registry.k8s.io/kube-scheduler:v1.36.2@sha256:\
+                 94dfc9f285718a06bb873947959b8514ed95dddaa7c74d765cc346fdfa684859",
+                "registry.k8s.io/kube-scheduler@sha256:",
+            ),
+        ];
+        for (versioned, digest_only) in kubernetes_images {
+            assert!(common_patch.contains(versioned), "{versioned}");
+            assert!(
+                image_lock.lines().any(|line| line == versioned),
+                "{versioned}"
+            );
+            assert!(!source.contains(digest_only), "{digest_only}");
+            assert!(!image_lock.contains(digest_only), "{digest_only}");
+        }
 
         assert!(!common_patch.contains("\n  etcd:"));
         assert!(control_plane_patch.contains(
