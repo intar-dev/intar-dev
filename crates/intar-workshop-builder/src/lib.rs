@@ -7,6 +7,7 @@ mod bundle;
 mod client;
 mod config;
 mod contracts;
+mod direct_provider;
 mod hydrate;
 mod kvm;
 mod orchestrator;
@@ -25,15 +26,16 @@ pub use client::{
     WorkshopRegistryClient,
 };
 pub use config::{
-    AuthoredImagePreparationConfig, KvmExecutionConfig, RegistryConfig, RuntimeBundleSigningConfig,
-    RuntimeBundleVerificationConfig, WorkerConfig, WorkshopBaseImageConfig, WorkshopBuilderConfig,
-    load, parse,
+    AuthoredImagePreparationConfig, BuilderExecutionMode, KvmExecutionConfig, RegistryConfig,
+    RuntimeBundleSigningConfig, RuntimeBundleVerificationConfig, WorkerConfig,
+    WorkshopBaseImageConfig, WorkshopBuilderConfig, load, parse,
 };
 pub use contracts::{
     BuiltVmImage, CheckpointBuildResult, HydratedWorkshopManifestV1, RuntimeBundleArtifact,
     RuntimeBundleCompression, WorkshopPublicationClaim, WorkshopPublicationResult,
 };
+pub use direct_provider::DirectProviderOnlyBackend;
 pub use kvm::KvmWorkshopBackend;
 pub use orchestrator::{ProcessOutcome, process_next, process_next_until_cancelled};
 pub use runtime_bundle::preflight_runtime_bundle_signing;
-pub use staging::cleanup_stale_staging_directories;
+pub use staging::{cleanup_stale_staging_directories, preflight_staging_root};

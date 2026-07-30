@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { validateWorkshopManifest } from "@/lib/workshops/validation";
 
 vi.mock("@/lib/build-scheduler", () => ({
   assignQueuedImageBuilds: vi.fn(),
@@ -153,6 +154,87 @@ describe("workshop source bundle validation", () => {
       serverType: "cx43",
       compatible: true,
     });
+  });
+
+  it("requires Intar verification evidence for every provider-only checkpoint", async () => {
+    const fixture = await buildWorkshopBundleFixture({
+      mutateManifest(compiled) {
+        Object.assign(compiled.manifest.workspace, {
+          provider: {
+            kind: "hetzner_cloud",
+            vm_id: "workspace",
+            server_type: "cx43",
+            system_image: "debian-13",
+          },
+        });
+      },
+    });
+    const source = await validate(fixture);
+    const checkpoints = [
+      checkpoint("checkpoint-00", "a"),
+      checkpoint("checkpoint-01", "b"),
+    ];
+    for (const report of checkpoints) {
+      report.vmImages = [];
+      report.sanitized = false;
+      report.coldBootVerified = false;
+    }
+    const manifest = hydrateWorkshopManifest({
+      source,
+      checkpoints,
+      resolvedProvider: {
+        kind: "hetzner_cloud",
+        vmId: "workspace",
+        serverType: "cx43",
+        systemImage: "debian-13",
+        hardware: {
+          architecture: "x86",
+          cores: 8,
+          memoryMib: 16_384,
+          diskMib: 163_840,
+        },
+        compatible: true,
+      },
+    });
+
+    expect(() => validateWorkshopManifest(manifest)).toThrow(
+      /checkpoint checkpoint-00 has no verified provider artifact/,
+    );
+    expect(() =>
+      validateWorkshopManifest(manifest, {
+        verifiedProviderCheckpointIds: new Set(["checkpoint-00"]),
+      }),
+    ).toThrow(/checkpoint checkpoint-01 has no verified provider artifact/);
+    expect(
+      validateWorkshopManifest(manifest, {
+        verifiedProviderCheckpointIds: new Set([
+          "checkpoint-00",
+          "checkpoint-01",
+        ]),
+      }),
+    ).toBe(manifest);
+    expect(() =>
+      validateWorkshopManifest(manifest, {
+        verifiedProviderCheckpointIds: new Set(["checkpoint-missing"]),
+      }),
+    ).toThrow(
+      /provider verification references unknown checkpoint checkpoint-missing/,
+    );
+
+    const unresolvedManifest = hydrateWorkshopManifest({
+      source,
+      checkpoints,
+    });
+    expect(() =>
+      validateWorkshopManifest(unresolvedManifest, {
+        verifiedProviderCheckpointIds: new Set([
+          "checkpoint-00",
+          "checkpoint-01",
+        ]),
+      }),
+    ).toThrow(
+      /provider checkpoint verification requires a compatible Hetzner provider/,
+    );
   });
 
   it.each([
@@ -445,9 +527,7 @@ function checkpoint(
   return {
     checkpointId,
     coveredModuleIds:
-      checkpointId === "checkpoint-00"
-        ? ["00-setup"]
-        : ["00-setup", "01-core"],
+      checkpointId === "checkpoint-00" ? ["00-setup"] : ["00-setup", "01-core"],
     sanitized: true,
     coldBootVerified: true,
     vmImages: [

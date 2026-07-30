@@ -100,6 +100,11 @@ export {
   workshopPublications,
   workshopRegistryTokens,
 } from "./schema/workshop-registry";
+export {
+  workshopPublicationProviderAttempts,
+  workshopPublicationProviderCheckpoints,
+  workshopPublicationProviderCostLedger,
+} from "./schema/workshop-publication-providers";
 export type {
   AgentHostRole,
   HostCpuReservationQuotaPhase,
@@ -130,5 +135,10 @@ export type {
 } from "./schema/workshops";
 export type {
   WorkshopCheckpointBuildStatus,
+  WorkshopProviderVerificationState,
   WorkshopPublicationStatus,
 } from "./schema/workshop-registry";
+export type {
+  WorkshopPublicationProviderAttemptStatus,
+  WorkshopPublicationProviderVerificationStatus,
+} from "./schema/workshop-publication-providers";

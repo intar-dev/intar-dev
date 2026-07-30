@@ -15,10 +15,21 @@ pub const DEFAULT_MAX_BUNDLE_ENTRIES: usize = 4_096;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkshopBuilderConfig {
+    #[serde(default)]
+    pub execution_mode: BuilderExecutionMode,
     pub registry: RegistryConfig,
     #[serde(default)]
     pub worker: WorkerConfig,
+    #[serde(default)]
     pub execution: KvmExecutionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuilderExecutionMode {
+    #[default]
+    AgentKvm,
+    DirectProviderOnly,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +126,29 @@ pub struct KvmExecutionConfig {
     pub images: Vec<WorkshopBaseImageConfig>,
 }
 
+impl Default for KvmExecutionConfig {
+    fn default() -> Self {
+        Self {
+            work_root: PathBuf::new(),
+            qemu_binary: PathBuf::new(),
+            e2fsck_binary: PathBuf::new(),
+            resize2fs_binary: PathBuf::new(),
+            sanitizer_path: String::new(),
+            ssh_username: default_ssh_username(),
+            accelerator: default_accelerator(),
+            require_kvm: default_true(),
+            ssh_wait_timeout_seconds: default_ssh_wait_timeout_seconds(),
+            script_timeout_seconds: default_script_timeout_seconds(),
+            shutdown_timeout_seconds: default_shutdown_timeout_seconds(),
+            probe_every_seconds: default_probe_every_seconds(),
+            probe_timeout_seconds: default_probe_timeout_seconds(),
+            runtime_bundle_verification: None,
+            authored_image_preparation: None,
+            images: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoredImagePreparationConfig {
@@ -198,22 +232,50 @@ impl WorkshopBuilderConfig {
         if self.worker.max_bundle_entries == 0 {
             bail!("worker.max_bundle_entries must be positive");
         }
-        if let Some(signing) = &self.worker.runtime_bundle_signing {
-            validate_runtime_bundle_signing(signing)?;
+        match self.execution_mode {
+            BuilderExecutionMode::AgentKvm => {
+                if let Some(signing) = &self.worker.runtime_bundle_signing {
+                    validate_runtime_bundle_signing(signing)?;
+                }
+                if self.execution.runtime_bundle_verification.is_some()
+                    && self.worker.runtime_bundle_signing.is_none()
+                {
+                    bail!(
+                        "execution.runtime_bundle_verification requires worker.runtime_bundle_signing"
+                    );
+                }
+                if self.worker.architecture != ImageArchitecture::X86_64 {
+                    bail!("workshop KVM backend v1 supports only worker architecture x86_64");
+                }
+                validate_execution(&self.execution)?;
+            }
+            BuilderExecutionMode::DirectProviderOnly => {
+                let signing = self.worker.runtime_bundle_signing.as_ref().context(
+                    "direct_provider_only execution requires worker.runtime_bundle_signing",
+                )?;
+                validate_runtime_bundle_signing(signing)?;
+                validate_direct_provider_execution(&self.execution)?;
+            }
         }
-        if self.worker.runtime_bundle_signing.is_some()
-            != self.execution.runtime_bundle_verification.is_some()
-        {
-            bail!(
-                "worker.runtime_bundle_signing and execution.runtime_bundle_verification must be configured together"
-            );
-        }
-        if self.worker.architecture != ImageArchitecture::X86_64 {
-            bail!("workshop KVM backend v1 supports only worker architecture x86_64");
-        }
-        validate_execution(&self.execution)?;
         Ok(())
     }
+}
+
+fn validate_direct_provider_execution(config: &KvmExecutionConfig) -> Result<()> {
+    if config.runtime_bundle_verification.is_some() {
+        bail!(
+            "direct_provider_only execution forbids execution.runtime_bundle_verification; Intar's provider harness owns runtime proof"
+        );
+    }
+    if config.authored_image_preparation.is_some() {
+        bail!(
+            "direct_provider_only execution forbids execution.authored_image_preparation; provider publications use signed reconstruction bundles"
+        );
+    }
+    if !config.images.is_empty() {
+        bail!("direct_provider_only execution forbids execution.images");
+    }
+    Ok(())
 }
 
 fn validate_runtime_bundle_signing(config: &RuntimeBundleSigningConfig) -> Result<()> {
@@ -668,7 +730,7 @@ const fn default_probe_timeout_seconds() -> u64 {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::parse;
+    use super::{BuilderExecutionMode, parse};
 
     const EXECUTION: &str = r#"
 [execution]
@@ -721,6 +783,7 @@ bootstrap_token = "secret"
         .unwrap();
 
         assert_eq!(config.worker.poll_interval_seconds, 5);
+        assert_eq!(config.execution_mode, BuilderExecutionMode::AgentKvm);
         assert_eq!(config.worker.max_bundle_entries, 4_096);
         assert_eq!(
             config.worker.architecture,
@@ -764,33 +827,109 @@ surprise = true
     #[test]
     fn parses_example_config() {
         let config = parse(include_str!("../config.example.toml")).unwrap();
-        let image = &config.execution.images[0];
         assert_eq!(
-            image.guest_build_material_paths,
-            ["/opt/platform-engineering-workshop/.git"]
+            config.execution_mode,
+            BuilderExecutionMode::DirectProviderOnly
         );
-        assert!(
-            image
-                .guest_forbidden_participant_paths
-                .contains(&"/opt/platform-engineering-workshop/.git".to_owned())
-        );
-        assert!(
-            !image
-                .guest_build_material_paths
-                .iter()
-                .any(|path| path.contains("catch-up.sh") || path.contains("solutions"))
-        );
-        let preparation = config
-            .execution
-            .authored_image_preparation
-            .as_ref()
-            .unwrap();
-        assert_eq!(preparation.image_name, image.name);
+        assert!(config.execution.images.is_empty());
+        assert!(config.execution.runtime_bundle_verification.is_none());
+        assert!(config.execution.authored_image_preparation.is_none());
+        assert!(config.worker.runtime_bundle_signing.is_some());
+    }
+
+    #[test]
+    fn direct_provider_only_needs_no_execution_section() {
+        let config = parse(
+            r#"
+execution_mode = "direct_provider_only"
+
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+"#,
+        )
+        .unwrap();
+
         assert_eq!(
-            preparation.minimum_free_space_bytes,
-            80 * 1024 * 1024 * 1024
+            config.execution_mode,
+            BuilderExecutionMode::DirectProviderOnly
         );
-        assert_eq!(image.disk, preparation.output_directory.join("disk.raw"));
+        assert!(config.execution.images.is_empty());
+    }
+
+    #[test]
+    fn direct_provider_only_requires_runtime_signing() {
+        let error = parse(
+            r#"
+execution_mode = "direct_provider_only"
+
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires worker.runtime_bundle_signing")
+        );
+    }
+
+    #[test]
+    fn direct_provider_only_forbids_agent_kvm_images() {
+        let error = parse(&format!(
+            r#"
+execution_mode = "direct_provider_only"
+
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+{}"#,
+            EXECUTION
+        ))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("forbids execution.images"));
+    }
+
+    #[test]
+    fn direct_provider_only_forbids_local_runtime_proof() {
+        let error = parse(&format!(
+            r#"
+execution_mode = "direct_provider_only"
+
+[registry]
+base_url = "https://intar.dev"
+host_id = "builder-01"
+bootstrap_token = "secret"
+
+[worker.runtime_bundle_signing]
+key_id = "workshop-runtime-v1"
+private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
+{}
+{}"#,
+            EXECUTION, RUNTIME_BUNDLE_VERIFICATION
+        ))
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("forbids execution.runtime_bundle_verification")
+        );
     }
 
     #[test]
@@ -956,8 +1095,8 @@ private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
     }
 
     #[test]
-    fn rejects_partial_direct_cloud_proof_configuration() {
-        let error = parse(&format!(
+    fn signing_does_not_require_local_direct_cloud_proof() {
+        let configured = parse(&format!(
             r#"
 [registry]
 base_url = "https://intar.dev"
@@ -970,9 +1109,13 @@ private_key_env = "INTAR_WORKSHOP_RUNTIME_SIGNING_KEY_B64"
 {}"#,
             EXECUTION
         ))
-        .unwrap_err();
-        assert!(error.to_string().contains("must be configured together"));
+        .unwrap();
+        assert!(configured.worker.runtime_bundle_signing.is_some());
+        assert!(configured.execution.runtime_bundle_verification.is_none());
+    }
 
+    #[test]
+    fn local_direct_cloud_proof_requires_signing() {
         let error = parse(&format!(
             r#"
 [registry]
@@ -984,6 +1127,10 @@ bootstrap_token = "secret"
             EXECUTION, RUNTIME_BUNDLE_VERIFICATION
         ))
         .unwrap_err();
-        assert!(error.to_string().contains("must be configured together"));
+        assert!(
+            error
+                .to_string()
+                .contains("runtime_bundle_verification requires worker.runtime_bundle_signing")
+        );
     }
 }

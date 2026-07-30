@@ -14,13 +14,14 @@ use tracing::{info, warn};
 
 use crate::backend::{
     BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, CheckpointImageTarget,
-    RuntimeBundleColdBoot, SealCheckpoint, SealedVmArtifact, WorkshopExecutionBackend,
+    SealCheckpoint, SealedVmArtifact, WorkshopExecutionBackend,
 };
 use crate::bundle::prepare_bundle;
 use crate::client::{PublicationRegistry, WorkshopBlobPublisher};
 use crate::config::WorkerConfig;
 use crate::contracts::{
-    BuiltVmImage, CheckpointBuildResult, WorkshopPublicationClaim, WorkshopPublicationResult,
+    BuiltVmImage, CheckpointBuildResult, RuntimeBundleCompression, WorkshopPublicationClaim,
+    WorkshopPublicationResult,
 };
 use crate::hydrate::hydrate_workshop_manifest;
 use crate::runtime_bundle::{RuntimeBundleSigner, produce_runtime_bundle};
@@ -70,7 +71,16 @@ where
     let publication_id = claim.publication_id.clone();
     info!(publication_id, "claimed workshop publication");
 
-    let build = build_publication(registry, backend, worker, &claim, cancellation).await;
+    let mut backend_used = false;
+    let build = build_publication(
+        registry,
+        backend,
+        worker,
+        &claim,
+        cancellation,
+        &mut backend_used,
+    )
+    .await;
     match build {
         Ok(success) => {
             cancellable(cancellation, registry.refresh_auth()).await?;
@@ -84,7 +94,9 @@ where
             Ok(ProcessOutcome::Succeeded { publication_id })
         }
         Err(error) => {
-            backend.abort();
+            if backend_used {
+                backend.abort();
+            }
             if cancellation.is_cancelled() {
                 return Err(error).context("workshop publication interrupted by shutdown");
             }
@@ -126,6 +138,7 @@ async fn build_publication<R, B>(
     worker: &WorkerConfig,
     claim: &WorkshopPublicationClaim,
     cancellation: &CancellationToken,
+    backend_used: &mut bool,
 ) -> Result<WorkshopPublicationResult>
 where
     R: PublicationRegistry + WorkshopBlobPublisher,
@@ -140,19 +153,30 @@ where
     let prepared = prepare_bundle(claim, &bytes, worker)?;
     ensure_running(cancellation)?;
     let modules = stable_topological_modules(&prepared.workshop)?;
-    let runtime_bundle_signer = match &prepared.workshop.manifest.workspace.provider {
-        Some(WorkspaceProvider::HetznerCloud { system_image, .. }) => {
+    if matches!(
+        prepared.workshop.manifest.workspace.provider.as_ref(),
+        Some(WorkspaceProvider::HetznerCloud { .. })
+    ) {
+        let (signer, compression) = {
             let config = worker.runtime_bundle_signing.as_ref().context(
                 "Hetzner-compatible workshop publication requires runtime bundle signing",
             )?;
-            Some((
-                RuntimeBundleSigner::load(config)?,
-                config.compression,
-                system_image.as_str(),
-            ))
-        }
-        None => None,
-    };
+            (RuntimeBundleSigner::load(config)?, config.compression)
+        };
+        return build_direct_provider_publication(
+            registry,
+            worker,
+            &prepared.root,
+            &prepared.workshop,
+            &modules,
+            &signer,
+            compression,
+            cancellation,
+        )
+        .await;
+    }
+
+    *backend_used = true;
     backend.begin(&BeginWorkshopBuild {
         publication_id: &claim.publication_id,
         bundle_root: &prepared.root,
@@ -235,97 +259,18 @@ where
             })?;
         let vm_images =
             hash_and_upload_artifacts(registry, &artifacts, &mut uploaded_artifacts, cancellation)?;
-        let (runtime_bundle, covered_module_ids) = if let Some((
-            signer,
-            compression,
-            system_image,
-        )) = &runtime_bundle_signer
-        {
-            ensure_running(cancellation)?;
-            let mut bundle = produce_runtime_bundle(
-                &prepared.root,
-                &prepared.workshop,
-                &modules,
-                index,
-                *compression,
-                signer,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to build runtime bundle for checkpoint '{}'",
-                    module.checkpoint
-                )
-            })?;
-            if u64::try_from(bundle.bytes.len()).unwrap_or(u64::MAX)
-                > worker.max_expanded_bundle_bytes
-            {
-                bail!(
-                    "runtime bundle for checkpoint '{}' exceeds the {} byte limit",
-                    module.checkpoint,
-                    worker.max_expanded_bundle_bytes
-                );
-            }
-            let signing_public_key_b64 = signer.verifying_key_b64();
-            let proof = backend
-                .cold_boot_runtime_bundle(&RuntimeBundleColdBoot {
-                    checkpoint_id: &module.checkpoint,
-                    system_image,
-                    bytes: &bundle.bytes,
-                    artifact: &bundle.artifact,
-                    signing_public_key_b64: &signing_public_key_b64,
-                    max_checkpoint_bytes: worker.max_expanded_bundle_bytes,
-                })
-                .with_context(|| {
-                    format!(
-                        "direct-cloud reconstruction proof for checkpoint '{}' failed",
-                        module.checkpoint
-                    )
-                })?;
-            if proof.workspace_agent_sha256.len() != 64
-                || !proof
-                    .workspace_agent_sha256
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-            {
-                bail!(
-                    "direct-cloud proof for checkpoint '{}' returned an invalid workspace-agent digest",
-                    module.checkpoint
-                );
-            }
-            bundle.artifact.workspace_agent_sha256 = Some(proof.workspace_agent_sha256);
-            ensure_running(cancellation)?;
-            let mut file = tempfile::NamedTempFile::new_in(&worker.work_root)
-                .context("failed to create runtime bundle upload file")?;
-            file.write_all(&bundle.bytes)
-                .context("failed to write runtime bundle upload file")?;
-            file.as_file()
-                .sync_all()
-                .context("failed to sync runtime bundle upload file")?;
-            ensure_running(cancellation)?;
-            if uploaded_artifacts.insert(bundle.artifact.sha256.clone()) {
-                registry.upload_artifact(
-                    &PublishArtifactFile::new(file.path(), &bundle.artifact.sha256)
-                        .map_err(anyhow::Error::from)?,
-                )?;
-            }
-            (Some(bundle.artifact), bundle.covered_module_ids)
-        } else {
-            (
-                None,
-                modules[..=index]
-                    .iter()
-                    .map(|module| module.id.clone())
-                    .collect(),
-            )
-        };
         checkpoints.push(CheckpointBuildResult {
             checkpoint_id: module.checkpoint.clone(),
-            covered_module_ids,
+            covered_module_ids: modules[..=index]
+                .iter()
+                .map(|module| module.id.clone())
+                .collect(),
             vm_images,
             sanitized: true,
             cold_boot_verified: true,
-            runtime_bundle_cold_boot_verified: runtime_bundle.is_some(),
-            runtime_bundle,
+            runtime_bundle_cold_boot_verified: false,
+            provider_verification_pending: false,
+            runtime_bundle: None,
         });
 
         if index + 1 < modules.len() {
@@ -344,6 +289,83 @@ where
     backend.finish()?;
     ensure_running(cancellation)?;
     let manifest = hydrate_workshop_manifest(&prepared.root, &prepared.workshop, &checkpoints)?;
+    Ok(WorkshopPublicationResult::Succeeded {
+        manifest: Box::new(manifest),
+        checkpoints,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_direct_provider_publication<R>(
+    registry: &R,
+    worker: &WorkerConfig,
+    source_root: &Path,
+    source: &ValidatedWorkshop,
+    modules: &[&Module],
+    signer: &RuntimeBundleSigner,
+    compression: RuntimeBundleCompression,
+    cancellation: &CancellationToken,
+) -> Result<WorkshopPublicationResult>
+where
+    R: PublicationRegistry + WorkshopBlobPublisher,
+{
+    let mut checkpoints = Vec::with_capacity(modules.len());
+    let mut uploaded_artifacts = BTreeSet::new();
+    for (index, module) in modules.iter().enumerate() {
+        ensure_running(cancellation)?;
+        let bundle =
+            produce_runtime_bundle(source_root, source, modules, index, compression, signer)
+                .with_context(|| {
+                    format!(
+                        "failed to build runtime bundle for checkpoint '{}'",
+                        module.checkpoint
+                    )
+                })?;
+        if u64::try_from(bundle.bytes.len()).unwrap_or(u64::MAX) > worker.max_expanded_bundle_bytes
+        {
+            bail!(
+                "runtime bundle for checkpoint '{}' exceeds the {} byte limit",
+                module.checkpoint,
+                worker.max_expanded_bundle_bytes
+            );
+        }
+
+        cancellable(cancellation, registry.refresh_auth())
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to refresh builder auth before uploading checkpoint '{}'",
+                    module.checkpoint
+                )
+            })?;
+        ensure_running(cancellation)?;
+        let mut file = tempfile::NamedTempFile::new_in(&worker.work_root)
+            .context("failed to create runtime bundle upload file")?;
+        file.write_all(&bundle.bytes)
+            .context("failed to write runtime bundle upload file")?;
+        file.as_file()
+            .sync_all()
+            .context("failed to sync runtime bundle upload file")?;
+        ensure_running(cancellation)?;
+        if uploaded_artifacts.insert(bundle.artifact.sha256.clone()) {
+            registry.upload_artifact(
+                &PublishArtifactFile::new(file.path(), &bundle.artifact.sha256)
+                    .map_err(anyhow::Error::from)?,
+            )?;
+        }
+        checkpoints.push(CheckpointBuildResult {
+            checkpoint_id: module.checkpoint.clone(),
+            covered_module_ids: bundle.covered_module_ids,
+            vm_images: Vec::new(),
+            sanitized: false,
+            cold_boot_verified: false,
+            runtime_bundle_cold_boot_verified: false,
+            provider_verification_pending: true,
+            runtime_bundle: Some(bundle.artifact),
+        });
+    }
+    ensure_running(cancellation)?;
+    let manifest = hydrate_workshop_manifest(source_root, source, &checkpoints)?;
     Ok(WorkshopPublicationResult::Succeeded {
         manifest: Box::new(manifest),
         checkpoints,

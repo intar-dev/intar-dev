@@ -1,10 +1,45 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 
 const STAGING_MARKER: &str = ".intar-workshop-staging-v1";
 const STAGING_MARKER_CONTENT: &str = "intar-workshop-builder-staging-v1\n";
+
+/// Validate the domain-neutral publication staging root without consulting
+/// any local VM or authored-image dependency.
+pub fn preflight_staging_root(path: &Path, prepare: bool) -> Result<()> {
+    ensure!(path.is_absolute(), "staging work root must be absolute");
+    ensure!(path != Path::new("/"), "staging work root must not be '/'");
+    if prepare {
+        fs::create_dir_all(path)
+            .with_context(|| format!("failed to create staging work root '{}'", path.display()))?;
+    }
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect staging work root '{}'", path.display()))?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "staging work root '{}' must be a real directory",
+        path.display()
+    );
+    #[cfg(unix)]
+    ensure!(
+        metadata.permissions().mode() & 0o022 == 0,
+        "staging work root '{}' is group/world writable",
+        path.display()
+    );
+    let probe = path.join(format!(".preflight-{}", std::process::id()));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .with_context(|| format!("staging work root '{}' is not writable", path.display()))?;
+    fs::remove_file(&probe).context("failed to remove workshop staging preflight file")?;
+    Ok(())
+}
 
 pub(crate) fn mark_staging_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)

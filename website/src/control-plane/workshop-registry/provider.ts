@@ -1,6 +1,9 @@
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { organizationProviderConnections } from "@/db/schema";
+import {
+  organizationProviderConnections,
+  type ProviderPriceObservation,
+} from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { resolveHetznerCatalog } from "@/lib/hcloud-provider-service";
 import { requireWorkshopHcloudRuntimeEnabledForOrganization } from "@/lib/workshops/feature-flag";
@@ -34,6 +37,22 @@ export async function resolveWorkshopPublicationProvider(input: {
   source: ValidatedWorkshopSourceBundle;
   now?: number;
 }): Promise<ResolvedWorkshopWorkspaceProvider | undefined> {
+  return (await resolveWorkshopPublicationProviderContext(input))?.provider;
+}
+
+export interface ResolvedWorkshopPublicationProviderContext {
+  provider: ResolvedWorkshopWorkspaceProvider;
+  connectionId: string;
+  permittedLocations: string[];
+  priceObservation: ProviderPriceObservation;
+}
+
+export async function resolveWorkshopPublicationProviderContext(input: {
+  d1: D1Database;
+  organizationId: string;
+  source: ValidatedWorkshopSourceBundle;
+  now?: number;
+}): Promise<ResolvedWorkshopPublicationProviderContext | undefined> {
   const declaration = readHetznerAuthoringDeclaration(input.source);
   if (!declaration) return undefined;
 
@@ -89,12 +108,17 @@ export async function resolveWorkshopPublicationProvider(input: {
     .set({ lastValidatedAt: now, updatedAt: now })
     .where(eq(organizationProviderConnections.id, connection.id));
   return {
-    kind: "hetzner_cloud",
-    vmId: declaration.vmId,
-    serverType: resolved.serverType,
-    systemImage: resolved.systemImage,
-    hardware: resolved.hardware,
-    compatible: true,
+    provider: {
+      kind: "hetzner_cloud",
+      vmId: declaration.vmId,
+      serverType: resolved.serverType,
+      systemImage: resolved.systemImage,
+      hardware: resolved.hardware,
+      compatible: true,
+    },
+    connectionId: connection.id,
+    permittedLocations: [...connection.approvedLocationsJson],
+    priceObservation: resolved.prices,
   };
 }
 
@@ -148,14 +172,8 @@ function readHetznerAuthoringDeclaration(
     serverType: text(provider.server_type, "workspace provider server_type"),
     systemImage: text(provider.system_image, "workspace provider system_image"),
     requirements: {
-      requiredCpuMillis: integer(
-        vm.vcpu_millis,
-        "workspace VM vcpu_millis",
-      ),
-      requiredMemoryMib: integer(
-        vm.memory_mib,
-        "workspace VM memory_mib",
-      ),
+      requiredCpuMillis: integer(vm.vcpu_millis, "workspace VM vcpu_millis"),
+      requiredMemoryMib: integer(vm.memory_mib, "workspace VM memory_mib"),
       requiredDiskMib,
     },
   };
@@ -163,7 +181,11 @@ function readHetznerAuthoringDeclaration(
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw appError(400, "workshop_provider_invalid", `${label} must be an object`);
+    throw appError(
+      400,
+      "workshop_provider_invalid",
+      `${label} must be an object`,
+    );
   }
   return value as Record<string, unknown>;
 }

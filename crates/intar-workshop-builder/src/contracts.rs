@@ -26,8 +26,9 @@ pub struct BuiltVmImage {
     pub boot_cmdline: String,
 }
 
-/// Builder proof for one checkpoint. A checkpoint is publishable only when
-/// both booleans are true for every VM image in the record.
+/// Builder result for one checkpoint. Agent-KVM results carry sealed images
+/// and completed local proof. Direct-provider results instead carry a signed
+/// reconstruction bundle and an explicit provider-verification handoff.
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointBuildResult {
@@ -43,10 +44,19 @@ pub struct CheckpointBuildResult {
     /// base. This is deliberately not inferred from `cold_boot_verified`,
     /// which describes the sealed agent-KVM disk path.
     pub runtime_bundle_cold_boot_verified: bool,
+    /// The direct provider must independently reconstruct and verify this
+    /// signed bundle before the checkpoint becomes usable. Builder reports
+    /// serialize this marker only for that pending provider-only handoff.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provider_verification_pending: bool,
     /// Learner-safe reconstruction material for direct cloud workspaces. KVM
     /// publications omit it and continue using sealed VM images.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_bundle: Option<RuntimeBundleArtifact>,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,7 +78,8 @@ pub struct RuntimeBundleArtifact {
     pub signature_b64: String,
     pub signing_key_id: String,
     /// SHA-256 of the exact workspace-agent binary that verified and applied
-    /// this bundle on the clean direct-cloud proof guest.
+    /// this bundle. Builder-side pending reports omit it; the independent
+    /// provider verifier records it after reconstructing a clean guest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_agent_sha256: Option<String>,
 }

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, count, desc, eq, inArray, isNull, max, ne } from "drizzle-orm";
+import { and, count, desc, eq, inArray, max, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type {
   CatalogObservation,
@@ -602,7 +602,7 @@ export async function rebindHetznerProject(input: {
     throw appError(
       409,
       "provider_cleanup_not_confirmed",
-      "all learner resources must have confirmed deletion before rebinding",
+      "all provider resources must have confirmed deletion before rebinding",
     );
   }
   const token = providerToken(input.token);
@@ -749,7 +749,7 @@ export async function disconnectHetznerProject(input: {
     throw appError(
       409,
       "provider_cleanup_not_confirmed",
-      "all learner resources must have confirmed deletion before disconnecting",
+      "all provider resources must have confirmed deletion before disconnecting",
     );
   }
   const active = await loadActiveCredential(connection);
@@ -762,9 +762,13 @@ export async function disconnectHetznerProject(input: {
          SELECT 1 FROM hetzner_allocations
          WHERE connection_id = ? AND deletion_confirmed_at IS NULL
        )
+       AND NOT EXISTS (
+         SELECT 1 FROM workshop_publication_provider_attempts
+         WHERE connection_id = ? AND deletion_confirmed_at IS NULL
+       )
      RETURNING id`,
   )
-    .bind(now, connection.id, connection.id)
+    .bind(now, connection.id, connection.id, connection.id)
     .first<{ id: string }>();
   if (!claimed) {
     throw appError(
@@ -807,7 +811,7 @@ export async function disconnectHetznerProject(input: {
     throw appError(
       409,
       "provider_cleanup_not_confirmed",
-      "a learner resource appeared while disconnecting; manual cleanup is required",
+      "a provider resource appeared while disconnecting; manual cleanup is required",
     );
   }
   const db = drizzle(env.DB);
@@ -883,7 +887,7 @@ export async function acknowledgeHetznerManualCleanup(input: {
     throw appError(
       409,
       "provider_cleanup_not_pending",
-      "the provider connection has no unconfirmed learner resources",
+      "the provider connection has no unconfirmed resources",
     );
   }
   const now = input.now ?? Date.now();
@@ -1224,21 +1228,42 @@ export async function ownershipLabels(
   };
 }
 
+export async function workshopPublicationVerifierOwnershipLabels(
+  organizationId: string,
+  connectionId: string,
+  publicationId: string,
+  checkpointId: string,
+  attempt: number,
+): Promise<OwnershipLabels> {
+  return {
+    organizationRef: (await sha256Hex(organizationId)).slice(0, 32),
+    connectionRef: (await sha256Hex(connectionId)).slice(0, 32),
+    purpose: "workshop_publication_verifier",
+    workshopPublicationRef: (await sha256Hex(publicationId)).slice(0, 32),
+    checkpointRef: (await sha256Hex(checkpointId)).slice(0, 32),
+    attempt,
+  };
+}
+
 export async function countLiveHetznerAllocations(
   connectionId: string,
 ): Promise<number> {
-  const rows = await drizzle(env.DB)
-    .select({ id: hetznerAllocations.id })
-    .from(hetznerAllocations)
-    .where(
-      and(
-        eq(hetznerAllocations.connectionId, connectionId),
-        // A cloud seat remains live (and potentially billable) until provider
-        // deletion is confirmed, regardless of its local lifecycle label.
-        isNull(hetznerAllocations.deletionConfirmedAt),
-      ),
-    );
-  return rows.length;
+  const row = await env.DB.prepare(
+    `SELECT
+       (
+         SELECT count(*)
+         FROM hetzner_allocations
+         WHERE connection_id = ? AND deletion_confirmed_at IS NULL
+       ) + (
+         SELECT count(*)
+         FROM workshop_publication_provider_attempts
+         WHERE connection_id = ?
+           AND deletion_confirmed_at IS NULL
+       ) AS live_count`,
+  )
+    .bind(connectionId, connectionId)
+    .first<{ live_count: number }>();
+  return row?.live_count ?? 0;
 }
 
 async function unconfirmedAllocations(
@@ -1247,12 +1272,23 @@ async function unconfirmedAllocations(
   const rows = await env.DB.prepare(
     `SELECT id, execution_id, deterministic_name, state, server_id,
             primary_ip_id, primary_ipv4, ssh_key_id, create_action_id,
-            delete_action_id, deletion_confirmed_at
+            delete_action_id, deletion_confirmed_at, created_at
      FROM hetzner_allocations
      WHERE connection_id = ? AND deletion_confirmed_at IS NULL
+     UNION ALL
+     SELECT attempt.id, checkpoint.publication_id AS execution_id,
+            attempt.deterministic_name, attempt.state, attempt.server_id,
+            attempt.primary_ip_id, attempt.primary_ipv4, attempt.ssh_key_id,
+            attempt.create_action_id, attempt.delete_action_id,
+            attempt.deletion_confirmed_at, attempt.created_at
+     FROM workshop_publication_provider_attempts attempt
+     INNER JOIN workshop_publication_provider_checkpoints checkpoint
+       ON checkpoint.id = attempt.provider_checkpoint_id
+     WHERE attempt.connection_id = ?
+       AND attempt.deletion_confirmed_at IS NULL
      ORDER BY created_at ASC, id ASC`,
   )
-    .bind(connectionId)
+    .bind(connectionId, connectionId)
     .all<{
       id: string;
       execution_id: string;

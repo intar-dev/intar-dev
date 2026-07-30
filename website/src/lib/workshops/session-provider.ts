@@ -45,6 +45,13 @@ export async function prepareWorkshopSessionProvider(input: {
 }): Promise<PreparedWorkshopSessionProvider> {
   const requested = input.runtimeProvider ?? { kind: "agent_kvm" as const };
   if (requested.kind === "agent_kvm") {
+    if (isProviderOnlyWorkshopRevision(input.manifest)) {
+      throw appError(
+        409,
+        "workshop_provider_required",
+        "this workshop revision is provider-only and requires Hetzner Cloud",
+      );
+    }
     return {
       providerKind: "agent_kvm",
       connectionId: null,
@@ -99,6 +106,18 @@ export async function prepareWorkshopSessionProvider(input: {
     permittedLocations: connection.approvedLocationsJson,
     initialPriceObservation: resolved.prices,
   };
+}
+
+export function isProviderOnlyWorkshopRevision(
+  manifest: WorkshopManifestV1,
+): boolean {
+  return (
+    manifest.workspace.provider?.kind === "hetzner_cloud" &&
+    manifest.workspace.checkpoints.length > 0 &&
+    manifest.workspace.checkpoints.every(
+      (checkpoint) => checkpoint.vmImages.length === 0,
+    )
+  );
 }
 
 export async function persistWorkshopSessionProvider(input: {

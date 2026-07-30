@@ -55,8 +55,8 @@ export interface WorkshopCheckpointBuildReport {
     imageKey: Record<string, unknown>;
     imageSha256: string;
   }>;
-  sanitized: true;
-  coldBootVerified: true;
+  sanitized: boolean;
+  coldBootVerified: boolean;
   runtimeBundleColdBootVerified?: true;
   providerArtifact?: {
     r2Key: string;

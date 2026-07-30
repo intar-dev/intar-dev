@@ -2812,9 +2812,13 @@ async function restoreConnectionAfterConfirmedCleanup(
        AND NOT EXISTS (
          SELECT 1 FROM hetzner_allocations
          WHERE connection_id = ? AND deletion_confirmed_at IS NULL
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM workshop_publication_provider_attempts
+         WHERE connection_id = ? AND deletion_confirmed_at IS NULL
        )`,
   )
-    .bind(now, connectionId, connectionId)
+    .bind(now, connectionId, connectionId, connectionId)
     .run();
 }
 
