@@ -463,19 +463,17 @@ ${indentCloudInit(kinoConfig, 6)}
       set -u
       verifier="\${1:?missing verifier}"
       set +e
-      /usr/bin/setpriv \\
-        --reuid=intar \\
-        --regid=intar \\
-        --init-groups \\
-        -- \\
-        /usr/bin/env -i \\
-          HOME=/home/intar \\
-          USER=intar \\
-          LOGNAME=intar \\
-          SHELL=/bin/bash \\
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
-          LANG=C.UTF-8 \\
-          LC_ALL=C.UTF-8 \\
+      /usr/bin/env -i \\
+        HOME=/home/intar \\
+        USER=intar \\
+        LOGNAME=intar \\
+        SHELL=/bin/bash \\
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+        LANG=C.UTF-8 \\
+        LC_ALL=C.UTF-8 \\
+        /bin/bash --noprofile --norc -c \\
+          'umask 0022; exec /bin/bash -- "$1"' \\
+          intar-probe \\
           "\${verifier}" </dev/null >/dev/null 2>&1
       status="\$?"
       set -e
@@ -485,6 +483,17 @@ ${indentCloudInit(kinoConfig, 6)}
         printf '{"passed":false}\\n'
         exit "\${status}"
       fi
+
+  - path: /usr/libexec/intar-workspace-wait-checkpoint
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -eu
+      state=/var/lib/intar-workspace-agent/state.json
+      until /usr/bin/grep -Fq '"checkpoint_applied":true' "\${state}" 2>/dev/null; do
+        /usr/bin/sleep 1
+      done
 
   - path: /usr/local/sbin/intar-kino-shell
     owner: root:root
@@ -508,6 +517,7 @@ ${indentCloudInit(kinoConfig, 6)}
       #!/bin/sh
       set -eu
       systemctl stop ssh.service
+      systemctl stop kino.service
       pkill -HUP -u intar -x kino 2>/dev/null || true
       remaining=300
       while pgrep -u intar -x kino >/dev/null 2>&1; do
@@ -528,12 +538,16 @@ ${indentCloudInit(kinoConfig, 6)}
 
       [Service]
       Type=simple
-      User=root
-      Group=root
+      User=intar
+      Group=intar
       UMask=0077
+      ExecStartPre=+/usr/libexec/intar-workspace-wait-checkpoint
       ExecStart=/usr/local/sbin/kino --config /etc/kino/kino.hcl
       Restart=on-failure
       RestartSec=2s
+      TimeoutStartSec=100min
+      TimeoutStopSec=5s
+      KillMode=control-group
       NoNewPrivileges=true
       PrivateTmp=true
       ProtectControlGroups=true
@@ -549,8 +563,8 @@ ${indentCloudInit(kinoConfig, 6)}
     content: |
       [Unit]
       Description=Intar Workshop learner workspace agent
-      Wants=network-online.target ssh.service kino.service
-      After=network-online.target ssh.service kino.service
+      Wants=network-online.target ssh.service
+      After=network-online.target ssh.service
       ConditionPathExists=/etc/intar/workspace-agent.toml
       StartLimitIntervalSec=300
       StartLimitBurst=10
@@ -595,7 +609,8 @@ runcmd:
   - [sshd, -t]
   - [systemctl, restart, ssh.service]
   - [systemctl, daemon-reload]
-  - [systemctl, enable, --now, kino.service, intar-workspace-agent.service]
+  - [systemctl, enable, kino.service, intar-workspace-agent.service]
+  - [systemctl, start, --no-block, kino.service, intar-workspace-agent.service]
 `;
 }
 
