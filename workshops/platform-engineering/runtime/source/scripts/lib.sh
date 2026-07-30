@@ -46,12 +46,13 @@ need() {
   have "$1" || die "'$1' not found. ${2:-request a checkpoint-00 restore; do not install an unpinned replacement.}"
 }
 
-# Talos v1.13.6 does not retry gRPC Unavailable when apid briefly restarts
-# during bootstrap. The initial create classifier requires the complete phase
-# sequence so later readiness failures cannot be mistaken for this known race.
+# Talos v1.13.6 can return Unavailable/EOF either while its ten-minute API
+# readiness loop is ending (before it prints "bootstrapping cluster") or from
+# the Bootstrap RPC itself. Match the complete cluster-create phase sequence;
+# every other Talos error still fails closed.
 is_initial_talos_bootstrap_unavailable_eof() {
   local message="${1:-}"
-  [[ "${message}" == *"waiting for Talos API (to bootstrap the cluster)"*"bootstrapping cluster"*"bootstrap error:"*"code = Unavailable"*"authentication handshake failed: EOF"* ]]
+  [[ "${message}" == *"creating controlplane nodes"*"creating worker nodes"*"waiting for Talos API (to bootstrap the cluster)"*"bootstrap error:"*"code = Unavailable"*"authentication handshake failed: EOF"* ]]
 }
 
 # The direct retry command has a different stable error prefix. Keep it
