@@ -40,7 +40,7 @@ done
 export DEBIAN_FRONTEND=noninteractive
 sed -i -e 's|http://deb.debian.org|https://deb.debian.org|g'   -e 's|http://security.debian.org|https://security.debian.org|g'   /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 apt-get update
-apt-get install --yes --no-install-recommends ca-certificates curl docker-cli docker.io git jq xz-utils
+apt-get install --yes --no-install-recommends ca-certificates curl docker-cli docker.io git jq sudo xz-utils
 systemctl enable --now docker
 getent passwd "${learner_user}" >/dev/null
 if [[ "${learner_user}" != root ]]; then

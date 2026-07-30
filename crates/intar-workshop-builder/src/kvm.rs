@@ -2372,9 +2372,10 @@ mod tests {
     }
 
     #[test]
-    fn reference_talos_reuses_kubelets_existing_shared_mount_for_local_storage() {
+    fn reference_talos_prepares_mount_capacity_and_reuses_kubelets_shared_mount() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let bootstrap = fs::read_to_string(root.join("runtime/bootstrap.sh")).unwrap();
         let create_cluster =
             fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
         let local_path = fs::read_to_string(root.join(
@@ -2390,8 +2391,62 @@ mod tests {
         assert!(!local_path.contains("/var/local-path-provisioner"));
         assert!(create_cluster.contains("df -Pk /var/lib/docker"));
         assert!(create_cluster.contains("df -Pi /var/lib/docker"));
-        assert!(create_cluster.contains("/proc/self/mountinfo"));
+        assert!(create_cluster.contains("df -Pk /run"));
+        assert!(create_cluster.contains("df -Pi /run"));
+        assert!(create_cluster.contains("/proc/[0-9]*/mountinfo"));
+        assert!(create_cluster.contains("max_namespace_mounts="));
+        assert!(!create_cluster.contains("/proc/self/mountinfo"));
         assert!(create_cluster.contains("/proc/sys/fs/mount-max"));
+        assert!(create_cluster.contains("TALOS_DOCKER_MIN_MOUNT_MAX=262144"));
+        assert!(create_cluster.contains("TALOS_DOCKER_GUARD_MOUNTS=196608"));
+        assert!(create_cluster.contains("sudo -n -- tee /proc/sys/fs/mount-max"));
+        assert!(create_cluster.contains("sudo -n -- /bin/bash --noprofile --norc -s"));
+        assert!(
+            create_cluster
+                .contains("if ! namespace_capacity=\"$(mount_namespace_capacity_snapshot)\"")
+        );
+        assert!(
+            create_cluster
+                .find("[[ -z \"${seen_namespaces[${namespace}]:-}\" ]] || continue")
+                .unwrap()
+                < create_cluster.find("mount_count=\"$(").unwrap()
+        );
+        assert!(
+            create_cluster.find("mount_count=\"$(").unwrap()
+                < create_cluster
+                    .find("seen_namespaces[\"${namespace}\"]=1")
+                    .unwrap()
+        );
+        assert!(bootstrap.contains("docker.io git jq sudo xz-utils"));
+        assert!(create_cluster.contains("start_mount_capacity_sampler"));
+        assert!(create_cluster.contains("stop_mount_capacity_sampler"));
+        assert!(create_cluster.contains("mount_capacity_sampler_failed"));
+        assert!(create_cluster.contains("mount_capacity_peak_count >= TALOS_DOCKER_GUARD_MOUNTS"));
+        assert!(create_cluster.contains("final_mount_count >= TALOS_DOCKER_GUARD_MOUNTS"));
+        assert!(
+            create_cluster.rfind("stop_mount_capacity_sampler").unwrap()
+                > create_cluster
+                    .find("kubectl wait --for=condition=Ready")
+                    .unwrap()
+        );
+        assert!(create_cluster.contains("Host capacity captured before cleanup:"));
+        assert!(
+            create_cluster
+                .rfind("Host capacity captured before cleanup:")
+                .unwrap()
+                > create_cluster
+                    .rfind("Talos failed-cluster removal exited")
+                    .unwrap()
+        );
+        assert!(
+            create_cluster
+                .find("Could not prepare Linux mount namespace capacity for Talos-in-Docker")
+                .unwrap()
+                < create_cluster
+                    .find("\ntalosctl cluster create docker \\")
+                    .unwrap()
+        );
+        assert!(!create_cluster.contains("/etc/sysctl.d"));
     }
 
     #[test]
