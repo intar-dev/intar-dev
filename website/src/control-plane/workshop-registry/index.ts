@@ -25,7 +25,7 @@ import {
   type WorkshopManifestV1,
 } from "@/db/schema";
 import type { WorkshopPublicationExpectedProbe } from "@/db/schema/workshop-publication-providers";
-import { toErrorResponse } from "@/lib/app-error";
+import { AppError, toErrorResponse } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   FlagshipFeatureToggleService,
@@ -60,6 +60,12 @@ const MAX_ERROR_LENGTH = 4_000;
 // renew this lease; builder_host_id remains the completion fencing token.
 const WORKSHOP_PUBLICATION_CLAIM_LEASE_MS = 12 * 60 * 60 * 1_000;
 const MAX_CLAIM_ATTEMPTS = 5;
+const TERMINAL_PROVIDER_STAGING_ERROR_CODES: ReadonlySet<string> = new Set([
+  "hcloud_server_type_unavailable",
+  "hcloud_server_type_incompatible",
+  "hcloud_server_type_undersized",
+  "hcloud_system_image_unavailable",
+]);
 const PROVIDER_FINALIZATION_GUARD_SQL = `
   publication.status = 'building'
   AND publication.provider_verification_state = 'verifying'
@@ -1566,6 +1572,71 @@ function isProviderVerificationPendingResult(raw: unknown): boolean {
   );
 }
 
+function isTerminalProviderStagingError(error: unknown): error is AppError {
+  return (
+    error instanceof AppError &&
+    TERMINAL_PROVIDER_STAGING_ERROR_CODES.has(error.code)
+  );
+}
+
+async function failTerminalProviderStaging(input: {
+  env: Cloudflare.Env;
+  publication: WorkshopPublicationRow;
+  builderHostId: string;
+  error: AppError;
+}): Promise<boolean> {
+  const now = Date.now();
+  const reason = input.error.message.slice(0, MAX_ERROR_LENGTH);
+
+  const results = await input.env.DB.batch([
+    input.env.DB.prepare(
+      `UPDATE workshop_publication_checkpoints
+       SET status = 'failed', vm_images_json = NULL, sanitized = 0,
+           cold_boot_verified = 0, error = ?, verified_at = NULL,
+           updated_at = ?
+       WHERE publication_id = ? AND status <> 'verified' AND EXISTS (
+         SELECT 1 FROM workshop_publications publication
+         WHERE publication.id = ? AND publication.status = 'building'
+           AND publication.builder_host_id = ?
+           AND publication.provider_verification_state IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM workshop_publication_provider_checkpoints checkpoint
+             WHERE checkpoint.publication_id = publication.id
+           )
+       )`,
+    ).bind(
+      reason,
+      now,
+      input.publication.id,
+      input.publication.id,
+      input.builderHostId,
+    ),
+    input.env.DB.prepare(
+      `UPDATE workshop_publications
+       SET status = 'failed', error = ?, claim_expires_at = NULL,
+           finished_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'building' AND builder_host_id = ?
+         AND provider_verification_state IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM workshop_publication_provider_checkpoints checkpoint
+           WHERE checkpoint.publication_id = workshop_publications.id
+         )`,
+    ).bind(
+      reason,
+      now,
+      now,
+      input.publication.id,
+      input.builderHostId,
+    ),
+  ]);
+
+  return (
+    results[0]?.meta.changes ===
+      input.publication.requiredCheckpointIdsJson.length &&
+    results[1]?.meta.changes === 1
+  );
+}
+
 async function stageHetznerProviderPublication(input: {
   env: Cloudflare.Env;
   publication: WorkshopPublicationRow;
@@ -1657,6 +1728,35 @@ async function stageHetznerProviderPublication(input: {
       "workshop provider verification staging failed",
       400,
     );
+    if (isTerminalProviderStagingError(error)) {
+      try {
+        if (
+          !(await failTerminalProviderStaging({
+            env: input.env,
+            publication: input.publication,
+            builderHostId: input.builderHostId,
+            error,
+          }))
+        ) {
+          return jsonResponse(
+            {
+              error:
+                "workshop provider verification staging failure lost its completion fence; retry",
+            },
+            409,
+          );
+        }
+      } catch (persistenceError) {
+        const persistenceResponse = toErrorResponse(
+          persistenceError,
+          "workshop provider verification staging failure could not be persisted",
+        );
+        return jsonResponse(
+          persistenceResponse.body,
+          persistenceResponse.status,
+        );
+      }
+    }
     return jsonResponse(response.body, response.status);
   }
 

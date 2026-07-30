@@ -702,6 +702,100 @@ describe("HcloudClient", () => {
     ).rejects.toThrow("Required Hetzner server type cx43 is unavailable");
   });
 
+  it("keeps a valid exact type when every permitted location is temporarily exhausted", async () => {
+    const exhaustedType = {
+      ...serverFixture().server_type,
+      locations: [
+        {
+          id: location.id,
+          name: location.name,
+          available: false,
+          recommended: false,
+          deprecation: null,
+        },
+      ],
+    };
+    const client = new HcloudClient("x".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/server_types") {
+          return json({ server_types: [exhaustedType], meta: {} });
+        }
+        if (url.pathname === "/v1/locations") {
+          return json({ locations: [location], meta: {} });
+        }
+        if (url.pathname === "/v1/images") {
+          return json({
+            images: [
+              {
+                id: 13,
+                status: "available",
+                type: "system",
+                name: "debian-13",
+                description: "Debian 13",
+                architecture: "x86",
+                deprecated: null,
+                deleted: null,
+                os_flavor: "debian",
+                os_version: "13",
+              },
+            ],
+            meta: {},
+          });
+        }
+        if (url.pathname === "/v1/pricing") {
+          return json({
+            pricing: {
+              currency: "EUR",
+              vat_rate: "0.19",
+              server_types: [
+                {
+                  id: exhaustedType.id,
+                  name: exhaustedType.name,
+                  prices: [
+                    {
+                      location: location.name,
+                      price_hourly: { net: "0.0200", gross: "0.0238" },
+                      price_monthly: { net: "12.0000", gross: "14.2800" },
+                    },
+                  ],
+                },
+              ],
+              primary_ips: [
+                {
+                  type: "ipv4",
+                  prices: [
+                    {
+                      location: location.name,
+                      price_hourly: { net: "0.0010", gross: "0.00119" },
+                      price_monthly: { net: "0.5000", gross: "0.5950" },
+                    },
+                  ],
+                },
+              ],
+            },
+          });
+        }
+        throw new Error(`Unhandled ${url.pathname}`);
+      }),
+    });
+
+    await expect(
+      client.observeCatalog({
+        requiredServerTypes: ["cx43"],
+        permittedLocations: ["nbg1"],
+        systemImage: "debian-13",
+      }),
+    ).resolves.toMatchObject({
+      serverTypes: [
+        {
+          name: "cx43",
+          locations: [{ name: "nbg1", available: false }],
+        },
+      ],
+    });
+  });
+
   it("requires exact server and IPv4 pricing in every permitted location", async () => {
     let ipv4Prices: Array<{
       location: string;

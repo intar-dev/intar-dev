@@ -118,6 +118,49 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     expect(provider.operations.length).toBeGreaterThan(0);
   });
 
+  it("does not let an older capacity-waiting type block a later type on the same connection", async () => {
+    await insertSameConnectionPublicationFixture("cpx42", NOW + 1, "cpx42");
+    provider.run.mockImplementation(async (request: RunOperationRequest) => {
+      if (request.operation.kind === "catalog") {
+        const serverType = request.operation.requiredServerTypes[0] ?? "cx43";
+        return {
+          data: catalog({
+            serverType,
+            available: serverType !== "cx43",
+          }),
+          canonicalWrites: [],
+          mustPersistBeforeNextOperation: false,
+        };
+      }
+      return providerOperation(request);
+    });
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 2 }),
+    ).resolves.toMatchObject({
+      publicationId: PUBLICATION_ID,
+      checkpointId: "00",
+      state: "waiting",
+    });
+    expect(await attemptCount(CHECKPOINT_ID)).toBe(0);
+    expect(await attemptCount("provider-checkpoint-cpx42")).toBe(0);
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 3 }),
+    ).resolves.toMatchObject({
+      publicationId: "publication-cpx42",
+      checkpointId: "00-cpx42",
+      state: "allocating",
+    });
+    expect(await attemptCount(CHECKPOINT_ID)).toBe(0);
+    expect(await attemptCount("provider-checkpoint-cpx42")).toBe(1);
+    expect(
+      provider.operations.find(
+        (operation) => operation.kind === "create_server",
+      ),
+    ).toMatchObject({ serverType: "cpx42" });
+  });
+
   it("does not let stuck cleanup block a later publication", async () => {
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
     const attempt = await currentAttempt();
@@ -642,7 +685,11 @@ function providerTime(): string {
   return new Date(NOW).toISOString();
 }
 
-function catalog() {
+function catalog(
+  options: { serverType?: string; available?: boolean } = {},
+) {
+  const serverType = options.serverType ?? "cx43";
+  const available = options.available ?? true;
   const prices = ["nbg1", "fsn1", "hel1"].map((location, index) => ({
     location,
     price_hourly: {
@@ -657,9 +704,9 @@ function catalog() {
     observedAt: providerTime(),
     serverTypes: [
       {
-        id: 43,
-        name: "cx43",
-        description: "CX43",
+        id: serverType === "cx43" ? 43 : 42,
+        name: serverType,
+        description: serverType.toUpperCase(),
         category: "cost_optimized",
         cores: 8,
         memory: 16,
@@ -673,7 +720,7 @@ function catalog() {
           id: index + 1,
           name,
           recommended: index === 0,
-          available: true,
+          available,
         })),
       },
     ],
@@ -695,7 +742,13 @@ function catalog() {
     pricing: {
       currency: "NOK",
       vat_rate: "25.0",
-      server_types: [{ id: 43, name: "cx43", prices }],
+      server_types: [
+        {
+          id: serverType === "cx43" ? 43 : 42,
+          name: serverType,
+          prices,
+        },
+      ],
       primary_ips: [
         {
           type: "ipv4",
@@ -816,7 +869,9 @@ async function insertProviderCheckpoint(input: {
   publicationId?: string;
   connectionId?: string;
   createdAt?: number;
+  serverType?: string;
 }): Promise<void> {
+  const serverType = input.serverType ?? "cx43";
   await env.DB.prepare(
     `INSERT INTO workshop_publication_provider_checkpoints (
        id, publication_id, checkpoint_id, ordinal,
@@ -842,7 +897,7 @@ async function insertProviderCheckpoint(input: {
       JSON.stringify({
         kind: "hetzner_cloud",
         vmId: "learner",
-        serverType: "cx43",
+        serverType,
         systemImage: "debian-13",
         hardware: {
           architecture: "x86",
@@ -857,7 +912,7 @@ async function insertProviderCheckpoint(input: {
         currency: "NOK",
         observedAt: NOW - 60_000,
         expiresAt: NOW + 86_400_000,
-        serverType: "cx43",
+        serverType,
         locations: [
           {
             location: "nbg1",
@@ -970,6 +1025,42 @@ async function insertAdditionalPublicationFixture(
     publicationId,
     connectionId,
     createdAt,
+  });
+}
+
+async function insertSameConnectionPublicationFixture(
+  suffix: string,
+  createdAt: number,
+  serverType: string,
+): Promise<void> {
+  const publicationId = `publication-${suffix}`;
+  await env.DB.prepare(
+    `INSERT INTO workshop_publications (
+       id, organization_id, workshop_slug, content_hash, source_r2_key,
+       compiled_manifest_json, required_checkpoint_ids_json, status,
+       submitted_by, registry_token_id, provider_verification_state,
+       created_at, updated_at
+     ) VALUES (?, 'org-verifier', ?, ?, ?, '{}', ?, 'building',
+               'owner-verifier', 'registry-token-verifier', 'verifying', ?, ?)`,
+  )
+    .bind(
+      publicationId,
+      `workshop-${suffix}`,
+      suffix.padEnd(64, "4"),
+      `source/${suffix}.tar.zst`,
+      JSON.stringify([`00-${suffix}`]),
+      createdAt,
+      createdAt,
+    )
+    .run();
+  await insertProviderCheckpoint({
+    id: `provider-checkpoint-${suffix}`,
+    checkpointId: `00-${suffix}`,
+    ordinal: 0,
+    publicationId,
+    connectionId: CONNECTION_ID,
+    createdAt,
+    serverType,
   });
 }
 

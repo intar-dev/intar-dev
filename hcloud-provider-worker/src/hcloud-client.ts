@@ -625,25 +625,7 @@ function assertPricingCoverage(
   }
 }
 
-function serverTypeAvailableInPermittedLocation(
-  serverType: HcloudServerType,
-  permittedLocations: string[],
-): boolean {
-  const locationStates = serverType.locations ?? [];
-  return (
-    locationStates.length === 0 ||
-    permittedLocations.some((location) =>
-      locationStates.some(
-        (state) => state.name === location && state.available && state.deprecation == null,
-      ),
-    )
-  );
-}
-
-function supportedX86ServerType(
-  serverType: HcloudServerType,
-  permittedLocations: string[],
-): boolean {
+function supportedX86ServerType(serverType: HcloudServerType): boolean {
   return (
     serverType.architecture === "x86" &&
     serverType.deprecated !== true &&
@@ -655,8 +637,7 @@ function supportedX86ServerType(
     Number.isFinite(serverType.memory) &&
     serverType.memory > 0 &&
     Number.isSafeInteger(serverType.disk) &&
-    serverType.disk > 0 &&
-    serverTypeAvailableInPermittedLocation(serverType, permittedLocations)
+    serverType.disk > 0
   );
 }
 
@@ -955,20 +936,23 @@ export class HcloudClient {
       });
     }
 
-    const supportedServerTypes = allServerTypes.filter((serverType) =>
-      supportedX86ServerType(serverType, input.permittedLocations),
-    );
+    // `locations[].available` is a transient capacity signal, not part of a
+    // server type's immutable identity. Keep the exact, structurally valid
+    // type in the catalog even when every permitted location is temporarily
+    // exhausted. Allocation and publication verification consume the
+    // availability flags and wait without creating resources.
+    const supportedServerTypes = allServerTypes.filter(supportedX86ServerType);
     if (input.requiredServerTypes.length === 0 && supportedServerTypes.length === 0) {
       throw new ProviderServiceError({
         code: "hcloud_server_type_unavailable",
-        message: "No supported x86 Hetzner server type is available in the permitted locations",
+        message: "No supported x86 Hetzner server type exists",
         retryable: false,
       });
     }
 
     const serverTypes = input.requiredServerTypes.map((name) => {
       const serverType = allServerTypes.find((candidate) => candidate.name === name);
-      if (!serverType || !supportedX86ServerType(serverType, input.permittedLocations)) {
+      if (!serverType || !supportedX86ServerType(serverType)) {
         throw new ProviderServiceError({
           code: "hcloud_server_type_unavailable",
           message: `Required Hetzner server type ${redactString(name)} is unavailable`,
@@ -1000,8 +984,9 @@ export class HcloudClient {
     return {
       observedAt: this.#now().toISOString(),
       // An empty requested list is the organization-connection preflight. It
-      // proves the project has at least one usable x86 type without coupling
-      // the connection to any workshop's exact immutable type.
+      // proves the project exposes at least one supported x86 type without
+      // coupling the connection to current capacity or to any workshop's
+      // exact immutable type.
       serverTypes: input.requiredServerTypes.length === 0 ? [] : serverTypes,
       locations,
       systemImages: [matchingImage],
