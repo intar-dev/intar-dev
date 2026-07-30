@@ -2244,17 +2244,32 @@ mod tests {
                 r#"
 set -euo pipefail
 source "$1"
-initial='waiting for Talos API (to bootstrap the cluster)
-bootstrapping cluster
-bootstrap error: rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: EOF"'
+initial='creating controlplane nodes
+creating worker nodes
+waiting for Talos API (to bootstrap the cluster)
+bootstrap error: 4 error(s) occurred:
+	rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: EOF"
+	rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: read tcp 127.0.0.1:50394->127.0.0.1:36519: read: connection reset by peer"
+	rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: read tcp 127.0.0.1:59914->127.0.0.1:36519: read: connection reset by peer"
+	timeout'
 is_initial_talos_bootstrap_unavailable_eof "$initial"
 ! is_initial_talos_bootstrap_unavailable_eof 'bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
-! is_initial_talos_bootstrap_unavailable_eof 'bootstrapping cluster
+post_rpc='creating controlplane nodes
+creating worker nodes
 waiting for Talos API (to bootstrap the cluster)
-bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
-! is_initial_talos_bootstrap_unavailable_eof 'waiting for Talos API (to bootstrap the cluster)
 bootstrapping cluster
-bootstrap error: rpc error: code = DeadlineExceeded desc = authentication handshake failed: EOF'
+bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
+is_initial_talos_bootstrap_unavailable_eof "$post_rpc"
+! is_initial_talos_bootstrap_unavailable_eof 'creating worker nodes
+creating controlplane nodes
+waiting for Talos API (to bootstrap the cluster)
+bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF
+	timeout'
+! is_initial_talos_bootstrap_unavailable_eof 'creating controlplane nodes
+creating worker nodes
+waiting for Talos API (to bootstrap the cluster)
+bootstrap error: rpc error: code = DeadlineExceeded desc = authentication handshake failed: EOF
+	timeout'
 is_retry_talos_bootstrap_unavailable_eof 'error executing bootstrap: rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: EOF"'
 ! is_retry_talos_bootstrap_unavailable_eof 'bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
 ! is_retry_talos_bootstrap_unavailable_eof 'error executing bootstrap: rpc error: code = Unavailable desc = unrelated'
