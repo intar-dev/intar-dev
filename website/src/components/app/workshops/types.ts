@@ -406,6 +406,21 @@ export interface WorkshopSessionResponse {
   session: WorkshopSessionDetail;
 }
 
+export interface WorkshopRegistryTokenSummary {
+  id: string;
+  name: string;
+  tokenPrefix: string;
+  lastUsedAt: number | null;
+  expiresAt: number | null;
+  revokedAt: number | null;
+  createdAt: number;
+}
+
+export interface CreatedWorkshopRegistryToken
+  extends WorkshopRegistryTokenSummary {
+  token: string;
+}
+
 export interface OrganizationWorkshopTemplate {
   id: string;
   slug: string;

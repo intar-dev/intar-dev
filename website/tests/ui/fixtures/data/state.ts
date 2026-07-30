@@ -1215,6 +1215,7 @@ export function createMockApiState(input?: {
       providerConnections: [],
       capacity: empty ? null : workshopSession.capacity,
     },
+    workshopRegistryTokens: [],
     hosts: empty ? [] : [host],
     hostRuns: empty ? { liveVms: [], archivedRuns: [] } : hostRuns,
     adminScenarios: empty

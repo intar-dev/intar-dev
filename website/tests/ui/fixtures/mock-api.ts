@@ -810,6 +810,52 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (
+        /^\/api\/organizations\/[^/]+\/workshops\/tokens$/.test(pathname) &&
+        method === "GET"
+      ) {
+        await json(route, { tokens: server.state.workshopRegistryTokens });
+        return;
+      }
+      if (
+        /^\/api\/organizations\/[^/]+\/workshops\/tokens$/.test(pathname) &&
+        method === "POST"
+      ) {
+        const body = await requestBody(route);
+        const token = `intar_ws_${"d".repeat(64)}`;
+        const created = {
+          id: "workshop-registry-token-created",
+          name: String(body.name ?? "Workshop publisher"),
+          tokenPrefix: token.slice(0, "intar_ws_".length + 10),
+          token,
+          lastUsedAt: null,
+          expiresAt:
+            typeof body.expiresAfterMinutes === "number"
+              ? FIXED_NOW + body.expiresAfterMinutes * 60_000
+              : FIXED_NOW + 24 * 60 * 60 * 1_000,
+          revokedAt: null,
+          createdAt: FIXED_NOW,
+        };
+        server.state.workshopRegistryTokens.unshift(
+          Object.fromEntries(
+            Object.entries(created).filter(([key]) => key !== "token"),
+          ),
+        );
+        await json(route, created, 201);
+        return;
+      }
+      const workshopRegistryTokenId = segment(
+        pathname,
+        /^\/api\/organizations\/[^/]+\/workshops\/tokens\/([^/]+)$/,
+      );
+      if (workshopRegistryTokenId && method === "DELETE") {
+        const token = server.state.workshopRegistryTokens.find(
+          (entry) => entry.id === workshopRegistryTokenId,
+        );
+        if (token) token.revokedAt = FIXED_NOW;
+        await noContent(route);
+        return;
+      }
+      if (
         /^\/api\/organizations\/[^/]+\/workshop-sessions$/.test(pathname) &&
         method === "POST"
       ) {

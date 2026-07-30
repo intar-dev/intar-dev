@@ -7,6 +7,7 @@ import { createAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
 
 const TOKEN_PREFIX = "intar_ws_";
+const DEFAULT_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 const MAX_TOKEN_LIFETIME_MS = 366 * 24 * 60 * 60 * 1_000;
 
 export interface WorkshopRegistryTokenSummary {
@@ -23,13 +24,9 @@ export async function createWorkshopRegistryToken(params: {
   organizationId: string;
   actorUserId: string;
   name: string;
-  expiresAt?: number | null;
+  expiresAt?: number;
 }): Promise<WorkshopRegistryTokenSummary & { token: string }> {
-  await requireOrganizationRole({
-    organizationId: params.organizationId,
-    userId: params.actorUserId,
-    admin: true,
-  });
+  await requireOwner(params.organizationId, params.actorUserId);
   const name = params.name.trim();
   if (!name || name.length > 80) {
     throw appError(
@@ -39,12 +36,11 @@ export async function createWorkshopRegistryToken(params: {
     );
   }
   const now = Date.now();
-  const expiresAt = params.expiresAt ?? null;
+  const expiresAt = params.expiresAt ?? now + DEFAULT_TOKEN_LIFETIME_MS;
   if (
-    expiresAt !== null &&
-    (!Number.isSafeInteger(expiresAt) ||
-      expiresAt <= now ||
-      expiresAt > now + MAX_TOKEN_LIFETIME_MS)
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= now ||
+    expiresAt > now + MAX_TOKEN_LIFETIME_MS
   ) {
     throw appError(
       400,
@@ -83,11 +79,7 @@ export async function listWorkshopRegistryTokens(params: {
   organizationId: string;
   actorUserId: string;
 }): Promise<WorkshopRegistryTokenSummary[]> {
-  await requireOrganizationRole({
-    organizationId: params.organizationId,
-    userId: params.actorUserId,
-    admin: true,
-  });
+  await requireOwner(params.organizationId, params.actorUserId);
   return drizzle(env.DB)
     .select({
       id: workshopRegistryTokens.id,
@@ -108,12 +100,9 @@ export async function revokeWorkshopRegistryToken(params: {
   actorUserId: string;
   tokenId: string;
 }): Promise<void> {
-  await requireOrganizationRole({
-    organizationId: params.organizationId,
-    userId: params.actorUserId,
-    admin: true,
-  });
-  const updated = await drizzle(env.DB)
+  await requireOwner(params.organizationId, params.actorUserId);
+  const db = drizzle(env.DB);
+  const updated = await db
     .update(workshopRegistryTokens)
     .set({ revokedAt: Date.now() })
     .where(
@@ -124,13 +113,29 @@ export async function revokeWorkshopRegistryToken(params: {
       ),
     )
     .returning({ id: workshopRegistryTokens.id });
-  if (!updated.length) {
-    throw appError(
-      404,
-      "workshop_registry_token_not_found",
-      "workshop registry token not found",
-    );
+  if (updated.length) return;
+
+  const existing = await db
+    .select({
+      id: workshopRegistryTokens.id,
+      revokedAt: workshopRegistryTokens.revokedAt,
+    })
+    .from(workshopRegistryTokens)
+    .where(
+      and(
+        eq(workshopRegistryTokens.id, params.tokenId),
+        eq(workshopRegistryTokens.organizationId, params.organizationId),
+      ),
+    )
+    .limit(1);
+  if (existing[0]?.revokedAt !== null && existing[0]?.revokedAt !== undefined) {
+    return;
   }
+  throw appError(
+    404,
+    "workshop_registry_token_not_found",
+    "workshop registry token not found",
+  );
 }
 
 export async function hashWorkshopRegistryToken(token: string): Promise<string> {
@@ -149,4 +154,18 @@ function createOpaqueToken(): string {
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return `${TOKEN_PREFIX}${body}`;
+}
+
+async function requireOwner(
+  organizationId: string,
+  userId: string,
+): Promise<void> {
+  const role = await requireOrganizationRole({ organizationId, userId });
+  if (role !== "owner") {
+    throw appError(
+      403,
+      "organization_owner_required",
+      "organization owner role required",
+    );
+  }
 }
