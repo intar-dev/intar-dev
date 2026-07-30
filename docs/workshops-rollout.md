@@ -906,7 +906,7 @@ Exercise all seven declared applications after releasing their modules:
 | Gitea | 30300 |
 | Argo CD | 30080 |
 | RustFS | 30901 |
-| Knative | 31081 |
+| Knative | 31080 |
 | Zot | 30500 |
 | Cloudbox Console | 30600 |
 | Grafana | 30030 |

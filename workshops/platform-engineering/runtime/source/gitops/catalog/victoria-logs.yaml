@@ -1,7 +1,8 @@
 # VictoriaLogs 1.24.0 — single-node log database (observability rework, issue #57).
 # Logs backend for the Victoria stack: OTLP logs ingest at :9428
-# /insert/opentelemetry/v1/logs, LogsQL /select/logsql/query, Loki-compatible
-# query API for Grafana. In-cluster: victoria-logs.observability.svc:9428.
+# /insert/opentelemetry/v1/logs and LogsQL /select/logsql/query. Grafana
+# uses the checksum-pinned native VictoriaLogs plugin. In-cluster:
+# victoria-logs.observability.svc:9428.
 # Sync-wave 0 (a storage backend). Part of the on-demand observability capability.
 #
 # Enable with:  cp gitops/catalog/victoria-logs.yaml gitops/apps/ && git add . && git commit -m 'enable victoria-logs' && git push

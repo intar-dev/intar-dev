@@ -4,8 +4,8 @@
 # Listens on :9428:
 #   - OTLP logs ingest → POST /insert/opentelemetry/v1/logs
 #   - LogsQL query     → GET  /select/logsql/query
-#   - Loki-compatible query API (used by Grafana's Loki datasource, see
-#     grafana/VENDOR.md) under /select/loki/api/v1/*
+#   - Grafana queries through the checksum-pinned native VictoriaLogs
+#     datasource plugin; VictoriaLogs does not expose a Loki query API.
 # Part of the on-demand observability capability (namespace observability).
 apiVersion: v1
 kind: PersistentVolumeClaim
