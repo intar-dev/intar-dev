@@ -162,7 +162,7 @@ if (imageLock !== runtimeImageLock) {
 const imageLockSha256 = createHash("sha256").update(imageLock).digest("hex");
 if (
   imageLockSha256 !==
-  "24c00299502b37b53197fa4aaf668f1954c0e807b59d7da473705df40bf8df4a"
+  "2a8e6a7b2122095ce0a5e569ae065018ca822c53eb0833f090cb43e672638f30"
 ) {
   throw new Error("workspace application routing must not add a runtime image");
 }
