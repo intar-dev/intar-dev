@@ -519,12 +519,26 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).toContain('reconstruction_home = "/home/intar"');
     expect(cloudInit).toContain('probe "module-00-workspace-ready"');
     expect(cloudInit).toContain("intar-kino-shell");
-    expect(cloudInit).toContain(
-      "/usr/sbin/runuser --user intar --",
+    const probeRunner = cloudInitWriteFile(
+      cloudInit,
+      "/usr/libexec/intar-workshop-run-probe",
     );
-    expect(cloudInit).toContain(
-      "/var/lib/intar-workshop-probes/00.sh",
+    expect(probeRunner).toContain(
+      `/usr/bin/setpriv \\
+        --reuid=intar \\
+        --regid=intar \\
+        --init-groups \\
+        -- \\
+        /usr/bin/env -i \\`,
     );
+    expect(probeRunner).toContain("HOME=/home/intar");
+    expect(probeRunner).toContain("USER=intar");
+    expect(probeRunner).toContain("LOGNAME=intar");
+    expect(probeRunner).not.toContain("runuser");
+    expect(probeRunner).toMatch(
+      /status="\$\?"[\s\S]*printf '\{"passed":false\}\\n'[\s\S]*exit "\$\{status\}"/,
+    );
+    expect(cloudInit).toContain("/var/lib/intar-workshop-probes/00.sh");
     expect(cloudInit).toContain("HOME=/home/intar");
     expect(cloudInit).toContain("ProtectHome=read-only");
     expect(cloudInit).toContain("ReadWritePaths=/home/intar");
@@ -540,6 +554,13 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).not.toContain("hcloud_token");
   });
 });
+
+function cloudInitWriteFile(cloudInit: string, path: string): string {
+  const start = cloudInit.indexOf(`  - path: ${path}\n`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = cloudInit.indexOf("\n  - path: ", start + 1);
+  return cloudInit.slice(start, end < 0 ? undefined : end);
+}
 
 async function seedGeneration() {
   const db = drizzle(env.DB);

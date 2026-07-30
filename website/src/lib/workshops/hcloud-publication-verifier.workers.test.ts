@@ -543,6 +543,54 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     expect(provider.finalize).not.toHaveBeenCalled();
   });
 
+  it("retries a persistent ready-state probe failure after confirmed cleanup", async () => {
+    await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
+    await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 });
+    const attempt = await currentAttempt();
+    await env.DB.prepare(
+      `UPDATE workshop_publication_provider_attempts
+       SET state = 'failed',
+           last_error_code = 'publication_verifier_probe_persisted',
+           error = 'required workshop probe remained failed after readiness',
+           updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(NOW + 2, attempt?.id)
+      .run();
+
+    for (let offset = 2; offset <= 8; offset += 1) {
+      await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + offset });
+    }
+
+    const publication = await env.DB.prepare(
+      `SELECT status, provider_verification_state
+       FROM workshop_publications WHERE id = ?`,
+    )
+      .bind(PUBLICATION_ID)
+      .first<Record<string, unknown>>();
+    expect(publication).toEqual({
+      status: "building",
+      provider_verification_state: "verifying",
+    });
+    const attempts = await env.DB.prepare(
+      `SELECT ordinal, state, deletion_confirmed_at
+       FROM workshop_publication_provider_attempts
+       WHERE provider_checkpoint_id = ?
+       ORDER BY ordinal`,
+    )
+      .bind(CHECKPOINT_ID)
+      .all<Record<string, unknown>>();
+    expect(attempts.results).toEqual([
+      {
+        ordinal: 1,
+        state: "deleted",
+        deletion_confirmed_at: expect.any(Number),
+      },
+      expect.objectContaining({ ordinal: 2 }),
+    ]);
+    expect(provider.finalize).not.toHaveBeenCalled();
+  });
+
   it("resumes cleanup after provider access returns and restores publication state", async () => {
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 });

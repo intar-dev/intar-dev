@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { countLiveHetznerAllocations } from "@/lib/workshops/provider-connections";
 import { resetD1Database } from "@/test/d1-migrations";
 import { handleWorkshopPublicationVerifierRequest } from "./workshop-publication-verifier";
@@ -35,10 +35,14 @@ describe("workshop publication verifier guest boundary", () => {
     await seedAttempt();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("exchanges a one-use bootstrap capability for scoped credentials", async () => {
-    await expect(
-      countLiveHetznerAllocations("connection-0001"),
-    ).resolves.toBe(1);
+    await expect(countLiveHetznerAllocations("connection-0001")).resolves.toBe(
+      1,
+    );
     const first = await bootstrapRequest();
     expect(first.status).toBe(200);
     const payload = await first.json<{
@@ -62,18 +66,16 @@ describe("workshop publication verifier guest boundary", () => {
     expect(JSON.stringify(stored)).not.toContain(BOOTSTRAP);
     expect(JSON.stringify(stored)).not.toContain(payload.report_credential);
 
-    const checkpoint = await handle(
-      new Request(payload.checkpoint.signed_url),
-    );
+    const checkpoint = await handle(new Request(payload.checkpoint.signed_url));
     expect(checkpoint.status).toBe(200);
     expect(new Uint8Array(await checkpoint.arrayBuffer())).toEqual(BUNDLE);
     expect(checkpoint.headers.get("cache-control")).toBe("private, no-store");
   });
 
   it("holds provider capacity until verifier deletion is confirmed", async () => {
-    await expect(
-      countLiveHetznerAllocations("connection-0001"),
-    ).resolves.toBe(1);
+    await expect(countLiveHetznerAllocations("connection-0001")).resolves.toBe(
+      1,
+    );
     await env.DB.prepare(
       `UPDATE workshop_publication_provider_attempts
        SET state = 'deleted', deletion_requested_at = ?,
@@ -82,9 +84,9 @@ describe("workshop publication verifier guest boundary", () => {
     )
       .bind(NOW + 1, NOW + 2, NOW + 2, "attempt-0001")
       .run();
-    await expect(
-      countLiveHetznerAllocations("connection-0001"),
-    ).resolves.toBe(0);
+    await expect(countLiveHetznerAllocations("connection-0001")).resolves.toBe(
+      0,
+    );
   });
 
   it("requires the complete healthy proof and latches it for cleanup", async () => {
@@ -134,6 +136,137 @@ describe("workshop publication verifier guest boundary", () => {
     });
 
     expect((await reportRequest(credential, proofReport(4))).status).toBe(401);
+  });
+
+  it("allows one ready probe miss to recover on the next report", async () => {
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+
+    const first = await reportRequest(credential, {
+      ...proofReport(1),
+      probes: [
+        { id: "setup-ready", status: "pass", observed_at_unix_ms: NOW },
+        { id: "docker-ready", status: "fail", observed_at_unix_ms: NOW },
+      ],
+    });
+    expect(first.status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+      last_error_code: null,
+    });
+
+    const recovered = await reportRequest(credential, proofReport(2));
+    expect(recovered.status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "proof_succeeded",
+      proof_report_sequence: 2,
+      proof_verified_at: expect.any(Number),
+      last_error_code: null,
+    });
+  });
+
+  it("fails a verifier attempt only after a ready probe remains failed beyond one full run", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+    expect(
+      (await reportRequest(credential, failingProofReport(1))).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      last_error_code: null,
+    });
+    clock.mockReturnValue(NOW + 10_000);
+    expect(
+      (await reportRequest(credential, failingProofReport(2))).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+      last_error_code: null,
+    });
+
+    clock.mockReturnValue(NOW + 5 * 60_000);
+    expect(
+      (await reportRequest(credential, failingProofReport(3))).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "failed",
+      proof_verified_at: null,
+      last_error_code: "publication_verifier_probe_persisted",
+      error:
+        "required workshop probes remained failed after readiness: docker-ready",
+    });
+    expect(
+      (await reportRequest(credential, failingProofReport(4))).status,
+    ).toBe(401);
+  });
+
+  it("starts failure persistence only after checkpoint download", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+
+    expect(
+      (await reportRequest(credential, failingProofReport(1))).status,
+    ).toBe(200);
+    clock.mockReturnValue(NOW + 5 * 60_000);
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+    expect(
+      (await reportRequest(credential, failingProofReport(2))).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+      last_error_code: null,
+    });
+  });
+
+  it("resets failure persistence across a report sequence gap", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+    expect(
+      (await reportRequest(credential, failingProofReport(1))).status,
+    ).toBe(200);
+
+    clock.mockReturnValue(NOW + 5 * 60_000);
+    expect(
+      (await reportRequest(credential, failingProofReport(3))).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+      last_error_code: null,
+    });
   });
 
   it("rejects stale verifier identities and moves guest failures to deletion", async () => {
@@ -328,6 +461,17 @@ function proofReport(sequence: number) {
   };
 }
 
+function failingProofReport(sequence: number) {
+  return {
+    ...proofReport(sequence),
+    error: "guest supplied diagnostic",
+    probes: [
+      { id: "setup-ready", status: "pass", observed_at_unix_ms: NOW },
+      { id: "docker-ready", status: "fail", observed_at_unix_ms: NOW },
+    ],
+  };
+}
+
 async function bootstrapRequest(): Promise<Response> {
   return handle(
     new Request(
@@ -378,7 +522,8 @@ async function handle(request: Request): Promise<Response> {
 
 async function attemptState(): Promise<Record<string, unknown> | null> {
   return env.DB.prepare(
-    `SELECT state, proof_report_sequence, proof_verified_at, last_error_code
+    `SELECT state, proof_report_sequence, proof_verified_at, last_error_code,
+            error
      FROM workshop_publication_provider_attempts WHERE id = ?`,
   )
     .bind("attempt-0001")

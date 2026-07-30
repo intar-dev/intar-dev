@@ -463,15 +463,19 @@ ${indentCloudInit(kinoConfig, 6)}
       set -u
       verifier="\${1:?missing verifier}"
       set +e
-      /usr/sbin/runuser --user intar -- \
-        /usr/bin/env -i \
-          HOME=/home/intar \
-          USER=intar \
-          LOGNAME=intar \
-          SHELL=/bin/bash \
-          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-          LANG=C.UTF-8 \
-          LC_ALL=C.UTF-8 \
+      /usr/bin/setpriv \\
+        --reuid=intar \\
+        --regid=intar \\
+        --init-groups \\
+        -- \\
+        /usr/bin/env -i \\
+          HOME=/home/intar \\
+          USER=intar \\
+          LOGNAME=intar \\
+          SHELL=/bin/bash \\
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+          LANG=C.UTF-8 \\
+          LC_ALL=C.UTF-8 \\
           "\${verifier}" </dev/null >/dev/null 2>&1
       status="\$?"
       set -e
@@ -479,6 +483,7 @@ ${indentCloudInit(kinoConfig, 6)}
         printf '{"passed":true}\\n'
       else
         printf '{"passed":false}\\n'
+        exit "\${status}"
       fi
 
   - path: /usr/local/sbin/intar-kino-shell
