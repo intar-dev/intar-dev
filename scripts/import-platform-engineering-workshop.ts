@@ -1643,6 +1643,11 @@ function copyRuntimePath(relativePath: string) {
       content = adaptDestroyCluster(content);
     } else if (relativePath === "scripts/bootstrap-gitops.sh") {
       content = adaptGiteaDigestValues(content);
+    } else if (
+      relativePath ===
+      "gitops/components/local-path-provisioner/local-path-storage.yaml"
+    ) {
+      content = adaptContainerizedTalosLocalStorage(content);
     } else if (relativePath === "scripts/seed-gitea.sh") {
       content = adaptSeedGiteaForSealedCheckpoints(content);
     } else if (relativePath === "gitops/components/rustfs/service-nodeport.yaml") {
@@ -1900,9 +1905,22 @@ function adaptTalosSystemImagePins(value: string): string {
   const adapted = value.replace("cluster:\n  network:", clusterImages);
   if (adapted === value) throw new Error("Talos machine patch anchor changed upstream");
   const withKubeletImages = adapted.replace(
-    "  kubelet:\n    extraMounts:",
-    `  kubelet:\n    image: ${pin("ghcr.io/siderolabs/kubelet:v1.36.2")}\n    extraArgs:\n      pod-infra-container-image: ${pin("registry.k8s.io/pause:3.10.1")}\n    extraMounts:`,
+    `  kubelet:
+    extraMounts:
+      # local-path-provisioner writes PV data here; without this bind mount
+      # every PVC on Talos stays Pending (kubelet cannot reach the host path).
+      - destination: /var/local-path-provisioner
+        type: bind
+        source: /var/local-path-provisioner
+        options: [bind, rshared, rw]`,
+    `  kubelet:
+    image: ${pin("ghcr.io/siderolabs/kubelet:v1.36.2")}
+    extraArgs:
+      pod-infra-container-image: ${pin("registry.k8s.io/pause:3.10.1")}`,
   );
+  if (withKubeletImages === adapted) {
+    throw new Error("Talos kubelet mount anchor changed upstream");
+  }
   const withControlPlaneEtcd = withKubeletImages.replace(
     `patches=(--config-patch "\${CNI_PATCH}")`,
     `# Talos rejects cluster.etcd configuration on worker machine configs, so
@@ -1923,6 +1941,31 @@ patches=(
     throw new Error("Talos role-specific patch anchor changed upstream");
   }
   return withControlPlaneEtcd;
+}
+
+function adaptContainerizedTalosLocalStorage(value: string): string {
+  const oldComment = `  # Workshop curation: Talos has an immutable root filesystem — /opt is not
+  # writable. /var/local-path-provisioner is the Talos-supported location and
+  # MUST be bind-mounted into the kubelet via a machine-config patch
+  # (machine.kubelet.extraMounts). See scripts/create-cluster.sh.`;
+  const newComment = `  # Workshop curation: Talos already bind-mounts /var/lib/kubelet into its
+  # kubelet system container with recursive shared propagation. Keeping
+  # workshop PVs below that existing mount avoids a second self-recursive
+  # kubelet extra mount while preserving hostPath visibility.`;
+  const adapted = value
+    .replace(oldComment, newComment)
+    .replaceAll(
+      "/var/local-path-provisioner",
+      "/var/lib/kubelet/local-path-provisioner",
+    );
+  if (
+    adapted === value ||
+    adapted.includes("/var/local-path-provisioner") ||
+    !adapted.includes("/var/lib/kubelet/local-path-provisioner")
+  ) {
+    throw new Error("Talos local-path storage anchor changed upstream");
+  }
+  return adapted;
 }
 
 function adaptCreateClusterForExternalRegistries(value: string): string {

@@ -60,13 +60,6 @@ machine:
     image: ghcr.io/siderolabs/kubelet:v1.36.2@sha256:e594fcc880e6d2816b3334e4ddfd586b420ca8c3a4dd2b40e9de1571e69e559a
     extraArgs:
       pod-infra-container-image: registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
-    extraMounts:
-      # local-path-provisioner writes PV data here; without this bind mount
-      # every PVC on Talos stays Pending (kubelet cannot reach the host path).
-      - destination: /var/local-path-provisioner
-        type: bind
-        source: /var/local-path-provisioner
-        options: [bind, rshared, rw]
 EOF
 )"
 
@@ -146,7 +139,19 @@ cleanup_destroyed_cluster_contexts() {
 }
 
 collect_failed_cluster_logs() {
-  local archive archive_members destroy_status
+  local archive archive_members disk_available_inodes disk_available_kib
+  local destroy_status mount_count mount_max
+
+  disk_available_kib="$(
+    df -Pk /var/lib/docker 2>/dev/null | awk 'NR == 2 { print $4 }' || true
+  )"
+  disk_available_inodes="$(
+    df -Pi /var/lib/docker 2>/dev/null | awk 'NR == 2 { print $4 }' || true
+  )"
+  mount_count="$(awk 'END { print NR }' /proc/self/mountinfo 2>/dev/null || true)"
+  mount_max="$(awk 'NR == 1 { print $1 }' /proc/sys/fs/mount-max 2>/dev/null || true)"
+  warn "Host capacity at failure: docker_available_kib=${disk_available_kib:-unknown} docker_available_inodes=${disk_available_inodes:-unknown} mount_count=${mount_count:-unknown} mount_max=${mount_max:-unknown}"
+
   archive="$(
     umask 077
     mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-failure.XXXXXX"
