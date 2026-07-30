@@ -32,7 +32,7 @@ export async function createWorkshopHelpRequest(params: {
   message: string;
 }): Promise<WorkshopHelpRequestRecord> {
   const access = await requireWorkshopSessionMember(params);
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_participant_required",
@@ -131,6 +131,7 @@ export async function claimWorkshopHelpRequest(params: {
         eq(workshopHelpRequests.id, params.helpRequestId),
         eq(workshopHelpRequests.sessionId, params.sessionId),
         eq(workshopHelpRequests.status, "open"),
+        sql`${workshopHelpRequests.requesterUserId} <> ${params.helperUserId}`,
         sql`EXISTS (
           SELECT 1
           FROM workshop_sessions session
@@ -151,6 +152,13 @@ export async function claimWorkshopHelpRequest(params: {
   const row = rows[0];
   if (!row) {
     const existing = await loadHelpRequest(params.sessionId, params.helpRequestId);
+    if (existing.requesterUserId === params.helperUserId) {
+      throw appError(
+        409,
+        "workshop_help_request_self_claim",
+        "a distinct helper must claim the help request",
+      );
+    }
     if (existing.claimedBy === params.helperUserId && existing.status === "claimed") {
       return existing;
     }
@@ -242,7 +250,7 @@ export async function closeWorkshopHelpRequest(params: {
           JOIN workshop_session_members actor_roster
             ON actor_roster.session_id = session.id
            AND actor_roster.user_id = ${params.actorUserId}
-           AND actor_roster.role = 'participant'
+           AND actor_roster.workspace_enabled = 1
           JOIN member actor_member
             ON actor_member.organization_id = session.organization_id
            AND actor_member.user_id = ${params.actorUserId}
@@ -304,7 +312,7 @@ export async function grantWorkshopAssist(params: {
     sessionId: params.sessionId,
     userId: params.learnerUserId,
   });
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_participant_required",
@@ -350,6 +358,13 @@ export async function grantWorkshopAssist(params: {
       409,
       "workshop_help_request_not_claimed",
       "a helper must claim the help request before access can be granted",
+    );
+  }
+  if (request.claimedBy === params.learnerUserId) {
+    throw appError(
+      409,
+      "workshop_assist_self_grant",
+      "assistance requires a distinct helper",
     );
   }
   if (!workspace) {

@@ -36,7 +36,7 @@ import type {
   WorkshopSessionDetail,
   WorkshopPresenceState,
 } from "./types";
-import { workshopModuleStateLabel } from "./types";
+import { workshopMemberHasWorkspace, workshopModuleStateLabel } from "./types";
 
 interface FacilitatorControlRoomProps {
   session: WorkshopSessionDetail;
@@ -634,7 +634,7 @@ function RosterMatrix({
                 <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-normal text-muted-foreground">
                   <span className="capitalize">{member.role}</span>
                   <PresenceIndicator member={member} />
-                  {member.role === "participant" && member.checkedInAt ? (
+                  {workshopMemberHasWorkspace(member) && member.checkedInAt ? (
                     <span>checked in</span>
                   ) : null}
                 </span>
@@ -644,7 +644,7 @@ function RosterMatrix({
                   {member.workspaceState?.replace("_", " ") ?? "not started"}
                 </span>
                 {session.viewer.canFacilitate &&
-                member.role === "participant" &&
+                workshopMemberHasWorkspace(member) &&
                 (session.state === "lobby" || session.state === "live") ? (
                   <ParticipantCatchUpControl
                     member={member}

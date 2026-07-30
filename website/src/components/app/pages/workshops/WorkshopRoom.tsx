@@ -35,7 +35,10 @@ import type {
   WorkshopSlide,
   WorkshopWorkspace,
 } from "@/components/app/workshops/types";
-import { workshopSessionStateLabel } from "@/components/app/workshops/types";
+import {
+  workshopMemberHasWorkspace,
+  workshopSessionStateLabel,
+} from "@/components/app/workshops/types";
 import {
   useWorkshopSession,
   workshopSessionQueryKey,
@@ -187,6 +190,7 @@ export function WorkshopRoom() {
       ) ?? null)
     : null;
   const currentAgenda = session.agenda.find((item) => item.active) ?? null;
+  const viewerHasWorkspace = workshopMemberHasWorkspace(session.viewer);
   const activeAssistTerminal = assistTerminal
     ? session.roster.find(
         (member) =>
@@ -208,7 +212,7 @@ export function WorkshopRoom() {
         </Alert>
       ) : null}
 
-      {actionError && session.viewer.role === "participant" ? (
+      {actionError && viewerHasWorkspace ? (
         <Alert variant="destructive">
           <CircleAlert />
           <AlertTitle>That action did not complete</AlertTitle>
@@ -224,14 +228,14 @@ export function WorkshopRoom() {
         onAction={performAction}
       />
 
-      {session.viewer.role === "participant" && currentSlide ? (
+      {viewerHasWorkspace && currentSlide ? (
         <WorkshopParticipantSlide
           slide={currentSlide}
           totalSlides={session.slides.length}
         />
       ) : null}
 
-      {session.viewer.role === "participant" ? (
+      {viewerHasWorkspace ? (
         <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
           <div className="min-w-0 space-y-6">
             {currentModule && currentModule.released ? (
@@ -325,8 +329,7 @@ export function WorkshopRoom() {
         </div>
       ) : null}
 
-      {session.viewer.role !== "participant" ||
-      session.viewer.canFacilitate ? (
+      {session.viewer.canFacilitate || session.viewer.canAssist ? (
         <FacilitatorControlRoom
           session={session}
           busyAction={busyAction}
@@ -486,7 +489,7 @@ function WorkshopNow({
             lab.
           </p>
         </div>
-        {session.viewer.role === "participant" ? (
+        {workshopMemberHasWorkspace(session.viewer) ? (
           session.viewer.checkedIn ? (
             <Badge variant="success" className="h-9 px-3">
               <CheckCircle2 /> Ready for preflight

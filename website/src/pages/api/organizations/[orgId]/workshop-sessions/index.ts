@@ -124,6 +124,7 @@ export const POST: APIRoute = async ({ request, params }) => {
 function parseRoster(value: unknown): Array<{
   userId: string;
   role: "participant" | "helper" | "facilitator";
+  workspaceEnabled: boolean;
 }> {
   if (!Array.isArray(value)) {
     throw appError(
@@ -144,9 +145,13 @@ function parseRoster(value: unknown): Array<{
       ? entry.userId.trim()
       : "";
     const role = "role" in entry ? entry.role : undefined;
+    const workspaceEnabled =
+      "workspaceEnabled" in entry ? entry.workspaceEnabled : undefined;
     if (
       !userId ||
-      (role !== "participant" && role !== "helper" && role !== "facilitator")
+      (role !== "participant" && role !== "helper" && role !== "facilitator") ||
+      (workspaceEnabled !== undefined &&
+        typeof workspaceEnabled !== "boolean")
     ) {
       throw appError(
         400,
@@ -154,7 +159,12 @@ function parseRoster(value: unknown): Array<{
         "workshop roster contains an invalid member",
       );
     }
-    return { userId, role };
+    return {
+      userId,
+      role,
+      workspaceEnabled:
+        role === "participant" || workspaceEnabled === true,
+    };
   });
 }
 

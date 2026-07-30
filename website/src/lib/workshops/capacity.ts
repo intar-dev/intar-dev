@@ -84,9 +84,9 @@ export async function getWorkshopCapacityPreflight(input: {
     }),
     env.DB.prepare(
       `SELECT
-         count(*) FILTER (WHERE member.role = 'participant' AND member.checked_in_at IS NOT NULL) AS checked_in,
+         count(*) FILTER (WHERE member.workspace_enabled = 1 AND member.checked_in_at IS NOT NULL) AS checked_in,
          count(*) FILTER (
-           WHERE member.role = 'participant'
+           WHERE member.workspace_enabled = 1
              AND generation.runtime_execution_id IS NOT NULL
              AND generation.state IN ('queued', 'provisioning', 'ready')
          ) AS provisioned

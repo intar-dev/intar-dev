@@ -1,18 +1,37 @@
 import type { WorkshopSessionRole } from "@/db/schema";
 
+export interface WorkshopRosterInput {
+  userId: string;
+  role: WorkshopSessionRole;
+  workspaceEnabled?: boolean;
+}
+
 /**
  * Keep an explicitly selected role for the manager. Session creation still
  * defaults the manager to facilitator when the roster omits them entirely.
+ * Participant remains the backwards-compatible learner role; staff only gain
+ * a learner workspace when it is explicitly requested.
  */
 export function withWorkshopManagerRosterDefault(
-  members: Array<{ userId: string; role: WorkshopSessionRole }>,
+  members: WorkshopRosterInput[],
   managerUserId: string,
-): Array<{ userId: string; role: WorkshopSessionRole }> {
+): WorkshopRosterInput[] {
   const rosterByUser = new Map(
-    members.map((entry) => [entry.userId, entry.role] as const),
+    members.map((entry) => [
+      entry.userId,
+      {
+        ...entry,
+        workspaceEnabled:
+          entry.role === "participant" || entry.workspaceEnabled === true,
+      },
+    ] as const),
   );
   if (!rosterByUser.has(managerUserId)) {
-    rosterByUser.set(managerUserId, "facilitator");
+    rosterByUser.set(managerUserId, {
+      userId: managerUserId,
+      role: "facilitator",
+      workspaceEnabled: false,
+    });
   }
-  return [...rosterByUser].map(([userId, role]) => ({ userId, role }));
+  return [...rosterByUser.values()];
 }

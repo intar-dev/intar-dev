@@ -77,7 +77,7 @@ export async function prepareCheckedInWorkshopWorkspaces(params: {
     .where(
       and(
         eq(workshopSessionMembers.sessionId, params.sessionId),
-        eq(workshopSessionMembers.role, "participant"),
+        eq(workshopSessionMembers.workspaceEnabled, true),
         isNotNull(workshopSessionMembers.checkedInAt),
       ),
     );
@@ -374,7 +374,7 @@ export async function prepareWorkshopCheckpointRestore(params: {
   if (
     workspace.userId === params.actorUserId &&
     "role" in actorAccess &&
-    actorAccess.role !== "participant"
+    !actorAccess.workspaceEnabled
   ) {
     throw appError(
       403,
@@ -661,7 +661,7 @@ export async function prepareWorkshopLateJoin(params: {
       and(
         eq(workshopSessionMembers.sessionId, params.sessionId),
         eq(workshopSessionMembers.userId, params.participantUserId),
-        eq(workshopSessionMembers.role, "participant"),
+        eq(workshopSessionMembers.workspaceEnabled, true),
       ),
     )
     .limit(1);

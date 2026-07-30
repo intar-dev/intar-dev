@@ -51,7 +51,22 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 
-type RosterChoice = WorkshopMemberRole | "excluded";
+type RosterRole = WorkshopMemberRole | "excluded";
+
+type RosterChoice = {
+  role: RosterRole;
+  workspaceEnabled: boolean;
+};
+
+function makeRosterChoice(
+  role: RosterRole,
+  workspaceEnabled = role === "participant",
+): RosterChoice {
+  return {
+    role,
+    workspaceEnabled: role === "participant" || workspaceEnabled,
+  };
+}
 
 export function OrganizationWorkshops() {
   const { orgId } = useParams({ from: "/app/organizations/$orgId/workshops" });
@@ -1195,18 +1210,27 @@ function ScheduleWorkshopDialog({
         data.members.map((member) => [
           member.userId,
           member.userId === data.viewer.userId
-            ? ("facilitator" as const)
-            : ("excluded" as const),
+            ? makeRosterChoice("facilitator")
+            : makeRosterChoice("excluded"),
         ]),
       );
     });
   }, [data.members, data.viewer.userId, open]);
 
-  const selectedMembers = Object.entries(roster).flatMap(([userId, role]) =>
-    role === "excluded" ? [] : [{ userId, role }],
+  const selectedMembers = Object.entries(roster).flatMap(([userId, choice]) =>
+    choice.role === "excluded"
+      ? []
+      : [
+          {
+            userId,
+            role: choice.role,
+            workspaceEnabled:
+              choice.role === "participant" || choice.workspaceEnabled,
+          },
+        ],
   );
-  const participantCount = selectedMembers.filter(
-    (member) => member.role === "participant",
+  const workspaceCount = selectedMembers.filter(
+    (member) => member.workspaceEnabled,
   ).length;
   const selectedRevision = revisionOptions.find(
     (candidate) => candidate.revision.id === templateRevisionId,
@@ -1238,8 +1262,8 @@ function ScheduleWorkshopDialog({
                 setError("Choose a valid start time.");
                 return;
               }
-              if (!participantCount) {
-                setError("Choose at least one participant.");
+              if (!workspaceCount) {
+                setError("Choose at least one learner workspace.");
                 return;
               }
               setBusy(true);
@@ -1381,7 +1405,7 @@ function ScheduleWorkshopDialog({
               members={data.members}
               viewerUserId={data.viewer.userId}
               roster={roster}
-              participantCount={participantCount}
+              workspaceCount={workspaceCount}
               onChange={setRoster}
             />
             {error ? (
@@ -1417,7 +1441,7 @@ function ScheduleWorkshopDialog({
                 busy ||
                 !title.trim() ||
                 !templateRevisionId ||
-                participantCount === 0
+                workspaceCount === 0
               }
             >
               {busy ? "Scheduling…" : "Schedule workshop"}
@@ -1446,25 +1470,37 @@ function EditRosterDialog({
 }) {
   const [roster, setRoster] = useState<Record<string, RosterChoice>>(() => {
     const selected = new Map(
-      (session.draftRoster ?? []).map((entry) => [entry.userId, entry.role]),
+      (session.draftRoster ?? []).map((entry) => [
+        entry.userId,
+        makeRosterChoice(entry.role, entry.workspaceEnabled),
+      ]),
     );
     if (!selected.has(viewerUserId)) {
-      selected.set(viewerUserId, "facilitator");
+      selected.set(viewerUserId, makeRosterChoice("facilitator"));
     }
     return Object.fromEntries(
       members.map((member) => [
         member.userId,
-        selected.get(member.userId) ?? "excluded",
+        selected.get(member.userId) ?? makeRosterChoice("excluded"),
       ]),
     );
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const selectedMembers = Object.entries(roster).flatMap(([userId, role]) =>
-    role === "excluded" ? [] : [{ userId, role }],
+  const selectedMembers = Object.entries(roster).flatMap(([userId, choice]) =>
+    choice.role === "excluded"
+      ? []
+      : [
+          {
+            userId,
+            role: choice.role,
+            workspaceEnabled:
+              choice.role === "participant" || choice.workspaceEnabled,
+          },
+        ],
   );
-  const participantCount = selectedMembers.filter(
-    (member) => member.role === "participant",
+  const workspaceCount = selectedMembers.filter(
+    (member) => member.workspaceEnabled,
   ).length;
 
   return (
@@ -1481,8 +1517,8 @@ function EditRosterDialog({
           id="edit-workshop-roster-form"
           onSubmit={async (event) => {
             event.preventDefault();
-            if (!participantCount) {
-              setError("Choose at least one participant.");
+            if (!workspaceCount) {
+              setError("Choose at least one learner workspace.");
               return;
             }
             setBusy(true);
@@ -1510,7 +1546,7 @@ function EditRosterDialog({
             members={members}
             viewerUserId={viewerUserId}
             roster={roster}
-            participantCount={participantCount}
+            workspaceCount={workspaceCount}
             onChange={setRoster}
           />
           {error ? (
@@ -1530,7 +1566,7 @@ function EditRosterDialog({
           <Button
             type="submit"
             form="edit-workshop-roster-form"
-            disabled={busy || participantCount === 0}
+            disabled={busy || workspaceCount === 0}
           >
             {busy ? "Saving…" : "Save roster"}
           </Button>
@@ -1544,29 +1580,32 @@ export function RosterEditor({
   members,
   viewerUserId,
   roster,
-  participantCount,
+  workspaceCount,
   onChange,
 }: {
   members: OrganizationWorkshopsResponse["members"];
   viewerUserId: string;
   roster: Record<string, RosterChoice>;
-  participantCount: number;
+  workspaceCount: number;
   onChange: (roster: Record<string, RosterChoice>) => void;
 }) {
   return (
     <fieldset>
       <legend className="text-sm font-semibold">Session roster</legend>
       <p className="mt-1 text-xs text-muted-foreground">
-        {participantCount} participant{participantCount === 1 ? "" : "s"} ·
-        helpers need learner consent before terminal access.
+        {workspaceCount} learner workspace{workspaceCount === 1 ? "" : "s"} ·
+        staff may facilitate and use their own workspace at the same time.
       </p>
       <div className="mt-2 divide-y overflow-hidden rounded-lg border">
         {members.map((member) => {
           const viewer = member.userId === viewerUserId;
+          const choice = roster[member.userId] ?? makeRosterChoice("excluded");
+          const workspaceEnabled =
+            choice.role === "participant" || choice.workspaceEnabled;
           return (
             <div
               key={member.userId}
-              className="grid grid-cols-[minmax(0,1fr)_9rem] items-center gap-3 px-3 py-2"
+              className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_9rem_9rem] sm:items-center sm:py-2"
             >
               <span className="min-w-0">
                 <span className="block truncate text-sm font-medium">
@@ -1579,13 +1618,18 @@ export function RosterEditor({
               <label>
                 <span className="sr-only">Role for {member.name}</span>
                 <select
-                  value={roster[member.userId] ?? "excluded"}
-                  onChange={(event) =>
+                  value={choice.role}
+                  disabled={viewer}
+                  onChange={(event) => {
+                    const role = event.target.value as RosterRole;
                     onChange({
                       ...roster,
-                      [member.userId]: event.target.value as RosterChoice,
-                    })
-                  }
+                      [member.userId]: makeRosterChoice(
+                        role,
+                        role === "excluded" ? false : choice.workspaceEnabled,
+                      ),
+                    });
+                  }}
                   className="h-9 w-full rounded-lg border border-input bg-card px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-70"
                 >
                   <option value="participant">Participant</option>
@@ -1595,6 +1639,33 @@ export function RosterEditor({
                     Not enrolled
                   </option>
                 </select>
+              </label>
+              <label
+                className={[
+                  "flex min-h-9 items-center gap-2 text-sm",
+                  choice.role === "excluded"
+                    ? "text-muted-foreground opacity-60"
+                    : "text-foreground",
+                ].join(" ")}
+              >
+                <input
+                  type="checkbox"
+                  checked={workspaceEnabled}
+                  disabled={
+                    choice.role === "excluded" || choice.role === "participant"
+                  }
+                  onChange={(event) =>
+                    onChange({
+                      ...roster,
+                      [member.userId]: makeRosterChoice(
+                        choice.role,
+                        event.target.checked,
+                      ),
+                    })
+                  }
+                  className="size-4 rounded border-input accent-primary focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40 disabled:cursor-not-allowed"
+                />
+                <span>Learner workspace</span>
               </label>
             </div>
           );

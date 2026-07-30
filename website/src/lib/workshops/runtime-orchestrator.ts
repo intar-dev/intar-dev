@@ -1034,7 +1034,7 @@ async function validateProvisioningRequest(
        AND generation.ordinal = ?
        AND generation.checkpoint_id = ?
        AND generation.state NOT IN ('archiving', 'archived')
-       AND roster.role = 'participant'
+       AND roster.workspace_enabled = 1
        AND organization_member.workshop_access_revoking_at IS NULL`,
   )
     .bind(
@@ -1091,7 +1091,7 @@ async function assertWorkshopProvisioningFence(
        AND generation.ordinal = ?
        AND generation.checkpoint_id = ?
        AND generation.state NOT IN ('archiving', 'archived')
-       AND roster.role = 'participant'
+       AND roster.workspace_enabled = 1
        AND organization_member.workshop_access_revoking_at IS NULL
        AND generation.runtime_execution_id = ?
        AND execution.domain_kind = 'workshop'
@@ -1153,7 +1153,7 @@ function workshopProvisioningDesiredStateWriteGuard(
       AND generation.ordinal = ${request.generationOrdinal}
       AND generation.checkpoint_id = ${request.checkpointId}
       AND generation.state NOT IN ('archiving', 'archived')
-      AND roster.role = 'participant'
+      AND roster.workspace_enabled = 1
       AND organization_member.workshop_access_revoking_at IS NULL
       AND generation.runtime_execution_id = ${executionId}
       AND execution.domain_kind = 'workshop'

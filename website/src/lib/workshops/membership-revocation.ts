@@ -12,6 +12,7 @@ import { WORKSHOP_ROUTE_ISSUANCE_PENDING_LEASE_MS } from "./route-issuance-inten
 interface WorkshopMembershipAccessRow {
   session_id: string;
   role: "participant" | "helper" | "facilitator";
+  workspace_enabled: number;
   workspace_id: string | null;
   terminal_route_usernames_json: string | string[] | null;
   application_route_ids_json: string | string[] | null;
@@ -57,6 +58,7 @@ export async function revokeLiveWorkshopAccessForOrganizationMember(input: {
       `SELECT
          session.id AS session_id,
          roster.role,
+         roster.workspace_enabled,
          workspace.id AS workspace_id,
          workspace.terminal_route_usernames_json,
          workspace.application_route_ids_json
@@ -122,14 +124,16 @@ export async function revokeLiveWorkshopAccessForOrganizationMember(input: {
 
   const participantWorkspaceIds = new Set(
     accessRows.flatMap((row) =>
-      row.role === "participant" && row.workspace_id ? [row.workspace_id] : [],
+      row.workspace_enabled === 1 && row.workspace_id
+        ? [row.workspace_id]
+        : [],
     ),
   );
   const terminalRoutes = new Set<string>();
   const applicationRoutes = new Set<string>();
   const assistRoutesByWorkspace = new Map<string, Set<string>>();
   for (const row of accessRows) {
-    if (!row.workspace_id || row.role !== "participant") continue;
+    if (!row.workspace_id || row.workspace_enabled !== 1) continue;
     for (const route of jsonStrings(row.terminal_route_usernames_json)) {
       terminalRoutes.add(route);
     }
@@ -293,7 +297,7 @@ export async function revokeLiveWorkshopAccessForOrganizationMember(input: {
   const participantSessionIds = [
     ...new Set(
       accessRows.flatMap((row) =>
-        row.role === "participant" ? [row.session_id] : [],
+        row.workspace_enabled === 1 ? [row.session_id] : [],
       ),
     ),
   ];

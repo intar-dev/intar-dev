@@ -140,7 +140,7 @@ export async function createWorkshopCostForecast(input: {
     .where(
       and(
         eq(workshopSessionMembers.sessionId, input.sessionId),
-        eq(workshopSessionMembers.role, "participant"),
+        eq(workshopSessionMembers.workspaceEnabled, true),
       ),
     );
   const participantCount = participantRows[0]?.value ?? 0;

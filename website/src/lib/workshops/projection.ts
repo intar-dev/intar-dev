@@ -88,6 +88,7 @@ export async function getWorkshopListProjection(
             session: entry.session,
             userId,
             role: entry.membership.role,
+            workspaceEnabled: entry.membership.workspaceEnabled,
             checkedInAt: entry.membership.checkedInAt,
             provisionState: entry.membership.provisionState,
           }),
@@ -144,6 +145,7 @@ export async function getOrganizationWorkshopsProjection(params: {
         workshopDb()
           .select({
             role: workshopSessionMembers.role,
+            workspaceEnabled: workshopSessionMembers.workspaceEnabled,
             checkedInAt: workshopSessionMembers.checkedInAt,
             provisionState: workshopSessionMembers.provisionState,
           })
@@ -167,6 +169,7 @@ export async function getOrganizationWorkshopsProjection(params: {
           session,
           userId: params.userId,
           role: roster[0]?.role ?? "facilitator",
+          workspaceEnabled: roster[0]?.workspaceEnabled ?? false,
           checkedInAt: roster[0]?.checkedInAt ?? null,
           provisionState: roster[0]?.provisionState ?? "not_ready",
         })),
@@ -175,6 +178,7 @@ export async function getOrganizationWorkshopsProjection(params: {
             ? draftRoster.map((entry) => ({
                 userId: entry.userId,
                 role: entry.role,
+                workspaceEnabled: entry.workspaceEnabled,
               }))
             : null,
         ...(managerOperations ?? {}),
@@ -333,16 +337,21 @@ export async function getWorkshopSessionProjection(params: {
   );
   const ownWorkspace =
     workspaces.find((entry) => entry.userId === params.userId) ?? null;
+  const hasActiveOrganizationMembership = access.organizationRole !== null;
   const canFacilitate =
     !projectorView &&
+    hasActiveOrganizationMembership &&
     (access.role === "facilitator" ||
       (access.organizationRole !== null &&
         isOrganizationAdminRole(access.organizationRole)));
   const canAssist =
     !projectorView &&
+    hasActiveOrganizationMembership &&
     (access.role === "facilitator" || access.role === "helper");
   const canSeeRoomProgress =
-    !projectorView && (canFacilitate || access.role === "helper");
+    !projectorView &&
+    (canFacilitate ||
+      (hasActiveOrganizationMembership && access.role === "helper"));
   const helpRequests = projectorView
     ? []
     : await listWorkshopHelpRequests(
@@ -427,6 +436,7 @@ export async function getWorkshopSessionProjection(params: {
       viewer: {
         userId: params.userId,
         role: access.role,
+        workspaceEnabled: access.workspaceEnabled,
         checkedIn: viewer.checkedInAt !== null,
         canFacilitate,
         canPresent: canFacilitate,
@@ -437,9 +447,8 @@ export async function getWorkshopSessionProjection(params: {
         : projectModules({
             manifest: context.manifest,
             session,
-            progress:
-              access.role === "participant" ? ownProgress : allProgress,
-            ...(access.role === "participant"
+            progress: access.workspaceEnabled ? ownProgress : allProgress,
+            ...(access.workspaceEnabled
               ? { participantUserId: params.userId }
               : {}),
             facilitator: canFacilitate,
@@ -650,6 +659,7 @@ async function projectWorkshopSummary(params: {
   session: WorkshopSessionRecord;
   userId: string;
   role: "participant" | "helper" | "facilitator";
+  workspaceEnabled: boolean;
   checkedInAt: number | null;
   provisionState: string;
 }) {
@@ -668,7 +678,7 @@ async function projectWorkshopSummary(params: {
         .where(
           and(
             eq(workshopSessionMembers.sessionId, params.session.id),
-            eq(workshopSessionMembers.role, "participant"),
+            eq(workshopSessionMembers.workspaceEnabled, true),
           ),
         ),
       db
@@ -697,6 +707,7 @@ async function projectWorkshopSummary(params: {
     templateTitle: params.session.templateTitle,
     state: params.session.state,
     role: params.role,
+    workspaceEnabled: params.workspaceEnabled,
     startsAt: params.session.scheduledStartAt,
     endsAt:
       params.session.scheduledStartAt +
@@ -1028,6 +1039,7 @@ function projectRosterMember(params: {
     userId: params.member.userId,
     name: params.member.name,
     role: params.member.role,
+    workspaceEnabled: params.member.workspaceEnabled,
     checkedInAt: params.member.checkedInAt,
     lastSeenAt: params.member.lastSeenAt,
     presenceState: workshopPresenceState(

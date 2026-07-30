@@ -349,7 +349,7 @@ async function loadWorkshopForecastFence(
             (SELECT count(*)
              FROM workshop_session_members roster
              WHERE roster.session_id = session.id
-               AND roster.role = 'participant') AS participant_count
+               AND roster.workspace_enabled = 1) AS participant_count
      FROM workshop_sessions session
      WHERE session.id = ?`,
   )
@@ -2228,7 +2228,7 @@ async function recreateUnhealthyHetznerGeneration(
     env.DB.prepare(
       `UPDATE workshop_session_members
        SET provision_state = 'queued', provision_error = NULL, updated_at = ?
-       WHERE session_id = ? AND user_id = ? AND role = 'participant'`,
+       WHERE session_id = ? AND user_id = ? AND workspace_enabled = 1`,
     ).bind(now, source.session_id, source.user_id),
     env.DB.prepare(
       `UPDATE workshop_assist_grants
@@ -2987,7 +2987,7 @@ async function validateProvisioningFence(
        AND workspace.id = ? AND workspace.user_id = ?
        AND workspace.current_generation_id = ? AND generation.id = ?
        AND generation.ordinal = ? AND generation.checkpoint_id = ?
-       AND roster.role = 'participant'
+       AND roster.workspace_enabled = 1
        AND organization_member.workshop_access_revoking_at IS NULL`,
   )
     .bind(
