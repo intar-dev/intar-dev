@@ -970,7 +970,24 @@ async function cleanupAttempt(
     env.DB.prepare(
       `UPDATE workshop_publication_provider_checkpoints
        SET verification_status = ?,
-           deletion_confirmed_at = CASE WHEN ? = 'verified' THEN ? ELSE NULL END,
+           deletion_confirmed_at = CASE
+             WHEN ? = 'verified' THEN ?
+             WHEN ? = 'failed'
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM workshop_publication_provider_attempts attempt
+                 WHERE attempt.provider_checkpoint_id =
+                   workshop_publication_provider_checkpoints.id
+                   AND attempt.deletion_confirmed_at IS NULL
+               )
+             THEN (
+               SELECT max(attempt.deletion_confirmed_at)
+               FROM workshop_publication_provider_attempts attempt
+               WHERE attempt.provider_checkpoint_id =
+                 workshop_publication_provider_checkpoints.id
+             )
+             ELSE NULL
+           END,
            error = CASE WHEN ? = 'verified' THEN NULL ELSE error END,
            updated_at = ?
        WHERE id = ? AND verification_status IN ('deleting', 'cleanup_pending')`,
@@ -978,6 +995,7 @@ async function cleanupAttempt(
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       now,
+      proofSucceeded ? "verified" : retry ? "pending" : "failed",
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       now,
       candidate.id,

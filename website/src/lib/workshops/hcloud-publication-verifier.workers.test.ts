@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
+import { applyD1Migrations, reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const provider = vi.hoisted(() => ({
@@ -36,7 +37,7 @@ import type {
 } from "../../../../hcloud-provider-worker/src/contracts";
 import { assertDeterministicName } from "../../../../hcloud-provider-worker/src/hcloud-client";
 import { appError } from "@/lib/app-error";
-import { resetD1Database } from "@/test/d1-migrations";
+import { d1Migrations, resetD1Database } from "@/test/d1-migrations";
 import { sweepHetznerWorkshopPublicationVerifiers } from "./hcloud-publication-verifier";
 
 const NOW = 1_800_000_000_000;
@@ -540,6 +541,22 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       .bind(CHECKPOINT_ID)
       .all<Record<string, unknown>>();
     expect(attempts.results).toEqual([{ ordinal: 1, state: "deleted" }]);
+    const checkpoint = await providerCheckpointCleanupSummary();
+    expect(checkpoint).toEqual({
+      verification_status: "failed",
+      deletion_confirmed_at: expect.any(Number),
+    });
+    expect(checkpoint?.deletion_confirmed_at).toBe(
+      (
+        await env.DB.prepare(
+          `SELECT deletion_confirmed_at
+           FROM workshop_publication_provider_attempts
+           WHERE provider_checkpoint_id = ?`,
+        )
+          .bind(CHECKPOINT_ID)
+          .first<{ deletion_confirmed_at: number }>()
+      )?.deletion_confirmed_at,
+    );
     expect(provider.finalize).not.toHaveBeenCalled();
   });
 
@@ -558,7 +575,16 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       .bind(NOW + 2, attempt?.id)
       .run();
 
-    for (let offset = 2; offset <= 8; offset += 1) {
+    for (let offset = 2; offset <= 6; offset += 1) {
+      await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + offset });
+    }
+
+    await expect(providerCheckpointCleanupSummary()).resolves.toEqual({
+      verification_status: "pending",
+      deletion_confirmed_at: null,
+    });
+
+    for (let offset = 7; offset <= 8; offset += 1) {
       await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + offset });
     }
 
@@ -701,6 +727,120 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       { ordinal: 2, location: "fsn1", state: "deleted" },
       { ordinal: 3, location: "hel1", state: "allocating" },
     ]);
+  });
+});
+
+describe("failed provider checkpoint cleanup backfill", () => {
+  beforeEach(async () => {
+    await reset();
+    await applyD1Migrations(
+      env.DB,
+      d1Migrations.filter((migration) => migration.name < "0019"),
+    );
+    await seedFixture();
+  });
+
+  it("backfills only failed checkpoints whose every attempt is deletion-confirmed", async () => {
+    await insertProviderCheckpoint({
+      id: "provider-checkpoint-retry",
+      checkpointId: "retry",
+      ordinal: 1,
+    });
+    await insertProviderCheckpoint({
+      id: "provider-checkpoint-unconfirmed",
+      checkpointId: "unconfirmed",
+      ordinal: 2,
+    });
+    await insertProviderCheckpoint({
+      id: "provider-checkpoint-empty",
+      checkpointId: "empty",
+      ordinal: 3,
+    });
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE workshop_publication_provider_checkpoints
+         SET verification_status = 'failed' WHERE id = ?`,
+      ).bind(CHECKPOINT_ID),
+      env.DB.prepare(
+        `UPDATE workshop_publication_provider_checkpoints
+         SET verification_status = 'failed' WHERE id = ?`,
+      ).bind("provider-checkpoint-unconfirmed"),
+      env.DB.prepare(
+        `UPDATE workshop_publication_provider_checkpoints
+         SET verification_status = 'failed' WHERE id = ?`,
+      ).bind("provider-checkpoint-empty"),
+    ]);
+    await insertCleanupAttempt({
+      id: "failed-attempt-1",
+      checkpointId: CHECKPOINT_ID,
+      ordinal: 1,
+      deletionConfirmedAt: NOW + 10,
+    });
+    await insertCleanupAttempt({
+      id: "failed-attempt-2",
+      checkpointId: CHECKPOINT_ID,
+      ordinal: 2,
+      deletionConfirmedAt: NOW + 20,
+    });
+    await insertCleanupAttempt({
+      id: "retry-attempt-1",
+      checkpointId: "provider-checkpoint-retry",
+      ordinal: 1,
+      deletionConfirmedAt: NOW + 30,
+    });
+    await insertCleanupAttempt({
+      id: "unconfirmed-attempt-1",
+      checkpointId: "provider-checkpoint-unconfirmed",
+      ordinal: 1,
+      deletionConfirmedAt: NOW + 40,
+    });
+    await insertCleanupAttempt({
+      id: "unconfirmed-attempt-2",
+      checkpointId: "provider-checkpoint-unconfirmed",
+      ordinal: 2,
+      deletionConfirmedAt: null,
+    });
+
+    const repair = d1Migrations.filter(
+      (migration) =>
+        migration.name ===
+        "0019_failed_workshop_checkpoint_cleanup_backfill.sql",
+    );
+    expect(repair).toHaveLength(1);
+    await applyD1Migrations(env.DB, repair);
+
+    const summaries = await providerCheckpointCleanupSummaries();
+    expect(summaries).toEqual([
+      {
+        id: CHECKPOINT_ID,
+        verification_status: "failed",
+        deletion_confirmed_at: NOW + 20,
+      },
+      {
+        id: "provider-checkpoint-retry",
+        verification_status: "pending",
+        deletion_confirmed_at: null,
+      },
+      {
+        id: "provider-checkpoint-unconfirmed",
+        verification_status: "failed",
+        deletion_confirmed_at: null,
+      },
+      {
+        id: "provider-checkpoint-empty",
+        verification_status: "failed",
+        deletion_confirmed_at: null,
+      },
+    ]);
+
+    for (const migration of repair) {
+      for (const query of migration.queries) {
+        await env.DB.prepare(query).run();
+      }
+    }
+    await expect(providerCheckpointCleanupSummaries()).resolves.toEqual(
+      summaries,
+    );
   });
 });
 
@@ -1332,6 +1472,72 @@ async function checkpointStatus(): Promise<string | null> {
     .bind(CHECKPOINT_ID)
     .first<{ verification_status: string }>();
   return row?.verification_status ?? null;
+}
+
+async function providerCheckpointCleanupSummary(): Promise<{
+  verification_status: string;
+  deletion_confirmed_at: number | null;
+} | null> {
+  return env.DB.prepare(
+    `SELECT verification_status, deletion_confirmed_at
+     FROM workshop_publication_provider_checkpoints WHERE id = ?`,
+  )
+    .bind(CHECKPOINT_ID)
+    .first();
+}
+
+async function providerCheckpointCleanupSummaries(): Promise<
+  Array<{
+    id: string;
+    verification_status: string;
+    deletion_confirmed_at: number | null;
+  }>
+> {
+  const rows = await env.DB.prepare(
+    `SELECT id, verification_status, deletion_confirmed_at
+     FROM workshop_publication_provider_checkpoints
+     ORDER BY ordinal`,
+  ).all<{
+    id: string;
+    verification_status: string;
+    deletion_confirmed_at: number | null;
+  }>();
+  return rows.results;
+}
+
+async function insertCleanupAttempt(input: {
+  id: string;
+  checkpointId: string;
+  ordinal: number;
+  deletionConfirmedAt: number | null;
+}): Promise<void> {
+  const deletionRequestedAt = NOW + input.ordinal;
+  await env.DB.prepare(
+    `INSERT INTO workshop_publication_provider_attempts (
+       id, provider_checkpoint_id, connection_id, ordinal,
+       deterministic_name, server_type, system_image, location, state,
+       control_plane_base_url, bootstrap_token_hash, bootstrap_expires_at,
+       report_credential_expires_at, deletion_requested_at,
+       deletion_confirmed_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, 'cx43', 'debian-13', 'nbg1', ?, 'https://intar.dev/',
+               ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      input.id,
+      input.checkpointId,
+      CONNECTION_ID,
+      input.ordinal,
+      `intar-wpv-${input.id}`,
+      input.deletionConfirmedAt === null ? "deleting" : "deleted",
+      `bootstrap-${input.id}`,
+      NOW + 30 * 60_000,
+      NOW + 2 * 60 * 60_000,
+      deletionRequestedAt,
+      input.deletionConfirmedAt,
+      NOW,
+      input.deletionConfirmedAt ?? deletionRequestedAt,
+    )
+    .run();
 }
 
 async function nonPublicationRuntimeCounts() {

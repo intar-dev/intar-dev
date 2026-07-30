@@ -33,6 +33,35 @@ if [[ -n "$(docker ps -aq --filter "label=talos.cluster.name=${CLUSTER_NAME}")" 
   die "A '${CLUSTER_NAME}' cluster already exists. Run ./scripts/destroy-cluster.sh first."
 fi
 
+# Talos runs kubelet as a nested container with shared rootfs propagation for
+# Kubernetes volumes. Raise Linux's per-mount-namespace ceiling only for this
+# disposable learner VM, verify it, and retain a guard against runaway growth.
+readonly TALOS_DOCKER_MIN_MOUNT_MAX=262144
+readonly TALOS_DOCKER_GUARD_MOUNTS=196608
+talos_docker_original_mount_max="$(
+  awk 'NR == 1 { print $1 }' /proc/sys/fs/mount-max 2>/dev/null || true
+)"
+[[ "${talos_docker_original_mount_max}" =~ ^[0-9]+$ ]] || {
+  die "Linux did not report a numeric fs.mount-max."
+}
+if (( talos_docker_original_mount_max < TALOS_DOCKER_MIN_MOUNT_MAX )); then
+  if (( EUID == 0 )); then
+    printf '%s\n' "${TALOS_DOCKER_MIN_MOUNT_MAX}" > /proc/sys/fs/mount-max
+  else
+    need sudo
+    printf '%s\n' "${TALOS_DOCKER_MIN_MOUNT_MAX}" \
+      | sudo -n -- tee /proc/sys/fs/mount-max >/dev/null
+  fi
+fi
+talos_docker_mount_max="$(
+  awk 'NR == 1 { print $1 }' /proc/sys/fs/mount-max 2>/dev/null || true
+)"
+[[ "${talos_docker_mount_max}" =~ ^[0-9]+$ ]] \
+  && (( talos_docker_mount_max >= TALOS_DOCKER_MIN_MOUNT_MAX )) || {
+  die "Could not prepare Linux mount namespace capacity for Talos-in-Docker."
+}
+info "Talos mount namespace ceiling: ${talos_docker_mount_max} (was ${talos_docker_original_mount_max})"
+
 # --- Machine config patches -----------------------------------------------------
 # Disable the default CNI (flannel) and kube-proxy: Cilium replaces both.
 # This is why Talos >= v1.13 is required — v1.12 hangs on cni:none (talos#12885).
@@ -138,25 +167,181 @@ cleanup_destroyed_cluster_contexts() {
   fi
 }
 
-collect_failed_cluster_logs() {
-  local archive archive_members disk_available_inodes disk_available_kib
-  local destroy_status mount_count mount_max
+mount_namespace_capacity_snapshot() {
+  local -a privileged_shell
 
-  disk_available_kib="$(
+  if (( EUID == 0 )); then
+    privileged_shell=(/bin/bash --noprofile --norc -s)
+  else
+    need sudo
+    privileged_shell=(sudo -n -- /bin/bash --noprofile --norc -s)
+  fi
+
+  # Docker, containerd, and runc namespaces are root-owned and ptrace-gated.
+  # Run this fixed signed helper as root so the guard measures the namespaces
+  # which can actually exhaust fs.mount-max.
+  "${privileged_shell[@]}" <<'INTAR_MOUNT_CAPACITY'
+set -u
+shopt -s nullglob
+declare -A seen_namespaces=()
+max_mount_count=0
+max_mount_namespace=unknown
+namespace_count=0
+
+for mountinfo in /proc/[0-9]*/mountinfo; do
+  pid="${mountinfo#/proc/}"
+  pid="${pid%/mountinfo}"
+  namespace="$(readlink "/proc/${pid}/ns/mnt" 2>/dev/null || true)"
+  namespace="${namespace//[!0-9]/}"
+  [[ -n "${namespace}" ]] || continue
+  [[ -z "${seen_namespaces[${namespace}]:-}" ]] || continue
+  mount_count="$(
+    awk 'END { print NR }' "${mountinfo}" 2>/dev/null || true
+  )"
+  [[ "${mount_count}" =~ ^[0-9]+$ ]] || continue
+  seen_namespaces["${namespace}"]=1
+  namespace_count=$((namespace_count + 1))
+  if (( mount_count > max_mount_count )); then
+    max_mount_count="${mount_count}"
+    max_mount_namespace="${namespace}"
+  fi
+done
+
+(( namespace_count > 0 )) || {
+  echo "No privileged mount namespaces were readable." >&2
+  exit 1
+}
+printf 'readable_mount_namespaces=%s max_namespace_mounts=%s max_namespace_id=%s' \
+  "${namespace_count}" "${max_mount_count}" "${max_mount_namespace}"
+INTAR_MOUNT_CAPACITY
+}
+
+host_capacity_snapshot() {
+  local docker_available_inodes docker_available_kib mount_max namespace_capacity
+  local run_available_inodes run_available_kib
+
+  docker_available_kib="$(
     df -Pk /var/lib/docker 2>/dev/null | awk 'NR == 2 { print $4 }' || true
   )"
-  disk_available_inodes="$(
+  docker_available_inodes="$(
     df -Pi /var/lib/docker 2>/dev/null | awk 'NR == 2 { print $4 }' || true
   )"
-  mount_count="$(awk 'END { print NR }' /proc/self/mountinfo 2>/dev/null || true)"
-  mount_max="$(awk 'NR == 1 { print $1 }' /proc/sys/fs/mount-max 2>/dev/null || true)"
-  warn "Host capacity at failure: docker_available_kib=${disk_available_kib:-unknown} docker_available_inodes=${disk_available_inodes:-unknown} mount_count=${mount_count:-unknown} mount_max=${mount_max:-unknown}"
+  run_available_kib="$(
+    df -Pk /run 2>/dev/null | awk 'NR == 2 { print $4 }' || true
+  )"
+  run_available_inodes="$(
+    df -Pi /run 2>/dev/null | awk 'NR == 2 { print $4 }' || true
+  )"
+  mount_max="$(
+    awk 'NR == 1 { print $1 }' /proc/sys/fs/mount-max 2>/dev/null || true
+  )"
+  if ! namespace_capacity="$(mount_namespace_capacity_snapshot)"; then
+    return 1
+  fi
+  printf 'docker_available_kib=%s docker_available_inodes=%s run_available_kib=%s run_available_inodes=%s mount_max=%s %s' \
+    "${docker_available_kib:-unknown}" \
+    "${docker_available_inodes:-unknown}" \
+    "${run_available_kib:-unknown}" \
+    "${run_available_inodes:-unknown}" \
+    "${mount_max:-unknown}" \
+    "${namespace_capacity}"
+}
+
+mount_capacity_sampler_pid=""
+mount_capacity_sampler_file=""
+mount_capacity_peak_count=0
+mount_capacity_peak_snapshot="unavailable"
+mount_capacity_sampler_failed=0
+
+start_mount_capacity_sampler() {
+  local initial_snapshot
+
+  mount_capacity_sampler_file="$(
+    umask 077
+    mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-mount-capacity.XXXXXX"
+  )" || die "Could not reserve a private mount-capacity sampler path."
+  if ! initial_snapshot="$(host_capacity_snapshot)"; then
+    rm -f "${mount_capacity_sampler_file}"
+    mount_capacity_sampler_file=""
+    die "Could not inspect privileged mount namespace capacity."
+  fi
+  printf '%s\n' "${initial_snapshot}" >> "${mount_capacity_sampler_file}"
+
+  (
+    while true; do
+      if ! host_capacity_snapshot; then
+        printf '%s\n' "sampler_error=privileged_mount_snapshot_failed"
+        exit 0
+      fi
+      printf '\n'
+      sleep 5
+    done
+  ) >> "${mount_capacity_sampler_file}" 2>/dev/null &
+  mount_capacity_sampler_pid=$!
+}
+
+stop_mount_capacity_sampler() {
+  local count peak_line
+
+  if [[ -n "${mount_capacity_sampler_pid}" ]]; then
+    kill "${mount_capacity_sampler_pid}" >/dev/null 2>&1 || true
+    wait "${mount_capacity_sampler_pid}" >/dev/null 2>&1 || true
+    mount_capacity_sampler_pid=""
+  fi
+  if [[ -n "${mount_capacity_sampler_file}" && -f "${mount_capacity_sampler_file}" ]]; then
+    if grep -Fxq "sampler_error=privileged_mount_snapshot_failed" \
+      "${mount_capacity_sampler_file}"; then
+      mount_capacity_sampler_failed=1
+    fi
+    peak_line="$(
+      awk '
+        {
+          count = -1
+          for (field = 1; field <= NF; field++) {
+            if ($field ~ /^max_namespace_mounts=[0-9]+$/) {
+              split($field, pair, "=")
+              count = pair[2] + 0
+            }
+          }
+          if (count > peak) {
+            peak = count
+            line = $0
+          }
+        }
+        END {
+          if (line != "") {
+            print peak "\t" line
+          }
+        }
+      ' "${mount_capacity_sampler_file}"
+    )"
+    if [[ -n "${peak_line}" ]]; then
+      count="${peak_line%%$'\t'*}"
+      [[ "${count}" =~ ^[0-9]+$ ]] && mount_capacity_peak_count="${count}"
+      mount_capacity_peak_snapshot="${peak_line#*$'\t'}"
+    fi
+    rm -f "${mount_capacity_sampler_file}"
+    mount_capacity_sampler_file=""
+  fi
+}
+
+trap stop_mount_capacity_sampler EXIT
+
+collect_failed_cluster_logs() {
+  local archive archive_members destroy_status failure_capacity
+
+  stop_mount_capacity_sampler
+  failure_capacity="$(host_capacity_snapshot 2>/dev/null || true)"
+  [[ -n "${failure_capacity}" ]] || failure_capacity="unavailable"
+  warn "Host capacity at failure: ${failure_capacity}"
+  warn "Peak host capacity during cluster bootstrap: ${mount_capacity_peak_snapshot}"
 
   archive="$(
     umask 077
     mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-failure.XXXXXX"
   )" || {
     warn "Could not reserve a private Talos log archive path"
+    warn "Host capacity captured before cleanup: ${failure_capacity}; cluster_bootstrap_peak: ${mount_capacity_peak_snapshot}"
     return 0
   }
 
@@ -189,6 +374,10 @@ collect_failed_cluster_logs() {
   else
     warn "Talos failed-cluster removal exited with status ${destroy_status}; preserving its contexts"
   fi
+
+  # The checkpoint runner retains a bounded output tail. Repeat the captured
+  # pre-cleanup values last so lengthy Talos logs cannot evict the evidence.
+  warn "Host capacity captured before cleanup: ${failure_capacity}; cluster_bootstrap_peak: ${mount_capacity_peak_snapshot}"
 }
 
 retry_transient_talos_bootstrap() {
@@ -306,6 +495,7 @@ info "1 controlplane (${TALOS_MEMORY_CONTROLPLANE} MB) + 1 worker (${TALOS_MEMOR
 # kube-proxy replacement makes every NodePort answer on every node.
 cluster_create_log="$(mktemp)"
 cluster_create_status=0
+start_mount_capacity_sampler
 talosctl cluster create docker \
   --name "${CLUSTER_NAME}" \
   --image "${TALOS_IMAGE}" \
@@ -407,6 +597,27 @@ step "Waiting for nodes to become Ready (Cilium rollout)"
 wait_rollout kube-system daemonset/cilium
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
+
+stop_mount_capacity_sampler
+final_capacity="$(host_capacity_snapshot)" \
+  || die "Could not inspect final privileged mount namespace capacity."
+final_mount_count="$(
+  sed -n 's/.*max_namespace_mounts=\([0-9][0-9]*\).*/\1/p' \
+    <<<"${final_capacity}"
+)"
+[[ "${final_mount_count}" =~ ^[0-9]+$ ]] \
+  || die "Final mount namespace capacity did not contain a numeric maximum."
+info "Peak mount capacity during cluster bootstrap: ${mount_capacity_peak_snapshot}"
+info "Final host capacity after cluster bootstrap: ${final_capacity}"
+if (( mount_capacity_sampler_failed != 0 )); then
+  collect_failed_cluster_logs
+  die "Privileged mount namespace sampling failed during Talos bootstrap."
+fi
+if (( mount_capacity_peak_count >= TALOS_DOCKER_GUARD_MOUNTS \
+  || final_mount_count >= TALOS_DOCKER_GUARD_MOUNTS )); then
+  collect_failed_cluster_logs
+  die "Talos mount propagation approached the guarded namespace ceiling."
+fi
 
 echo
 ok "Cluster '${CLUSTER_NAME}' is up — you now own a cloud. ☁️"
