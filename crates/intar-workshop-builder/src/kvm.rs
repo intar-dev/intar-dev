@@ -2196,6 +2196,111 @@ mod tests {
     }
 
     #[test]
+    fn reference_talos_bootstrap_recovery_is_narrow_and_valid_shell() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let create_cluster = root.join("runtime/source/scripts/create-cluster.sh");
+        let lib = root.join("runtime/source/scripts/lib.sh");
+        let source = fs::read_to_string(&create_cluster).unwrap();
+
+        assert!(source.contains("--save-cluster-logs-archive-path"));
+        assert!(source.contains("retry_transient_talos_bootstrap"));
+        assert!(source.contains("talosctl cluster show --name"));
+        assert!(source.contains("umask 077"));
+        assert!(source.contains("mktemp"));
+        assert!(source.contains("tar -tzf"));
+        assert!(source.contains("tail -n 80"));
+        assert!(source.contains("rm -f \"${archive}\""));
+        assert!(source.contains("talosctl config context"));
+        assert!(source.contains("talosctl config remove \"${CLUSTER_NAME}\" -y"));
+        assert!(source.contains("kubectl get --raw=/readyz"));
+        assert!(source.contains("deadline=$((SECONDS + 600))"));
+        assert!(source.contains("while (( SECONDS < deadline ))"));
+        assert!(source.contains("remaining=$((deadline - SECONDS))"));
+        assert!(source.contains("timeout --signal=KILL \"${request_timeout}s\""));
+        assert!(source.contains("if (( remaining < retry_sleep ))"));
+        assert!(source.contains(
+            "if is_retryable_talos_bootstrap_timeout_status \"${bootstrap_status}\"; then"
+        ));
+        assert!(!source.contains("Talos bootstrap retry exceeded its"));
+        assert!(!source.contains("for attempt in $(seq 1 60)"));
+        assert!(
+            !source
+                .lines()
+                .any(|line| line.trim_start().starts_with("--force"))
+        );
+        assert!(
+            Command::new("bash")
+                .arg("-n")
+                .arg(&create_cluster)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let classifier = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+source "$1"
+initial='waiting for Talos API (to bootstrap the cluster)
+bootstrapping cluster
+bootstrap error: rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: EOF"'
+is_initial_talos_bootstrap_unavailable_eof "$initial"
+! is_initial_talos_bootstrap_unavailable_eof 'bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
+! is_initial_talos_bootstrap_unavailable_eof 'bootstrapping cluster
+waiting for Talos API (to bootstrap the cluster)
+bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
+! is_initial_talos_bootstrap_unavailable_eof 'waiting for Talos API (to bootstrap the cluster)
+bootstrapping cluster
+bootstrap error: rpc error: code = DeadlineExceeded desc = authentication handshake failed: EOF'
+is_retry_talos_bootstrap_unavailable_eof 'error executing bootstrap: rpc error: code = Unavailable desc = connection error: desc = "transport: authentication handshake failed: EOF"'
+! is_retry_talos_bootstrap_unavailable_eof 'bootstrap error: rpc error: code = Unavailable desc = authentication handshake failed: EOF'
+! is_retry_talos_bootstrap_unavailable_eof 'error executing bootstrap: rpc error: code = Unavailable desc = unrelated'
+is_retryable_talos_bootstrap_timeout_status 124
+is_retryable_talos_bootstrap_timeout_status 137
+! is_retryable_talos_bootstrap_timeout_status 0
+! is_retryable_talos_bootstrap_timeout_status 1
+is_provisional_talos_bootstrap_already_exists 'error executing bootstrap: rpc error: code = AlreadyExists desc = etcd data directory is not empty'
+! is_provisional_talos_bootstrap_already_exists 'rpc error: code = AlreadyExists desc = etcd data directory is not empty'
+! is_provisional_talos_bootstrap_already_exists 'rpc error: code = AlreadyExists desc = another resource exists'
+
+redacted="$(
+  printf '%s\n' \
+    '{"token": "jsonSecret42"}' \
+    '{"access_token": "jsonAccessSecret42"}' \
+    '"password": "yamlQuotedSecret42"' \
+    'client_secret: yamlPlainSecret42' \
+    'refresh_token: yamlRefreshSecret42' \
+    'Authorization: Bearer bearerSecret42' \
+    'Authorization: Basic basicSecret42' \
+    'https://urlUserSecret:urlPassSecret@example.invalid/fail' \
+    'https://example.invalid/error?token=queryTokenSecret&api_key=queryKeySecret' \
+    'bootstrap abcdef.0123456789abcdef failed' \
+    'fatal apid failed' \
+    | redact_talos_diagnostic_line
+)"
+for secret in \
+  jsonSecret42 jsonAccessSecret42 yamlQuotedSecret42 yamlPlainSecret42 \
+  yamlRefreshSecret42 bearerSecret42 basicSecret42 \
+  urlUserSecret urlPassSecret queryTokenSecret queryKeySecret \
+  abcdef.0123456789abcdef
+do
+  [[ "${redacted}" != *"${secret}"* ]]
+done
+[[ "${redacted}" == *"[REDACTED]"* ]]
+[[ "${redacted}" == *"fatal apid failed"* ]]
+"#,
+            )
+            .arg("bash")
+            .arg(&lib)
+            .status()
+            .unwrap();
+        assert!(classifier.success());
+    }
+
+    #[test]
     fn renders_named_kino_probes_to_retained_manual_verifiers() {
         let workshop = fixture();
         let config = render_probe_config(&workshop.manifest, 10, 120).unwrap();
