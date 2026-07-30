@@ -480,13 +480,13 @@ function moduleContent(module: ModuleDefinition, readme: string): string {
   return content
     .replace(
       /## Escalate to the agent:[^\n]*/u,
-      "## Optional agent-assisted investigation on the CX43 path",
+      "## Optional agent-assisted investigation on the CPX42 path",
     )
     .replace(
       /### Enable Kagent and point it at your platform[\s\S]*?(?=### Beat 2:)/u,
       `### Use the hosted-model path
 
-CX43 has 16 GiB RAM, so Intar intentionally omits the source workshop's
+CPX42 has 16 GiB RAM, so Intar intentionally omits the source workshop's
 host-side Ollama beat. Enable Kagent through the GitOps catalog as described,
 then replace its default ModelConfig with the hosted provider configuration in
 Beat 2 before opening an investigation. The human-only fault diagnosis and
@@ -564,7 +564,7 @@ function importModule(module: ModuleDefinition, allSlides: ImportedSlide[]) {
         },
         {
           title: "Docker reports too little CPU or memory",
-          body: "This is a provider sizing or guest-runtime failure. The Platform Engineering revision requires at least 4 CPUs and 16 GiB RAM and is pinned to CX43 for Hetzner sessions.",
+          body: "This is a provider sizing or guest-runtime failure. The Platform Engineering revision requires at least 4 CPUs and 16 GiB RAM and is pinned to CPX42 for Hetzner sessions.",
         },
         {
           title: "DNS, TLS, or registry access changed after provisioning",
@@ -1270,7 +1270,7 @@ workspace {
 
   provider "hetzner_cloud" {
     vm_id        = "learner"
-    server_type  = "cx43"
+    server_type  = "cpx42"
     system_image = "debian-13"
   }
 

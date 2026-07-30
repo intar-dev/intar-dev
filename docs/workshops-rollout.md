@@ -19,7 +19,7 @@ learner server: Debian 13 → Docker → Talos-in-Docker → Kubernetes applicat
 ```
 
 The immutable Platform Engineering revision requires 4000 millicores, 16 GiB
-RAM, and 32 GiB disk and pins the exact x86 server type `cx43`. The resolved
+RAM, and 32 GiB disk and pins the exact x86 server type `cpx42`. The resolved
 Hetzner shape may provide more disk; the workshop no longer requires a 100 GiB
 Intar runner reservation. There is no provider-side server-type substitution.
 
@@ -77,7 +77,7 @@ is healthy. Enable only one exact pilot organization while commissioning.
 - A dedicated, initially empty Hetzner project is connected by an organization
   owner. Intar creates only its persistent sentinel firewall at connection
   time.
-- The live Hetzner catalog still reports the pinned `cx43` as non-deprecated,
+- The live Hetzner catalog still reports the pinned `cpx42` as non-deprecated,
   x86, and at least 4000 millicores, 16 GiB RAM, and 32 GiB disk.
 - A fresh cost forecast is below the configured organization ceiling, or an
   owner has explicitly recorded the session override.
@@ -161,7 +161,7 @@ test "$(find workshops/platform-engineering/slides/notes -maxdepth 1 -name 'slid
 test "$(rg -c '^module "' workshops/platform-engineering/workshop.hcl)" = 11
 rg -n 'cpu_millis  = 4000|memory_mib  = 16384|disk_mib    = 32768' \
   workshops/platform-engineering/workshop.hcl
-rg -n 'server_type  = "cx43"|system_image = "debian-13"' \
+rg -n 'server_type  = "cpx42"|system_image = "debian-13"' \
   workshops/platform-engineering/workshop.hcl
 rg -n 'Apache-2.0|1b6fad43551a720b143d7a52799f81c4c89455cb' \
   workshops/platform-engineering/workshop.hcl \
@@ -787,10 +787,10 @@ server limit, and sentinel firewall ID. Admins may inspect this masked health
 state; only owners may connect, rotate, rebind, disconnect, or acknowledge
 manual cleanup.
 
-## 9. Publish the immutable CX43 revision
+## 9. Publish the immutable CPX42 revision
 
 The organization must have an active Hetzner connection before publishing a
-Hetzner-declared workshop. Publication re-resolves the exact `cx43` catalog
+Hetzner-declared workshop. Publication re-resolves the exact `cpx42` catalog
 entry through that project's token and rejects missing, deprecated, ARM,
 undersized, or materially changed hardware.
 
@@ -838,7 +838,7 @@ no KVM proof asserted, 11 provider-verifier checkpoints with
 - non-null `cold_boot_verified_at`.
 
 Inspect the revision manifest and require 240 minutes, 11 modules, 85 slides,
-Apache-2.0 attribution, `cx43`, Debian 13, x86, and resolved hardware satisfying
+Apache-2.0 attribution, `cpx42`, Debian 13, x86, and resolved hardware satisfying
 4000 millicores, 16 GiB RAM, and 32 GiB disk.
 
 ## 10. Create the one-user session and approve its forecast
@@ -893,7 +893,7 @@ Open the lobby, check in the participant, and bulk-provision from
 
 - one labelled Primary IPv4 with `auto_delete=true`;
 - one ephemeral SSH-key resource;
-- one `cx43` Debian 13 server attached to the persistent firewall;
+- one `cpx42` Debian 13 server attached to the persistent firewall;
 - no IPv6, Volume, Network, Backup, snapshot, Load Balancer, Floating IP,
   placement group, or builder server.
 
@@ -960,7 +960,7 @@ Perform one destructive checkpoint restore:
 Exercise recovery by making the guest report stale: degraded after 45 seconds,
 recovery-eligible after 90 seconds, one reboot attempt, then replacement after
 the recovery wait if it does not recover. The replacement uses the same pinned
-`cx43`; it never mutates the old disk in place or substitutes a type.
+`cpx42`; it never mutates the old disk in place or substitutes a type.
 
 ## 12. End the session and prove zero external resources
 
@@ -1021,7 +1021,7 @@ Before enabling any additional organization, run a separate session with two
 real participant identities in the same pilot organization:
 
 - bulk-provision both from checkpoint 00;
-- require two distinct `cx43` servers, Primary IPv4s, SSH keys, workspace-agent
+- require two distinct `cpx42` servers, Primary IPv4s, SSH keys, workspace-agent
   report credentials, SSH host keys, runtime executions, and active slots;
 - require each browser's application cookie to authorize only its own opaque
   route;

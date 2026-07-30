@@ -24,6 +24,7 @@ import {
   imageObjectKey,
   registryImageKey,
 } from "@/control-plane/image-registry/shared";
+import { appError } from "@/lib/app-error";
 import {
   agentBootstrapTokens,
   agentHosts,
@@ -686,6 +687,54 @@ describe("workshop registry publication lifecycle", () => {
     );
   });
 
+  it("stages a valid exact type when live location capacity is exhausted", async () => {
+    await seedHetznerConnection();
+    const catalog = hcloudCatalog();
+    for (const locationState of catalog.serverTypes[0]!.locations) {
+      locationState.available = false;
+    }
+    providerMocks.run.mockResolvedValue({ data: catalog });
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+
+    const staged = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: await directProviderCheckpointResult(),
+    });
+    expect(staged.status).toBe(202);
+    const checkpoints = await drizzle(env.DB)
+      .select()
+      .from(workshopPublicationProviderCheckpoints)
+      .where(
+        eq(
+          workshopPublicationProviderCheckpoints.publicationId,
+          receipt.publicationId,
+        ),
+      );
+    expect(checkpoints).toHaveLength(2);
+    expect(
+      checkpoints.every((checkpoint) =>
+        checkpoint.priceObservationJson.locations.every(
+          (location) => !location.available,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await drizzle(env.DB)
+          .select()
+          .from(workshopPublications)
+          .where(eq(workshopPublications.id, receipt.publicationId))
+      )[0],
+    ).toMatchObject({
+      status: "building",
+      providerVerificationState: "verifying",
+    });
+  });
+
   it("fails Hetzner staging closed without signed runtime bundles or a connection", async () => {
     const fixture = await buildHetznerWorkshopBundleFixture();
     const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
@@ -741,9 +790,15 @@ describe("workshop registry publication lifecycle", () => {
       checkpoints,
     });
     expect(result.status).toBe(409);
-    await expect(result.json()).resolves.toMatchObject({
+    const body = (await result.json()) as { code: string; error: string };
+    expect(body).toMatchObject({
       code: "hcloud_server_type_undersized",
     });
+    await expectTerminalProviderStagingFailure({
+      publicationId: receipt.publicationId,
+      error: body.error,
+    });
+    expect((await claimNext(builderToken)).status).toBe(204);
     expect(
       await drizzle(env.DB).select().from(workshopTemplateRevisions),
     ).toEqual([]);
@@ -790,10 +845,80 @@ describe("workshop registry publication lifecycle", () => {
         checkpoints,
       });
       expect(result.status).toBe(409);
-      await expect(result.json()).resolves.toMatchObject({ code });
+      const body = (await result.json()) as { code: string; error: string };
+      expect(body).toMatchObject({ code });
+      await expectTerminalProviderStagingFailure({
+        publicationId: receipt.publicationId,
+        error: body.error,
+      });
+      expect((await claimNext(builderToken)).status).toBe(204);
       expect(
         await drizzle(env.DB).select().from(workshopTemplateRevisions),
       ).toEqual([]);
+    },
+  );
+
+  it("terminally fails staging when the pinned Hetzner system image is unavailable", async () => {
+    await seedHetznerConnection();
+    const catalog = hcloudCatalog();
+    catalog.systemImages = [];
+    providerMocks.run.mockResolvedValue({ data: catalog });
+    const fixture = await buildHetznerWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+
+    const result = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: await directProviderCheckpointResult(),
+    });
+    expect(result.status).toBe(409);
+    const body = (await result.json()) as { code: string; error: string };
+    expect(body).toMatchObject({ code: "hcloud_system_image_unavailable" });
+    await expectTerminalProviderStagingFailure({
+      publicationId: receipt.publicationId,
+      error: body.error,
+    });
+    expect((await claimNext(builderToken)).status).toBe(204);
+  });
+
+  it.each([
+    [
+      "pricing",
+      503,
+      "hcloud_pricing_unavailable",
+      "Hetzner pricing metadata is unavailable",
+    ],
+    [
+      "location capacity",
+      409,
+      "hcloud_location_unavailable",
+      "the pinned server type is unavailable in every approved location",
+    ],
+  ])(
+    "keeps retryable provider catalog failure %s assigned to the builder",
+    async (_label, status, code, message) => {
+      await seedHetznerConnection();
+      providerMocks.run.mockRejectedValue(appError(status, code, message));
+      const fixture = await buildHetznerWorkshopBundleFixture();
+      const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+      const builderToken = await bootstrapBuilder();
+      expect((await claimNext(builderToken)).status).toBe(200);
+
+      const result = await reportBuilderResult({
+        builderToken,
+        publicationId: receipt.publicationId,
+        checkpoints: await directProviderCheckpointResult(),
+      });
+      expect(result.status).toBe(status);
+      await expect(result.json()).resolves.toMatchObject({ code });
+      await expectRetryableProviderStagingFailure(receipt.publicationId);
+      const resumed = await claimNext(builderToken);
+      expect(resumed.status).toBe(200);
+      await expect(resumed.json()).resolves.toMatchObject({
+        publication_id: receipt.publicationId,
+      });
     },
   );
 
@@ -1524,6 +1649,87 @@ async function directProviderCheckpointResult(
       };
     }),
   );
+}
+
+async function expectTerminalProviderStagingFailure(input: {
+  publicationId: string;
+  error: string;
+}): Promise<void> {
+  const db = drizzle(env.DB);
+  const publications = await db
+    .select()
+    .from(workshopPublications)
+    .where(eq(workshopPublications.id, input.publicationId));
+  expect(publications).toHaveLength(1);
+  expect(publications[0]).toMatchObject({
+    status: "failed",
+    providerVerificationState: null,
+    error: input.error,
+    claimExpiresAt: null,
+    finishedAt: expect.any(Number),
+  });
+
+  const checkpoints = await db
+    .select()
+    .from(workshopPublicationCheckpoints)
+    .where(
+      eq(workshopPublicationCheckpoints.publicationId, input.publicationId),
+    );
+  expect(checkpoints).toHaveLength(
+    publications[0]!.requiredCheckpointIdsJson.length,
+  );
+  expect(
+    checkpoints.every(
+      (checkpoint) =>
+        checkpoint.status === "failed" &&
+        checkpoint.error === input.error &&
+        checkpoint.sanitized === false &&
+        checkpoint.coldBootVerified === false &&
+        checkpoint.verifiedAt === null,
+    ),
+  ).toBe(true);
+  expect(
+    await db
+      .select()
+      .from(workshopPublicationProviderCheckpoints)
+      .where(
+        eq(
+          workshopPublicationProviderCheckpoints.publicationId,
+          input.publicationId,
+        ),
+      ),
+  ).toEqual([]);
+}
+
+async function expectRetryableProviderStagingFailure(
+  publicationId: string,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  const publications = await db
+    .select()
+    .from(workshopPublications)
+    .where(eq(workshopPublications.id, publicationId));
+  expect(publications).toHaveLength(1);
+  expect(publications[0]).toMatchObject({
+    status: "building",
+    providerVerificationState: null,
+    error: null,
+    claimExpiresAt: expect.any(Number),
+    finishedAt: null,
+  });
+  const checkpoints = await db
+    .select()
+    .from(workshopPublicationCheckpoints)
+    .where(eq(workshopPublicationCheckpoints.publicationId, publicationId));
+  expect(checkpoints).toHaveLength(
+    publications[0]!.requiredCheckpointIdsJson.length,
+  );
+  expect(
+    checkpoints.every(
+      (checkpoint) =>
+        checkpoint.status === "building" && checkpoint.error === null,
+    ),
+  ).toBe(true);
 }
 
 async function seedProviderPublicationProof(publicationId: string) {
