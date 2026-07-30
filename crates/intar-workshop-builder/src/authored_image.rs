@@ -18,8 +18,8 @@ use tracing::info;
 
 use crate::bundle::prepare_local_bundle;
 use crate::config::{
-    AuthoredImagePreparationConfig, KvmExecutionConfig, WorkshopBaseImageConfig,
-    WorkshopBuilderConfig,
+    AuthoredImagePreparationConfig, BuilderExecutionMode, KvmExecutionConfig,
+    WorkshopBaseImageConfig, WorkshopBuilderConfig,
 };
 use crate::kvm::{GuestBootRequest, KvmWorkshopBackend, boot_authored_image_guest};
 use crate::staging::{mark_staging_directory, unmark_staging_directory};
@@ -104,6 +104,10 @@ pub fn prepare_authored_image(
     config: &WorkshopBuilderConfig,
     cancellation: CancellationToken,
 ) -> Result<AuthoredImageProvenance> {
+    ensure!(
+        config.execution_mode == BuilderExecutionMode::AgentKvm,
+        "authored-image preparation is forbidden in direct_provider_only execution mode"
+    );
     let preparation = config
         .execution
         .authored_image_preparation
@@ -1261,15 +1265,9 @@ mod tests {
             .unwrap();
         assert_eq!(module_zero.verify_script, "scripts/verify-00.sh");
 
-        let config = crate::config::parse(include_str!("../config.example.toml")).unwrap();
-        let preparation = config
-            .execution
-            .authored_image_preparation
-            .as_ref()
-            .unwrap();
         let runtime_source = workshop_root.join("runtime/source");
         assert_eq!(
-            validate_image_verifier(&runtime_source, &preparation.image_verifier).unwrap(),
+            validate_image_verifier(&runtime_source, "lab/00-setup/verify.sh").unwrap(),
             "lab/00-setup/verify.sh"
         );
     }

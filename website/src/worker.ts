@@ -4,8 +4,10 @@ import { handleAgentRunArtifactRequest } from "@/control-plane/agent-run-artifac
 import { HostRuntimeDO } from "@/control-plane/host-runtime-do";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { handleWorkshopRegistryRequest } from "@/control-plane/workshop-registry";
+import { handleWorkshopPublicationVerifierRequest } from "@/control-plane/workshop-publication-verifier";
 import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
 import { openDueWorkshopLobbies } from "@/lib/workshops/auto-lobby";
+import { sweepHetznerWorkshopPublicationVerifiers } from "@/lib/workshops/hcloud-publication-verifier";
 import { sweepHetznerWorkshopRuntimes } from "@/lib/workshops/hcloud-runtime";
 
 export default {
@@ -32,6 +34,12 @@ export default {
       return workspaceAgentResponse;
     }
 
+    const publicationVerifierResponse =
+      await handleWorkshopPublicationVerifierRequest(request, env);
+    if (publicationVerifierResponse) {
+      return publicationVerifierResponse;
+    }
+
     const registryResponse = await handleImageRegistryRequest(request, env);
     if (registryResponse) {
       return registryResponse;
@@ -55,15 +63,19 @@ export default {
     return handle(request, env, ctx);
   },
   async scheduled(controller) {
-    const [lobbies, hcloud] = await Promise.all([
+    const [lobbies, hcloud, hcloudPublications] = await Promise.all([
       openDueWorkshopLobbies({ now: controller.scheduledTime }),
       sweepHetznerWorkshopRuntimes({ now: controller.scheduledTime }),
+      sweepHetznerWorkshopPublicationVerifiers({
+        now: controller.scheduledTime,
+      }),
     ]);
     console.info(
       JSON.stringify({
         event: "workshop_minute_sweep",
         lobbies,
         hcloud,
+        hcloudPublications,
       }),
     );
   },

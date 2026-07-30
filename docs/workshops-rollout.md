@@ -11,6 +11,7 @@ learner:
 Intar website/control plane
   ├─ service binding → route-less intar-hcloud-provider Worker
   │                    └─ encrypted organization BYOK token → Hetzner API
+  ├─ publication harness → fresh direct Hetzner verifier per checkpoint
   ├─ signed checkpoint bundle → learner server
   └─ Stargate SSH forwarding → terminal and declared application ports
 
@@ -35,7 +36,7 @@ workstation.
 
 Do not use local Docker or Docker Desktop for this rollout, and do not read,
 write, or probe the workstation keychain. Docker is installed and exercised
-only inside the trusted builder proof guest and the Hetzner learner servers.
+only inside direct Hetzner verifier and learner servers.
 The Hetzner project token is entered once by the organization owner in the
 Intar web UI; it is not a GitHub secret, shell variable, ticket attachment, or
 builder input.
@@ -61,15 +62,16 @@ is healthy. Enable only one exact pilot organization while commissioning.
   repository's short-lived single-operator commissioning guard.
 - The route-less `intar-hcloud-provider` Worker is deployed with a dedicated
   Cloudflare API token and a valid 32-byte provider credential KEK.
-- D1 migrations `0016_hetzner_workshop_runtime.sql` and
-  `0017_workshop_checkpoint_guest_tools.sql` are applied exactly once, and
-  `PRAGMA foreign_key_check` returns no rows.
+- D1 migrations `0016_hetzner_workshop_runtime.sql`,
+  `0017_workshop_checkpoint_guest_tools.sql`, and
+  `0018_workshop_hcloud_publication_verifier.sql` are applied exactly once,
+  and `PRAGMA foreign_key_check` returns no rows.
 - The website has the provider service binding, the Stargate egress CIDRs, and
   the approved runtime-bundle public signing-key map.
-- The trusted builder has the matching private Ed25519 seed, a clean Debian 13
-  direct-cloud proof disk, and the exact CI-published `intar-workspace-agent`.
-  The private seed never enters GitHub, D1, R2, the website Worker, or a learner
-  server.
+- The trusted builder has the matching private Ed25519 seed. Direct-provider
+  proof uses the exact CI-published `intar-workspace-agent` on fresh Hetzner
+  servers; no local proof disk is used. The private seed never enters GitHub,
+  D1, R2, the website Worker, or a verifier or learner server.
 - First-level application routing remains healthy at
   `wa-<opaque-id>.intar.app`; `ws.intar.app` remains unchanged.
 - A dedicated, initially empty Hetzner project is connected by an organization
@@ -250,6 +252,7 @@ workshops and the shared runtime ledger. The Hetzner rollout adds:
 | --- | --- |
 | `0016_hetzner_workshop_runtime.sql` | provider identity, encrypted credential versions, audit events, pinned session provider, signed checkpoint artifacts, guest credentials, Hetzner allocations, provider actual state, immutable forecasts, resource cost ledger, and final cost summaries |
 | `0017_workshop_checkpoint_guest_tools.sql` | immutable checkpoint pins for the exact workspace-agent and Kino digests |
+| `0018_workshop_hcloud_publication_verifier.sql` | direct-provider publication checkpoints, verifier attempts, proof state, cleanup confirmation, and independently rounded verifier cost ledgers |
 
 Existing execution rows are backfilled to `agent_kvm`. Scenario host
 reservations remain agent-only. A Hetzner execution has no synthetic
@@ -448,7 +451,7 @@ Guest paths such as `/healthz`, `/v1/terminal/ws`, and
 `/v1/workspace-apps/x` must reach the guest on a `wa-` host rather than
 Stargate's gateway router.
 
-## 6. Install and prove the trusted workshop builder
+## 6. Release the builder and use Intar's direct-provider harness
 
 Release `intar-workshop-builder` through `.github/workflows/release.yml` from
 the same `main` source SHA as the successful Website production run:
@@ -483,28 +486,52 @@ gh workflow run release.yml --ref workshop-builder/v<VERSION> \
   -f resume_tag=workshop-builder/v<VERSION>
 ```
 
-Verify the release checksum and install the CI artifact on the dedicated
-x86_64 Linux/KVM builder. Do not build or package it with local Docker.
+Verify the release checksum and install the CI artifact on the current trusted
+workshop builder. Do not build or package it with local Docker. For a
+`hetzner_cloud` publication, this host validates the source and produces the
+signed, content-addressed bundles; it makes zero KVM backend calls.
 
 Configure:
 
+- `execution_mode = "direct_provider_only"` at the document root;
 - `[worker.runtime_bundle_signing]` with the protected key ID and the
   builder-only private key file;
-- `[execution.runtime_bundle_verification]` with a minimal clean Debian 13
-  disk, kernel, initrd, boot command line, and their exact SHA-256 values;
-- the exact statically linked `intar-workspace-agent` and checksum from the
-  workshop-builder release archive, plus its paired Kino binary; their digests
-  must match `workshop-guest-tools.provenance.json`, which records the protected
-  Website run and immutable artifact ID/digest;
-- `[execution.authored_image_preparation]` with the CI-packaged deterministic
-  Platform bundle, Kino, sanitizer, their exact checksums, the selected image
-  mapping, and an absent atomic output directory;
-- the freshly initialized learner-safe workshop `.git` as build material and
-  every build-only or known answer path as a forbidden participant path.
+- no local direct-cloud proof disk or authored Platform image. Intar's
+  provider harness performs every clean proof on a fresh direct Hetzner server.
 
-The clean direct-cloud proof disk contains only Debian 13 and the `INTARBUILD`
-seed/SSH bootstrap contract. It must not contain workshop source, solved state,
-pre-pulled OCI layers, or an installed agent copy.
+Use `crates/intar-workshop-builder/config.example.toml` as the production
+shape. It deliberately has no `[execution]`, image, disk, QEMU, or KVM
+configuration. `doctor`, `run`, and `run-once` validate only the neutral bundle
+work root and signing key in this mode. The builder claims with
+`execution_mode=direct_provider_only`; the registry selects only publications
+whose compiled manifest declares `hetzner_cloud`.
+
+The protected Website deployment publishes the exact statically linked
+`intar-workspace-agent` and Kino binaries. Their digests in
+`workshop-guest-tools.provenance.json` record the protected Website run and
+immutable artifact ID/digest; the registry, rather than the builder host, pins
+those digests onto each staged verifier checkpoint.
+
+The builder result for all eleven checkpoints must contain a signed bundle,
+`provider_verification_pending = true`, no VM images, and no builder-asserted
+cold-boot proof. The canonical D1 state machine then reserves a provider seat,
+creates a labelled direct server, Primary IPv4, and ephemeral SSH key through
+the route-less provider Worker, and boots the generation-bound workspace
+agent. It applies the exact signed bundle from tmpfs, requires SSH readiness
+and every named probe, then deletes all resources and confirms external absence
+before advancing to the next checkpoint.
+
+Only after all eleven verifier generations are proven and deleted may the
+registry publish the immutable revision. Verifier attempts never create
+learner workspaces, runtime executions, active slots, routes, or scenario
+records. Their independently rounded estimated Hetzner cost is retained with
+the publication.
+
+### Agent-KVM-only reference
+
+The authored-image, clean-disk, and QEMU procedure below applies only to
+workshops that publish `agent_kvm` images. It must not be executed for the
+provider-only Platform Engineering revision.
 
 The workshop-builder release archive must contain and pass the included
 `deploy/SHA256SUMS` plus the focused checksum files for:
@@ -694,18 +721,11 @@ sudo -u intar-builder /usr/local/bin/intar-workshop-builder doctor \
 `doctor` re-hashes the full promoted disk and every pinned preparation input;
 do not start the service if it reports provenance drift.
 
-Use `run-once` for the first publication and retain the full direct-proof
-serial/build log. For every checkpoint, require both:
-
-1. the existing authored KVM image's sanitize/seal/cold-boot proof; and
-2. a fresh clone of the clean Debian disk applying the exact signed
-   reconstruction bundle through `intar-workspace-agent verify-bundle`.
-
-The second proof must report
-`runtime_bundle_cold_boot_verified = true`. A legacy
-`cold_boot_verified = true` alone is insufficient for Hetzner compatibility.
-The registry must also pin the CI-published workspace-agent and paired Kino
-digests on each immutable checkpoint artifact.
+For an `agent_kvm` publication, `run-once` retains the normal
+sanitize/seal/cold-boot evidence and non-empty VM image metadata. Those fields
+are never accepted as Hetzner evidence. A direct-provider publication instead
+uses only the provider-verifier proof and confirmed deletion described at the
+start of this section.
 
 ## 7. Enable the exact pilot flags
 
@@ -800,11 +820,16 @@ bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT checkpoint_id, status, sanitized, cold_boot_verified, error FROM workshop_publication_checkpoints WHERE publication_id = '<PUBLICATION_ID>' ORDER BY checkpoint_id;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
+  "SELECT checkpoint_id, verification_status, proof_verified_at, deletion_confirmed_at, error FROM workshop_publication_provider_checkpoints WHERE publication_id = '<PUBLICATION_ID>' ORDER BY ordinal;"
+
+bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT checkpoint_id, provider_kind, sha256, signing_key_id, workspace_agent_sha256, kino_sha256, status, cold_boot_verified_at FROM runtime_provider_checkpoint_artifacts WHERE template_revision_id = '<REVISION_ID>' ORDER BY checkpoint_id;"
 ```
 
-Require 11 checkpoints, all publication checkpoints sanitized and cold-boot
-verified, and 11 immutable `hetzner_cloud` artifacts with:
+Require 11 ordinary publication checkpoints in terminal `verified` state with
+no KVM proof asserted, 11 provider-verifier checkpoints with
+`verification_status = 'verified'` and non-null proof/deletion timestamps, and
+11 immutable `hetzner_cloud` artifacts with:
 
 - content SHA-256 and Ed25519 signature;
 - the approved signing key ID;

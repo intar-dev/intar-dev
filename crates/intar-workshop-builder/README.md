@@ -18,29 +18,44 @@ metadata. The crate:
   posting one success result;
 - for a `hetzner_cloud` workshop, emits exactly one deterministic,
   content-addressed reconstruction bundle per checkpoint through that same
-  generic artifact upload path and separately cold-boots that exact bundle on
-  a pinned clean Debian 13 base; and
+  generic artifact upload path and hands it to Intar's direct-provider
+  verification harness without starting the KVM backend; and
 - posts one terminal failure and aborts the guest workflow on any non-shutdown
   error. Operator shutdown leaves the claim resumable instead of publishing a
   false terminal failure.
 
-The crate includes the deployable `intar-workshop-builder` binary and concrete
-`KvmWorkshopBackend`. Run `doctor` before enabling the service; `run` also
-performs the same checks before authenticating or claiming a publication:
+The crate includes the deployable `intar-workshop-builder` binary, the concrete
+`KvmWorkshopBackend`, and a fail-closed provider-only backend. The top-level
+`execution_mode` selects the host capability:
+
+- `direct_provider_only` is the production mode for Hetzner publications. It
+  requires runtime-bundle signing, claims only manifests declaring
+  `hetzner_cloud`, and never preflights, constructs, or invokes a KVM backend.
+  It forbids authored images, local runtime proof, and `execution.images`.
+- `agent_kvm` retains the existing authored-image and local checkpoint path.
+  It remains the default when `execution_mode` is omitted, preserving existing
+  configurations and claim behavior.
+
+`config.example.toml` is the production `direct_provider_only` configuration
+and therefore has no `[execution]`, disk, image, QEMU, or KVM setting. Run
+`doctor` before enabling the service; `run` performs the same mode-specific
+checks before authenticating or claiming a publication:
 
 ```console
 intar-workshop-builder doctor --config /etc/intar/workshop-builder.toml
 intar-workshop-builder run --config /etc/intar/workshop-builder.toml
 ```
 
-The same binary has an explicit, one-shot authored-base workflow:
+In `agent_kvm` mode, the same binary has an explicit, one-shot authored-base
+workflow:
 
 ```console
 intar-workshop-builder prepare-authored-image \
   --config /etc/intar/workshop-builder.toml
 ```
 
-It is never invoked by `run`, `run-once`, or publication claiming. The
+It is rejected in `direct_provider_only` mode and is never invoked by `run`,
+`run-once`, or publication claiming. The
 protected release archive carries the deterministic Platform workshop bundle,
 Kino, the sanitizer, their checksum files, and the exact workspace agent.
 `[execution.authored_image_preparation]` pins the first three inputs by
@@ -62,7 +77,7 @@ beyond the conservative two-disk peak for publication artifacts. A host with
 less than that configured budget is rejected before creating a disk. This
 check does not replace normal capacity monitoring.
 
-The execution mapping is deliberately operator-owned. Each
+The `agent_kvm` execution mapping is deliberately operator-owned. Each
 `workspace.vm.image` resolves to one absolute raw base disk, kernel, initrd and
 boot command line in `config.example.toml`. V1 accepts only x86_64. The host rejects symlinked or
 missing files, an unsafe work root, missing KVM access, missing filesystem
@@ -71,8 +86,13 @@ before a build starts. V1 rejects multi-VM workshops explicitly.
 
 ## Direct-cloud reconstruction bundles
 
-A workshop whose HCL selects `hetzner_cloud` additionally requires
-`[worker.runtime_bundle_signing]`. `key_id` is public metadata. The Ed25519
+A production builder for workshops whose HCL selects `hetzner_cloud` uses
+`execution_mode = "direct_provider_only"` and requires
+`[worker.runtime_bundle_signing]`. Its claim request carries that capability;
+the registry filters atomically on the already-validated compiled manifest, so
+the builder cannot take an `agent_kvm` publication. The local provider-only
+backend is a second fence and returns an error from every VM lifecycle method.
+`key_id` is public metadata. The Ed25519
 private seed is supplied either by an absolute `private_key_file` or by the
 named `private_key_env`; the latter contains standard-base64 for exactly 32
 bytes. The key itself must never be written into TOML. Unix key files must be
@@ -105,32 +125,23 @@ The Ed25519 signature covers the exact compressed bytes whose SHA-256 is used
 by the generic artifact registry; the terminal checkpoint report sends
 `sha256`, `compression`, `signature_b64`, and `signing_key_id`.
 
-Signing alone is not a Hetzner compatibility proof. Direct-cloud publishing
-also requires `[execution.runtime_bundle_verification]`. It pins a separate
-minimal Debian 13 raw disk, kernel, initrd, and the exact statically linked
-`intar-workspace-agent` by SHA-256. `doctor` hashes every configured artifact
-before registry authentication. For every checkpoint, the builder clones that
-clean disk instead of the authored KVM checkpoint, boots it with a fresh seed
-and SSH key, uploads the exact just-signed bundle and pinned agent, and invokes
-the agent's `verify-bundle` path. That path verifies the digest and
-Ed25519 signature, requires tmpfs staging, safely extracts the bundle, applies
-the bootstrap and catch-up steps, installs the probe mappings, and runs the
-included verifiers. Only an acknowledged shutdown after success produces
-`runtime_bundle_cold_boot_verified = true`; the registry independently requires
-that explicit field for every `hetzner_cloud` artifact. A legacy sealed-disk
-`cold_boot_verified` value can never stand in for it.
+Signing alone is not a Hetzner compatibility proof. The builder marks each
+signed bundle as awaiting provider verification and reports no KVM image or
+local cold-boot claim. The registry pins the CI-published workspace-agent and
+Kino digests, then Intar's provider harness creates a fresh direct Hetzner
+Debian 13 server for each checkpoint through the organization's encrypted BYOK
+connection. The generation-bound workspace agent downloads the exact signed
+bundle into tmpfs, verifies and applies it, installs the probe mappings, and
+reports SSH readiness plus every expected probe.
 
-The proof disk contains only Debian 13 plus Intar's `INTARBUILD` seed/SSH
-bootstrap contract. It must not be the authored workshop image and must not
-contain workshop source, pre-pulled OCI layers, or an installed agent copy. The
-release archive carries `intar-workspace-agent` and its checksum; install that
-exact binary at the configured path. Record the clean disk/kernel/initrd
-digests from the operator-controlled image promotion job. Changing any pinned
-input fails `doctor` until the configuration is deliberately updated. The
-registry also requires the reported agent digest to match the CI-published
-guest-tool manifest at publication time and pins its paired Kino digest; later
-learner allocation uses those immutable digests rather than the mutable
-`current.json` pointer.
+The registry publishes the immutable revision only after the proof succeeds
+and the harness confirms deletion of that verifier server, Primary IPv4, and
+ephemeral SSH key. Verifier attempts are separate publication records: they
+never become learner workspaces, runtime executions, active slots, terminal
+routes, or scenario data. Their independently rounded estimated provider cost
+remains visible with the publication. `[execution.runtime_bundle_verification]`
+is never consulted by the direct-provider path and must not be used as Hetzner
+publication evidence.
 
 The Platform Engineering revision carries a curated learner source tree and a
 reviewed external-image inventory. Its bootstrap starts from clean Debian 13,

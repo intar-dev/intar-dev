@@ -56,6 +56,7 @@ import {
   rebindHetznerProject,
   rotateHetznerCredential,
   updateHetznerProviderGuardrails,
+  workshopPublicationVerifierOwnershipLabels,
 } from "./provider-connections";
 
 describe("Hetzner BYOK provider connections", () => {
@@ -68,6 +69,30 @@ describe("Hetzner BYOK provider connections", () => {
     providerMocks.requireFeature.mockResolvedValue(undefined);
     await seedIdentity();
     providerMocks.connect.mockResolvedValue(providerConnectionResult());
+  });
+
+  it("creates purpose-specific hashed ownership for publication verifiers", async () => {
+    const ownership = await workshopPublicationVerifierOwnershipLabels(
+      "org-a",
+      "connection-a",
+      "publication-a",
+      "checkpoint-00",
+      2,
+    );
+
+    expect(ownership).toMatchObject({
+      purpose: "workshop_publication_verifier",
+      attempt: 2,
+    });
+    expect(ownership.organizationRef).toMatch(/^[a-f0-9]{32}$/);
+    expect(ownership.connectionRef).toMatch(/^[a-f0-9]{32}$/);
+    if (ownership.purpose !== "workshop_publication_verifier") {
+      throw new Error("expected publication-verifier ownership");
+    }
+    expect(ownership.workshopPublicationRef).toMatch(/^[a-f0-9]{32}$/);
+    expect(ownership.checkpointRef).toMatch(/^[a-f0-9]{32}$/);
+    expect(JSON.stringify(ownership)).not.toContain("publication-a");
+    expect(JSON.stringify(ownership)).not.toContain("checkpoint-00");
   });
 
   it("allows only owners to connect and returns masked provider health", async () => {

@@ -93,6 +93,54 @@ function serverFixture(): HcloudServer {
 }
 
 describe("HcloudClient", () => {
+  it("labels publication verifier resources without faking a learner workspace", () => {
+    const verifier = {
+      organizationRef: "org-ref",
+      connectionRef: "connection-ref",
+      purpose: "workshop_publication_verifier",
+      workshopPublicationRef: "publication-ref",
+      checkpointRef: "checkpoint-00",
+      attempt: 1,
+    } as const;
+    expect(ownershipToLabels(verifier)).toEqual({
+      intar_managed: "true",
+      intar_provider: "hetzner_cloud",
+      intar_org: "org-ref",
+      intar_connection: "connection-ref",
+      intar_purpose: "workshop_publication_verifier",
+      intar_publication: "publication-ref",
+      intar_checkpoint: "checkpoint-00",
+      intar_attempt: "1",
+    });
+    expect(labelsMatchOwnership(ownershipToLabels(verifier), verifier)).toBe(
+      true,
+    );
+  });
+
+  it("rejects incomplete or learner-shaped publication verifier ownership", () => {
+    expect(() =>
+      ownershipToLabels({
+        organizationRef: "org-ref",
+        connectionRef: "connection-ref",
+        purpose: "workshop_publication_verifier",
+        workshopPublicationRef: "publication-ref",
+        checkpointRef: "checkpoint-00",
+        attempt: 0,
+      }),
+    ).toThrow("Invalid publication attempt ownership reference");
+    expect(() =>
+      ownershipToLabels({
+        organizationRef: "org-ref",
+        connectionRef: "connection-ref",
+        workspaceRef: "workspace-ref",
+        purpose: "workshop_publication_verifier",
+        workshopPublicationRef: "publication-ref",
+        checkpointRef: "checkpoint-00",
+        attempt: 1,
+      } as never),
+    ).toThrow("Workshop publication ownership cannot include learner references");
+  });
+
   it("never exposes the API token or provider body in an error", async () => {
     const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let authorization = "";

@@ -211,8 +211,19 @@ fn fixture() -> PathBuf {
         .join("../intar-workshop-manifest/tests/fixtures/platform-engineering-workshop")
 }
 
-fn setup() -> (FakeRegistry, WorkerConfig, tempfile::TempDir) {
-    let bundle = intar_workshop_manifest::build_bundle(fixture()).unwrap();
+#[derive(Clone, Copy)]
+enum TestRuntime {
+    AgentKvm,
+    HetznerCloud,
+}
+
+fn setup(runtime: TestRuntime) -> (FakeRegistry, WorkerConfig, tempfile::TempDir) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = match runtime {
+        TestRuntime::AgentKvm => agent_kvm_fixture(&temporary),
+        TestRuntime::HetznerCloud => fixture(),
+    };
+    let bundle = intar_workshop_manifest::build_bundle(root).unwrap();
     let required_checkpoint_ids = bundle
         .workshop
         .manifest
@@ -234,31 +245,56 @@ fn setup() -> (FakeRegistry, WorkerConfig, tempfile::TempDir) {
         artifacts: Mutex::new(Vec::new()),
         refreshes: Mutex::new(0),
     };
-    let temporary = tempfile::tempdir().unwrap();
-    let signing_key_path = temporary.path().join("runtime-signing-key");
-    std::fs::write(&signing_key_path, [17_u8; 32]).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&signing_key_path, std::fs::Permissions::from_mode(0o600))
-            .unwrap();
-    }
-    let worker = WorkerConfig {
-        work_root: temporary.path().join("work"),
-        runtime_bundle_signing: Some(RuntimeBundleSigningConfig {
+    let runtime_bundle_signing = matches!(runtime, TestRuntime::HetznerCloud).then(|| {
+        let signing_key_path = temporary.path().join("runtime-signing-key");
+        std::fs::write(&signing_key_path, [17_u8; 32]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&signing_key_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        RuntimeBundleSigningConfig {
             key_id: "runtime-test-v1".to_owned(),
             private_key_file: Some(signing_key_path),
             private_key_env: None,
             compression: RuntimeBundleCompression::Zstd,
-        }),
+        }
+    });
+    let worker = WorkerConfig {
+        work_root: temporary.path().join("work"),
+        runtime_bundle_signing,
         ..WorkerConfig::default()
     };
     (registry, worker, temporary)
 }
 
+fn agent_kvm_fixture(temporary: &tempfile::TempDir) -> PathBuf {
+    let source = fixture();
+    let validated = intar_workshop_manifest::load_and_validate(&source).unwrap();
+    let destination = temporary.path().join("agent-kvm-fixture");
+    for relative in validated.source_files {
+        let target = destination.join(&relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(&relative), target).unwrap();
+    }
+    let manifest_path = destination.join("workshop.hcl");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let provider = r#"
+  provider "hetzner_cloud" {
+    vm_id        = "workspace"
+    server_type  = "cx43"
+    system_image = "debian-13"
+  }
+"#;
+    assert!(manifest.contains(provider));
+    std::fs::write(manifest_path, manifest.replacen(provider, "", 1)).unwrap();
+    destination
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builds_uploads_and_commits_all_checkpoints_in_order() {
-    let (registry, worker, _temporary) = setup();
+    let (registry, worker, _temporary) = setup(TestRuntime::AgentKvm);
     let mut backend = FakeBackend::new();
 
     let outcome = process_next(&registry, &mut backend, &worker)
@@ -297,10 +333,6 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
     );
     assert_eq!(
         backend.events.get(8).map(String::as_str),
-        Some("runtime-cold:checkpoint-00")
-    );
-    assert_eq!(
-        backend.events.get(9).map(String::as_str),
         Some("resume:checkpoint-00")
     );
     assert_eq!(backend.events.last().map(String::as_str), Some("finish"));
@@ -342,7 +374,111 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
     assert!(
         checkpoints
             .iter()
-            .all(|checkpoint| checkpoint.runtime_bundle_cold_boot_verified)
+            .all(|checkpoint| !checkpoint.runtime_bundle_cold_boot_verified)
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| !checkpoint.provider_verification_pending)
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.runtime_bundle.is_none())
+    );
+    let json = serde_json::to_value(&results[0]).unwrap();
+    assert_eq!(json["status"], "succeeded");
+    assert_eq!(json["manifest"]["schemaVersion"], 1);
+    assert_eq!(
+        json["checkpoints"][0]["vm_images"][0]["image_format"],
+        "raw_zstd"
+    );
+    assert_eq!(
+        json["checkpoints"][0]["vm_images"][0]["boot_cmdline"],
+        intar_image_build::PUBLISHED_BOOT_CMDLINE
+    );
+    assert!(json["checkpoints"][0]["vm_images"][0].get("boot").is_none());
+    assert_eq!(
+        json["checkpoints"][0]["runtime_bundle_cold_boot_verified"],
+        false
+    );
+    assert_eq!(
+        json["checkpoints"][0]["covered_module_ids"],
+        serde_json::json!(["00"])
+    );
+    assert!(
+        json["checkpoints"][0]
+            .get("provider_verification_pending")
+            .is_none()
+    );
+    assert!(json["checkpoints"][0].get("runtime_bundle").is_none());
+    assert_eq!(registry.images.lock().unwrap().len(), 11);
+    // Kernel and initrd contents are identical across the fake checkpoints,
+    // so those two uploads are deduplicated.
+    assert_eq!(registry.artifacts.lock().unwrap().len(), 2);
+    // Once per checkpoint before blob upload, once before the final result.
+    assert_eq!(*registry.refreshes.lock().unwrap(), 12);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_provider_reports_deterministic_pending_bundles_without_backend_calls() {
+    let (first_registry, first_worker, _first_temporary) = setup(TestRuntime::HetznerCloud);
+    let mut first_backend = FakeBackend::new();
+    let first_outcome = process_next(&first_registry, &mut first_backend, &first_worker)
+        .await
+        .unwrap();
+
+    let (second_registry, second_worker, _second_temporary) = setup(TestRuntime::HetznerCloud);
+    let mut second_backend = FakeBackend::new();
+    let second_outcome = process_next(&second_registry, &mut second_backend, &second_worker)
+        .await
+        .unwrap();
+
+    assert_eq!(first_outcome, second_outcome);
+    assert!(first_backend.events.is_empty());
+    assert!(!first_backend.aborted);
+    assert!(second_backend.events.is_empty());
+    assert!(!second_backend.aborted);
+
+    let first_results = first_registry.results.lock().unwrap().clone();
+    let second_results = second_registry.results.lock().unwrap().clone();
+    assert_eq!(first_results, second_results);
+    let WorkshopPublicationResult::Succeeded {
+        manifest,
+        checkpoints,
+    } = &first_results[0]
+    else {
+        panic!("expected success result");
+    };
+    assert_eq!(checkpoints.len(), 11);
+    assert_eq!(manifest.workspace.checkpoints.len(), 11);
+    assert!(
+        manifest
+            .workspace
+            .checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.vm_images.is_empty())
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.vm_images.is_empty())
+    );
+    assert!(checkpoints.iter().all(|checkpoint| !checkpoint.sanitized));
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| !checkpoint.cold_boot_verified)
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| !checkpoint.runtime_bundle_cold_boot_verified)
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.provider_verification_pending)
     );
     assert!(
         checkpoints
@@ -358,37 +494,34 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
             .len(),
         11
     );
-    let json = serde_json::to_value(&results[0]).unwrap();
-    assert_eq!(json["status"], "succeeded");
-    assert_eq!(json["manifest"]["schemaVersion"], 1);
+    assert_eq!(checkpoints[0].covered_module_ids, ["00"]);
     assert_eq!(
-        json["checkpoints"][0]["vm_images"][0]["image_format"],
-        "raw_zstd"
+        checkpoints[10].covered_module_ids,
+        [
+            "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"
+        ]
     );
-    assert_eq!(
-        json["checkpoints"][0]["vm_images"][0]["boot_cmdline"],
-        intar_image_build::PUBLISHED_BOOT_CMDLINE
-    );
-    assert!(json["checkpoints"][0]["vm_images"][0].get("boot").is_none());
-    assert_eq!(
-        json["checkpoints"][0]["runtime_bundle"]["compression"],
-        "zstd"
-    );
+
+    let json = serde_json::to_value(&first_results[0]).unwrap();
+    assert_eq!(json["checkpoints"][0]["vm_images"], serde_json::json!([]));
+    assert_eq!(json["checkpoints"][0]["sanitized"], false);
+    assert_eq!(json["checkpoints"][0]["cold_boot_verified"], false);
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle_cold_boot_verified"],
-        true
+        false
     );
     assert_eq!(
-        json["checkpoints"][0]["covered_module_ids"],
-        serde_json::json!(["00"])
+        json["checkpoints"][0]["provider_verification_pending"],
+        true
     );
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle"]["signing_key_id"],
         "runtime-test-v1"
     );
-    assert_eq!(
-        json["checkpoints"][0]["runtime_bundle"]["workspace_agent_sha256"],
-        "a".repeat(64)
+    assert!(
+        json["checkpoints"][0]["runtime_bundle"]
+            .get("workspace_agent_sha256")
+            .is_none()
     );
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle"]["signature_b64"]
@@ -397,18 +530,43 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
             .len(),
         88
     );
-    assert_eq!(registry.images.lock().unwrap().len(), 11);
-    // Kernel and initrd contents are identical across the fake checkpoints,
-    // so those two uploads are deduplicated. Each checkpoint also has exactly
-    // one distinct content-addressed reconstruction bundle.
-    assert_eq!(registry.artifacts.lock().unwrap().len(), 13);
-    // Once per checkpoint before blob upload, once before the final result.
-    assert_eq!(*registry.refreshes.lock().unwrap(), 12);
+    assert!(first_registry.images.lock().unwrap().is_empty());
+    let reported_artifacts = checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.runtime_bundle.as_ref().unwrap().sha256.clone())
+        .collect::<Vec<_>>();
+    let first_artifacts = first_registry.artifacts.lock().unwrap().clone();
+    assert_eq!(first_artifacts, reported_artifacts);
+    assert_eq!(
+        *first_registry.refreshes.lock().unwrap(),
+        12,
+        "one refresh per bundle upload plus the terminal result"
+    );
+    let second_artifacts = second_registry.artifacts.lock().unwrap().clone();
+    assert_eq!(first_artifacts, second_artifacts);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_provider_validation_failure_does_not_abort_the_backend() {
+    let (registry, mut worker, _temporary) = setup(TestRuntime::HetznerCloud);
+    worker.runtime_bundle_signing = None;
+    let mut backend = FakeBackend::new();
+
+    let outcome = process_next(&registry, &mut backend, &worker)
+        .await
+        .unwrap();
+
+    let ProcessOutcome::Failed { error, .. } = outcome else {
+        panic!("expected failed outcome");
+    };
+    assert!(error.contains("requires runtime bundle signing"));
+    assert!(backend.events.is_empty());
+    assert!(!backend.aborted);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reports_one_terminal_failure_and_aborts_the_guest_workflow() {
-    let (registry, worker, _temporary) = setup();
+    let (registry, worker, _temporary) = setup(TestRuntime::AgentKvm);
     let mut backend = FakeBackend::new();
     backend.fail_catch_up = Some("01".to_owned());
 
@@ -431,7 +589,7 @@ async fn reports_one_terminal_failure_and_aborts_the_guest_workflow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_aborts_an_active_build_without_reporting_terminal_failure() {
-    let (registry, worker, _temporary) = setup();
+    let (registry, worker, _temporary) = setup(TestRuntime::AgentKvm);
     let cancellation = CancellationToken::new();
     let mut backend = FakeBackend::new();
     backend.cancel_on_begin = Some(cancellation.clone());

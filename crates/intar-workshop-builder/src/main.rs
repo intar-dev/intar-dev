@@ -6,9 +6,10 @@ use std::thread;
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use intar_workshop_builder::{
-    KvmWorkshopBackend, WorkshopBuilderConfig, WorkshopExecutionBackend, WorkshopRegistryClient,
-    cleanup_stale_staging_directories, load, preflight_runtime_bundle_signing,
-    prepare_authored_image, process_next_until_cancelled, run_forever_until_cancelled,
+    BuilderExecutionMode, DirectProviderOnlyBackend, KvmWorkshopBackend, WorkshopBuilderConfig,
+    WorkshopExecutionBackend, WorkshopRegistryClient, cleanup_stale_staging_directories, load,
+    preflight_runtime_bundle_signing, preflight_staging_root, prepare_authored_image,
+    process_next_until_cancelled, run_forever_until_cancelled,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -16,7 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "intar-workshop-builder")]
-#[command(about = "Build immutable Intar workshop checkpoints on a trusted KVM host")]
+#[command(about = "Build immutable Intar workshop checkpoint artifacts")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -25,7 +26,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate trusted binaries, KVM, work roots, and every configured image.
+    /// Validate the configured publication mode and its trusted inputs.
     Doctor(ConfigArgs),
     /// Poll the workshop registry and process publications until terminated.
     Run(ConfigArgs),
@@ -54,14 +55,28 @@ async fn main() -> Result<()> {
 
 fn doctor(args: ConfigArgs) -> Result<()> {
     let config = load(&args.config)?;
-    KvmWorkshopBackend::preflight(&config.execution, true)?;
-    KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
-    preflight_runtime_bundle_signing(&config.worker)?;
-    info!(
-        images = config.execution.images.len(),
-        work_root = %config.execution.work_root.display(),
-        "workshop builder host preflight passed"
-    );
+    match config.execution_mode {
+        BuilderExecutionMode::AgentKvm => {
+            KvmWorkshopBackend::preflight(&config.execution, true)?;
+            KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+            preflight_runtime_bundle_signing(&config.worker)?;
+            info!(
+                execution_mode = "agent_kvm",
+                images = config.execution.images.len(),
+                work_root = %config.execution.work_root.display(),
+                "workshop builder host preflight passed"
+            );
+        }
+        BuilderExecutionMode::DirectProviderOnly => {
+            preflight_staging_root(&config.worker.work_root, true)?;
+            preflight_runtime_bundle_signing(&config.worker)?;
+            info!(
+                execution_mode = "direct_provider_only",
+                work_root = %config.worker.work_root.display(),
+                "workshop builder host preflight passed without local VM dependencies"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -79,6 +94,9 @@ async fn run_once(args: ConfigArgs) -> Result<()> {
 
 async fn prepare_authored(args: ConfigArgs) -> Result<()> {
     let config = load(&args.config)?;
+    if config.execution_mode != BuilderExecutionMode::AgentKvm {
+        bail!("prepare-authored-image is unavailable in direct_provider_only execution mode");
+    }
     let cancellation = CancellationToken::new();
     let worker_cancellation = cancellation.clone();
     let thread = thread::Builder::new()
@@ -120,10 +138,20 @@ async fn prepare_authored(args: ConfigArgs) -> Result<()> {
 fn prepare_run_host(config: &WorkshopBuilderConfig) -> Result<()> {
     // Preflight and stale cleanup happen before authentication and therefore
     // before a new publication can be claimed.
-    KvmWorkshopBackend::preflight(&config.execution, true)?;
-    KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
-    preflight_runtime_bundle_signing(&config.worker)?;
-    for root in [&config.execution.work_root, &config.worker.work_root] {
+    let roots = match config.execution_mode {
+        BuilderExecutionMode::AgentKvm => {
+            KvmWorkshopBackend::preflight(&config.execution, true)?;
+            KvmWorkshopBackend::preflight_bundle_work_root(&config.worker.work_root, true)?;
+            preflight_runtime_bundle_signing(&config.worker)?;
+            vec![&config.execution.work_root, &config.worker.work_root]
+        }
+        BuilderExecutionMode::DirectProviderOnly => {
+            preflight_staging_root(&config.worker.work_root, true)?;
+            preflight_runtime_bundle_signing(&config.worker)?;
+            vec![&config.worker.work_root]
+        }
+    };
+    for root in roots {
         let removed = cleanup_stale_staging_directories(root)?;
         if removed > 0 {
             info!(
@@ -178,28 +206,55 @@ fn run_worker_thread(
     cancellation: CancellationToken,
 ) -> Result<()> {
     // The outer process runtime remains dedicated to signal handling. This
-    // separate multi-thread runtime owns registry I/O and the synchronous
-    // QEMU/image lifecycle; blocking guest operations use `block_in_place`
-    // without starving cancellation delivery.
+    // separate multi-thread runtime owns registry I/O and, in agent_kvm mode,
+    // the synchronous QEMU/image lifecycle. Blocking operations use
+    // `block_in_place` without starving cancellation delivery.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_name("intar-workshop-runtime")
         .enable_all()
         .build()
         .context("failed to create dedicated workshop worker runtime")?;
-    let mut backend =
-        KvmWorkshopBackend::new_with_cancellation(config.execution.clone(), cancellation.clone());
-    let result = runtime.block_on(async {
-        let client = WorkshopRegistryClient::new(&config.registry)?;
+    match config.execution_mode {
+        BuilderExecutionMode::AgentKvm => {
+            let mut backend = KvmWorkshopBackend::new_with_cancellation(
+                config.execution.clone(),
+                cancellation.clone(),
+            );
+            let result =
+                run_worker_with_backend(&runtime, &config, mode, &cancellation, &mut backend);
+            backend.abort();
+            result
+        }
+        BuilderExecutionMode::DirectProviderOnly => {
+            let mut backend = DirectProviderOnlyBackend::new();
+            let result =
+                run_worker_with_backend(&runtime, &config, mode, &cancellation, &mut backend);
+            backend.abort();
+            result
+        }
+    }
+}
+
+fn run_worker_with_backend<B>(
+    runtime: &tokio::runtime::Runtime,
+    config: &WorkshopBuilderConfig,
+    mode: WorkerMode,
+    cancellation: &CancellationToken,
+    backend: &mut B,
+) -> Result<()>
+where
+    B: WorkshopExecutionBackend,
+{
+    runtime.block_on(async {
+        let client = WorkshopRegistryClient::new_with_execution_mode(
+            &config.registry,
+            config.execution_mode,
+        )?;
         match mode {
             WorkerMode::Forever => {
-                run_forever_until_cancelled(
-                    &client,
-                    &mut backend,
-                    &config.worker,
-                    cancellation.clone(),
-                )
-                .await
+                run_forever_until_cancelled(&client, backend, &config.worker, cancellation.clone())
+                    .await
             }
             WorkerMode::Once => {
                 let registry = tokio::select! {
@@ -209,9 +264,9 @@ fn run_worker_thread(
                 };
                 let outcome = match process_next_until_cancelled(
                     &registry,
-                    &mut backend,
+                    backend,
                     &config.worker,
-                    &cancellation,
+                    cancellation,
                 )
                 .await
                 {
@@ -226,9 +281,7 @@ fn run_worker_thread(
                 Ok(())
             }
         }
-    });
-    backend.abort();
-    result
+    })
 }
 
 async fn shutdown_signal() -> Result<()> {

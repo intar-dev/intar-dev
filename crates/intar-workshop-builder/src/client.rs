@@ -7,7 +7,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::RegistryConfig;
+use crate::config::{BuilderExecutionMode, RegistryConfig};
 use crate::contracts::{WorkshopPublicationClaim, WorkshopPublicationResult};
 
 const AGENT_BOOTSTRAP_PATH: &str = "/api/agent/bootstrap";
@@ -37,6 +37,7 @@ pub struct WorkshopRegistryClient {
     base_url: Url,
     host_id: String,
     bootstrap_token: String,
+    execution_mode: BuilderExecutionMode,
     client: Client,
 }
 
@@ -45,6 +46,7 @@ pub struct AuthenticatedWorkshopRegistry {
     host_id: String,
     bootstrap_token: String,
     access_token: RwLock<String>,
+    execution_mode: BuilderExecutionMode,
     client: Client,
 }
 
@@ -63,6 +65,13 @@ struct BootstrapResponse {
 
 impl WorkshopRegistryClient {
     pub fn new(config: &RegistryConfig) -> Result<Self> {
+        Self::new_with_execution_mode(config, BuilderExecutionMode::AgentKvm)
+    }
+
+    pub fn new_with_execution_mode(
+        config: &RegistryConfig,
+        execution_mode: BuilderExecutionMode,
+    ) -> Result<Self> {
         let base_url = Url::parse(config.base_url.trim()).context("invalid registry base URL")?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
@@ -77,6 +86,7 @@ impl WorkshopRegistryClient {
             base_url,
             host_id: config.host_id.trim().to_owned(),
             bootstrap_token: config.bootstrap_token.trim().to_owned(),
+            execution_mode,
             client,
         })
     }
@@ -114,6 +124,7 @@ impl WorkshopRegistryClient {
             host_id: self.host_id.clone(),
             bootstrap_token: self.bootstrap_token.clone(),
             access_token: RwLock::new(bootstrap.access_token),
+            execution_mode: self.execution_mode,
             client: self.client.clone(),
         })
     }
@@ -157,7 +168,7 @@ impl PublicationRegistry for AuthenticatedWorkshopRegistry {
     }
 
     async fn claim_next(&self) -> Result<Option<WorkshopPublicationClaim>> {
-        let url = endpoint(&self.base_url, "/agent/registry/workshop-publications/next")?;
+        let url = publication_claim_endpoint(&self.base_url, self.execution_mode)?;
         let response = self
             .client
             .get(url.clone())
@@ -256,6 +267,15 @@ impl PublicationRegistry for AuthenticatedWorkshopRegistry {
     }
 }
 
+fn publication_claim_endpoint(base_url: &Url, execution_mode: BuilderExecutionMode) -> Result<Url> {
+    let mut url = endpoint(base_url, "/agent/registry/workshop-publications/next")?;
+    if execution_mode == BuilderExecutionMode::DirectProviderOnly {
+        url.query_pairs_mut()
+            .append_pair("execution_mode", "direct_provider_only");
+    }
+    Ok(url)
+}
+
 impl WorkshopBlobPublisher for AuthenticatedWorkshopRegistry {
     fn upload_image(&self, image: &UploadImageBlob) -> Result<()> {
         self.uploader()?
@@ -312,8 +332,11 @@ mod tests {
 
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    use super::{AGENT_BOOTSTRAP_PATH, WorkshopRegistryClient, endpoint, same_origin};
-    use crate::config::RegistryConfig;
+    use super::{
+        AGENT_BOOTSTRAP_PATH, WorkshopRegistryClient, endpoint, publication_claim_endpoint,
+        same_origin,
+    };
+    use crate::config::{BuilderExecutionMode, RegistryConfig};
 
     #[test]
     fn endpoints_are_root_relative() {
@@ -323,6 +346,18 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "https://intar.dev/agent/registry/workshop-publications/next"
+        );
+        assert_eq!(
+            publication_claim_endpoint(&base, BuilderExecutionMode::AgentKvm)
+                .unwrap()
+                .as_str(),
+            "https://intar.dev/agent/registry/workshop-publications/next"
+        );
+        assert_eq!(
+            publication_claim_endpoint(&base, BuilderExecutionMode::DirectProviderOnly)
+                .unwrap()
+                .as_str(),
+            "https://intar.dev/agent/registry/workshop-publications/next?execution_mode=direct_provider_only"
         );
     }
 

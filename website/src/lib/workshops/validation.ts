@@ -4,6 +4,15 @@ import { appError } from "@/lib/app-error";
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
+export interface WorkshopManifestValidationOptions {
+  /**
+   * Checkpoints whose provider-only reconstruction artifacts have already
+   * been verified by Intar. Callers must derive this set from canonical
+   * provider verification state, never from workshop or builder input.
+   */
+  verifiedProviderCheckpointIds?: ReadonlySet<string>;
+}
+
 export function validateWorkshopSlug(input: string): string {
   const slug = input.trim();
   if (!SLUG_PATTERN.test(slug) || slug.length > 80) {
@@ -64,7 +73,10 @@ export function validateContentHash(input: string): string {
   return hash;
 }
 
-export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
+export function validateWorkshopManifest(
+  input: unknown,
+  options: WorkshopManifestValidationOptions = {},
+): WorkshopManifestV1 {
   if (!isRecord(input) || input.schemaVersion !== 1) {
     throw invalidManifest("manifest must use schemaVersion 1");
   }
@@ -149,6 +161,24 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
       );
     }
   }
+  const allowsProviderOnlyCheckpoints =
+    provider?.kind === "hetzner_cloud" && provider.compatible === true;
+  const verifiedProviderCheckpointIds =
+    options.verifiedProviderCheckpointIds ?? new Set<string>();
+  if (verifiedProviderCheckpointIds.size > 0) {
+    if (!allowsProviderOnlyCheckpoints) {
+      throw invalidManifest(
+        "provider checkpoint verification requires a compatible Hetzner provider",
+      );
+    }
+    for (const checkpointId of verifiedProviderCheckpointIds) {
+      if (!checkpointIds.has(checkpointId)) {
+        throw invalidManifest(
+          `provider verification references unknown checkpoint ${checkpointId}`,
+        );
+      }
+    }
+  }
 
   if (!checkpointIds.has(manifest.workspace.initialCheckpointId)) {
     throw invalidManifest("initial checkpoint does not exist");
@@ -156,6 +186,14 @@ export function validateWorkshopManifest(input: unknown): WorkshopManifestV1 {
   for (const checkpoint of manifest.workspace.checkpoints) {
     if (!Array.isArray(checkpoint.vmImages)) {
       throw invalidManifest(`checkpoint ${checkpoint.id} has no VM images`);
+    }
+    if (allowsProviderOnlyCheckpoints && checkpoint.vmImages.length === 0) {
+      if (!verifiedProviderCheckpointIds.has(checkpoint.id)) {
+        throw invalidManifest(
+          `checkpoint ${checkpoint.id} has no verified provider artifact`,
+        );
+      }
+      continue;
     }
     const imageVmIds = new Set(checkpoint.vmImages.map((image) => image.vmId));
     for (const vmId of vmIds) {

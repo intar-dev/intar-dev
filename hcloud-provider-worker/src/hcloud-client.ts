@@ -189,6 +189,65 @@ export function ownershipToLabels(ownership: OwnershipLabels): Record<string, st
     intar_org: ownership.organizationRef,
     intar_connection: ownership.connectionRef,
   };
+  if (ownership.purpose === "workshop_publication_verifier") {
+    if (
+      ("workspaceRef" in ownership &&
+        ownership.workspaceRef !== undefined) ||
+      ("generation" in ownership && ownership.generation !== undefined)
+    ) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message:
+          "Workshop publication ownership cannot include learner references",
+        retryable: false,
+      });
+    }
+    assertLabelRef(
+      ownership.workshopPublicationRef,
+      "workshop publication",
+    );
+    assertLabelRef(ownership.checkpointRef, "checkpoint");
+    if (!Number.isSafeInteger(ownership.attempt) || ownership.attempt < 1) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message: "Invalid publication attempt ownership reference",
+        retryable: false,
+      });
+    }
+    return {
+      ...labels,
+      intar_purpose: ownership.purpose,
+      intar_publication: ownership.workshopPublicationRef,
+      intar_checkpoint: ownership.checkpointRef,
+      intar_attempt: String(ownership.attempt),
+    };
+  }
+  if (
+    ownership.purpose !== undefined &&
+    ownership.purpose !== "learner_workspace"
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "Invalid ownership purpose",
+      retryable: false,
+    });
+  }
+  const untrustedOwnership = ownership as OwnershipLabels & {
+    workshopPublicationRef?: unknown;
+    checkpointRef?: unknown;
+    attempt?: unknown;
+  };
+  if (
+    untrustedOwnership.workshopPublicationRef !== undefined ||
+    untrustedOwnership.checkpointRef !== undefined ||
+    untrustedOwnership.attempt !== undefined
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "Learner ownership cannot include publication references",
+      retryable: false,
+    });
+  }
   if (ownership.workspaceRef !== undefined) {
     assertLabelRef(ownership.workspaceRef, "workspace");
     labels.intar_workspace = ownership.workspaceRef;

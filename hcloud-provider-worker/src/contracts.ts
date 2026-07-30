@@ -30,12 +30,34 @@ export interface EncryptedCredentialEnvelope {
   createdAt: string;
 }
 
-export interface OwnershipLabels {
+interface BaseOwnershipLabels {
   organizationRef: string;
   connectionRef: string;
+}
+
+export interface LearnerWorkspaceOwnershipLabels
+  extends BaseOwnershipLabels {
+  purpose?: "learner_workspace";
   workspaceRef?: string;
   generation?: number;
+  workshopPublicationRef?: never;
+  checkpointRef?: never;
+  attempt?: never;
 }
+
+export interface WorkshopPublicationVerifierOwnershipLabels
+  extends BaseOwnershipLabels {
+  purpose: "workshop_publication_verifier";
+  workshopPublicationRef: string;
+  checkpointRef: string;
+  attempt: number;
+  workspaceRef?: never;
+  generation?: never;
+}
+
+export type OwnershipLabels =
+  | LearnerWorkspaceOwnershipLabels
+  | WorkshopPublicationVerifierOwnershipLabels;
 
 export interface CanonicalProviderWrite {
   requestId: string;

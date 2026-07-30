@@ -25,6 +25,7 @@ const RUNTIME_BOOTSTRAP_PATH: &str = "runtime/bootstrap.sh";
 const RUNTIME_IMAGE_LOCK_PATH: &str = "runtime/images.lock";
 const RUNTIME_SOURCE_PATH: &str = "runtime/source";
 const WORKSHOP_LICENSE_PATH: &str = "LICENSE";
+const SHELL_COMMAND_SEPARATOR: &str = "\0";
 
 /// Loaded signer for one builder process. The secret key is intentionally not
 /// `Debug`, serialized, cloned, or placed in a publication report.
@@ -105,10 +106,6 @@ impl RuntimeBundleSigner {
         BASE64_STANDARD.encode(self.key.sign(bytes).to_bytes())
     }
 
-    pub(crate) fn verifying_key_b64(&self) -> String {
-        BASE64_STANDARD.encode(self.key.verifying_key().to_bytes())
-    }
-
     #[cfg(test)]
     fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
         self.key.verifying_key()
@@ -148,12 +145,17 @@ pub(crate) fn produce_runtime_bundle(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let image_inventory = external_images.iter().map(String::as_str).collect();
 
     for module in ordered_modules {
         let verifier_archive_path = format!("probes/{}/verify.sh", module.id);
         let verify = read_runtime_script(root, &module.verify_script)?;
-        collect_digest_pinned_images(&verify, &mut BTreeSet::new())
-            .with_context(|| format!("invalid image reference in '{}'", module.verify_script))?;
+        validate_executable_image_references(
+            &module.verify_script,
+            &verify,
+            &image_inventory,
+            &runtime.pinned_image_variables,
+        )?;
         entries.insert(verifier_archive_path.clone(), verify);
         probe_verifiers.push(ReconstructionProbeVerifier {
             module_id: &module.id,
@@ -166,8 +168,12 @@ pub(crate) fn produce_runtime_bundle(
         let catch_up_archive_path = format!("scripts/{}/catch-up.sh", module.id);
         let verify_archive_path = format!("probes/{}/verify.sh", module.id);
         let catch_up = read_runtime_script(root, &module.catch_up_script)?;
-        collect_digest_pinned_images(&catch_up, &mut BTreeSet::new())
-            .with_context(|| format!("invalid image reference in '{}'", module.catch_up_script))?;
+        validate_executable_image_references(
+            &module.catch_up_script,
+            &catch_up,
+            &image_inventory,
+            &runtime.pinned_image_variables,
+        )?;
         entries.insert(catch_up_archive_path.clone(), catch_up);
         steps.push(ReconstructionStep {
             module_id: &module.id,
@@ -216,6 +222,7 @@ struct CollectedRuntimeSource {
     install_root: String,
     files: Vec<ReconstructionFile>,
     external_images: Vec<String>,
+    pinned_image_variables: BTreeMap<String, String>,
 }
 
 fn collect_runtime_source(
@@ -239,8 +246,9 @@ fn collect_runtime_source(
         RUNTIME_BOOTSTRAP_PATH,
         1024 * 1024,
     )?;
-    std::str::from_utf8(&bootstrap).context("runtime/bootstrap.sh must contain valid UTF-8")?;
-    entries.insert(RUNTIME_BOOTSTRAP_PATH.to_owned(), bootstrap);
+    let bootstrap_text = std::str::from_utf8(&bootstrap)
+        .context("runtime/bootstrap.sh must contain valid UTF-8")?
+        .to_owned();
 
     let image_lock = read_regular_bounded(
         &root.join(RUNTIME_IMAGE_LOCK_PATH),
@@ -283,6 +291,7 @@ fn collect_runtime_source(
         .collect::<BTreeSet<_>>();
     let mut total = u64::try_from(license.len()).context("workshop LICENSE is too large")?;
     let mut files = Vec::with_capacity(paths.len() + 1);
+    let mut text_sources = vec![(RUNTIME_BOOTSTRAP_PATH.to_owned(), bootstrap_text, true)];
     let license_archive_path = "runtime/root/LICENSE".to_owned();
     files.push(ReconstructionFile {
         archive_path: license_archive_path.clone(),
@@ -310,6 +319,22 @@ fn collect_runtime_source(
             validate_runtime_image_references(text, &image_set).with_context(|| {
                 format!("runtime source '{relative_display}' has an unsafe image reference")
             })?;
+            validate_split_image_blocks(
+                &format!("runtime/source/{relative_display}"),
+                text,
+                &image_set,
+                &BTreeMap::new(),
+            )?;
+            if is_dockerfile_path(&relative) {
+                validate_dockerfile_image_references(text, &image_set).with_context(|| {
+                    format!("runtime Dockerfile '{relative_display}' has an unsafe base image")
+                })?;
+            }
+            let executable = relative
+                .extension()
+                .is_some_and(|extension| extension == "sh")
+                || runtime_file_mode(&source)? == 0o755;
+            text_sources.push((relative_display.clone(), text.to_owned(), executable));
         }
         let archive_path = format!("runtime/root/{relative_display}");
         let mode = runtime_file_mode(&source)?;
@@ -321,11 +346,29 @@ fn collect_runtime_source(
         });
         entries.insert(archive_path, bytes);
     }
+    validate_runtime_image_references(
+        std::str::from_utf8(&bootstrap).context("runtime/bootstrap.sh must contain valid UTF-8")?,
+        &image_set,
+    )
+    .context("runtime/bootstrap.sh has an unsafe image reference")?;
+    entries.insert(RUNTIME_BOOTSTRAP_PATH.to_owned(), bootstrap);
+    let pinned_image_variables = collect_literal_pinned_image_variables(&text_sources, &image_set)?;
+    for (label, source, executable) in &text_sources {
+        if *executable {
+            validate_executable_image_references(
+                label,
+                source.as_bytes(),
+                &image_set,
+                &pinned_image_variables,
+            )?;
+        }
+    }
 
     Ok(CollectedRuntimeSource {
         install_root: config.install_root,
         files,
         external_images,
+        pinned_image_variables,
     })
 }
 
@@ -481,28 +524,1100 @@ fn validate_runtime_image_references(source: &str, inventory: &BTreeSet<&str>) -
         "docker.gitea.com/",
     ];
     for token in source.split(|character: char| !is_oci_token_character(character)) {
+        let image_token = token.strip_prefix("docker://").unwrap_or(token);
+        if image_token
+            .split_once("@sha256:")
+            .is_some_and(|(name, _)| !name.is_empty())
+        {
+            validate_digest_pinned_image(image_token)?;
+            if !inventory_contains_image(inventory, image_token) {
+                bail!("OCI reference '{image_token}' is absent from runtime/images.lock");
+            }
+            continue;
+        }
         if !REGISTRIES
             .iter()
-            .any(|registry| token.starts_with(registry))
+            .any(|registry| image_token.starts_with(registry))
         {
             continue;
         }
-        let has_tag = token
+        let has_tag = image_token
             .rsplit('/')
             .next()
             .is_some_and(|tail| tail.contains(':'));
-        if !has_tag && !token.contains("@sha256:") {
+        if !has_tag && !image_token.contains("@sha256:") {
             continue;
         }
-        if !token.contains("@sha256:") {
-            bail!("tag-only OCI reference '{token}' is forbidden");
+        if !image_token.contains("@sha256:") {
+            bail!("tag-only OCI reference '{image_token}' is forbidden");
         }
-        validate_digest_pinned_image(token)?;
-        if !inventory.contains(token) {
-            bail!("OCI reference '{token}' is absent from runtime/images.lock");
+        validate_digest_pinned_image(image_token)?;
+        if !inventory_contains_image(inventory, image_token) {
+            bail!("OCI reference '{image_token}' is absent from runtime/images.lock");
+        }
+    }
+    for line in source.lines() {
+        let line = strip_shell_comment(line).trim();
+        if let Some(image) = yaml_image_scalar(line) {
+            validate_consumed_image_reference(
+                "runtime source image field",
+                image,
+                inventory,
+                &BTreeMap::new(),
+            )?;
+        }
+        for image in inline_yaml_image_scalars(line)
+            .into_iter()
+            .chain(json_image_scalars(line))
+        {
+            validate_consumed_image_reference(
+                "runtime source inline image field",
+                image,
+                inventory,
+                &BTreeMap::new(),
+            )?;
         }
     }
     Ok(())
+}
+
+fn is_dockerfile_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "Dockerfile"
+        || name.starts_with("Dockerfile.")
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dockerfile"))
+}
+
+fn validate_dockerfile_image_references(source: &str, inventory: &BTreeSet<&str>) -> Result<()> {
+    for line in source.lines() {
+        let line = strip_shell_comment(line).trim();
+        if let Some(image) = dockerfile_base_image(line) {
+            validate_consumed_image_reference(
+                "runtime source Dockerfile FROM",
+                image,
+                inventory,
+                &BTreeMap::new(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_literal_pinned_image_variables(
+    sources: &[(String, String, bool)],
+    inventory: &BTreeSet<&str>,
+) -> Result<BTreeMap<String, String>> {
+    let mut variables = BTreeMap::new();
+    let mut assignments = BTreeMap::<String, BTreeSet<String>>::new();
+    for (label, source, _) in sources {
+        for line in source.lines() {
+            let line = strip_shell_comment(line).trim();
+            let line = line
+                .strip_prefix("export ")
+                .or_else(|| line.strip_prefix("readonly "))
+                .or_else(|| line.strip_prefix("local "))
+                .unwrap_or(line)
+                .trim();
+            let Some((name, raw_value)) = line.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if !is_shell_identifier(name) {
+                continue;
+            }
+            let value = unquote_static_value(raw_value.trim());
+            assignments
+                .entry(name.to_owned())
+                .or_default()
+                .insert(value.to_owned());
+            if !value.contains("@sha256:") {
+                continue;
+            }
+            if value.contains(['$', '`', '\\']) {
+                bail!(
+                    "{label} assigns a dynamically constructed OCI image to '{}'",
+                    name
+                );
+            }
+            validate_digest_pinned_image(value)?;
+            if !inventory_contains_image(inventory, value) {
+                bail!(
+                    "{label} assigns OCI image '{value}' which is absent from runtime/images.lock"
+                );
+            }
+            match variables.entry(name.to_owned()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(value.to_owned());
+                }
+                std::collections::btree_map::Entry::Occupied(entry) if entry.get() == value => {}
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    bail!(
+                        "OCI image variable '{}' has conflicting literal assignments '{}' and '{}'",
+                        name,
+                        entry.get(),
+                        value
+                    );
+                }
+            }
+        }
+    }
+    for (name, pinned) in &variables {
+        if assignments
+            .get(name)
+            .is_some_and(|values| values.iter().any(|value| value != pinned))
+        {
+            bail!(
+                "OCI image variable '{name}' has another mutable, dynamic, or conflicting assignment"
+            );
+        }
+    }
+    Ok(variables)
+}
+
+fn validate_executable_image_references(
+    label: &str,
+    bytes: &[u8],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    let source = std::str::from_utf8(bytes)
+        .with_context(|| format!("runtime executable '{label}' must contain valid UTF-8"))?;
+    validate_runtime_image_references(source, inventory)
+        .with_context(|| format!("runtime executable '{label}' has an unsafe image reference"))?;
+    validate_split_image_blocks(label, source, inventory, variables)?;
+    for command in logical_shell_commands(source) {
+        let tokens = shell_tokens(&command)
+            .with_context(|| format!("runtime executable '{label}' has ambiguous shell syntax"))?;
+        validate_shell_image_consumers(label, &tokens, inventory, variables)?;
+    }
+    Ok(())
+}
+
+fn validate_split_image_blocks(
+    label: &str,
+    source: &str,
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = strip_shell_comment(lines[index]);
+        if line.trim() != "image:" {
+            index += 1;
+            continue;
+        }
+        let parent_indent = line.len() - line.trim_start().len();
+        let mut child_indent = None;
+        let mut registry = None;
+        let mut repository = None;
+        let mut tag = None;
+        let mut digest = None;
+        index += 1;
+        while index < lines.len() {
+            let child = strip_shell_comment(lines[index]);
+            let trimmed = child.trim();
+            if trimmed.is_empty() {
+                index += 1;
+                continue;
+            }
+            let indent = child.len() - child.trim_start().len();
+            if indent <= parent_indent {
+                break;
+            }
+            let direct_indent = *child_indent.get_or_insert(indent);
+            if indent == direct_indent
+                && let Some((key, value)) = trimmed.split_once(':')
+            {
+                let value = unquote_static_value(value.trim());
+                match key {
+                    "registry" => registry = Some(value),
+                    "repository" => repository = Some(value),
+                    "tag" => tag = Some(value),
+                    "digest" => digest = Some(value),
+                    _ => {}
+                }
+            }
+            index += 1;
+        }
+        if registry.is_none() && repository.is_none() && tag.is_none() && digest.is_none() {
+            continue;
+        }
+        let registry = registry.with_context(|| {
+            format!("runtime executable '{label}' has split image values without registry")
+        })?;
+        let repository = repository.with_context(|| {
+            format!("runtime executable '{label}' has split image values without repository")
+        })?;
+        let digest = digest
+            .filter(|digest| !digest.is_empty())
+            .with_context(|| {
+                format!("runtime executable '{label}' has split image values without digest")
+            })?;
+        let digest = digest.strip_prefix("sha256:").with_context(|| {
+            format!("runtime executable '{label}' has a non-SHA-256 split image digest")
+        })?;
+        let tag = tag.filter(|tag| !tag.is_empty());
+        let image = if let Some(tag) = tag {
+            format!("{registry}/{repository}:{tag}@sha256:{digest}")
+        } else {
+            format!("{registry}/{repository}@sha256:{digest}")
+        };
+        validate_consumed_image_reference(label, &image, inventory, variables)?;
+    }
+    Ok(())
+}
+
+fn validate_shell_image_consumers(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    validate_shell_image_consumers_inner(label, tokens, inventory, variables, false)
+}
+
+fn validate_shell_image_consumers_inner(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+    reject_bare_dynamic_command: bool,
+) -> Result<()> {
+    for segment in tokens.split(|token| token == SHELL_COMMAND_SEPARATOR) {
+        validate_shell_image_segment(
+            label,
+            segment,
+            inventory,
+            variables,
+            reject_bare_dynamic_command,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_shell_image_segment(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+    reject_bare_dynamic_command: bool,
+) -> Result<()> {
+    validate_image_variable_mutations(label, tokens, variables)?;
+    reject_indirect_image_execution(
+        label,
+        tokens,
+        inventory,
+        variables,
+        reject_bare_dynamic_command,
+    )?;
+    let Some((index, tool)) = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(index, token)| image_tool_name(token).map(|tool| (index, tool)))
+    else {
+        return Ok(());
+    };
+    match tool {
+        "docker" | "podman" | "nerdctl" => {
+            let Some(mut subcommand) =
+                image_tool_action_index(tokens, index + 1).with_context(|| {
+                    format!("runtime executable '{label}' has ambiguous {tool} options")
+                })?
+            else {
+                return Ok(());
+            };
+            if matches!(
+                tokens.get(subcommand).map(String::as_str),
+                Some("image" | "container")
+            ) {
+                let namespace = tokens[subcommand].as_str();
+                subcommand = image_tool_action_index(tokens, subcommand + 1)
+                    .with_context(|| {
+                        format!(
+                            "runtime executable '{label}' has ambiguous {tool} {namespace} options"
+                        )
+                    })?
+                    .with_context(|| {
+                        format!("runtime executable '{label}' has no {tool} {namespace} subcommand")
+                    })?;
+            }
+            let action = tokens[subcommand].as_str();
+            if matches!(action, "pull" | "run" | "create") {
+                let image =
+                    container_image_argument(&tokens[subcommand + 1..]).with_context(|| {
+                        format!(
+                            "runtime executable '{label}' has an ambiguous {tool} {action} image"
+                        )
+                    })?;
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+            }
+        }
+        "ctr" => {
+            let Some(namespace) =
+                image_tool_action_index(tokens, index + 1).with_context(|| {
+                    format!("runtime executable '{label}' has ambiguous ctr options")
+                })?
+            else {
+                return Ok(());
+            };
+            let action = image_tool_action_index(tokens, namespace + 1).with_context(|| {
+                format!("runtime executable '{label}' has ambiguous ctr images options")
+            })?;
+            if tokens.get(namespace).is_some_and(|value| value == "images")
+                && action
+                    .is_some_and(|action| tokens.get(action).is_some_and(|value| value == "pull"))
+            {
+                let action = action.context("ctr images pull action disappeared")?;
+                let image = first_positional(&tokens[action + 1..], container_option_takes_value)
+                    .with_context(|| {
+                    format!("runtime executable '{label}' has an ambiguous ctr images pull")
+                })?;
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+            }
+        }
+        "crictl" | "oras" => {
+            let action = image_tool_action_index(tokens, index + 1).with_context(|| {
+                format!("runtime executable '{label}' has ambiguous {tool} options")
+            })?;
+            if action.is_some_and(|action| tokens.get(action).is_some_and(|value| value == "pull"))
+            {
+                let action = action.context("image pull action disappeared")?;
+                let image = first_positional(&tokens[action + 1..], container_option_takes_value)
+                    .with_context(|| {
+                    format!("runtime executable '{label}' has an ambiguous {tool} pull")
+                })?;
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+            }
+        }
+        "crane" => {
+            let action = image_tool_action_index(tokens, index + 1).with_context(|| {
+                format!("runtime executable '{label}' has ambiguous crane options")
+            })?;
+            if matches!(
+                action.and_then(|action| tokens.get(action).map(String::as_str)),
+                Some("pull" | "export" | "copy")
+            ) {
+                let action = action.context("crane image action disappeared")?;
+                let image = first_positional(&tokens[action + 1..], container_option_takes_value)
+                    .with_context(|| {
+                    format!("runtime executable '{label}' has an ambiguous {tool} source image")
+                })?;
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+            }
+        }
+        "skopeo" => {
+            let action = image_tool_action_index(tokens, index + 1).with_context(|| {
+                format!("runtime executable '{label}' has ambiguous skopeo options")
+            })?;
+            if action.is_some_and(|action| tokens.get(action).is_some_and(|value| value == "copy"))
+            {
+                let action = action.context("skopeo copy action disappeared")?;
+                let image = first_positional(&tokens[action + 1..], container_option_takes_value)
+                    .with_context(|| {
+                    format!("runtime executable '{label}' has an ambiguous skopeo source image")
+                })?;
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+            }
+        }
+        "helm" => {
+            if tokens[index + 1..].iter().any(|token| {
+                let token = token.to_ascii_lowercase();
+                token.contains("image.repository")
+                    || token.contains("image.registry")
+                    || token.contains("image.tag")
+                    || token.contains("image.digest")
+            }) {
+                bail!(
+                    "runtime executable '{label}' mutates Helm image fields on the command line; use validated split image values"
+                );
+            }
+            for (value_index, token) in tokens[index + 1..].iter().enumerate() {
+                let value = token.strip_prefix("--values=").or_else(|| {
+                    matches!(token.as_str(), "-f" | "--values")
+                        .then(|| tokens.get(index + 2 + value_index).map(String::as_str))
+                        .flatten()
+                });
+                if value.is_some_and(|path| {
+                    path != "-"
+                        && path != "/dev/stdin"
+                        && (path.contains(['$', '`'])
+                            || path.contains("..")
+                            || path.starts_with('/')
+                            || path.contains("://"))
+                }) {
+                    bail!(
+                        "runtime executable '{label}' uses a Helm values source outside the signed runtime bundle"
+                    );
+                }
+            }
+        }
+        "kubectl" => {
+            validate_image_flags(label, &tokens[index + 1..], inventory, variables)?;
+            validate_kubectl_image_mutations(label, &tokens[index + 1..], inventory, variables)?;
+        }
+        "talosctl" => {
+            validate_image_flags(label, &tokens[index + 1..], inventory, variables)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_kubectl_image_mutations(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    for index in 0..tokens.len() {
+        if tokens.get(index).is_some_and(|token| token == "set")
+            && tokens.get(index + 1).is_some_and(|token| token == "image")
+        {
+            let mut found = false;
+            for assignment in &tokens[index + 2..] {
+                if assignment.starts_with('-') {
+                    continue;
+                }
+                let Some((container, image)) = assignment.split_once('=') else {
+                    continue;
+                };
+                if container.is_empty() || image.is_empty() {
+                    bail!("runtime executable '{label}' has malformed kubectl set image");
+                }
+                validate_consumed_image_reference(label, image, inventory, variables)?;
+                found = true;
+            }
+            if !found {
+                bail!("runtime executable '{label}' has ambiguous kubectl set image");
+            }
+        }
+        if tokens.get(index).is_some_and(|token| token == "patch") {
+            let patch_tokens = &tokens[index + 1..];
+            for (patch_index, token) in patch_tokens.iter().enumerate() {
+                let patch_file = token.strip_prefix("--patch-file=").or_else(|| {
+                    (token == "--patch-file")
+                        .then(|| patch_tokens.get(patch_index + 1).map(String::as_str))
+                        .flatten()
+                });
+                if patch_file.is_some_and(|path| path != "/dev/stdin") {
+                    bail!(
+                        "runtime executable '{label}' uses an external kubectl patch file whose image boundary cannot be proven"
+                    );
+                }
+            }
+            if patch_tokens
+                .iter()
+                .any(|token| token.to_ascii_lowercase().contains("image"))
+            {
+                bail!(
+                    "runtime executable '{label}' mutates an image through kubectl patch; use a validated manifest"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_image_variable_mutations(
+    label: &str,
+    tokens: &[String],
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    for token in tokens {
+        if let Some((name, value)) = token.split_once('=') {
+            let name = name.strip_suffix('+').unwrap_or(name);
+            if image_tool_name(value).is_some() {
+                bail!(
+                    "runtime executable '{label}' aliases image tool '{value}' through variable '{name}'"
+                );
+            }
+            if variables.get(name).is_some_and(|pinned| pinned != value) {
+                bail!("runtime executable '{label}' mutates pinned OCI image variable '{name}'");
+            }
+        }
+    }
+    for (index, token) in tokens.iter().enumerate() {
+        match token.as_str() {
+            "read" | "unset" => {
+                if tokens[index + 1..]
+                    .iter()
+                    .any(|name| variables.contains_key(name.trim_start_matches('-')))
+                {
+                    bail!("runtime executable '{label}' mutates a pinned OCI image variable");
+                }
+            }
+            "for" | "select"
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|name| variables.contains_key(name)) =>
+            {
+                bail!("runtime executable '{label}' iterates over a pinned OCI image variable");
+            }
+            "readarray" | "mapfile" | "getopts"
+                if tokens[index + 1..]
+                    .iter()
+                    .any(|name| variables.contains_key(name.trim_start_matches('-'))) =>
+            {
+                bail!("runtime executable '{label}' mutates a pinned OCI image variable");
+            }
+            "printf"
+                if tokens.get(index + 1).is_some_and(|token| token == "-v")
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|name| variables.contains_key(name)) =>
+            {
+                bail!("runtime executable '{label}' mutates a pinned OCI image variable");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn reject_indirect_image_execution(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+    reject_bare_dynamic_command: bool,
+) -> Result<()> {
+    for (index, token) in tokens.iter().enumerate() {
+        let command = token.rsplit('/').next().unwrap_or(token);
+        if command == "eval" {
+            bail!("runtime executable '{label}' uses eval, so image execution cannot be proven");
+        }
+        if matches!(command, "sh" | "bash" | "dash" | "zsh") {
+            let Some(command_index) = tokens[index + 1..]
+                .iter()
+                .position(|value| {
+                    value
+                        .strip_prefix('-')
+                        .is_some_and(|flags| !flags.starts_with('-') && flags.contains('c'))
+                })
+                .map(|relative| index + 1 + relative + 1)
+            else {
+                continue;
+            };
+            let nested = tokens
+                .get(command_index)
+                .context("shell -c is missing its command string")?;
+            if exact_shell_variable(nested).is_some()
+                || nested.trim_start().starts_with("$(")
+                || nested.contains('`')
+            {
+                bail!("runtime executable '{label}' dynamically constructs a {command} -c command");
+            }
+            for nested_command in logical_shell_commands(nested) {
+                let nested_tokens = shell_tokens(&nested_command).with_context(|| {
+                    format!("runtime executable '{label}' has ambiguous nested shell syntax")
+                })?;
+                validate_shell_image_consumers_inner(
+                    label,
+                    &nested_tokens,
+                    inventory,
+                    variables,
+                    true,
+                )?;
+            }
+        }
+    }
+    if reject_bare_dynamic_command
+        && tokens
+            .first()
+            .is_some_and(|command| command.starts_with('$') || command.starts_with('`'))
+    {
+        bail!(
+            "runtime executable '{label}' dynamically selects command '{}'",
+            tokens[0]
+        );
+    }
+    if tokens.windows(2).any(|pair| {
+        (pair[0].starts_with('$') || pair[0].starts_with('`'))
+            && matches!(
+                pair[1].as_str(),
+                "pull" | "run" | "create" | "copy" | "export"
+            )
+    }) {
+        bail!("runtime executable '{label}' dynamically selects an image tool");
+    }
+    if let Some((_, pair)) = tokens.windows(2).enumerate().find(|(index, pair)| {
+        (*index == 0
+            || tokens
+                .get(index.saturating_sub(1))
+                .is_some_and(|wrapper| matches!(wrapper.as_str(), "env" | "command" | "exec")))
+            && (pair[0].starts_with('$') || pair[0].starts_with('`'))
+            && pair[1]
+                .strip_prefix('-')
+                .is_some_and(|flags| !flags.starts_with('-') && flags.contains('c'))
+    }) {
+        bail!(
+            "runtime executable '{label}' dynamically selects a shell near '{}' '{}'",
+            pair[0],
+            pair[1]
+        );
+    }
+    Ok(())
+}
+
+fn image_tool_name(token: &str) -> Option<&str> {
+    let tool = token.rsplit('/').next().unwrap_or(token);
+    matches!(
+        tool,
+        "docker"
+            | "podman"
+            | "nerdctl"
+            | "ctr"
+            | "crictl"
+            | "oras"
+            | "crane"
+            | "skopeo"
+            | "helm"
+            | "kubectl"
+            | "talosctl"
+    )
+    .then_some(tool)
+}
+
+fn validate_image_flags(
+    label: &str,
+    tokens: &[String],
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if let Some(image) = token.strip_prefix("--image=") {
+            validate_consumed_image_reference(label, image, inventory, variables)?;
+        } else if token == "--image" {
+            let image = tokens
+                .get(index + 1)
+                .context("image flag is missing its value")?;
+            validate_consumed_image_reference(label, image, inventory, variables)?;
+            index += 1;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn container_image_argument(tokens: &[String]) -> Result<&str> {
+    first_positional(tokens, container_option_takes_value)
+}
+
+fn image_tool_action_index(tokens: &[String], start: usize) -> Result<Option<usize>> {
+    let index = first_positional_index(&tokens[start..], container_option_takes_value)?
+        .map(|index| start + index);
+    if index.is_some_and(|index| tokens[index].contains(['$', '`'])) {
+        bail!("image command dynamically selects its action");
+    }
+    Ok(index)
+}
+
+fn first_positional(tokens: &[String], option_takes_value: fn(&str) -> bool) -> Result<&str> {
+    let index = first_positional_index(tokens, option_takes_value)?
+        .context("image command has no positional image argument")?;
+    Ok(tokens[index].as_str())
+}
+
+fn first_positional_index(
+    tokens: &[String],
+    option_takes_value: fn(&str) -> bool,
+) -> Result<Option<usize>> {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == "--" {
+            return Ok(tokens.get(index + 1).map(|_| index + 1));
+        }
+        if token.starts_with('-') {
+            if !token.contains('=') && option_takes_value(token) {
+                if tokens.get(index + 1).is_none() {
+                    bail!("image command option '{token}' is missing its value");
+                }
+                index += 2;
+            } else if token.contains('=') || container_option_is_boolean(token) {
+                index += 1;
+            } else {
+                bail!("image command uses unsupported option '{token}'");
+            }
+            continue;
+        }
+        return Ok(Some(index));
+    }
+    Ok(None)
+}
+
+fn container_option_takes_value(value: &str) -> bool {
+    matches!(
+        value,
+        "--add-host"
+            | "--annotation"
+            | "--authfile"
+            | "--blkio-weight"
+            | "--cap-add"
+            | "--cap-drop"
+            | "--cgroup-parent"
+            | "--cidfile"
+            | "--config"
+            | "--connection"
+            | "--context"
+            | "--cpu-period"
+            | "--cpu-quota"
+            | "--cpus"
+            | "--cpuset-cpus"
+            | "--device"
+            | "--dns"
+            | "--entrypoint"
+            | "--env"
+            | "--env-file"
+            | "--gpus"
+            | "--host"
+            | "--hosts-dir"
+            | "--identity"
+            | "--jobs"
+            | "--label"
+            | "--log-level"
+            | "--memory"
+            | "--mount"
+            | "--name"
+            | "--network"
+            | "--namespace"
+            | "--platform"
+            | "--publish"
+            | "--pull"
+            | "--restart"
+            | "--runtime"
+            | "--security-opt"
+            | "--snapshotter"
+            | "--src-creds"
+            | "--storage-driver"
+            | "--tlscacert"
+            | "--tlscert"
+            | "--tlskey"
+            | "--url"
+            | "--user"
+            | "--volume"
+            | "--workdir"
+            | "-H"
+            | "-e"
+            | "-h"
+            | "-l"
+            | "-m"
+            | "-p"
+            | "-u"
+            | "-v"
+            | "-w"
+    )
+}
+
+fn container_option_is_boolean(value: &str) -> bool {
+    matches!(
+        value,
+        "--all"
+            | "--all-tags"
+            | "--debug"
+            | "--detach"
+            | "--disable-content-trust"
+            | "--experimental"
+            | "--insecure"
+            | "--insecure-registry"
+            | "--interactive"
+            | "--plain-http"
+            | "--preserve-digests"
+            | "--privileged"
+            | "--quiet"
+            | "--read-only"
+            | "--recursive"
+            | "--rm"
+            | "--tls"
+            | "--tlsverify"
+            | "--tty"
+            | "-D"
+            | "-a"
+            | "-d"
+            | "-i"
+            | "-q"
+            | "-t"
+    )
+}
+
+fn validate_consumed_image_reference(
+    label: &str,
+    raw: &str,
+    inventory: &BTreeSet<&str>,
+    variables: &BTreeMap<String, String>,
+) -> Result<()> {
+    let raw = raw.trim();
+    let resolved = if let Some(variable) = exact_shell_variable(raw) {
+        variables.get(variable).with_context(|| {
+            format!("runtime executable '{label}' uses dynamic OCI image reference '{raw}'")
+        })?
+    } else {
+        if raw.contains(['$', '`']) {
+            bail!("runtime executable '{label}' dynamically constructs OCI image '{raw}'");
+        }
+        raw.strip_prefix("docker://").unwrap_or(raw)
+    };
+    if is_internal_image_reference(resolved) {
+        return Ok(());
+    }
+    validate_digest_pinned_image(resolved).with_context(|| {
+        format!("runtime executable '{label}' uses mutable OCI image '{resolved}'")
+    })?;
+    if !inventory_contains_image(inventory, resolved) {
+        bail!(
+            "runtime executable '{label}' uses OCI image '{resolved}' which is absent from runtime/images.lock"
+        );
+    }
+    Ok(())
+}
+
+fn exact_shell_variable(value: &str) -> Option<&str> {
+    if let Some(name) = value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
+        return is_shell_identifier(name).then_some(name);
+    }
+    let name = value.strip_prefix('$')?;
+    is_shell_identifier(name).then_some(name)
+}
+
+fn is_shell_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn is_internal_image_reference(value: &str) -> bool {
+    let registry = value.split('/').next().unwrap_or_default();
+    registry == "localhost"
+        || registry.starts_with("localhost:")
+        || registry == "127.0.0.1"
+        || registry.starts_with("127.0.0.1:")
+        || registry == "[::1]"
+        || registry.starts_with("[::1]:")
+        || registry
+            .split(':')
+            .next()
+            .is_some_and(|host| host.ends_with(".svc") || host.ends_with(".svc.cluster.local"))
+}
+
+fn yaml_image_scalar(line: &str) -> Option<&str> {
+    let line = line.strip_prefix("- ").unwrap_or(line).trim_start();
+    let value = line
+        .strip_prefix("image:")
+        .or_else(|| line.strip_prefix("'image':"))
+        .or_else(|| line.strip_prefix("\"image\":"))?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(unquote_static_value(value))
+}
+
+fn inline_yaml_image_scalars(line: &str) -> Vec<&str> {
+    let mut images = Vec::new();
+    for key in ["image:", "'image':", "\"image\":"] {
+        for (offset, _) in line.match_indices(key) {
+            let prefix = &line[..offset];
+            if !prefix
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|character| matches!(character, '{' | '[' | ','))
+            {
+                continue;
+            }
+            let value = line[offset + key.len()..].trim_start();
+            if let Some(value) = flow_scalar(value) {
+                images.push(value);
+            }
+        }
+    }
+    images
+}
+
+fn json_image_scalars(line: &str) -> Vec<&str> {
+    let mut images = Vec::new();
+    let mut remaining = line;
+    while let Some(offset) = remaining.find("\"image\"") {
+        remaining = &remaining[offset + "\"image\"".len()..];
+        let Some(value) = remaining.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let value = value.trim_start();
+        let Some(value) = value.strip_prefix('"') else {
+            continue;
+        };
+        let Some(end) = value.find('"') else {
+            continue;
+        };
+        images.push(&value[..end]);
+        remaining = &value[end + 1..];
+    }
+    images
+}
+
+fn flow_scalar(value: &str) -> Option<&str> {
+    if let Some(value) = value.strip_prefix('"') {
+        return value.find('"').map(|end| &value[..end]);
+    }
+    if let Some(value) = value.strip_prefix('\'') {
+        return value.find('\'').map(|end| &value[..end]);
+    }
+    let end = value
+        .find(|character: char| matches!(character, ',' | '}' | ']') || character.is_whitespace())
+        .unwrap_or(value.len());
+    (end > 0).then_some(&value[..end])
+}
+
+fn dockerfile_base_image(line: &str) -> Option<&str> {
+    let mut words = line.split_ascii_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("from") {
+        return None;
+    }
+    let mut image = words.next()?;
+    if image.starts_with("--platform=") {
+        image = words.next()?;
+    }
+    (image != "scratch").then_some(image)
+}
+
+fn unquote_static_value(value: &str) -> &str {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn logical_shell_commands(source: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    for raw in source.lines() {
+        let line = raw.trim_end();
+        let continued = line.ends_with('\\');
+        current.push_str(line.strip_suffix('\\').unwrap_or(line));
+        if continued || shell_tokens(&current).is_err() {
+            current.push(' ');
+            continue;
+        }
+        commands.push(std::mem::take(&mut current));
+    }
+    if !current.is_empty() {
+        commands.push(current);
+    }
+    commands
+}
+
+fn shell_tokens(source: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in source.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                } else {
+                    current.push(character);
+                }
+            }
+            Some('"') => match character {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(character),
+            },
+            Some(_) => unreachable!(),
+            None => match character {
+                '\'' | '"' => quote = Some(character),
+                '\\' => escaped = true,
+                '#' if current.is_empty() => break,
+                ';' | '|' | '&' | '(' | ')' => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                    if tokens
+                        .last()
+                        .is_none_or(|token| token != SHELL_COMMAND_SEPARATOR)
+                    {
+                        tokens.push(SHELL_COMMAND_SEPARATOR.to_owned());
+                    }
+                }
+                value if value.is_whitespace() => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(character),
+            },
+        }
+    }
+    if escaped || quote.is_some() {
+        bail!("unterminated quote or escape");
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn strip_shell_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut at_word_start = true;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            at_word_start = false;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => match character {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => {}
+            },
+            Some(_) => unreachable!(),
+            None => match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    at_word_start = false;
+                }
+                '\\' => {
+                    escaped = true;
+                    at_word_start = false;
+                }
+                '#' if at_word_start => return &line[..index],
+                value => at_word_start = value.is_whitespace(),
+            },
+        }
+    }
+    line
 }
 
 fn read_runtime_script(root: &Path, relative: &str) -> Result<Vec<u8>> {
@@ -519,20 +1634,52 @@ fn read_runtime_script(root: &Path, relative: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn collect_digest_pinned_images(bytes: &[u8], output: &mut BTreeSet<String>) -> Result<()> {
-    let source = std::str::from_utf8(bytes).context("runtime script is not UTF-8")?;
-    for token in source.split(|character: char| !is_oci_token_character(character)) {
-        if !token.contains("@sha256:") {
-            continue;
-        }
-        validate_digest_pinned_image(token)?;
-        output.insert(token.to_owned());
-    }
-    Ok(())
-}
-
 fn is_oci_token_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '/' | ':' | '@')
+}
+
+fn inventory_contains_image(inventory: &BTreeSet<&str>, value: &str) -> bool {
+    let Ok(expected) = canonical_digest_identity(value) else {
+        return false;
+    };
+    inventory.iter().any(|candidate| {
+        canonical_digest_identity(candidate).is_ok_and(|candidate| candidate == expected)
+    })
+}
+
+fn canonical_digest_identity(value: &str) -> Result<(String, &str)> {
+    validate_digest_pinned_image(value)?;
+    let (name, digest) = value
+        .split_once("@sha256:")
+        .context("validated OCI image is missing its digest")?;
+    let repository = if let Some((prefix, tail)) = name.rsplit_once('/') {
+        let tail = tail
+            .split_once(':')
+            .map_or(tail, |(repository, _)| repository);
+        format!("{prefix}/{tail}")
+    } else {
+        name.split_once(':')
+            .map_or_else(|| name.to_owned(), |(repository, _)| repository.to_owned())
+    };
+    let canonical = if let Some((registry, rest)) = repository.split_once('/') {
+        if registry.contains('.') || registry.contains(':') || registry == "localhost" {
+            let registry = if registry == "index.docker.io" {
+                "docker.io"
+            } else {
+                registry
+            };
+            if registry == "docker.io" && !rest.contains('/') {
+                format!("{registry}/library/{rest}")
+            } else {
+                format!("{registry}/{rest}")
+            }
+        } else {
+            format!("docker.io/{repository}")
+        }
+    } else {
+        format!("docker.io/library/{repository}")
+    };
+    Ok((canonical, digest))
 }
 
 fn validate_digest_pinned_image(value: &str) -> Result<()> {
@@ -959,25 +2106,132 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_valid_digest_pinned_external_images() {
-        let digest = "a".repeat(64);
-        let mut images = BTreeSet::new();
-        collect_digest_pinned_images(
-            format!("pull registry.example:5000/team/app@sha256:{digest}\n").as_bytes(),
-            &mut images,
+    fn executable_images_must_be_exactly_digest_locked() {
+        let locked = format!("registry.example:5000/team/app@sha256:{}", "a".repeat(64));
+        let images = BTreeSet::from([locked.as_str()]);
+        validate_executable_image_references(
+            "test.sh",
+            format!("docker pull {locked}\n").as_bytes(),
+            &images,
+            &BTreeMap::new(),
         )
         .unwrap();
-        assert_eq!(
-            images.into_iter().collect::<Vec<_>>(),
-            vec![format!("registry.example:5000/team/app@sha256:{digest}")]
-        );
+        validate_executable_image_references(
+            "test.sh",
+            format!("skopeo copy docker://{locked} docker://localhost:30500/team/app:v1\n")
+                .as_bytes(),
+            &images,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        validate_executable_image_references(
+            "test.sh",
+            format!("docker --config /tmp/intar-docker image pull {locked}\n").as_bytes(),
+            &images,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        for source in [
+            "docker pull alpine\n",
+            "docker pull alpine:latest\n",
+            "docker --config /tmp/intar-docker pull alpine:latest\n",
+            "docker pull registry.example:5000/team/app:latest\n",
+            "docker pull \"$IMAGE\"\n",
+            "ACTION=pull; docker \"$ACTION\" alpine:latest\n",
+            "DOCKER=docker; \"$DOCKER\" pull alpine:latest\n",
+            "\"$DOCKER\" pull alpine:latest\n",
+            "env \"$DOCKER\" pull alpine:latest\n",
+            "eval 'docker pull alpine:latest'\n",
+            "bash -c 'docker pull alpine:latest'\n",
+            "bash -lc 'docker pull alpine:latest'\n",
+            "bash -c 'true; $CMD'\n",
+            "CMD='docker pull alpine:latest'; bash -c \"$CMD\"\n",
+            "SHELL=bash; \"$SHELL\" -c 'docker pull alpine:latest'\n",
+            "docker run --gpus registry.example:5000/team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa alpine:latest\n",
+            "docker --unknown-option value pull registry.example:5000/team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "docker pull registry.example:5000/team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa && docker pull alpine:latest\n",
+            "kubectl run demo --image=registry.other.invalid/team/app:latest\n",
+            "kubectl set image deployment/demo app=alpine:latest\n",
+            "kubectl patch deployment/demo -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"image\":\"alpine:latest\"}]}}}}'\n",
+            "kubectl patch deployment/demo --patch-file patch.json\n",
+            "helm upgrade demo ./chart --set image.tag=latest\n",
+            "crane copy --insecure registry.other.invalid/team/app:latest localhost:30500/team/app:v1\n",
+            "skopeo copy docker://registry.other.invalid/team/app:latest docker://localhost:30500/team/app:v1\n",
+        ] {
+            assert!(
+                validate_executable_image_references(
+                    "test.sh",
+                    source.as_bytes(),
+                    &images,
+                    &BTreeMap::new(),
+                )
+                .is_err(),
+                "unsafe pull was accepted: {source}"
+            );
+        }
+
+        let other = format!("registry.other.invalid/team/app@sha256:{}", "b".repeat(64));
         assert!(
-            collect_digest_pinned_images(
-                b"pull example/app@sha256:not-a-digest",
-                &mut BTreeSet::new()
+            validate_executable_image_references(
+                "test.sh",
+                format!("crane pull {other} image.tar\n").as_bytes(),
+                &images,
+                &BTreeMap::new(),
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn executable_image_variables_must_resolve_to_one_locked_literal() {
+        let locked = format!(
+            "registry.example.invalid/team/talos@sha256:{}",
+            "c".repeat(64)
+        );
+        let images = BTreeSet::from([locked.as_str()]);
+        let sources = vec![(
+            "versions.env".to_owned(),
+            format!("TALOS_IMAGE=\"{locked}\"\n"),
+            false,
+        )];
+        let variables = collect_literal_pinned_image_variables(&sources, &images).unwrap();
+        validate_executable_image_references(
+            "create.sh",
+            b"talosctl cluster create docker --image \"${TALOS_IMAGE}\"\n",
+            &images,
+            &variables,
+        )
+        .unwrap();
+
+        for source in [
+            "talosctl cluster create docker --image \"${REGISTRY}/${IMAGE}:latest\"\n",
+            "docker pull \"${IMAGE:-alpine:latest}\"\n",
+            "kubectl run demo --image \"$(resolve-image)\"\n",
+            "TALOS_IMAGE=alpine:latest; docker pull \"$TALOS_IMAGE\"\n",
+            "for TALOS_IMAGE in alpine:latest; do docker pull \"$TALOS_IMAGE\"; done\n",
+            "mapfile -t TALOS_IMAGE < images.txt; docker pull \"$TALOS_IMAGE\"\n",
+        ] {
+            assert!(
+                validate_executable_image_references(
+                    "create.sh",
+                    source.as_bytes(),
+                    &images,
+                    &variables,
+                )
+                .is_err(),
+                "dynamic image was accepted: {source}"
+            );
+        }
+        let conflicting_sources = vec![
+            sources[0].clone(),
+            (
+                "override.sh".to_owned(),
+                "TALOS_IMAGE=alpine:latest\n".to_owned(),
+                true,
+            ),
+        ];
+        assert!(collect_literal_pinned_image_variables(&conflicting_sources, &images).is_err());
     }
 
     #[test]
@@ -991,7 +2245,8 @@ mod tests {
     fn learner_source_rejects_solution_paths_symlinks_and_unlocked_images() {
         assert!(validate_runtime_relative_path(Path::new("solutions/module-01.sh")).is_err());
         assert!(validate_runtime_relative_path(Path::new("lab/01/solve.sh")).is_err());
-        let inventory = BTreeSet::new();
+        let canonical = format!("docker.io/library/nats@sha256:{}", "b".repeat(64));
+        let inventory = BTreeSet::from([canonical.as_str()]);
         assert!(
             validate_runtime_image_references(
                 "image: docker.io/library/busybox:1.37.0",
@@ -1006,6 +2261,89 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            validate_runtime_image_references(
+                "image: registry.example.invalid/team/app:latest",
+                &inventory
+            )
+            .is_err()
+        );
+        assert!(validate_runtime_image_references("image: alpine:latest", &inventory).is_err());
+        assert!(
+            validate_runtime_image_references(
+                "containers: [{name: app, image: alpine:latest}]",
+                &inventory
+            )
+            .is_err()
+        );
+        assert!(
+            validate_runtime_image_references(
+                "{\"containers\":[{\"image\":\"alpine:latest\"}]}",
+                &inventory
+            )
+            .is_err()
+        );
+        assert!(
+            validate_runtime_image_references(
+                "containers: [{'image': 'alpine:latest'}]",
+                &inventory
+            )
+            .is_err()
+        );
+        assert!(
+            validate_runtime_image_references(
+                "containers: [{\"image\": alpine:latest}]",
+                &inventory
+            )
+            .is_err()
+        );
+        assert!(validate_runtime_image_references("'image': alpine:latest", &inventory).is_err());
+        assert!(validate_runtime_image_references("\"image\": alpine:latest", &inventory).is_err());
+        assert!(
+            validate_runtime_image_references("image: localhost:30500/learner-app:v1", &inventory)
+                .is_ok()
+        );
+        validate_runtime_image_references(
+            &format!("image: nats:2.12.12@sha256:{}", "b".repeat(64)),
+            &inventory,
+        )
+        .unwrap();
+        validate_runtime_image_references(
+            &format!("image: docker.io/nats@sha256:{}", "b".repeat(64)),
+            &inventory,
+        )
+        .unwrap();
+        validate_split_image_blocks(
+            "values.sh",
+            &format!(
+                "image:\n  registry: docker.io\n  repository: library/nats\n  tag: \"\"\n  digest: sha256:{}\n",
+                "b".repeat(64)
+            ),
+            &inventory,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            validate_split_image_blocks(
+                "values.sh",
+                &format!(
+                    "image:\n  registry: docker.io\n  repository: library/nats\n  tag: latest\n  digest: sha256:{}\n",
+                    "c".repeat(64)
+                ),
+                &inventory,
+                &BTreeMap::new(),
+            )
+            .is_err()
+        );
+        assert!(validate_dockerfile_image_references("FROM alpine:latest\n", &inventory).is_err());
+        validate_dockerfile_image_references(
+            "FROM zot.zot.svc.cluster.local:5000/library/learner:v1\n",
+            &inventory,
+        )
+        .unwrap();
+        assert!(!is_internal_image_reference(
+            "registry.svc.example.com/team/app:latest"
+        ));
     }
 
     #[test]

@@ -17,6 +17,11 @@ export type WorkshopPublicationStatus =
   | "building"
   | "failed"
   | "published";
+export type WorkshopProviderVerificationState =
+  | "verifying"
+  | "verified"
+  | "failed"
+  | "cleanup_pending";
 
 export type WorkshopCheckpointBuildStatus =
   | "pending"
@@ -91,6 +96,9 @@ export const workshopPublications = sqliteTable(
     error: text("error"),
     claimedAt: integer("claimed_at"),
     claimExpiresAt: integer("claim_expires_at"),
+    providerVerificationState: text("provider_verification_state").$type<
+      WorkshopProviderVerificationState | null
+    >(),
     finishedAt: integer("finished_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
@@ -124,6 +132,10 @@ export const workshopPublications = sqliteTable(
     check(
       "workshop_publications_checkpoints_json_valid",
       sql`json_valid(${table.requiredCheckpointIdsJson})`,
+    ),
+    check(
+      "workshop_publications_provider_verification_state_valid",
+      sql`${table.providerVerificationState} is null OR ${table.providerVerificationState} in ('verifying', 'verified', 'failed', 'cleanup_pending')`,
     ),
   ],
 );
