@@ -24,6 +24,8 @@ need talosctl
 need kubectl
 need helm
 need docker
+need timeout
+need tar
 docker_running || die "Docker daemon is not reachable. Start Docker and re-run."
 
 # Talos labels every node container with talos.cluster.name=<cluster>
@@ -72,6 +74,209 @@ EOF
 
 patches=(--config-patch "${CNI_PATCH}")
 
+# The controlplane always gets the first host address of TALOS_SUBNET (.2;
+# .1 is the Docker bridge gateway).
+TALOS_CP_IP="${TALOS_SUBNET_GATEWAY%.*}.2"
+
+cleanup_destroyed_cluster_contexts() {
+  local contexts current_context other_context talosconfig_path
+
+  if have kubectl; then
+    kubectl config delete-context "admin@${CLUSTER_NAME}" >/dev/null 2>&1 || true
+    kubectl config delete-cluster "${CLUSTER_NAME}" >/dev/null 2>&1 || true
+    kubectl config delete-user "admin@${CLUSTER_NAME}" >/dev/null 2>&1 || true
+  fi
+
+  contexts="$(
+    talosctl config contexts 2>/dev/null \
+      | awk 'NR > 1 { if ($1 == "*") print $2; else print $1 }'
+  )" || {
+    warn "Could not enumerate talosconfig contexts after cluster removal"
+    return 0
+  }
+
+  if ! grep -Fxq "${CLUSTER_NAME}" <<<"${contexts}"; then
+    return 0
+  fi
+
+  current_context="$(
+    talosctl config contexts 2>/dev/null \
+      | awk 'NR > 1 && $1 == "*" { print $2; exit }'
+  )" || current_context=""
+  other_context="$(
+    awk -v target="${CLUSTER_NAME}" 'NF && $0 != target { print; exit }' <<<"${contexts}"
+  )"
+
+  if [[ -n "${other_context}" ]]; then
+    if [[ "${current_context}" == "${CLUSTER_NAME}" ]] \
+      && ! talosctl config context "${other_context}" >/dev/null 2>&1; then
+      warn "Could not switch away from talosconfig context '${CLUSTER_NAME}'; leaving it intact"
+      return 0
+    fi
+    talosctl config remove "${CLUSTER_NAME}" -y >/dev/null 2>&1 \
+      || warn "Could not remove stale talosconfig context '${CLUSTER_NAME}'"
+    return 0
+  fi
+
+  # `talosctl config remove` intentionally refuses to remove the current/sole
+  # context. This learner VM owns this one-context talosconfig, so remove only
+  # that file; never touch a directory or follow a symlink.
+  talosconfig_path="${TALOSCONFIG:-${HOME}/.talos/config}"
+  case "${talosconfig_path}" in
+    ""|"/"|"${HOME}")
+      warn "Refusing unsafe talosconfig cleanup path '${talosconfig_path}'"
+      return 0
+      ;;
+  esac
+  if [[ -f "${talosconfig_path}" && ! -L "${talosconfig_path}" ]]; then
+    rm -f -- "${talosconfig_path}"
+  else
+    warn "Dedicated talosconfig is not a regular file; leaving it intact"
+  fi
+}
+
+collect_failed_cluster_logs() {
+  local archive archive_members destroy_status
+  archive="$(
+    umask 077
+    mktemp "${TMPDIR:-/tmp}/${CLUSTER_NAME}-failure.XXXXXX"
+  )" || {
+    warn "Could not reserve a private Talos log archive path"
+    return 0
+  }
+
+  warn "Collecting Talos logs and removing the failed cluster"
+  destroy_status=0
+  timeout --signal=KILL 120s talosctl cluster destroy \
+    --name "${CLUSTER_NAME}" \
+    --save-cluster-logs-archive-path "${archive}" \
+    || destroy_status=$?
+
+  archive_members=""
+  if archive_members="$(tar -tzf "${archive}" 2>/dev/null)" \
+    && grep -Eq '(^|/)[^/]+\.log$' <<<"${archive_members}"; then
+    warn "Last high-signal Talos log lines (credentials redacted):"
+    tar -xOzf "${archive}" 2>/dev/null \
+      | LC_ALL=C tr -cd '\11\12\15\40-\176' \
+      | grep -Ei 'apid|bootstrap|certificate|error|fail|fatal|handshake|killed|oom|panic|timeout' \
+      | redact_talos_diagnostic_line \
+      | cut -c1-500 \
+      | tail -n 80 \
+      || true
+  else
+    warn "Talos did not produce a valid log archive"
+  fi
+
+  rm -f "${archive}"
+
+  if (( destroy_status == 0 )); then
+    cleanup_destroyed_cluster_contexts
+  else
+    warn "Talos failed-cluster removal exited with status ${destroy_status}; preserving its contexts"
+  fi
+}
+
+retry_transient_talos_bootstrap() {
+  local attempt bootstrap_output bootstrap_status deadline remaining request_timeout retry_sleep
+
+  deadline=$((SECONDS + 600))
+  step "Retrying the transient Talos bootstrap handshake"
+  if ! timeout --signal=KILL 5s talosctl cluster show --name "${CLUSTER_NAME}" >/dev/null 2>&1; then
+    fail "Talos did not preserve cluster state after the transient bootstrap failure"
+    return 1
+  fi
+  if ! timeout --signal=KILL 5s talosctl --context "${CLUSTER_NAME}" config info >/dev/null 2>&1; then
+    fail "Talos did not preserve context '${CLUSTER_NAME}' after the transient bootstrap failure"
+    return 1
+  fi
+
+  attempt=0
+  while (( SECONDS < deadline )); do
+    attempt=$((attempt + 1))
+    remaining=$((deadline - SECONDS))
+    request_timeout=5
+    if (( remaining < request_timeout )); then
+      request_timeout="${remaining}"
+    fi
+    (( request_timeout > 0 )) || break
+
+    # Do not send bootstrap while apid is still between listeners.
+    if ! timeout --signal=KILL "${request_timeout}s" talosctl \
+      --context "${CLUSTER_NAME}" \
+      --nodes "${TALOS_CP_IP}" \
+      version >/dev/null 2>&1; then
+      remaining=$((deadline - SECONDS))
+      (( remaining > 0 )) || break
+      if (( attempt == 1 || attempt % 12 == 0 )); then
+        info "Waiting for Talos API (attempt ${attempt}; ${remaining}s remain)"
+      fi
+      retry_sleep=5
+      if (( remaining < retry_sleep )); then
+        retry_sleep="${remaining}"
+      fi
+      sleep "${retry_sleep}"
+      continue
+    fi
+
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || break
+    request_timeout=5
+    if (( remaining < request_timeout )); then
+      request_timeout="${remaining}"
+    fi
+
+    bootstrap_output=""
+    bootstrap_status=0
+    bootstrap_output="$(
+      timeout --signal=KILL "${request_timeout}s" talosctl \
+        --context "${CLUSTER_NAME}" \
+        --nodes "${TALOS_CP_IP}" \
+        bootstrap 2>&1
+    )" || bootstrap_status=$?
+
+    if (( bootstrap_status == 0 )); then
+      ok "Talos bootstrap retry succeeded"
+      return 0
+    fi
+
+    if is_provisional_talos_bootstrap_already_exists "${bootstrap_output}"; then
+      warn "etcd is already initialized; treating this as provisional until the Kubernetes API check"
+      return 0
+    fi
+
+    if is_retry_talos_bootstrap_unavailable_eof "${bootstrap_output}"; then
+      remaining=$((deadline - SECONDS))
+      (( remaining > 0 )) || break
+      warn "Talos bootstrap handshake is still transient (attempt ${attempt}; ${remaining}s remain)"
+      retry_sleep=5
+      if (( remaining < retry_sleep )); then
+        retry_sleep="${remaining}"
+      fi
+      sleep "${retry_sleep}"
+      continue
+    fi
+
+    if is_retryable_talos_bootstrap_timeout_status "${bootstrap_status}"; then
+      remaining=$((deadline - SECONDS))
+      (( remaining > 0 )) || break
+      warn "Talos bootstrap request hit its ${request_timeout}-second bound (attempt ${attempt}; ${remaining}s remain)"
+      retry_sleep=5
+      if (( remaining < retry_sleep )); then
+        retry_sleep="${remaining}"
+      fi
+      sleep "${retry_sleep}"
+      continue
+    fi
+
+    fail "Talos bootstrap retry returned a non-transient error:"
+    printf '%s\n' "${bootstrap_output}" >&2
+    return 1
+  done
+
+  fail "Talos bootstrap did not recover before its 600-second deadline"
+  return 1
+}
+
 # The direct-cloud runtime intentionally has no local registry mirror.
 # Talos containerd resolves every external workload from its digest-pinned
 # manifest reference. Checkpoint 00 has already gated DNS, TLS, HTTPS, and
@@ -84,6 +289,8 @@ info "1 controlplane (${TALOS_MEMORY_CONTROLPLANE} MB) + 1 worker (${TALOS_MEMOR
 
 # NodePorts are published on the controlplane container; Cilium's
 # kube-proxy replacement makes every NodePort answer on every node.
+cluster_create_log="$(mktemp)"
+cluster_create_status=0
 talosctl cluster create docker \
   --name "${CLUSTER_NAME}" \
   --image "${TALOS_IMAGE}" \
@@ -93,26 +300,72 @@ talosctl cluster create docker \
   --memory-workers "${TALOS_MEMORY_WORKER}" \
   --subnet "${TALOS_SUBNET}" \
   --exposed-ports "${NODEPORT_GITEA}:${NODEPORT_GITEA}/tcp,${NODEPORT_ARGOCD}:${NODEPORT_ARGOCD}/tcp,${NODEPORT_ZOT}:${NODEPORT_ZOT}/tcp,${NODEPORT_PORTAL}:${NODEPORT_PORTAL}/tcp,${NODEPORT_BACKSTAGE}:${NODEPORT_BACKSTAGE}/tcp,${NODEPORT_RUSTFS_S3}:${NODEPORT_RUSTFS_S3}/tcp,${NODEPORT_RUSTFS_CONSOLE}:${NODEPORT_RUSTFS_CONSOLE}/tcp,${NODEPORT_GRAFANA}:${NODEPORT_GRAFANA}/tcp,${NODEPORT_KOURIER}:${NODEPORT_KOURIER}/tcp,${NODEPORT_NATS}:${NODEPORT_NATS}/tcp" \
-  "${patches[@]}"
+  "${patches[@]}" \
+  2>&1 | tee "${cluster_create_log}" || {
+    cluster_create_pipeline_status=("${PIPESTATUS[@]}")
+    cluster_create_status="${cluster_create_pipeline_status[0]}"
+    if (( cluster_create_status == 0 )); then
+      cluster_create_status="${cluster_create_pipeline_status[1]}"
+    fi
+  }
+
+cluster_create_output="$(tail -c 65536 "${cluster_create_log}")"
+rm -f "${cluster_create_log}"
+
+if (( cluster_create_status != 0 )); then
+  if is_initial_talos_bootstrap_unavailable_eof "${cluster_create_output}" \
+    && retry_transient_talos_bootstrap; then
+    warn "Recovered the Talos v1.13 bootstrap handshake race"
+  else
+    collect_failed_cluster_logs
+    die "Talos cluster creation failed"
+  fi
+fi
 
 # --- 2. kubeconfig ------------------------------------------------------------------
 step "Merging kubeconfig"
-# The controlplane always gets the first host address of TALOS_SUBNET (.2 —
-# .1 is the gateway). Set it as the context's default node so every later
+# Set the controlplane as the context's default node so every later
 # talosctl command (yours included) works without a -n flag; on a fresh
 # machine `talosctl kubeconfig` fails without this (found by rehearsal-in-CI).
-TALOS_CP_IP="${TALOS_SUBNET_GATEWAY%.*}.2"
-talosctl --context "${CLUSTER_NAME}" config node "${TALOS_CP_IP}"
-talosctl --context "${CLUSTER_NAME}" kubeconfig --force
-kubectl config use-context "admin@${CLUSTER_NAME}" >/dev/null
+if ! talosctl --context "${CLUSTER_NAME}" config node "${TALOS_CP_IP}"; then
+  collect_failed_cluster_logs
+  die "Could not select the Talos controlplane node"
+fi
+
+kubeconfig_ready=0
+kubeconfig_deadline=$((SECONDS + 120))
+while (( SECONDS < kubeconfig_deadline )); do
+  if timeout --signal=KILL 10s talosctl --context "${CLUSTER_NAME}" kubeconfig --force; then
+    kubeconfig_ready=1
+    break
+  fi
+  sleep 5
+done
+if (( kubeconfig_ready == 0 )); then
+  collect_failed_cluster_logs
+  die "Could not retrieve kubeconfig from the Talos controlplane within 2 minutes"
+fi
+if ! kubectl config use-context "admin@${CLUSTER_NAME}" >/dev/null; then
+  collect_failed_cluster_logs
+  die "Could not select the Kubernetes context"
+fi
 ok "kubectl context: admin@${CLUSTER_NAME}"
 
-step "Waiting for the Kubernetes API"
-for _ in $(seq 1 60); do
-  kubectl get nodes >/dev/null 2>&1 && break
-  sleep 2
+step "Waiting for the Kubernetes API readyz and node list"
+kubernetes_api_ready=0
+kubernetes_api_deadline=$((SECONDS + 300))
+while (( SECONDS < kubernetes_api_deadline )); do
+  if timeout --signal=KILL 10s kubectl get --raw=/readyz >/dev/null 2>&1 \
+    && timeout --signal=KILL 10s kubectl get nodes >/dev/null 2>&1; then
+    kubernetes_api_ready=1
+    break
+  fi
+  sleep 5
 done
-kubectl get nodes >/dev/null 2>&1 || die "Kubernetes API did not come up within 2 minutes"
+if (( kubernetes_api_ready == 0 )); then
+  collect_failed_cluster_logs
+  die "Kubernetes API readyz and node list did not become available within 5 minutes"
+fi
 ok "API server is answering (nodes are NotReady until Cilium arrives — expected)"
 
 # --- 3. Cilium ------------------------------------------------------------------------

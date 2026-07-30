@@ -46,6 +46,55 @@ need() {
   have "$1" || die "'$1' not found. ${2:-request a checkpoint-00 restore; do not install an unpinned replacement.}"
 }
 
+# Talos v1.13.6 does not retry gRPC Unavailable when apid briefly restarts
+# during bootstrap. The initial create classifier requires the complete phase
+# sequence so later readiness failures cannot be mistaken for this known race.
+is_initial_talos_bootstrap_unavailable_eof() {
+  local message="${1:-}"
+  [[ "${message}" == *"waiting for Talos API (to bootstrap the cluster)"*"bootstrapping cluster"*"bootstrap error:"*"code = Unavailable"*"authentication handshake failed: EOF"* ]]
+}
+
+# The direct retry command has a different stable error prefix. Keep it
+# separate from initial create classification and fail closed on every other
+# Talos error, including unrelated Unavailable responses.
+is_retry_talos_bootstrap_unavailable_eof() {
+  local message="${1:-}"
+  [[ "${message}" == *"error executing bootstrap:"*"code = Unavailable"*"authentication handshake failed: EOF"* ]]
+}
+
+# GNU timeout reports 124 for its normal deadline and 137 when the requested
+# KILL signal terminates the command. Either can mean the bootstrap request
+# reached the node before the client was killed, so retry until the outer
+# recovery deadline and let an exact AlreadyExists response resolve ambiguity.
+is_retryable_talos_bootstrap_timeout_status() {
+  local status="${1:-0}"
+  (( status == 124 || status == 137 ))
+}
+
+# A bootstrap reply can be lost after etcd was initialized. This result is only
+# provisional: callers must still prove kubeconfig and Kubernetes API health.
+is_provisional_talos_bootstrap_already_exists() {
+  local message="${1:-}"
+  [[ "${message}" == *"error executing bootstrap:"*"code = AlreadyExists"*"etcd data directory is not empty"* ]]
+}
+
+# Redact credentials before any Talos log line reaches CI output. This covers
+# JSON/YAML key-value forms, HTTP auth, URL credentials, and Kubernetes-style
+# bootstrap tokens while retaining enough surrounding error text to diagnose.
+redact_talos_diagnostic_line() {
+  sed -E \
+    -e 's#(https?://)[^/@[:space:]]+@#\1[REDACTED]@#g' \
+    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
+    -e 's/([?&](api_key|access_token|refresh_token|key|password|passwd|secret|token)=)[^&[:space:]#]+/\1[REDACTED]/Ig' \
+    -e 's/("(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|client[_ -]?secret|password|passwd|private[_ -]?key|secret|token)"[[:space:]]*[:=][[:space:]]*)"[^"]*"/\1"[REDACTED]"/Ig' \
+    -e 's/(Authorization[[:space:]]*[:=][[:space:]]*).*/\1[REDACTED]/Ig' \
+    -e 's/((api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|client[_ -]?secret|password|passwd|private[_ -]?key|secret|token)[[:space:]]*[:=][[:space:]]*)"[^"]*"/\1"[REDACTED]"/Ig' \
+    -e 's/("(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|client[_ -]?secret|password|passwd|private[_ -]?key|secret|token)"[[:space:]]*[:=][[:space:]]*)[^",;[:space:]}]+/\1[REDACTED]/Ig' \
+    -e 's/((api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|client[_ -]?secret|password|passwd|private[_ -]?key|secret|token)[[:space:]]*[:=][[:space:]]*)[^",;[:space:]}]+/\1[REDACTED]/Ig' \
+    -e 's/(^|[^A-Za-z0-9])[A-Za-z0-9]{6}\.[A-Za-z0-9]{16}([^A-Za-z0-9]|$)/\1[REDACTED]\2/g' \
+    -e 's/[A-Za-z0-9_+\/=-]{32,}/[REDACTED]/g'
+}
+
 # wait_rollout <ns> <kind/name> [timeout-seconds] — a robust rollout wait for the
 # bootstrap path. A single `kubectl rollout status --timeout` fails HARD the
 # moment a cold cluster's first image pull or a scheduling delay overruns the
