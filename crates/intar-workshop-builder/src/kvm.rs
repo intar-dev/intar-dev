@@ -2417,7 +2417,15 @@ mod tests {
                     .find("seen_namespaces[\"${namespace}\"]=1")
                     .unwrap()
         );
-        assert!(bootstrap.contains("docker.io git jq sudo xz-utils"));
+        assert!(bootstrap.contains("docker.io git jq xz-utils"));
+        assert!(
+            !bootstrap
+                .lines()
+                .find(|line| line.starts_with("apt-get install "))
+                .unwrap()
+                .split_ascii_whitespace()
+                .any(|package| package == "sudo")
+        );
         assert!(create_cluster.contains("start_mount_capacity_sampler"));
         assert!(create_cluster.contains("stop_mount_capacity_sampler"));
         assert!(create_cluster.contains("mount_capacity_sampler_failed"));
