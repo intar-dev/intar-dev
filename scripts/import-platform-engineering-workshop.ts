@@ -1258,6 +1258,7 @@ if (( status == 0 )); then
 
     rustfs_forwarded_curl() {
       curl -sS --max-time 15 \\
+        -H 'User-Agent: Mozilla/5.0 (compatible; Intar-Workspace-App-Probe/1.0)' \\
         -H "Host: \${public_host}" \\
         -H "X-Forwarded-Host: \${public_host}" \\
         -H 'X-Forwarded-Proto: https' \\

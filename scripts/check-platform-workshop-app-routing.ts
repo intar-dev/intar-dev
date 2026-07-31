@@ -281,6 +281,7 @@ requireText(
 requireText(
   "scripts/verify-03.sh",
   "http://localhost:30901/",
+  "User-Agent: Mozilla/5.0 (compatible; Intar-Workspace-App-Probe/1.0)",
   "X-Forwarded-Port: 443",
   "safe same-origin redirect",
   "unsafe, missing, or duplicate redirect location",
