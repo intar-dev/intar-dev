@@ -11,7 +11,7 @@ git add . && git commit -m "module 09: enable observability" && git push
 kubectl -n observability get pods   # victoria-metrics/-logs/-traces, grafana, otel-collector (agents + gateway)
 ```
 
-Then open Grafana at **http://localhost:30030** (NodePort — no port-forward needed) →
+Then open **Grafana** under **Workspace applications** in the Intar workshop room →
 Explore → data source **VictoriaTraces** (the Jaeger datasource) → Search. Upload a fresh
 image (traces are easiest to find seconds after you make them), then look for the
 uploader/resizer service names and open the newest trace: one waterfall, portal to

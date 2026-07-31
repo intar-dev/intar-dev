@@ -1,5 +1,5 @@
 # Workshop addition (not upstream): expose Grafana on a stable NodePort so the
-# browser reaches it without a port-forward: http://localhost:30030
+# Intar reaches this declared workspace application without a public guest port
 # 30030 is the canonical observability port (freed when otel-lgtm was retired in
 # the #57 rework); the portal's GRAFANA_URL deep-links point here.
 apiVersion: v1

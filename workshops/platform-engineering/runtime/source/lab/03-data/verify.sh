@@ -30,7 +30,7 @@ check_app() { # <name>
     fi
     sleep 5
   done
-  fail "ArgoCD app '$1' is '$st' — did you cp gitops/catalog/$1.yaml to gitops/apps/ and push? Check http://localhost:30080"
+  fail "ArgoCD app '$1' is '$st' — did you cp gitops/catalog/$1.yaml to gitops/apps/ and push? Open Argo CD under Workspace applications in the Intar room"
 }
 
 # --- Platform components enabled -------------------------------------------

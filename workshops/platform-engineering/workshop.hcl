@@ -196,7 +196,7 @@ module "07" {
   facilitator_notes = "facilitator/module-07.md"
   hints             = ["hints/module-07-01.md", "hints/module-07-02.md", "hints/module-07-03.md", "hints/module-07-04.md"]
   solution          = "content/module-07-solution.md"
-  explain_back      = "Tell your neighbor: list every network hop in your pipeline (git clone from ? → build\nruns where? → push to ? → kubelet pulls from ?). How many of those left your laptop?\nThat's the sovereignty argument in one answer."
+  explain_back      = "Tell your neighbor: list every network hop in your pipeline (git clone from ? → build\nruns where? → push to ? → kubelet pulls from ?). How many of those left your learner VM?\nThat's the sovereignty argument in one answer."
   verify_script     = "scripts/verify-07.sh"
   catch_up_script   = "scripts/catch-up-07.sh"
   checkpoint        = "checkpoint-07"

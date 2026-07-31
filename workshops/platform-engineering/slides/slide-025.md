@@ -1,6 +1,6 @@
 # Your progress, live
 
-- Cloudbox Console → **Workshop** page
-- One row per module, inferred from cluster
-- It reads live state — no self-reporting
-- `http://localhost:30600/workshop` (after module 02)
+- Intar workshop room → **Agenda** → **Live verification**
+- One row per module, combining verifier results and live probe health
+- Verification latches; later regressions remain visible
+- Available from lobby check-in through the archived session

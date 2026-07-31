@@ -1,6 +1,6 @@
 # Your cloud, in a box
 
-    **docker** Your laptop · Docker — the "datacenter"
+    **docker** Your learner VM · Docker — the "datacenter"
 
       **talos** **cilium** Talos + Cilium · Kubernetes — no kube-proxy
 

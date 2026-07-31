@@ -40,25 +40,19 @@ done
 kubectl -n demo wait --for=condition=Ready cluster/app-db --timeout=420s
 kubectl -n demo exec app-db-1 -- psql -U postgres -d app -tAc 'SELECT 1;'
 
-# 3. Bucket + object + presigned URL. Uses local aws CLI when present,
-#    otherwise an in-cluster aws-cli pod.
-if command -v aws >/dev/null 2>&1; then
-  export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=us-east-1
-  aws --endpoint-url http://localhost:30900 s3 mb s3://app-assets 2>/dev/null || true
-  echo "hello from my own cloud" > /tmp/cloudbox-hello.txt
-  aws --endpoint-url http://localhost:30900 s3 cp /tmp/cloudbox-hello.txt s3://app-assets/hello.txt
-  aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600
-else
-  kubectl -n demo run solve-s3 --rm -i --restart=Never --quiet \
-    --image=public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581 \
-    --env AWS_ACCESS_KEY_ID=cloudbox --env AWS_SECRET_ACCESS_KEY=cloudbox123 \
-    --env AWS_REGION=us-east-1 \
-    --command -- /bin/sh -c '
-      set -e
-      EP=http://rustfs-svc.rustfs.svc.cluster.local:9000
-      aws --endpoint-url $EP s3 mb s3://app-assets 2>/dev/null || true
-      echo "hello from my own cloud" > /tmp/hello.txt
-      aws --endpoint-url $EP s3 cp /tmp/hello.txt s3://app-assets/hello.txt
-      aws --endpoint-url $EP s3 presign s3://app-assets/hello.txt --expires-in 3600'
-fi
+# 3. Bucket + object + a guest-local presigned download.
+aws_s3() {
+  docker run --rm --network host -i \
+    -e AWS_ACCESS_KEY_ID=cloudbox \
+    -e AWS_SECRET_ACCESS_KEY=cloudbox123 \
+    -e AWS_REGION=us-east-1 \
+    public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581 \
+    --endpoint-url http://localhost:30900 "$@"
+}
+aws_s3 s3 mb s3://app-assets 2>/dev/null || true
+printf 'hello from my own cloud\n' |
+  aws_s3 s3 cp - s3://app-assets/hello.txt
+PRESIGNED_URL="$(aws_s3 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
+curl --fail --show-error --output /dev/null "$PRESIGNED_URL"
+printf 'Presigned object download verified inside the learner VM.\n'
 ```

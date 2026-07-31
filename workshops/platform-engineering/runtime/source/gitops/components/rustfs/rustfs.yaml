@@ -15,8 +15,8 @@ automountServiceAccountToken: true
 ---
 # Source: rustfs/templates/secret.yaml
 # WORKSHOP-GRADE CREDENTIALS: cloudbox / cloudbox123, committed to git on
-# purpose. This is an ephemeral lab sandbox on your own laptop — never do
-# this for anything reachable from a real network.
+# purpose. This is an isolated learner workspace with Intar-authorized routes — never
+# use workshop credentials for production or any independently exposed service.
 apiVersion: v1
 kind: Secret
 metadata:

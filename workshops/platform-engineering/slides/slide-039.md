@@ -1,6 +1,6 @@
 # GO — Module 03
 
-**Outcome:** `psql` into your own DBaaS; a presigned URL that works.
+**Outcome:** `psql` into your own DBaaS; a presigned download verified in the learner terminal.
 
 ```bash
 # enable cnpg-operator.yaml + rustfs.yaml from the catalog

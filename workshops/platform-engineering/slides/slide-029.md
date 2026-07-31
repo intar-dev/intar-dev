@@ -4,4 +4,4 @@ Module 01 · 35 min · core
 
 **talos** **cilium**
 
-BRUKTBY  Their new datacenter is just Docker on this laptop — an immutable OS with no server to SSH into and pet.
+BRUKTBY  Their new datacenter is just Docker on this learner VM — an immutable OS with no server to SSH into and pet.

@@ -7,6 +7,47 @@ status=$?
 set -e
 printf '%s\n' "${output}"
 if (( status == 0 )); then
+  rustfs_aws() {
+    docker run --rm --network host -i \
+      -e AWS_ACCESS_KEY_ID=cloudbox \
+      -e AWS_SECRET_ACCESS_KEY=cloudbox123 \
+      -e AWS_REGION=us-east-1 \
+      -e AWS_PAGER= \
+      "public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581" \
+      --endpoint-url http://localhost:30900 "$@"
+  }
+
+  if ! rustfs_object_key="$(rustfs_aws s3api list-objects-v2 \
+    --bucket app-assets \
+    --max-items 1 \
+    --query 'Contents[0].Key' \
+    --output text)"; then
+    printf 'RustFS could not list an object for presigned-download verification\n' >&2
+    status=1
+  elif [[ -z "${rustfs_object_key}" ||
+          "${rustfs_object_key}" == "None" ||
+          "${rustfs_object_key}" == *$'\n'* ]]; then
+    printf 'RustFS returned no deterministic object key for presigned-download verification\n' >&2
+    status=1
+  elif ! rustfs_presigned_url="$(rustfs_aws s3 presign \
+    "s3://app-assets/${rustfs_object_key}" \
+    --expires-in 300)"; then
+    printf 'RustFS could not generate a presigned download URL\n' >&2
+    status=1
+  elif [[ "${rustfs_presigned_url}" != http://localhost:30900/* ||
+          "${rustfs_presigned_url}" == *" "* ||
+          "${rustfs_presigned_url}" == *$'\t'* ||
+          "${rustfs_presigned_url}" == *$'\n'* ]]; then
+    printf 'RustFS generated an unsafe or non-local presigned URL\n' >&2
+    status=1
+  elif ! curl -fsS --max-time 15 --output /dev/null \
+    "${rustfs_presigned_url}"; then
+    printf 'RustFS presigned download failed inside the learner VM\n' >&2
+    status=1
+  fi
+fi
+
+if (( status == 0 )); then
   public_host=wa-workshop-probe.intar.app
   if ! rustfs_probe_dir="$(mktemp -d)"; then
     printf 'could not create temporary directory for RustFS workspace-app probe\n' >&2

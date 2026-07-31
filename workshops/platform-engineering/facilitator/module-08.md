@@ -68,26 +68,26 @@ Backstage earns its weight when you need: the plugin ecosystem (ArgoCD, PagerDut
 
 The costs are real too: roughly 2 GB of Node.js plus a Postgres, YAML-heavy configuration, and — the big one — typically a team that owns it. The closing line, verbatim from the lab: a portal is a PRODUCT decision, not a default.
 
-Next slide: we look at Backstage live, so this isn't a straw man.
+Next slide: use the bundled Backstage screenshots to make the comparison concrete without provisioning an undeclared application.
 
 
 ---
 
-Presenter demo, ~5 minutes, on the projector cluster (backstage.yaml was pre-enabled during the second break — first boot is slow: ~2 GB CNOE image plus a CNPG database, which is precisely why this is a demo and not the hands-on).
+Facilitator comparison, ~5 minutes, using the bundled Backstage screenshots. Do not enable backstage.yaml in the hosted session: it has no declared Intar workspace route.
 
-The loop to show: guest sign-in at :30700 → catalog entities fed from Gitea → run a software template → chase the result through Gitea (:30300, a new repo appeared) → ArgoCD (:30080, a new Application) → pods running.
+Use the bundled screenshots to trace Backstage's conceptual loop: catalog entity → software template → new Gitea repository → ArgoCD Application → running workload. Backstage is not a declared Intar workspace application in this revision.
 
 Narrate what to watch for: the template wires together git, CI/CD, and the catalog — that integration glue is the real, ongoing work of operating Backstage. The demo is deliberately placed AFTER attendees built the same self-service loop themselves in 04 and saw it fronted by a form minutes ago: same shape, industrial strength, industrial weight.
 
-backstage.yaml stays in the catalog — anyone with RAM to spare can run this exact loop at home. That's the fair test of the build-vs-buy slide.
+Keep backstage.yaml disabled in hosted sessions. The pinned source remains available for a separately sized, explicitly routed workshop revision.
 
 
 ---
 
-The task: enable portal.yaml (lands in ns portal in seconds — one small Go binary), explore the Console at :30600, and for each page answer "which Kubernetes API is this?" — they installed every one of them today.
+The task: enable portal.yaml (lands in ns portal in seconds — one small Go binary), open **Cloudbox Console** under **Workspace applications**, and for each page answer "which Kubernetes API is this?" — they installed every one of them today.
 
 Star task: create console-db (size small) via the New database form, then prove it with kubectl: the WorkshopDatabase XR, and the composed CNPG cluster booting with -w. Then the governance question: this one didn't go through git — find the evidence, keep the thought for the explain-back.
 
 Finish by actually reading the source — apps/portal/ is a few dozen small Go files (internal/kube/client.go for the API, one file per page under internal/web/) and a set of templates; ask them to find the 20 lines behind the form in internal/web/databases.go. "After today you can read every line of your platform's front door" is the sentence to leave hanging.
 
-Also point out the Workshop page they've been watching all day lives in this same binary (workshop.go) — a checklist inferred from live cluster state, ~100 lines.
+Open the Console's Workshop page now. It becomes available with module 08 and summarizes live cluster state; compare it with Intar's native verification view used earlier. The page is implemented in `workshop.go` in roughly 100 lines.

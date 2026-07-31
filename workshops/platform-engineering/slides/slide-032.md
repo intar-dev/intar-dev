@@ -4,4 +4,4 @@ Module 02 · 35 min · core
 
 **gitea** **argocd**
 
-BRUKTBY  Git becomes their only deploy button — every platform change a reviewable commit, nothing tied to GitHub or the venue WiFi.
+BRUKTBY  Git becomes their only deploy button — every platform change a reviewable commit, nothing tied to a hosted Git SaaS.

@@ -1,10 +1,10 @@
 # GO — Module 00
 
-**Outcome:** your laptop is provably ready.
+**Outcome:** your dedicated Intar workspace is provably ready.
 
 ```bash
 cd lab/00-setup && ./verify.sh     # all green?
 cd lab/00-setup && ./verify.sh
 ```
 
-15 min · red sticky if anything is
+15 min · choose **Need help** if anything is

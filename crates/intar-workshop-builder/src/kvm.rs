@@ -2216,7 +2216,11 @@ mod tests {
         assert!(!grafana_source.contains("/select/logsql/query"));
         let grafana_catalog =
             fs::read_to_string(root.join("runtime/source/gitops/catalog/grafana.yaml")).unwrap();
-        assert!(grafana_catalog.contains("Browser: http://localhost:30030"));
+        assert!(
+            grafana_catalog
+                .contains("Browser: declared as the Grafana workspace application on port 30030")
+        );
+        assert!(!grafana_catalog.contains("Browser: http://localhost:"));
         assert!(!grafana_catalog.contains("localhost:30031"));
 
         let verifier_00 = fs::read_to_string(root.join(&module_00.verify_script)).unwrap();

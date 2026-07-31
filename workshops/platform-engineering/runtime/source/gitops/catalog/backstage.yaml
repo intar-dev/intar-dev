@@ -1,10 +1,10 @@
 # Backstage portal, CNOE prebuilt image (module S3 — run LAST: heaviest
 # component, ~2GB image + a CNPG Postgres). Guest sign-in, wired to the
-# in-cluster Gitea and ArgoCD. UI: http://localhost:30700
+# in-cluster Gitea and ArgoCD. not exposed as an Intar workspace application in v1
 # Requires cnpg-operator to be enabled first (its database is a CNPG
 # Cluster — hence SkipDryRunOnMissingResource).
 #
-# Enable with:  cp gitops/catalog/backstage.yaml gitops/apps/ && git add . && git commit -m 'enable backstage' && git push
+# Hosted Intar sessions: keep this disabled; no Backstage workspace application route is declared.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:

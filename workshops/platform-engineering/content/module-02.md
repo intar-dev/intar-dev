@@ -11,8 +11,8 @@ your name in it — materialize without you touching `kubectl apply`.
 
 This is the architectural heart of the workshop. Everything from here on — databases,
 platform APIs, serverless — arrives as a git commit that ArgoCD converges. Note the git
-server is *inside* the cluster: your platform doesn't depend on GitHub, on the venue WiFi,
-or on anyone's SaaS. That's "cloud on your terms" in one design decision. The pattern
+server is *inside* the cluster: the GitOps loop does not depend on GitHub or a hosted Git SaaS; Intar connectivity
+and registry egress remain explicit. That's "cloud on your terms" in one design decision. The pattern
 (app-of-apps: one root Application that deploys other Applications) is exactly how real
 platform teams bootstrap clusters.
 
@@ -26,9 +26,9 @@ platform teams bootstrap clusters.
    ```
 
 2. Look around your cloud's control room:
-   - Gitea: http://localhost:30300 — log in as `gitea_admin` / `cloudbox123`, find the
+   - Gitea: under **Workspace applications** in the Intar workshop room, open **Gitea** and log in as `gitea_admin` / `cloudbox123`, find the
      `cloudbox/platform` repo.
-   - ArgoCD: http://localhost:30080 — username `admin`; get the password from the cluster
+   - Argo CD: from the same **Workspace applications** list, open **Argo CD**; username `admin`; get the password from the cluster
      (hint 1). Find the root `platform` Application. What path in the repo does it watch?
      What single Application did it already create, and why is that dir called "wave 0"?
 

@@ -35,7 +35,7 @@ Every model in this table is fine at a SINGLE well-formed tool call — that's w
 
 This isn't a random pick of numbers — qwen3:4b (2.5 GB, Ollama's own reference model for tool-calling docs) is the exact model beat 1 of the lab runs, host-side, dependent on digest-pinned external pulls, pre-pulled by the Intar checkpoint bootstrap. Watching it flail on your OWN fault, live, teaches this table better than reading it ever could — that's why beat 1 is built to fail instructively, not tightened until it accidentally succeeds.
 
-Say plainly: this isn't a swipe at small models in general — it's a swipe at using a stock ≤8B chat model, unmodified, for a MULTI-TURN tool-calling job it wasn't tuned for. Purpose-built tool models (ToolACE-8B, xLAM-2) close much of this gap; that's just not the model an attendee pulls by default, and it's out of scope for a laptop lab.
+Say plainly: this isn't a swipe at small models in general — it's a swipe at using a stock ≤8B chat model, unmodified, for a MULTI-TURN tool-calling job it wasn't tuned for. Purpose-built tool models (ToolACE-8B, xLAM-2) close much of this gap; that's just not the model an attendee pulls by default, and it's out of scope for a learner VM lab.
 
 
 ---
@@ -59,6 +59,6 @@ Beat 1 runs entirely digest-pinned against qwen3:4b on host-side Ollama (never i
 
 Beat 2 is one git push: switch the same ModelConfig to the free OpenCode Zen key from the module 00 prep (or a personal Claude/OpenAI key as the documented fallback), and re-run the investigation — same fault, same Case file, now a real hypothesis with a kill-test. Verify it against the cluster, then fix it with the git revert the Case file hands you.
 
-16 GB laptop callout, say it out loud: the local model doesn't fit alongside the running cluster on the minimum spec — go straight to beat 2, the README says so plainly, no twenty minutes lost discovering it. And the standing fallback if Kagent itself misbehaves on the day: module 05's bring-your-own-agent flow works identically, no platform dependency.
+16 GB learner VM callout, say it out loud: the local model doesn't fit alongside the running cluster on the minimum spec — go straight to beat 2, the README says so plainly, no twenty minutes lost discovering it. And the standing fallback if Kagent itself misbehaves on the day: module 05's bring-your-own-agent flow works identically, no platform dependency.
 
 Screenshot note for whoever refreshes this deck: swap in a real Case file capture from the Console once the module-10 Console slice lands — the interactive prototype is the placeholder reference for now.

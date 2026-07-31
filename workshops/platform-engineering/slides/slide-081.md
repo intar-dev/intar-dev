@@ -9,4 +9,4 @@ Self-service infra **crossplane**
 Serverless · CI · registry **knative** **Argo Workflows** **Zot**
 Cloud console **Cloudbox**
 
-No account. No bill. No permission.
+Dedicated VM. Provider-billed. Deleted at teardown.

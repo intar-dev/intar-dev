@@ -4,7 +4,7 @@
 kubectl -n demo get ksvc hello -o jsonpath='{.status.url}'    # e.g. http://hello.demo.example.com
 ```
 
-`example.com` obviously doesn't resolve to your laptop — that's fine. HTTP routing only
+`example.com` obviously doesn't resolve to your learner VM — that's fine. HTTP routing only
 needs the header to match:
 
 ```bash

@@ -1,6 +1,6 @@
 # Cloudbox Console — the bespoke portal attendees wire up in module 08
 # (Backstage stays in the catalog as the presenter demo). Single Go binary +
-# htmx, built from apps/portal in this repo. UI: http://localhost:30600.
+# htmx, built from apps/portal in this repo. UI: declared as the Cloudbox Console workspace application.
 # Reads platform state (ArgoCD Applications, CNPG Clusters, Knative
 # Services, pods, namespaces). XR self-service (the Databases page) requires
 # the module-08 Role in gitops/components/demo/ — it ships with the `demo`

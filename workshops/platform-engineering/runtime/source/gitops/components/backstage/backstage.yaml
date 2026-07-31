@@ -261,8 +261,9 @@ spec:
       containers:
         - name: backstage
           # Tag pinned to the commit the CNOE ref-implementation deploys.
-          # NOTE: this image is linux/amd64 only — Apple Silicon runs it under
-          # emulation (works on Docker Desktop/OrbStack, slower startup).
+          # NOTE: this image is linux/amd64. The workshop revision requires an
+          # x86 learner runtime, but Backstage remains disabled because no
+          # workspace application route is declared for it.
           image: ghcr.io/cnoe-io/backstage-app@sha256:960dcd8b68ba8fed3685727c63b5221e5f95392694d887a12e14d792834636de
           command:
             - node
@@ -303,8 +304,7 @@ spec:
           # TCP probe on purpose: the new Backstage backend serves health at
           # /.backstage/health/v1/* (old backends used /healthcheck) — a port
           # check works for either and the CNOE reference ships no probe at
-          # all. Generous windows: first boot runs DB migrations and, on
-          # Apple Silicon, amd64 emulation.
+          # all. Generous windows: first boot runs database migrations.
           readinessProbe:
             tcpSocket:
               port: 7007
