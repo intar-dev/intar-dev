@@ -1913,12 +1913,30 @@ function adaptTalosSystemImagePins(value: string): string {
         type: bind
         source: /var/local-path-provisioner
         options: [bind, rshared, rw]`,
-    `  kubelet:
+    `  # Kubernetes v1.36 no longer accepts kubelet's removed
+  # --pod-infra-container-image flag. Configure the CRI sandbox image through
+  # Talos' documented containerd fragment instead, retaining the exact digest.
+  files:
+    - content: |
+        [plugins]
+          [plugins."io.containerd.cri.v1.images".pinned_images]
+            sandbox = "${pin("registry.k8s.io/pause:3.10.1")}"
+      path: /etc/cri/conf.d/20-customization.part
+      op: create
+  kubelet:
     image: ${pin("ghcr.io/siderolabs/kubelet:v1.36.2")}
-    extraArgs:
-      pod-infra-container-image: ${pin("registry.k8s.io/pause:3.10.1")}`,
+`,
   );
-  if (withKubeletImages === adapted) {
+  if (
+    withKubeletImages === adapted ||
+    withKubeletImages.includes("pod-infra-container-image:") ||
+    !withKubeletImages.includes(
+      '[plugins."io.containerd.cri.v1.images".pinned_images]',
+    ) ||
+    !withKubeletImages.includes(
+      `sandbox = "${pin("registry.k8s.io/pause:3.10.1")}"`,
+    )
+  ) {
     throw new Error("Talos kubelet mount anchor changed upstream");
   }
   const withControlPlaneEtcd = withKubeletImages.replace(

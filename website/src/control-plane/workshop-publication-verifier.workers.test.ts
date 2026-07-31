@@ -270,6 +270,8 @@ describe("workshop publication verifier guest boundary", () => {
   });
 
   it("rejects stale verifier identities and moves guest failures to deletion", async () => {
+    const talosFailure =
+      "checkpoint apply failed; stderr tail: INTAR_TALOS_FAILURE=nodes0,kubectl-connect,run2,oom0,restart0,wait-kubelet";
     const bootstrap = await bootstrapRequest();
     const { report_credential: credential } = await bootstrap.json<{
       report_credential: string;
@@ -285,12 +287,13 @@ describe("workshop publication verifier guest boundary", () => {
       terminal_ready: false,
       ssh_host_keys_openssh: [],
       probes: [],
-      error: "checkpoint application failed",
+      error: talosFailure,
     });
     expect(failed.status).toBe(200);
     expect(await attemptState()).toMatchObject({
       state: "failed",
       last_error_code: "guest_reported_failure",
+      error: talosFailure,
     });
     const checkpoint = await env.DB.prepare(
       `SELECT verification_status
@@ -299,6 +302,108 @@ describe("workshop publication verifier guest boundary", () => {
       .bind("provider-checkpoint-0001")
       .first<{ verification_status: string }>();
     expect(checkpoint?.verification_status).toBe("bootstrapping");
+  });
+
+  it("sanitizes authenticated guest diagnostics before persistence", async () => {
+    const bootstrap = await bootstrapRequest();
+    const { report_credential: credential } = await bootstrap.json<{
+      report_credential: string;
+    }>();
+    const signedUrl =
+      "https://intar.test/api/runtime/workshop-publication-verifier/checkpoints/iwpv_checkpoint_signed_secret";
+    const controls = "\t\u001b\b\u007f\u0085\r\n\0";
+    const failed = await reportRequest(credential, {
+      ...proofReport(1),
+      phase: "failed",
+      health: "failed",
+      terminal_ready: false,
+      ssh_host_keys_openssh: [
+        `ssh-ed25519 AAAATESTVERIFIER credential-comment-${credential}`,
+      ],
+      probes: [
+        {
+          id: "setup-ready",
+          status: "fail",
+          observed_at_unix_ms: NOW,
+          error: `probe${controls}${credential} ${signedUrl}`,
+        },
+      ],
+      error:
+        `apply${controls}${credential} ${signedUrl} ` +
+        "xiwpv_checkpoint_naked_secret-",
+    });
+    expect(failed.status).toBe(200);
+
+    const stored = await env.DB.prepare(
+      `SELECT error, report_json
+       FROM workshop_publication_provider_attempts WHERE id = ?`,
+    )
+      .bind("attempt-0001")
+      .first<{ error: string; report_json: string }>();
+    expect(stored).toBeTruthy();
+    expect(stored?.error).toBe(
+      "apply[REDACTED] https://intar.test x[REDACTED]",
+    );
+    expect(stored?.report_json).not.toContain(credential);
+    expect(stored?.report_json).not.toContain("iwpv_checkpoint_signed_secret");
+    const parsed = JSON.parse(stored?.report_json ?? "{}");
+    expect(parsed).toMatchObject({
+      ssh_host_keys_openssh: ["ssh-ed25519 AAAATESTVERIFIER"],
+      probes: [
+        {
+          error: "probe[REDACTED] https://intar.test",
+        },
+      ],
+    });
+    expect(parsed.error).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(parsed.probes[0].error).not.toMatch(
+      /[\u0000-\u001f\u007f-\u009f]/,
+    );
+  });
+
+  it("rejects a report credential outside sanitizable error fields", async () => {
+    const bootstrap = await bootstrapRequest();
+    const { report_credential: credential } = await bootstrap.json<{
+      report_credential: string;
+    }>();
+    const response = await reportRequest(credential, {
+      ...proofReport(1),
+      probes: [
+        ...proofReport(1).probes,
+        {
+          id: credential,
+          status: "fail",
+          observed_at_unix_ms: NOW,
+        },
+      ],
+    });
+    expect(response.status).toBe(400);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      error: null,
+    });
+  });
+
+  it("does not persist an empty sanitized failure", async () => {
+    const bootstrap = await bootstrapRequest();
+    const { report_credential: credential } = await bootstrap.json<{
+      report_credential: string;
+    }>();
+    const response = await reportRequest(credential, {
+      ...proofReport(1),
+      phase: "failed",
+      health: "failed",
+      terminal_ready: false,
+      ssh_host_keys_openssh: [],
+      probes: [],
+      error: "\r\n\t\u001b\0",
+    });
+    expect(response.status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "failed",
+      last_error_code: "guest_reported_failure",
+      error: null,
+    });
   });
 });
 
@@ -452,7 +557,7 @@ function proofReport(sequence: number) {
     health: "healthy",
     terminal_ready: true,
     recording_drain_completed: false,
-    ssh_host_keys_openssh: ["ssh-ed25519 AAAATEST verifier"],
+    ssh_host_keys_openssh: ["ssh-ed25519 AAAATESTVERIFIER verifier"],
     probes: [
       { id: "setup-ready", status: "pass", observed_at_unix_ms: NOW },
       { id: "docker-ready", status: "pass", observed_at_unix_ms: NOW },

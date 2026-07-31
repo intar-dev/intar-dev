@@ -85,10 +85,18 @@ machine:
   nodeLabels:
     cloudbox.io/region: eu-laptop-1
     cloudbox.io/zone: under-desk-a
+  # Kubernetes v1.36 no longer accepts kubelet's removed
+  # --pod-infra-container-image flag. Configure the CRI sandbox image through
+  # Talos' documented containerd fragment instead, retaining the exact digest.
+  files:
+    - content: |
+        [plugins]
+          [plugins."io.containerd.cri.v1.images".pinned_images]
+            sandbox = "registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
+      path: /etc/cri/conf.d/20-customization.part
+      op: create
   kubelet:
     image: ghcr.io/siderolabs/kubelet:v1.36.2@sha256:e594fcc880e6d2816b3334e4ddfd586b420ca8c3a4dd2b40e9de1571e69e559a
-    extraArgs:
-      pod-infra-container-image: registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c
 EOF
 )"
 
@@ -112,6 +120,13 @@ TALOS_CP_IP="${TALOS_SUBNET_GATEWAY%.*}.2"
 readonly TALOS_CONTROLPLANE_COUNT=1
 readonly TALOS_WORKER_COUNT=1
 readonly EXPECTED_TALOS_NODE_COUNT=$((TALOS_CONTROLPLANE_COUNT + TALOS_WORKER_COUNT))
+# Both nested Talos containerd instances cold-pull their digest-pinned
+# Kubernetes images from the external registries. Give node registration the
+# same 20-minute allowance as the fixed, non-configurable Talos v1.13 Docker
+# readiness check. If that parent check expires first, the guarded handoff
+# below keeps Intar's later-starting node deadline authoritative.
+readonly TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS=1200
+readonly TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS=5
 
 cleanup_destroyed_cluster_contexts() {
   local contexts current_context other_context talosconfig_path
@@ -262,6 +277,9 @@ cluster_create_tail="unavailable"
 cluster_create_state="not_started"
 bootstrap_kubeconfig_dir=""
 bootstrap_kubeconfig=""
+kubernetes_node_count=0
+kubernetes_node_query_status="not-run"
+talos_failure_marker="nodes0,kubectl-not-run,run0,oom0,restart0,wait-unknown"
 
 start_mount_capacity_sampler() {
   local initial_snapshot
@@ -360,6 +378,153 @@ report_cluster_create_tail() {
   printf '%s\n' "${cluster_create_tail}" >&2
 }
 
+classify_talos_wait_line() {
+  local line="${1:-}"
+
+  talos_wait_phase=""
+  case "${line}" in
+    *"waiting for all control plane static pods to be running"*)
+      talos_wait_phase="static-pods"
+      ;;
+    *"waiting for all control plane components to be ready"*)
+      talos_wait_phase="control-plane"
+      ;;
+    *"waiting for all k8s nodes to report schedulable"*)
+      talos_wait_phase="schedulable"
+      ;;
+    *"waiting for all k8s nodes to report ready"*)
+      talos_wait_phase="nodes-ready"
+      ;;
+    *"waiting for all k8s nodes to report"*)
+      talos_wait_phase="nodes"
+      ;;
+    *"waiting for all nodes to finish boot sequence"*)
+      talos_wait_phase="boot"
+      ;;
+    *"waiting for kubelet to be healthy"*)
+      talos_wait_phase="kubelet"
+      ;;
+    *"waiting for etcd to be healthy"*)
+      talos_wait_phase="etcd"
+      ;;
+    *"waiting for apid to be ready"*)
+      talos_wait_phase="apid"
+      ;;
+    *"waiting for Talos API"*)
+      talos_wait_phase="talos-api"
+      ;;
+  esac
+  [[ -n "${talos_wait_phase}" ]]
+}
+
+classify_kubernetes_node_list() {
+  local invalid lower output="${2:-}" status="${1:-1}"
+
+  kubernetes_node_count=0
+  kubernetes_node_query_status="error"
+  if (( status != 0 )); then
+    lower="$(LC_ALL=C tr '[:upper:]' '[:lower:]' <<<"${output}")"
+    if (( status == 124 || status == 137 )); then
+      kubernetes_node_query_status="timeout"
+    elif [[ "${lower}" == *"unauthorized"* || "${lower}" == *"forbidden"* ]]; then
+      kubernetes_node_query_status="auth"
+    elif [[ "${lower}" == *"certificate"* || "${lower}" == *"x509"* \
+      || "${lower}" == *"tls"* ]]; then
+      kubernetes_node_query_status="tls"
+    elif [[ "${lower}" == *"connection refused"* \
+      || "${lower}" == *"connection to the server was refused"* \
+      || "${lower}" == *"i/o timeout"* \
+      || "${lower}" == *"deadline exceeded"* || "${lower}" == *"no route to host"* \
+      || "${lower}" == *"unable to connect"* ]]; then
+      kubernetes_node_query_status="connect"
+    fi
+    return 1
+  fi
+
+  read -r kubernetes_node_count invalid < <(
+    awk '
+      NF && !/^node\/[^[:space:]]+$/ { invalid = 1; next }
+      /^node\/[^[:space:]]+$/ {
+        if (seen[$0]++) invalid = 1
+        else count++
+      }
+      END { print count + 0, invalid + 0 }
+    ' <<<"${output}"
+  )
+  if (( invalid != 0 )); then
+    kubernetes_node_query_status="malformed"
+    return 1
+  fi
+
+  kubernetes_node_query_status="ok"
+  (( kubernetes_node_count == EXPECTED_TALOS_NODE_COUNT ))
+}
+
+capture_talos_failure_marker() {
+  local container_list_output inspect_line inspect_output inspect_state="ok"
+  local oom_value restart_total=0 restart_value
+  local oom_count=0 running_count=0 running_value wait_reason="unknown"
+  local -a container_ids=()
+
+  # Select the last upstream phase retained in the private command tail. Keep
+  # the vocabulary fixed so the final marker is useful and always fits inside
+  # the workspace agent's independently bounded stderr tail.
+  while IFS= read -r inspect_line; do
+    if classify_talos_wait_line "${inspect_line}"; then
+      wait_reason="${talos_wait_phase}"
+    fi
+  done <<<"${cluster_create_tail}"
+
+  container_list_output=""
+  if ! container_list_output="$(
+    timeout --signal=KILL "${TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS}s" \
+      docker ps -aq --filter "label=talos.cluster.name=${CLUSTER_NAME}" 2>/dev/null
+  )"; then
+    inspect_state="error"
+  elif [[ -n "${container_list_output}" ]]; then
+    while IFS= read -r inspect_line; do
+      [[ -n "${inspect_line}" ]] && container_ids+=("${inspect_line}")
+    done <<<"${container_list_output}"
+  fi
+  if [[ "${inspect_state}" == "ok" && ${#container_ids[@]} -gt 0 ]]; then
+    inspect_output=""
+    if ! inspect_output="$(
+      timeout --signal=KILL "${TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS}s" \
+        docker inspect \
+          --format '{{.State.Running}} {{.State.OOMKilled}} {{.RestartCount}}' \
+          "${container_ids[@]}" 2>/dev/null
+    )"; then
+      inspect_state="error"
+    else
+      while read -r running_value oom_value restart_value; do
+        [[ "${running_value}" == "true" ]] && running_count=$((running_count + 1))
+        [[ "${oom_value}" == "true" ]] && oom_count=$((oom_count + 1))
+        if [[ "${restart_value}" =~ ^[0-9]+$ ]]; then
+          restart_total=$((restart_total + restart_value))
+        fi
+      done <<<"${inspect_output}"
+    fi
+  fi
+  (( restart_total <= 99 )) || restart_total=99
+
+  if [[ "${inspect_state}" == "ok" ]]; then
+    printf -v talos_failure_marker \
+      'nodes%s,kubectl-%s,run%s,oom%s,restart%s,wait-%s' \
+      "${kubernetes_node_count}" \
+      "${kubernetes_node_query_status}" \
+      "${running_count}" \
+      "${oom_count}" \
+      "${restart_total}" \
+      "${wait_reason}"
+  else
+    printf -v talos_failure_marker \
+      'nodes%s,kubectl-%s,inspect-error,wait-%s' \
+      "${kubernetes_node_count}" \
+      "${kubernetes_node_query_status}" \
+      "${wait_reason}"
+  fi
+}
+
 cluster_create_child_is_running() {
   local job_pid process_state
 
@@ -429,8 +594,11 @@ collect_failed_cluster_logs() {
   local -a destroy_command
   local archive archive_members destroy_status failure_capacity
 
-  stop_cluster_create_child
+  # Capture the useful wait reason and live container state before SIGTERM adds
+  # its expected context-canceled cleanup noise to the Talos command log.
   capture_cluster_create_tail
+  capture_talos_failure_marker
+  stop_cluster_create_child
   stop_mount_capacity_sampler
   failure_capacity="$(host_capacity_snapshot 2>/dev/null || true)"
   [[ -n "${failure_capacity}" ]] || failure_capacity="unavailable"
@@ -486,6 +654,7 @@ collect_failed_cluster_logs() {
   # command and capacity evidence last so lengthy Talos logs cannot evict it.
   report_cluster_create_tail
   warn "Host capacity captured before cleanup: ${failure_capacity}; cluster_bootstrap_peak: ${mount_capacity_peak_snapshot}"
+  printf 'INTAR_TALOS_FAILURE=%s\n' "${talos_failure_marker}" >&2
 }
 
 retry_transient_talos_bootstrap() {
@@ -596,18 +765,53 @@ retry_transient_talos_bootstrap() {
 # registry manifest availability for the full signed image lock.
 info "Using digest-pinned external registries; no local mirror is configured"
 
-recover_cluster_create_handshake() {
+is_talos_cluster_readiness_timeout() {
+  local current_line last_line="" output="${1:-}" previous_line=""
+
+  # Talos' condition reporter writes the active condition immediately before
+  # Cobra writes the fixed check-context error. Classify only that terminal
+  # pair; an older phase elsewhere in the log must not bless an unrelated RPC
+  # or bootstrap deadline.
+  while IFS= read -r current_line; do
+    [[ "${current_line}" =~ [^[:space:]] ]] || continue
+    previous_line="${last_line}"
+    last_line="${current_line}"
+  done < <(
+    printf '%s\n' "${output}" \
+      | LC_ALL=C tr -cd '\11\12\15\40-\176' \
+      | tr -d '\r'
+  )
+  [[ "${last_line}" == "context deadline exceeded" \
+    || "${last_line}" == "Error: context deadline exceeded" ]] || return 1
+  classify_talos_wait_line "${previous_line}" || return 1
+  # Intar subsequently proves API access, node registration, Cilium, and Node
+  # readiness. It does not clear or otherwise accept cordoned nodes, so an
+  # upstream schedulability timeout remains fatal.
+  [[ "${talos_wait_phase}" != "schedulable" ]]
+}
+
+recover_cluster_create_exit() {
   local cluster_create_output exited_status="${1:-0}"
 
   (( exited_status != 0 )) || return 1
   cluster_create_output="$(
     tail -c 65536 "${cluster_create_log}" 2>/dev/null || true
   )"
-  is_initial_talos_bootstrap_unavailable_eof "${cluster_create_output}" \
-    || return 1
-  if retry_transient_talos_bootstrap; then
+  if is_initial_talos_bootstrap_unavailable_eof "${cluster_create_output}"; then
+    if retry_transient_talos_bootstrap; then
+      cluster_create_state="recovered"
+      warn "Recovered the Talos v1.13 bootstrap handshake race; continuing without a cluster-create child"
+      return 0
+    fi
+    return 1
+  fi
+  if is_talos_cluster_readiness_timeout "${cluster_create_output}" \
+    && timeout --signal=KILL 5s talosctl cluster show \
+      --name "${CLUSTER_NAME}" >/dev/null 2>&1 \
+    && timeout --signal=KILL 5s talosctl --context "${CLUSTER_NAME}" \
+      config info >/dev/null 2>&1; then
     cluster_create_state="recovered"
-    warn "Recovered the Talos v1.13 bootstrap handshake race; continuing without a cluster-create child"
+    warn "Talos' fixed readiness check expired; continuing under Intar's bounded node and Cilium gates"
     return 0
   fi
   return 1
@@ -637,7 +841,7 @@ require_cluster_create_running() {
     cluster_create_state="succeeded"
     return 0
   fi
-  if recover_cluster_create_handshake "${exited_status}"; then
+  if recover_cluster_create_exit "${exited_status}"; then
     return 0
   fi
   cluster_create_state="failed"
@@ -675,7 +879,7 @@ wait_for_cluster_create_success() {
     cluster_create_state="succeeded"
     return 0
   fi
-  if recover_cluster_create_handshake "${exited_status}"; then
+  if recover_cluster_create_exit "${exited_status}"; then
     return 0
   fi
   cluster_create_state="failed"
@@ -793,20 +997,27 @@ fi
 
 step "Waiting for all Kubernetes nodes to register"
 kubernetes_api_ready=0
-kubernetes_api_deadline=$((SECONDS + 300))
+kubernetes_api_deadline=$((SECONDS + TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS))
 while (( SECONDS < kubernetes_api_deadline )); do
   # Mirror Talos v1.13.6's own pre-CNI Kubernetes check: an authenticated
   # Node List must contain every expected node, but the Ready condition is
   # intentionally deferred until Cilium exists. API-server /readyz is a
   # stronger, unrelated boot-sequence signal and must not block CNI install.
   # https://github.com/siderolabs/talos/blob/v1.13.6/pkg/cluster/check/kubernetes.go
-  if timeout --signal=KILL 10s kubectl \
-    --kubeconfig "${bootstrap_kubeconfig}" \
-    get nodes -o name 2>/dev/null \
-    | awk -v expected="${EXPECTED_TALOS_NODE_COUNT}" '
-        !/^node\/[^[:space:]]+$/ { invalid = 1 }
-        END { exit invalid || NR != expected }
-      '; then
+  kubernetes_node_list_output=""
+  kubernetes_node_list_status=0
+  if kubernetes_node_list_output="$(
+    timeout --signal=KILL 10s kubectl \
+      --kubeconfig "${bootstrap_kubeconfig}" \
+      get nodes -o name 2>&1
+  )"; then
+    kubernetes_node_list_status=0
+  else
+    kubernetes_node_list_status=$?
+  fi
+  if classify_kubernetes_node_list \
+    "${kubernetes_node_list_status}" \
+    "${kubernetes_node_list_output}"; then
     kubernetes_api_ready=1
     break
   fi
@@ -822,7 +1033,7 @@ if (( kubernetes_api_ready == 0 )); then
     | tail -n 30 >&2 \
     || true
   collect_failed_cluster_logs
-  die "Kubernetes did not report all ${EXPECTED_TALOS_NODE_COUNT} expected nodes within 5 minutes"
+  die "Kubernetes did not report all ${EXPECTED_TALOS_NODE_COUNT} expected nodes within $((TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS / 60)) minutes"
 fi
 ok "All ${EXPECTED_TALOS_NODE_COUNT} nodes registered (NotReady until Cilium arrives — expected)"
 

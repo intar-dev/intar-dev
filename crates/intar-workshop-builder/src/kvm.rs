@@ -2355,6 +2355,14 @@ mod tests {
             assert!(!source.contains(digest_only), "{digest_only}");
             assert!(!image_lock.contains(digest_only), "{digest_only}");
         }
+        let pause_image = "registry.k8s.io/pause@sha256:\
+             278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c";
+        assert!(common_patch.contains("[plugins.\"io.containerd.cri.v1.images\".pinned_images]"));
+        assert!(common_patch.contains(&format!("sandbox = \"{pause_image}\"")));
+        assert!(common_patch.contains("path: /etc/cri/conf.d/20-customization.part"));
+        assert!(common_patch.contains("op: create"));
+        assert!(!common_patch.contains("pod-infra-container-image:"));
+        assert!(image_lock.lines().any(|line| line == pause_image));
 
         assert!(!common_patch.contains("\n  etcd:"));
         assert!(control_plane_patch.contains(
@@ -2478,13 +2486,20 @@ mod tests {
         ));
         assert!(source.contains("--workers \"${TALOS_WORKER_COUNT}\""));
         assert!(source.contains("get nodes -o name"));
-        assert!(source.contains("NR != expected"));
+        assert!(source.contains("classify_kubernetes_node_list"));
+        assert!(source.contains("kubernetes_node_query_status=\"malformed\""));
         assert!(source.contains("get --raw='/readyz?verbose'"));
         assert!(source.contains("not a pre-CNI success gate"));
         assert!(source.contains("talos_context_deadline=$((SECONDS + 600))"));
         assert!(source.contains("talos_api_deadline=$((SECONDS + 600))"));
         assert!(source.contains("bootstrap_kubeconfig_deadline=$((SECONDS + 180))"));
-        assert!(source.contains("kubernetes_api_deadline=$((SECONDS + 300))"));
+        assert!(source.contains("TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS=1200"));
+        assert!(source.contains("TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS=5"));
+        assert!(source.contains("is_talos_cluster_readiness_timeout"));
+        assert!(source.contains("recover_cluster_create_exit"));
+        assert!(source.contains(
+            "kubernetes_api_deadline=$((SECONDS + TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS))"
+        ));
         assert!(source.contains("TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB=65536"));
         assert!(source.contains("ulimit -f \"${TALOS_CLUSTER_CREATE_LOG_LIMIT_KIB}\""));
         assert!(source.contains("exec talosctl cluster create docker \\"));
@@ -2499,7 +2514,6 @@ mod tests {
         assert!(source.contains("wait \"${cluster_create_pid}\""));
         assert!(!source.contains("pkill"));
         assert!(source.contains("retry_transient_talos_bootstrap"));
-        assert!(source.contains("recover_cluster_create_handshake"));
         assert!(source.contains("cluster_create_state=\"running\""));
         assert!(source.contains("cluster_create_state=\"recovered\""));
         assert!(source.contains("cluster_create_state=\"succeeded\""));
@@ -2525,11 +2539,35 @@ mod tests {
         assert!(source.contains("cleanup_cluster_bootstrap_files"));
         assert!(source.contains("trap cleanup_cluster_bootstrap EXIT"));
         assert_eq!(source.matches("report_cluster_create_tail").count(), 3);
+        assert!(source.contains("INTAR_TALOS_FAILURE=%s\\n"));
+        let failed_log_collection = source
+            .split_once("collect_failed_cluster_logs() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\nretry_transient_talos_bootstrap()")
+            .unwrap()
+            .0;
+        assert!(
+            failed_log_collection
+                .find("capture_cluster_create_tail")
+                .unwrap()
+                < failed_log_collection
+                    .find("stop_cluster_create_child")
+                    .unwrap()
+        );
+        assert!(
+            failed_log_collection
+                .find("capture_talos_failure_marker")
+                .unwrap()
+                < failed_log_collection
+                    .find("stop_cluster_create_child")
+                    .unwrap()
+        );
         let reaped_child = source
             .find("cluster_create_pid=\"\"\n  if (( exited_status == 0 )); then")
             .unwrap();
         let recover_child = source[reaped_child..]
-            .find("if recover_cluster_create_handshake")
+            .find("if recover_cluster_create_exit")
             .map(|offset| reaped_child + offset)
             .unwrap();
         let fail_child = source[recover_child..]
@@ -2562,7 +2600,7 @@ mod tests {
         assert!(temporary_kubeconfig < cilium_install);
         let pre_cilium_gate = &source[temporary_kubeconfig..cilium_install];
         assert!(pre_cilium_gate.contains("get nodes -o name"));
-        assert!(pre_cilium_gate.contains("NR != expected"));
+        assert!(pre_cilium_gate.contains("classify_kubernetes_node_list"));
         assert!(!pre_cilium_gate.contains("get --raw=/readyz"));
         assert!(cilium_install < nodes_ready);
         assert!(nodes_ready < require_create_success);
@@ -2639,7 +2677,7 @@ fi
         let early_success_test = [
             r#"
 set -euo pipefail
-recover_cluster_create_handshake() { return 1; }
+recover_cluster_create_exit() { return 1; }
 collect_failed_cluster_logs() { return 96; }
 die() { return 97; }
 cluster_create_state=running
@@ -2703,6 +2741,184 @@ capture_cluster_create_tail
             Command::new("bash")
                 .arg("-c")
                 .arg(missing_tail_test)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let node_list_classifier = source
+            .split_once("classify_kubernetes_node_list() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\ncapture_talos_failure_marker()")
+            .unwrap()
+            .0;
+        let node_list_classifier_test = [
+            r#"
+set -euo pipefail
+EXPECTED_TALOS_NODE_COUNT=2
+classify_kubernetes_node_list() {
+"#,
+            node_list_classifier,
+            r#"
+}
+
+assert_case() {
+  local expected_result="$1" expected_count="$2" expected_status="$3"
+  local command_status="$4" output="$5" actual_result=0
+  if classify_kubernetes_node_list "${command_status}" "${output}"; then
+    actual_result=0
+  else
+    actual_result=$?
+  fi
+  (( actual_result == expected_result ))
+  (( kubernetes_node_count == expected_count ))
+  [[ "${kubernetes_node_query_status}" == "${expected_status}" ]]
+}
+
+assert_case 1 0 ok 0 ""
+assert_case 1 1 ok 0 "node/cloudbox-controlplane-1"
+assert_case 0 2 ok 0 $'node/cloudbox-controlplane-1\nnode/cloudbox-worker-1'
+assert_case 1 3 ok 0 $'node/a\nnode/b\nnode/c'
+assert_case 1 1 malformed 0 $'node/cloudbox-controlplane-1\nnode/cloudbox-controlplane-1'
+assert_case 1 1 malformed 0 $'node/cloudbox-controlplane-1\nunexpected'
+assert_case 1 0 timeout 124 ""
+assert_case 1 0 connect 1 "The connection to the server was refused"
+assert_case 1 0 auth 1 "Error from server (Forbidden)"
+assert_case 1 0 tls 1 "x509: certificate signed by unknown authority"
+"#,
+        ]
+        .concat();
+        let node_list_classifier_output = Command::new("bash")
+            .arg("-c")
+            .arg(node_list_classifier_test)
+            .output()
+            .unwrap();
+        assert!(
+            node_list_classifier_output.status.success(),
+            "node-list classifier failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&node_list_classifier_output.stdout),
+            String::from_utf8_lossy(&node_list_classifier_output.stderr),
+        );
+
+        let talos_wait_line_classifier = source
+            .split_once("classify_talos_wait_line() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\nclassify_kubernetes_node_list()")
+            .unwrap()
+            .0;
+        let failure_marker = source
+            .split_once("capture_talos_failure_marker() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\ncluster_create_child_is_running()")
+            .unwrap()
+            .0;
+        let failure_marker_test = [
+            r#"
+set -euo pipefail
+marker_test_root="$(mktemp -d)"
+trap 'rm -rf -- "${marker_test_root}"' EXIT
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'case "${DOCKER_MODE:-healthy}:$1" in' \
+  '  healthy:ps) printf "one\ntwo\n" ;;' \
+  '  healthy:inspect) printf "true false 0\nfalse true 101\n" ;;' \
+  '  error:*) exit 23 ;;' \
+  '  hang:*) while :; do :; done ;;' \
+  'esac' >"${marker_test_root}/docker"
+chmod 0700 "${marker_test_root}/docker"
+PATH="${marker_test_root}:${PATH}"
+export PATH
+TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS=1
+CLUSTER_NAME=cloudbox
+kubernetes_node_count=0
+kubernetes_node_query_status=connect
+cluster_create_tail="waiting for kubelet to be healthy"
+classify_talos_wait_line() {
+"#,
+            talos_wait_line_classifier,
+            r#"
+}
+capture_talos_failure_marker() {
+"#,
+            failure_marker,
+            r#"
+}
+
+DOCKER_MODE=healthy
+export DOCKER_MODE
+capture_talos_failure_marker
+[[ "${talos_failure_marker}" == \
+  "nodes0,kubectl-connect,run1,oom1,restart99,wait-kubelet" ]]
+
+DOCKER_MODE=error
+export DOCKER_MODE
+capture_talos_failure_marker
+[[ "${talos_failure_marker}" == \
+  "nodes0,kubectl-connect,inspect-error,wait-kubelet" ]]
+
+DOCKER_MODE=hang
+export DOCKER_MODE
+marker_started_at="${SECONDS}"
+capture_talos_failure_marker
+(( SECONDS - marker_started_at < 5 ))
+[[ "${talos_failure_marker}" == \
+  "nodes0,kubectl-connect,inspect-error,wait-kubelet" ]]
+"#,
+        ]
+        .concat();
+        let failure_marker_output = Command::new("bash")
+            .arg("-c")
+            .arg(failure_marker_test)
+            .output()
+            .unwrap();
+        assert!(
+            failure_marker_output.status.success(),
+            "failure-marker diagnostics failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&failure_marker_output.stdout),
+            String::from_utf8_lossy(&failure_marker_output.stderr),
+        );
+
+        let readiness_timeout_classifier = source
+            .split_once("is_talos_cluster_readiness_timeout() {\n")
+            .unwrap()
+            .1
+            .split_once("\n}\n\nrecover_cluster_create_exit()")
+            .unwrap()
+            .0;
+        let readiness_timeout_test = [
+            "set -euo pipefail\nclassify_talos_wait_line() {\n",
+            talos_wait_line_classifier,
+            "\n}\nis_talos_cluster_readiness_timeout() {\n",
+            readiness_timeout_classifier,
+            r#"
+}
+is_talos_cluster_readiness_timeout \
+  $'waiting for kubelet to be healthy\ncontext deadline exceeded'
+is_talos_cluster_readiness_timeout \
+  $'waiting for all k8s nodes to report\ncontext deadline exceeded'
+[[ "${talos_wait_phase}" == "nodes" ]]
+is_talos_cluster_readiness_timeout \
+  $'waiting for all control plane components to be ready\nError: context deadline exceeded'
+[[ "${talos_wait_phase}" == "control-plane" ]]
+! is_talos_cluster_readiness_timeout \
+  $'waiting for all k8s nodes to report schedulable\ncontext deadline exceeded'
+! is_talos_cluster_readiness_timeout 'context deadline exceeded'
+! is_talos_cluster_readiness_timeout \
+  $'waiting for all nodes to be reported\ncontext deadline exceeded'
+! is_talos_cluster_readiness_timeout \
+  $'waiting for all k8s nodes to report\npermission denied'
+! is_talos_cluster_readiness_timeout \
+  $'waiting for Talos API\nbootstrap error: rpc deadline\ncontext deadline exceeded'
+"#,
+        ]
+        .concat();
+        assert!(
+            Command::new("bash")
+                .arg("-c")
+                .arg(readiness_timeout_test)
                 .status()
                 .unwrap()
                 .success()
