@@ -517,6 +517,9 @@ describe("workspace agent guest control plane", () => {
     expect(cloudInit).toContain("require_checkpoint_tmpfs = true");
     expect(cloudInit).toContain('reconstruction_user = "intar"');
     expect(cloudInit).toContain('reconstruction_home = "/home/intar"');
+    expect(cloudInit).toMatch(
+      /packages:\n(?:  - .+\n)*  - sudo\n(?:  - .+\n)*\nusers:/,
+    );
     expect(cloudInit).toContain('probe "module-00-workspace-ready"');
     expect(cloudInit).toContain("intar-kino-shell");
     const probeRunner = cloudInitWriteFile(
@@ -591,6 +594,7 @@ describe("workspace agent guest control plane", () => {
       "After=network-online.target ssh.service",
     );
     expect(agentService).not.toContain("kino.service");
+    expect(agentService).toContain("RestrictSUIDSGID=true");
     expect(cloudInit).toContain("/var/lib/intar-workshop-probes/00.sh");
     expect(cloudInit).toContain("HOME=/home/intar");
     expect(cloudInit).toContain("ProtectHome=read-only");
