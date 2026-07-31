@@ -2211,7 +2211,15 @@ mod tests {
             "rollout status deployment/otel-collector-gateway --timeout=600s",
             "rollout status daemonset/otel-collector-agent --timeout=600s",
             "http://localhost:30030/api/health",
+            "trap 'rm -f \"$TMP_PNG\"' EXIT",
             "uploading test image through the portal",
+            "module09_trace_ready=0",
+            "module09_gallery_ready=0",
+            "module09_deadline=$((SECONDS + 300))",
+            "module09_attempt % 6 == 0",
+            "module 09 connected upload trace did not converge within 300s",
+            "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s",
+            "trap - EXIT",
         ] {
             let position = catch_up_09[previous..].find(expected).unwrap_or_else(|| {
                 panic!("module 09 catch-up is missing ordered text '{expected}'")
@@ -2229,13 +2237,21 @@ mod tests {
             "/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20",
             r#"["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"]"#,
             "[.processes[]?.serviceName]",
-            "VictoriaTraces datasource did not expose one connected upload trace",
+            "module09_trace_ready=0",
+            "module09_gallery_ready=0",
+            "module09_deadline=$((SECONDS + 60))",
+            "for module09_attempt in $(seq 1 12)",
+            "module 09 connected upload trace did not converge within 60s",
+            "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s",
+            "module09_gallery_hard_failure=1",
         ] {
             assert!(
                 verifier_09.contains(expected),
                 "module 09 verifier is missing '{expected}'"
             );
         }
+        assert!(!verifier_09.contains("Nothing here yet"));
+        assert!(!verifier_09.contains("contained objects without a canonical"));
         for script in [&module_09.catch_up_script, &module_09.verify_script] {
             assert!(
                 Command::new("bash")
@@ -2446,6 +2462,211 @@ esac
         assert!(
             String::from_utf8_lossy(&failure.stdout).contains("FAIL: hello-site:v1 not in Zot")
         );
+    }
+
+    #[test]
+    fn module_09_outcome_probe_polls_without_leaking_presigned_urls() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn write_stub(root: &Path, name: &str, source: &str) {
+            let path = root.join(name);
+            fs::write(&path, source).unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let fixtures = tempfile::tempdir().unwrap();
+        let bin = fixtures.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        write_stub(&bin, "sleep", "#!/usr/bin/env bash\nexit 0\n");
+        write_stub(
+            &bin,
+            "kubectl",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"get application"*) printf 'Synced Healthy' ;;
+  *"rollout status"*) exit 0 ;;
+  *"--raw="*) exit 0 ;;
+  *"get service grafana-nodeport"*) printf '30030' ;;
+  *) printf 'unexpected kubectl fixture invocation\n' >&2; exit 2 ;;
+esac
+"#,
+        );
+        write_stub(
+            &bin,
+            "curl",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+
+increment() {
+  local counter="${INTAR_FIXTURE_STATE}/$1"
+  local count
+  count="$(cat "$counter" 2>/dev/null || echo 0)"
+  count=$((count + 1))
+  printf '%s' "$count" >"$counter"
+  printf '%s' "$count"
+}
+
+output_path() {
+  local previous="" argument
+  for argument in "$@"; do
+    if [[ "$previous" == "--output" ]]; then
+      printf '%s' "$argument"
+      return
+    fi
+    previous="$argument"
+  done
+}
+
+case "$*" in
+  *"http://localhost:30030/api/health"*)
+    printf '{"database":"ok"}\n'
+    ;;
+  *"victoriametrics/api/v1/query?query=up"*)
+    printf '{"status":"success"}\n'
+    ;;
+  *"/api/datasources/uid/victorialogs/health"*)
+    printf '{"status":"ok"}\n'
+    ;;
+  *"victoriatraces/api/traces"*)
+    count="$(increment trace)"
+    if [[ "$INTAR_FIXTURE_MODE" == "permanent_trace" ||
+          ("$INTAR_FIXTURE_MODE" == "transient" && "$count" -lt 2) ]]; then
+      printf '{"data":[]}\n'
+    else
+      printf '%s\n' '{"data":[{"processes":{"p":{"serviceName":"cloudbox-portal"},"u":{"serviceName":"cloudbox-uploader"},"r":{"serviceName":"cloudbox-resizer"}}}]}'
+    fi
+    ;;
+  *"http://localhost:30600/gallery/grid"*)
+    count="$(increment gallery)"
+    case "$INTAR_FIXTURE_MODE" in
+      permanent_gallery)
+        printf '<div>S3 error: warming</div>\n'
+        ;;
+      localhost)
+        printf '<img src="http://localhost:30900/images/thumb.jpg">\n'
+        ;;
+      transient)
+        if (( count < 2 )); then
+          printf '<div>S3 error: warming</div>\n'
+        else
+          printf '%s\n' '<img src="https://wa-workshop-probe.intar.app/__intar-s3/images/thumb.jpg?X-Amz-Signature=DO-NOT-LEAK&amp;part=1">'
+        fi
+        ;;
+      *)
+        printf '%s\n' '<img src="https://wa-workshop-probe.intar.app/__intar-s3/images/thumb.jpg?X-Amz-Signature=DO-NOT-LEAK&amp;part=1">'
+        ;;
+    esac
+    ;;
+  *"http://localhost:30600/__intar-s3/app-assets/hello.txt"*)
+    printf '200'
+    ;;
+  *"http://localhost:30600/__intar-s3/images/thumb.jpg"*)
+    destination="$(output_path "$@")"
+    [[ -n "$destination" ]]
+    printf 'fixture-image' >"$destination"
+    ;;
+  *"http://localhost:30600/gallery/upload"*)
+    increment upload >/dev/null
+    printf 'verifier attempted a side-effecting upload\n' >&2
+    exit 2
+    ;;
+  *)
+    printf 'unexpected curl fixture invocation\n' >&2
+    exit 2
+    ;;
+esac
+"#,
+        );
+
+        let base_verifier = fixtures.path().join("base-verifier");
+        write_stub(
+            fixtures.path(),
+            "base-verifier",
+            "#!/usr/bin/env bash\nprintf 'base verifier passed\\n'\n",
+        );
+        let generated = fs::read_to_string(root.join("scripts/verify-09.sh")).unwrap();
+        let verifier_assignment =
+            "verifier=/opt/platform-engineering-workshop/lab/09-capstone/verify.sh";
+        assert!(generated.contains(verifier_assignment));
+        let executable = generated.replacen(
+            verifier_assignment,
+            &format!("verifier={}", base_verifier.display()),
+            1,
+        );
+        write_stub(fixtures.path(), "verify-09", &executable);
+        let verifier = fixtures.path().join("verify-09");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let run = |mode: &str| {
+            let state = fixtures.path().join(format!("state-{mode}"));
+            fs::create_dir(&state).unwrap();
+            let output = Command::new("bash")
+                .arg(&verifier)
+                .env("PATH", &path)
+                .env("INTAR_FIXTURE_MODE", mode)
+                .env("INTAR_FIXTURE_STATE", &state)
+                .output()
+                .unwrap();
+            (state, output)
+        };
+
+        let (transient_state, transient) = run("transient");
+        assert!(
+            transient.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&transient.stdout),
+            String::from_utf8_lossy(&transient.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(transient_state.join("trace")).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            fs::read_to_string(transient_state.join("gallery")).unwrap(),
+            "2"
+        );
+        assert!(!transient_state.join("upload").exists());
+        for output in [&transient.stdout, &transient.stderr] {
+            assert!(!String::from_utf8_lossy(output).contains("DO-NOT-LEAK"));
+        }
+
+        let (_, permanent_trace) = run("permanent_trace");
+        assert!(!permanent_trace.status.success());
+        assert!(
+            String::from_utf8_lossy(&permanent_trace.stderr)
+                .contains("connected upload trace did not converge within 60s")
+        );
+        let (_, permanent_gallery) = run("permanent_gallery");
+        assert!(!permanent_gallery.status.success());
+        assert!(
+            String::from_utf8_lossy(&permanent_gallery.stderr)
+                .contains("did not converge on a non-empty canonical /__intar-s3/ object")
+        );
+        let (localhost_state, localhost) = run("localhost");
+        assert!(!localhost.status.success());
+        assert!(String::from_utf8_lossy(&localhost.stderr).contains("exposed a localhost URL"));
+        assert_eq!(
+            fs::read_to_string(localhost_state.join("gallery")).unwrap(),
+            "1"
+        );
+        for output in [
+            &permanent_trace.stdout,
+            &permanent_trace.stderr,
+            &permanent_gallery.stdout,
+            &permanent_gallery.stderr,
+            &localhost.stdout,
+            &localhost.stderr,
+        ] {
+            assert!(!String::from_utf8_lossy(output).contains("DO-NOT-LEAK"));
+        }
     }
 
     #[test]

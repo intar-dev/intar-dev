@@ -96,10 +96,29 @@ if (( status == 0 )); then
     'http://localhost:30030/api/datasources/uid/victorialogs/health' \
     '((.status // "") | ascii_downcase) == "ok"'
 
-  connected_trace=
-  for _ in $(seq 1 24); do
-    connected_trace="$(
-      curl -fsS --max-time 15 \
+module09_trace_ready=0
+module09_gallery_ready=0
+module09_gallery_hard_failure=0
+module09_outcome_status=0
+module09_public_host=wa-workshop-probe.intar.app
+module09_deadline=$((SECONDS + 60))
+
+module09_portal_curl() {
+  curl -sS --max-time 5 \
+    -H "Host: ${module09_public_host}" \
+    -H "X-Forwarded-Host: ${module09_public_host}" \
+    -H 'X-Forwarded-Proto: https' \
+    -H 'X-Forwarded-Port: 443' \
+    "$@"
+}
+
+for module09_attempt in $(seq 1 12); do
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  if (( module09_trace_ready == 0 )); then
+    module09_connected_trace="$(
+      curl -fsS --max-time 5 \
         'http://localhost:30030/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20' \
         2>/dev/null || true
     )"
@@ -108,68 +127,68 @@ if (( status == 0 )); then
         ([.processes[]?.serviceName] | unique) as $services |
         (["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"] -
           $services | length == 0))' \
-      <<<"${connected_trace}" >/dev/null 2>&1; then
-      break
+      <<<"${module09_connected_trace}" >/dev/null 2>&1; then
+      module09_trace_ready=1
     fi
-    sleep 5
-  done
-  if ! jq -e \
-    'any(.data[]?;
-      ([.processes[]?.serviceName] | unique) as $services |
-      (["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"] -
-        $services | length == 0))' \
-    <<<"${connected_trace}" >/dev/null 2>&1; then
-    printf 'Grafana VictoriaTraces datasource did not expose one connected upload trace\n' >&2
-    observability_status=1
   fi
 
-  public_host=wa-workshop-probe.intar.app
-  portal_workspace_app_curl() {
-    curl -sS --max-time 15 \
-      -H "Host: ${public_host}" \
-      -H "X-Forwarded-Host: ${public_host}" \
-      -H 'X-Forwarded-Proto: https' \
-      -H 'X-Forwarded-Port: 443' \
-      "$@"
-  }
-
-  if ! gallery_page="$(portal_workspace_app_curl \
-    --fail \
-    http://localhost:30600/gallery/grid)"; then
-    printf 'Cloudbox gallery did not answer through the canonical workspace-app Host\n' >&2
-    observability_status=1
-  elif [[ "${gallery_page}" == *"localhost:"* ]]; then
-    printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\n' >&2
-    observability_status=1
-  else
-    gallery_s3_url=$(
-      printf '%s\n' "${gallery_page}" |
+  if (( module09_gallery_ready == 0 )); then
+    module09_gallery_page="$(
+      module09_portal_curl --fail \
+        http://localhost:30600/gallery/grid 2>/dev/null || true
+    )"
+    if [[ "${module09_gallery_page}" == *"localhost:"* ]]; then
+      printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\n' >&2
+      module09_gallery_hard_failure=1
+      module09_outcome_status=1
+      break
+    fi
+    module09_gallery_url=$(
+      printf '%s\n' "${module09_gallery_page}" |
         grep -Eo 'https://wa-workshop-probe\.intar\.app/__intar-s3/[^"<[:space:]]+' |
         sed 's/&amp;/\&/g' |
         sed -n '1p' || true
     )
-
-    if [[ -n "${gallery_s3_url}" ]]; then
-      gallery_s3_path="${gallery_s3_url#https://wa-workshop-probe.intar.app}"
-      gallery_s3_file="$(mktemp)"
-      if ! portal_workspace_app_curl \
-        --fail \
-        --output "${gallery_s3_file}" \
-        "http://localhost:30600${gallery_s3_path}"; then
-        printf 'Cloudbox gallery presigned S3 GET failed through /__intar-s3/\n' >&2
-        observability_status=1
-      elif [[ ! -s "${gallery_s3_file}" ]]; then
-        printf 'Cloudbox gallery presigned S3 GET returned an empty object\n' >&2
-        observability_status=1
+    if [[ -n "${module09_gallery_url}" ]]; then
+      module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"
+      module09_gallery_file="$(mktemp)"
+      if module09_portal_curl --fail \
+        --output "${module09_gallery_file}" \
+        "http://localhost:30600${module09_gallery_path}" \
+        2>/dev/null &&
+          [[ -s "${module09_gallery_file}" ]]; then
+        module09_gallery_ready=1
       fi
-      rm -f "${gallery_s3_file}"
-    elif [[ "${gallery_page}" != *"Nothing here yet"* ]]; then
-      printf 'Cloudbox gallery contained objects without a canonical /__intar-s3/ URL\n' >&2
-      observability_status=1
+      rm -f "${module09_gallery_file}"
     fi
   fi
 
-  if ! gallery_s3_head_status="$(portal_workspace_app_curl \
+  if (( module09_trace_ready == 1 && module09_gallery_ready == 1 )); then
+    break
+  fi
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  sleep 5
+done
+
+if (( module09_trace_ready == 0 && module09_gallery_hard_failure == 0 )); then
+  printf 'module 09 connected upload trace did not converge within 60s\n' >&2
+  module09_outcome_status=1
+fi
+if (( module09_gallery_ready == 0 && module09_gallery_hard_failure == 0 )); then
+  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s\n' >&2
+  module09_outcome_status=1
+fi
+
+  if (( module09_outcome_status != 0 )); then
+    observability_status=1
+  fi
+
+  if ! gallery_s3_head_status="$(module09_portal_curl \
     --head \
     --output /dev/null \
     --write-out '%{http_code}' \
