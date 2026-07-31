@@ -75,17 +75,20 @@ pub async fn issue_workspace_app_session(
     // existing route and its browser sessions untouched.
     let url =
         crate::workspace_app::build_workspace_app_url(&state, &route.route_id, &bootstrap.token)?;
+    let create_only = route.create_only;
     let stored = state
         .store
         .upsert_workspace_app_route(route, &bootstrap.token_sha256, bootstrap.expires_at)
         .await?;
-    // An upsert is also a route authorization rotation. Close any HTTP or
-    // WebSocket tunnel that was established under the replaced credentials.
-    state.sessions.terminate_username(&stored.route_id).await;
-    state
-        .workspace_app_tunnels
-        .invalidate(&stored.route_id)
-        .await;
+    if !create_only {
+        // An upsert is also a route authorization rotation. Close any HTTP or
+        // WebSocket tunnel that was established under replaced credentials.
+        state.sessions.terminate_username(&stored.route_id).await;
+        state
+            .workspace_app_tunnels
+            .invalidate(&stored.route_id)
+            .await;
+    }
     Ok(Json(IssueWorkspaceAppSessionResponse {
         route_id: stored.route_id,
         url,

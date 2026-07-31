@@ -382,6 +382,37 @@ async fn workspace_app_route_reissue_rotates_browser_authorization() -> Result<(
 }
 
 #[tokio::test]
+async fn workspace_app_create_only_conflict_preserves_existing_authorization() -> Result<()> {
+    let harness = Harness::start().await?;
+    let first = harness.issue_workspace_app_session().await?;
+    let first_browser = harness.bootstrap_workspace_app(&first).await?;
+
+    let conflict = harness
+        .send_workspace_app_session_request(
+            "wa-01-unguessable",
+            None,
+            Duration::from_secs(60 * 60),
+            true,
+        )
+        .await?;
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.json::<serde_json::Value>().await?,
+        serde_json::json!({
+            "error": "workspace application route already exists"
+        })
+    );
+
+    let current = reqwest::Client::new()
+        .get(first_browser.base_url.join("hello")?)
+        .header(reqwest::header::COOKIE, &first_browser.cookie)
+        .send()
+        .await?;
+    assert_eq!(current.status(), reqwest::StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_app_browser_cookie_is_bound_to_one_route() -> Result<()> {
     let harness = Harness::start().await?;
     let first = harness
@@ -979,8 +1010,23 @@ impl Harness {
         upstream_host: Option<&str>,
         route_lifetime: Duration,
     ) -> Result<IssueWorkspaceAppSessionResponse> {
+        let response = self
+            .send_workspace_app_session_request(route_id, upstream_host, route_lifetime, false)
+            .await?;
+        assert!(response.status().is_success(), "{}", response.text().await?);
+        Ok(response.json().await?)
+    }
+
+    async fn send_workspace_app_session_request(
+        &self,
+        route_id: &str,
+        upstream_host: Option<&str>,
+        route_lifetime: Duration,
+        create_only: bool,
+    ) -> Result<reqwest::Response> {
         let request = IssueWorkspaceAppSessionRequest {
             route_id: route_id.to_owned(),
+            create_only,
             target_username: self.target_username.clone(),
             target_ip: "127.0.0.1".to_owned(),
             target_ssh_port: self.target_addr.port(),
@@ -1008,8 +1054,7 @@ impl Harness {
             .json(&request)
             .send()
             .await?;
-        assert!(response.status().is_success(), "{}", response.text().await?);
-        Ok(response.json().await?)
+        Ok(response)
     }
 
     async fn bootstrap_workspace_app(

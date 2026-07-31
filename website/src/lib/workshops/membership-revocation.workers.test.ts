@@ -9,6 +9,7 @@ const accessMocks = vi.hoisted(() => ({
   deleteStargateRoute: vi.fn(),
   deleteStargateWorkspaceAppRoute: vi.fn(),
   issueStargateWorkspaceAppSession: vi.fn(),
+  createWorkspaceAppRouteId: vi.fn(),
   loadCurrentRuntimeVmTerminalTarget: vi.fn(),
   afterWorkshopManagerAuthorizationOnce: null as (() => Promise<void>) | null,
   afterWorkshopHelperAuthorizationOnce: null as (() => Promise<void>) | null,
@@ -54,6 +55,10 @@ vi.mock("@/lib/runtime-executions", async (importOriginal) => ({
     accessMocks.loadCurrentRuntimeVmTerminalTarget,
 }));
 
+vi.mock("./workspace-app-route-id", () => ({
+  createWorkspaceAppRouteId: accessMocks.createWorkspaceAppRouteId,
+}));
+
 import {
   activeRuntimeSlots,
   member,
@@ -80,6 +85,10 @@ import {
   updateOrganizationMemberRole,
 } from "@/lib/organizations";
 import { resetD1Database } from "@/test/d1-migrations";
+import {
+  StargateWorkspaceAppInvalidResponseError,
+  StargateWorkspaceAppRouteConflictError,
+} from "@/lib/stargate";
 import { issueWorkshopWorkspaceApplication } from "./applications";
 import { claimWorkshopHelpRequest, revokeWorkshopAssist } from "./assistance";
 import { getWorkshopSessionProjection } from "./projection";
@@ -95,18 +104,22 @@ const GENERATION_ID = "generation-participant-1";
 const EXECUTION_ID = "execution-participant-1";
 const PARTICIPANT_ROUTE = "participant-terminal-route";
 const ASSIST_ROUTE = "helper-assist-route";
-const APPLICATION_ROUTE = "existing-workspace-app-route";
+const APPLICATION_ROUTE = "wa-acid-acorn-acre-acts";
 
 describe("workshop access revocation during organization membership removal", () => {
   beforeEach(async () => {
     accessMocks.deleteStargateRoute.mockReset();
     accessMocks.deleteStargateWorkspaceAppRoute.mockReset();
     accessMocks.issueStargateWorkspaceAppSession.mockReset();
+    accessMocks.createWorkspaceAppRouteId.mockReset();
     accessMocks.loadCurrentRuntimeVmTerminalTarget.mockReset();
     accessMocks.afterWorkshopManagerAuthorizationOnce = null;
     accessMocks.afterWorkshopHelperAuthorizationOnce = null;
     accessMocks.deleteStargateRoute.mockResolvedValue(undefined);
     accessMocks.deleteStargateWorkspaceAppRoute.mockResolvedValue(undefined);
+    accessMocks.createWorkspaceAppRouteId.mockReturnValue(
+      "wa-afar-affix-aged-agent",
+    );
     accessMocks.issueStargateWorkspaceAppSession.mockImplementation(
       async (input: { routeId: string; expiresAt: Date }) => ({
         routeId: input.routeId,
@@ -569,6 +582,85 @@ describe("workshop access revocation during organization membership removal", ()
     }
   });
 
+  it("retries a Stargate create-only collision without deleting the existing route", async () => {
+    await seedLiveWorkshopFixture();
+    const collisionRouteId = "wa-agile-aging-agony-ahead";
+    const openedRouteId = "wa-aide-aids-aim-ajar";
+    accessMocks.createWorkspaceAppRouteId
+      .mockReturnValueOnce(collisionRouteId)
+      .mockReturnValueOnce(openedRouteId);
+    accessMocks.issueStargateWorkspaceAppSession.mockRejectedValueOnce(
+      new StargateWorkspaceAppRouteConflictError(collisionRouteId),
+    );
+
+    const opened = await issueWorkshopWorkspaceApplication({
+      sessionId: SESSION_ID,
+      workspaceId: WORKSPACE_ID,
+      applicationId: "gitea",
+      actorUserId: "participant",
+    });
+
+    expect(opened.routeId).toBe(openedRouteId);
+    expect(accessMocks.issueStargateWorkspaceAppSession).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(
+      accessMocks.issueStargateWorkspaceAppSession.mock.calls.map(
+        ([request]) => ({
+          routeId: request.routeId,
+          createOnly: request.createOnly,
+        }),
+      ),
+    ).toEqual([
+      { routeId: collisionRouteId, createOnly: true },
+      { routeId: openedRouteId, createOnly: true },
+    ]);
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).not.toHaveBeenCalled();
+  });
+
+  it("reserves around a route ID already recorded by any workspace", async () => {
+    await seedLiveWorkshopFixture();
+    const openedRouteId = "wa-alarm-alias-alibi-alien";
+    accessMocks.createWorkspaceAppRouteId
+      .mockReturnValueOnce(APPLICATION_ROUTE)
+      .mockReturnValueOnce(openedRouteId);
+
+    const opened = await issueWorkshopWorkspaceApplication({
+      sessionId: SESSION_ID,
+      workspaceId: WORKSPACE_ID,
+      applicationId: "gitea",
+      actorUserId: "participant",
+    });
+
+    expect(opened.routeId).toBe(openedRouteId);
+    expect(accessMocks.issueStargateWorkspaceAppSession).toHaveBeenCalledOnce();
+    expect(
+      accessMocks.issueStargateWorkspaceAppSession.mock.calls[0]?.[0],
+    ).toMatchObject({ routeId: openedRouteId, createOnly: true });
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).not.toHaveBeenCalled();
+  });
+
+  it("stops after eight application route collisions", async () => {
+    await seedLiveWorkshopFixture();
+    accessMocks.createWorkspaceAppRouteId.mockReturnValue(APPLICATION_ROUTE);
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "workshop_application_route_unavailable",
+    });
+
+    expect(accessMocks.createWorkspaceAppRouteId).toHaveBeenCalledTimes(8);
+    expect(accessMocks.issueStargateWorkspaceAppSession).not.toHaveBeenCalled();
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).not.toHaveBeenCalled();
+  });
+
   it("deletes an application route when archival wins the final recording race", async () => {
     await seedLiveWorkshopFixture();
     accessMocks.issueStargateWorkspaceAppSession.mockImplementationOnce(
@@ -626,10 +718,10 @@ describe("workshop access revocation during organization membership removal", ()
     ).resolves.toEqual([{ routes: [APPLICATION_ROUTE] }]);
   });
 
-  it("cleans up the requested route when gateway response validation fails", async () => {
+  it("does not delete a potentially pre-existing route after an ambiguous gateway failure", async () => {
     await seedLiveWorkshopFixture();
     accessMocks.issueStargateWorkspaceAppSession.mockRejectedValueOnce(
-      new Error("invalid stargate workspace application response"),
+      new Error("stargate transport failed before confirmation"),
     );
 
     await expect(
@@ -639,15 +731,12 @@ describe("workshop access revocation during organization membership removal", ()
         applicationId: "gitea",
         actorUserId: "participant",
       }),
-    ).rejects.toThrow("invalid stargate workspace application response");
+    ).rejects.toThrow("stargate transport failed before confirmation");
 
     const request = accessMocks.issueStargateWorkspaceAppSession.mock
       .calls[0]?.[0] as { routeId: string } | undefined;
     expect(request?.routeId).toMatch(/^wa-[a-z0-9-]+$/);
-    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledOnce();
-    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
-      request?.routeId,
-    );
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).not.toHaveBeenCalled();
     await expect(
       env.DB.prepare(
         "SELECT id FROM workshop_route_issuance_intents WHERE workspace_id = ?",
@@ -661,6 +750,73 @@ describe("workshop access revocation during organization membership removal", ()
         .from(workshopWorkspaces)
         .where(eq(workshopWorkspaces.id, WORKSPACE_ID)),
     ).resolves.toEqual([{ routes: [APPLICATION_ROUTE] }]);
+  });
+
+  it("deletes only the requested route after a confirmed create returns an invalid response", async () => {
+    await seedLiveWorkshopFixture();
+    const routeId = "wa-alike-alive-aloft-alone";
+    accessMocks.createWorkspaceAppRouteId.mockReturnValue(routeId);
+    accessMocks.issueStargateWorkspaceAppSession.mockRejectedValueOnce(
+      new StargateWorkspaceAppInvalidResponseError(
+        routeId,
+        new Error("invalid stargate workspace application response"),
+      ),
+    );
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toThrow("invalid stargate workspace application response");
+
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledOnce();
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      routeId,
+    );
+    await expect(
+      env.DB.prepare(
+        "SELECT id FROM workshop_route_issuance_intents WHERE workspace_id = ?",
+      )
+        .bind(WORKSPACE_ID)
+        .all(),
+    ).resolves.toMatchObject({ results: [] });
+  });
+
+  it("never deletes an unexpected route ID returned after create-only issuance", async () => {
+    await seedLiveWorkshopFixture();
+    const requestedRouteId = "wa-along-amber-amend-amiss";
+    const unexpectedRouteId = "wa-among-ample-amuse-angel";
+    accessMocks.createWorkspaceAppRouteId.mockReturnValue(requestedRouteId);
+    accessMocks.issueStargateWorkspaceAppSession.mockImplementationOnce(
+      async (input: { expiresAt: Date }) => ({
+        routeId: unexpectedRouteId,
+        url: `https://${unexpectedRouteId}.intar.app/?__intar_bootstrap=one-time`,
+        bootstrapExpiresAt: input.expiresAt.getTime() - 14 * 60_000,
+        expiresAt: input.expiresAt.getTime(),
+      }),
+    );
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toMatchObject({
+      code: "workshop_application_expiry_invalid",
+    });
+
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledOnce();
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      requestedRouteId,
+    );
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).not.toHaveBeenCalledWith(
+      unexpectedRouteId,
+    );
   });
 
   it("blocks application issuance interleaved after the removal cleanup snapshot", async () => {

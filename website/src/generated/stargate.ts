@@ -49,6 +49,7 @@ export type WorkspaceAppProtocol = "http";
 
 export interface IssueWorkspaceAppSessionRequest {
   route_id: string;
+  create_only?: boolean;
   target_username: string;
   target_ip: string;
   target_ssh_port: number;

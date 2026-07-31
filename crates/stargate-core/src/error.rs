@@ -6,6 +6,8 @@ pub enum StargateError {
     Validation(String),
     #[error("route for username `{0}` was not found")]
     RouteNotFound(String),
+    #[error("workspace application route `{0}` already exists")]
+    WorkspaceAppRouteAlreadyExists(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error("database error: {0}")]

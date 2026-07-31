@@ -161,6 +161,7 @@ impl IntoResponse for GatewayHttpError {
         let status = match &self.0 {
             StargateError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             StargateError::RouteNotFound(_) => StatusCode::NOT_FOUND,
+            StargateError::WorkspaceAppRouteAlreadyExists(_) => StatusCode::CONFLICT,
             StargateError::Unauthorized => StatusCode::UNAUTHORIZED,
             StargateError::Database(_) | StargateError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -196,6 +197,9 @@ fn public_error_message(error: &StargateError) -> &'static str {
     match error {
         StargateError::Validation(_) => "validation error",
         StargateError::RouteNotFound(_) => "route not found",
+        StargateError::WorkspaceAppRouteAlreadyExists(_) => {
+            "workspace application route already exists"
+        }
         StargateError::Unauthorized => "unauthorized",
         StargateError::Database(_) | StargateError::Internal(_) => "internal server error",
         StargateError::Io(_)

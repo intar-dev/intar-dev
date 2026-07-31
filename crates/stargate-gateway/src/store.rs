@@ -189,15 +189,19 @@ impl SqliteRouteStore {
     ) -> Result<WorkspaceAppRouteRecord> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let mut transaction = self.pool.begin().await.map_err(sqlx_error)?;
-        // Reissuing an existing route is an authorization rotation. Invalidate
-        // every browser session before replacing the bootstrap capability.
-        sqlx::query("DELETE FROM workspace_app_browser_sessions WHERE route_id = ?")
-            .bind(&route.route_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(sqlx_error)?;
-        sqlx::query(
-            r#"
+        if !route.create_only {
+            // Reissuing an existing route is an authorization rotation.
+            // Invalidate every browser session before replacing bootstrap.
+            sqlx::query("DELETE FROM workspace_app_browser_sessions WHERE route_id = ?")
+                .bind(&route.route_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?;
+        }
+        macro_rules! insert_workspace_app_route_sql {
+            ($conflict:literal) => {
+                concat!(
+                    r#"
             INSERT INTO workspace_app_routes (
                 route_id,
                 target_username,
@@ -219,7 +223,16 @@ impl SqliteRouteStore {
                 updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(route_id) DO UPDATE SET
+            "#,
+                    $conflict
+                )
+            };
+        }
+        let statement: &'static str = if route.create_only {
+            insert_workspace_app_route_sql!("ON CONFLICT(route_id) DO NOTHING")
+        } else {
+            insert_workspace_app_route_sql!(
+                r#"ON CONFLICT(route_id) DO UPDATE SET
                 target_username = excluded.target_username,
                 target_ip = excluded.target_ip,
                 target_ssh_port = excluded.target_ssh_port,
@@ -235,30 +248,37 @@ impl SqliteRouteStore {
                 run_id = excluded.run_id,
                 vm_id = excluded.vm_id,
                 user_id = excluded.user_id,
-                updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(&route.route_id)
-        .bind(&route.target_username)
-        .bind(&route.target_ip)
-        .bind(i64::from(route.target_ssh_port))
-        .bind(&route.target_host_key_openssh)
-        .bind(&route.target_private_key_openssh)
-        .bind(i64::from(route.target_app_port))
-        .bind(workspace_app_protocol_slug(route.protocol))
-        .bind(route.upstream_host.as_deref())
-        .bind(route.expires_at.unix_timestamp())
-        .bind(bootstrap_token_sha256)
-        .bind(bootstrap_expires_at.unix_timestamp())
-        .bind(route.metadata.host_id.as_deref())
-        .bind(route.metadata.run_id.as_deref())
-        .bind(route.metadata.vm_id.as_deref())
-        .bind(route.metadata.user_id.as_deref())
-        .bind(now)
-        .bind(now)
-        .execute(&mut *transaction)
-        .await
-        .map_err(sqlx_error)?;
+                updated_at = excluded.updated_at"#
+            )
+        };
+        let result = sqlx::query(statement)
+            .bind(&route.route_id)
+            .bind(&route.target_username)
+            .bind(&route.target_ip)
+            .bind(i64::from(route.target_ssh_port))
+            .bind(&route.target_host_key_openssh)
+            .bind(&route.target_private_key_openssh)
+            .bind(i64::from(route.target_app_port))
+            .bind(workspace_app_protocol_slug(route.protocol))
+            .bind(route.upstream_host.as_deref())
+            .bind(route.expires_at.unix_timestamp())
+            .bind(bootstrap_token_sha256)
+            .bind(bootstrap_expires_at.unix_timestamp())
+            .bind(route.metadata.host_id.as_deref())
+            .bind(route.metadata.run_id.as_deref())
+            .bind(route.metadata.vm_id.as_deref())
+            .bind(route.metadata.user_id.as_deref())
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+        if route.create_only && result.rows_affected() == 0 {
+            transaction.rollback().await.map_err(sqlx_error)?;
+            return Err(StargateError::WorkspaceAppRouteAlreadyExists(
+                route.route_id,
+            ));
+        }
         transaction.commit().await.map_err(sqlx_error)?;
 
         self.get_workspace_app_route(&route.route_id)

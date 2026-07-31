@@ -9,6 +9,109 @@ import {
 export type WorkshopRouteIssuanceKind = "terminal" | "application";
 export const WORKSHOP_ROUTE_ISSUANCE_PENDING_LEASE_MS = 2 * 60_000;
 
+export type WorkshopApplicationRouteReservation =
+  | { status: "reserved"; intentId: string }
+  | { status: "collision" }
+  | { status: "unauthorized" };
+
+export async function reserveWorkshopApplicationRouteIssuanceIntent(input: {
+  organizationId: string;
+  sessionId: string;
+  workspaceId: string;
+  generationId: string;
+  actorUserId: string;
+  routeKey: string;
+  capabilityExpiresAt: number;
+  now?: number;
+}): Promise<WorkshopApplicationRouteReservation> {
+  const id = createAppId();
+  const now = input.now ?? Date.now();
+  const row = await env.DB.prepare(
+    `INSERT INTO workshop_route_issuance_intents
+       (id, organization_id, session_id, workspace_id, generation_id,
+        actor_user_id, kind, route_key, state, capability_expires_at,
+        created_at, updated_at)
+     SELECT ?, session.organization_id, session.id, workspace.id, generation.id,
+            ?, 'application', ?, 'pending', ?, ?, ?
+     FROM workshop_sessions session
+     JOIN workshop_workspaces workspace ON workspace.session_id = session.id
+     JOIN workshop_workspace_generations generation
+       ON generation.id = workspace.current_generation_id
+     JOIN member organization_member
+       ON organization_member.organization_id = session.organization_id
+      AND organization_member.user_id = ?
+     JOIN member workspace_member
+       ON workspace_member.organization_id = session.organization_id
+      AND workspace_member.user_id = workspace.user_id
+     WHERE session.id = ?
+       AND session.organization_id = ?
+       AND session.state IN ('lobby', 'live')
+       AND workspace.id = ?
+       AND workspace.current_generation_id = ?
+       AND workspace.state = 'ready'
+       AND generation.state = 'ready'
+       AND organization_member.workshop_access_revoking_at IS NULL
+       AND workspace_member.workshop_access_revoking_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_workspaces recorded_workspace,
+              json_each(recorded_workspace.application_route_ids_json) recorded_route
+         WHERE CAST(recorded_route.value AS TEXT) = ?
+       )
+     ON CONFLICT(kind, route_key) DO NOTHING
+     RETURNING id`,
+  )
+    .bind(
+      id,
+      input.actorUserId,
+      input.routeKey,
+      input.capabilityExpiresAt,
+      now,
+      now,
+      input.actorUserId,
+      input.sessionId,
+      input.organizationId,
+      input.workspaceId,
+      input.generationId,
+      input.routeKey,
+    )
+    .first<{ id: string }>();
+  if (row) return { status: "reserved", intentId: row.id };
+
+  const authorized = await env.DB.prepare(
+    `SELECT 1 AS authorized
+     FROM workshop_sessions session
+     JOIN workshop_workspaces workspace ON workspace.session_id = session.id
+     JOIN workshop_workspace_generations generation
+       ON generation.id = workspace.current_generation_id
+     JOIN member organization_member
+       ON organization_member.organization_id = session.organization_id
+      AND organization_member.user_id = ?
+     JOIN member workspace_member
+       ON workspace_member.organization_id = session.organization_id
+      AND workspace_member.user_id = workspace.user_id
+     WHERE session.id = ?
+       AND session.organization_id = ?
+       AND session.state IN ('lobby', 'live')
+       AND workspace.id = ?
+       AND workspace.current_generation_id = ?
+       AND workspace.state = 'ready'
+       AND generation.state = 'ready'
+       AND organization_member.workshop_access_revoking_at IS NULL
+       AND workspace_member.workshop_access_revoking_at IS NULL
+     LIMIT 1`,
+  )
+    .bind(
+      input.actorUserId,
+      input.sessionId,
+      input.organizationId,
+      input.workspaceId,
+      input.generationId,
+    )
+    .first<{ authorized: number }>();
+  return authorized ? { status: "collision" } : { status: "unauthorized" };
+}
+
 export async function beginWorkshopRouteIssuanceIntent(input: {
   organizationId: string;
   sessionId: string;
