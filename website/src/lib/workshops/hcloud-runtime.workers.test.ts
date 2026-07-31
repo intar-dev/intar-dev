@@ -47,6 +47,7 @@ import {
   runtimeProviderCheckpointArtifacts,
   runtimeProviderCostLedger,
   runtimeProviderGuestCredentials,
+  runtimeVms,
   user,
   workshopSessionCostForecasts,
   workshopSessionCostSummaries,
@@ -139,18 +140,29 @@ describe("Hetzner workshop runtime provider", () => {
       }),
     ]);
 
-    const [runtime, allocations, ledgers, slots, reservations, hosts] =
-      await Promise.all([
-        db
-          .select()
-          .from(runtimeExecutions)
-          .where(eq(runtimeExecutions.id, execution.executionId)),
-        db.select().from(hetznerAllocations),
-        db.select().from(runtimeProviderCostLedger),
-        db.select().from(activeRuntimeSlots),
-        db.select().from(hostResourceReservations),
-        db.select().from(agentHosts),
-      ]);
+    const [
+      runtime,
+      runtimeVmRows,
+      allocations,
+      ledgers,
+      slots,
+      reservations,
+      hosts,
+    ] = await Promise.all([
+      db
+        .select()
+        .from(runtimeExecutions)
+        .where(eq(runtimeExecutions.id, execution.executionId)),
+      db
+        .select()
+        .from(runtimeVms)
+        .where(eq(runtimeVms.executionId, execution.executionId)),
+      db.select().from(hetznerAllocations),
+      db.select().from(runtimeProviderCostLedger),
+      db.select().from(activeRuntimeSlots),
+      db.select().from(hostResourceReservations),
+      db.select().from(agentHosts),
+    ]);
     expect(runtime[0]).toMatchObject({
       providerKind: "hetzner_cloud",
       providerConnectionId: PROVIDER_CONNECTION_ID,
@@ -158,6 +170,17 @@ describe("Hetzner workshop runtime provider", () => {
       domainKind: "workshop",
       domainId: fixture.request.workspaceId,
     });
+    expect(runtimeVmRows).toEqual([
+      expect.objectContaining({
+        vmId: "learner",
+        imageKeyJson: {
+          providerKind: "hetzner_cloud",
+          checkpointArtifactId: "checkpoint-artifact-a",
+          r2Key: "checkpoints/revision-a/00.tar.zst",
+        },
+        imageSha256: "c".repeat(64),
+      }),
+    ]);
     expect(allocations).toEqual([
       expect.objectContaining({
         executionId: execution.executionId,
@@ -2125,6 +2148,46 @@ describe("Hetzner workshop runtime provider", () => {
     ).rejects.toMatchObject({ code: "hcloud_concurrency_limit_reached" });
     expect(providerMocks.run).not.toHaveBeenCalled();
   });
+
+  it.each([
+    "missing",
+    "unverified",
+    "wrong revision",
+    "wrong checkpoint",
+  ] as const)(
+    "rejects a %s provider checkpoint artifact before external allocation",
+    async (condition) => {
+      const fixture = await seedRuntimeFixture({
+        checkpointArtifact: condition,
+      });
+
+      await expect(
+        provisionWorkshopRequest(fixture.request),
+      ).rejects.toMatchObject({ code: "hcloud_checkpoint_not_verified" });
+      expect(providerMocks.run).not.toHaveBeenCalled();
+      expect(providerMocks.operations).toEqual([]);
+      const db = drizzle(env.DB);
+      const [executions, vms, slots, allocations, ledgers, credentials] =
+        await Promise.all([
+          db.select().from(runtimeExecutions),
+          db.select().from(runtimeVms),
+          db.select().from(activeRuntimeSlots),
+          db.select().from(hetznerAllocations),
+          db.select().from(runtimeProviderCostLedger),
+          db.select().from(runtimeProviderGuestCredentials),
+        ]);
+      expect(
+        { executions, vms, slots, allocations, ledgers, credentials },
+      ).toEqual({
+        executions: [],
+        vms: [],
+        slots: [],
+        allocations: [],
+        ledgers: [],
+        credentials: [],
+      });
+    },
+  );
 });
 
 async function defaultProviderOperation(
@@ -2389,6 +2452,12 @@ async function seedRuntimeFixture(
     maxConcurrentServers?: number;
     seedOtherParticipant?: boolean;
     workspaceRole?: "participant" | "facilitator";
+    checkpointArtifact?:
+      | "verified"
+      | "missing"
+      | "unverified"
+      | "wrong revision"
+      | "wrong checkpoint";
   } = {},
 ): Promise<{ now: number; request: WorkshopProvisioningRequest }> {
   const now = Date.now();
@@ -2454,6 +2523,18 @@ async function seedRuntimeFixture(
     publishedBy: "owner-a",
     publishedAt: now,
   });
+  if (options.checkpointArtifact === "wrong revision") {
+    await db.insert(workshopTemplateRevisions).values({
+      id: "revision-other",
+      templateId: "template-a",
+      revision: 2,
+      sourceRevision: "source-other",
+      contentHash: "f".repeat(64),
+      manifestJson: manifest,
+      publishedBy: "owner-a",
+      publishedAt: now,
+    });
+  }
   await db
     .update(workshopTemplates)
     .set({ currentRevisionId: "revision-a" })
@@ -2584,23 +2665,33 @@ async function seedRuntimeFixture(
     "checkpoints/revision-a/00.tar.zst",
     checkpoint,
   );
-  await db.insert(runtimeProviderCheckpointArtifacts).values({
-    id: "checkpoint-artifact-a",
-    templateRevisionId: "revision-a",
-    checkpointId: "checkpoint-00",
-    providerKind: "hetzner_cloud",
-    r2Key: "checkpoints/revision-a/00.tar.zst",
-    sha256: "c".repeat(64),
-    sizeBytes: checkpoint.byteLength,
-    compression: "zstd",
-    signatureB64: "signed-checkpoint",
-    signingKeyId: "workshop-builder-v1",
-    workspaceAgentSha256: BINARY_SHA256,
-    kinoSha256: KINO_BINARY_SHA256,
-    status: "verified",
-    coldBootVerifiedAt: now,
-    createdAt: now,
-  });
+  if (options.checkpointArtifact !== "missing") {
+    await db.insert(runtimeProviderCheckpointArtifacts).values({
+      id: "checkpoint-artifact-a",
+      templateRevisionId:
+        options.checkpointArtifact === "wrong revision"
+          ? "revision-other"
+          : "revision-a",
+      checkpointId:
+        options.checkpointArtifact === "wrong checkpoint"
+          ? "checkpoint-other"
+          : "checkpoint-00",
+      providerKind: "hetzner_cloud",
+      r2Key: "checkpoints/revision-a/00.tar.zst",
+      sha256: "c".repeat(64),
+      sizeBytes: checkpoint.byteLength,
+      compression: "zstd",
+      signatureB64: "signed-checkpoint",
+      signingKeyId: "workshop-builder-v1",
+      workspaceAgentSha256: BINARY_SHA256,
+      kinoSha256: KINO_BINARY_SHA256,
+      status:
+        options.checkpointArtifact === "unverified" ? "pending" : "verified",
+      coldBootVerifiedAt:
+        options.checkpointArtifact === "unverified" ? null : now,
+      createdAt: now,
+    });
+  }
   await db.insert(workshopWorkspaces).values({
     id: "workspace-a",
     sessionId: "session-a",
@@ -2691,17 +2782,7 @@ function workshopManifest(): WorkshopManifestV1 {
         {
           id: "checkpoint-00",
           label: "Setup",
-          vmImages: [
-            {
-              vmId: "learner",
-              imageKey: {
-                scenario: "workshop-checkpoint-00",
-                vm: "learner",
-                arch: "x86_64",
-              },
-              imageSha256: "e".repeat(64),
-            },
-          ],
+          vmImages: [],
         },
       ],
       initialCheckpointId: "checkpoint-00",
