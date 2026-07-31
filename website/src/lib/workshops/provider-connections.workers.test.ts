@@ -728,6 +728,47 @@ describe("Hetzner BYOK provider connections", () => {
     expect(credential[0]?.revokedAt).toBe(1_750_000_021_000);
   });
 
+  it("does not offer manual cleanup for a live allocation that is still managed", async () => {
+    const connected = await connectHetznerProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      token: "secret-hcloud-token-value",
+    });
+    await seedWorkshopSession(connected.id);
+    await seedAllocation(connected.id, null);
+    const db = drizzle(env.DB);
+    await db
+      .update(hetznerAllocations)
+      .set({ state: "ready" })
+      .where(eq(hetznerAllocations.id, "allocation-a"));
+
+    const ownerView = await listHetznerProviderConnections({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+    });
+    expect(ownerView[0]?.cleanupResources).toEqual([]);
+    await expect(
+      acknowledgeHetznerManualCleanup({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "provider_cleanup_not_pending",
+    });
+    await expect(
+      disconnectHetznerProject({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "provider_cleanup_not_confirmed",
+    });
+  });
+
   it("keeps cleanup-pending issuance fenced after credential rotation", async () => {
     const connected = await connectHetznerProject({
       organizationId: "org-a",
