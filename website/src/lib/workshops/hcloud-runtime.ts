@@ -71,6 +71,8 @@ const RECORDING_DRAIN_TIMEOUT_MS = 60_000;
 interface HcloudRuntimePreflight {
   connection: Awaited<ReturnType<typeof requireConnection>>;
   checkpointArtifactId: string;
+  checkpointArtifactR2Key: string;
+  checkpointArtifactSha256: string;
   workspaceAgentSha256: string;
   kinoSha256: string;
   forecast: StoredWorkshopCostForecast;
@@ -293,6 +295,8 @@ export async function preflightHetznerWorkshopRuntime(
   const artifact = await drizzle(env.DB)
     .select({
       id: runtimeProviderCheckpointArtifacts.id,
+      r2Key: runtimeProviderCheckpointArtifacts.r2Key,
+      sha256: runtimeProviderCheckpointArtifacts.sha256,
       workspaceAgentSha256:
         runtimeProviderCheckpointArtifacts.workspaceAgentSha256,
       kinoSha256: runtimeProviderCheckpointArtifacts.kinoSha256,
@@ -315,6 +319,8 @@ export async function preflightHetznerWorkshopRuntime(
     .limit(1);
   if (
     !artifact[0] ||
+    !artifact[0].r2Key.trim() ||
+    !isSha256(artifact[0].sha256) ||
     !isSha256(artifact[0].workspaceAgentSha256) ||
     !isSha256(artifact[0].kinoSha256)
   ) {
@@ -327,6 +333,8 @@ export async function preflightHetznerWorkshopRuntime(
   return {
     connection,
     checkpointArtifactId: artifact[0].id,
+    checkpointArtifactR2Key: artifact[0].r2Key,
+    checkpointArtifactSha256: artifact[0].sha256,
     workspaceAgentSha256: artifact[0].workspaceAgentSha256,
     kinoSha256: artifact[0].kinoSha256,
     forecast,
@@ -509,7 +517,7 @@ export async function allocateHetznerWorkshopRuntime(
           }
         }
         const executionId = createAppId();
-        const vms = runtimeVmSpecs(request, executionId);
+        const vms = runtimeVmSpecs(request, executionId, preflight);
         const created = previous
           ? await createRuntimeRecoveryGeneration({
               sourceExecutionId: previous.executionId,
@@ -3049,6 +3057,12 @@ async function assertProvisioningFence(
 function runtimeVmSpecs(
   request: WorkshopProvisioningRequest,
   executionId: string,
+  preflight: Pick<
+    HcloudRuntimePreflight,
+    | "checkpointArtifactId"
+    | "checkpointArtifactR2Key"
+    | "checkpointArtifactSha256"
+  >,
 ): RuntimeVmSpec[] {
   const checkpoint = request.manifest.workspace.checkpoints.find(
     (candidate) => candidate.id === request.checkpointId,
@@ -3060,24 +3074,17 @@ function runtimeVmSpecs(
       "workshop checkpoint not found",
     );
   }
-  const images = new Map(
-    checkpoint.vmImages.map((entry) => [entry.vmId, entry]),
-  );
   return request.manifest.workspace.vms.map((vm, ordinal) => {
-    const image = images.get(vm.id);
-    if (!image) {
-      throw appError(
-        409,
-        "workshop_checkpoint_incomplete",
-        "checkpoint bundle is incomplete",
-      );
-    }
     return {
       vmId: vm.id,
       ordinal,
       runtimeVmName: `workshop-${executionId}-${runtimeNamePart(vm.id)}`,
-      imageKey: image.imageKey,
-      imageSha256: image.imageSha256,
+      imageKey: {
+        providerKind: "hetzner_cloud",
+        checkpointArtifactId: preflight.checkpointArtifactId,
+        r2Key: preflight.checkpointArtifactR2Key,
+      },
+      imageSha256: preflight.checkpointArtifactSha256,
       cpuMillis: vm.cpuMillis,
       memoryMib: vm.memoryMib,
       diskMib: vm.diskMib,
