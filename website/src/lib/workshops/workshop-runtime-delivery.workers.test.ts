@@ -587,7 +587,10 @@ describe("workshop runtime delivery", () => {
         .from(runtimeExecutions)
         .orderBy(asc(runtimeExecutions.generation)),
       db
-        .select({ type: workshopEvents.type })
+        .select({
+          type: workshopEvents.type,
+          payload: workshopEvents.payloadJson,
+        })
         .from(workshopEvents)
         .where(
           eq(workshopEvents.type, "workspace.checkpoint_restore_requested"),
@@ -603,7 +606,16 @@ describe("workshop runtime delivery", () => {
       }),
     ]);
     expect(executions).toEqual([{ generation: 1 }, { generation: 2 }]);
-    expect(restoreEvents).toHaveLength(1);
+    expect(restoreEvents).toEqual([
+      {
+        type: "workspace.checkpoint_restore_requested",
+        payload: expect.objectContaining({
+          generationId: pendingGenerationId,
+          workspaceId: initialRequest.workspaceId,
+          checkpointId: "checkpoint-01",
+        }),
+      },
+    ]);
     expect(cleanupMocks.deleteStargateRoute).toHaveBeenCalledTimes(2);
   });
 

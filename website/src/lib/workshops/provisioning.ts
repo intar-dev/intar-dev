@@ -508,6 +508,7 @@ export async function prepareWorkshopCheckpointRestore(params: {
         actorUserId: params.actorUserId,
         type: "workspace.checkpoint_restore_requested",
         payloadJson: {
+          generationId,
           workspaceId: params.workspaceId,
           participantUserId: workspace.userId,
           checkpointId: params.checkpointId,
