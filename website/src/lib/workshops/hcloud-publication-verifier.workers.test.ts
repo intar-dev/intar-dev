@@ -63,6 +63,7 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     featureFlags.hcloudRuntimeEnabled.mockReset();
     featureFlags.hcloudRuntimeEnabled.mockResolvedValue(true);
     await seedFixture();
+    await setVerificationBasis(CHECKPOINT_ID, CHECKPOINT_ID);
   });
 
   it("waits without provider mutation until the organization runtime flag is enabled", async () => {
@@ -507,10 +508,126 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     });
   });
 
+  it("proves every checkpoint through one cumulative terminal basis", async () => {
+    const basisId = await insertCumulativeSecondCheckpoint();
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW }),
+    ).resolves.toMatchObject({
+      checkpointId: "01",
+      state: "allocating",
+    });
+    const attempt = await currentAttempt();
+    expect(attempt).toMatchObject({
+      provider_checkpoint_id: basisId,
+      state: "allocating",
+    });
+    await expect(attemptCount(CHECKPOINT_ID)).resolves.toBe(0);
+    await expect(attemptCount(basisId)).resolves.toBe(1);
+    await expect(
+      count("workshop_publication_provider_cost_ledger"),
+    ).resolves.toBe(2);
+
+    const serverCreate = provider.operations.find(
+      (operation) => operation.kind === "create_server",
+    );
+    expect(String(serverCreate?.cloudInit)).toContain(
+      'probe "workspace-ready"',
+    );
+    expect(String(serverCreate?.cloudInit)).toContain('probe "service-ready"');
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 }),
+    ).resolves.toMatchObject({ checkpointId: "01", state: "bootstrapping" });
+
+    const proofAt = NOW + 2;
+    await env.DB.prepare(
+      `UPDATE workshop_publication_provider_attempts
+       SET state = 'proof_succeeded', proof_report_sequence = 7,
+           proof_verified_at = ?, last_report_sequence = 7,
+           last_report_phase = 'ready', last_report_health = 'healthy',
+           last_report_at = ?, checkpoint_first_downloaded_at = ?,
+           report_json = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+      .bind(
+        proofAt,
+        proofAt,
+        NOW + 1,
+        JSON.stringify({
+          phase: "ready",
+          health: "healthy",
+          terminal_ready: true,
+          ssh_host_keys_openssh: ["ssh-ed25519 AAAATEST verifier"],
+          probes: [
+            { id: "workspace-ready", status: "pass" },
+            { id: "service-ready", status: "pass" },
+          ],
+        }),
+        proofAt,
+        attempt?.id,
+      )
+      .run();
+
+    await expect(
+      sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 3 }),
+    ).resolves.toMatchObject({ checkpointId: "01", state: "deleting" });
+    for (let offset = 4; offset <= 7; offset += 1) {
+      await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + offset });
+    }
+
+    const checkpoints = await env.DB.prepare(
+      `SELECT id, checkpoint_id, verification_basis_checkpoint_id,
+              verification_status, proof_verified_at, deletion_confirmed_at
+       FROM workshop_publication_provider_checkpoints
+       WHERE publication_id = ? ORDER BY ordinal`,
+    )
+      .bind(PUBLICATION_ID)
+      .all<Record<string, unknown>>();
+    expect(checkpoints.results).toEqual([
+      {
+        id: CHECKPOINT_ID,
+        checkpoint_id: "00",
+        verification_basis_checkpoint_id: basisId,
+        verification_status: "verified",
+        proof_verified_at: proofAt,
+        deletion_confirmed_at: expect.any(Number),
+      },
+      {
+        id: basisId,
+        checkpoint_id: "01",
+        verification_basis_checkpoint_id: basisId,
+        verification_status: "verified",
+        proof_verified_at: proofAt,
+        deletion_confirmed_at: expect.any(Number),
+      },
+    ]);
+    expect(checkpoints.results[0]?.deletion_confirmed_at).toBe(
+      checkpoints.results[1]?.deletion_confirmed_at,
+    );
+    await expect(attemptCount(CHECKPOINT_ID)).resolves.toBe(0);
+    await expect(attemptCount(basisId)).resolves.toBe(1);
+    await expect(currentAttempt()).resolves.toMatchObject({
+      provider_checkpoint_id: basisId,
+      state: "deleted",
+      proof_verified_at: proofAt,
+      deletion_confirmed_at: expect.any(Number),
+    });
+    await expect(
+      count("workshop_publication_provider_cost_ledger"),
+    ).resolves.toBe(2);
+    expect(provider.finalize).toHaveBeenCalledWith({
+      publicationId: PUBLICATION_ID,
+      now: NOW + 7,
+    });
+  });
+
   it("does not retry a deterministic guest proof failure", async () => {
+    const basisId = await insertCumulativeSecondCheckpoint();
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 });
     const attempt = await currentAttempt();
+    expect(attempt).toMatchObject({ provider_checkpoint_id: basisId });
     await env.DB.prepare(
       `UPDATE workshop_publication_provider_attempts
        SET state = 'failed', last_error_code = 'guest_reported_failure',
@@ -535,13 +652,21 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       provider_verification_state: "failed",
     });
     const attempts = await env.DB.prepare(
-      `SELECT ordinal, state FROM workshop_publication_provider_attempts
+      `SELECT provider_checkpoint_id, ordinal, state
+       FROM workshop_publication_provider_attempts
        WHERE provider_checkpoint_id = ?`,
     )
-      .bind(CHECKPOINT_ID)
+      .bind(basisId)
       .all<Record<string, unknown>>();
-    expect(attempts.results).toEqual([{ ordinal: 1, state: "deleted" }]);
-    const checkpoint = await providerCheckpointCleanupSummary();
+    expect(attempts.results).toEqual([
+      {
+        provider_checkpoint_id: basisId,
+        ordinal: 1,
+        state: "deleted",
+      },
+    ]);
+    await expect(attemptCount(CHECKPOINT_ID)).resolves.toBe(0);
+    const checkpoint = await providerCheckpointCleanupSummary(basisId);
     expect(checkpoint).toEqual({
       verification_status: "failed",
       deletion_confirmed_at: expect.any(Number),
@@ -553,7 +678,7 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
            FROM workshop_publication_provider_attempts
            WHERE provider_checkpoint_id = ?`,
         )
-          .bind(CHECKPOINT_ID)
+          .bind(basisId)
           .first<{ deletion_confirmed_at: number }>()
       )?.deletion_confirmed_at,
     );
@@ -561,9 +686,11 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
   });
 
   it("retries a persistent ready-state probe failure after confirmed cleanup", async () => {
+    const basisId = await insertCumulativeSecondCheckpoint();
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 });
     const attempt = await currentAttempt();
+    expect(attempt).toMatchObject({ provider_checkpoint_id: basisId });
     await env.DB.prepare(
       `UPDATE workshop_publication_provider_attempts
        SET state = 'failed',
@@ -579,7 +706,7 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + offset });
     }
 
-    await expect(providerCheckpointCleanupSummary()).resolves.toEqual({
+    await expect(providerCheckpointCleanupSummary(basisId)).resolves.toEqual({
       verification_status: "pending",
       deletion_confirmed_at: null,
     });
@@ -604,7 +731,7 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
        WHERE provider_checkpoint_id = ?
        ORDER BY ordinal`,
     )
-      .bind(CHECKPOINT_ID)
+      .bind(basisId)
       .all<Record<string, unknown>>();
     expect(attempts.results).toEqual([
       {
@@ -614,6 +741,7 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       },
       expect.objectContaining({ ordinal: 2 }),
     ]);
+    await expect(attemptCount(CHECKPOINT_ID)).resolves.toBe(0);
     expect(provider.finalize).not.toHaveBeenCalled();
   });
 
@@ -664,13 +792,15 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
     });
   });
 
-  it("keeps later checkpoints pending until the predecessor is verified", async () => {
+  it("retains ordered sequential allocation for legacy checkpoints without a basis", async () => {
     await insertSecondCheckpoint();
+    await setVerificationBasis(CHECKPOINT_ID, null);
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW });
     await sweepHetznerWorkshopPublicationVerifiers({ now: NOW + 1 });
 
     const rows = await env.DB.prepare(
       `SELECT checkpoint.checkpoint_id, checkpoint.verification_status,
+              checkpoint.verification_basis_checkpoint_id,
               count(attempt.id) AS attempts
        FROM workshop_publication_provider_checkpoints checkpoint
        LEFT JOIN workshop_publication_provider_attempts attempt
@@ -681,11 +811,13 @@ describe("direct Hetzner workshop publication verifier lifecycle", () => {
       {
         checkpoint_id: "00",
         verification_status: "bootstrapping",
+        verification_basis_checkpoint_id: null,
         attempts: 1,
       },
       {
         checkpoint_id: "01",
         verification_status: "pending",
+        verification_basis_checkpoint_id: null,
         attempts: 0,
       },
     ]);
@@ -1183,6 +1315,47 @@ async function insertSecondCheckpoint(): Promise<void> {
   });
 }
 
+async function insertCumulativeSecondCheckpoint(): Promise<string> {
+  const basisId = "provider-checkpoint-01";
+  await insertSecondCheckpoint();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET verification_basis_checkpoint_id = ?, updated_at = ?
+       WHERE id = ?`,
+    ).bind(basisId, NOW, CHECKPOINT_ID),
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET verification_basis_checkpoint_id = ?,
+           covered_module_ids_json = ?, expected_probes_json = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    ).bind(
+      basisId,
+      JSON.stringify(["00", "01"]),
+      JSON.stringify([
+        { moduleId: "00", probeId: "workspace-ready" },
+        { moduleId: "01", probeId: "service-ready" },
+      ]),
+      NOW,
+      basisId,
+    ),
+  ]);
+  return basisId;
+}
+
+async function setVerificationBasis(
+  checkpointId: string,
+  basisCheckpointId: string | null,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE workshop_publication_provider_checkpoints
+     SET verification_basis_checkpoint_id = ? WHERE id = ?`,
+  )
+    .bind(basisCheckpointId, checkpointId)
+    .run();
+}
+
 async function seedLegacyNameFailure(
   input: { sshKeyId?: string } = {},
 ): Promise<void> {
@@ -1401,6 +1574,10 @@ async function insertAdditionalPublicationFixture(
     connectionId,
     createdAt,
   });
+  await setVerificationBasis(
+    `provider-checkpoint-${suffix}`,
+    `provider-checkpoint-${suffix}`,
+  );
 }
 
 async function insertSameConnectionPublicationFixture(
@@ -1437,6 +1614,10 @@ async function insertSameConnectionPublicationFixture(
     createdAt,
     serverType,
   });
+  await setVerificationBasis(
+    `provider-checkpoint-${suffix}`,
+    `provider-checkpoint-${suffix}`,
+  );
 }
 
 async function attemptCount(checkpointId: string): Promise<number> {
@@ -1474,7 +1655,9 @@ async function checkpointStatus(): Promise<string | null> {
   return row?.verification_status ?? null;
 }
 
-async function providerCheckpointCleanupSummary(): Promise<{
+async function providerCheckpointCleanupSummary(
+  checkpointId = CHECKPOINT_ID,
+): Promise<{
   verification_status: string;
   deletion_confirmed_at: number | null;
 } | null> {
@@ -1482,7 +1665,7 @@ async function providerCheckpointCleanupSummary(): Promise<{
     `SELECT verification_status, deletion_confirmed_at
      FROM workshop_publication_provider_checkpoints WHERE id = ?`,
   )
-    .bind(CHECKPOINT_ID)
+    .bind(checkpointId)
     .first();
 }
 

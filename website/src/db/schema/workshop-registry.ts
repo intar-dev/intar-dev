@@ -96,18 +96,17 @@ export const workshopPublications = sqliteTable(
     error: text("error"),
     claimedAt: integer("claimed_at"),
     claimExpiresAt: integer("claim_expires_at"),
-    providerVerificationState: text("provider_verification_state").$type<
-      WorkshopProviderVerificationState | null
-    >(),
+    providerVerificationState: text(
+      "provider_verification_state",
+    ).$type<WorkshopProviderVerificationState | null>(),
     finishedAt: integer("finished_at"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },
   (table) => [
-    uniqueIndex("workshop_publications_org_hash_uidx").on(
-      table.organizationId,
-      table.contentHash,
-    ),
+    uniqueIndex("workshop_publications_org_hash_active_uidx")
+      .on(table.organizationId, table.contentHash)
+      .where(sql`${table.status} <> 'failed'`),
     index("workshop_publications_status_created_idx").on(
       table.status,
       table.createdAt,

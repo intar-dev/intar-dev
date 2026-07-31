@@ -37,7 +37,7 @@ import { isWorkshopHcloudRuntimeEnabledForOrganization } from "./feature-flag";
 import { buildWorkspaceAgentCloudInit } from "./workspace-agent-control-plane";
 
 const BOOTSTRAP_TTL_MS = 30 * 60_000;
-const REPORT_TTL_MS = 2 * 60 * 60_000;
+const REPORT_TTL_MS = 4 * 60 * 60_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
 const ACTION_POLL_MS = 15_000;
 const MAX_CANDIDATES_PER_SWEEP = 32;
@@ -55,6 +55,7 @@ interface ProviderCheckpointRow {
   organization_id: string;
   checkpoint_id: string;
   ordinal: number;
+  verification_basis_checkpoint_id: string | null;
   expected_probes_json: string | Array<{ moduleId: string; probeId: string }>;
   connection_id: string;
   resolved_provider_json: string | ResolvedProvider;
@@ -124,8 +125,9 @@ export interface WorkshopPublicationVerifierSweepResult {
 }
 
 /**
- * Advances at most one publication checkpoint. A later checkpoint is never
- * selected until every earlier one has completed proof and confirmed cleanup.
+ * Advances at most one publication proof basis. New cumulative publications
+ * select only their terminal checkpoint basis; legacy rows without a basis
+ * retain the original ordered checkpoint behavior.
  */
 export async function sweepHetznerWorkshopPublicationVerifiers(
   input: {
@@ -487,12 +489,18 @@ async function allocatePendingCheckpoint(
              WHERE checkpoint.id = ?
                AND checkpoint.connection_id = ?
                AND checkpoint.verification_status = 'pending'
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM workshop_publication_provider_checkpoints prior
-                 WHERE prior.publication_id = checkpoint.publication_id
-                   AND prior.ordinal < checkpoint.ordinal
-                   AND prior.verification_status <> 'verified'
+               AND (
+                 checkpoint.verification_basis_checkpoint_id = checkpoint.id
+                 OR (
+                   checkpoint.verification_basis_checkpoint_id IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1
+                     FROM workshop_publication_provider_checkpoints prior
+                     WHERE prior.publication_id = checkpoint.publication_id
+                       AND prior.ordinal < checkpoint.ordinal
+                       AND prior.verification_status <> 'verified'
+                   )
+                 )
                )
            )
            AND NOT EXISTS (
@@ -970,6 +978,9 @@ async function cleanupAttempt(
     env.DB.prepare(
       `UPDATE workshop_publication_provider_checkpoints
        SET verification_status = ?,
+           proof_verified_at = CASE
+             WHEN ? = 'verified' THEN ? ELSE proof_verified_at
+           END,
            deletion_confirmed_at = CASE
              WHEN ? = 'verified' THEN ?
              WHEN ? = 'failed'
@@ -990,14 +1001,25 @@ async function cleanupAttempt(
            END,
            error = CASE WHEN ? = 'verified' THEN NULL ELSE error END,
            updated_at = ?
-       WHERE id = ? AND verification_status IN ('deleting', 'cleanup_pending')`,
+       WHERE (
+         id = ?
+         OR (? = 'verified' AND verification_basis_checkpoint_id = ?)
+       )
+         AND verification_status IN (
+           'pending', 'allocating', 'bootstrapping', 'applying',
+           'deleting', 'cleanup_pending', 'verified'
+         )`,
     ).bind(
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
+      refreshed.proof_verified_at ?? now,
+      proofSucceeded ? "verified" : retry ? "pending" : "failed",
       now,
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       proofSucceeded ? "verified" : retry ? "pending" : "failed",
       now,
+      candidate.id,
+      proofSucceeded ? "verified" : retry ? "pending" : "failed",
       candidate.id,
     ),
     env.DB.prepare(
@@ -1791,7 +1813,8 @@ async function nextCheckpoints(
     `SELECT
        checkpoint.id, checkpoint.publication_id,
        publication.organization_id, checkpoint.checkpoint_id,
-       checkpoint.ordinal, checkpoint.expected_probes_json,
+       checkpoint.ordinal, checkpoint.verification_basis_checkpoint_id,
+       checkpoint.expected_probes_json,
        checkpoint.connection_id, checkpoint.resolved_provider_json,
        checkpoint.permitted_locations_json, checkpoint.price_observation_json,
        checkpoint.r2_key, checkpoint.sha256, checkpoint.size_bytes,
@@ -1803,11 +1826,17 @@ async function nextCheckpoints(
       AND publication.status = 'building'
       AND publication.provider_verification_state IN ('verifying', 'cleanup_pending')
      WHERE checkpoint.verification_status <> 'verified'
-       AND NOT EXISTS (
-         SELECT 1 FROM workshop_publication_provider_checkpoints prior
-         WHERE prior.publication_id = checkpoint.publication_id
-           AND prior.ordinal < checkpoint.ordinal
-           AND prior.verification_status <> 'verified'
+       AND (
+         checkpoint.verification_basis_checkpoint_id = checkpoint.id
+         OR (
+           checkpoint.verification_basis_checkpoint_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM workshop_publication_provider_checkpoints prior
+             WHERE prior.publication_id = checkpoint.publication_id
+               AND prior.ordinal < checkpoint.ordinal
+               AND prior.verification_status <> 'verified'
+           )
+         )
        )
      ORDER BY checkpoint.updated_at ASC, publication.created_at ASC,
               checkpoint.ordinal ASC
@@ -1838,7 +1867,8 @@ async function checkpointById(
     `SELECT
        checkpoint.id, checkpoint.publication_id,
        publication.organization_id, checkpoint.checkpoint_id,
-       checkpoint.ordinal, checkpoint.expected_probes_json,
+       checkpoint.ordinal, checkpoint.verification_basis_checkpoint_id,
+       checkpoint.expected_probes_json,
        checkpoint.connection_id, checkpoint.resolved_provider_json,
        checkpoint.permitted_locations_json, checkpoint.price_observation_json,
        checkpoint.r2_key, checkpoint.sha256, checkpoint.size_bytes,
@@ -1850,11 +1880,17 @@ async function checkpointById(
       AND publication.status = 'building'
       AND publication.provider_verification_state IN ('verifying', 'cleanup_pending')
      WHERE checkpoint.id = ? AND checkpoint.verification_status <> 'verified'
-       AND NOT EXISTS (
-         SELECT 1 FROM workshop_publication_provider_checkpoints prior
-         WHERE prior.publication_id = checkpoint.publication_id
-           AND prior.ordinal < checkpoint.ordinal
-           AND prior.verification_status <> 'verified'
+       AND (
+         checkpoint.verification_basis_checkpoint_id = checkpoint.id
+         OR (
+           checkpoint.verification_basis_checkpoint_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM workshop_publication_provider_checkpoints prior
+             WHERE prior.publication_id = checkpoint.publication_id
+               AND prior.ordinal < checkpoint.ordinal
+               AND prior.verification_status <> 'verified'
+           )
+         )
        )
      LIMIT 1`,
   )

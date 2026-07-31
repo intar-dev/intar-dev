@@ -66,9 +66,7 @@ export const workshopPublicationProviderCheckpoints = sqliteTable(
     expectedProbesJson: jsonText<WorkshopPublicationExpectedProbe[]>(
       "expected_probes_json",
     ).notNull(),
-    providerKind: text("provider_kind")
-      .$type<"hetzner_cloud">()
-      .notNull(),
+    providerKind: text("provider_kind").$type<"hetzner_cloud">().notNull(),
     connectionId: text("connection_id")
       .notNull()
       .references(() => organizationProviderConnections.id, {
@@ -97,6 +95,7 @@ export const workshopPublicationProviderCheckpoints = sqliteTable(
       .$type<WorkshopPublicationProviderVerificationStatus>()
       .default("pending")
       .notNull(),
+    verificationBasisCheckpointId: text("verification_basis_checkpoint_id"),
     proofVerifiedAt: integer("proof_verified_at"),
     deletionConfirmedAt: integer("deletion_confirmed_at"),
     error: text("error"),
@@ -112,6 +111,9 @@ export const workshopPublicationProviderCheckpoints = sqliteTable(
       table.publicationId,
       table.verificationStatus,
       table.ordinal,
+    ),
+    index("workshop_publication_provider_verification_basis_idx").on(
+      table.verificationBasisCheckpointId,
     ),
     check(
       "workshop_publication_provider_kind_valid",

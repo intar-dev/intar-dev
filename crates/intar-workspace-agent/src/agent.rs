@@ -18,7 +18,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
-const CHECKPOINT_APPLY_TIMEOUT_SECONDS: u64 = 90 * 60;
+// A terminal workshop bundle reconstructs every module in order on one clean
+// publication server. Keep the timeout below the provider report credential
+// lifetime while allowing the full cumulative plan to finish.
+const CHECKPOINT_APPLY_TIMEOUT_SECONDS: u64 = 3 * 60 * 60;
 
 pub struct WorkspaceAgent {
     config: AgentConfig,
@@ -277,11 +280,12 @@ impl WorkspaceAgent {
         .unwrap_or(Err(CheckpointError::ApplyTimedOut {
             seconds: CHECKPOINT_APPLY_TIMEOUT_SECONDS,
         }));
-        if let Err(error) = apply_result {
-            return Err(self.checkpoint_failed(state, error).await);
-        }
+        let proof = match apply_result {
+            Ok(proof) => proof,
+            Err(error) => return Err(self.checkpoint_failed(state, error).await),
+        };
         self.state_store
-            .mark_checkpoint_applied(state)
+            .mark_checkpoint_applied(state, proof.completed_module_ids().to_vec())
             .map_err(AgentError::State)?;
 
         self.send_report(
@@ -387,6 +391,7 @@ impl WorkspaceAgent {
             health,
             terminal_ready,
             recording_drain_completed,
+            completed_module_ids: state.completed_module_ids().to_vec(),
             ssh_host_keys_openssh,
             probes,
             error,

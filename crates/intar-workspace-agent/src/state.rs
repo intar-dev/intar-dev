@@ -1,6 +1,7 @@
 use crate::model::{BootstrapResponse, CheckpointDescriptor, ExecutionIdentity};
 use crate::secrets::SecretString;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ struct PersistedState {
     report_credential: SecretString,
     checkpoint: CheckpointDescriptor,
     checkpoint_applied: bool,
+    #[serde(default)]
+    completed_module_ids: Vec<String>,
     last_reserved_report_sequence: u64,
 }
 
@@ -37,6 +40,10 @@ impl GenerationState {
 
     pub fn checkpoint_applied(&self) -> bool {
         self.inner.checkpoint_applied
+    }
+
+    pub fn completed_module_ids(&self) -> &[String] {
+        &self.inner.completed_module_ids
     }
 
     pub fn last_reserved_report_sequence(&self) -> u64 {
@@ -88,6 +95,7 @@ impl StateStore {
             report_credential: response.report_credential,
             checkpoint: response.checkpoint,
             checkpoint_applied: false,
+            completed_module_ids: Vec::new(),
             last_reserved_report_sequence: 0,
         };
         self.validate_state(&state)?;
@@ -95,9 +103,17 @@ impl StateStore {
         Ok(GenerationState { inner: state })
     }
 
-    pub fn mark_checkpoint_applied(&self, state: &mut GenerationState) -> Result<(), StateError> {
+    pub fn mark_checkpoint_applied(
+        &self,
+        state: &mut GenerationState,
+        completed_module_ids: Vec<String>,
+    ) -> Result<(), StateError> {
         self.validate_state(&state.inner)?;
+        if !valid_completed_module_ids(&completed_module_ids) {
+            return Err(StateError::InvalidCompletedModules);
+        }
         state.inner.checkpoint_applied = true;
+        state.inner.completed_module_ids = completed_module_ids;
         // The signed download capability is no longer useful after successful
         // apply. Keep the content address for audit/recovery, but do not retain
         // the expired URL on the guest disk.
@@ -128,6 +144,11 @@ impl StateStore {
                 expected: self.identity.clone(),
                 actual: state.identity.clone(),
             });
+        }
+        if !valid_completed_module_ids(&state.completed_module_ids)
+            || (!state.checkpoint_applied && !state.completed_module_ids.is_empty())
+        {
+            return Err(StateError::InvalidCompletedModules);
         }
         Ok(())
     }
@@ -176,6 +197,18 @@ impl StateStore {
         })?;
         Ok(())
     }
+}
+
+fn valid_completed_module_ids(module_ids: &[String]) -> bool {
+    module_ids.len() <= 256
+        && module_ids.iter().all(|module_id| {
+            !module_id.is_empty()
+                && module_id.len() <= 128
+                && module_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        && module_ids.iter().collect::<BTreeSet<_>>().len() == module_ids.len()
 }
 
 pub fn read_bootstrap_capability(path: &Path) -> Result<SecretString, StateError> {
@@ -265,6 +298,8 @@ pub enum StateError {
     InvalidBootstrapCapability,
     #[error("report sequence space is exhausted")]
     SequenceExhausted,
+    #[error("completed workshop module proof is invalid")]
+    InvalidCompletedModules,
 }
 
 #[cfg(test)]
@@ -336,14 +371,30 @@ mod tests {
         let state_path = temp.path().join("state.json");
         let store = StateStore::new(state_path.clone(), identity(1));
         let mut state = store.install_bootstrap(response()).expect("bootstrap");
+        assert!(!state.checkpoint_applied());
+        assert!(state.completed_module_ids().is_empty());
+        let before = std::fs::read_to_string(&state_path).expect("initial persisted state");
+        assert!(before.contains("\"checkpoint_applied\":false"));
+        assert!(before.contains("\"completed_module_ids\":[]"));
 
         store
-            .mark_checkpoint_applied(&mut state)
+            .mark_checkpoint_applied(&mut state, vec!["00".to_owned(), "00".to_owned()])
+            .expect_err("duplicate module proof must be rejected");
+        let rejected = store.load().expect("reload rejected proof").expect("state");
+        assert!(!rejected.checkpoint_applied());
+        assert!(rejected.completed_module_ids().is_empty());
+
+        store
+            .mark_checkpoint_applied(&mut state, vec!["00".to_owned(), "01".to_owned()])
             .expect("checkpoint marker");
 
         let raw = std::fs::read_to_string(state_path).expect("persisted state");
         assert!(raw.contains("\"checkpoint_applied\":true"));
+        assert!(raw.contains("\"completed_module_ids\":[\"00\",\"01\"]"));
         assert!(!raw.contains("signed=yes"));
+        let loaded = store.load().expect("reload").expect("state");
+        assert!(loaded.checkpoint_applied());
+        assert_eq!(loaded.completed_module_ids(), ["00", "01"]);
     }
 
     #[test]

@@ -11,7 +11,7 @@ learner:
 Intar website/control plane
   ├─ service binding → route-less intar-hcloud-provider Worker
   │                    └─ encrypted organization BYOK token → Hetzner API
-  ├─ publication harness → fresh direct Hetzner verifier per checkpoint
+  ├─ publication harness → one clean cumulative Hetzner verifier
   ├─ signed checkpoint bundle → learner server
   └─ Stargate SSH forwarding → terminal and declared application ports
 
@@ -257,6 +257,8 @@ workshops and the shared runtime ledger. The Hetzner rollout adds:
 | `0018_workshop_hcloud_publication_verifier.sql` | direct-provider publication checkpoints, verifier attempts, proof state, cleanup confirmation, and independently rounded verifier cost ledgers |
 | `0019_failed_workshop_checkpoint_cleanup_backfill.sql` | cleanup timestamps for terminal failed verifier checkpoints whose provider resources were already confirmed deleted |
 | `0020_workshop_workspace_enrollment.sql` | role-independent learner-workspace entitlement, participant backfill, immutable post-provision enrollment, and database authorization guards |
+| `0021_workshop_publication_verification_basis.sql` | explicit terminal checkpoint basis for cumulative direct-provider publication verification |
+| `0022_workshop_publication_retries.sql` | one active publication per organization and content hash while permitting a new attempt after a safely cancelled or failed publication |
 
 Existing execution rows are backfilled to `agent_kvm`. Scenario host
 reservations remain agent-only. A Hetzner execution has no synthetic
@@ -511,7 +513,8 @@ Configure:
 - `[worker.runtime_bundle_signing]` with the protected key ID and the
   builder-only private key file;
 - no local direct-cloud proof disk or authored Platform image. Intar's
-  provider harness performs every clean proof on a fresh direct Hetzner server.
+  provider harness performs one clean cumulative proof on a direct Hetzner
+  server.
 
 Use `crates/intar-workshop-builder/config.example.toml` as the production
 shape. It deliberately has no `[execution]`, image, disk, QEMU, or KVM
@@ -528,18 +531,22 @@ those digests onto each staged verifier checkpoint.
 
 The builder result for all eleven checkpoints must contain a signed bundle,
 `provider_verification_pending = true`, no VM images, and no builder-asserted
-cold-boot proof. The canonical D1 state machine then reserves a provider seat,
-creates a labelled direct server, Primary IPv4, and ephemeral SSH key through
-the route-less provider Worker, and boots the generation-bound workspace
-agent. It applies the exact signed bundle from tmpfs, requires SSH readiness
-and every named probe, then deletes all resources and confirms external absence
-before advancing to the next checkpoint.
+cold-boot proof. The canonical D1 state machine reserves one provider seat and
+creates one labelled direct server, Primary IPv4, and ephemeral SSH key through
+the route-less provider Worker. The generation-bound workspace agent stages
+the exact terminal bundle in tmpfs, runs bootstrap once, and applies each
+catch-up followed by its verifier in stable checkpoint order on that persistent
+server. Any failed step rejects the cumulative proof and no later step is
+credited.
 
-Only after all eleven verifier generations are proven and deleted may the
-registry publish the immutable revision. Verifier attempts never create
-learner workspaces, runtime executions, active slots, routes, or scenario
-records. Their independently rounded estimated Hetzner cost is retained with
-the publication.
+The terminal checkpoint is the only cold-boot verification basis. The ten
+predecessor checkpoint records become verified by an explicit reference to
+that terminal basis and retain no independent cold-boot claim. Only after the
+cumulative proof succeeds and the verifier server, Primary IPv4, and SSH key
+are confirmed absent may the registry publish the immutable revision. The
+single verifier attempt never creates a learner workspace, runtime execution,
+active slot, route, or scenario record. Its rounded estimated Hetzner cost is
+retained with the publication.
 
 ### Agent-KVM-only reference
 
@@ -834,7 +841,7 @@ bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT checkpoint_id, status, sanitized, cold_boot_verified, error FROM workshop_publication_checkpoints WHERE publication_id = '<PUBLICATION_ID>' ORDER BY checkpoint_id;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
-  "SELECT checkpoint_id, verification_status, proof_verified_at, deletion_confirmed_at, error FROM workshop_publication_provider_checkpoints WHERE publication_id = '<PUBLICATION_ID>' ORDER BY ordinal;"
+  "SELECT checkpoint_id, verification_status, verification_basis_checkpoint_id, proof_verified_at, deletion_confirmed_at, error FROM workshop_publication_provider_checkpoints WHERE publication_id = '<PUBLICATION_ID>' ORDER BY ordinal;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT checkpoint_id, provider_kind, sha256, signing_key_id, workspace_agent_sha256, kino_sha256, status, cold_boot_verified_at FROM runtime_provider_checkpoint_artifacts WHERE template_revision_id = '<REVISION_ID>' ORDER BY checkpoint_id;"
@@ -842,14 +849,18 @@ bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
 
 Require 11 ordinary publication checkpoints in terminal `verified` state with
 no KVM proof asserted, 11 provider-verifier checkpoints with
-`verification_status = 'verified'` and non-null proof/deletion timestamps, and
-11 immutable `hetzner_cloud` artifacts with:
+`verification_status = 'verified'`, and 11 immutable `hetzner_cloud` artifacts
+with:
 
 - content SHA-256 and Ed25519 signature;
 - the approved signing key ID;
 - non-null workspace-agent and Kino SHA-256 values;
 - `status = 'verified'`;
-- non-null `cold_boot_verified_at`.
+- the terminal checkpoint referenced as `verification_basis_checkpoint_id` by
+  every provider checkpoint;
+- non-null proof/deletion timestamps and `cold_boot_verified_at` only for that
+  terminal basis; predecessor artifacts must not claim an independent cold
+  boot.
 
 Inspect the revision manifest and require 240 minutes, 11 modules, 85 slides,
 Apache-2.0 attribution, `cpx42`, Debian 13, x86, and resolved hardware satisfying
@@ -891,8 +902,10 @@ The immutable forecast must show, in the Hetzner project's native currency:
 
 Forecasts expire after 24 hours and refresh automatically at lobby entry.
 Hetzner rounds each independently created resource lifetime up to a full hour.
-A restore therefore creates separate server and IPv4 ledger entries with
-independent rounding. Do not convert the native billing currency.
+Publication therefore uses one rounded verifier server/IPv4 pair rather than
+one pair per checkpoint. A learner restore still creates separate server and
+IPv4 ledger entries with independent rounding. Do not convert the native
+billing currency.
 
 If the forecast exceeds the organization gross ceiling, provisioning is
 blocked. An owner may record an explicit session override after reviewing the
@@ -910,6 +923,11 @@ Open the lobby, check in the participant, and bulk-provision from
 - one `cpx42` Debian 13 server attached to the persistent firewall;
 - no IPv6, Volume, Network, Backup, snapshot, Load Balancer, Floating IP,
   placement group, or builder server.
+
+The learner keeps this one server while completing released modules
+incrementally; module release and technical verification must not allocate a
+replacement. A checkpoint restore or recovery explicitly revokes the old
+generation and creates one new server from the selected cumulative bundle.
 
 The firewall allows inbound TCP/22 only from
 `STARGATE_EGRESS_IPV4_CIDRS`. With no outbound rules, the learner can reach the

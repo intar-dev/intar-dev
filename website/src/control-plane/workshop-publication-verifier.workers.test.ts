@@ -12,6 +12,7 @@ const BUNDLE = new TextEncoder().encode("signed workshop checkpoint");
 const SHA256 =
   "3df34b031378f19bb1e8d5d663086bf82f178eedc36ee82b73802bbab3f552d1";
 const SIGNATURE = btoa(String.fromCharCode(...new Uint8Array(64)));
+const TERMINAL_MODULE_IDS = ["00", "01", "02"];
 const PRICE = JSON.stringify({
   currency: "EUR",
   observedAt: NOW,
@@ -136,6 +137,115 @@ describe("workshop publication verifier guest boundary", () => {
     });
 
     expect((await reportRequest(credential, proofReport(4))).status).toBe(401);
+  });
+
+  it("requires the exact ordered terminal module plan before latching proof", async () => {
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+
+    const missingModules: Record<string, unknown> = { ...proofReport(1) };
+    delete missingModules.completed_module_ids;
+    expect((await reportRequest(credential, missingModules)).status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+    });
+
+    expect(
+      (
+        await reportRequest(credential, {
+          ...proofReport(2),
+          completed_module_ids: ["00", "01"],
+        })
+      ).status,
+    ).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+    });
+
+    expect(
+      (
+        await reportRequest(credential, {
+          ...proofReport(3),
+          completed_module_ids: ["01", "00", "02"],
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await reportRequest(credential, {
+          ...proofReport(3),
+          completed_module_ids: [...TERMINAL_MODULE_IDS, "03"],
+        })
+      ).status,
+    ).toBe(400);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+    });
+
+    expect((await reportRequest(credential, proofReport(3))).status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "proof_succeeded",
+      proof_report_sequence: 3,
+      proof_verified_at: expect.any(Number),
+    });
+  });
+
+  it("preserves probe-only proof for an in-flight legacy attempt", async () => {
+    await env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET verification_basis_checkpoint_id = NULL WHERE id = ?`,
+    )
+      .bind("provider-checkpoint-0001")
+      .run();
+    const bootstrap = await bootstrapRequest();
+    const {
+      report_credential: credential,
+      checkpoint: { signed_url: checkpointUrl },
+    } = await bootstrap.json<{
+      report_credential: string;
+      checkpoint: { signed_url: string };
+    }>();
+    expect((await handle(new Request(checkpointUrl))).status).toBe(200);
+
+    const legacyReport: Record<string, unknown> = { ...proofReport(1) };
+    delete legacyReport.completed_module_ids;
+    expect((await reportRequest(credential, legacyReport)).status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "proof_succeeded",
+      proof_report_sequence: 1,
+      proof_verified_at: expect.any(Number),
+    });
+  });
+
+  it("accepts an applying heartbeat with an empty completed-module prefix", async () => {
+    const bootstrap = await bootstrapRequest();
+    const { report_credential: credential } = await bootstrap.json<{
+      report_credential: string;
+    }>();
+
+    const response = await reportRequest(credential, {
+      ...proofReport(1),
+      phase: "applying_checkpoint",
+      terminal_ready: false,
+      completed_module_ids: [],
+      ssh_host_keys_openssh: [],
+      probes: [],
+    });
+    expect(response.status).toBe(200);
+    expect(await attemptState()).toMatchObject({
+      state: "applying",
+      proof_verified_at: null,
+    });
   });
 
   it("allows one ready probe miss to recover on the next report", async () => {
@@ -356,9 +466,7 @@ describe("workshop publication verifier guest boundary", () => {
       ],
     });
     expect(parsed.error).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
-    expect(parsed.probes[0].error).not.toMatch(
-      /[\u0000-\u001f\u007f-\u009f]/,
-    );
+    expect(parsed.probes[0].error).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
   });
 
   it("rejects a report credential outside sanitizable error fields", async () => {
@@ -486,14 +594,15 @@ async function seedAttempt(): Promise<void> {
          permitted_locations_json, price_observation_json,
          r2_key, sha256, size_bytes, compression, signature_b64,
          signing_key_id, workspace_agent_sha256, kino_sha256,
-         verification_status, created_at, updated_at
+         verification_status, verification_basis_checkpoint_id,
+         created_at, updated_at
        ) VALUES (?, ?, ?, 0, ?, ?, 'hetzner_cloud', ?, ?, ?, ?, ?, ?, ?,
-                 'zstd', ?, ?, ?, ?, 'bootstrapping', ?, ?)`,
+                 'zstd', ?, ?, ?, ?, 'bootstrapping', ?, ?, ?)`,
     ).bind(
       "provider-checkpoint-0001",
       "publication-0001",
       "00",
-      JSON.stringify(["00"]),
+      JSON.stringify(TERMINAL_MODULE_IDS),
       JSON.stringify([
         { moduleId: "00", probeId: "setup-ready" },
         { moduleId: "00", probeId: "docker-ready" },
@@ -518,6 +627,7 @@ async function seedAttempt(): Promise<void> {
       "test-key",
       "b".repeat(64),
       "c".repeat(64),
+      "provider-checkpoint-0001",
       NOW,
       NOW,
     ),
@@ -557,6 +667,7 @@ function proofReport(sequence: number) {
     health: "healthy",
     terminal_ready: true,
     recording_drain_completed: false,
+    completed_module_ids: [...TERMINAL_MODULE_IDS],
     ssh_host_keys_openssh: ["ssh-ed25519 AAAATESTVERIFIER verifier"],
     probes: [
       { id: "setup-ready", status: "pass", observed_at_unix_ms: NOW },

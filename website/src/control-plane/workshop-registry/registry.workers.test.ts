@@ -29,6 +29,7 @@ import {
   agentBootstrapTokens,
   agentHosts,
   organizationProviderConnections,
+  providerAuditEvents,
   providerCredentialVersions,
   runtimeProviderCheckpointArtifacts,
   organization,
@@ -345,6 +346,15 @@ describe("workshop registry publication lifecycle", () => {
         ),
       );
     expect(stagedRows).toHaveLength(2);
+    const stagedBasis = stagedRows.find(
+      (checkpoint) => checkpoint.checkpointId === "checkpoint-01",
+    )!;
+    expect(
+      stagedRows.every(
+        (checkpoint) =>
+          checkpoint.verificationBasisCheckpointId === stagedBasis.id,
+      ),
+    ).toBe(true);
     expect(stagedRows).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -451,6 +461,13 @@ describe("workshop registry publication lifecycle", () => {
       );
 
     const proofRows = await seedProviderPublicationProof(receipt.publicationId);
+    expect(proofRows).toHaveLength(1);
+    expect(
+      await db.select().from(workshopPublicationProviderAttempts),
+    ).toHaveLength(1);
+    expect(
+      await db.select().from(workshopPublicationProviderCostLedger),
+    ).toHaveLength(2);
     expect(
       await finalizeVerifiedWorkshopProviderPublication({
         publicationId: receipt.publicationId,
@@ -503,6 +520,46 @@ describe("workshop registry publication lifecycle", () => {
       .set({ reportJson: proofRows[0]!.report })
       .where(
         eq(workshopPublicationProviderAttempts.id, proofRows[0]!.attemptId),
+      );
+
+    const incompleteModuleReport = structuredClone(proofRows[0]!.report);
+    incompleteModuleReport.completed_module_ids.pop();
+    await db
+      .update(workshopPublicationProviderAttempts)
+      .set({ reportJson: incompleteModuleReport })
+      .where(
+        eq(workshopPublicationProviderAttempts.id, proofRows[0]!.attemptId),
+      );
+    expect(
+      await finalizeVerifiedWorkshopProviderPublication({
+        publicationId: receipt.publicationId,
+        now: 1_800_000_000_000,
+      }),
+    ).toBe(false);
+    await db
+      .update(workshopPublicationProviderAttempts)
+      .set({ reportJson: proofRows[0]!.report })
+      .where(
+        eq(workshopPublicationProviderAttempts.id, proofRows[0]!.attemptId),
+      );
+
+    await db
+      .update(workshopPublicationProviderCheckpoints)
+      .set({ verificationBasisCheckpointId: null })
+      .where(
+        eq(workshopPublicationProviderCheckpoints.id, secondCheckpoint.id),
+      );
+    expect(
+      await finalizeVerifiedWorkshopProviderPublication({
+        publicationId: receipt.publicationId,
+        now: 1_800_000_000_000,
+      }),
+    ).toBe(false);
+    await db
+      .update(workshopPublicationProviderCheckpoints)
+      .set({ verificationBasisCheckpointId: secondCheckpoint.id })
+      .where(
+        eq(workshopPublicationProviderCheckpoints.id, secondCheckpoint.id),
       );
 
     expect(
@@ -567,6 +624,14 @@ describe("workshop registry publication lifecycle", () => {
       ),
     ).toBe(true);
     expect(artifacts).toHaveLength(2);
+    expect(
+      artifacts.find((artifact) => artifact.checkpointId === "checkpoint-00")
+        ?.coldBootVerifiedAt,
+    ).toBeNull();
+    expect(
+      artifacts.find((artifact) => artifact.checkpointId === "checkpoint-01")
+        ?.coldBootVerifiedAt,
+    ).toBe(proofRows[0]!.report.reported_at_unix_ms);
     expect(artifacts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -632,6 +697,86 @@ describe("workshop registry publication lifecycle", () => {
         .bind(revisionId)
         .run(),
     ).rejects.toThrow(/runtime provider checkpoint artifacts are immutable/);
+  });
+
+  it("requires completed-module attestation for an explicit single-checkpoint basis", async () => {
+    await seedHetznerConnection();
+    const fixture = await buildHetznerWorkshopBundleFixture({
+      mutateManifest(compiled) {
+        compiled.scheduled_duration_minutes = 15;
+        compiled.manifest.modules = [compiled.manifest.modules[0]!];
+        compiled.manifest.agenda = compiled.manifest.agenda.slice(0, 2);
+        compiled.manifest.presentation.slides = [
+          compiled.manifest.presentation.slides[0]!,
+        ];
+        compiled.manifest.workspace.applications = [];
+      },
+    });
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+    const staged = await reportBuilderResult({
+      builderToken,
+      publicationId: receipt.publicationId,
+      checkpoints: await directProviderCheckpointResult(["checkpoint-00"]),
+    });
+    expect(staged.status).toBe(202);
+
+    const db = drizzle(env.DB);
+    const checkpoints = await db
+      .select()
+      .from(workshopPublicationProviderCheckpoints)
+      .where(
+        eq(
+          workshopPublicationProviderCheckpoints.publicationId,
+          receipt.publicationId,
+        ),
+      );
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]!.verificationBasisCheckpointId).toBe(
+      checkpoints[0]!.id,
+    );
+
+    const proofRows = await seedProviderPublicationProof(receipt.publicationId);
+    expect(proofRows).toHaveLength(1);
+    await confirmProviderPublicationCleanup(receipt.publicationId);
+    const missingAttestation = structuredClone(proofRows[0]!.report) as Record<
+      string,
+      unknown
+    >;
+    delete missingAttestation.completed_module_ids;
+    await db
+      .update(workshopPublicationProviderAttempts)
+      .set({ reportJson: missingAttestation })
+      .where(
+        eq(workshopPublicationProviderAttempts.id, proofRows[0]!.attemptId),
+      );
+    expect(
+      await finalizeVerifiedWorkshopProviderPublication({
+        publicationId: receipt.publicationId,
+        now: 1_800_000_000_000,
+      }),
+    ).toBe(false);
+
+    await db
+      .update(workshopPublicationProviderAttempts)
+      .set({ reportJson: proofRows[0]!.report })
+      .where(
+        eq(workshopPublicationProviderAttempts.id, proofRows[0]!.attemptId),
+      );
+    expect(
+      await finalizeVerifiedWorkshopProviderPublication({
+        publicationId: receipt.publicationId,
+        now: 1_800_000_000_000,
+      }),
+    ).toBe(true);
+    const artifacts = await db
+      .select()
+      .from(runtimeProviderCheckpointArtifacts);
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]!.coldBootVerifiedAt).toBe(
+      proofRows[0]!.report.reported_at_unix_ms,
+    );
   });
 
   it("uses the builder's stable topological order for provider checkpoint coverage", async () => {
@@ -1144,6 +1289,255 @@ describe("workshop registry publication lifecycle", () => {
     expect(await db.select().from(workshopTemplateRevisions)).toEqual([]);
   });
 
+  it("cancels a zero-resource provider publication while preserving verified checkpoints", async () => {
+    const { publicationId } = await stageHetznerPublicationForCancellation();
+    const db = drizzle(env.DB);
+    const ordinary = await db
+      .select()
+      .from(workshopPublicationCheckpoints)
+      .where(eq(workshopPublicationCheckpoints.publicationId, publicationId));
+    const providerCheckpoints = (
+      await db
+        .select()
+        .from(workshopPublicationProviderCheckpoints)
+        .where(
+          eq(
+            workshopPublicationProviderCheckpoints.publicationId,
+            publicationId,
+          ),
+        )
+    ).sort((left, right) => left.ordinal - right.ordinal);
+    const verifiedAt = 1_799_500_000_000;
+    const verifiedOrdinary = ordinary.find(
+      (checkpoint) => checkpoint.checkpointId === "checkpoint-01",
+    )!;
+    const pendingOrdinary = ordinary.find(
+      (checkpoint) => checkpoint.checkpointId === "checkpoint-00",
+    )!;
+    const verifiedProvider = providerCheckpoints.at(-1)!;
+    const pendingProvider = providerCheckpoints[0]!;
+    await Promise.all([
+      db
+        .update(workshopPublicationCheckpoints)
+        .set({ status: "verified", verifiedAt })
+        .where(eq(workshopPublicationCheckpoints.id, verifiedOrdinary.id)),
+      db
+        .update(workshopPublicationCheckpoints)
+        .set({ status: "pending" })
+        .where(eq(workshopPublicationCheckpoints.id, pendingOrdinary.id)),
+      db
+        .update(workshopPublicationProviderCheckpoints)
+        .set({
+          verificationStatus: "verified",
+          proofVerifiedAt: verifiedAt,
+          deletionConfirmedAt: verifiedAt + 1,
+        })
+        .where(
+          eq(workshopPublicationProviderCheckpoints.id, verifiedProvider.id),
+        ),
+    ]);
+
+    const cancelled = await cancelPublication(ORG_A_TOKEN, publicationId);
+    expect(cancelled.status).toBe(200);
+    await expect(cancelled.json()).resolves.toEqual({
+      publication_id: publicationId,
+      status: "failed",
+    });
+
+    const [publication, ordinaryAfter, providerAfter, audits] =
+      await Promise.all([
+        db
+          .select()
+          .from(workshopPublications)
+          .where(eq(workshopPublications.id, publicationId)),
+        db
+          .select()
+          .from(workshopPublicationCheckpoints)
+          .where(
+            eq(workshopPublicationCheckpoints.publicationId, publicationId),
+          ),
+        db
+          .select()
+          .from(workshopPublicationProviderCheckpoints)
+          .where(
+            eq(
+              workshopPublicationProviderCheckpoints.publicationId,
+              publicationId,
+            ),
+          ),
+        db
+          .select()
+          .from(providerAuditEvents)
+          .where(
+            eq(providerAuditEvents.type, "provider.publication.cancelled"),
+          ),
+      ]);
+    expect(publication[0]).toMatchObject({
+      status: "failed",
+      providerVerificationState: "failed",
+      error: "publication cancelled by publisher",
+      claimExpiresAt: null,
+      finishedAt: expect.any(Number),
+    });
+    expect(
+      ordinaryAfter.find((checkpoint) => checkpoint.id === verifiedOrdinary.id),
+    ).toMatchObject({
+      status: "verified",
+      error: null,
+      verifiedAt,
+    });
+    expect(
+      ordinaryAfter.find((checkpoint) => checkpoint.id === pendingOrdinary.id),
+    ).toMatchObject({
+      status: "failed",
+      error: "publication cancelled by publisher",
+    });
+    expect(
+      providerAfter.find((checkpoint) => checkpoint.id === verifiedProvider.id),
+    ).toMatchObject({
+      verificationStatus: "verified",
+      error: null,
+      proofVerifiedAt: verifiedAt,
+      deletionConfirmedAt: verifiedAt + 1,
+    });
+    expect(
+      providerAfter.find((checkpoint) => checkpoint.id === pendingProvider.id),
+    ).toMatchObject({
+      verificationStatus: "failed",
+      error: "publication cancelled by publisher",
+    });
+    expect(audits).toEqual([
+      expect.objectContaining({
+        organizationId: "org-a",
+        connectionId: "hcloud-connection-a",
+        actorUserId: "publisher-a",
+        type: "provider.publication.cancelled",
+        payloadJson: {
+          publicationId,
+          registryTokenId: "registry-token-a",
+          reason: "publication cancelled by publisher",
+        },
+      }),
+    ]);
+
+    const repeated = await cancelPublication(ORG_A_TOKEN, publicationId);
+    expect(repeated.status).toBe(200);
+    await expect(repeated.json()).resolves.toEqual({
+      publication_id: publicationId,
+      status: "failed",
+    });
+    expect(
+      await db
+        .select()
+        .from(providerAuditEvents)
+        .where(eq(providerAuditEvents.type, "provider.publication.cancelled")),
+    ).toHaveLength(1);
+  });
+
+  it("refuses cancellation while a provider attempt is not deletion-confirmed", async () => {
+    const { publicationId } = await stageHetznerPublicationForCancellation();
+    await seedProviderPublicationProof(publicationId);
+
+    const cancelled = await cancelPublication(ORG_A_TOKEN, publicationId);
+    expect(cancelled.status).toBe(409);
+    await expect(cancelled.json()).resolves.toEqual({
+      error:
+        "publication still owns provider resources; wait for confirmed cleanup before cancelling",
+    });
+
+    const db = drizzle(env.DB);
+    const publication = await db
+      .select()
+      .from(workshopPublications)
+      .where(eq(workshopPublications.id, publicationId));
+    expect(publication[0]).toMatchObject({
+      status: "building",
+      providerVerificationState: "verifying",
+      finishedAt: null,
+    });
+    expect(
+      await db
+        .select()
+        .from(providerAuditEvents)
+        .where(eq(providerAuditEvents.type, "provider.publication.cancelled")),
+    ).toEqual([]);
+  });
+
+  it("rejects cancellation after publication", async () => {
+    const fixture = await buildWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const builderToken = await bootstrapBuilder();
+    expect((await claimNext(builderToken)).status).toBe(200);
+    const checkpoints = checkpointResult(receipt.publicationId);
+    await seedCheckpointObjects(checkpoints);
+    expect(
+      (
+        await reportBuilderResult({
+          builderToken,
+          publicationId: receipt.publicationId,
+          checkpoints,
+        })
+      ).status,
+    ).toBe(201);
+
+    const cancelled = await cancelPublication(
+      ORG_A_TOKEN,
+      receipt.publicationId,
+    );
+    expect(cancelled.status).toBe(409);
+    await expect(cancelled.json()).resolves.toEqual({
+      error: "published workshop revisions are immutable",
+    });
+  });
+
+  it("treats an already-failed publication as an idempotent cancellation", async () => {
+    const fixture = await buildWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+    const db = drizzle(env.DB);
+    await db
+      .update(workshopPublications)
+      .set({
+        status: "failed",
+        error: "existing terminal failure",
+        finishedAt: 1_799_000_000_000,
+      })
+      .where(eq(workshopPublications.id, receipt.publicationId));
+
+    const cancelled = await cancelPublication(
+      ORG_A_TOKEN,
+      receipt.publicationId,
+    );
+    expect(cancelled.status).toBe(200);
+    await expect(cancelled.json()).resolves.toEqual({
+      publication_id: receipt.publicationId,
+      status: "failed",
+    });
+    const publication = await db
+      .select()
+      .from(workshopPublications)
+      .where(eq(workshopPublications.id, receipt.publicationId));
+    expect(publication[0]).toMatchObject({
+      status: "failed",
+      error: "existing terminal failure",
+      finishedAt: 1_799_000_000_000,
+    });
+    expect(await db.select().from(providerAuditEvents)).toEqual([]);
+  });
+
+  it("keeps cancellation isolated to the publishing organization", async () => {
+    const fixture = await buildWorkshopBundleFixture();
+    const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+
+    const denied = await cancelPublication(ORG_B_TOKEN, receipt.publicationId);
+    expect(denied.status).toBe(404);
+    await expect(denied.json()).resolves.toEqual({ error: "not found" });
+    const publication = await drizzle(env.DB)
+      .select()
+      .from(workshopPublications)
+      .where(eq(workshopPublications.id, receipt.publicationId));
+    expect(publication[0]).toMatchObject({ status: "queued", error: null });
+  });
+
   it("keeps uploads and status reads isolated to the publishing organization", async () => {
     const fixture = await buildWorkshopBundleFixture();
     const [orgA, orgB] = await Promise.all([
@@ -1466,6 +1860,35 @@ async function publicationStatus(token: string, publicationId: string) {
   };
 }
 
+async function cancelPublication(
+  token: string,
+  publicationId: string,
+): Promise<Response> {
+  return registryRequest(
+    new Request(
+      `https://intar.test/registry/v1/workshop-bundles/${publicationId}`,
+      { method: "DELETE", headers: bearer(token) },
+    ),
+  );
+}
+
+async function stageHetznerPublicationForCancellation(): Promise<{
+  publicationId: string;
+}> {
+  await seedHetznerConnection();
+  const fixture = await buildHetznerWorkshopBundleFixture();
+  const receipt = await uploadBundle(ORG_A_TOKEN, fixture);
+  const builderToken = await bootstrapBuilder();
+  expect((await claimNext(builderToken)).status).toBe(200);
+  const staged = await reportBuilderResult({
+    builderToken,
+    publicationId: receipt.publicationId,
+    checkpoints: await directProviderCheckpointResult(),
+  });
+  expect(staged.status).toBe(202);
+  return { publicationId: receipt.publicationId };
+}
+
 async function reportBuilderResult(params: {
   builderToken: string;
   publicationId: string;
@@ -1756,6 +2179,7 @@ async function seedProviderPublicationProof(publicationId: string) {
       health: "healthy";
       terminal_ready: true;
       recording_drain_completed: false;
+      completed_module_ids: string[];
       ssh_host_keys_openssh: string[];
       probes: Array<{
         id: string;
@@ -1765,7 +2189,15 @@ async function seedProviderPublicationProof(publicationId: string) {
       reported_at_unix_ms: number;
     };
   }> = [];
-  for (const [index, checkpoint] of checkpoints.entries()) {
+  const verificationBasisIds = new Set(
+    checkpoints.map(
+      (checkpoint) => checkpoint.verificationBasisCheckpointId ?? checkpoint.id,
+    ),
+  );
+  const verificationBasisCheckpoints = checkpoints.filter((checkpoint) =>
+    verificationBasisIds.has(checkpoint.id),
+  );
+  for (const [index, checkpoint] of verificationBasisCheckpoints.entries()) {
     const attemptId = `provider-attempt-${index + 1}-00000000`;
     const proofAt = 1_799_000_000_000 + index * 10_000;
     const report = {
@@ -1780,6 +2212,7 @@ async function seedProviderPublicationProof(publicationId: string) {
       health: "healthy" as const,
       terminal_ready: true as const,
       recording_drain_completed: false as const,
+      completed_module_ids: checkpoint.coveredModuleIdsJson,
       ssh_host_keys_openssh: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestVerifierHostKey",
       ],
@@ -1901,15 +2334,22 @@ async function confirmProviderPublicationCleanup(
     .where(
       eq(workshopPublicationProviderCheckpoints.publicationId, publicationId),
     );
-  for (const checkpoint of checkpoints) {
+  const checkpointById = new Map(
+    checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  const verificationBasisIds = new Set(
+    checkpoints.map(
+      (checkpoint) => checkpoint.verificationBasisCheckpointId ?? checkpoint.id,
+    ),
+  );
+  const deletionByBasisId = new Map<string, number>();
+  for (const basisId of verificationBasisIds) {
+    const checkpoint = checkpointById.get(basisId)!;
     const attempts = await db
       .select()
       .from(workshopPublicationProviderAttempts)
       .where(
-        eq(
-          workshopPublicationProviderAttempts.providerCheckpointId,
-          checkpoint.id,
-        ),
+        eq(workshopPublicationProviderAttempts.providerCheckpointId, basisId),
       );
     const deletionAt =
       (checkpoint.proofVerifiedAt ?? 1_799_000_000_000) + 1_000;
@@ -1930,10 +2370,17 @@ async function confirmProviderPublicationCleanup(
         .set({ deletionConfirmedAt: deletionAt, updatedAt: deletionAt })
         .where(eq(workshopPublicationProviderCostLedger.attemptId, attempt.id));
     }
+    deletionByBasisId.set(basisId, deletionAt);
+  }
+  for (const checkpoint of checkpoints) {
+    const basisId = checkpoint.verificationBasisCheckpointId ?? checkpoint.id;
+    const basis = checkpointById.get(basisId)!;
+    const deletionAt = deletionByBasisId.get(basisId)!;
     await db
       .update(workshopPublicationProviderCheckpoints)
       .set({
         verificationStatus: "verified",
+        proofVerifiedAt: basis.proofVerifiedAt,
         deletionConfirmedAt: deletionAt,
         updatedAt: deletionAt,
       })
