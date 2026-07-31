@@ -27,7 +27,7 @@ export async function updateParticipantWorkshopProgress(params: {
   explainBackStatus?: WorkshopExplainBackStatus;
 }): Promise<WorkshopModuleProgressRecord> {
   const access = await requireWorkshopSessionMember(params);
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_participant_required",
@@ -72,7 +72,7 @@ export async function revealWorkshopHint(params: {
   hintId: string;
 }): Promise<WorkshopModuleProgressRecord> {
   const access = await requireWorkshopSessionMember(params);
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_participant_required",
@@ -179,7 +179,7 @@ export async function recordWorkshopModuleObservation(params: {
   const module = requireManifestModule(context.manifest, params.moduleId);
   const db = workshopDb();
   const roster = await db
-    .select({ role: workshopSessionMembers.role })
+    .select({ workspaceEnabled: workshopSessionMembers.workspaceEnabled })
     .from(workshopSessionMembers)
     .where(
       and(
@@ -188,7 +188,7 @@ export async function recordWorkshopModuleObservation(params: {
       ),
     )
     .limit(1);
-  if (roster[0]?.role !== "participant") {
+  if (!roster[0]?.workspaceEnabled) {
     throw appError(
       404,
       "workshop_participant_not_found",

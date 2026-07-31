@@ -67,7 +67,10 @@ import { resetD1Database } from "@/test/d1-migrations";
 import { performWorkshopSessionAction } from "./actions";
 import { provisionWorkshopRequest } from "./runtime-orchestrator";
 import { updateWorkshopSession } from "./sessions";
-import { getWorkshopCostProjection } from "./cost-storage";
+import {
+  createWorkshopCostForecast,
+  getWorkshopCostProjection,
+} from "./cost-storage";
 import {
   allocateHetznerWorkshopRuntime,
   archiveHetznerWorkshopRuntime,
@@ -200,6 +203,41 @@ describe("Hetzner workshop runtime provider", () => {
     ]);
     expect(reservations).toEqual([]);
     expect(hosts).toEqual([]);
+  });
+
+  it("forecasts one learner seat for a workspace-enabled facilitator", async () => {
+    const fixture = await seedRuntimeFixture({
+      workspaceRole: "facilitator",
+    });
+
+    const forecast = await createWorkshopCostForecast({
+      sessionId: "session-a",
+      priceObservation: priceObservation(fixture.now),
+      trigger: "admin_refresh",
+      actorUserId: "owner-a",
+      now: fixture.now,
+    });
+
+    const roster = await drizzle(env.DB)
+      .select({
+        role: workshopSessionMembers.role,
+        workspaceEnabled: workshopSessionMembers.workspaceEnabled,
+      })
+      .from(workshopSessionMembers)
+      .where(eq(workshopSessionMembers.sessionId, "session-a"));
+    expect(roster).toEqual([
+      { role: "facilitator", workspaceEnabled: true },
+    ]);
+    expect(forecast.participantCount).toBe(1);
+    expect(forecast.expected).toMatchObject({
+      participantCount: 1,
+      totalNetMicros:
+        forecast.expected.serverNetMicrosPerLearner +
+        forecast.expected.ipv4NetMicrosPerLearner,
+      totalGrossMicros:
+        forecast.expected.serverGrossMicrosPerLearner +
+        forecast.expected.ipv4GrossMicrosPerLearner,
+    });
   });
 
   it("uses the immutable revision guest-tool pair after current.json changes", async () => {
@@ -2350,6 +2388,7 @@ async function seedRuntimeFixture(
     exceedsGrossCeiling?: boolean;
     maxConcurrentServers?: number;
     seedOtherParticipant?: boolean;
+    workspaceRole?: "participant" | "facilitator";
   } = {},
 ): Promise<{ now: number; request: WorkshopProvisioningRequest }> {
   const now = Date.now();
@@ -2436,7 +2475,8 @@ async function seedRuntimeFixture(
       id: "roster-learner-a",
       sessionId: "session-a",
       userId: "learner-a",
-      role: "participant",
+      role: options.workspaceRole ?? "participant",
+      workspaceEnabled: true,
       checkedInAt: now,
       provisionState: "queued",
       assignedBy: "owner-a",

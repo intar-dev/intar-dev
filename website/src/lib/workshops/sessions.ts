@@ -63,6 +63,7 @@ export interface WorkshopSessionListEntry {
   session: WorkshopSessionRecord;
   membership: {
     role: WorkshopSessionRole;
+    workspaceEnabled: boolean;
     checkedInAt: number | null;
     provisionState:
       | "not_ready"
@@ -83,6 +84,7 @@ export async function listWorkshopSessionsForUser(params: {
       .select({
         ...sessionSelection(),
         role: workshopSessionMembers.role,
+        workspaceEnabled: workshopSessionMembers.workspaceEnabled,
         checkedInAt: workshopSessionMembers.checkedInAt,
         provisionState: workshopSessionMembers.provisionState,
       })
@@ -119,12 +121,13 @@ export async function listWorkshopSessionsForUser(params: {
       (row) =>
         currentOrganizationIds.has(row.organizationId) ||
         ((row.state === "ended" || row.state === "cancelled") &&
-          row.role === "participant"),
+          row.workspaceEnabled),
     )
     .map((row) => ({
       session: sessionRecord(row),
       membership: {
         role: row.role,
+        workspaceEnabled: row.workspaceEnabled,
         checkedInAt: row.checkedInAt,
         provisionState: row.provisionState,
       },
@@ -258,6 +261,7 @@ export async function createWorkshopSession(params: {
       sessionId,
       userId: params.actorUserId,
       role: "facilitator",
+      workspaceEnabled: false,
       assignedBy: params.actorUserId,
       createdAt: now,
       updatedAt: now,
@@ -315,7 +319,11 @@ export async function createWorkshopSession(params: {
 export async function replaceWorkshopRoster(params: {
   sessionId: string;
   actorUserId: string;
-  members: Array<{ userId: string; role: WorkshopSessionRole }>;
+  members: Array<{
+    userId: string;
+    role: WorkshopSessionRole;
+    workspaceEnabled?: boolean;
+  }>;
   expectedVersion?: number;
   draftOnly?: boolean;
 }): Promise<WorkshopRosterMemberRecord[]> {
@@ -346,7 +354,10 @@ export async function replaceWorkshopRoster(params: {
       "workshop roster must contain at least one member",
     );
   }
-  const memberByUser = new Map<string, WorkshopSessionRole>();
+  const memberByUser = new Map<
+    string,
+    { role: WorkshopSessionRole; workspaceEnabled: boolean }
+  >();
   for (const entry of params.members) {
     const userId = entry.userId.trim();
     if (!userId || !isWorkshopSessionRole(entry.role)) {
@@ -363,7 +374,11 @@ export async function replaceWorkshopRoster(params: {
         "workshop roster contains the same member more than once",
       );
     }
-    memberByUser.set(userId, entry.role);
+    memberByUser.set(userId, {
+      role: entry.role,
+      workspaceEnabled:
+        entry.role === "participant" || entry.workspaceEnabled === true,
+    });
   }
   const db = workshopDb();
   const existingWorkspace = await db
@@ -397,7 +412,9 @@ export async function replaceWorkshopRoster(params: {
     );
   }
   const hasManager =
-    [...memberByUser.values()].includes("facilitator") ||
+    [...memberByUser.values()].some(
+      (entry) => entry.role === "facilitator",
+    ) ||
     organizationMembers.some((entry) =>
       isOrganizationAdminRole(entry.role as OrganizationRole),
     );
@@ -429,7 +446,9 @@ export async function replaceWorkshopRoster(params: {
         id: existingMember?.id ?? createAppId(),
         sessionId: params.sessionId,
         userId,
-        role: memberByUser.get(userId) ?? "participant",
+        role: memberByUser.get(userId)?.role ?? "participant",
+        workspaceEnabled:
+          memberByUser.get(userId)?.workspaceEnabled ?? true,
         checkedInAt: existingMember?.checkedInAt ?? null,
         provisionState: existingMember?.provisionState ?? "not_ready",
         assignedBy: params.actorUserId,
@@ -442,7 +461,9 @@ export async function replaceWorkshopRoster(params: {
           workshopSessionMembers.userId,
         ],
         set: {
-          role: memberByUser.get(userId) ?? "participant",
+          role: memberByUser.get(userId)?.role ?? "participant",
+          workspaceEnabled:
+            memberByUser.get(userId)?.workspaceEnabled ?? true,
           assignedBy: params.actorUserId,
           updatedAt: now,
         },
@@ -560,6 +581,7 @@ export async function listWorkshopRoster(
       userId: workshopSessionMembers.userId,
       name: user.name,
       role: workshopSessionMembers.role,
+      workspaceEnabled: workshopSessionMembers.workspaceEnabled,
       checkedInAt: workshopSessionMembers.checkedInAt,
       lastSeenAt: workshopSessionMembers.lastSeenAt,
       provisionState: workshopSessionMembers.provisionState,
@@ -579,7 +601,7 @@ export async function checkInToWorkshop(params: {
   userId: string;
 }): Promise<{ checkedInAt: number }> {
   const access = await requireWorkshopSessionMember(params);
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_participant_required",

@@ -43,7 +43,7 @@ export async function issueWorkshopWorkspaceApplication(input: {
     sessionId: input.sessionId,
     userId: input.actorUserId,
   });
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_application_participant_only",

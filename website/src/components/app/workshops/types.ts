@@ -56,6 +56,7 @@ export interface WorkshopSessionSummary {
   templateTitle: string;
   state: WorkshopSessionState;
   role: WorkshopMemberRole;
+  workspaceEnabled?: boolean;
   startsAt: number;
   endsAt: number;
   currentModuleTitle: string | null;
@@ -65,6 +66,7 @@ export interface WorkshopSessionSummary {
   draftRoster?: Array<{
     userId: string;
     role: WorkshopMemberRole;
+    workspaceEnabled?: boolean;
   }> | null;
   runtimeProvider?: WorkshopRuntimeProvider;
   cost?: WorkshopCostProjection | null;
@@ -203,6 +205,7 @@ export interface WorkshopRosterMember {
   userId: string;
   name: string;
   role: WorkshopMemberRole;
+  workspaceEnabled?: boolean;
   checkedInAt: number | null;
   lastSeenAt: number | null;
   presenceState: WorkshopPresenceState;
@@ -360,6 +363,7 @@ export interface WorkshopCostProjection {
 export interface WorkshopViewer {
   userId: string;
   role: WorkshopMemberRole;
+  workspaceEnabled?: boolean;
   checkedIn: boolean;
   canFacilitate: boolean;
   canPresent: boolean;
@@ -517,6 +521,13 @@ export function workshopSessionStateLabel(state: WorkshopSessionState): string {
     case "cancelled":
       return "Cancelled";
   }
+}
+
+export function workshopMemberHasWorkspace(member: {
+  role: WorkshopMemberRole;
+  workspaceEnabled?: boolean;
+}): boolean {
+  return member.role === "participant" || member.workspaceEnabled === true;
 }
 
 export function workshopModuleStateLabel(state: WorkshopModuleState): string {

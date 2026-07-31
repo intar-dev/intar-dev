@@ -82,7 +82,11 @@ import {
 import { resetD1Database } from "@/test/d1-migrations";
 import { issueWorkshopWorkspaceApplication } from "./applications";
 import { claimWorkshopHelpRequest, revokeWorkshopAssist } from "./assistance";
-import { updateWorkshopSession } from "./sessions";
+import { getWorkshopSessionProjection } from "./projection";
+import {
+  listWorkshopSessionsForUser,
+  updateWorkshopSession,
+} from "./sessions";
 
 const ORGANIZATION_ID = "organization-workshop-revocation";
 const SESSION_ID = "session-workshop-revocation";
@@ -341,6 +345,99 @@ describe("workshop access revocation during organization membership removal", ()
     expect(history.map((event) => event.type)).toEqual(
       expect.arrayContaining(["module.verified", "membership.access_revoked"]),
     );
+  });
+
+  it("revokes a workspace-enabled facilitator runtime while preserving only their archived learner history", async () => {
+    await seedLiveWorkshopFixture({ workspaceUserId: "facilitator" });
+    const db = drizzle(env.DB);
+    await db
+      .update(workshopSessions)
+      .set({ state: "ended" })
+      .where(eq(workshopSessions.id, SESSION_ID));
+
+    await removeOrganizationMember({
+      organizationId: ORGANIZATION_ID,
+      memberId: membershipId("facilitator"),
+      actorUserId: "owner",
+    });
+
+    expect(accessMocks.deleteStargateRoute).toHaveBeenCalledWith(
+      PARTICIPANT_ROUTE,
+    );
+    expect(accessMocks.deleteStargateRoute).toHaveBeenCalledWith(ASSIST_ROUTE);
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      APPLICATION_ROUTE,
+    );
+    const [workspaceRows, generationRows, executionRows, slots] =
+      await Promise.all([
+        db
+          .select({
+            userId: workshopWorkspaces.userId,
+            state: workshopWorkspaces.state,
+            terminalRoutes: workshopWorkspaces.terminalRouteUsernamesJson,
+            applicationRoutes: workshopWorkspaces.applicationRouteIdsJson,
+          })
+          .from(workshopWorkspaces)
+          .where(eq(workshopWorkspaces.id, WORKSPACE_ID)),
+        db
+          .select({ state: workshopWorkspaceGenerations.state })
+          .from(workshopWorkspaceGenerations)
+          .where(eq(workshopWorkspaceGenerations.id, GENERATION_ID)),
+        db
+          .select({
+            userId: runtimeExecutions.userId,
+            state: runtimeExecutions.state,
+          })
+          .from(runtimeExecutions)
+          .where(eq(runtimeExecutions.id, EXECUTION_ID)),
+        db
+          .select()
+          .from(activeRuntimeSlots)
+          .where(eq(activeRuntimeSlots.userId, "facilitator")),
+      ]);
+    expect(workspaceRows).toEqual([
+      {
+        userId: "facilitator",
+        state: "ended",
+        terminalRoutes: [],
+        applicationRoutes: [],
+      },
+    ]);
+    expect(generationRows).toEqual([{ state: "archived" }]);
+    expect(executionRows).toEqual([
+      { userId: "facilitator", state: "archived" },
+    ]);
+    expect(slots).toEqual([]);
+
+    const history = await getWorkshopSessionProjection({
+      sessionId: SESSION_ID,
+      userId: "facilitator",
+    });
+    expect(history.session.viewer).toMatchObject({
+      role: "facilitator",
+      workspaceEnabled: true,
+      canFacilitate: false,
+      canPresent: false,
+      canAssist: false,
+    });
+    expect(history.session.roster).toEqual([]);
+    expect(history.session.workspace).toMatchObject({ state: "ended" });
+    expect(history.session.modules[0]?.facilitatorNotesMarkdown).toBeNull();
+    await expect(
+      listWorkshopSessionsForUser({ userId: "facilitator" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        session: expect.objectContaining({
+          id: SESSION_ID,
+          state: "ended",
+        }),
+        membership: expect.objectContaining({
+          role: "facilitator",
+          workspaceEnabled: true,
+          provisionState: "ended",
+        }),
+      }),
+    ]);
   });
 
   it("keeps the organization membership when external cleanup fails", async () => {
@@ -962,10 +1059,13 @@ describe("workshop access revocation during organization membership removal", ()
   });
 });
 
-async function seedLiveWorkshopFixture(): Promise<void> {
+async function seedLiveWorkshopFixture(
+  options: { workspaceUserId?: "participant" | "facilitator" } = {},
+): Promise<void> {
   const db = drizzle(env.DB);
   const now = 1_800_000_000_000;
   const createdAt = new Date(now);
+  const workspaceUserId = options.workspaceUserId ?? "participant";
   await db.insert(user).values(
     ["owner", "participant", "helper", "facilitator"].map((id) => ({
       id,
@@ -1035,12 +1135,18 @@ async function seedLiveWorkshopFixture(): Promise<void> {
       roster("owner", "facilitator", "not_ready", now),
       roster("participant", "participant", "ready", now),
       roster("helper", "helper", "not_ready", now),
-      roster("facilitator", "facilitator", "not_ready", now),
+      roster(
+        "facilitator",
+        "facilitator",
+        workspaceUserId === "facilitator" ? "ready" : "not_ready",
+        now,
+        workspaceUserId === "facilitator",
+      ),
     ]);
   await db.insert(workshopWorkspaces).values({
     id: WORKSPACE_ID,
     sessionId: SESSION_ID,
-    userId: "participant",
+    userId: workspaceUserId,
     state: "ready",
     terminalRouteUsernamesJson: [PARTICIPANT_ROUTE, ASSIST_ROUTE],
     applicationRouteIdsJson: [APPLICATION_ROUTE],
@@ -1064,7 +1170,7 @@ async function seedLiveWorkshopFixture(): Promise<void> {
     .where(eq(workshopWorkspaces.id, WORKSPACE_ID));
   await db.insert(runtimeExecutions).values({
     id: EXECUTION_ID,
-    userId: "participant",
+    userId: workspaceUserId,
     organizationId: ORGANIZATION_ID,
     domainKind: "workshop",
     domainId: WORKSPACE_ID,
@@ -1075,7 +1181,7 @@ async function seedLiveWorkshopFixture(): Promise<void> {
     updatedAt: now,
   });
   await db.insert(activeRuntimeSlots).values({
-    userId: "participant",
+    userId: workspaceUserId,
     executionId: EXECUTION_ID,
     acquiredAt: now,
   });
@@ -1086,7 +1192,7 @@ async function seedLiveWorkshopFixture(): Promise<void> {
   await db.insert(workshopModuleProgress).values({
     id: "participant-progress",
     sessionId: SESSION_ID,
-    userId: "participant",
+    userId: workspaceUserId,
     moduleId: "module-00",
     technicalStatus: "verified",
     currentHealth: "passing",
@@ -1098,11 +1204,11 @@ async function seedLiveWorkshopFixture(): Promise<void> {
   await db.insert(workshopHelpRequests).values({
     id: "help-request",
     sessionId: SESSION_ID,
-    requesterUserId: "participant",
+    requesterUserId: workspaceUserId,
     moduleId: "module-00",
     message: "Please help",
     status: "claimed",
-    activeKey: `${SESSION_ID}:participant`,
+    activeKey: `${SESSION_ID}:${workspaceUserId}`,
     claimedBy: "helper",
     claimedAt: now,
     createdAt: now,
@@ -1113,7 +1219,7 @@ async function seedLiveWorkshopFixture(): Promise<void> {
     sessionId: SESSION_ID,
     workspaceId: WORKSPACE_ID,
     helpRequestId: "help-request",
-    learnerUserId: "participant",
+    learnerUserId: workspaceUserId,
     helperUserId: "helper",
     grantedAt: now,
     expiresAt: now + 15 * 60_000,
@@ -1125,7 +1231,7 @@ async function seedLiveWorkshopFixture(): Promise<void> {
     id: "history-event",
     organizationId: ORGANIZATION_ID,
     sessionId: SESSION_ID,
-    actorUserId: "participant",
+    actorUserId: workspaceUserId,
     type: "module.verified",
     payloadJson: { moduleId: "module-00" },
     createdAt: now,
@@ -1199,12 +1305,14 @@ function roster(
   role: "participant" | "helper" | "facilitator",
   provisionState: "not_ready" | "ready",
   now: number,
+  workspaceEnabled = role === "participant",
 ): typeof workshopSessionMembers.$inferInsert {
   return {
     id: `roster-${userId}`,
     sessionId: SESSION_ID,
     userId,
     role,
+    workspaceEnabled,
     provisionState,
     assignedBy: "owner",
     createdAt: now,

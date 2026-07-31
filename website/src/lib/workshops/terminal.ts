@@ -129,7 +129,7 @@ async function issueWorkshopTerminalSession(input: {
 
   if (
     input.mode === "native" &&
-    (access.role !== "participant" ||
+    (!access.workspaceEnabled ||
       workspace.workspaceUserId !== input.actorUserId)
   ) {
     throw appError(

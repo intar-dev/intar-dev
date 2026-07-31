@@ -67,6 +67,7 @@ export interface WorkshopRosterMemberRecord {
   userId: string;
   name: string;
   role: WorkshopSessionRole;
+  workspaceEnabled: boolean;
   checkedInAt: number | null;
   lastSeenAt: number | null;
   provisionState: WorkshopProvisionState;

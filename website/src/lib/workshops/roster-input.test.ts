@@ -8,7 +8,13 @@ describe("workshop manager roster defaults", () => {
         [{ userId: "owner", role: "participant" }],
         "owner",
       ),
-    ).toEqual([{ userId: "owner", role: "participant" }]);
+    ).toEqual([
+      {
+        userId: "owner",
+        role: "participant",
+        workspaceEnabled: true,
+      },
+    ]);
   });
 
   it("adds the manager as facilitator only when the roster omits them", () => {
@@ -18,8 +24,37 @@ describe("workshop manager roster defaults", () => {
         "owner",
       ),
     ).toEqual([
-      { userId: "learner", role: "participant" },
-      { userId: "owner", role: "facilitator" },
+      {
+        userId: "learner",
+        role: "participant",
+        workspaceEnabled: true,
+      },
+      {
+        userId: "owner",
+        role: "facilitator",
+        workspaceEnabled: false,
+      },
+    ]);
+  });
+
+  it("preserves a staff role while opting into a learner workspace", () => {
+    expect(
+      withWorkshopManagerRosterDefault(
+        [
+          {
+            userId: "owner",
+            role: "facilitator",
+            workspaceEnabled: true,
+          },
+        ],
+        "owner",
+      ),
+    ).toEqual([
+      {
+        userId: "owner",
+        role: "facilitator",
+        workspaceEnabled: true,
+      },
     ]);
   });
 });

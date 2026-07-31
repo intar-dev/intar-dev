@@ -32,6 +32,7 @@ export interface WorkshopSessionAccess {
   state: WorkshopSessionState;
   version: number;
   role: WorkshopSessionRole;
+  workspaceEnabled: boolean;
   organizationRole: OrganizationRole | null;
 }
 
@@ -57,6 +58,7 @@ export async function requireWorkshopSessionMember(params: {
       state: workshopSessions.state,
       version: workshopSessions.version,
       role: workshopSessionMembers.role,
+      workspaceEnabled: workshopSessionMembers.workspaceEnabled,
       organizationMembershipId: member.id,
       organizationRole: member.role,
     })
@@ -89,7 +91,7 @@ export async function requireWorkshopSessionMember(params: {
     );
   }
   const archived = row.state === "ended" || row.state === "cancelled";
-  const canReadLearnerHistory = archived && row.role === "participant";
+  const canReadLearnerHistory = archived && row.workspaceEnabled;
   if (!row.organizationMembershipId && !canReadLearnerHistory) {
     throw appError(
       404,
@@ -104,6 +106,7 @@ export async function requireWorkshopSessionMember(params: {
     state: row.state,
     version: row.version,
     role: row.role,
+    workspaceEnabled: row.workspaceEnabled,
     organizationRole: (row.organizationRole as OrganizationRole | null) ?? null,
   };
 }

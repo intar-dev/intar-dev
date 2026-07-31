@@ -270,7 +270,7 @@ async function requireWorkshopArtifactOwner(input: {
   userId: string;
 }): Promise<void> {
   const access = await requireWorkshopSessionMember(input);
-  if (access.role !== "participant") {
+  if (!access.workspaceEnabled) {
     throw appError(
       403,
       "workshop_artifact_owner_required",

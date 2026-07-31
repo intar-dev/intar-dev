@@ -1,11 +1,60 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createWorkshopSession,
   createWorkshopRegistryToken,
   listWorkshopRegistryTokens,
   overrideWorkshopHetznerGrossCeiling,
   refreshWorkshopHetznerCostForecast,
   revokeWorkshopRegistryToken,
 } from "./api";
+
+describe("workshop session API", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sends workspace enrollment independently from the member role", async () => {
+    const payload = { session: { id: "session-a" } };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(payload, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createWorkshopSession("org/one", {
+        templateRevisionId: "revision-a",
+        title: "Platform workshop",
+        startsAt: 1_900_000_000_000,
+        members: [
+          {
+            userId: "facilitator-a",
+            role: "facilitator",
+            workspaceEnabled: true,
+          },
+        ],
+      }),
+    ).resolves.toEqual(payload);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/organizations/org%2Fone/workshop-sessions",
+      {
+        credentials: "include",
+        method: "POST",
+        body: JSON.stringify({
+          templateRevisionId: "revision-a",
+          title: "Platform workshop",
+          startsAt: 1_900_000_000_000,
+          members: [
+            {
+              userId: "facilitator-a",
+              role: "facilitator",
+              workspaceEnabled: true,
+            },
+          ],
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+  });
+});
 
 describe("workshop Hetzner cost API", () => {
   afterEach(() => {

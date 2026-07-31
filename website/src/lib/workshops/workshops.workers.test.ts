@@ -256,8 +256,16 @@ describe("standalone workshops", () => {
     });
     expect(organizationView.sessions[0]?.draftRoster).toEqual(
       expect.arrayContaining([
-        { userId: "owner-a", role: "facilitator" },
-        { userId: "learner-a", role: "participant" },
+        {
+          userId: "owner-a",
+          role: "facilitator",
+          workspaceEnabled: false,
+        },
+        {
+          userId: "learner-a",
+          role: "participant",
+          workspaceEnabled: true,
+        },
       ]),
     );
     expect(organizationView.sessions[0]?.templateRevisionId).toBe(
@@ -304,7 +312,7 @@ describe("standalone workshops", () => {
     });
   });
 
-  it("lets one organization owner facilitate while rostered as the participant", async () => {
+  it("lets one organization owner facilitate with an explicit learner workspace", async () => {
     const template = await createTemplateFixture();
     const session = await createWorkshopSession({
       organizationId: "org-a",
@@ -321,7 +329,13 @@ describe("standalone workshops", () => {
         action: "replace_roster",
         expectedVersion: 1,
         payload: {
-          members: [{ userId: "owner-a", role: "participant" }],
+          members: [
+            {
+              userId: "owner-a",
+              role: "facilitator",
+              workspaceEnabled: true,
+            },
+          ],
         },
       }),
     ).resolves.toEqual({ kind: "updated" });
@@ -331,13 +345,18 @@ describe("standalone workshops", () => {
       userId: "owner-a",
     });
     expect(draft.session.viewer).toMatchObject({
-      role: "participant",
+      role: "facilitator",
+      workspaceEnabled: true,
       canFacilitate: true,
       canPresent: true,
-      canAssist: false,
+      canAssist: true,
     });
     expect(draft.session.roster).toEqual([
-      expect.objectContaining({ userId: "owner-a", role: "participant" }),
+      expect.objectContaining({
+        userId: "owner-a",
+        role: "facilitator",
+        workspaceEnabled: true,
+      }),
     ]);
     expect(
       draft.session.modules.find((module) => module.id === "00-setup"),
@@ -366,6 +385,10 @@ describe("standalone workshops", () => {
       userId: "owner-a",
       message: "Need a second pair of eyes.",
     });
+    expect(help).toMatchObject({
+      requesterUserId: "owner-a",
+      status: "open",
+    });
     await expect(
       claimWorkshopHelpRequest({
         sessionId: session.id,
@@ -373,9 +396,63 @@ describe("standalone workshops", () => {
         helperUserId: "owner-a",
       }),
     ).rejects.toMatchObject({
-      status: 403,
-      code: "workshop_helper_required",
+      status: 409,
+      code: "workshop_help_request_self_claim",
     });
+    await expect(
+      drizzle(env.DB)
+        .update(workshopHelpRequests)
+        .set({
+          status: "claimed",
+          claimedBy: "owner-a",
+          claimedAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+        .where(eq(workshopHelpRequests.id, help.id)),
+    ).rejects.toMatchObject({
+      cause: expect.objectContaining({
+        message: expect.stringContaining(
+          "workshop help claim identities are no longer authorized",
+        ),
+      }),
+    });
+  });
+
+  it("does not grant a staff member a learner workspace by default", async () => {
+    const template = await createTemplateFixture();
+    const session = await createWorkshopSession({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      templateRevisionId: template.revisionId,
+      title: "Staff-only session",
+      scheduledStartAt: Date.now() + 60 * 60 * 1_000,
+    });
+    await updateWorkshopSession({
+      sessionId: session.id,
+      actorUserId: "owner-a",
+      expectedVersion: 1,
+      state: "lobby",
+    });
+
+    await expect(
+      checkInToWorkshop({
+        sessionId: session.id,
+        userId: "owner-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "workshop_participant_required",
+    });
+    const view = await getWorkshopSessionProjection({
+      sessionId: session.id,
+      userId: "owner-a",
+    });
+    expect(view.session.viewer).toMatchObject({
+      role: "facilitator",
+      workspaceEnabled: false,
+      canFacilitate: true,
+    });
+    expect(view.session.workspace).toBeNull();
   });
 
   it("does not let an ordinary participant replace the facilitator", async () => {
@@ -1173,8 +1250,13 @@ describe("standalone workshops", () => {
     ).resolves.toEqual([]);
   });
 
-  it("preserves ended participant history after organization removal", async () => {
+  it("preserves only learner-owned history after organization removal", async () => {
     const setup = await createSessionFixture();
+    const db = drizzle(env.DB);
+    await db
+      .update(workshopSessionMembers)
+      .set({ workspaceEnabled: true })
+      .where(eq(workshopSessionMembers.userId, "helper-a"));
     await openLobby(setup.sessionId);
     const live = await updateWorkshopSession({
       sessionId: setup.sessionId,
@@ -1188,7 +1270,6 @@ describe("standalone workshops", () => {
       expectedVersion: live.version,
       state: "ended",
     });
-    const db = drizzle(env.DB);
     await db.delete(member).where(eq(member.userId, "learner-a"));
     await db.delete(member).where(eq(member.userId, "helper-a"));
 
@@ -1210,18 +1291,30 @@ describe("standalone workshops", () => {
     expect(learnerHistory.map((entry) => entry.session.id)).toEqual([
       setup.sessionId,
     ]);
-    await expect(
-      getWorkshopSessionProjection({
-        sessionId: setup.sessionId,
-        userId: "helper-a",
-      }),
-    ).rejects.toMatchObject({
-      status: 404,
-      code: "workshop_session_not_found",
+    const removedHelperHistory = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "helper-a",
     });
+    expect(removedHelperHistory.session.viewer).toMatchObject({
+      role: "helper",
+      workspaceEnabled: true,
+      canFacilitate: false,
+      canPresent: false,
+      canAssist: false,
+    });
+    expect(removedHelperHistory.session.roster).toEqual([]);
+    expect(
+      removedHelperHistory.session.modules.find(
+        (module) => module.id === "00-setup",
+      )?.facilitatorNotesMarkdown,
+    ).toBeNull();
     await expect(
       listWorkshopSessionsForUser({ userId: "helper-a" }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([
+      expect.objectContaining({
+        session: expect.objectContaining({ id: setup.sessionId }),
+      }),
+    ]);
   });
 
   it("rejects direct template and revision publication outside the registry", async () => {

@@ -300,6 +300,9 @@ export const workshopSessionMembers = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
     role: text("role").$type<WorkshopSessionRole>().notNull(),
+    workspaceEnabled: integer("workspace_enabled", { mode: "boolean" })
+      .default(false)
+      .notNull(),
     checkedInAt: integer("checked_in_at"),
     lastSeenAt: integer("last_seen_at"),
     provisionState: text("provision_state")
@@ -321,6 +324,11 @@ export const workshopSessionMembers = sqliteTable(
     index("workshop_session_members_session_role_idx").on(
       table.sessionId,
       table.role,
+      table.provisionState,
+    ),
+    index("workshop_session_members_session_workspace_idx").on(
+      table.sessionId,
+      table.workspaceEnabled,
       table.provisionState,
     ),
     index("workshop_session_members_session_last_seen_idx").on(

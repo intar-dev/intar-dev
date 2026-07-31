@@ -160,6 +160,7 @@ export function createWorkshopSession(
     members: Array<{
       userId: string;
       role: "participant" | "helper" | "facilitator";
+      workspaceEnabled?: boolean;
     }>;
     runtimeProvider?:
       | { kind: "agent_kvm" }
