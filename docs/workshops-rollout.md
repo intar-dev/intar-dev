@@ -63,9 +63,11 @@ is healthy. Enable only one exact pilot organization while commissioning.
 - The route-less `intar-hcloud-provider` Worker is deployed with a dedicated
   Cloudflare API token and a valid 32-byte provider credential KEK.
 - D1 migrations `0016_hetzner_workshop_runtime.sql`,
-  `0017_workshop_checkpoint_guest_tools.sql`, and
-  `0018_workshop_hcloud_publication_verifier.sql` are applied exactly once,
-  and `PRAGMA foreign_key_check` returns no rows.
+  `0017_workshop_checkpoint_guest_tools.sql`,
+  `0018_workshop_hcloud_publication_verifier.sql`,
+  `0019_failed_workshop_checkpoint_cleanup_backfill.sql`, and
+  `0020_workshop_workspace_enrollment.sql` are applied exactly once, and
+  `PRAGMA foreign_key_check` returns no rows.
 - The website has the provider service binding, the Stargate egress CIDRs, and
   the approved runtime-bundle public signing-key map.
 - The trusted builder has the matching private Ed25519 seed. Direct-provider
@@ -253,6 +255,8 @@ workshops and the shared runtime ledger. The Hetzner rollout adds:
 | `0016_hetzner_workshop_runtime.sql` | provider identity, encrypted credential versions, audit events, pinned session provider, signed checkpoint artifacts, guest credentials, Hetzner allocations, provider actual state, immutable forecasts, resource cost ledger, and final cost summaries |
 | `0017_workshop_checkpoint_guest_tools.sql` | immutable checkpoint pins for the exact workspace-agent and Kino digests |
 | `0018_workshop_hcloud_publication_verifier.sql` | direct-provider publication checkpoints, verifier attempts, proof state, cleanup confirmation, and independently rounded verifier cost ledgers |
+| `0019_failed_workshop_checkpoint_cleanup_backfill.sql` | cleanup timestamps for terminal failed verifier checkpoints whose provider resources were already confirmed deleted |
+| `0020_workshop_workspace_enrollment.sql` | role-independent learner-workspace entitlement, participant backfill, immutable post-provision enrollment, and database authorization guards |
 
 Existing execution rows are backfilled to `agent_kvm`. Scenario host
 reservations remain agent-only. A Hetzner execution has no synthetic
@@ -316,18 +320,28 @@ After CI succeeds, prove the migration and binding:
 ```sh
 cd website
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
-  "SELECT id, name, applied_at FROM d1_migrations WHERE name IN ('0016_hetzner_workshop_runtime.sql','0017_workshop_checkpoint_guest_tools.sql') ORDER BY id;"
+  "SELECT name, count(*) AS applied_count, min(applied_at) AS applied_at FROM d1_migrations WHERE name IN ('0016_hetzner_workshop_runtime.sql','0017_workshop_checkpoint_guest_tools.sql','0018_workshop_hcloud_publication_verifier.sql','0019_failed_workshop_checkpoint_cleanup_backfill.sql','0020_workshop_workspace_enrollment.sql') GROUP BY name ORDER BY name;"
+
+bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
+  "SELECT cid, name, type, \"notnull\", dflt_value FROM pragma_table_info('workshop_session_members') WHERE name = 'workspace_enabled';"
+
+bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
+  "SELECT count(*) AS invalid_participant_entitlements FROM workshop_session_members WHERE role = 'participant' AND workspace_enabled <> 1;"
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   'PRAGMA foreign_key_check;'
 
 bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
   "SELECT provider_kind, count(*) AS executions FROM runtime_executions GROUP BY provider_kind ORDER BY provider_kind;"
+
+bunx wrangler d1 execute DB --remote --config wrangler.jsonc --command \
+  "SELECT count(*) AS invalid_scenario_provider_rows FROM runtime_executions WHERE domain_kind = 'scenario' AND provider_kind <> 'agent_kvm';"
 ```
 
-Both migration filenames must appear exactly once, foreign-key check must
-return no rows, and all pre-existing Scenario executions must remain
-`agent_kvm`.
+All five migration filenames must appear exactly once. The entitlement column
+must be non-null `INTEGER` with default `0`, participant entitlements and
+Scenario provider violations must both be zero, and the foreign-key check must
+return no rows.
 
 Run one ordinary Scenario lifecycle after deployment. Its catalog, terminal,
 probes, artifacts, desired state, teardown, and active slot must behave as
