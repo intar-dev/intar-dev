@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "636fe1358b614c1500aee16f201215b11ce1ebfafb9b63d59d9bd5fb797f81b1";
+  "6b9281d1250ff589726626d18dc9cdabcdd93ea66d55e90be3790bb86f337839";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "5627641e111bd511734b6e0c9995ab0df6e2e888a78460d71bd727c65dc45487";
+  "f799e5ae21513008dabc0b0f294b82b642023ffca159948e90cc5c88d45c9d9b";
 const EXPECTED_OVERLAY_SHA256 =
   "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
 const EXPECTED_CHANGED_FILES = 2;
@@ -23,6 +23,8 @@ if (!process.argv[2] || !process.argv[3]) {
 
 assertNullSafeConditionWaitContract(rawRoot, "regenerated import");
 assertNullSafeConditionWaitContract(adaptedRoot, "checked-in workshop");
+assertModule07VerifierContract(rawRoot, "regenerated import");
+assertModule07VerifierContract(adaptedRoot, "checked-in workshop");
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -236,6 +238,52 @@ function assertNullSafeConditionWaitContract(root: string, label: string) {
     )
   ) {
     throw new Error(`${label} retains an unsafe CNPG fault restore wait`);
+  }
+}
+
+function assertModule07VerifierContract(root: string, label: string) {
+  const verifier = readFileSync(
+    join(root, "runtime/source/lab/07-ci/verify.sh"),
+    "utf8",
+  );
+  const wrapper = readFileSync(join(root, "scripts/verify-07.sh"), "utf8");
+  for (const contract of [
+    "ZOT_READY=0",
+    "TEMPLATE_READY=0",
+    "WORKFLOW_READY=0",
+    "IMAGE_READY=0",
+    "http://localhost:30500/v2/hello-site/tags/list",
+    'any((.tags // [])[]?; . == "v1")',
+    "--for=condition=Available deploy/hello-site --timeout=180s",
+    '[[ "$BODY" == *"hello-site"* ]]',
+  ]) {
+    if (!verifier.includes(contract)) {
+      throw new Error(
+        `${label} is missing module 07 stabilization contract: ${contract}`,
+      );
+    }
+  }
+  for (const unstable of [
+    "http://localhost:30500/v2/_catalog",
+    "| grep -q '=Succeeded'",
+    "| grep -q 'hello-site'",
+    "--for=condition=Available deploy/hello-site --timeout=10s",
+  ]) {
+    if (verifier.includes(unstable)) {
+      throw new Error(
+        `${label} retains unstable module 07 verifier text: ${unstable}`,
+      );
+    }
+  }
+  for (const diagnostic of [
+    "awk '/FAIL:/{ line=$0 } END{ print line }'",
+    "INTAR_FAIL %.72s",
+  ]) {
+    if (!wrapper.includes(diagnostic)) {
+      throw new Error(
+        `${label} is missing bounded verifier diagnostics: ${diagnostic}`,
+      );
+    }
   }
 }
 

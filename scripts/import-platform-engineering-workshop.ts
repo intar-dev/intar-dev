@@ -1164,6 +1164,13 @@ ${module00Check}${workspaceAppCheck}if (( status == 0 )); then
   printf 'INTAR_PROBE ${module.probe} pass\\n'
 else
   printf 'INTAR_PROBE ${module.probe} fail\\n'
+  last_failure="$(
+    awk '/FAIL:/{ line=$0 } END{ print line }' <<<"${"${output}"}"
+  )"
+  if [[ -n "\${last_failure}" ]]; then
+    last_failure="\${last_failure#*FAIL: }"
+    printf 'INTAR_FAIL %.72s\\n' "\${last_failure}" >&2
+  fi
 fi
 exit "${"${status}"}"
 `;
@@ -1774,7 +1781,7 @@ function adaptTrustedConditionWaits(moduleId: string, value: string): string {
         `module ${moduleId} ${label} anchor occurred ${occurrences} times upstream`,
       );
     }
-    adapted = adapted.replace(anchor, replacement);
+    adapted = adapted.replace(anchor, () => replacement);
   };
 
   switch (moduleId) {
@@ -2479,6 +2486,8 @@ function copyRuntimePath(relativePath: string) {
       content = adaptContainerizedTalosLocalStorage(content);
     } else if (relativePath === "scripts/seed-gitea.sh") {
       content = adaptSeedGiteaForSealedCheckpoints(content);
+    } else if (relativePath === "lab/07-ci/verify.sh") {
+      content = adaptModule07Verifier(content);
     } else if (relativePath === "gitops/components/rustfs/service-nodeport.yaml") {
       content = adaptRustfsWorkspaceAppService(content);
     } else if (relativePath === "gitops/components/portal/portal.yaml") {
@@ -3578,6 +3587,171 @@ function adaptLearnerBuiltImageDockerfile(value: string): string {
       /# The base image comes from YOUR in-cluster Zot registry — seed it first[\s\S]*?# your own registry — fully offline\./u,
       "# The base is copied from its reviewed external digest into learner-owned Zot\n# before this build. The resulting learner artifact is intentionally addressed\n# by its local workshop tag; no mutable external tag is pulled.",
     );
+}
+
+function adaptModule07Verifier(value: string): string {
+  let adapted = value;
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `module 07 verifier ${label} anchor occurred ${occurrences} times upstream ` +
+          `(first=${adapted.indexOf(anchor)}, last=${adapted.lastIndexOf(anchor)})`,
+      );
+    }
+    adapted = adapted.replace(anchor, () => replacement);
+  };
+
+  replaceOnce(
+    `# --- Zot registry ---------------------------------------------------------------
+if curl -fsS --max-time 5 http://localhost:30500/v2/ >/dev/null 2>&1; then
+  ok "Zot registry API answers on :30500"
+else
+  fail "Zot not answering on :30500 — kubectl -n zot get pods,svc"
+fi`,
+    `# --- Zot registry ---------------------------------------------------------------
+ZOT_READY=0
+for _ in $(seq 1 36); do
+  if curl -fsS --max-time 5 http://localhost:30500/v2/ >/dev/null 2>&1; then
+    ZOT_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( ZOT_READY == 1 )); then
+  ok "Zot registry API answers on :30500"
+else
+  fail "Zot not answering on :30500 — kubectl -n zot get pods,svc"
+fi`,
+    "Zot API",
+  );
+
+  replaceOnce(
+    `# --- WorkflowTemplate present ------------------------------------------------------
+if kubectl -n builds get workflowtemplate build-and-push >/dev/null 2>&1; then
+  ok "WorkflowTemplate build-and-push exists in ns builds"
+else
+  fail "WorkflowTemplate build-and-push missing in ns builds — is the argo-workflows app fully synced?"
+fi`,
+    `# --- WorkflowTemplate present ------------------------------------------------------
+TEMPLATE_READY=0
+for _ in $(seq 1 36); do
+  if kubectl -n builds get workflowtemplate build-and-push >/dev/null 2>&1; then
+    TEMPLATE_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( TEMPLATE_READY == 1 )); then
+  ok "WorkflowTemplate build-and-push exists in ns builds"
+else
+  fail "WorkflowTemplate build-and-push missing in ns builds — is the argo-workflows app fully synced?"
+fi`,
+    "WorkflowTemplate",
+  );
+
+  replaceOnce(
+    `# --- A build succeeded --------------------------------------------------------------
+PHASES="$(kubectl -n builds get workflows \\
+  -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\\n"}{end}' 2>/dev/null | grep '^build-hello-site-' || true)"
+if [ -z "$PHASES" ]; then
+  fail "no build-hello-site-* workflow found — submit one: kubectl create -f workflow-run.yaml"
+elif echo "$PHASES" | grep -q '=Succeeded'; then
+  ok "build workflow Succeeded ($(echo "$PHASES" | grep -c '=Succeeded') run(s))"
+else
+  fail "build workflow(s) exist but none Succeeded ($(echo "$PHASES" | tr '\\n' ' ')) — kubectl -n builds get pods; read the failing step's logs"
+fi`,
+    `# --- A build succeeded --------------------------------------------------------------
+PHASES=""
+WORKFLOW_READY=0
+for _ in $(seq 1 36); do
+  PHASES="$(kubectl -n builds get workflows \\
+    -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\\n"}{end}' 2>/dev/null || true)"
+  PHASES="$(awk '/^build-hello-site-/{ print }' <<<"$PHASES")"
+  if [[ "$PHASES" == *"=Succeeded"* ]]; then
+    WORKFLOW_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( WORKFLOW_READY == 1 )); then
+  SUCCEEDED_COUNT="$(awk 'index($0, "=Succeeded"){ count++ } END{ print count + 0 }' <<<"$PHASES")"
+  ok "build workflow Succeeded (\${SUCCEEDED_COUNT} run(s))"
+elif [[ -z "$PHASES" ]]; then
+  fail "no build-hello-site-* workflow found — submit one: kubectl create -f workflow-run.yaml"
+else
+  PHASE_SUMMARY="\${PHASES//$'\\n'/ }"
+  fail "build workflow(s) exist but none Succeeded (\${PHASE_SUMMARY}) — kubectl -n builds get pods; read the failing step's logs"
+fi`,
+    "successful workflow",
+  );
+
+  replaceOnce(
+    `# --- Image actually in the registry ---------------------------------------------------
+CATALOG="$(curl -fsS --max-time 5 http://localhost:30500/v2/_catalog 2>/dev/null || echo '{}')"
+if echo "$CATALOG" | grep -q 'hello-site'; then
+  ok "image 'hello-site' present in Zot catalog"
+else
+  fail "hello-site not in Zot catalog ($CATALOG) — did the push step succeed? check the workflow logs"
+fi`,
+    `# --- Image actually in the registry ---------------------------------------------------
+TAG_RESPONSE="{}"
+IMAGE_READY=0
+for _ in $(seq 1 36); do
+  TAG_RESPONSE="$(curl -fsS --max-time 5 \\
+    http://localhost:30500/v2/hello-site/tags/list 2>/dev/null || echo '{}')"
+  if jq -e '.name == "hello-site" and any((.tags // [])[]?; . == "v1")' \\
+    <<<"$TAG_RESPONSE" >/dev/null 2>&1; then
+    IMAGE_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( IMAGE_READY == 1 )); then
+  ok "image 'hello-site:v1' present in Zot"
+else
+  fail "hello-site:v1 not in Zot ($TAG_RESPONSE) — did the push step succeed? check the workflow logs"
+fi`,
+    "exact Zot tag",
+  );
+
+  replaceOnce(
+    `if kubectl -n demo wait --for=condition=Available deploy/hello-site --timeout=10s >/dev/null 2>&1; then`,
+    `if kubectl -n demo wait --for=condition=Available deploy/hello-site --timeout=180s >/dev/null 2>&1; then`,
+    "deployment rollout",
+  );
+  replaceOnce(
+    `  if echo "$BODY" | grep -q 'hello-site'; then`,
+    `  if [[ "$BODY" == *"hello-site"* ]]; then`,
+    "served-page check",
+  );
+
+  const forbidden = [
+    "http://localhost:30500/v2/_catalog",
+    "| grep -q '=Succeeded'",
+    "| grep -q 'hello-site'",
+    "--timeout=10s",
+  ];
+  for (const contract of forbidden) {
+    if (adapted.includes(contract)) {
+      throw new Error(
+        `module 07 verifier retains unstable point check: ${contract}`,
+      );
+    }
+  }
+  if (
+    !adapted.includes("http://localhost:30500/v2/hello-site/tags/list") ||
+    !adapted.includes('any((.tags // [])[]?; . == "v1")') ||
+    !adapted.includes("WORKFLOW_READY=0") ||
+    !adapted.includes("--timeout=180s")
+  ) {
+    throw new Error("module 07 verifier stabilization contract is incomplete");
+  }
+  return adapted;
 }
 
 function adaptDigestPinnedFault01(relativePath: string, value: string): string {
