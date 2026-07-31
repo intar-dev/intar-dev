@@ -460,7 +460,12 @@ export async function listHetznerProviderConnections(input: {
               verified: false as const,
             },
       ...(role === "owner"
-        ? { cleanupResources: await unconfirmedAllocations(connection.id) }
+        ? {
+            cleanupResources: await unconfirmedAllocations(
+              connection.id,
+              true,
+            ),
+          }
         : {}),
     })),
   );
@@ -910,7 +915,7 @@ export async function acknowledgeHetznerManualCleanup(input: {
       "a disconnected provider connection has no unverified cleanup to acknowledge",
     );
   }
-  const resources = await unconfirmedAllocations(connection.id);
+  const resources = await unconfirmedAllocations(connection.id, true);
   if (resources.length === 0) {
     throw appError(
       409,
@@ -1383,6 +1388,7 @@ export async function countLiveHetznerAllocations(
 
 async function unconfirmedAllocations(
   connectionId: string,
+  cleanupPendingOnly = false,
 ): Promise<HetznerManualCleanupResource[]> {
   const rows = await env.DB.prepare(
     `SELECT id, execution_id, deterministic_name, state, server_id,
@@ -1390,6 +1396,7 @@ async function unconfirmedAllocations(
             delete_action_id, deletion_confirmed_at, created_at
      FROM hetzner_allocations
      WHERE connection_id = ? AND deletion_confirmed_at IS NULL
+       AND (? = 0 OR state = 'cleanup_pending')
      UNION ALL
      SELECT attempt.id, checkpoint.publication_id AS execution_id,
             attempt.deterministic_name, attempt.state, attempt.server_id,
@@ -1401,9 +1408,15 @@ async function unconfirmedAllocations(
        ON checkpoint.id = attempt.provider_checkpoint_id
      WHERE attempt.connection_id = ?
        AND attempt.deletion_confirmed_at IS NULL
+       AND (? = 0 OR attempt.state = 'cleanup_pending')
      ORDER BY created_at ASC, id ASC`,
   )
-    .bind(connectionId, connectionId)
+    .bind(
+      connectionId,
+      cleanupPendingOnly ? 1 : 0,
+      connectionId,
+      cleanupPendingOnly ? 1 : 0,
+    )
     .all<{
       id: string;
       execution_id: string;
