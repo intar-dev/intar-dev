@@ -1,25 +1,25 @@
 # Facilitator notes — module 00
 
-This is the safety net, not the plan — the prework email asked everyone to do this at home. The next 15 minutes exist for those who didn't, and for machines that changed since.
+The lobby gate is part of the plan: each checked-in learner receives a dedicated Intar workspace. Use these 15 minutes to prove that checkpoint 00 finished and the pinned runtime is healthy before the core workshop starts.
 
-While the room runs checks, the presenters circulate. Anyone whose laptop fundamentally can't run it goes straight to a lifeboat (pair up, or devcontainer/Codespaces) — do NOT let anyone burn 45 minutes fighting their Docker install.
-
-
----
-
-The digest-pinned rule isn't just conference pragmatism — it's the first platform-engineering lesson of the day. If your platform can't stand up without reaching the internet, it isn't your platform; it's a client of someone else's.
-
-Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server will live in-cluster; ArgoCD never points at GitHub. Once images are pulled, the whole workshop works in airplane mode.
-
-Hardware honesty, one more time: 16 GB RAM minimum with at least 10 GB allocatable to Docker; 32 GB is comfortable. The full platform idles around 8 GB inside the cluster. On 16 GB machines: close the Electron zoo. macOS: OrbStack or Docker Desktop with a raised memory limit. WSL2: raise it in .wslconfig — and WSL2 is our least-tested platform, so lifeboats apply.
+While Intar provisions and checks the learner VMs, presenters watch the roster and help queue. A failed workspace is a provider or bootstrap problem: inspect its named probes, then restore checkpoint 00 or recreate it through Intar instead of repairing it manually.
 
 
 ---
 
-Set the timer visibly. The task: run the pre-flight, fix what it flags (most common: Docker not running, or Docker memory limit below 10 GB), and run the module's verify.sh.
+The digest-pinned rule is the first platform-engineering lesson of the day: external dependencies must be explicit, immutable, and observable. Digest pins prevent tag drift; they do not pretend DNS, TLS, registries, or provider egress have disappeared.
 
-Already green because you did the prework? Perfect — you have 15 minutes of head start: skim lab/01-cluster/README.md, or help a neighbor. Helping a neighbor is the fastest way to learn this material.
+Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server then lives in-cluster and Argo CD never points at GitHub. Uncached or restored generations still require working registry egress, and the browser session still requires Intar connectivity.
 
-Triage guidance for presenters/helpers: image pulls not done is the only unfixable-in-room problem (bandwidth) — those people pair up or go to Codespaces immediately. Everything else (memory limits, missing tools) is a 2-minute fix.
+Capacity honesty: this revision pins one CPX42 per learner. Its 16 GiB RAM covers the roughly 7.5–8 GiB in-cluster workload plus Talos, Docker, and operating-system headroom. Intar blocks provisioning if the pinned type, price, quota, or required location is unavailable; never resize or substitute it silently.
 
-When ~90% of the room is green, move on — stragglers keep pulling in the background and module 01 doesn't need the images immediately.
+
+---
+
+Set the timer visibly. The task: check in, wait for the Intar workspace to become ready, open its terminal, and run the module verifier. Treat Docker, resource, registry, or agent failures as provisioning failures.
+
+Already green when the lobby opens? Perfect — use the remaining preflight time to skim lab/01-cluster/README.md, or help a neighbor. Helping a neighbor is the fastest way to learn this material.
+
+Triage guidance for presenters/helpers: use the facilitator roster, named probe state, and help queue. Registry, quota, location, guest-kernel, or bootstrap failures belong in the Intar recovery path; do not move learners to an untracked runtime.
+
+Move on only when the facilitator preflight shows enough ready seats for the room. Keep late workspaces visible in the lobby and use checkpoint recovery for learners who join after the release.

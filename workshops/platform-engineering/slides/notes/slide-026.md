@@ -1,3 +1,3 @@
-This is the safety net, not the plan — the prework email asked everyone to do this at home. The next 15 minutes exist for those who didn't, and for machines that changed since.
+The lobby gate is part of the plan: each checked-in learner receives a dedicated Intar workspace. Use these 15 minutes to prove that checkpoint 00 finished and the pinned runtime is healthy before the core workshop starts.
 
-While the room runs checks, the presenters circulate. Anyone whose laptop fundamentally can't run it goes straight to a lifeboat (pair up, or devcontainer/Codespaces) — do NOT let anyone burn 45 minutes fighting their Docker install.
+While Intar provisions and checks the learner VMs, presenters watch the roster and help queue. A failed workspace is a provider or bootstrap problem: inspect its named probes, then restore checkpoint 00 or recreate it through Intar instead of repairing it manually.

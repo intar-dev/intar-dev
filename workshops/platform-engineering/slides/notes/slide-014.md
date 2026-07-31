@@ -1,3 +1,3 @@
 Talos is the biggest identity shift of the day (module 01 goes deep). The pin matters: v1.13.6, never 1.12.x — cni:none docker clusters hung on readiness until the v1.13.0 fix (talos#12885). Default node memory limit is 2048 MB and the stack won't fit, so the scripts raise it (4096 CP / 6144 worker).
 
-Cilium tradeoff to name honestly: eBPF wants a modern kernel — Docker Desktop macOS ships 6.10, WSL2 6.6, both fine; the risk platform is exotic Linux firewalld/nftables setups. We keep kube-proxy-free for the wow factor but the fallback keeps kube-proxy to remove a nested-cgroup variable — robustness vs. wow is a real dial here.
+Cilium tradeoff to name honestly: eBPF and Talos-in-Docker need the dedicated Debian 13 guest kernel to expose the required nesting, cgroup, and BPF capabilities. Publication cold-boots every checkpoint on the pinned provider type; a kernel mismatch blocks the revision instead of silently switching to a kind fallback.

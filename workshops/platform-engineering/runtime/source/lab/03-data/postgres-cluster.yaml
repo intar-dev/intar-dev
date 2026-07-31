@@ -1,4 +1,4 @@
-# A CloudNativePG PostgreSQL cluster, sized for a laptop.
+# A CloudNativePG PostgreSQL cluster, sized for the learner VM.
 # Copy to gitops/components/demo/postgres-cluster.yaml in your platform repo and push.
 #
 # CNPG picks its default (pre-pulled) postgres image when imageName is unset —
@@ -8,7 +8,7 @@ kind: Cluster
 metadata:
   name: app-db
 spec:
-  instances: 1            # HA needs 3 — try it at home, your laptop RAM pays here
+  instances: 1            # Production HA normally needs 3; this workshop uses 1.
 
   bootstrap:
     initdb:

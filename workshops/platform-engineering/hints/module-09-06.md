@@ -11,7 +11,7 @@ git add . && git commit -m "module 09: eventing + picture pipeline" && git push
 kubectl -n pipeline get broker,trigger,ksvc          # wait for Ready True across the board
 
 kubectl -n pipeline get pods -w &                    # the watcher
-# → http://localhost:30600/gallery — upload a photo, watch 0 → 1 → 0 twice
+# In Intar: Workspace applications → Cloudbox Console → Gallery; upload a photo and watch 0 → 1 → 0 twice
 kill %1
 
 export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=us-east-1

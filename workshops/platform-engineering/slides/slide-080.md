@@ -1,6 +1,6 @@
 # The box, now full
 
-    **docker** Your laptop · Docker — still yours when the lid closes
+    **docker** Your learner VM · Docker — live until verified teardown
 
       **talos** **cilium** ✅ Talos + Cilium · Kubernetes — running (01)
 

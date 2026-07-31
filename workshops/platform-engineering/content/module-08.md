@@ -2,8 +2,8 @@
 
 ## The goal
 
-At the end of this module your platform has a front door: the **Cloudbox Console** at
-http://localhost:30600, showing — live — the ArgoCD apps, Postgres clusters, and Knative
+At the end of this module your platform has a front door: the **Cloudbox Console**. Open it under **Workspace applications** in
+the Intar workshop room; it shows — live — the ArgoCD apps, Postgres clusters, and Knative
 services *you built today*. The trophy: you create a database through its "New database"
 form and prove with `kubectl` that a real `WorkshopDatabase` XR and a real CNPG cluster
 appeared. Then you read the portal's entire source code, because it's small enough that
@@ -41,7 +41,7 @@ most portals.
 
 1. Enable `portal.yaml` from the catalog. It lands in ns `portal` and takes seconds — it's
    one small Go binary (compare that to what module 08 used to be…).
-2. Open **http://localhost:30600** and explore. The nav groups the pages into **Platform**
+2. Under **Workspace applications** in the Intar workshop room, open **Cloudbox Console** and explore. The nav groups the pages into **Platform**
    (Overview, Components, Access, Workshop, Activity, Billing), **Services** (Applications,
    Databases, Buckets, Functions, Streams, Builds — Applications, Databases and Functions
    each have a detail page, and Buckets uses an in-page object browser), and **Capstone** (Gallery) — and none of them is a mock: every row is a live read
@@ -111,16 +111,11 @@ audience is you. Backstage earns its weight when you need:
 The costs are real too: ~2 GB of Node.js + Postgres, YAML-heavy configuration, and
 typically a team that owns it. A portal is a *product decision*, not a default.
 
-> **Presenter demo (~5 min):** the presenter now enables `backstage.yaml` from the
-> catalog on the projector cluster and runs the classic loop: catalog → software template
-> → new Gitea repo → ArgoCD app → pods. Watch for what the template wires together —
-> that integration glue is the real work of running Backstage.
->
-> *Presenter notes:* pre-enable `backstage.yaml` before the module (first boot is slow,
-> ~2 GB image + CNPG database — it's why this is a demo, not the lab). Show: guest
-> sign-in at :30700, catalog entities fed from Gitea, run the template, then chase it
-> through Gitea (:30300) and ArgoCD (:30080). `backstage.yaml` stays in the catalog —
-> attendees with RAM to spare can run the same loop at home.
+> **Facilitator discussion (~5 min):** Compare the readable Cloudbox Console with
+> Backstage's catalog and software-template model. Backstage remains source material in
+> this workshop revision but is not a declared Intar workspace application, so do not
+> enable its optional catalog item during the hosted session. Use the bundled screenshots
+> and trace the same template → Gitea → ArgoCD → workload loop conceptually.
 
 ## Hints
 

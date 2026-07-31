@@ -365,45 +365,53 @@ function buildSlide(
 }
 
 function sanitizeMarkdown(value: string): string {
-  return replaceRuntimeImageReferences(adaptExternalRuntimeNarrative(value
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<svg[\s\S]*?<\/svg>/gi, "")
-    .replace(
-      /<img\s+[^>]*src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*\/?\s*>/gi,
-      (_match, source: string, alt: string) =>
-        `![${alt}](${normalizeImageSource(source)})`,
-    )
-    .replace(
-      /<Logo\s+([^>]+)\/?\s*>/gi,
-      (_match, attributes: string) => {
-        const label =
-          attributes.match(/label=["']([^"']+)["']/i)?.[1] ??
-          attributes.match(/text=["']([^"']+)["']/i)?.[1] ??
-          attributes.match(/name=["']([^"']+)["']/i)?.[1] ??
-          "platform component";
-        return `**${label}**`;
-      },
-    )
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<strong>/gi, "**")
-    .replace(/<\/strong>/gi, "**")
-    .replace(/<b>/gi, "**")
-    .replace(/<\/b>/gi, "**")
-    .replace(/<em>/gi, "*")
-    .replace(/<\/em>/gi, "*")
-    .replace(/<code>/gi, "`")
-    .replace(/<\/code>/gi, "`")
-    .replace(/::right::/g, "\n")
-    .replace(/```mermaid\s*\{[^}]*\}/g, "```mermaid")
-    .replace(/mise x crane@0\.21\.7 -- crane/g, "crane")
-    .replace(/<\/?[A-Za-z!?][^>\n]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&rarr;/g, "→")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()
-    .concat("\n")));
+  return replaceRuntimeImageReferences(
+    adaptHetznerLearnerRuntimeNarrative(
+      adaptWorkspaceAppNarrative(
+        adaptExternalRuntimeNarrative(
+          value
+          .replace(/<!--[\s\S]*?-->/g, "")
+          .replace(/<style[\s\S]*?<\/style>/gi, "")
+          .replace(/<svg[\s\S]*?<\/svg>/gi, "")
+          .replace(
+            /<img\s+[^>]*src=["']([^"']+)["'][^>]*alt=["']([^"']*)["'][^>]*\/?\s*>/gi,
+            (_match, source: string, alt: string) =>
+              `![${alt}](${normalizeImageSource(source)})`,
+          )
+          .replace(
+            /<Logo\s+([^>]+)\/?\s*>/gi,
+            (_match, attributes: string) => {
+              const label =
+                attributes.match(/label=["']([^"']+)["']/i)?.[1] ??
+                attributes.match(/text=["']([^"']+)["']/i)?.[1] ??
+                attributes.match(/name=["']([^"']+)["']/i)?.[1] ??
+                "platform component";
+              return `**${label}**`;
+            },
+          )
+          .replace(/<br\s*\/?>/gi, "\n")
+          .replace(/<strong>/gi, "**")
+          .replace(/<\/strong>/gi, "**")
+          .replace(/<b>/gi, "**")
+          .replace(/<\/b>/gi, "**")
+          .replace(/<em>/gi, "*")
+          .replace(/<\/em>/gi, "*")
+          .replace(/<code>/gi, "`")
+          .replace(/<\/code>/gi, "`")
+          .replace(/::right::/g, "\n")
+          .replace(/```mermaid\s*\{[^}]*\}/g, "```mermaid")
+          .replace(/mise x crane@0\.21\.7 -- crane/g, "crane")
+          .replace(/<\/?[A-Za-z!?][^>\n]*>/g, "")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&rarr;/g, "→")
+          .replace(/[ \t]+\n/g, "\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim()
+            .concat("\n"),
+        ),
+      ),
+    ),
+  );
 }
 
 function adaptExternalRuntimeNarrative(value: string): string {
@@ -472,11 +480,506 @@ function adaptExternalRuntimeNarrative(value: string): string {
     );
 }
 
+function adaptWorkspaceAppNarrative(value: string): string {
+  return value
+    .replace(
+      /Gitea: http:\/\/localhost:30300 — log in as/g,
+      "Gitea: under **Workspace applications** in the Intar workshop room, open **Gitea** and log in as",
+    )
+    .replace(
+      /ArgoCD: http:\/\/localhost:30080 — username/g,
+      "Argo CD: from the same **Workspace applications** list, open **Argo CD**; username",
+    )
+    .replace(
+      /front door: the \*\*Cloudbox Console\*\* at\nhttp:\/\/localhost:30600, showing/g,
+      "front door: the **Cloudbox Console**. Open it under **Workspace applications** in\nthe Intar workshop room; it shows",
+    )
+    .replace(
+      /Open \*\*http:\/\/localhost:30600\*\* and explore/g,
+      "Under **Workspace applications** in the Intar workshop room, open **Cloudbox Console** and explore",
+    )
+    .replace(
+      /open \*\*http:\/\/localhost:30600\/gallery\*\* and upload any JPEG\/PNG/g,
+      "under **Workspace applications** in the Intar workshop room, open **Cloudbox Console**, go to **Gallery**, and upload any JPEG/PNG",
+    )
+    .replace(
+      /in Grafana at \*\*http:\/\/localhost:30030\*\* → Explore/g,
+      "in **Grafana** under **Workspace applications** in the Intar workshop room → Explore",
+    )
+    .replace(
+      /Then open Grafana at \*\*http:\/\/localhost:30030\*\* \(NodePort — no port-forward needed\) →/g,
+      "Then open **Grafana** under **Workspace applications** in the Intar workshop room →",
+    )
+    .replace(
+      /^open http:\/\/localhost:30600\s+# explore, then: Databases → New database\n\s+# name: console-db, size: small → Create$/gm,
+      "# In the Intar workshop room: Workspace applications → Cloudbox Console → Databases\n# New database → name: console-db, size: small → Create",
+    )
+    .replace(
+      /^# → http:\/\/localhost:30600\/gallery — upload a photo, watch 0 → 1 → 0 twice$/gm,
+      "# In Intar: Workspace applications → Cloudbox Console → Gallery; upload a photo and watch 0 → 1 → 0 twice",
+    )
+    .replace(
+      /^# enable portal\.yaml → open http:\/\/localhost:30600$/gm,
+      "# enable portal.yaml → in Intar, open Workspace applications → Cloudbox Console",
+    )
+    .replace(
+      /In the lab they'll poke both UIs: Gitea at localhost:30300 \(gitea_admin \/ cloudbox123\), ArgoCD at localhost:30080 \(admin, password fetched from the cluster — that's hint 1\)\./g,
+      "In the lab they'll open Gitea (gitea_admin / cloudbox123) and Argo CD (admin, password fetched from the cluster — that's hint 1) under Workspace applications in the Intar room.",
+    )
+    .replace(
+      /find the upload's trace in Grafana at http:\/\/localhost:30030 → Explore/g,
+      "open Grafana under Workspace applications in the Intar room and find the upload's trace under Explore",
+    )
+    .replace(
+      /upload at localhost:30600\/gallery/g,
+      "open Cloudbox Console under Workspace applications in the Intar room and upload in Gallery",
+    )
+    .replace(
+      /The loop to show: guest sign-in at :30700 → catalog entities fed from Gitea → run a software template → chase the result through Gitea \(:30300, a new repo appeared\) → ArgoCD \(:30080, a new Application\) → pods running\./g,
+      "Use the bundled screenshots to trace Backstage's conceptual loop: catalog entity → software template → new Gitea repository → ArgoCD Application → running workload. Backstage is not a declared Intar workspace application in this revision.",
+    )
+    .replace(
+      `# Your progress, live
+
+- Cloudbox Console → **Workshop** page
+- One row per module, inferred from cluster
+- It reads live state — no self-reporting
+- \`http://localhost:30600/workshop\` (after module 02)
+`,
+      `# Your progress, live
+
+- Intar workshop room → **Agenda** → **Live verification**
+- One row per module, combining verifier results and live probe health
+- Verification latches; later regressions remain visible
+- Available from lobby check-in through the archived session
+`,
+    )
+    .replace(
+      /Once the platform's portal is running \(it arrives via the catalog; you'll meet it properly in module 08\), its Workshop page shows a checklist of all ten modules — each row inferred from your live cluster state: nodes ready, kube-proxy absent, Gitea healthy, a CNPG cluster in demo, WorkshopDatabases present, thumbnails in the images bucket, and so on\.\n\nTwo honest caveats to mention: it's a hint, not a judge — verify\.sh in each lab folder is the authoritative check; and module 05 \(fault-fixing\) can't be inferred from end-state at all\./g,
+      "In the Intar workshop room, **Agenda** includes **Live verification** for every module. It shows technical verification separately from current probe health, caught-up state, and explain-back. Verification latches once achieved, while a later regression remains visible instead of erasing completion.\n\nThe manual `verify.sh` in each lab folder remains useful for detailed diagnostics; Intar records the named deterministic probe result as the session progress contract.",
+    );
+}
+
+function adaptHetznerLearnerRuntimeNarrative(value: string): string {
+  const awsCliImage = imageMappings.get(
+    "public.ecr.aws/aws-cli/aws-cli:2.27.49",
+  );
+  if (!awsCliImage) {
+    throw new Error("AWS CLI image is missing from the reviewed runtime image lock");
+  }
+  return value
+    .replace(
+      /called \*\*cloudbox\*\* runs on your\nlaptop:/g,
+      "called **cloudbox** runs inside your dedicated Intar\nlearner VM:",
+    )
+    .replace(
+      /it fits in Docker on your laptop\./g,
+      "it runs as Docker containers inside that learner VM.",
+    )
+    .replace(
+      /…on a laptopthe thinnest viable one/g,
+      "…on one learner VM — the thinnest viable one",
+    )
+    .replace(
+      /Cilium tradeoff to name honestly: eBPF wants a modern kernel — Docker Desktop macOS ships 6\.10, WSL2 6\.6, both fine; the risk platform is exotic Linux firewalld\/nftables setups\. We keep kube-proxy-free for the wow factor but the fallback keeps kube-proxy to remove a nested-cgroup variable — robustness vs\. wow is a real dial here\./g,
+      "Cilium tradeoff to name honestly: eBPF and Talos-in-Docker need the dedicated Debian 13 guest kernel to expose the required nesting, cgroup, and BPF capabilities. Publication cold-boots every checkpoint on the pinned provider type; a kernel mismatch blocks the revision instead of silently switching to a kind fallback.",
+    )
+    .replace(
+      `The cluster is cattle: \`./scripts/destroy-cluster.sh && ./scripts/create-cluster.sh\` is
+always safe and takes ~5 minutes (images are already local). If Talos-in-Docker fights
+your machine specifically, \`./scripts/kind-fallback.sh\` gives you a kind+Cilium cluster —
+you lose the Talos exploration but every later module works the same.`,
+      `The Talos cluster is cattle: \`./scripts/destroy-cluster.sh && ./scripts/create-cluster.sh\`
+recreates it from the pinned configuration. Re-creation may need the declared external
+registries. If Talos-in-Docker or the guest kernel misbehaves, use **Need help** in Intar;
+the facilitator can restore the canonical checkpoint instead of switching runtimes.`,
+    )
+    .replace(
+      `This is the safety net, not the plan — the prework email asked everyone to do this at home. The next 15 minutes exist for those who didn't, and for machines that changed since.`,
+      "The lobby gate is part of the plan: each checked-in learner receives a dedicated Intar workspace. Use these 15 minutes to prove that checkpoint 00 finished and the pinned runtime is healthy before the core workshop starts.",
+    )
+    .replace(
+      `While the room runs checks, the presenters circulate. Anyone whose laptop fundamentally can't run it goes straight to a lifeboat (pair up, or devcontainer/Codespaces) — do NOT let anyone burn 45 minutes fighting their Docker install.`,
+      "While Intar provisions and checks the learner VMs, presenters watch the roster and help queue. A failed workspace is a provider or bootstrap problem: inspect its named probes, then restore checkpoint 00 or recreate it through Intar instead of repairing it manually.",
+    )
+    .replace(
+      `The digest-pinned rule isn't just conference pragmatism — it's the first platform-engineering lesson of the day. If your platform can't stand up without reaching the internet, it isn't your platform; it's a client of someone else's.`,
+      "The digest-pinned rule is the first platform-engineering lesson of the day: external dependencies must be explicit, immutable, and observable. Digest pins prevent tag drift; they do not pretend DNS, TLS, registries, or provider egress have disappeared.",
+    )
+    .replace(
+      `Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server will live in-cluster; ArgoCD never points at GitHub. Once images are pulled, the whole workshop works in airplane mode.`,
+      "Concretely: the Intar checkpoint bootstrap validates every pinned image against its external registry; the git server then lives in-cluster and Argo CD never points at GitHub. Uncached or restored generations still require working registry egress, and the browser session still requires Intar connectivity.",
+    )
+    .replace(
+      `Hardware honesty, one more time: 16 GB RAM minimum with at least 10 GB allocatable to Docker; 32 GB is comfortable. The full platform idles around 8 GB inside the cluster. On 16 GB machines: close the Electron zoo. macOS: OrbStack or Docker Desktop with a raised memory limit. WSL2: raise it in .wslconfig — and WSL2 is our least-tested platform, so lifeboats apply.`,
+      "Capacity honesty: this revision pins one CPX42 per learner. Its 16 GiB RAM covers the roughly 7.5–8 GiB in-cluster workload plus Talos, Docker, and operating-system headroom. Intar blocks provisioning if the pinned type, price, quota, or required location is unavailable; never resize or substitute it silently.",
+    )
+    .replace(
+      `Set the timer visibly. The task: run the pre-flight, fix what it flags (most common: Docker not running, or Docker memory limit below 10 GB), and run the module's verify.sh.`,
+      "Set the timer visibly. The task: check in, wait for the Intar workspace to become ready, open its terminal, and run the module verifier. Treat Docker, resource, registry, or agent failures as provisioning failures.",
+    )
+    .replace(
+      /Already green because you did the prework\? Perfect — you have 15 minutes of head start:/g,
+      "Already green when the lobby opens? Perfect — use the remaining preflight time to",
+    )
+    .replace(
+      `Triage guidance for presenters/helpers: image pulls not done is the only unfixable-in-room problem (bandwidth) — those people pair up or go to Codespaces immediately. Everything else (memory limits, missing tools) is a 2-minute fix.`,
+      "Triage guidance for presenters/helpers: use the facilitator roster, named probe state, and help queue. Registry, quota, location, guest-kernel, or bootstrap failures belong in the Intar recovery path; do not move learners to an untracked runtime.",
+    )
+    .replace(
+      `When ~90% of the room is green, move on — stragglers keep pulling in the background and module 01 doesn't need the images immediately.`,
+      "Move on only when the facilitator preflight shows enough ready seats for the room. Keep late workspaces visible in the lobby and use checkpoint recovery for learners who join after the release.",
+    )
+    .replace(
+      `# You leave with Bruktby's cloud —
+and it's **yours**
+
+Still running tomorrow. No account. No bill. No permission.`,
+      `# You build Bruktby's cloud —
+inside your **own workspace**
+
+Dedicated learner VM. Your Hetzner project. Measured cost. Verified teardown.`,
+    )
+    .replace(
+      /"At the end of these four hours, your laptop is running the complete cloud platform Bruktby moved to — Kubernetes, GitOps, a managed database, S3-compatible storage, a self-service API, serverless, a portal — with their photo pipeline live on top of it\. And when you close the lid and go home, it's still yours\. No trial account, no free tier, no vendor\."/g,
+      '"During these four hours, each dedicated learner VM runs the complete cloud platform Bruktby moved to — Kubernetes, GitOps, a managed database, S3-compatible storage, a self-service API, serverless, a portal — with their photo pipeline live on top. Intar tracks the provider estimate and deletes every learner resource when the session ends."',
+    )
+    .replace(
+      `-  green sticky — "I'm fine"
+-  red sticky — "come by, please"
+- Helpers roam; no hand-raising needed
+- Pairing is encouraged — arguably better
+- Laptop says no? Devcontainer lifeboat`,
+      `- Intar check-in shows that you're present
+- **Need help** puts you in the facilitator queue
+- You decide whether to grant browser-terminal assistance
+- Pairing and explain-backs are encouraged
+- Provisioning failure? Restore or recreate through Intar`,
+    )
+    .replace(
+      /The sticky-note protocol means nobody sits blocked with a hand in the air: red sticky up, keep poking at something else, a helper finds you\./g,
+      "The Intar help queue means nobody sits blocked with a hand in the air: choose **Need help**, keep investigating, and a helper can claim the request.",
+    )
+    .replace(
+      /Pairing: the whole workshop works as a pair on one machine — you'll talk through more and type less\. If your pre-flight fails, pair up or use the devcontainer: the repo ships a \.devcontainer that runs identical content in GitHub Codespaces \(4 cores \/ 16 GB machine\)\. Acknowledge the irony out loud — the lifeboat for the sovereignty workshop is Microsoft's cloud, which is exactly why it's the lifeboat and not the boat\./g,
+      "Pairing is encouraged for discussion, but every enrolled participant keeps an independently tracked Intar workspace. If preflight fails, use the provider recovery path so progress, cost, routes, and teardown remain auditable.",
+    )
+    .replace(
+      `# GO — Module 00
+
+**Outcome:** your laptop is provably ready.`,
+      `# GO — Module 00
+
+**Outcome:** your dedicated Intar workspace is provably ready.`,
+    )
+    .replace(
+      /15 min · red sticky if anything is/g,
+      "15 min · choose **Need help** if anything is",
+    )
+    .replace(
+      `    **Fits a 16 GB laptop**
+
+    In-cluster total ≈ 7.5–8 GB; ≥10 GB to Docker. Every pick optimises for this ceiling.
+    the constraint that shaped the whole stack`,
+      `    **Fits one 16 GiB learner VM**
+
+    In-cluster total ≈ 7.5–8 GiB, leaving headroom for Talos, Docker, and Debian.
+    the CPX42 constraint that shaped the whole stack`,
+    )
+    .replace(
+      /scripts\/images\.txt · check-consistency\.sh enforces it/g,
+      "runtime/images.lock · Intar publish validation enforces it",
+    )
+    .replace(
+      `    **docker** Your laptop · Docker — still yours when the lid closes`,
+      "    **docker** Your learner VM · Docker — live until verified teardown",
+    )
+    .replace(
+      /The same diagram from the first ten minutes — but now every box on it is running on the laptops in this room\./g,
+      "The same diagram from the first ten minutes — but now every box is running inside the dedicated learner VMs for this session.",
+    )
+    .replace(
+      /Then the sovereignty callback: no account was created today\. No bill will arrive\. Nothing phones home\. When the laptop lid closes, the cloud goes to sleep — and it wakes up still yours\./g,
+      "Then the ownership callback: the learner VM is billed directly to the organization's Hetzner project, Intar shows an estimate rather than an invoice, external digest pulls are explicit, and session teardown must leave zero servers, IPs, keys, routes, or slots.",
+    )
+    .replace(
+      /\*\*Your laptop\. Your cloud\. Your terms\.\*\*/g,
+      "**Every layer understood. Your platform. Your terms.**",
+    )
+    .replace(
+      /"The cluster on your laptop is not a demo — it's yours\. Keep it\. Break it\. Rebuild it with catch-up\."/g,
+      '"The platform you built is not a slideware demo. Break it, explain it, and rebuild it from a canonical checkpoint while the session is live."',
+    )
+    .replace(
+      /when you run this at home/g,
+      "when you build from the source in your own environment",
+    )
+    .replace(
+      /Presenter prep during this break: pre-enable backstage\.yaml from the catalog on the projector cluster NOW — its first boot is slow \(~2 GB image \+ a CNPG database\) and module 08's demo needs it warm\./g,
+      "Presenter prep during this break: keep Backstage disabled. Module 08 uses bundled screenshots for the comparison because Backstage is not a declared Intar workspace application in this revision.",
+    )
+    .replace(
+      /Next slide: we look at Backstage live, so this isn't a straw man\./g,
+      "Next slide: use the bundled Backstage screenshots to make the comparison concrete without provisioning an undeclared application.",
+    )
+    .replace(
+      /Presenter demo, ~5 minutes, on the projector cluster \(backstage\.yaml was pre-enabled during the second break — first boot is slow: ~2 GB CNOE image plus a CNPG database, which is precisely why this is a demo and not the hands-on\)\./g,
+      "Facilitator comparison, ~5 minutes, using the bundled Backstage screenshots. Do not enable backstage.yaml in the hosted session: it has no declared Intar workspace route.",
+    )
+    .replace(
+      /backstage\.yaml stays in the catalog — anyone with RAM to spare can run this exact loop at home\. That's the fair test of the build-vs-buy slide\./g,
+      "Keep backstage.yaml disabled in hosted sessions. The pinned source remains available for a separately sized, explicitly routed workshop revision.",
+    )
+    .replace(
+      `# Interlude: Backstage, live
+
+Presenter demo · ~5 min · watch the projector
+
+- Catalog → template → new Gitea repo
+- → ArgoCD app → running pods
+- The template's glue is the real work
+- \`backstage.yaml\` stays in the catalog — try at home`,
+      `# Interlude: Backstage, unpacked
+
+Facilitator comparison · ~5 min · bundled screenshots
+
+- Catalog → template → new Gitea repo
+- → Argo CD app → running pods
+- The template's glue is the real work
+- Source retained; hosted runtime intentionally disabled`,
+    )
+    .replace(
+      /Later, in module 08, they'll see Backstage's software templates doing a fancier version of exactly this\./g,
+      "Later, module 08 uses bundled Backstage screenshots to compare its software-template model with this loop.",
+    )
+    .replace(
+      `We'll keep it on the projector between modules as the room's shared progress board. It's also a nice teaser: the page itself is ~100 lines of Go reading the Kubernetes API — you'll read its source in module 08.
+
+Now — let's make sure everyone's laptop is ready. Module 00.`,
+      "Keep the synchronized Intar projector view visible between modules. Now use the lobby preflight to make sure every checked-in learner workspace is ready for module 00.",
+    )
+    .replace(
+      /Every hop of git → build → push → deploy happens inside the laptop's cluster — zero external services\./g,
+      "Every git → build → push → deploy hop stays inside the learner VM. External registries supply only the digest-pinned base images declared by the revision.",
+    )
+    .replace(
+      /Zero external services touched — git, build, registry, deploy all happen on your\nlaptop's cloud\./g,
+      "Git, build, the learner registry, and deployment all stay inside the learner VM; only declared digest-pinned base images come from external registries.",
+    )
+    .replace(
+      /the whole build-and-ship pipeline, running inside your own cluster with zero external services\./g,
+      "the whole build-and-ship data path running inside your own cluster, with declared base-image pulls from external registries.",
+    )
+    .replace(
+      /Zero external services touched — git, build, registry, deploy all happen on your/g,
+      "The build-and-deploy data path stays inside your",
+    )
+    .replace(
+      / — zero external services\./g,
+      "; the build-and-deploy data path stays inside the learner VM.",
+    )
+    .replace(
+      /with zero external services\./g,
+      "with its build-and-deploy data path inside the learner VM.",
+    )
+    .replace(
+      /The platform does not depend on GitHub, on the venue WiFi, or on anyone's SaaS\./g,
+      "The platform's Git state does not depend on GitHub or another hosted Git SaaS.",
+    )
+    .replace(
+      /Your platform does not depend on GitHub, on the venue WiFi, or on anyone's SaaS\./g,
+      "The platform's Git state does not depend on GitHub or another hosted Git SaaS.",
+    )
+    .replace(
+      /your platform doesn't depend on GitHub, on the venue WiFi,\nor on anyone's SaaS\./g,
+      "the GitOps loop does not depend on GitHub or a hosted Git SaaS; Intar connectivity\nand registry egress remain explicit.",
+    )
+    .replace(
+      /nothing tied to GitHub or the venue WiFi/g,
+      "nothing tied to a hosted Git SaaS",
+    )
+    .replace(
+      /It also means the workshop survives conference WiFi\./g,
+      "Registry egress and the Intar browser control plane remain explicit external dependencies.",
+    )
+    .replace(
+      /Nothing depends on GitHub or the venue WiFi\./g,
+      "The GitOps loop does not depend on GitHub; Intar connectivity and registry egress remain explicit.",
+    )
+    .replace(
+      /generate a \*\*presigned URL\*\*\. Open it in your browser\. That URL is you handing a\n\s+download link to someone with zero AWS involved\./g,
+      "generate a **presigned URL**, save it, and prove it with `curl --fail` from the same\n   learner terminal. The S3 API NodePort is guest-local and intentionally not exposed as a\n   workspace application. In the browser, open **RustFS** under **Workspace applications**\n   to inspect the bucket and object.",
+    )
+    .replace(
+      `aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600
+# open the printed URL in your browser`,
+      `PRESIGNED_URL="$(aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
+curl --fail --show-error "$PRESIGNED_URL"
+# Browser proof uses Workspace applications → RustFS; the S3 API URL is guest-local.`,
+    )
+    .replace(
+      `export AWS_ACCESS_KEY_ID=cloudbox AWS_SECRET_ACCESS_KEY=cloudbox123 AWS_REGION=us-east-1
+aws --endpoint-url http://localhost:30900 s3 mb s3://app-assets
+echo "hello from my own cloud" > /tmp/hello.txt
+aws --endpoint-url http://localhost:30900 s3 cp /tmp/hello.txt s3://app-assets/
+PRESIGNED_URL="$(aws --endpoint-url http://localhost:30900 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
+curl --fail --show-error "$PRESIGNED_URL"
+# Browser proof uses Workspace applications → RustFS; the S3 API URL is guest-local.`,
+      `aws_s3() {
+  docker run --rm --network host -i \\
+    -e AWS_ACCESS_KEY_ID=cloudbox \\
+    -e AWS_SECRET_ACCESS_KEY=cloudbox123 \\
+    -e AWS_REGION=us-east-1 \\
+    ${awsCliImage} \\
+    --endpoint-url http://localhost:30900 "$@"
+}
+aws_s3 s3 mb s3://app-assets 2>/dev/null || true
+printf 'hello from my own cloud\\n' | aws_s3 s3 cp - s3://app-assets/hello.txt
+PRESIGNED_URL="$(aws_s3 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
+curl --fail --show-error "$PRESIGNED_URL"
+# Browser proof uses Workspace applications → RustFS; the S3 API URL is guest-local.`,
+    )
+    .replace(
+      /Same story for object storage: S3 is an API, and RustFS implements it — buckets, multipart, presigned URLs\. In the lab they'll create a bucket, upload a file, and generate a presigned URL that works in their browser: handing someone a download link with zero AWS involved\./g,
+      "Same story for object storage: S3 is an API, and RustFS implements it — buckets, multipart, presigned URLs. In the lab they create a bucket and upload a file, then verify a guest-local presigned URL with `curl` in the learner terminal. Browser inspection uses the separately authorized **RustFS** workspace application.",
+    )
+    .replace(
+      /3\. RustFS speaks S3 on NodePort 30900 \(access key cloudbox \/ secret cloudbox123\): create a bucket, upload a file, generate a presigned URL, open it in the browser\./g,
+      "3. RustFS speaks S3 on guest-local NodePort 30900 (access key cloudbox / secret cloudbox123): create a bucket, upload a file, generate a presigned URL, and verify it with `curl` in the learner terminal. Use **Workspace applications → RustFS** for browser inspection.",
+    )
+    .replace(
+      /Wins to celebrate: the psql prompt \(module win #1\) and a presigned URL opening in a browser \(win #2 — "you just handed out a download link with zero AWS"\)\./g,
+      "Wins to celebrate: the psql prompt (module win #1) and a presigned URL returning the uploaded object inside the learner terminal (win #2). Then use the authorized RustFS application to show that the same object exists in the browser.",
+    )
+    .replace(
+      /Presigned URL failures are usually a clock-skew or wrong-endpoint issue; hints cover both\./g,
+      "Presigned URL failures are usually clock-skew or wrong-endpoint issues; the check must run in the learner terminal because port 30900 is guest-local.",
+    )
+    .replace(
+      /\*\*Outcome:\*\* `psql` into your own DBaaS; a presigned URL that works\./g,
+      "**Outcome:** `psql` into your own DBaaS; a presigned download verified in the learner terminal.",
+    )
+    .replace(
+      /While people are away, this is a good moment to bring the Cloudbox Console's Workshop page up on the projector — by now most rows for 00–03 should be turning green across the room\.\n\nHelpers: sweep for red stickies during the break; break time is catch-up time for anyone behind, and catch-up\.sh 3 gets them fully current in ~2 minutes\./g,
+      "Keep the projector on Intar's synchronized break timer. On the private facilitator screen, open the roster-by-module live-verification view and check modules 00–03 without exposing participant identities.\n\nHelpers: watch Intar's **Need help** queue. Claim unresolved requests and, when a learner needs canonical recovery, use the module-03 catch-up checkpoint through Intar rather than running hidden catch-up material in their terminal.",
+    )
+    .replace(
+      /Presenter demo first \(~5 min\): enable both catalog apps on the projector cluster, submit the build workflow, follow it to Succeeded, then prove the artifact is real by querying Zot's OCI API \(\/v2\/ endpoints on NodePort 30500\) — and run the freshly built image via GitOps\./g,
+      "Presenter demo first (~5 min): use a facilitator workspace only when that facilitator is explicitly enrolled with a workspace; otherwise use a consenting participant's shared workspace. Enable both catalog apps, submit the build workflow, follow it to Succeeded, then prove the artifact through Zot's guest-local OCI API and run the freshly built image via GitOps.",
+    )
+    .replace(
+      /Presenter-demo-first module: rootless BuildKit on Talos is pioneer territory \(nobody has published this combo\), so the front of the room shows the golden path, and the lab stays available for the brave and for home\./g,
+      "Presenter-demo-first module: rootless BuildKit on Talos is pioneer territory, so the front of the room shows the golden path and the lab remains available in the released stretch pool.",
+    )
+    .replace(
+      /"Your registry\. Your build\. No Docker Hub, no GitHub Actions, no external anything\."/g,
+      '"Your registry and your build output stay here. Digest-pinned base images still arrive through the declared external registries."',
+    )
+    .replace(
+      /The task: enable portal\.yaml \(lands in ns portal in seconds — one small Go binary\), explore the Console at :30600, and for each page answer "which Kubernetes API is this\?"/g,
+      'The task: enable portal.yaml (lands in ns portal in seconds — one small Go binary), open **Cloudbox Console** under **Workspace applications**, and for each page answer "which Kubernetes API is this?"',
+    )
+    .replace(
+      /Also point out the Workshop page they've been watching all day lives in this same binary \(workshop\.go\) — a checklist inferred from live cluster state, ~100 lines\./g,
+      "Open the Console's Workshop page now. It becomes available with module 08 and summarizes live cluster state; compare it with Intar's native verification view used earlier. The page is implemented in `workshop.go` in roughly 100 lines.",
+    )
+    .replace(
+      /the Workshop page you've been watching all day is ~100 of them/g,
+      "the Workshop page you will open in module 08 is roughly 100 of them",
+    )
+    .replace(
+      /You'll build a container INSIDE your cluster with Argo Workflows \+ BuildKit and push it to your own Zot registry — no Docker Hub, no cloud build minutes\./g,
+      "You'll build a container inside your cluster with Argo Workflows + BuildKit and push it to your own Zot registry. The build runs on the learner VM and pulls only the revision's digest-pinned external base images.",
+    )
+    .replace(
+      /Everything on this second table is for the fast 20% and for your couch tonight — it's all public and nothing later depends on it\./g,
+      "Everything on this second table is a dependency-aware stretch pool. Nothing later depends on completing every stretch module.",
+    )
+    .replace(
+      /No account\. No bill\. No permission\./g,
+      "Dedicated VM. Provider-billed. Deleted at teardown.",
+    )
+    .replace(
+      /\n\s+it — then go run your cloud on your terms\./g,
+      "\nStar it — then go run your cloud on your terms.",
+    )
+    .replace(/\blaptop's\b/gi, "learner VM's")
+    .replace(/\blaptops\b/gi, "learner VMs")
+    .replace(/\blaptop\b/gi, "learner VM");
+}
+
+function adaptTrustedScriptNarrative(
+  moduleId: string,
+  value: string,
+): string {
+  if (moduleId === "03") {
+    const awsCliImage = imageMappings.get(
+      "public.ecr.aws/aws-cli/aws-cli:2.27.49",
+    );
+    if (!awsCliImage) {
+      throw new Error("AWS CLI image is missing from the reviewed runtime image lock");
+    }
+    const sourceBlock = /# 3\. Bucket \+ object \+ presigned URL\.[\s\S]*?\nfi/u;
+    if ((value.match(new RegExp(sourceBlock.source, "gu")) ?? []).length !== 1) {
+      throw new Error(
+        "module 03 trusted presigned-download anchor changed upstream",
+      );
+    }
+    return value.replace(
+      sourceBlock,
+      `# 3. Bucket + object + a guest-local presigned download.
+aws_s3() {
+  docker run --rm --network host -i \\
+    -e AWS_ACCESS_KEY_ID=cloudbox \\
+    -e AWS_SECRET_ACCESS_KEY=cloudbox123 \\
+    -e AWS_REGION=us-east-1 \\
+    ${awsCliImage} \\
+    --endpoint-url http://localhost:30900 "$@"
+}
+aws_s3 s3 mb s3://app-assets 2>/dev/null || true
+printf 'hello from my own cloud\\n' |
+  aws_s3 s3 cp - s3://app-assets/hello.txt
+PRESIGNED_URL="$(aws_s3 s3 presign s3://app-assets/hello.txt --expires-in 3600)"
+curl --fail --show-error --output /dev/null "$PRESIGNED_URL"
+printf 'Presigned object download verified inside the learner VM.\\n'`,
+    );
+  }
+  if (moduleId === "08") {
+    return value
+      .replace(
+        'echo "Cloudbox Console is up: http://localhost:30600"',
+        'echo "Cloudbox Console is ready; open it under Workspace applications in the Intar room."',
+      )
+      .replace(
+        'echo "console-db is Ready — see it on http://localhost:30600/databases"',
+        'echo "console-db is Ready — see it in Cloudbox Console under Databases."',
+      );
+  }
+  if (moduleId === "09") {
+    return value.replace(
+      'echo "thumbnail produced after ~${WAITED}s — see http://localhost:30600/gallery"',
+      'echo "thumbnail produced after ~${WAITED}s — see it in Cloudbox Console under Gallery."',
+    );
+  }
+  return value;
+}
+
 function moduleContent(module: ModuleDefinition, readme: string): string {
   if (module.id === "00") return renderModule00Content();
-  const content = sanitizeMarkdown(
+  let content = sanitizeMarkdown(
     readme.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, ""),
   );
+  if (module.id === "08") {
+    content = content.replace(
+      /> \*\*Presenter demo \(~5 min\):\*\*[\s\S]*?> attendees with RAM to spare can run the same loop at home\.\n/u,
+      `> **Facilitator discussion (~5 min):** Compare the readable Cloudbox Console with
+> Backstage's catalog and software-template model. Backstage remains source material in
+> this workshop revision but is not a declared Intar workspace application, so do not
+> enable its optional catalog item during the hosted session. Use the bundled screenshots
+> and trace the same template → Gitea → ArgoCD → workload loop conceptually.
+`,
+    );
+  }
   if (module.id !== "10") return content;
   return content
     .replace(
@@ -596,11 +1099,12 @@ function importModule(module: ModuleDefinition, allSlides: ImportedSlide[]) {
 
   const solve = module.id === "00"
     ? "cd /opt/platform-engineering-workshop/lab/00-setup\n./verify.sh"
-    : adaptExternalRuntimeNarrative(
-      replaceRuntimeImageReferences(read(`lab/${module.directory}/solve.sh`)),
-    )
-      .replaceAll("mise x crane@0.21.7 -- crane", "crane")
-      .replaceAll("<", "&lt;");
+    : adaptTrustedScriptNarrative(
+      module.id,
+      adaptExternalRuntimeNarrative(
+        replaceRuntimeImageReferences(read(`lab/${module.directory}/solve.sh`)),
+      ).replaceAll("mise x crane@0.21.7 -- crane", "crane"),
+    ).replaceAll("<", "&lt;");
   writeText(
     `content/module-${module.id}-solution.md`,
     `# Canonical solution for module ${module.id}\n\nThis is adapted from the pinned upstream \`solve.sh\` for Intar's digest-pinned external runtime. Reveal it only after the learner has chosen to see the solution.\n\n\`\`\`bash\n${solve.trim()}\n\`\`\`\n`,
@@ -666,6 +1170,12 @@ exit "${"${status}"}"
 }
 
 function renderWorkspaceAppProbe(moduleId: string): string {
+  const awsCliImage = imageMappings.get(
+    "public.ecr.aws/aws-cli/aws-cli:2.27.49",
+  );
+  if (!awsCliImage) {
+    throw new Error("AWS CLI image is missing from the reviewed runtime image lock");
+  }
   switch (moduleId) {
     case "02":
       return `if (( status == 0 )); then
@@ -688,6 +1198,47 @@ fi
 `;
     case "03":
       return `if (( status == 0 )); then
+  rustfs_aws() {
+    docker run --rm --network host -i \\
+      -e AWS_ACCESS_KEY_ID=cloudbox \\
+      -e AWS_SECRET_ACCESS_KEY=cloudbox123 \\
+      -e AWS_REGION=us-east-1 \\
+      -e AWS_PAGER= \\
+      "${awsCliImage}" \\
+      --endpoint-url http://localhost:30900 "$@"
+  }
+
+  if ! rustfs_object_key="$(rustfs_aws s3api list-objects-v2 \\
+    --bucket app-assets \\
+    --max-items 1 \\
+    --query 'Contents[0].Key' \\
+    --output text)"; then
+    printf 'RustFS could not list an object for presigned-download verification\\n' >&2
+    status=1
+  elif [[ -z "\${rustfs_object_key}" ||
+          "\${rustfs_object_key}" == "None" ||
+          "\${rustfs_object_key}" == *$'\\n'* ]]; then
+    printf 'RustFS returned no deterministic object key for presigned-download verification\\n' >&2
+    status=1
+  elif ! rustfs_presigned_url="$(rustfs_aws s3 presign \\
+    "s3://app-assets/\${rustfs_object_key}" \\
+    --expires-in 300)"; then
+    printf 'RustFS could not generate a presigned download URL\\n' >&2
+    status=1
+  elif [[ "\${rustfs_presigned_url}" != http://localhost:30900/* ||
+          "\${rustfs_presigned_url}" == *" "* ||
+          "\${rustfs_presigned_url}" == *$'\\t'* ||
+          "\${rustfs_presigned_url}" == *$'\\n'* ]]; then
+    printf 'RustFS generated an unsafe or non-local presigned URL\\n' >&2
+    status=1
+  elif ! curl -fsS --max-time 15 --output /dev/null \\
+    "\${rustfs_presigned_url}"; then
+    printf 'RustFS presigned download failed inside the learner VM\\n' >&2
+    status=1
+  fi
+fi
+
+if (( status == 0 )); then
   public_host=wa-workshop-probe.intar.app
   if ! rustfs_probe_dir="$(mktemp -d)"; then
     printf 'could not create temporary directory for RustFS workspace-app probe\\n' >&2
@@ -881,6 +1432,96 @@ fi
   fi
 fi
 `;
+    case "08":
+      return `if (( status == 0 )); then
+  public_host=wa-workshop-probe.intar.app
+
+  portal_workspace_app_curl() {
+    curl -sS --max-time 15 \\
+      -H "Host: \${public_host}" \\
+      -H "X-Forwarded-Host: \${public_host}" \\
+      -H 'X-Forwarded-Proto: https' \\
+      -H 'X-Forwarded-Port: 443' \\
+      "$@"
+  }
+
+  if ! portal_status="$(portal_workspace_app_curl \\
+    --output /dev/null \\
+    --write-out '%{http_code}' \\
+    http://localhost:30600/)"; then
+    printf 'Cloudbox Console did not answer through the canonical workspace-app Host\\n' >&2
+    status=1
+  elif [[ "\${portal_status}" != "200" ]]; then
+    printf 'Cloudbox Console returned HTTP %s for canonical workspace-app Host %s\\n' \\
+      "\${portal_status}" "\${public_host}" >&2
+    status=1
+  fi
+
+  if (( status == 0 )); then
+    invalid_public_host=wa-workshop-probe.intar.app.attacker.invalid
+    if ! invalid_host_status="$(curl -sS --max-time 15 \\
+      --output /dev/null \\
+      --write-out '%{http_code}' \\
+      -H "Host: \${invalid_public_host}" \\
+      -H "X-Forwarded-Host: \${public_host}" \\
+      -H 'X-Forwarded-Proto: https' \\
+      -H 'X-Forwarded-Port: 443' \\
+      http://localhost:30600/)"; then
+      printf 'Cloudbox Console invalid-Host probe did not complete\\n' >&2
+      status=1
+    elif [[ "\${invalid_host_status}" != "400" ]]; then
+      printf 'Cloudbox Console accepted invalid Host %s with HTTP %s\\n' \\
+        "\${invalid_public_host}" "\${invalid_host_status}" >&2
+      status=1
+    fi
+  fi
+
+  if (( status == 0 )); then
+    if ! s3_put_status="$(portal_workspace_app_curl \\
+      --output /dev/null \\
+      --write-out '%{http_code}' \\
+      -X PUT \\
+      http://localhost:30600/__intar-s3/probe)"; then
+      printf 'Cloudbox S3 unsafe-method probe did not complete\\n' >&2
+      status=1
+    elif [[ "\${s3_put_status}" != "405" ]]; then
+      printf 'Cloudbox same-origin S3 adapter accepted PUT (HTTP %s)\\n' \\
+        "\${s3_put_status}" >&2
+      status=1
+    fi
+  fi
+
+  if (( status == 0 )); then
+    if ! s3_head_status="$(portal_workspace_app_curl \\
+      --head \\
+      --output /dev/null \\
+      --write-out '%{http_code}' \\
+      http://localhost:30600/__intar-s3/app-assets/hello.txt)"; then
+      printf 'Cloudbox S3 HEAD probe did not reach the workspace-app adapter\\n' >&2
+      status=1
+    elif [[ "\${s3_head_status}" != 2* &&
+            "\${s3_head_status}" != "403" ]]; then
+      printf 'Cloudbox S3 HEAD path returned HTTP %s instead of RustFS 2xx/403\\n' \\
+        "\${s3_head_status}" >&2
+      status=1
+    fi
+  fi
+
+  if (( status == 0 )); then
+    if ! grafana_launcher="$(portal_workspace_app_curl \\
+      --fail \\
+      http://localhost:30600/__intar-grafana)"; then
+      printf 'Cloudbox Grafana launcher did not answer through the workspace-app adapter\\n' >&2
+      status=1
+    elif [[ "\${grafana_launcher}" != *"Workspace applications"* ||
+            "\${grafana_launcher}" != *"Grafana"* ||
+            "\${grafana_launcher}" == *"localhost"* ]]; then
+      printf 'Cloudbox Grafana launcher did not provide safe Intar navigation\\n' >&2
+      status=1
+    fi
+  fi
+fi
+`;
     case "09":
       return `if (( status == 0 )); then
   observability_status=0
@@ -999,6 +1640,66 @@ fi
     observability_status=1
   fi
 
+  public_host=wa-workshop-probe.intar.app
+  portal_workspace_app_curl() {
+    curl -sS --max-time 15 \\
+      -H "Host: \${public_host}" \\
+      -H "X-Forwarded-Host: \${public_host}" \\
+      -H 'X-Forwarded-Proto: https' \\
+      -H 'X-Forwarded-Port: 443' \\
+      "$@"
+  }
+
+  if ! gallery_page="$(portal_workspace_app_curl \\
+    --fail \\
+    http://localhost:30600/gallery/grid)"; then
+    printf 'Cloudbox gallery did not answer through the canonical workspace-app Host\\n' >&2
+    observability_status=1
+  elif [[ "\${gallery_page}" == *"localhost:"* ]]; then
+    printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\\n' >&2
+    observability_status=1
+  else
+    gallery_s3_url=$(
+      printf '%s\\n' "\${gallery_page}" |
+        grep -Eo 'https://wa-workshop-probe\\.intar\\.app/__intar-s3/[^"<[:space:]]+' |
+        sed 's/&amp;/\\&/g' |
+        sed -n '1p' || true
+    )
+
+    if [[ -n "\${gallery_s3_url}" ]]; then
+      gallery_s3_path="\${gallery_s3_url#https://wa-workshop-probe.intar.app}"
+      gallery_s3_file="$(mktemp)"
+      if ! portal_workspace_app_curl \\
+        --fail \\
+        --output "\${gallery_s3_file}" \\
+        "http://localhost:30600\${gallery_s3_path}"; then
+        printf 'Cloudbox gallery presigned S3 GET failed through /__intar-s3/\\n' >&2
+        observability_status=1
+      elif [[ ! -s "\${gallery_s3_file}" ]]; then
+        printf 'Cloudbox gallery presigned S3 GET returned an empty object\\n' >&2
+        observability_status=1
+      fi
+      rm -f "\${gallery_s3_file}"
+    elif [[ "\${gallery_page}" != *"Nothing here yet"* ]]; then
+      printf 'Cloudbox gallery contained objects without a canonical /__intar-s3/ URL\\n' >&2
+      observability_status=1
+    fi
+  fi
+
+  if ! gallery_s3_head_status="$(portal_workspace_app_curl \\
+    --head \\
+    --output /dev/null \\
+    --write-out '%{http_code}' \\
+    http://localhost:30600/__intar-s3/app-assets/hello.txt)"; then
+    printf 'Cloudbox S3 HEAD probe did not reach the workspace-app adapter\\n' >&2
+    observability_status=1
+  elif [[ "\${gallery_s3_head_status}" != 2* &&
+          "\${gallery_s3_head_status}" != "403" ]]; then
+    printf 'Cloudbox S3 HEAD path returned HTTP %s instead of RustFS 2xx/403\\n' \\
+      "\${gallery_s3_head_status}" >&2
+    observability_status=1
+  fi
+
   if (( observability_status != 0 )); then
     status=1
   fi
@@ -1049,6 +1750,7 @@ exec ./lab/00-setup/verify.sh
   if (module.id === "09") {
     script = adaptModule09ObservabilityCatchUp(script);
   }
+  script = adaptTrustedScriptNarrative(module.id, script);
   if (/\/solutions(?:\/|\b)/u.test(script)) {
     throw new Error(
       `module ${module.id} catch-up still references upstream solutions`,
@@ -1266,7 +1968,7 @@ workspace {
     image       = "platform-engineering-workshop-debian13-1b6fad4"
     cpu_millis  = 4000
     memory_mib  = 16384
-    disk_mib    = 65536
+    disk_mib    = 32768
   }
 
   provider "hetzner_cloud" {
@@ -1652,6 +2354,8 @@ function copyRuntimePath(relativePath: string) {
       content = adaptSeedGiteaForSealedCheckpoints(content);
     } else if (relativePath === "gitops/components/rustfs/service-nodeport.yaml") {
       content = adaptRustfsWorkspaceAppService(content);
+    } else if (relativePath === "gitops/components/portal/portal.yaml") {
+      content = adaptPortalWorkspaceAppService(content);
     } else if (
       relativePath === "gitops/catalog/victoria-logs.yaml" ||
       relativePath === "gitops/components/victoria-logs/victoria-logs.yaml"
@@ -1700,7 +2404,538 @@ function adaptRuntimeSourceText(value: string): string {
     .replace(/(?:\.\/)?scripts\/cloudbox-init\.sh(?:\s+--[a-z-]+)*/g, "the Intar checkpoint bootstrap")
     .replace(/solutions\/module-[0-9]{2}(?:\/[A-Za-z0-9._/-]+)?/g, "canonical module state")
     .replace(/the workshop's offline cache/gi, "the workshop's digest-pinned external image contract")
-    .replace(/pre-pulled by `the Intar checkpoint bootstrap`/gi, "declared in the signed external image lock");
+    .replace(/pre-pulled by `the Intar checkpoint bootstrap`/gi, "declared in the signed external image lock")
+    .replace(
+      /open http:\/\/localhost:30080 or:/g,
+      "open Argo CD under Workspace applications in the Intar room or:",
+    )
+    .replace(
+      /check http:\/\/localhost:30080 and the module hints/g,
+      "open Argo CD under Workspace applications in the Intar room; consult the module hints",
+    )
+    .replace(
+      /[Cc]heck http:\/\/localhost:30080/g,
+      "Open Argo CD under Workspace applications in the Intar room",
+    )
+    .replace(
+      'ok "Gitea answers on http://localhost:30300"',
+      'ok "Gitea answers on its declared workspace-app port 30300"',
+    )
+    .replace(
+      /create 'console-db' via the console's New database form \(http:\/\/localhost:30600\/databases\)/g,
+      "create 'console-db' from Cloudbox Console's New database form in Intar",
+    )
+    .replace(
+      /upload a photo at http:\/\/localhost:30600\/gallery/g,
+      "upload a photo from Cloudbox Console's Gallery in Intar",
+    )
+    .replace(
+      /UI: http:\/\/localhost:30600\./g,
+      "UI: declared as the Cloudbox Console workspace application.",
+    )
+    .replace(
+      /Browser: http:\/\/localhost:30030\.?/g,
+      "Browser: declared as the Grafana workspace application.",
+    )
+    .replace(
+      /# http:\/\/localhost:30500, in-cluster/g,
+      "# Browser UI: declared as the Zot workspace application; in-cluster",
+    )
+    .replace(
+      /UI: http:\/\/localhost:30700/g,
+      "not exposed as an Intar workspace application in v1",
+    )
+    .replace(
+      /# browser reaches it without a port-forward: http:\/\/localhost:30030/g,
+      "# Intar reaches this declared workspace application without a public guest port",
+    )
+    .replace(
+      /# Enable with:\s+cp gitops\/catalog\/backstage\.yaml gitops\/apps\/ && git add \. && git commit -m 'enable backstage' && git push/g,
+      "# Hosted Intar sessions: keep this disabled; no Backstage workspace application route is declared.",
+    )
+    .replace(
+      "# NOTE: this image is linux/amd64 only — Apple Silicon runs it under\n          # emulation (works on Docker Desktop/OrbStack, slower startup).",
+      "# NOTE: this image is linux/amd64. The workshop revision requires an\n          # x86 learner runtime, but Backstage remains disabled because no\n          # workspace application route is declared for it.",
+    )
+    .replace(
+      "# all. Generous windows: first boot runs DB migrations and, on\n          # Apple Silicon, amd64 emulation.",
+      "# all. Generous windows: first boot runs database migrations.",
+    )
+    .replace(
+      "varied cgroup setups on attendee laptops. ~80% of the 256Mi limit.",
+      "fixed learner-VM cgroup contract. ~80% of the 256Mi limit.",
+    )
+    .replace(
+      "This is the pioneer module — red sticky note and we'll dig in together.",
+      "This is the pioneer module — open Need help and we'll dig in together.",
+    )
+    .replace(
+      "This is an ephemeral lab sandbox on your own laptop — never do\n# this for anything reachable from a real network.",
+      "This is an isolated learner workspace with Intar-authorized routes — never\n# use workshop credentials for production or any independently exposed service.",
+    )
+    .replace(
+      "# on a stable NodePort so attendees can use presigned URLs and S3 clients from\n# the laptop without a port-forward: http://localhost:30900",
+      "# on a stable guest-only NodePort. Intar reaches it through SSH direct\n# forwarding; the port is never published from the learner VM.",
+    )
+    .replace(
+      "# A CloudNativePG PostgreSQL cluster, sized for a laptop.",
+      "# A CloudNativePG PostgreSQL cluster, sized for the learner VM.",
+    )
+    .replace(
+      "instances: 1            # HA needs 3 — try it at home, your laptop RAM pays here",
+      "instances: 1            # Production HA normally needs 3; this workshop uses 1.",
+    )
+    .replace(
+      "# Caps kept small (workshop laptop); this is a sandbox, not production.",
+      "# Caps stay small for the workshop learner VM; this is not a production sizing guide.",
+    )
+    .replace(
+      "# NodePort so the `nats` CLI and apps on the laptop can connect without a\n# port-forward: nats://localhost:30422",
+      "# guest-only NodePort so in-workspace clients can connect without a\n# kubectl port-forward: nats://localhost:30422",
+    )
+    .replace(
+      "# mise version installed by dev-setup.sh / CI / devcontainer (the mise.run\n# installer honors MISE_VERSION). Keep the devcontainer copy in sync.",
+      "# mise version installed by the signed checkpoint bundle and CI. The mise.run\n# installer honors MISE_VERSION; keep the runtime contract in sync.",
+    );
+}
+
+function adaptPortalWorkspaceAppService(value: string): string {
+  let adapted = value;
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `portal workspace-app ${label} anchor occurred ${occurrences} times upstream`,
+      );
+    }
+    adapted = adapted.replace(anchor, replacement);
+  };
+
+  const namespaceAnchor = `apiVersion: v1
+kind: Namespace
+metadata:
+  name: portal
+---`;
+  if (adapted.split(namespaceAnchor).length - 1 !== 1) {
+    throw new Error(
+      "portal workspace-app namespace anchor was not unique upstream",
+    );
+  }
+  const adapterConfig = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-workspace-app-adapter
+  namespace: portal
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: portal
+          per_connection_buffer_limit_bytes: 1048576
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 18080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: portal_workspace_app
+                    normalize_path: false
+                    merge_slashes: false
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    route_config:
+                      name: portal
+                      virtual_hosts:
+                        - name: portal
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: /__intar-s3/
+                                headers:
+                                  - name: ":method"
+                                    safe_regex_match:
+                                      google_re2: {}
+                                      regex: "^(GET|HEAD)$"
+                              route:
+                                cluster: rustfs
+                                prefix_rewrite: /
+                                host_rewrite_literal: localhost:30900
+                                timeout: 0s
+                              request_headers_to_remove:
+                                - forwarded
+                                - x-forwarded-for
+                                - x-forwarded-host
+                                - x-forwarded-proto
+                                - x-forwarded-port
+                              response_headers_to_add:
+                                - header:
+                                    key: cache-control
+                                    value: private, no-store
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                - header:
+                                    key: referrer-policy
+                                    value: no-referrer
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - match:
+                                prefix: /__intar-s3/
+                              direct_response:
+                                status: 405
+                                body:
+                                  inline_string: "method not allowed\\n"
+                            - match:
+                                prefix: /__intar-grafana
+                              direct_response:
+                                status: 200
+                                body:
+                                  inline_string: >-
+                                    <!doctype html><meta charset="utf-8"><title>Open Grafana</title><p>Return to the Intar workshop room and choose <b>Workspace applications → Grafana</b>.</p>
+                              response_headers_to_add:
+                                - header:
+                                    key: content-type
+                                    value: text/html; charset=utf-8
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                - header:
+                                    key: cache-control
+                                    value: private, no-store
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                                - header:
+                                    key: content-security-policy
+                                    value: "default-src 'none'; style-src 'unsafe-inline'"
+                                  append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                            - match:
+                                prefix: /agent/ask
+                                headers:
+                                  - name: ":method"
+                                    exact_match: POST
+                              name: portal-agent-stream
+                              route:
+                                cluster: portal
+                                timeout: 130s
+                              request_headers_to_remove:
+                                - accept-encoding
+                            - match:
+                                prefix: /
+                              name: portal-ui
+                              route:
+                                cluster: portal
+                                timeout: 70s
+                              request_headers_to_remove:
+                                - accept-encoding
+                    http_filters:
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          inline_code: |
+                            local function replace_all(value, needle, replacement)
+                              local result = {}
+                              local offset = 1
+                              while true do
+                                local first, last = string.find(value, needle, offset, true)
+                                if first == nil then
+                                  table.insert(result, string.sub(value, offset))
+                                  break
+                                end
+                                table.insert(result, string.sub(value, offset, first - 1))
+                                table.insert(result, replacement)
+                                offset = last + 1
+                              end
+                              return table.concat(result)
+                            end
+
+                            local function public_base(authority)
+                              if authority == "localhost:30600" or authority == "127.0.0.1:30600" then
+                                return "http://" .. authority
+                              end
+                              local label = string.match(
+                                authority,
+                                "^(wa%-[a-z0-9][a-z0-9%-]*)%.intar%.app$"
+                              )
+                              if label == nil or #label > 63 or string.sub(label, -1) == "-" then
+                                return nil
+                              end
+                              return "https://" .. authority
+                            end
+
+                            function envoy_on_request(handle)
+                              local base = public_base(handle:headers():get(":authority") or "")
+                              if base == nil then
+                                handle:respond(
+                                  {
+                                    [":status"] = "400",
+                                    ["content-type"] = "text/plain",
+                                    ["cache-control"] = "no-store"
+                                  },
+                                  "invalid Host\\n"
+                                )
+                                return
+                              end
+                              handle:streamInfo():dynamicMetadata():set(
+                                "intar.portal-adapter",
+                                "public_base",
+                                base
+                              )
+                            end
+
+                            function envoy_on_response(handle)
+                              if handle:streamInfo():routeName() ~= "portal-ui" then
+                                return
+                              end
+                              local content_type = handle:headers():get("content-type") or ""
+                              if string.find(content_type, "text/html", 1, true) == nil then
+                                return
+                              end
+                              local metadata = handle:streamInfo():dynamicMetadata():get(
+                                "intar.portal-adapter"
+                              )
+                              if metadata == nil or metadata.public_base == nil then
+                                return
+                              end
+                              local body = handle:body()
+                              if body == nil then
+                                return
+                              end
+                              local content = body:getBytes(0, body:length())
+                              content = replace_all(
+                                content,
+                                "http://localhost:30900",
+                                metadata.public_base .. "/__intar-s3"
+                              )
+                              content = replace_all(
+                                content,
+                                "http://localhost:30030",
+                                metadata.public_base .. "/__intar-grafana"
+                              )
+                              body:setBytes(content)
+                              handle:headers():remove("content-length")
+                              handle:headers():remove("etag")
+                            end
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                          suppress_envoy_headers: true
+      clusters:
+        - name: portal
+          type: STATIC
+          connect_timeout: 2s
+          circuit_breakers:
+            thresholds:
+              - priority: DEFAULT
+                max_requests: 32
+          load_assignment:
+            cluster_name: portal
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 127.0.0.1
+                          port_value: 8080
+        - name: rustfs
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          connect_timeout: 2s
+          load_assignment:
+            cluster_name: rustfs
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: rustfs-svc.rustfs.svc.cluster.local
+                          port_value: 9000
+    admin:
+      address:
+        socket_address:
+          address: 127.0.0.1
+          port_value: 19000
+`;
+  adapted = adapted.replace(
+    namespaceAnchor,
+    `${namespaceAnchor}
+${adapterConfig}---`,
+  );
+
+  replaceOnce(
+    `    spec:
+      serviceAccountName: portal
+      containers:`,
+    `    spec:
+      serviceAccountName: portal
+      automountServiceAccountToken: false
+      volumes:
+        - name: portal-kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+        - name: workspace-app-adapter-config
+          configMap:
+            name: portal-workspace-app-adapter
+        - name: workspace-app-adapter-tmp
+          emptyDir:
+            sizeLimit: 16Mi
+      containers:`,
+    "pod volumes",
+  );
+  replaceOnce(
+    `          ports:
+            - containerPort: 8080
+              name: http`,
+    `          ports:
+            - containerPort: 8080
+              name: portal-http`,
+    "portal port",
+  );
+  replaceOnce(
+    `          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http`,
+    `          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: portal-http`,
+    "portal readiness probe",
+  );
+  replaceOnce(
+    `          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http`,
+    `          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: portal-http`,
+    "portal liveness probe",
+  );
+  replaceOnce(
+    `          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service`,
+    `          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: portal-kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        - name: workspace-app-adapter
+          image: docker.io/envoyproxy/envoy@sha256:c5e8a68e52f4d4697a9adb280dbe415d77fedf1257e183dcb86205bd438f18bd
+          command: ["/usr/local/bin/envoy"]
+          args:
+            - --disable-hot-restart
+            - --concurrency
+            - "1"
+            - -c
+            - /etc/intar-workspace-app/envoy.yaml
+            - --log-level
+            - warn
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - containerPort: 18080
+              name: gateway
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              httpHeaders:
+                - name: Host
+                  value: localhost:30600
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              httpHeaders:
+                - name: Host
+                  value: localhost:30600
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          volumeMounts:
+            - name: workspace-app-adapter-config
+              mountPath: /etc/intar-workspace-app/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+            - name: workspace-app-adapter-tmp
+              mountPath: /tmp
+---
+apiVersion: v1
+kind: Service`,
+    "adapter container",
+  );
+  replaceOnce(
+    `      targetPort: http
+      nodePort: 30600`,
+    `      targetPort: gateway
+      nodePort: 30600`,
+    "service target",
+  );
+  replaceOnce(
+    `            # Host the BROWSER uses for presigned URLs (the RustFS NodePort
+            # as seen from the attendee's machine). Matches NODEPORT_RUSTFS_S3.
+            - name: S3_PUBLIC_ENDPOINT`,
+    `            # Cloudbox signs with the stable guest-local RustFS authority.
+            # The sidecar rewrites rendered URLs to a route-local /__intar-s3/
+            # path, then restores this authority before RustFS verifies SigV4.
+            - name: S3_PUBLIC_ENDPOINT`,
+    "S3 public endpoint comment",
+  );
+  replaceOnce(
+    `            # Browser-facing Grafana (NodePort 30030, the Victoria-stack
+            # Grafana) — used for the portal's observability deep-links.
+            - name: GRAFANA_URL`,
+    `            # Stable marker for observability deep-links. The sidecar
+            # replaces it with guidance to open the separately authorized
+            # Grafana route under Workspace applications in the Intar room.
+            - name: GRAFANA_URL`,
+    "Grafana public endpoint comment",
+  );
+
+  return adapted;
 }
 
 function renderRuntimeBootstrap(): string {
@@ -2378,7 +3613,10 @@ function adaptGrafanaCatalog(value: string): string {
   if (value.split(expected).length - 1 !== 1) {
     throw new Error("Grafana catalog browser-port anchor changed upstream");
   }
-  return value.replace(expected, "Browser: http://localhost:30030");
+  return value.replace(
+    expected,
+    "Browser: declared as the Grafana workspace application on port 30030",
+  );
 }
 
 function read(relative: string): string {

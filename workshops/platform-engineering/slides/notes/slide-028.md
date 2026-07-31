@@ -1,7 +1,7 @@
-Set the timer visibly. The task: run the pre-flight, fix what it flags (most common: Docker not running, or Docker memory limit below 10 GB), and run the module's verify.sh.
+Set the timer visibly. The task: check in, wait for the Intar workspace to become ready, open its terminal, and run the module verifier. Treat Docker, resource, registry, or agent failures as provisioning failures.
 
-Already green because you did the prework? Perfect — you have 15 minutes of head start: skim lab/01-cluster/README.md, or help a neighbor. Helping a neighbor is the fastest way to learn this material.
+Already green when the lobby opens? Perfect — use the remaining preflight time to skim lab/01-cluster/README.md, or help a neighbor. Helping a neighbor is the fastest way to learn this material.
 
-Triage guidance for presenters/helpers: image pulls not done is the only unfixable-in-room problem (bandwidth) — those people pair up or go to Codespaces immediately. Everything else (memory limits, missing tools) is a 2-minute fix.
+Triage guidance for presenters/helpers: use the facilitator roster, named probe state, and help queue. Registry, quota, location, guest-kernel, or bootstrap failures belong in the Intar recovery path; do not move learners to an untracked runtime.
 
-When ~90% of the room is green, move on — stragglers keep pulling in the background and module 01 doesn't need the images immediately.
+Move on only when the facilitator preflight shows enough ready seats for the room. Keep late workspaces visible in the lobby and use checkpoint recovery for learners who join after the release.

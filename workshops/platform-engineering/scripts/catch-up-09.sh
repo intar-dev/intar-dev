@@ -126,4 +126,4 @@ until s3 s3api list-objects-v2 --bucket images --prefix thumbs/ \
   [ "$WAITED" -ge 240 ] && { echo "no thumbnail after ${WAITED}s — check: kubectl -n pipeline logs -l serving.knative.dev/service=resizer -c user-container" >&2; exit 1; }
   sleep 10; WAITED=$((WAITED + 10))
 done
-echo "thumbnail produced after ~${WAITED}s — see http://localhost:30600/gallery"
+echo "thumbnail produced after ~${WAITED}s — see it in Cloudbox Console under Gallery."

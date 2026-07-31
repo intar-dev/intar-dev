@@ -123,6 +123,66 @@ if (( status == 0 )); then
     observability_status=1
   fi
 
+  public_host=wa-workshop-probe.intar.app
+  portal_workspace_app_curl() {
+    curl -sS --max-time 15 \
+      -H "Host: ${public_host}" \
+      -H "X-Forwarded-Host: ${public_host}" \
+      -H 'X-Forwarded-Proto: https' \
+      -H 'X-Forwarded-Port: 443' \
+      "$@"
+  }
+
+  if ! gallery_page="$(portal_workspace_app_curl \
+    --fail \
+    http://localhost:30600/gallery/grid)"; then
+    printf 'Cloudbox gallery did not answer through the canonical workspace-app Host\n' >&2
+    observability_status=1
+  elif [[ "${gallery_page}" == *"localhost:"* ]]; then
+    printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\n' >&2
+    observability_status=1
+  else
+    gallery_s3_url=$(
+      printf '%s\n' "${gallery_page}" |
+        grep -Eo 'https://wa-workshop-probe\.intar\.app/__intar-s3/[^"<[:space:]]+' |
+        sed 's/&amp;/\&/g' |
+        sed -n '1p' || true
+    )
+
+    if [[ -n "${gallery_s3_url}" ]]; then
+      gallery_s3_path="${gallery_s3_url#https://wa-workshop-probe.intar.app}"
+      gallery_s3_file="$(mktemp)"
+      if ! portal_workspace_app_curl \
+        --fail \
+        --output "${gallery_s3_file}" \
+        "http://localhost:30600${gallery_s3_path}"; then
+        printf 'Cloudbox gallery presigned S3 GET failed through /__intar-s3/\n' >&2
+        observability_status=1
+      elif [[ ! -s "${gallery_s3_file}" ]]; then
+        printf 'Cloudbox gallery presigned S3 GET returned an empty object\n' >&2
+        observability_status=1
+      fi
+      rm -f "${gallery_s3_file}"
+    elif [[ "${gallery_page}" != *"Nothing here yet"* ]]; then
+      printf 'Cloudbox gallery contained objects without a canonical /__intar-s3/ URL\n' >&2
+      observability_status=1
+    fi
+  fi
+
+  if ! gallery_s3_head_status="$(portal_workspace_app_curl \
+    --head \
+    --output /dev/null \
+    --write-out '%{http_code}' \
+    http://localhost:30600/__intar-s3/app-assets/hello.txt)"; then
+    printf 'Cloudbox S3 HEAD probe did not reach the workspace-app adapter\n' >&2
+    observability_status=1
+  elif [[ "${gallery_s3_head_status}" != 2* &&
+          "${gallery_s3_head_status}" != "403" ]]; then
+    printf 'Cloudbox S3 HEAD path returned HTTP %s instead of RustFS 2xx/403\n' \
+      "${gallery_s3_head_status}" >&2
+    observability_status=1
+  fi
+
   if (( observability_status != 0 )); then
     status=1
   fi

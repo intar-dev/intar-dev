@@ -1,8 +1,8 @@
-# Interlude: Backstage, live
+# Interlude: Backstage, unpacked
 
-Presenter demo · ~5 min · watch the projector
+Facilitator comparison · ~5 min · bundled screenshots
 
 - Catalog → template → new Gitea repo
-- → ArgoCD app → running pods
+- → Argo CD app → running pods
 - The template's glue is the real work
-- `backstage.yaml` stays in the catalog — try at home
+- Source retained; hosted runtime intentionally disabled

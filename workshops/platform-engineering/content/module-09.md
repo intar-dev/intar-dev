@@ -26,7 +26,7 @@ Victoria stack + OTel Collector — watches it end to end. The one new piece is
 Lambda. The uploader doesn't know the resizer exists; it emits a fact
 (`dev.cloudbox.image.uploaded`, as a CloudEvent) and the Broker routes it to whoever
 subscribed. That decoupling is the whole point of event-driven architecture, and today it
-runs on your laptop, readable end to end.
+runs on your learner VM, readable end to end.
 
 ## The task
 
@@ -38,7 +38,7 @@ runs on your laptop, readable end to end.
    in ns `pipeline`: with no traffic, both ksvcs sit at **zero**.
 2. **The moment.** Two terminals:
    - `kubectl -n pipeline get pods -w`
-   - open **http://localhost:30600/gallery** and upload any JPEG/PNG.
+   - under **Workspace applications** in the Intar workshop room, open **Cloudbox Console**, go to **Gallery**, and upload any JPEG/PNG.
 
    Watch the uploader pod cold-start to receive the file, then the *resizer* appear from
    nowhere to handle the event. Nothing called it. The first upload is the slow one: both
@@ -55,7 +55,7 @@ runs on your laptop, readable end to end.
    image bytes go, and what actually traveled through the Broker?
 5. **The flourish.** Observability is an on-demand capability — enable the Victoria stack +
    OTel Collector from the catalog first (hint 5 has the files), then find the upload's trace
-   in Grafana at **http://localhost:30030** → Explore → **VictoriaTraces** and see the chain —
+   in **Grafana** under **Workspace applications** in the Intar workshop room → Explore → **VictoriaTraces** and see the chain —
    portal → uploader → broker → resizer — as one waterfall. Hint 5 if the Jaeger trace view is
    new to you.
 6. Run `./verify.sh`.
@@ -94,7 +94,7 @@ production grade?
 - **Sepia.** Fork `apps/resizer` into a sepia-filter service writing `sepia/`,
   subscribe it with its own Trigger — a second opinion on every upload, built entirely
   from parts you own.
-- You built S3-events → queue → function on a laptop. Sketch which managed products
+- You built S3-events → queue → function on a learner VM. Sketch which managed products
   this replaces on your cloud bill, and what you'd genuinely still pay for.
 
 > Run the pinned manual verifier at `/opt/platform-engineering-workshop/lab/09-capstone/verify.sh`. Layered hints and the solution are released separately by Intar.

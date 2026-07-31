@@ -1,6 +1,6 @@
 # Workshop addition (not part of the upstream chart): expose the S3 endpoint
-# on a stable NodePort so attendees can use presigned URLs and S3 clients from
-# the laptop without a port-forward: http://localhost:30900
+# on a stable guest-only NodePort. Intar reaches it through SSH direct
+# forwarding; the port is never published from the learner VM.
 apiVersion: v1
 kind: Service
 metadata:

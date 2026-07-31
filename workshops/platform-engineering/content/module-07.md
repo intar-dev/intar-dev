@@ -5,8 +5,7 @@
 At the end of this module your cluster builds its own container images: an Argo Workflow
 runs BuildKit (rootless) *inside* the cluster, builds the tiny app in [`app/`](app/) from
 your in-cluster Gitea, pushes it to your in-cluster Zot registry, and a Deployment runs
-it. Zero external services touched — git, build, registry, deploy all happen on your
-laptop's cloud.
+it. Git, build, the learner registry, and deployment all stay inside the learner VM; only declared digest-pinned base images come from external registries.
 
 > **Honesty note:** this is the least-rehearsed path in the workshop (rootless BuildKit
 > on Talos is pioneer territory — nobody has published this combo). It's a presenter demo
@@ -61,7 +60,7 @@ in Zot's catalog; and the hello-site Deployment Available and serving the page.
 ## Explain-back
 
 Tell your neighbor: list every network hop in your pipeline (git clone from ? → build
-runs where? → push to ? → kubelet pulls from ?). How many of those left your laptop?
+runs where? → push to ? → kubelet pulls from ?). How many of those left your learner VM?
 That's the sovereignty argument in one answer.
 
 ## Going deeper

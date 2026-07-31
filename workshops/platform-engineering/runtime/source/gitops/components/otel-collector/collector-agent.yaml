@@ -64,7 +64,7 @@ data:
       # Guardrail against the module-09 RAM ceiling: shed load before the
       # container hits its memory limit rather than getting OOM-killed.
       # Explicit MiB (not percentage) so behaviour is deterministic across the
-      # varied cgroup setups on attendee laptops. ~80% of the 256Mi limit.
+      # fixed learner-VM cgroup contract. ~80% of the 256Mi limit.
       memory_limiter:
         check_interval: 5s
         limit_mib: 200

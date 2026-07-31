@@ -94,6 +94,22 @@ if ((manifest.match(/port\s+= 30030/gu)?.length ?? 0) !== 1) {
   throw new Error("workshop.hcl must declare Grafana port 30030 exactly once");
 }
 
+const cloudbox = applicationBlock(manifest, "cloudbox");
+for (const expected of [
+  "port           = 30600",
+  'protocol       = "http"',
+  'release_module = "08"',
+]) {
+  if (!cloudbox.includes(expected)) {
+    throw new Error(
+      `Cloudbox application is missing ${JSON.stringify(expected)}`,
+    );
+  }
+}
+if ((manifest.match(/port\s+= 30600/gu)?.length ?? 0) !== 1) {
+  throw new Error("workshop.hcl must declare Cloudbox port 30600 exactly once");
+}
+
 const versions = requireText(
   "runtime/source/scripts/versions.env",
   'NODEPORT_RUSTFS_CONSOLE="30901"',
@@ -141,6 +157,101 @@ if (rustfs.includes("NET_BIND_SERVICE")) {
   throw new Error("RustFS listener or security capabilities were changed");
 }
 
+const portalAdapter = requireText(
+  "runtime/source/gitops/components/portal/portal.yaml",
+  "name: portal-workspace-app-adapter",
+  "per_connection_buffer_limit_bytes: 1048576",
+  "port_value: 18080",
+  'domains: ["*"]',
+  "prefix: /__intar-s3/",
+  'regex: "^(GET|HEAD)$"',
+  "cluster: rustfs",
+  "prefix_rewrite: /",
+  "host_rewrite_literal: localhost:30900",
+  "timeout: 0s",
+  "status: 405",
+  '"method not allowed\\n"',
+  "Workspace applications → Grafana",
+  "prefix: /agent/ask",
+  "name: portal-agent-stream",
+  "timeout: 130s",
+  "name: portal-ui",
+  "timeout: 70s",
+  'authority == "localhost:30600"',
+  'authority == "127.0.0.1:30600"',
+  '"^(wa%-[a-z0-9][a-z0-9%-]*)%.intar%.app$"',
+  "#label > 63",
+  'string.sub(label, -1) == "-"',
+  'return "https://" .. authority',
+  '[":status"] = "400"',
+  '"invalid Host\\n"',
+  'routeName() ~= "portal-ui"',
+  '"http://localhost:30900"',
+  'metadata.public_base .. "/__intar-s3"',
+  '"http://localhost:30030"',
+  'metadata.public_base .. "/__intar-grafana"',
+  "suppress_envoy_headers: true",
+  "automountServiceAccountToken: false",
+  "name: portal-kube-api-access",
+  "mountPath: /var/run/secrets/kubernetes.io/serviceaccount",
+  "--concurrency",
+  "runAsGroup: 65534",
+  "type: RuntimeDefault",
+  "docker.io/envoyproxy/envoy@sha256:c5e8a68e52f4d4697a9adb280dbe415d77fedf1257e183dcb86205bd438f18bd",
+  "targetPort: gateway",
+);
+if ((portalAdapter.match(/prefix: \/__intar-s3\//gu)?.length ?? 0) !== 2) {
+  throw new Error(
+    "portal adapter must have one GET/HEAD S3 route and one 405 fallback",
+  );
+}
+if ((portalAdapter.match(/targetPort: gateway/gu)?.length ?? 0) !== 1) {
+  throw new Error("portal NodePort must target only the workspace-app adapter");
+}
+if (
+  (portalAdapter.match(
+    /mountPath: \/var\/run\/secrets\/kubernetes\.io\/serviceaccount/gu,
+  )?.length ?? 0) !== 1
+) {
+  throw new Error(
+    "only the portal container may mount the Kubernetes API credential",
+  );
+}
+requireOrderedText(
+  "runtime/source/gitops/components/portal/portal.yaml",
+  `                            - match:
+                                prefix: /__intar-s3/
+                                headers:
+                                  - name: ":method"
+                                    safe_regex_match:
+                                      google_re2: {}
+                                      regex: "^(GET|HEAD)$"
+                              route:
+                                cluster: rustfs
+                                prefix_rewrite: /
+                                host_rewrite_literal: localhost:30900
+                                timeout: 0s`,
+  `                            - match:
+                                prefix: /__intar-s3/
+                              direct_response:
+                                status: 405`,
+  `                            - match:
+                                prefix: /agent/ask
+                                headers:
+                                  - name: ":method"
+                                    exact_match: POST
+                              name: portal-agent-stream
+                              route:
+                                cluster: portal
+                                timeout: 130s`,
+  `                            - match:
+                                prefix: /
+                              name: portal-ui
+                              route:
+                                cluster: portal
+                                timeout: 70s`,
+);
+
 const kourier = requireText(
   "runtime/source/gitops/components/knative-serving/kourier.yaml",
   "nodePort: 31080",
@@ -186,6 +297,24 @@ requireText(
   "http://localhost:31080/",
   "did not answer through the declared upstream-host contract",
 );
+requireText(
+  "scripts/verify-08.sh",
+  "wa-workshop-probe.intar.app",
+  "X-Forwarded-Host:",
+  "http://localhost:30600/",
+  "canonical workspace-app Host",
+  "wa-workshop-probe.intar.app.attacker.invalid",
+  "invalid-Host probe",
+  "accepted invalid Host",
+  '"${invalid_host_status}" != "400"',
+  "-X PUT",
+  '"${s3_put_status}" != "405"',
+  "--head",
+  "http://localhost:30600/__intar-s3/app-assets/hello.txt",
+  "instead of RustFS 2xx/403",
+  "http://localhost:30600/__intar-grafana",
+  "safe Intar navigation",
+);
 
 requireOrderedText(
   "scripts/catch-up-09.sh",
@@ -219,6 +348,17 @@ requireText(
   '["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"]',
   "[.processes[]?.serviceName]",
   "VictoriaTraces datasource did not expose one connected upload trace",
+  "http://localhost:30600/gallery/grid",
+  "Cloudbox gallery exposed a localhost URL",
+  "https://wa-workshop-probe\\.intar\\.app/__intar-s3/",
+  String.raw`sed 's/&amp;/\&/g'`,
+  'gallery_s3_path="${gallery_s3_url#https://wa-workshop-probe.intar.app}"',
+  "presigned S3 GET failed through /__intar-s3/",
+  "presigned S3 GET returned an empty object",
+  "http://localhost:30600/__intar-s3/app-assets/hello.txt",
+  "--head",
+  '"${gallery_s3_head_status}" != "403"',
+  "instead of RustFS 2xx/403",
 );
 
 requireText(
@@ -227,10 +367,11 @@ requireText(
 );
 requireText(
   "runtime/source/gitops/catalog/grafana.yaml",
-  "Browser: http://localhost:30030",
+  "Browser: declared as the Grafana workspace application on port 30030",
 );
 rejectText(
   "runtime/source/gitops/catalog/grafana.yaml",
+  "http://localhost:30030",
   "localhost:30031",
 );
 requireText(
@@ -293,6 +434,376 @@ requireText(
 rejectText(
   "slides/notes/slide-018.md",
   "Prometheus/Loki/Jaeger datasources",
+);
+
+requireText(
+  "content/module-02.md",
+  "under **Workspace applications** in the Intar workshop room, open **Gitea**",
+  "from the same **Workspace applications** list, open **Argo CD**",
+);
+rejectText(
+  "content/module-02.md",
+  "Gitea: http://localhost:30300",
+  "ArgoCD: http://localhost:30080",
+);
+requireText(
+  "content/module-03.md",
+  "prove it with `curl --fail` from the same",
+  "guest-local and intentionally not exposed as a",
+  "open **RustFS** under **Workspace applications**",
+);
+rejectText(
+  "content/module-03.md",
+  "Open it in your browser",
+  "download link to someone with zero AWS involved",
+);
+requireText(
+  "hints/module-03-05.md",
+  "docker run --rm --network host -i",
+  "public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581",
+  'PRESIGNED_URL="$(aws_s3 s3 presign',
+  'curl --fail --show-error "$PRESIGNED_URL"',
+  "Workspace applications → RustFS",
+  "S3 API URL is guest-local",
+);
+rejectText("hints/module-03-05.md", "open the printed URL in your browser");
+for (const relative of [
+  "content/module-03-solution.md",
+  "scripts/catch-up-03.sh",
+]) {
+  requireText(
+    relative,
+    "docker run --rm --network host -i",
+    "public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581",
+    'PRESIGNED_URL="$(aws_s3 s3 presign',
+    'curl --fail --show-error --output /dev/null "$PRESIGNED_URL"',
+    "Presigned object download verified inside the learner VM.",
+  );
+  rejectText(relative, "if command -v aws", "in-cluster aws-cli pod");
+}
+requireText(
+  "scripts/verify-03.sh",
+  "rustfs_object_key",
+  "rustfs_presigned_url",
+  "RustFS presigned download failed inside the learner VM",
+  "docker run --rm --network host -i",
+  "public.ecr.aws/aws-cli/aws-cli@sha256:bad3346a39098ab077be6ed58c7e1fe68321a4a844c7c740318100013e6c3581",
+);
+requireText(
+  "facilitator/module-03.md",
+  "guest-local presigned URL with `curl` in the learner terminal",
+  "private facilitator screen",
+  "roster-by-module live-verification view",
+  "watch Intar's **Need help** queue",
+  "module-03 catch-up checkpoint through Intar",
+);
+rejectText(
+  "facilitator/module-03.md",
+  "Cloudbox Console's Workshop page up on the projector",
+  "sweep for red stickies",
+  "catch-up.sh 3",
+);
+requireText(
+  "facilitator/module-07.md",
+  "facilitator is explicitly enrolled with a workspace",
+  "consenting participant's shared workspace",
+  "guest-local OCI API",
+);
+rejectText("facilitator/module-07.md", "projector cluster");
+requireText(
+  "content/module-08.md",
+  "Open it under **Workspace applications**",
+  "the Intar workshop room",
+  "not a declared Intar workspace application",
+);
+rejectText(
+  "content/module-08.md",
+  "http://localhost:30600",
+  "guest sign-in at :30700",
+);
+requireText(
+  "content/module-09.md",
+  "under **Workspace applications** in the Intar workshop room, open **Cloudbox Console**",
+  "in **Grafana** under **Workspace applications** in the Intar workshop room",
+);
+rejectText(
+  "content/module-09.md",
+  "http://localhost:30600/gallery",
+  "http://localhost:30030",
+);
+requireText(
+  "hints/module-08-04.md",
+  "Workspace applications → Cloudbox Console → Databases",
+);
+rejectText("hints/module-08-04.md", "open http://localhost:30600");
+requireText(
+  "hints/module-09-05.md",
+  "open **Grafana** under **Workspace applications** in the Intar workshop room",
+);
+rejectText("hints/module-09-05.md", "http://localhost:30030");
+requireText(
+  "hints/module-09-06.md",
+  "Workspace applications → Cloudbox Console → Gallery",
+  "aws --endpoint-url http://localhost:30900",
+);
+rejectText("hints/module-09-06.md", "http://localhost:30600/gallery");
+
+requireText(
+  "slides/slide-025.md",
+  "Intar workshop room → **Agenda** → **Live verification**",
+  "Verification latches; later regressions remain visible",
+);
+rejectText("slides/slide-025.md", "Cloudbox Console", "localhost");
+requireText(
+  "slides/notes/slide-025.md",
+  "technical verification",
+  "current probe health",
+  "caught-up state",
+  "explain-back",
+);
+requireText(
+  "slides/slide-064.md",
+  "in Intar, open Workspace applications → Cloudbox Console",
+);
+rejectText("slides/slide-064.md", "open http://localhost:30600");
+for (const relative of [
+  "facilitator/module-08.md",
+  "slides/notes/slide-063.md",
+]) {
+  requireText(
+    relative,
+    "Backstage is not a declared Intar workspace application",
+  );
+  rejectText(relative, "guest sign-in at :30700");
+}
+requireText(
+  "facilitator/module-08.md",
+  "open **Cloudbox Console** under **Workspace applications**",
+  "It becomes available with module 08",
+  "Intar's native verification view used earlier",
+);
+rejectText(
+  "facilitator/module-08.md",
+  "explore the Console at :30600",
+  "they've been watching all day",
+);
+requireText(
+  "slides/notes/slide-040.md",
+  "Intar's synchronized break timer",
+  "private facilitator screen",
+  "Need help",
+);
+rejectText(
+  "slides/notes/slide-040.md",
+  "Cloudbox Console",
+  "red stickies",
+);
+requireText(
+  "slides/notes/slide-055.md",
+  "facilitator is explicitly enrolled with a workspace",
+  "consenting participant's shared workspace",
+);
+rejectText("slides/notes/slide-055.md", "projector cluster");
+requireText(
+  "slides/notes/slide-064.md",
+  "open **Cloudbox Console** under **Workspace applications**",
+  "It becomes available with module 08",
+);
+rejectText(
+  "slides/notes/slide-064.md",
+  "explore the Console at :30600",
+  "they've been watching all day",
+);
+
+requireText(
+  "content/module-08-solution.md",
+  "curl -fsS --max-time 5 -o /dev/null http://localhost:30600/",
+  "open it under Workspace applications in the Intar room",
+  "see it in Cloudbox Console under Databases",
+);
+requireText(
+  "scripts/catch-up-08.sh",
+  "curl -fsS --max-time 5 -o /dev/null http://localhost:30600/",
+  "open it under Workspace applications in the Intar room",
+  "see it in Cloudbox Console under Databases",
+);
+requireText(
+  "content/module-09-solution.md",
+  "http://localhost:30600/gallery/upload",
+  "see it in Cloudbox Console under Gallery",
+);
+requireText(
+  "scripts/catch-up-09.sh",
+  "http://localhost:30600/gallery/upload",
+  "see it in Cloudbox Console under Gallery",
+);
+
+for (const relative of [
+  "runtime/source/lab/02-gitops/verify.sh",
+  "runtime/source/lab/03-data/verify.sh",
+  "runtime/source/lab/04-self-service/verify.sh",
+]) {
+  requireText(relative, "Workspace applications in the Intar room");
+  rejectText(relative, "open http://localhost:30080", "Check http://localhost:30080");
+}
+requireText(
+  "runtime/source/lab/08-portal/verify.sh",
+  "curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://localhost:30600/",
+  "Cloudbox Console's New database form in Intar",
+);
+rejectText(
+  "runtime/source/lab/08-portal/verify.sh",
+  "(http://localhost:30600/databases)",
+);
+requireText(
+  "runtime/source/lab/09-capstone/verify.sh",
+  "aws --endpoint-url http://localhost:30900",
+  "Cloudbox Console's Gallery in Intar",
+);
+rejectText(
+  "runtime/source/lab/09-capstone/verify.sh",
+  "photo at http://localhost:30600/gallery",
+);
+
+requireText(
+  "content/module-01.md",
+  "dedicated Intar",
+  "learner VM",
+  "facilitator can restore the canonical checkpoint",
+);
+rejectText(
+  "content/module-01.md",
+  "runs on your laptop",
+  "Docker on your laptop",
+  "./scripts/kind-fallback.sh",
+  "images are already local",
+);
+requireText(
+  "facilitator/module-00.md",
+  "dedicated Intar workspace",
+  "pins one CPX42 per learner",
+  "registry egress",
+  "Intar recovery path",
+);
+rejectText(
+  "facilitator/module-00.md",
+  "Docker Desktop",
+  "OrbStack",
+  "WSL2",
+  "Codespaces",
+  "airplane mode",
+  "prework email",
+);
+requireText(
+  "slides/slide-005.md",
+  "inside your **own workspace**",
+  "Your Hetzner project",
+  "Verified teardown",
+);
+rejectText("slides/slide-005.md", "No account", "No bill", "tomorrow");
+requireText(
+  "slides/slide-019.md",
+  "runtime/images.lock",
+  "**Fits one 16 GiB learner VM**",
+  "Talos, Docker, and Debian",
+);
+rejectText("slides/slide-019.md", "16 GB laptop", "≥10 GB to Docker");
+requireText(
+  "slides/slide-023.md",
+  "**Need help**",
+  "browser-terminal assistance",
+  "Restore or recreate through Intar",
+);
+rejectText(
+  "slides/slide-023.md",
+  "green sticky",
+  "red sticky",
+  "Devcontainer",
+);
+requireText(
+  "slides/slide-028.md",
+  "dedicated Intar workspace is provably ready",
+  "**Need help**",
+);
+requireText(
+  "slides/slide-080.md",
+  "Your learner VM",
+  "live until verified teardown",
+);
+requireText(
+  "slides/slide-085.md",
+  "**Every layer understood. Your platform. Your terms.**",
+);
+for (const relative of [
+  "slides/notes/slide-005.md",
+  "slides/notes/slide-026.md",
+  "slides/notes/slide-027.md",
+  "slides/notes/slide-028.md",
+  "slides/notes/slide-080.md",
+  "slides/notes/slide-085.md",
+]) {
+  rejectText(
+    relative,
+    "Docker Desktop",
+    "OrbStack",
+    "WSL2",
+    "Codespaces",
+    "airplane mode",
+    "No bill",
+    "laptop lid",
+    "cluster on your laptop",
+  );
+}
+requireText(
+  "slides/notes/slide-080.md",
+  "billed directly to the organization's Hetzner project",
+  "zero servers, IPs, keys, routes, or slots",
+);
+
+requireText(
+  "slides/slide-063.md",
+  "# Interlude: Backstage, unpacked",
+  "bundled screenshots",
+  "hosted runtime intentionally disabled",
+);
+for (const relative of [
+  "facilitator/module-05.md",
+  "facilitator/module-08.md",
+  "slides/notes/slide-049.md",
+  "slides/notes/slide-062.md",
+  "slides/notes/slide-063.md",
+]) {
+  rejectText(
+    relative,
+    "pre-enable backstage.yaml",
+    "Backstage live",
+    "backstage.yaml was pre-enabled",
+    "backstage.yaml stays in the catalog",
+  );
+}
+requireText(
+  "runtime/source/gitops/catalog/backstage.yaml",
+  "keep this disabled",
+  "no Backstage workspace application route is declared",
+);
+rejectText(
+  "runtime/source/gitops/catalog/backstage.yaml",
+  "commit -m 'enable backstage'",
+);
+rejectText(
+  "slides/notes/slide-025.md",
+  "~100 lines of Go",
+  "everyone's laptop",
+);
+requireText(
+  "runtime/source/gitops/components/portal/portal.yaml",
+  "sidecar rewrites rendered URLs to a route-local /__intar-s3/",
+  "Grafana route under Workspace applications in the Intar room",
+);
+rejectText(
+  "runtime/source/gitops/components/portal/portal.yaml",
+  "as seen from the attendee's machine",
+  "Browser-facing Grafana (NodePort 30030",
 );
 
 const imageLock = read("runtime/images.lock");

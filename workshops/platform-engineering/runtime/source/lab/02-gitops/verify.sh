@@ -34,13 +34,13 @@ check_app() { # <name>
     fi
     sleep 5
   done
-  fail "ArgoCD app '$1' is '$st' (want Healthy) — open http://localhost:30080 or: kubectl -n argocd get app $1 -o yaml"
+  fail "ArgoCD app '$1' is '$st' (want Healthy) — open Argo CD under Workspace applications in the Intar room or: kubectl -n argocd get app $1 -o yaml"
 }
 
 # --- Gitea -------------------------------------------------------------------
 if curl -fsS --max-time 5 http://localhost:30300/api/healthz >/dev/null 2>&1 \
    || curl -fsS --max-time 5 http://localhost:30300/ >/dev/null 2>&1; then
-  ok "Gitea answers on http://localhost:30300"
+  ok "Gitea answers on its declared workspace-app port 30300"
 else
   fail "Gitea not reachable on :30300 — did ./scripts/bootstrap-gitops.sh run? kubectl -n gitea get pods"
 fi

@@ -4,6 +4,6 @@ Beat 1 runs entirely digest-pinned against qwen3:4b on host-side Ollama (never i
 
 Beat 2 is one git push: switch the same ModelConfig to the free OpenCode Zen key from the module 00 prep (or a personal Claude/OpenAI key as the documented fallback), and re-run the investigation — same fault, same Case file, now a real hypothesis with a kill-test. Verify it against the cluster, then fix it with the git revert the Case file hands you.
 
-16 GB laptop callout, say it out loud: the local model doesn't fit alongside the running cluster on the minimum spec — go straight to beat 2, the README says so plainly, no twenty minutes lost discovering it. And the standing fallback if Kagent itself misbehaves on the day: module 05's bring-your-own-agent flow works identically, no platform dependency.
+16 GB learner VM callout, say it out loud: the local model doesn't fit alongside the running cluster on the minimum spec — go straight to beat 2, the README says so plainly, no twenty minutes lost discovering it. And the standing fallback if Kagent itself misbehaves on the day: module 05's bring-your-own-agent flow works identically, no platform dependency.
 
 Screenshot note for whoever refreshes this deck: swap in a real Case file capture from the Console once the module-10 Console slice lands — the interactive prototype is the placeholder reference for now.

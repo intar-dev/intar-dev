@@ -30,7 +30,7 @@ check_app() { # <name>
     fi
     sleep 5
   done
-  fail "ArgoCD app '$1' is '$st' — check http://localhost:30080 and the module hints"
+  fail "ArgoCD app '$1' is '$st' — open Argo CD under Workspace applications in the Intar room; consult the module hints"
 }
 
 # --- Crossplane installed ----------------------------------------------------

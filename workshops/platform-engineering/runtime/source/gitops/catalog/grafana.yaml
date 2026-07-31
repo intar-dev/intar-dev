@@ -1,6 +1,6 @@
 # Grafana 12.4.5 — dashboards for the Victoria stack (observability rework,
 # issue #57). Datasources pre-provisioned: VictoriaMetrics (Prometheus, default)
-# and VictoriaLogs (Loki). Anonymous read (Viewer). Browser: http://localhost:30030
+# and VictoriaLogs (Loki). Anonymous read (Viewer). Browser: declared as the Grafana workspace application on port 30030
 # (NodePort 30030 — the canonical observability port, freed when otel-lgtm was
 # retired in the #57 rework). On-demand: enabled with the rest of the Victoria
 # observability capability, not wave-0.

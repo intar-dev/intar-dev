@@ -88,7 +88,7 @@ fi
 
 echo
 if [ "$FAILED" -gt 0 ]; then
-  echo "❌ $FAILED check(s) failed. This is the pioneer module — red sticky note and we'll dig in together."
+  echo "❌ $FAILED check(s) failed. This is the pioneer module — open Need help and we'll dig in together."
   exit 1
 fi
 echo "✅ Module 07 complete — git, build, registry, deploy: all yours."

@@ -7,6 +7,6 @@
    **Onboarding** → the labs, hints, locked-page teasers
    **Secure default** → "you hand the portal its keys" (RBAC)
    **Self-service** → New Database / New Function forms
-   **Thinnest viable** → all of it, on your laptop
+   **Thinnest viable** → all of it, on your learner VM
 
 A shopping list of things you'd rent — assembled into a platform you **own**.

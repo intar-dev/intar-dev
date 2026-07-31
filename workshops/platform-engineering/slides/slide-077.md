@@ -7,6 +7,6 @@
   Low cognitive loadintent, not implementation
   Optional & composableuse only what you need
   Secure by defaultsafe defaults, guardrails
-  …on a laptopthe thinnest viable one
+  …on one learner VM — the thinnest viable one
 
 The CNCF Platforms White Paper's seven attributes — the vendor-neutral definition.

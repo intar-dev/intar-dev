@@ -1,7 +1,5 @@
-Once the platform's portal is running (it arrives via the catalog; you'll meet it properly in module 08), its Workshop page shows a checklist of all ten modules — each row inferred from your live cluster state: nodes ready, kube-proxy absent, Gitea healthy, a CNPG cluster in demo, WorkshopDatabases present, thumbnails in the images bucket, and so on.
+In the Intar workshop room, **Agenda** includes **Live verification** for every module. It shows technical verification separately from current probe health, caught-up state, and explain-back. Verification latches once achieved, while a later regression remains visible instead of erasing completion.
 
-Two honest caveats to mention: it's a hint, not a judge — verify.sh in each lab folder is the authoritative check; and module 05 (fault-fixing) can't be inferred from end-state at all.
+The manual `verify.sh` in each lab folder remains useful for detailed diagnostics; Intar records the named deterministic probe result as the session progress contract.
 
-We'll keep it on the projector between modules as the room's shared progress board. It's also a nice teaser: the page itself is ~100 lines of Go reading the Kubernetes API — you'll read its source in module 08.
-
-Now — let's make sure everyone's laptop is ready. Module 00.
+Keep the synchronized Intar projector view visible between modules. Now use the lobby preflight to make sure every checked-in learner workspace is ready for module 00.

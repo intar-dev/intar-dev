@@ -1,5 +1,5 @@
 First break, roughly the 2-hour mark. Fill in the actual return time on the projector (or say it twice).
 
-While people are away, this is a good moment to bring the Cloudbox Console's Workshop page up on the projector — by now most rows for 00–03 should be turning green across the room.
+Keep the projector on Intar's synchronized break timer. On the private facilitator screen, open the roster-by-module live-verification view and check modules 00–03 without exposing participant identities.
 
-Helpers: sweep for red stickies during the break; break time is catch-up time for anyone behind, and catch-up.sh 3 gets them fully current in ~2 minutes.
+Helpers: watch Intar's **Need help** queue. Claim unresolved requests and, when a learner needs canonical recovery, use the module-03 catch-up checkpoint through Intar rather than running hidden catch-up material in their terminal.

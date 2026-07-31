@@ -1,4 +1,4 @@
-# You leave with Bruktby's cloud —
-and it's **yours**
+# You build Bruktby's cloud —
+inside your **own workspace**
 
-Still running tomorrow. No account. No bill. No permission.
+Dedicated learner VM. Your Hetzner project. Measured cost. Verified teardown.
