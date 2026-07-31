@@ -106,9 +106,12 @@ patches=(
   --config-patch-controlplanes "${CONTROL_PLANE_PATCH}"
 )
 
-# The controlplane always gets the first host address of TALOS_SUBNET (.2;
-# .1 is the Docker bridge gateway).
+# The Docker provisioner creates one controlplane at the first host address of
+# TALOS_SUBNET (.2; .1 is the Docker bridge gateway). Workers are explicit.
 TALOS_CP_IP="${TALOS_SUBNET_GATEWAY%.*}.2"
+readonly TALOS_CONTROLPLANE_COUNT=1
+readonly TALOS_WORKER_COUNT=1
+readonly EXPECTED_TALOS_NODE_COUNT=$((TALOS_CONTROLPLANE_COUNT + TALOS_WORKER_COUNT))
 
 cleanup_destroyed_cluster_contexts() {
   local contexts current_context other_context talosconfig_path
@@ -613,7 +616,8 @@ recover_cluster_create_handshake() {
 require_cluster_create_running() {
   local exited_status
 
-  if [[ "${cluster_create_state}" == "recovered" ]]; then
+  if [[ "${cluster_create_state}" == "recovered" \
+    || "${cluster_create_state}" == "succeeded" ]]; then
     return 0
   fi
   [[ "${cluster_create_state}" == "running" && -n "${cluster_create_pid}" ]] \
@@ -629,6 +633,10 @@ require_cluster_create_running() {
     exited_status=$?
   fi
   cluster_create_pid=""
+  if (( exited_status == 0 )); then
+    cluster_create_state="succeeded"
+    return 0
+  fi
   if recover_cluster_create_handshake "${exited_status}"; then
     return 0
   fi
@@ -640,7 +648,8 @@ require_cluster_create_running() {
 wait_for_cluster_create_success() {
   local completion_deadline exited_status
 
-  if [[ "${cluster_create_state}" == "recovered" ]]; then
+  if [[ "${cluster_create_state}" == "recovered" \
+    || "${cluster_create_state}" == "succeeded" ]]; then
     return 0
   fi
   [[ "${cluster_create_state}" == "running" && -n "${cluster_create_pid}" ]] \
@@ -676,7 +685,7 @@ wait_for_cluster_create_success() {
 
 # --- 1. Create the cluster --------------------------------------------------------
 step "Creating Talos cluster '${CLUSTER_NAME}' (Talos ${TALOS_VERSION}, Kubernetes ${KUBERNETES_VERSION})"
-info "1 controlplane (${TALOS_MEMORY_CONTROLPLANE} MB) + 1 worker (${TALOS_MEMORY_WORKER} MB)"
+info "${TALOS_CONTROLPLANE_COUNT} controlplane (${TALOS_MEMORY_CONTROLPLANE} MB) + ${TALOS_WORKER_COUNT} worker (${TALOS_MEMORY_WORKER} MB)"
 
 # NodePorts are published on the controlplane container; Cilium's
 # kube-proxy replacement makes every NodePort answer on every node.
@@ -698,7 +707,7 @@ start_mount_capacity_sampler
     --name "${CLUSTER_NAME}" \
     --image "${TALOS_IMAGE}" \
     --kubernetes-version "${KUBERNETES_VERSION}" \
-    --workers 1 \
+    --workers "${TALOS_WORKER_COUNT}" \
     --memory-controlplanes "${TALOS_MEMORY_CONTROLPLANE}" \
     --memory-workers "${TALOS_MEMORY_WORKER}" \
     --subnet "${TALOS_SUBNET}" \
@@ -708,10 +717,10 @@ start_mount_capacity_sampler
 cluster_create_pid=$!
 cluster_create_state="running"
 
-# Talos v1.13 waits for Kubernetes node readiness before it merges the normal
-# kubeconfig. With CNI set to none, the nodes cannot become Ready until Cilium
-# is installed. Keep the supported cluster-create command running, obtain a
-# dedicated kubeconfig through the Talos API, and satisfy that readiness gate.
+# With CNI set to none, the nodes cannot become Ready until Cilium is installed.
+# Keep the supported cluster-create command running and obtain a dedicated
+# kubeconfig through the Talos API so Cilium can be applied during the documented
+# bootstrap window.
 step "Waiting for the Talos context and API"
 talos_context_ready=0
 talos_context_deadline=$((SECONDS + 600))
@@ -782,16 +791,22 @@ if ! chmod 0600 "${bootstrap_kubeconfig}"; then
   die "Could not protect the dedicated bootstrap kubeconfig"
 fi
 
-step "Waiting for the Kubernetes API readyz and node list"
+step "Waiting for all Kubernetes nodes to register"
 kubernetes_api_ready=0
 kubernetes_api_deadline=$((SECONDS + 300))
 while (( SECONDS < kubernetes_api_deadline )); do
+  # Mirror Talos v1.13.6's own pre-CNI Kubernetes check: an authenticated
+  # Node List must contain every expected node, but the Ready condition is
+  # intentionally deferred until Cilium exists. API-server /readyz is a
+  # stronger, unrelated boot-sequence signal and must not block CNI install.
+  # https://github.com/siderolabs/talos/blob/v1.13.6/pkg/cluster/check/kubernetes.go
   if timeout --signal=KILL 10s kubectl \
     --kubeconfig "${bootstrap_kubeconfig}" \
-    get --raw=/readyz >/dev/null 2>&1 \
-    && timeout --signal=KILL 10s kubectl \
-      --kubeconfig "${bootstrap_kubeconfig}" \
-      get nodes >/dev/null 2>&1; then
+    get nodes -o name 2>/dev/null \
+    | awk -v expected="${EXPECTED_TALOS_NODE_COUNT}" '
+        !/^node\/[^[:space:]]+$/ { invalid = 1 }
+        END { exit invalid || NR != expected }
+      '; then
     kubernetes_api_ready=1
     break
   fi
@@ -799,10 +814,17 @@ while (( SECONDS < kubernetes_api_deadline )); do
   sleep 2
 done
 if (( kubernetes_api_ready == 0 )); then
+  warn "Kubernetes API readyz diagnostic (not a pre-CNI success gate):"
+  timeout --signal=KILL 10s kubectl \
+    --kubeconfig "${bootstrap_kubeconfig}" \
+    get --raw='/readyz?verbose' 2>&1 \
+    | LC_ALL=C tr -cd '\11\12\15\40-\176' \
+    | tail -n 30 >&2 \
+    || true
   collect_failed_cluster_logs
-  die "Kubernetes API readyz and node list did not become available within 5 minutes"
+  die "Kubernetes did not report all ${EXPECTED_TALOS_NODE_COUNT} expected nodes within 5 minutes"
 fi
-ok "API server is answering (nodes are NotReady until Cilium arrives — expected)"
+ok "All ${EXPECTED_TALOS_NODE_COUNT} nodes registered (NotReady until Cilium arrives — expected)"
 
 # --- 3. Cilium ------------------------------------------------------------------------
 step "Installing Cilium ${CILIUM_VERSION} (CNI + kube-proxy replacement)"
