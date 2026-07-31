@@ -19,6 +19,8 @@ use http::StatusCode;
 use serde_json::json;
 use stargate_core::{AdminAuthSettings, Result, StargateError, TerminalTokenSettings};
 
+use crate::outbound::WorkspaceAppTunnelPool;
+
 pub use auth::AssertionValidator;
 pub use runtime::{load_settings, run};
 pub use session_registry::{SessionLease, SessionRegistry};
@@ -47,6 +49,7 @@ pub struct PublicGatewayState {
 pub struct GatewayState {
     pub store: SqliteRouteStore,
     pub sessions: SessionRegistry,
+    pub(crate) workspace_app_tunnels: WorkspaceAppTunnelPool,
     pub admin_auth: AssertionValidator,
     pub public_web: PublicGatewayState,
 }
@@ -63,6 +66,7 @@ impl GatewayState {
         Ok(Self {
             store,
             sessions: SessionRegistry::default(),
+            workspace_app_tunnels: WorkspaceAppTunnelPool::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {
                 public_base_url: web.public_base_url.clone(),

@@ -215,7 +215,7 @@ async fn proxy_workspace_app(
         _ = wait_until(authorization_expires_at) => {
             return Err(GatewayHttpError(StargateError::Unauthorized));
         }
-        tunnel = open_workspace_app_tunnel(&route) => tunnel?,
+        tunnel = open_workspace_app_tunnel(&state.workspace_app_tunnels, &route) => tunnel?,
     };
     let (mut sender, connection) = tokio::select! {
         _ = connection_cancel.cancelled() => {

@@ -82,6 +82,10 @@ pub async fn issue_workspace_app_session(
     // An upsert is also a route authorization rotation. Close any HTTP or
     // WebSocket tunnel that was established under the replaced credentials.
     state.sessions.terminate_username(&stored.route_id).await;
+    state
+        .workspace_app_tunnels
+        .invalidate(&stored.route_id)
+        .await;
     Ok(Json(IssueWorkspaceAppSessionResponse {
         route_id: stored.route_id,
         url,
@@ -113,6 +117,7 @@ pub async fn delete_workspace_app_route(
         return Err(GatewayHttpError(StargateError::RouteNotFound(route_id)));
     }
     state.sessions.terminate_username(&route_id).await;
+    state.workspace_app_tunnels.invalidate(&route_id).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
