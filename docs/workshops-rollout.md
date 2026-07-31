@@ -1015,11 +1015,58 @@ Require:
 - final net/gross estimates and forecast variance retained in native currency.
 
 Provider IDs remain in D1 as audit evidence; “zero resources” means confirmed
-external absence, not deleted ledger rows. In the Hetzner web console, require
-no server, Primary IP, or ephemeral SSH key and no unexpected network, volume,
-snapshot, backup, load balancer, floating IP, or placement group. The one
-persistent Intar sentinel firewall is expected while the connection remains
-active.
+external absence, not deleted ledger rows. As the organization owner, request:
+
+```text
+GET /api/organizations/<ORGANIZATION_ID>/workshop-providers/hetzner/<CONNECTION_ID>/inventory
+```
+
+This endpoint reads the project only through the route-less provider Worker
+and returns a sanitized proof: counts for servers, Primary IPs, Floating IPs,
+firewalls, networks, volumes, placement groups, snapshots, SSH keys, load
+balancers, and certificates; the expected sentinel ID/name; and
+`sentinel.present`, `sentinel.onlyFirewall`, and `clean` booleans. It never
+returns provider resource names, IP addresses, labels, SSH key material, or
+credential data. It is owner-only; an admin or a user from another
+organization is rejected before credential loading or any provider RPC.
+
+The successful teardown shape is:
+
+```json
+{
+  "connectionId": "<CONNECTION_ID>",
+  "observedAt": 1750000000000,
+  "counts": {
+    "servers": 0,
+    "primaryIps": 0,
+    "floatingIps": 0,
+    "firewalls": 1,
+    "networks": 0,
+    "volumes": 0,
+    "placementGroups": 0,
+    "snapshots": 0,
+    "sshKeys": 0,
+    "loadBalancers": 0,
+    "certificates": 0
+  },
+  "sentinel": {
+    "expected": {
+      "id": "<SENTINEL_FIREWALL_ID>",
+      "name": "<DETERMINISTIC_SENTINEL_NAME>"
+    },
+    "present": true,
+    "onlyFirewall": true
+  },
+  "clean": true
+}
+```
+
+Require `clean = true`, every count except `firewalls` to be zero,
+`firewalls = 1`, and both sentinel booleans to be true. The one persistent
+Intar sentinel firewall is expected while the connection remains active.
+`clean` also requires every supported provider collection to have been
+inventoried and the sentinel to retain exactly the canonical inbound TCP/22
+rule for the configured Stargate egress IPv4 CIDRs.
 
 Query Stargate by the recorded execution IDs and require no terminal,
 workspace-application, or browser-session routes. A consumed bootstrap or old

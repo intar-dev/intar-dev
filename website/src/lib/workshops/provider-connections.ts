@@ -6,6 +6,7 @@ import type {
   CredentialContext,
   EncryptedCredentialEnvelope,
   OwnershipLabels,
+  ProjectInventory,
 } from "../../../../hcloud-provider-worker/src/contracts";
 import {
   hetznerAllocations,
@@ -81,6 +82,33 @@ export interface HetznerManualCleanupAcknowledgement {
   verified: false;
   sentinelFirewallId: string;
   resources: HetznerManualCleanupResource[];
+}
+
+export interface HetznerProjectInventoryInspection {
+  connectionId: string;
+  observedAt: number;
+  counts: {
+    servers: number;
+    primaryIps: number;
+    floatingIps: number;
+    firewalls: number;
+    networks: number;
+    volumes: number;
+    placementGroups: number;
+    snapshots: number;
+    sshKeys: number;
+    loadBalancers: number;
+    certificates: number;
+  };
+  sentinel: {
+    expected: {
+      id: string;
+      name: string;
+    };
+    present: boolean;
+    onlyFirewall: boolean;
+  };
+  clean: boolean;
 }
 
 export async function connectHetznerProject(input: {
@@ -1143,6 +1171,93 @@ export async function refreshHetznerCatalog(input: {
   return operation.data as CatalogObservation;
 }
 
+/**
+ * Reads the provider project through the route-less provider Worker and
+ * returns only the minimum proof needed after teardown. Raw provider resource
+ * records can contain public IPs, SSH public keys, labels, fingerprints, and
+ * user-selected names, so none of them cross this API boundary.
+ */
+export async function inspectHetznerProjectInventory(input: {
+  organizationId: string;
+  connectionId: string;
+  actorUserId: string;
+  now?: number;
+}): Promise<HetznerProjectInventoryInspection> {
+  // Authorization deliberately precedes both credential loading and the
+  // provider RPC. This also makes another organization's connection
+  // indistinguishable from a missing connection.
+  await requireOwner(input.organizationId, input.actorUserId);
+  const connection = await requireConnection(
+    input.organizationId,
+    input.connectionId,
+  );
+  const expectedSourceCidrs = [
+    ...new Set(stargateEgressIpv4Cidrs()),
+  ].sort();
+  const active = await loadActiveCredential(connection);
+  const operation = await hcloudRunOperation({
+    requestId: createAppId(),
+    connectionId: connection.id,
+    credentialContext: active.context,
+    credential: active.envelope,
+    operation: { kind: "inventory" },
+  });
+  const inventory = requireProjectInventory(operation.data);
+  const expectedName = `intar-${connection.id.slice(0, 20)}-sentinel`;
+  const expectedOwnership = await ownershipLabels(
+    input.organizationId,
+    connection.id,
+  );
+  const sentinelPresent = inventory.firewalls.some((firewall) =>
+    isExpectedSentinel(
+      firewall,
+      connection.sentinelFirewallId,
+      expectedName,
+      expectedOwnership,
+      expectedSourceCidrs,
+    ),
+  );
+  const counts = {
+    servers: inventory.servers.length,
+    primaryIps: inventory.primaryIps.length,
+    floatingIps: inventory.floatingIps.length,
+    firewalls: inventory.firewalls.length,
+    networks: inventory.networks.length,
+    volumes: inventory.volumes.length,
+    placementGroups: inventory.placementGroups.length,
+    snapshots: inventory.snapshots.length,
+    sshKeys: inventory.sshKeys.length,
+    loadBalancers: inventory.loadBalancers.length,
+    certificates: inventory.certificates.length,
+  };
+  const onlyFirewall = sentinelPresent && counts.firewalls === 1;
+  const noEphemeralOrForeignResources =
+    counts.servers === 0 &&
+    counts.primaryIps === 0 &&
+    counts.floatingIps === 0 &&
+    counts.networks === 0 &&
+    counts.volumes === 0 &&
+    counts.placementGroups === 0 &&
+    counts.snapshots === 0 &&
+    counts.sshKeys === 0 &&
+    counts.loadBalancers === 0 &&
+    counts.certificates === 0;
+  return {
+    connectionId: connection.id,
+    observedAt: input.now ?? Date.now(),
+    counts,
+    sentinel: {
+      expected: {
+        id: connection.sentinelFirewallId,
+        name: expectedName,
+      },
+      present: sentinelPresent,
+      onlyFirewall,
+    },
+    clean: onlyFirewall && noEphemeralOrForeignResources,
+  };
+}
+
 export async function requireConnection(
   organizationId: string,
   connectionId: string,
@@ -1354,6 +1469,101 @@ async function requireOwner(organizationId: string, userId: string) {
       "organization owner role required",
     );
   }
+}
+
+function requireProjectInventory(
+  value: unknown,
+): ProjectInventory & {
+  certificates: NonNullable<ProjectInventory["certificates"]>;
+} {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.servers) ||
+    !Array.isArray(value.primaryIps) ||
+    !Array.isArray(value.floatingIps) ||
+    !Array.isArray(value.firewalls) ||
+    !Array.isArray(value.networks) ||
+    !Array.isArray(value.volumes) ||
+    !Array.isArray(value.placementGroups) ||
+    !Array.isArray(value.snapshots) ||
+    !Array.isArray(value.sshKeys) ||
+    !Array.isArray(value.loadBalancers) ||
+    !Array.isArray(value.certificates)
+  ) {
+    throw appError(
+      502,
+      "hcloud_inventory_invalid",
+      "Hetzner project inventory could not be verified",
+    );
+  }
+  return value as unknown as ProjectInventory & {
+    certificates: NonNullable<ProjectInventory["certificates"]>;
+  };
+}
+
+function isExpectedSentinel(
+  firewall: unknown,
+  expectedId: string,
+  expectedName: string,
+  ownership: OwnershipLabels,
+  expectedSourceCidrs: readonly string[],
+): boolean {
+  if (
+    !isRecord(firewall) ||
+    typeof firewall.id !== "number" ||
+    !Number.isSafeInteger(firewall.id) ||
+    String(firewall.id) !== expectedId ||
+    firewall.name !== expectedName ||
+    !isRecord(firewall.labels)
+  ) {
+    return false;
+  }
+  return (
+    firewall.labels.intar_managed === "true" &&
+    firewall.labels.intar_provider === "hetzner_cloud" &&
+    firewall.labels.intar_org === ownership.organizationRef &&
+    firewall.labels.intar_connection === ownership.connectionRef &&
+    hasCanonicalSentinelRules(firewall.rules, expectedSourceCidrs)
+  );
+}
+
+function hasCanonicalSentinelRules(
+  value: unknown,
+  expectedSourceCidrs: readonly string[],
+): boolean {
+  if (!Array.isArray(value) || value.length !== 1) return false;
+  const rule = value[0];
+  if (
+    !isRecord(rule) ||
+    rule.direction !== "in" ||
+    rule.protocol !== "tcp" ||
+    rule.port !== "22" ||
+    rule.description !== "Intar Stargate SSH forwarding" ||
+    rule.destination_ips !== undefined ||
+    !Array.isArray(rule.source_ips) ||
+    !rule.source_ips.every((entry) => typeof entry === "string")
+  ) {
+    return false;
+  }
+  const actualSourceCidrs = [...new Set(rule.source_ips)].sort();
+  return (
+    actualSourceCidrs.length === rule.source_ips.length &&
+    stringArraysEqual(actualSourceCidrs, expectedSourceCidrs)
+  );
+}
+
+function stringArraysEqual(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function providerToken(value: string): string {

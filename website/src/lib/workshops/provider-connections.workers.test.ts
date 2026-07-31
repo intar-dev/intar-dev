@@ -51,8 +51,10 @@ import {
   connectHetznerProject,
   countLiveHetznerAllocations,
   disconnectHetznerProject,
+  inspectHetznerProjectInventory,
   listHetznerProviderConnections,
   overrideWorkshopSessionGrossCeiling,
+  ownershipLabels,
   rebindHetznerProject,
   rotateHetznerCredential,
   updateHetznerProviderGuardrails,
@@ -169,6 +171,310 @@ describe("Hetzner BYOK provider connections", () => {
       encryptedTokenB64: "encrypted-token",
       wrappedDekB64: "wrapped-dek",
     });
+  });
+
+  it("returns a sanitized owner-only proof of an empty project with exactly the sentinel", async () => {
+    const connected = await connectHetznerProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      token: "secret-hcloud-token-value",
+    });
+    const ownership = await ownershipLabels("org-a", connected.id);
+    const sentinelName = `intar-${connected.id.slice(0, 20)}-sentinel`;
+    providerMocks.run.mockResolvedValue({
+      data: {
+        ...providerConnectionResult().inventory,
+        firewalls: [
+          {
+            id: 42,
+            name: sentinelName,
+            labels: {
+              intar_managed: "true",
+              intar_provider: "hetzner_cloud",
+              intar_org: ownership.organizationRef,
+              intar_connection: ownership.connectionRef,
+              provider_private_label: "must-not-cross-the-api-boundary",
+            },
+            rules: [
+              {
+                direction: "in",
+                protocol: "tcp",
+                port: "22",
+                source_ips: ["192.0.2.10/32"],
+                description: "Intar Stargate SSH forwarding",
+              },
+            ],
+          },
+        ],
+      },
+      canonicalWrites: [],
+      mustPersistBeforeNextOperation: false,
+    });
+
+    const inspection = await inspectHetznerProjectInventory({
+      organizationId: "org-a",
+      connectionId: connected.id,
+      actorUserId: "owner-a",
+      now: 1_750_000_005_000,
+    });
+
+    expect(providerMocks.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: connected.id,
+        credentialContext: expect.objectContaining({
+          organizationId: "org-a",
+          connectionId: connected.id,
+        }),
+        operation: { kind: "inventory" },
+      }),
+    );
+    expect(inspection).toEqual({
+      connectionId: connected.id,
+      observedAt: 1_750_000_005_000,
+      counts: {
+        servers: 0,
+        primaryIps: 0,
+        floatingIps: 0,
+        firewalls: 1,
+        networks: 0,
+        volumes: 0,
+        placementGroups: 0,
+        snapshots: 0,
+        sshKeys: 0,
+        loadBalancers: 0,
+        certificates: 0,
+      },
+      sentinel: {
+        expected: { id: "42", name: sentinelName },
+        present: true,
+        onlyFirewall: true,
+      },
+      clean: true,
+    });
+    const serialized = JSON.stringify(inspection);
+    expect(serialized).not.toContain("192.0.2.10");
+    expect(serialized).not.toContain("provider_private_label");
+    expect(serialized).not.toContain("must-not-cross-the-api-boundary");
+    expect(serialized).not.toContain("encrypted-token");
+    expect(serialized).not.toContain("wrapped-dek");
+  });
+
+  it("counts unexpected resources without returning provider payload details", async () => {
+    const connected = await connectHetznerProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      token: "secret-hcloud-token-value",
+    });
+    const ownership = await ownershipLabels("org-a", connected.id);
+    const sentinelName = `intar-${connected.id.slice(0, 20)}-sentinel`;
+    const secret = "provider-payload-secret-must-be-redacted";
+    providerMocks.run.mockResolvedValue({
+      data: {
+        servers: [
+          {
+            id: 1,
+            name: secret,
+            public_net: { ipv4: { ip: "203.0.113.77" } },
+          },
+        ],
+        primaryIps: [{ id: 2, ip: "203.0.113.78", name: secret }],
+        floatingIps: [{ id: 3, name: secret }],
+        firewalls: [
+          {
+            id: 42,
+            name: sentinelName,
+            labels: {
+              intar_managed: "true",
+              intar_provider: "hetzner_cloud",
+              intar_org: ownership.organizationRef,
+              intar_connection: ownership.connectionRef,
+            },
+            rules: [
+              {
+                direction: "in",
+                protocol: "tcp",
+                port: "22",
+                source_ips: ["192.0.2.10/32"],
+                description: "Intar Stargate SSH forwarding",
+              },
+            ],
+          },
+          { id: 4, name: secret, labels: { secret }, rules: [] },
+        ],
+        networks: [{ id: 5, name: secret }],
+        volumes: [{ id: 6, name: secret }],
+        placementGroups: [{ id: 7, name: secret }],
+        snapshots: [{ id: 8, name: secret, description: secret }],
+        sshKeys: [
+          {
+            id: 9,
+            name: secret,
+            fingerprint: secret,
+            public_key: secret,
+            labels: { secret },
+          },
+        ],
+        loadBalancers: [{ id: 10, name: secret }],
+        certificates: [{ id: 11, name: secret }],
+      },
+      canonicalWrites: [],
+      mustPersistBeforeNextOperation: false,
+    });
+
+    const inspection = await inspectHetznerProjectInventory({
+      organizationId: "org-a",
+      connectionId: connected.id,
+      actorUserId: "owner-a",
+    });
+
+    expect(inspection.counts).toEqual({
+      servers: 1,
+      primaryIps: 1,
+      floatingIps: 1,
+      firewalls: 2,
+      networks: 1,
+      volumes: 1,
+      placementGroups: 1,
+      snapshots: 1,
+      sshKeys: 1,
+      loadBalancers: 1,
+      certificates: 1,
+    });
+    expect(inspection.sentinel).toMatchObject({
+      present: true,
+      onlyFirewall: false,
+    });
+    expect(inspection.clean).toBe(false);
+    const serialized = JSON.stringify(inspection);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("203.0.113");
+    expect(serialized).not.toContain("public_key");
+    expect(serialized).not.toContain("fingerprint");
+    expect(serialized).not.toContain("labels");
+  });
+
+  it("fails closed when the sentinel rules or a provider collection cannot be verified", async () => {
+    const connected = await connectHetznerProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      token: "secret-hcloud-token-value",
+    });
+    const ownership = await ownershipLabels("org-a", connected.id);
+    const sentinelName = `intar-${connected.id.slice(0, 20)}-sentinel`;
+    const inventory = {
+      ...providerConnectionResult().inventory,
+      firewalls: [
+        {
+          id: 42,
+          name: sentinelName,
+          labels: {
+            intar_managed: "true",
+            intar_provider: "hetzner_cloud",
+            intar_org: ownership.organizationRef,
+            intar_connection: ownership.connectionRef,
+          },
+          rules: [
+            {
+              direction: "in",
+              protocol: "tcp",
+              port: "22",
+              source_ips: ["0.0.0.0/0"],
+              description: "Intar Stargate SSH forwarding",
+            },
+          ],
+        },
+      ],
+    };
+    providerMocks.run.mockResolvedValue({
+      data: inventory,
+      canonicalWrites: [],
+      mustPersistBeforeNextOperation: false,
+    });
+
+    await expect(
+      inspectHetznerProjectInventory({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+      }),
+    ).resolves.toMatchObject({
+      sentinel: { present: false, onlyFirewall: false },
+      clean: false,
+    });
+
+    const { certificates: _certificates, ...incompleteInventory } = inventory;
+    providerMocks.run.mockResolvedValue({
+      data: incompleteInventory,
+      canonicalWrites: [],
+      mustPersistBeforeNextOperation: false,
+    });
+    await expect(
+      inspectHetznerProjectInventory({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "hcloud_inventory_invalid",
+    });
+  });
+
+  it("authorizes owners before inventory credential or provider access", async () => {
+    const connected = await connectHetznerProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      token: "secret-hcloud-token-value",
+    });
+    providerMocks.run.mockClear();
+
+    await expect(
+      inspectHetznerProjectInventory({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "admin-a",
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "organization_owner_required",
+    });
+    expect(providerMocks.run).not.toHaveBeenCalled();
+
+    const db = drizzle(env.DB);
+    const now = new Date();
+    await db.insert(user).values({
+      id: "owner-b",
+      name: "owner-b",
+      email: "owner-b@example.test",
+      emailVerified: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(organization).values({
+      id: "org-b",
+      name: "Organization B",
+      slug: "org-b",
+      createdAt: now,
+    });
+    await db.insert(member).values({
+      id: "membership-owner-b",
+      organizationId: "org-b",
+      userId: "owner-b",
+      role: "owner",
+      createdAt: now,
+    });
+
+    await expect(
+      inspectHetznerProjectInventory({
+        organizationId: "org-b",
+        connectionId: connected.id,
+        actorUserId: "owner-b",
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: "provider_connection_not_found",
+    });
+    expect(providerMocks.run).not.toHaveBeenCalled();
   });
 
   it("uses a stable connection identity and rejects a duplicate before another provider write", async () => {
@@ -731,6 +1037,7 @@ function providerConnectionResult() {
       snapshots: [],
       sshKeys: [],
       loadBalancers: [],
+      certificates: [],
     },
     catalog: {
       observedAt: new Date(1_750_000_000_000).toISOString(),
