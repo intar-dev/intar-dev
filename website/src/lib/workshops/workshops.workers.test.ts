@@ -34,6 +34,7 @@ import {
   organization,
   organizationProviderConnections,
   runtimeExecutions,
+  runtimeProviderActualState,
   runtimeVmActualState,
   runtimeVms,
   user,
@@ -1179,6 +1180,129 @@ describe("standalone workshops", () => {
         probes: [expect.objectContaining({ status: "fail" })],
       }),
     );
+  });
+
+  it("projects only current-generation provider probes without erasing caught-up progress", async () => {
+    const setup = await readyWorkspaceFixture();
+    const executionId = `runtime-${setup.generationId}`;
+    const observedAt = Date.now() + 10_000;
+    const db = drizzle(env.DB);
+    await seedReadyRuntimeExecution(setup.workspaceId, setup.generationId);
+    await recordWorkshopModuleObservation({
+      sessionId: setup.sessionId,
+      participantUserId: "learner-a",
+      moduleId: "01-core",
+      technicalStatus: "caught_up",
+      currentHealth: "unknown",
+    });
+    await db.insert(runtimeProviderActualState).values({
+      executionId,
+      providerKind: "hetzner_cloud",
+      sourceId: "allocation-current",
+      generation: 2,
+      sequence: 1,
+      phase: "ready",
+      health: "healthy",
+      terminalReady: true,
+      sshHostKeysJson: [],
+      probesJson: [
+        providerProbeSnapshot("workspace-ready", "pass", observedAt),
+        providerProbeSnapshot("service-ready", "pass", observedAt),
+      ],
+      reportJson: {
+        contract_version: 1,
+        identity: {
+          execution_id: executionId,
+          workspace_id: setup.workspaceId,
+          generation: 2,
+        },
+      },
+      reportedAt: observedAt,
+      observedAt,
+      updatedAt: observedAt,
+    });
+
+    const stale = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "owner-a",
+    });
+    expect(
+      stale.session.roster
+        .find((entry) => entry.userId === "learner-a")
+        ?.progress.find((entry) => entry.moduleId === "01-core")?.probes,
+    ).toEqual([expect.objectContaining({ status: "unknown" })]);
+
+    await db
+      .update(runtimeProviderActualState)
+      .set({
+        generation: 1,
+        sequence: 2,
+        probesJson: [
+          providerProbeSnapshot("workspace-ready", "pass", observedAt + 1),
+          {
+            ...providerProbeSnapshot("service-ready", "fail", observedAt + 1),
+            error: "current provider generation regressed",
+          },
+          providerProbeSnapshot("undeclared-probe", "fail", observedAt + 1),
+        ],
+        observedAt: observedAt + 1,
+        updatedAt: observedAt + 1,
+      })
+      .where(eq(runtimeProviderActualState.executionId, executionId));
+
+    for (const userId of ["owner-a", "helper-a"]) {
+      const projection = await getWorkshopSessionProjection({
+        sessionId: setup.sessionId,
+        userId,
+      });
+      const progress = projection.session.roster.find(
+        (entry) => entry.userId === "learner-a",
+      )?.progress;
+      expect(progress).toContainEqual(
+        expect.objectContaining({
+          moduleId: "00-setup",
+          probes: [expect.objectContaining({ status: "pass" })],
+        }),
+      );
+      expect(progress).toContainEqual(
+        expect.objectContaining({
+          moduleId: "01-core",
+          state: "caught_up",
+          probes: [
+            expect.objectContaining({
+              status: "fail",
+              detail: "current provider generation regressed",
+            }),
+          ],
+        }),
+      );
+      expect(JSON.stringify(progress)).not.toContain("undeclared-probe");
+    }
+
+    await db
+      .update(runtimeProviderActualState)
+      .set({
+        sequence: 3,
+        probesJson: [
+          providerProbeSnapshot("workspace-ready", "pass", observedAt + 2),
+          providerProbeSnapshot("service-ready", "pass", observedAt + 2),
+        ],
+        observedAt: observedAt + 2,
+        updatedAt: observedAt + 2,
+      })
+      .where(eq(runtimeProviderActualState.executionId, executionId));
+
+    const learnerProjection = await getWorkshopSessionProjection({
+      sessionId: setup.sessionId,
+      userId: "learner-a",
+    });
+    expect(learnerProjection.session.roster).toEqual([]);
+    expect(
+      learnerProjection.session.modules.find((entry) => entry.id === "01-core"),
+    ).toMatchObject({
+      state: "caught_up",
+      probes: [expect.objectContaining({ status: "pass" })],
+    });
   });
 
   it("revokes live room, terminal, application, and helper access with organization membership", async () => {
@@ -2977,6 +3101,18 @@ function probeSnapshot(
     phase: "scenario",
     status,
     checked_at_unix_ms: checkedAt,
+  };
+}
+
+function providerProbeSnapshot(
+  id: string,
+  status: "pass" | "fail" | "unknown",
+  observedAt: number,
+): Record<string, unknown> {
+  return {
+    id,
+    status,
+    observed_at_unix_ms: observedAt,
   };
 }
 

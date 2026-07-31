@@ -2,6 +2,7 @@ import { and, count, desc, eq, inArray } from "drizzle-orm";
 import {
   organization,
   organizationProviderConnections,
+  runtimeProviderActualState,
   runtimeVmActualState,
   runtimeVms,
   workshopSessionMembers,
@@ -379,17 +380,15 @@ export async function getWorkshopSessionProjection(params: {
     runtimeProviderRows[0]?.kind !== "hetzner_cloud"
       ? await getWorkshopCapacityPreflight({ sessionId: params.sessionId })
       : null;
-  const probeReports = canSeeRoomProgress
-    ? await loadCurrentWorkshopProbeReports({
-        sessionId: params.sessionId,
-        manifest: context.manifest,
-      })
-    : new Map<string, CurrentWorkshopProbeReport>();
-  const slides = projectSlides(
-    context.manifest,
-    session,
-    canFacilitate,
-  );
+  const probeReports =
+    canSeeRoomProgress || access.workspaceEnabled
+      ? await loadCurrentWorkshopProbeReports({
+          sessionId: params.sessionId,
+          manifest: context.manifest,
+          ...(!canSeeRoomProgress ? { userId: params.userId } : {}),
+        })
+      : new Map<string, CurrentWorkshopProbeReport>();
+  const slides = projectSlides(context.manifest, session, canFacilitate);
   const projectedAt = Date.now();
   const canSeeManagerOperations =
     !projectorView &&
@@ -452,6 +451,9 @@ export async function getWorkshopSessionProjection(params: {
               ? { participantUserId: params.userId }
               : {}),
             facilitator: canFacilitate,
+            probeReport: access.workspaceEnabled
+              ? (probeReports.get(params.userId) ?? null)
+              : null,
           }),
       agenda: projectorView
         ? []
@@ -727,6 +729,7 @@ function projectModules(params: {
   progress: WorkshopModuleProgressRecord[];
   participantUserId?: string;
   facilitator: boolean;
+  probeReport: CurrentWorkshopProbeReport | null;
 }) {
   return params.manifest.modules.map((module, ordinal) => {
     const progress = params.participantUserId
@@ -800,17 +803,23 @@ function projectModules(params: {
           revealed,
         };
       }),
-      probes: module.probeIds.map((probeId) => ({
-        id: probeId,
-        label: probeId,
-        status:
-          progress?.currentHealth === "passing"
-            ? ("pass" as const)
-            : progress?.currentHealth === "failing"
-              ? ("fail" as const)
-              : ("unknown" as const),
-        detail: null,
-      })),
+      probes: module.probeIds.map((probeId) => {
+        const snapshot = params.probeReport?.probes.get(probeId);
+        return {
+          id: probeId,
+          label: probeId,
+          status:
+            snapshot?.status ??
+            (params.probeReport?.hasValidReport
+              ? ("pending" as const)
+              : progress?.currentHealth === "passing"
+                ? ("pass" as const)
+                : progress?.currentHealth === "failing"
+                  ? ("fail" as const)
+                  : ("unknown" as const)),
+          detail: snapshot?.detail ?? null,
+        };
+      }),
     };
   });
 }
@@ -824,6 +833,7 @@ function projectProjectorModules(
     session,
     progress: [],
     facilitator: false,
+    probeReport: null,
   })
     .filter((module) => module.released)
     .map((module) => ({
@@ -1119,53 +1129,91 @@ interface CurrentWorkshopProbeReport {
 async function loadCurrentWorkshopProbeReports(params: {
   sessionId: string;
   manifest: WorkshopManifestV1;
+  userId?: string;
 }): Promise<Map<string, CurrentWorkshopProbeReport>> {
-  const rows = await workshopDb()
-    .select({
-      userId: workshopWorkspaces.userId,
-      executionId: runtimeVmActualState.executionId,
-      runtimeVmName: runtimeVms.runtimeVmName,
-      report: runtimeVmActualState.reportJson,
-      observedAt: runtimeVmActualState.observedAt,
-    })
-    .from(workshopWorkspaces)
-    .innerJoin(
-      workshopWorkspaceGenerations,
-      and(
-        eq(
-          workshopWorkspaceGenerations.id,
-          workshopWorkspaces.currentGenerationId,
+  const db = workshopDb();
+  const workspaceScope = params.userId
+    ? and(
+        eq(workshopWorkspaces.sessionId, params.sessionId),
+        eq(workshopWorkspaces.userId, params.userId),
+      )
+    : eq(workshopWorkspaces.sessionId, params.sessionId);
+  const [vmRows, providerRows] = await Promise.all([
+    db
+      .select({
+        userId: workshopWorkspaces.userId,
+        executionId: runtimeVmActualState.executionId,
+        runtimeVmName: runtimeVms.runtimeVmName,
+        report: runtimeVmActualState.reportJson,
+        observedAt: runtimeVmActualState.observedAt,
+      })
+      .from(workshopWorkspaces)
+      .innerJoin(
+        workshopWorkspaceGenerations,
+        and(
+          eq(
+            workshopWorkspaceGenerations.id,
+            workshopWorkspaces.currentGenerationId,
+          ),
+          eq(workshopWorkspaceGenerations.workspaceId, workshopWorkspaces.id),
         ),
+      )
+      .innerJoin(
+        runtimeVmActualState,
         eq(
-          workshopWorkspaceGenerations.workspaceId,
-          workshopWorkspaces.id,
-        ),
-      ),
-    )
-    .innerJoin(
-      runtimeVmActualState,
-      eq(
-        runtimeVmActualState.executionId,
-        workshopWorkspaceGenerations.runtimeExecutionId,
-      ),
-    )
-    .innerJoin(
-      runtimeVms,
-      and(
-        eq(runtimeVms.id, runtimeVmActualState.runtimeVmId),
-        eq(
-          runtimeVms.executionId,
+          runtimeVmActualState.executionId,
           workshopWorkspaceGenerations.runtimeExecutionId,
         ),
-      ),
-    )
-    .where(eq(workshopWorkspaces.sessionId, params.sessionId));
+      )
+      .innerJoin(
+        runtimeVms,
+        and(
+          eq(runtimeVms.id, runtimeVmActualState.runtimeVmId),
+          eq(
+            runtimeVms.executionId,
+            workshopWorkspaceGenerations.runtimeExecutionId,
+          ),
+        ),
+      )
+      .where(workspaceScope),
+    db
+      .select({
+        userId: workshopWorkspaces.userId,
+        probes: runtimeProviderActualState.probesJson,
+        observedAt: runtimeProviderActualState.observedAt,
+      })
+      .from(workshopWorkspaces)
+      .innerJoin(
+        workshopWorkspaceGenerations,
+        and(
+          eq(
+            workshopWorkspaceGenerations.id,
+            workshopWorkspaces.currentGenerationId,
+          ),
+          eq(workshopWorkspaceGenerations.workspaceId, workshopWorkspaces.id),
+        ),
+      )
+      .innerJoin(
+        runtimeProviderActualState,
+        and(
+          eq(
+            runtimeProviderActualState.executionId,
+            workshopWorkspaceGenerations.runtimeExecutionId,
+          ),
+          eq(
+            runtimeProviderActualState.generation,
+            workshopWorkspaceGenerations.ordinal,
+          ),
+        ),
+      )
+      .where(workspaceScope),
+  ]);
   const knownProbeIds = new Set(
     params.manifest.modules.flatMap((module) => module.probeIds),
   );
   const reports = new Map<string, CurrentWorkshopProbeReport>();
 
-  for (const row of rows) {
+  for (const row of vmRows) {
     const parsed = parseCurrentWorkshopProbeReport({
       report: row.report,
       executionId: row.executionId,
@@ -1173,27 +1221,82 @@ async function loadCurrentWorkshopProbeReports(params: {
       observedAt: row.observedAt,
       knownProbeIds,
     });
-    if (!parsed) continue;
-    const aggregate = reports.get(row.userId) ?? {
-      hasValidReport: false,
-      probes: new Map<string, CurrentWorkshopProbeSnapshot>(),
-    };
-    aggregate.hasValidReport = true;
-    for (const [probeId, snapshot] of parsed) {
-      const existing = aggregate.probes.get(probeId);
-      if (
-        !existing ||
-        snapshot.checkedAt > existing.checkedAt ||
-        (snapshot.checkedAt === existing.checkedAt &&
-          snapshot.observedAt >= existing.observedAt)
-      ) {
-        aggregate.probes.set(probeId, snapshot);
-      }
-    }
-    reports.set(row.userId, aggregate);
+    mergeCurrentWorkshopProbeReport(reports, row.userId, parsed);
+  }
+
+  for (const row of providerRows) {
+    const parsed = parseCurrentProviderProbeReport({
+      probes: row.probes,
+      observedAt: row.observedAt,
+      knownProbeIds,
+    });
+    mergeCurrentWorkshopProbeReport(reports, row.userId, parsed);
   }
 
   return reports;
+}
+
+function mergeCurrentWorkshopProbeReport(
+  reports: Map<string, CurrentWorkshopProbeReport>,
+  userId: string,
+  parsed: Map<string, CurrentWorkshopProbeSnapshot> | null,
+): void {
+  if (!parsed) return;
+  const aggregate = reports.get(userId) ?? {
+    hasValidReport: false,
+    probes: new Map<string, CurrentWorkshopProbeSnapshot>(),
+  };
+  aggregate.hasValidReport = true;
+  for (const [probeId, snapshot] of parsed) {
+    const existing = aggregate.probes.get(probeId);
+    if (
+      !existing ||
+      snapshot.checkedAt > existing.checkedAt ||
+      (snapshot.checkedAt === existing.checkedAt &&
+        snapshot.observedAt >= existing.observedAt)
+    ) {
+      aggregate.probes.set(probeId, snapshot);
+    }
+  }
+  reports.set(userId, aggregate);
+}
+
+function parseCurrentProviderProbeReport(params: {
+  probes: unknown;
+  observedAt: number;
+  knownProbeIds: ReadonlySet<string>;
+}): Map<string, CurrentWorkshopProbeSnapshot> | null {
+  if (!Array.isArray(params.probes)) return null;
+  const snapshots = new Map<string, CurrentWorkshopProbeSnapshot>();
+  for (const candidate of params.probes) {
+    if (!isRecord(candidate)) continue;
+    const id = candidate.id;
+    const status = candidate.status;
+    const checkedAt = candidate.observed_at_unix_ms;
+    const error = candidate.error;
+    if (
+      typeof id !== "string" ||
+      !params.knownProbeIds.has(id) ||
+      (status !== "pass" && status !== "fail" && status !== "unknown") ||
+      typeof checkedAt !== "number" ||
+      !Number.isSafeInteger(checkedAt) ||
+      checkedAt < 0 ||
+      (error !== undefined && error !== null && typeof error !== "string")
+    ) {
+      continue;
+    }
+    const snapshot: CurrentWorkshopProbeSnapshot = {
+      status,
+      detail: typeof error === "string" ? error : null,
+      checkedAt,
+      observedAt: params.observedAt,
+    };
+    const existing = snapshots.get(id);
+    if (!existing || snapshot.checkedAt >= existing.checkedAt) {
+      snapshots.set(id, snapshot);
+    }
+  }
+  return snapshots;
 }
 
 function parseCurrentWorkshopProbeReport(params: {

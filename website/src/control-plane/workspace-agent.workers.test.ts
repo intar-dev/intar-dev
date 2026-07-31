@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/vitest-pool-workers/types" />
 
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleWorkspaceAgentControlPlaneRequest } from "./workspace-agent";
@@ -16,6 +16,7 @@ import {
   runtimeProviderGuestCredentials,
   runtimeVms,
   user,
+  workshopEvents,
   workshopSessionMembers,
   workshopSessions,
   workshopModuleProgress,
@@ -378,6 +379,106 @@ describe("workspace agent guest control plane", () => {
     ).toEqual(regressedProgress.map(progressSnapshot));
   });
 
+  it("atomically projects ten caught-up modules once for identical reports", async () => {
+    const batchManifest = manifestWithProbeModules(10);
+    await resetD1Database();
+    await seedGeneration(batchManifest);
+    const db = drizzle(env.DB);
+    await env.DB.batch(
+      batchManifest.modules.map((module, index) =>
+        env.DB.prepare(
+          `INSERT INTO workshop_module_progress (
+             id, session_id, user_id, module_id, technical_status,
+             current_health, explain_back_status, revealed_hint_ids_json,
+             started_at, caught_up_at, completed_at, updated_at
+           ) VALUES (?, 'session-1', 'learner-1', ?, 'caught_up', 'unknown',
+             'not_required', '[]', ?, ?, ?, ?)`,
+        ).bind(
+          `caught-up-${index}`,
+          module.id,
+          NOW - 1_000,
+          NOW - 1_000,
+          NOW - 1_000,
+          NOW - 1_000,
+        ),
+      ),
+    );
+    const reportCredential = await bootstrap();
+    const probes = batchManifest.modules.map((module) =>
+      namedProbe(module.probeIds[0]!, "pass"),
+    );
+
+    const first = await reportRequest(
+      reportCredential,
+      reportBody(1, reportCredential, probes),
+    );
+    expect(first.status).toBe(200);
+    const afterFirst = await db
+      .select()
+      .from(workshopModuleProgress)
+      .where(
+        and(
+          eq(workshopModuleProgress.sessionId, "session-1"),
+          eq(workshopModuleProgress.userId, "learner-1"),
+        ),
+      )
+      .orderBy(workshopModuleProgress.moduleId);
+    expect(afterFirst).toHaveLength(10);
+    expect(
+      afterFirst.map((row) => ({
+        technicalStatus: row.technicalStatus,
+        currentHealth: row.currentHealth,
+        firstVerifiedAt: row.firstVerifiedAt,
+      })),
+    ).toEqual(
+      Array.from({ length: 10 }, () => ({
+        technicalStatus: "caught_up",
+        currentHealth: "passing",
+        firstVerifiedAt: null,
+      })),
+    );
+    const firstEvents = await db
+      .select()
+      .from(workshopEvents)
+      .where(
+        and(
+          eq(workshopEvents.sessionId, "session-1"),
+          eq(workshopEvents.type, "progress.observed"),
+        ),
+      );
+    expect(firstEvents).toHaveLength(10);
+
+    const second = await reportRequest(
+      reportCredential,
+      reportBody(2, reportCredential, probes),
+    );
+    expect(second.status).toBe(200);
+    const afterSecond = await db
+      .select()
+      .from(workshopModuleProgress)
+      .where(
+        and(
+          eq(workshopModuleProgress.sessionId, "session-1"),
+          eq(workshopModuleProgress.userId, "learner-1"),
+        ),
+      )
+      .orderBy(workshopModuleProgress.moduleId);
+    expect(afterSecond.map((row) => row.updatedAt)).toEqual(
+      afterFirst.map((row) => row.updatedAt),
+    );
+    expect(
+      await db
+        .select()
+        .from(workshopEvents)
+        .where(
+          and(
+            eq(workshopEvents.sessionId, "session-1"),
+            eq(workshopEvents.type, "progress.observed"),
+          ),
+        ),
+    ).toHaveLength(10);
+  });
+
   it("binds artifact grants to one generation and consumes uploads once", async () => {
     const reportCredential = await bootstrap();
     const payload = new TextEncoder().encode("runtime artifact");
@@ -632,7 +733,9 @@ function cloudInitWriteFile(cloudInit: string, path: string): string {
   return cloudInit.slice(start, end);
 }
 
-async function seedGeneration() {
+async function seedGeneration(
+  manifestJson: WorkshopManifestV1 = manifest(),
+) {
   const db = drizzle(env.DB);
   const createdAt = new Date(NOW - 60_000);
   await db.insert(user).values({
@@ -672,7 +775,7 @@ async function seedGeneration() {
     revision: 1,
     sourceRevision: "fixture",
     contentHash: "a".repeat(64),
-    manifestJson: manifest(),
+    manifestJson,
     publishedBy: "learner-1",
     publishedAt: NOW,
   });
@@ -997,5 +1100,29 @@ function manifest(): WorkshopManifestV1 {
     agenda: [],
     presentation: { slides: [] },
     durationMinutes: 240,
+  };
+}
+
+function manifestWithProbeModules(count: number): WorkshopManifestV1 {
+  const base = manifest();
+  return {
+    ...base,
+    modules: Array.from({ length: count }, (_, index) => {
+      const ordinal = String(index).padStart(2, "0");
+      return {
+        id: `${ordinal}-module`,
+        title: `Module ${ordinal}`,
+        tier: index === 0 ? ("gate" as const) : ("core" as const),
+        outcome: `Module ${ordinal} is healthy.`,
+        dependsOn:
+          index === 0 ? [] : [`${String(index - 1).padStart(2, "0")}-module`],
+        participantMarkdown: `Complete module ${ordinal}.`,
+        facilitatorNotesMarkdown: `Observe module ${ordinal}.`,
+        hints: [],
+        solutionMarkdown: `Apply module ${ordinal}.`,
+        probeIds: [`probe-${ordinal}`],
+        catchUpCheckpointId: "checkpoint-00",
+      };
+    }),
   };
 }

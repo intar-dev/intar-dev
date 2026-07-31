@@ -15,7 +15,6 @@ import {
   hostActualState,
   hostResourceReservations,
   type RuntimeExecutionState,
-  type WorkshopCurrentHealth,
   type WorkshopManifestV1,
   type WorkshopWorkspaceGenerationState,
 } from "@/db/schema";
@@ -54,7 +53,7 @@ import type {
   VmProbeSnapshotV1,
   VmReportV2,
 } from "@/generated/bridge";
-import { recordWorkshopModuleObservation } from "@/lib/workshops/progress";
+import { recordWorkshopProbeReport } from "@/lib/workshops/progress";
 import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
 import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
 
@@ -79,6 +78,7 @@ type RuntimeVmReportContext = {
 type CurrentWorkshopRuntimeContext = {
   generationId: string;
   workspaceId: string;
+  organizationId: string;
   sessionId: string;
   participantUserId: string;
   manifest: WorkshopManifestV1;
@@ -1022,6 +1022,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       `SELECT
          generation.id AS generation_id,
          workspace.id AS workspace_id,
+         session.organization_id,
          workspace.session_id,
          workspace.user_id AS participant_user_id,
          revision.manifest_json
@@ -1050,6 +1051,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       .first<{
         generation_id: string;
         workspace_id: string;
+        organization_id: string;
         session_id: string;
         participant_user_id: string;
         manifest_json: string;
@@ -1058,6 +1060,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     return {
       generationId: row.generation_id,
       workspaceId: row.workspace_id,
+      organizationId: row.organization_id,
       sessionId: row.session_id,
       participantUserId: row.participant_user_id,
       manifest: JSON.parse(row.manifest_json) as WorkshopManifestV1,
@@ -1106,46 +1109,15 @@ export class HostRuntimeDO extends HostRuntimeBase {
     observedAt: number,
   ): Promise<void> {
     const snapshots = latestProbeSnapshots(actual);
-    const progressRows = await this.env.DB.prepare(
-      `SELECT module_id, technical_status, current_health
-       FROM workshop_module_progress
-       WHERE session_id = ? AND user_id = ?`,
-    )
-      .bind(workshop.sessionId, workshop.participantUserId)
-      .all<{
-        module_id: string;
-        technical_status: string;
-        current_health: WorkshopCurrentHealth;
-      }>();
-    const current = new Map(
-      progressRows.results.map((row) => [row.module_id, row]),
-    );
-    for (const module of workshop.manifest.modules) {
-      if (module.probeIds.length === 0) continue;
-      const probes = module.probeIds.map((probeId) => snapshots.get(probeId));
-      const allPassing =
-        probes.length > 0 && probes.every((probe) => probe?.status === "pass");
-      const currentHealth: WorkshopCurrentHealth = allPassing
-        ? "passing"
-        : probes.some((probe) => probe?.status === "fail")
-          ? "failing"
-          : "unknown";
-      const existing = current.get(module.id);
-      if (
-        existing?.current_health === currentHealth &&
-        (!allPassing || existing.technical_status === "verified")
-      ) {
-        continue;
-      }
-      await recordWorkshopModuleObservation({
-        sessionId: workshop.sessionId,
-        participantUserId: workshop.participantUserId,
-        moduleId: module.id,
-        ...(allPassing ? { technicalStatus: "verified" as const } : {}),
-        currentHealth,
-        observedAt,
-      });
-    }
+    await recordWorkshopProbeReport({
+      database: this.env.DB,
+      organizationId: workshop.organizationId,
+      sessionId: workshop.sessionId,
+      participantUserId: workshop.participantUserId,
+      manifest: workshop.manifest,
+      probes: snapshots,
+      observedAt,
+    });
   }
 
   private async applyBridgeBuildReport(
