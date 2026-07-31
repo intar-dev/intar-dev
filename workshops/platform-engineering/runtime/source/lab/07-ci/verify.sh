@@ -37,45 +37,84 @@ check_app zot
 check_app argo-workflows
 
 # --- Zot registry ---------------------------------------------------------------
-if curl -fsS --max-time 5 http://localhost:30500/v2/ >/dev/null 2>&1; then
+ZOT_READY=0
+for _ in $(seq 1 36); do
+  if curl -fsS --max-time 5 http://localhost:30500/v2/ >/dev/null 2>&1; then
+    ZOT_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( ZOT_READY == 1 )); then
   ok "Zot registry API answers on :30500"
 else
   fail "Zot not answering on :30500 — kubectl -n zot get pods,svc"
 fi
 
 # --- WorkflowTemplate present ------------------------------------------------------
-if kubectl -n builds get workflowtemplate build-and-push >/dev/null 2>&1; then
+TEMPLATE_READY=0
+for _ in $(seq 1 36); do
+  if kubectl -n builds get workflowtemplate build-and-push >/dev/null 2>&1; then
+    TEMPLATE_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( TEMPLATE_READY == 1 )); then
   ok "WorkflowTemplate build-and-push exists in ns builds"
 else
   fail "WorkflowTemplate build-and-push missing in ns builds — is the argo-workflows app fully synced?"
 fi
 
 # --- A build succeeded --------------------------------------------------------------
-PHASES="$(kubectl -n builds get workflows \
-  -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null | grep '^build-hello-site-' || true)"
-if [ -z "$PHASES" ]; then
+PHASES=""
+WORKFLOW_READY=0
+for _ in $(seq 1 36); do
+  PHASES="$(kubectl -n builds get workflows \
+    -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+  PHASES="$(awk '/^build-hello-site-/{ print }' <<<"$PHASES")"
+  if [[ "$PHASES" == *"=Succeeded"* ]]; then
+    WORKFLOW_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( WORKFLOW_READY == 1 )); then
+  SUCCEEDED_COUNT="$(awk 'index($0, "=Succeeded"){ count++ } END{ print count + 0 }' <<<"$PHASES")"
+  ok "build workflow Succeeded (${SUCCEEDED_COUNT} run(s))"
+elif [[ -z "$PHASES" ]]; then
   fail "no build-hello-site-* workflow found — submit one: kubectl create -f workflow-run.yaml"
-elif echo "$PHASES" | grep -q '=Succeeded'; then
-  ok "build workflow Succeeded ($(echo "$PHASES" | grep -c '=Succeeded') run(s))"
 else
-  fail "build workflow(s) exist but none Succeeded ($(echo "$PHASES" | tr '\n' ' ')) — kubectl -n builds get pods; read the failing step's logs"
+  PHASE_SUMMARY="${PHASES//$'\n'/ }"
+  fail "build workflow(s) exist but none Succeeded (${PHASE_SUMMARY}) — kubectl -n builds get pods; read the failing step's logs"
 fi
 
 # --- Image actually in the registry ---------------------------------------------------
-CATALOG="$(curl -fsS --max-time 5 http://localhost:30500/v2/_catalog 2>/dev/null || echo '{}')"
-if echo "$CATALOG" | grep -q 'hello-site'; then
-  ok "image 'hello-site' present in Zot catalog"
+TAG_RESPONSE="{}"
+IMAGE_READY=0
+for _ in $(seq 1 36); do
+  TAG_RESPONSE="$(curl -fsS --max-time 5 \
+    http://localhost:30500/v2/hello-site/tags/list 2>/dev/null || echo '{}')"
+  if jq -e '.name == "hello-site" and any((.tags // [])[]?; . == "v1")' \
+    <<<"$TAG_RESPONSE" >/dev/null 2>&1; then
+    IMAGE_READY=1
+    break
+  fi
+  sleep 5
+done
+if (( IMAGE_READY == 1 )); then
+  ok "image 'hello-site:v1' present in Zot"
 else
-  fail "hello-site not in Zot catalog ($CATALOG) — did the push step succeed? check the workflow logs"
+  fail "hello-site:v1 not in Zot ($TAG_RESPONSE) — did the push step succeed? check the workflow logs"
 fi
 
 # --- And it runs ------------------------------------------------------------------------
-if kubectl -n demo wait --for=condition=Available deploy/hello-site --timeout=10s >/dev/null 2>&1; then
+if kubectl -n demo wait --for=condition=Available deploy/hello-site --timeout=180s >/dev/null 2>&1; then
   ok "hello-site Deployment is Available"
   BODY="$(kubectl -n demo run "verify-curl-$$" --rm -i --restart=Never --quiet \
     --image=docker.io/library/busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028 \
     --command -- /bin/sh -c 'wget -qO- http://hello-site.demo.svc.cluster.local/ 2>/dev/null || true' 2>/dev/null || true)"
-  if echo "$BODY" | grep -q 'hello-site'; then
+  if [[ "$BODY" == *"hello-site"* ]]; then
     ok "hello-site serves the page you built"
   else
     # The probe pod may fail to start on a struggling cluster; the rollout

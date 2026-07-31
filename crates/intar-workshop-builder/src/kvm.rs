@@ -2140,6 +2140,52 @@ mod tests {
         assert!(catch_up_07.contains("localhost:30500/library/busybox:1.37.0"));
         assert!(catch_up_07.contains("crane copy --insecure"));
         assert!(!catch_up_07.contains("mise x"));
+        let verifier_07 =
+            fs::read_to_string(root.join("runtime/source/lab/07-ci/verify.sh")).unwrap();
+        let verifier_wrapper_07 = fs::read_to_string(root.join(&module_07.verify_script)).unwrap();
+        for expected in [
+            "ZOT_READY=0",
+            "TEMPLATE_READY=0",
+            "WORKFLOW_READY=0",
+            "IMAGE_READY=0",
+            "http://localhost:30500/v2/hello-site/tags/list",
+            r#"any((.tags // [])[]?; . == "v1")"#,
+            "--for=condition=Available deploy/hello-site --timeout=180s",
+            r#"[[ "$BODY" == *"hello-site"* ]]"#,
+        ] {
+            assert!(
+                verifier_07.contains(expected),
+                "module 07 verifier is missing '{expected}'"
+            );
+        }
+        for forbidden in [
+            "http://localhost:30500/v2/_catalog",
+            "| grep -q '=Succeeded'",
+            "| grep -q 'hello-site'",
+            "--for=condition=Available deploy/hello-site --timeout=10s",
+        ] {
+            assert!(
+                !verifier_07.contains(forbidden),
+                "module 07 verifier retains unstable text '{forbidden}'"
+            );
+        }
+        assert!(verifier_wrapper_07.contains("awk '/FAIL:/{ line=$0 } END{ print line }'"));
+        assert!(verifier_wrapper_07.contains("INTAR_FAIL %.72s"));
+        for script in [
+            root.join("runtime/source/lab/07-ci/verify.sh"),
+            root.join(&module_07.verify_script),
+        ] {
+            assert!(
+                Command::new("bash")
+                    .arg("-n")
+                    .arg(&script)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "module 07 verifier '{}' has invalid shell syntax",
+                script.display()
+            );
+        }
 
         let module_09 = workshop
             .manifest
@@ -2251,6 +2297,155 @@ mod tests {
         .unwrap();
         let runtime_mise_lock = fs::read_to_string(root.join("runtime/source/mise.lock")).unwrap();
         assert_eq!(runtime_mise_lock, reviewed_mise_lock);
+    }
+
+    #[test]
+    fn module_07_verifier_polls_transient_outcomes_and_reports_permanent_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn write_stub(root: &Path, name: &str, source: &str) {
+            let path = root.join(name);
+            fs::write(&path, source).unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let verifier = root.join("runtime/source/lab/07-ci/verify.sh");
+        let fixtures = tempfile::tempdir().unwrap();
+        let bin = fixtures.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let state = fixtures.path().join("state");
+        fs::create_dir(&state).unwrap();
+        write_stub(&bin, "sleep", "#!/usr/bin/env bash\nexit 0\n");
+        write_stub(
+            &bin,
+            "jq",
+            r#"#!/usr/bin/env bash
+payload="$(cat)"
+[[ "$payload" == *'"v1"'* ]]
+"#,
+        );
+        write_stub(
+            &bin,
+            "kubectl",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"get application"*)
+    printf 'Synced Healthy'
+    ;;
+  *"get workflowtemplate build-and-push"*)
+    counter="${INTAR_FIXTURE_STATE}/template"
+    count="$(cat "$counter" 2>/dev/null || echo 0)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$counter"
+    (( count >= 2 ))
+    ;;
+  *"get workflows"*)
+    counter="${INTAR_FIXTURE_STATE}/workflow"
+    count="$(cat "$counter" 2>/dev/null || echo 0)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$counter"
+    if (( count >= 2 )); then
+      printf 'build-hello-site-fixture=Succeeded\n'
+    else
+      printf 'build-hello-site-fixture=Running\n'
+    fi
+    ;;
+  *"wait --for=condition=Available deploy/hello-site"*)
+    exit 0
+    ;;
+  *"run verify-curl-"*)
+    printf '<html>hello-site</html>'
+    ;;
+  *)
+    printf 'unexpected kubectl fixture invocation: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+"#,
+        );
+        write_stub(
+            &bin,
+            "curl",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"/v2/hello-site/tags/list"*)
+    counter="${INTAR_FIXTURE_STATE}/tag"
+    count="$(cat "$counter" 2>/dev/null || echo 0)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$counter"
+    if (( count >= 2 )); then
+      printf '{"name":"hello-site","tags":["v1"]}\n'
+    else
+      printf '{}\n'
+    fi
+    ;;
+  *"/v2/"*)
+    counter="${INTAR_FIXTURE_STATE}/zot"
+    count="$(cat "$counter" 2>/dev/null || echo 0)"
+    count=$((count + 1))
+    printf '%s' "$count" >"$counter"
+    (( count >= 2 ))
+    ;;
+  *)
+    printf 'unexpected curl fixture invocation: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+"#,
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let success = Command::new("bash")
+            .arg(&verifier)
+            .env("PATH", &path)
+            .env("INTAR_FIXTURE_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(
+            success.status.success(),
+            "{}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&success.stdout);
+        assert!(stdout.contains("build workflow Succeeded (1 run(s))"));
+        assert!(stdout.contains("image 'hello-site:v1' present in Zot"));
+        for counter in ["zot", "template", "workflow", "tag"] {
+            assert_eq!(fs::read_to_string(state.join(counter)).unwrap(), "2");
+        }
+
+        fs::remove_dir_all(&state).unwrap();
+        fs::create_dir(&state).unwrap();
+        write_stub(
+            &bin,
+            "curl",
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"/v2/hello-site/tags/list"*) printf '{}\n' ;;
+  *"/v2/"*) exit 0 ;;
+  *) exit 2 ;;
+esac
+"#,
+        );
+        let failure = Command::new("bash")
+            .arg(&verifier)
+            .env("PATH", path)
+            .env("INTAR_FIXTURE_STATE", state)
+            .output()
+            .unwrap();
+        assert!(!failure.status.success());
+        assert!(
+            String::from_utf8_lossy(&failure.stdout).contains("FAIL: hello-site:v1 not in Zot")
+        );
     }
 
     #[test]
