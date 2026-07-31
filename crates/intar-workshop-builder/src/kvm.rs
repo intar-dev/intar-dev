@@ -2288,6 +2288,18 @@ mod tests {
             !portal_source
                 .contains("- name: S3_PUBLIC_ENDPOINT\n              value: localhost:30900")
         );
+        let cloudbox_otel = "- name: OTEL_EXPORTER_OTLP_ENDPOINT\n              value: http://otel-collector.observability.svc.cluster.local:4318";
+        assert_eq!(portal_source.matches(cloudbox_otel).count(), 1);
+        assert!(portal_source.contains(
+            "- name: PROM_URL\n              value: http://victoria-metrics.observability.svc.cluster.local:8428"
+        ));
+        assert!(!portal_source.contains("http://lgtm.observability.svc.cluster.local"));
+        let picture_pipeline_source = fs::read_to_string(
+            root.join("runtime/source/gitops/components/picture-pipeline/picture-pipeline.yaml"),
+        )
+        .unwrap();
+        assert_eq!(picture_pipeline_source.matches(cloudbox_otel).count(), 2);
+        assert!(!picture_pipeline_source.contains("http://lgtm.observability.svc.cluster.local"));
         let module_10 = workshop
             .manifest
             .modules

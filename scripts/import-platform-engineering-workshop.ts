@@ -2622,6 +2622,11 @@ function copyRuntimePath(relativePath: string) {
     } else if (relativePath === "gitops/components/portal/portal.yaml") {
       content = adaptPortalWorkspaceAppService(content);
     } else if (
+      relativePath ===
+      "gitops/components/picture-pipeline/picture-pipeline.yaml"
+    ) {
+      content = adaptPicturePipelineTelemetry(content);
+    } else if (
       relativePath === "gitops/catalog/victoria-logs.yaml" ||
       relativePath === "gitops/components/victoria-logs/victoria-logs.yaml"
     ) {
@@ -3180,6 +3185,21 @@ kind: Service`,
     "service target",
   );
   replaceOnce(
+    `            - name: UPLOADER_URL
+              value: http://uploader.pipeline.svc.cluster.local
+            # WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral`,
+    `            - name: UPLOADER_URL
+              value: http://uploader.pipeline.svc.cluster.local
+            # The pinned portal image predates the workshop's migration from
+            # otel-lgtm to VictoriaMetrics and the OpenTelemetry Collector.
+            - name: PROM_URL
+              value: http://victoria-metrics.observability.svc.cluster.local:8428
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4318
+            # WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral`,
+    "current observability endpoints",
+  );
+  replaceOnce(
     `            # Host the BROWSER uses for presigned URLs (the RustFS NodePort
             # as seen from the attendee's machine). Matches NODEPORT_RUSTFS_S3.
             - name: S3_PUBLIC_ENDPOINT
@@ -3200,6 +3220,63 @@ kind: Service`,
             # Grafana route under Workspace applications in the Intar room.
             - name: GRAFANA_URL`,
     "Grafana public endpoint comment",
+  );
+
+  return adapted;
+}
+
+function adaptPicturePipelineTelemetry(value: string): string {
+  let adapted = value;
+  const endpoint = "http://otel-collector.observability.svc.cluster.local:4318";
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `picture-pipeline ${label} anchor occurred ${occurrences} times upstream`,
+      );
+    }
+    adapted = adapted.replace(anchor, replacement);
+  };
+
+  replaceOnce(
+    `            - name: BROKER_URL
+              value: http://broker-ingress.knative-eventing.svc.cluster.local/pipeline/default
+          resources:`,
+    `            - name: BROKER_URL
+              value: http://broker-ingress.knative-eventing.svc.cluster.local/pipeline/default
+            # The pinned v0.1.0 image still defaults to the retired otel-lgtm
+            # service, so bind it to the collector deployed by this workshop.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${endpoint}
+          resources:`,
+    "uploader telemetry endpoint",
+  );
+  replaceOnce(
+    `            - name: S3_BUCKET
+              value: images
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # Image decoding is the one memory-hungry step in the pipeline.`,
+    `            - name: S3_BUCKET
+              value: images
+            # The pinned v0.1.0 image still defaults to the retired otel-lgtm
+            # service, so bind it to the collector deployed by this workshop.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: ${endpoint}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              # Image decoding is the one memory-hungry step in the pipeline.`,
+    "resizer telemetry endpoint",
   );
 
   return adapted;

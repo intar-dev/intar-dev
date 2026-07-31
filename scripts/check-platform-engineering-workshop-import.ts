@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "9034abd6f097e14f4c7dd43e5c24cd9163a93245da4e1680c30df6fa78631688";
+  "dca7d986b80d8214dc28d9c03ed7d3bc2d05a980037e8ad66475bf4fd950d3f4";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "45abb0b42b9c61546ca9bd30f173828e5116f6d1ce3e5fc54dfc21968e783984";
+  "ad4bbbeb96bd5f57c15abcf33305aff5d4cc300e72c708fd0722921e549f6e14";
 const EXPECTED_OVERLAY_SHA256 =
   "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
 const EXPECTED_CHANGED_FILES = 2;
@@ -30,6 +30,8 @@ assertModule09OutcomeContract(adaptedRoot, "checked-in workshop");
 assertModule10CumulativeContract(rawRoot, "regenerated import");
 assertModule10CumulativeContract(adaptedRoot, "checked-in workshop");
 assertPortalSigningAuthority(adaptedRoot);
+assertCloudboxRuntimeEndpoints(rawRoot, "regenerated import");
+assertCloudboxRuntimeEndpoints(adaptedRoot, "checked-in workshop");
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -316,6 +318,45 @@ function assertPortalSigningAuthority(root: string) {
     throw new Error(
       "checked-in portal must not use pod loopback for MinIO presigning and region discovery",
     );
+  }
+}
+
+function assertCloudboxRuntimeEndpoints(root: string, label: string) {
+  const portal = readFileSync(
+    join(root, "runtime/source/gitops/components/portal/portal.yaml"),
+    "utf8",
+  );
+  const pipeline = readFileSync(
+    join(
+      root,
+      "runtime/source/gitops/components/picture-pipeline/picture-pipeline.yaml",
+    ),
+    "utf8",
+  );
+  const otel = `- name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4318`;
+  if (portal.split(otel).length - 1 !== 1) {
+    throw new Error(`${label} must bind the portal to the active OTLP endpoint`);
+  }
+  if (pipeline.split(otel).length - 1 !== 2) {
+    throw new Error(
+      `${label} must bind both picture-pipeline services to the active OTLP endpoint`,
+    );
+  }
+  const prom = `- name: PROM_URL
+              value: http://victoria-metrics.observability.svc.cluster.local:8428`;
+  if (portal.split(prom).length - 1 !== 1) {
+    throw new Error(
+      `${label} must bind the portal to the active VictoriaMetrics endpoint`,
+    );
+  }
+  for (const [name, manifest] of [
+    ["portal", portal],
+    ["picture pipeline", pipeline],
+  ] as const) {
+    if (manifest.includes("http://lgtm.observability.svc.cluster.local")) {
+      throw new Error(`${label} ${name} retains an active retired lgtm endpoint`);
+    }
   }
 }
 

@@ -341,6 +341,12 @@ spec:
             # (Knative answers on the service's root domain, no port).
             - name: UPLOADER_URL
               value: http://uploader.pipeline.svc.cluster.local
+            # The pinned portal image predates the workshop's migration from
+            # otel-lgtm to VictoriaMetrics and the OpenTelemetry Collector.
+            - name: PROM_URL
+              value: http://victoria-metrics.observability.svc.cluster.local:8428
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4318
             # WORKSHOP-GRADE CREDENTIALS, committed on purpose (ephemeral
             # lab sandbox) — must match the rustfs component.
             - name: S3_ENDPOINT
