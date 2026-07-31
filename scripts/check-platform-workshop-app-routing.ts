@@ -167,7 +167,7 @@ const portalAdapter = requireText(
   'regex: "^(GET|HEAD)$"',
   "cluster: rustfs",
   "prefix_rewrite: /",
-  "host_rewrite_literal: localhost:30900",
+  "host_rewrite_literal: rustfs-svc.rustfs.svc.cluster.local:9000",
   "timeout: 0s",
   "status: 405",
   '"method not allowed\\n"',
@@ -186,7 +186,7 @@ const portalAdapter = requireText(
   '[":status"] = "400"',
   '"invalid Host\\n"',
   'routeName() ~= "portal-ui"',
-  '"http://localhost:30900"',
+  '"http://rustfs-svc.rustfs.svc.cluster.local:9000"',
   'metadata.public_base .. "/__intar-s3"',
   '"http://localhost:30030"',
   'metadata.public_base .. "/__intar-grafana"',
@@ -200,6 +200,23 @@ const portalAdapter = requireText(
   "docker.io/envoyproxy/envoy@sha256:c5e8a68e52f4d4697a9adb280dbe415d77fedf1257e183dcb86205bd438f18bd",
   "targetPort: gateway",
 );
+const portalSigningAuthority = "rustfs-svc.rustfs.svc.cluster.local:9000";
+for (const anchor of [
+  `host_rewrite_literal: ${portalSigningAuthority}`,
+  `"http://${portalSigningAuthority}",`,
+  `- name: S3_PUBLIC_ENDPOINT\n              value: ${portalSigningAuthority}`,
+]) {
+  if (portalAdapter.split(anchor).length - 1 !== 1) {
+    throw new Error(
+      `portal presigning, response rewrite, and S3 proxy Host must share one internal RustFS authority: ${anchor}`,
+    );
+  }
+}
+if (/S3_PUBLIC_ENDPOINT\s*\n\s*value: localhost:30900/u.test(portalAdapter)) {
+  throw new Error(
+    "portal must not use pod loopback for MinIO presigning and region discovery",
+  );
+}
 if ((portalAdapter.match(/prefix: \/__intar-s3\//gu)?.length ?? 0) !== 2) {
   throw new Error(
     "portal adapter must have one GET/HEAD S3 route and one 405 fallback",
@@ -229,7 +246,7 @@ requireOrderedText(
                               route:
                                 cluster: rustfs
                                 prefix_rewrite: /
-                                host_rewrite_literal: localhost:30900
+                                host_rewrite_literal: rustfs-svc.rustfs.svc.cluster.local:9000
                                 timeout: 0s`,
   `                            - match:
                                 prefix: /__intar-s3/
@@ -338,6 +355,8 @@ requireOrderedText(
   "module09_trace_ready=0",
   "module09_gallery_ready=0",
   "module09_deadline=$((SECONDS + 300))",
+  "module09_gallery_last_state=not_checked",
+  "curl -sS --max-time 20",
   "module09_attempt % 6 == 0",
   "module 09 connected upload trace did not converge within 300s",
   "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s",
@@ -358,6 +377,8 @@ requireText(
   "[.processes[]?.serviceName]",
   "module09_trace_ready=0",
   "module09_gallery_ready=0",
+  "module09_gallery_last_state=not_checked",
+  "curl -sS --max-time 20",
   "module09_deadline=$((SECONDS + 60))",
   "for module09_attempt in $(seq 1 12)",
   "module 09 connected upload trace did not converge within 60s",
@@ -368,6 +389,7 @@ requireText(
   'module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"',
   "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s",
   "module09_gallery_hard_failure=1",
+  "grid rendered without a canonical object URL",
   "http://localhost:30600/__intar-s3/app-assets/hello.txt",
   "--head",
   '"${gallery_s3_head_status}" != "403"',

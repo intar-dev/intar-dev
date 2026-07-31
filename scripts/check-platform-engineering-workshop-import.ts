@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "368e5abd243cc0058bd30b55e2f35cb143d1fe5166d9bb3ae1b02b42630a47c4";
+  "9034abd6f097e14f4c7dd43e5c24cd9163a93245da4e1680c30df6fa78631688";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "3b6dad9e56adeb92a19eccdcdf05db8104f5a43f7d184c67ab0dcec3ef2f1180";
+  "45abb0b42b9c61546ca9bd30f173828e5116f6d1ce3e5fc54dfc21968e783984";
 const EXPECTED_OVERLAY_SHA256 =
   "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
 const EXPECTED_CHANGED_FILES = 2;
@@ -27,6 +27,9 @@ assertModule07VerifierContract(rawRoot, "regenerated import");
 assertModule07VerifierContract(adaptedRoot, "checked-in workshop");
 assertModule09OutcomeContract(rawRoot, "regenerated import");
 assertModule09OutcomeContract(adaptedRoot, "checked-in workshop");
+assertModule10CumulativeContract(rawRoot, "regenerated import");
+assertModule10CumulativeContract(adaptedRoot, "checked-in workshop");
+assertPortalSigningAuthority(adaptedRoot);
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -289,6 +292,59 @@ function assertModule07VerifierContract(root: string, label: string) {
   }
 }
 
+function assertPortalSigningAuthority(root: string) {
+  const portal = readFileSync(
+    join(
+      root,
+      "runtime/source/gitops/components/portal/portal.yaml",
+    ),
+    "utf8",
+  );
+  const authority = "rustfs-svc.rustfs.svc.cluster.local:9000";
+  for (const anchor of [
+    `host_rewrite_literal: ${authority}`,
+    `"http://${authority}",`,
+    `- name: S3_PUBLIC_ENDPOINT\n              value: ${authority}`,
+  ]) {
+    if (portal.split(anchor).length - 1 !== 1) {
+      throw new Error(
+        `checked-in portal presigning, response rewrite, and S3 proxy Host must share one internal RustFS authority: ${anchor}`,
+      );
+    }
+  }
+  if (/S3_PUBLIC_ENDPOINT\s*\n\s*value: localhost:30900/u.test(portal)) {
+    throw new Error(
+      "checked-in portal must not use pod loopback for MinIO presigning and region discovery",
+    );
+  }
+}
+
+function assertModule10CumulativeContract(root: string, label: string) {
+  const catchUp = readFileSync(join(root, "scripts/catch-up-10.sh"), "utf8");
+  for (const contract of [
+    'source "$REPO_ROOT/lab/common.sh"',
+    '"$DIR/restore.sh" all',
+    'COMPONENT_PATH="gitops/components/demo/demo-web.yaml"',
+    'BASELINE_SRC="$DIR/baseline/demo-web.yaml"',
+    'if [[ ! -f "$CLONE/$COMPONENT_PATH" ]]',
+    'git -C "$CLONE" add "$COMPONENT_PATH"',
+    'commit -q -m "module 10: restore demo-web baseline"',
+    "wait_exists demo deployment/demo-web 300",
+    "rollout status deployment/demo-web --timeout=300s",
+  ]) {
+    if (!catchUp.includes(contract)) {
+      throw new Error(
+        `${label} module 10 catch-up does not establish the clean cumulative baseline: ${contract}`,
+      );
+    }
+  }
+  if (catchUp.includes('exec "$DIR/restore.sh" all')) {
+    throw new Error(
+      `${label} module 10 catch-up exits before seeding its cumulative baseline`,
+    );
+  }
+}
+
 function assertModule09OutcomeContract(root: string, label: string) {
   const catchUp = readFileSync(
     join(root, "scripts/catch-up-09.sh"),
@@ -301,6 +357,8 @@ function assertModule09OutcomeContract(root: string, label: string) {
   for (const contract of [
     "module09_trace_ready=0",
     "module09_gallery_ready=0",
+    "module09_gallery_last_state=not_checked",
+    "curl -sS --max-time 20",
     "module09_deadline=$((SECONDS + 60))",
     "for module09_attempt in $(seq 1 12)",
     "module 09 connected upload trace did not converge within 60s",
@@ -308,6 +366,7 @@ function assertModule09OutcomeContract(root: string, label: string) {
     "https://wa-workshop-probe\\.intar\\.app/__intar-s3/",
     'module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"',
     "module09_gallery_hard_failure=1",
+    "grid rendered without a canonical object URL",
   ]) {
     if (!verifier.includes(contract)) {
       throw new Error(
@@ -317,6 +376,8 @@ function assertModule09OutcomeContract(root: string, label: string) {
   }
   for (const contract of [
     "trap 'rm -f \"$TMP_PNG\"' EXIT",
+    "module09_gallery_last_state=not_checked",
+    "curl -sS --max-time 20",
     "module09_attempt % 6 == 0",
     "module09_deadline=$((SECONDS + 300))",
     "module 09 connected upload trace did not converge within 300s",
