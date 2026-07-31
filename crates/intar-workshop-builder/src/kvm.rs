@@ -2102,7 +2102,11 @@ mod tests {
         assert!(!catch_up_00.contains("MISE_OFFLINE"));
         assert!(!catch_up_01.contains("/scripts/catch-up.sh"));
         assert!(catch_up_01.contains("scripts/create-cluster.sh"));
-        assert!(catch_up_01.contains("kubectl wait --for=condition=Ready nodes --all"));
+        assert!(catch_up_01.contains("source \"$REPO_ROOT/lab/common.sh\""));
+        assert!(catch_up_01.contains("wait_condition \"\" nodes Ready 300"));
+        assert!(!catch_up_01.contains("kubectl wait --for=condition=Ready nodes"));
+        let common = fs::read_to_string(root.join("runtime/source/lab/common.sh")).unwrap();
+        assert!(common.contains("(.status.conditions? // [])[]?"));
         let module_00_verifier =
             fs::read_to_string(root.join("runtime/source/lab/00-setup/verify.sh")).unwrap();
         assert!(!module_00_verifier.contains("platform-engineering-workshop/.git"));

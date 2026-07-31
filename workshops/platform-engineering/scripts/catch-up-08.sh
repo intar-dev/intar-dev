@@ -41,5 +41,5 @@ spec:
   size: small
 EOF
 
-kubectl -n demo wait --for=condition=Ready workshopdatabase/console-db --timeout=600s
+wait_condition demo workshopdatabase/console-db Ready 600
 echo "console-db is Ready — see it in Cloudbox Console under Databases."

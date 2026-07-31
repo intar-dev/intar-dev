@@ -21,7 +21,7 @@ wait_app cnpg-operator
 # CNPG's CRD was Established (SkipDryRunOnMissingResource) — a race that leaves
 # cluster/app-db missing. Wait for the CRD first, then make sure the Cluster
 # actually materializes before waiting on its readiness.
-kubectl wait --for=condition=Established crd/clusters.postgresql.cnpg.io --timeout=180s
+wait_condition "" crd/clusters.postgresql.cnpg.io Established 180
 wait_app rustfs
 wait_app demo
 
@@ -33,7 +33,7 @@ for _ in $(seq 1 60); do
   kubectl -n demo get cluster/app-db >/dev/null 2>&1 && break
   sleep 5
 done
-kubectl -n demo wait --for=condition=Ready cluster/app-db --timeout=420s
+wait_condition demo cluster/app-db Ready 420
 kubectl -n demo exec app-db-1 -- psql -U postgres -d app -tAc 'SELECT 1;'
 
 # 3. Bucket + object + a guest-local presigned download.

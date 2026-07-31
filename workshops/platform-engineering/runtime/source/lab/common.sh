@@ -104,6 +104,43 @@ wait_exists() {
   return 1
 }
 
+# wait_condition <ns-or-empty> <resource> <condition> [timeout-seconds]
+# Poll a single resource, or every item in a resource list such as "nodes",
+# until the named Kubernetes condition is True. Kubernetes can briefly expose
+# status.conditions as null while a controller initializes an object. Native
+# kubectl wait treats that valid transitional state as a fatal accessor error;
+# the null-coalescing jq generator below treats it as an empty condition list
+# and keeps polling. An empty resource list is never considered ready.
+wait_condition() {
+  local ns="$1" obj="$2" condition="$3" timeout="${4:-300}" waited=0 state
+  while [ "$waited" -lt "$timeout" ]; do
+    if [ -n "$ns" ]; then
+      state="$(kubectl -n "$ns" get "$obj" -o json 2>/dev/null)" || state=""
+    else
+      state="$(kubectl get "$obj" -o json 2>/dev/null)" || state=""
+    fi
+    if [ -n "$state" ] && jq -e --arg condition "$condition" '
+      def has_true_condition($wanted):
+        any((.status.conditions? // [])[]?;
+          (((.type? // "") | ascii_downcase) == ($wanted | ascii_downcase)) and
+          ((((.status? // "") | tostring) | ascii_downcase) == "true"));
+      if has("items") then
+        (((.items // []) | length) > 0) and
+        all((.items // [])[]; has_true_condition($condition))
+      else
+        has_true_condition($condition)
+      end
+    ' <<<"$state" >/dev/null; then
+      echo "${obj} condition ${condition}=True"
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "ERROR: timed out after ${timeout}s waiting for ${obj} condition ${condition}=True in ${ns:-cluster scope}" >&2
+  return 1
+}
+
 # wait_for_cr <ns> <resource> [crd] — the demo app can report Synced while
 # SKIPPING a custom resource whose CRD wasn't Established yet
 # (SkipDryRunOnMissingResource), leaving the CR "not found" when a solve script
@@ -111,8 +148,8 @@ wait_exists() {
 # Established, nudge the demo app to re-apply, then poll for the CR to appear.
 # (Recurring finding across modules 03/04/06 in rehearsal-in-CI.)
 wait_for_cr() {
-  ns="$1"; resource="$2"; crd="${3:-}"
-  [ -n "$crd" ] && kubectl wait --for=condition=Established "crd/$crd" --timeout=180s
+  local ns="$1" resource="$2" crd="${3:-}"
+  [ -n "$crd" ] && wait_condition "" "crd/$crd" Established 180
   kubectl -n argocd annotate application demo argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1 || true
   for _ in $(seq 1 60); do
     kubectl -n "$ns" get "$resource" >/dev/null 2>&1 && return 0

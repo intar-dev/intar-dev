@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "955b9f9b09a633d06a49616ba763230db862e5b71ed6bdd53d5ff058d0ea5aac";
+  "636fe1358b614c1500aee16f201215b11ce1ebfafb9b63d59d9bd5fb797f81b1";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "e3b4bf175f93496dee3507870d41f2cabea0255e0ced1edee54d8870751bc448";
+  "5627641e111bd511734b6e0c9995ab0df6e2e888a78460d71bd727c65dc45487";
 const EXPECTED_OVERLAY_SHA256 =
   "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
 const EXPECTED_CHANGED_FILES = 2;
@@ -20,6 +20,9 @@ if (!process.argv[2] || !process.argv[3]) {
     "usage: bun scripts/check-platform-engineering-workshop-import.ts RAW_IMPORT ADAPTED_TREE",
   );
 }
+
+assertNullSafeConditionWaitContract(rawRoot, "regenerated import");
+assertNullSafeConditionWaitContract(adaptedRoot, "checked-in workshop");
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -136,6 +139,104 @@ function digestOverlay(
 function entryLock(entry: SnapshotEntry | undefined): string {
   if (!entry) return "missing";
   return `${entry.executable ? "x" : "-"}:${entry.sha256}`;
+}
+
+function assertNullSafeConditionWaitContract(root: string, label: string) {
+  const readContract = (relativePath: string) =>
+    readFileSync(join(root, relativePath), "utf8");
+  const common = readContract("runtime/source/lab/common.sh");
+  const commonContracts = [
+    "wait_condition() {",
+    "(.status.conditions? // [])[]?",
+    "(((.items // []) | length) > 0)",
+    "all((.items // [])[]; has_true_condition($condition))",
+    '[ -n "$crd" ] && wait_condition "" "crd/$crd" Established 180',
+  ];
+  for (const contract of commonContracts) {
+    if (!common.includes(contract)) {
+      throw new Error(
+        `${label} is missing null-safe condition contract: ${contract}`,
+      );
+    }
+  }
+
+  const expectedCalls = new Map<string, string[]>([
+    [
+      "scripts/catch-up-01.sh",
+      [
+        'source "$REPO_ROOT/lab/common.sh"',
+        'wait_condition "" nodes Ready 300',
+      ],
+    ],
+    [
+      "scripts/catch-up-03.sh",
+      [
+        'wait_condition "" crd/clusters.postgresql.cnpg.io Established 180',
+        "wait_condition demo cluster/app-db Ready 420",
+      ],
+    ],
+    [
+      "scripts/catch-up-04.sh",
+      [
+        'wait_condition "" xrd/workshopdatabases.platform.cloudbox.io Established 180',
+        "wait_condition demo workshopdatabase/my-db Ready 600",
+      ],
+    ],
+    [
+      "scripts/catch-up-06.sh",
+      ["wait_condition demo ksvc/hello Ready 300"],
+    ],
+    [
+      "scripts/catch-up-08.sh",
+      ["wait_condition demo workshopdatabase/console-db Ready 600"],
+    ],
+    [
+      "scripts/catch-up-09.sh",
+      [
+        "wait_condition pipeline broker/default Ready 300",
+        "wait_condition pipeline ksvc/uploader Ready 300",
+        "wait_condition pipeline ksvc/resizer Ready 300",
+        "wait_condition pipeline trigger/resize-on-upload Ready 300",
+        "wait_condition pipeline job/create-images-bucket Complete 300",
+      ],
+    ],
+  ]);
+  const directConditionWait =
+    /kubectl(?:\s+-n\s+\S+)?\s+wait\s+--for=condition=/u;
+  for (
+    const name of readdirSync(join(root, "scripts"))
+      .filter((candidate) => /^catch-up-[0-9]{2}\.sh$/u.test(candidate))
+      .sort()
+  ) {
+    if (directConditionWait.test(readContract(`scripts/${name}`))) {
+      throw new Error(
+        `${label} retains a direct kubectl condition wait in scripts/${name}`,
+      );
+    }
+  }
+  for (const [relativePath, calls] of expectedCalls) {
+    const script = readContract(relativePath);
+    for (const call of calls) {
+      if (!script.includes(call)) {
+        throw new Error(
+          `${label} is missing ${call} in ${relativePath}`,
+        );
+      }
+    }
+  }
+
+  const cnpgRestore = readContract(
+    "runtime/source/lab/05-debug-with-ai/faults/02-db-stuck/fix.sh",
+  );
+  if (
+    directConditionWait.test(cnpgRestore) ||
+    !cnpgRestore.includes('source "$DIR/../../../common.sh"') ||
+    !cnpgRestore.includes(
+      "wait_condition faultlab-02 cluster/orders-db Ready 300",
+    )
+  ) {
+    throw new Error(`${label} retains an unsafe CNPG fault restore wait`);
+  }
 }
 
 function sha256(value: Uint8Array): string {

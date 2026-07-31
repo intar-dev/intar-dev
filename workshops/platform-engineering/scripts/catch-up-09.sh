@@ -33,12 +33,13 @@ wait_exists pipeline broker/default
 wait_exists pipeline ksvc/uploader
 wait_exists pipeline ksvc/resizer
 wait_exists pipeline trigger/resize-on-upload
-kubectl -n pipeline wait --for=condition=Ready broker/default --timeout=300s
+wait_condition pipeline broker/default Ready 300
 # Wait for the subscriber ksvcs BEFORE the trigger. A Knative Trigger only goes
 # Ready once BOTH its broker AND its subscriber (the resizer ksvc) are
 # address-resolvable — so waiting on the trigger before its subscriber is a race
 # that intermittently timed out under CI load. Order the dependency correctly.
-kubectl -n pipeline wait --for=condition=Ready ksvc/uploader ksvc/resizer --timeout=300s
+wait_condition pipeline ksvc/uploader Ready 300
+wait_condition pipeline ksvc/resizer Ready 300
 # The trigger latches "BrokerNotConfigured" if it first reconciled before the
 # broker was Ready (the broker itself races the eventing-config install). With the
 # broker AND subscriber now up, poke the trigger to re-reconcile so it picks them
@@ -46,9 +47,9 @@ kubectl -n pipeline wait --for=condition=Ready ksvc/uploader ksvc/resizer --time
 # reconcile) even on a re-run; ArgoCD selfHeal reverts it afterwards.
 kubectl -n pipeline annotate trigger/resize-on-upload \
   cloudbox.io/rereconcile="$(date +%s)" --overwrite >/dev/null 2>&1 || true
-kubectl -n pipeline wait --for=condition=Ready trigger/resize-on-upload --timeout=300s
+wait_condition pipeline trigger/resize-on-upload Ready 300
 wait_exists pipeline job/create-images-bucket
-kubectl -n pipeline wait --for=condition=Complete job/create-images-bucket --timeout=300s
+wait_condition pipeline job/create-images-bucket Complete 300
 
 # The three storage backends and Grafana are ArgoCD wave 0. The collector is
 # wave 1, so prove the whole first wave before waiting for its two workloads.
