@@ -1193,9 +1193,13 @@ module09_gallery_hard_failure=0
 module09_outcome_status=0
 module09_public_host=wa-workshop-probe.intar.app
 module09_deadline=$((SECONDS + ${timeoutSeconds}))
+module09_gallery_last_state=not_checked
 
 module09_portal_curl() {
-  curl -sS --max-time 5 \\
+  # Cloudbox deliberately gives its RustFS gallery listing 15 seconds. Keep
+  # the caller above that bound so it can return a useful fragment instead of
+  # being cancelled by the proof harness first.
+  curl -sS --max-time 20 \\
     -H "Host: \${module09_public_host}" \\
     -H "X-Forwarded-Host: \${module09_public_host}" \\
     -H 'X-Forwarded-Proto: https' \\
@@ -1228,6 +1232,13 @@ for module09_attempt in $(seq 1 ${maxAttempts}); do
       module09_portal_curl --fail \\
         http://localhost:30600/gallery/grid 2>/dev/null || true
     )"
+    if [[ -z "\${module09_gallery_page}" ]]; then
+      module09_gallery_last_state='grid request returned no body'
+    elif [[ "\${module09_gallery_page}" == *"S3 error:"* ]]; then
+      module09_gallery_last_state='grid reported an S3 error'
+    else
+      module09_gallery_last_state='grid rendered without a canonical object URL'
+    fi
     if [[ "\${module09_gallery_page}" == *"localhost:"* ]]; then
       printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\\n' >&2
       module09_gallery_hard_failure=1
@@ -1241,6 +1252,7 @@ for module09_attempt in $(seq 1 ${maxAttempts}); do
         sed -n '1p' || true
     )
     if [[ -n "\${module09_gallery_url}" ]]; then
+      module09_gallery_last_state='canonical object fetch failed or was empty'
       module09_gallery_path="\${module09_gallery_url#https://wa-workshop-probe.intar.app}"
       module09_gallery_file="$(mktemp)"
       if module09_portal_curl --fail \\
@@ -1249,6 +1261,7 @@ for module09_attempt in $(seq 1 ${maxAttempts}); do
         2>/dev/null &&
           [[ -s "\${module09_gallery_file}" ]]; then
         module09_gallery_ready=1
+        module09_gallery_last_state=ready
       fi
       rm -f "\${module09_gallery_file}"
     fi
@@ -1271,7 +1284,8 @@ if (( module09_trace_ready == 0 && module09_gallery_hard_failure == 0 )); then
   module09_outcome_status=1
 fi
 if (( module09_gallery_ready == 0 && module09_gallery_hard_failure == 0 )); then
-  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within ${timeoutSeconds}s\\n' >&2
+  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within ${timeoutSeconds}s (%s)\\n' \\
+    "\${module09_gallery_last_state}" >&2
   module09_outcome_status=1
 fi
 `;
@@ -1791,6 +1805,9 @@ exec ./lab/00-setup/verify.sh
   if (module.id === "09") {
     script = adaptModule09ObservabilityCatchUp(script);
   }
+  if (module.id === "10") {
+    script = adaptModule10DayTwoCatchUp(script);
+  }
   script = adaptTrustedConditionWaits(module.id, script);
   script = adaptTrustedScriptNarrative(module.id, script);
   if (/\/solutions(?:\/|\b)/u.test(script)) {
@@ -2036,6 +2053,52 @@ trap - EXIT`,
   );
 
   return adapted;
+}
+
+function adaptModule10DayTwoCatchUp(value: string): string {
+  const anchor = `DIR="/opt/platform-engineering-workshop/lab/10-day2-ops"
+
+exec "$DIR/restore.sh" all`;
+  const replacement = `DIR="/opt/platform-engineering-workshop/lab/10-day2-ops"
+REPO_ROOT="/opt/platform-engineering-workshop"
+# shellcheck source=../common.sh
+source "$REPO_ROOT/lab/common.sh"
+
+# A normal cumulative run reaches module 10 without injecting a day-two fault.
+# Revert any fault that does exist, then make the clean demo-web baseline an
+# explicit part of the canonical checkpoint instead of relying on inject.sh's
+# learner-only first-run setup path.
+"$DIR/restore.sh" all
+
+CLONE="$(gitops_clone)"
+TMP_PARENT="$(dirname "$CLONE")"
+trap 'rm -rf "$TMP_PARENT"' EXIT
+COMPONENT_PATH="gitops/components/demo/demo-web.yaml"
+BASELINE_SRC="$DIR/baseline/demo-web.yaml"
+
+mkdir -p "$(dirname "$CLONE/$COMPONENT_PATH")"
+# Only the absent baseline is a normal cumulative state. Known injected faults
+# were reverted above; preserve any other drift so the verifier reports it.
+if [[ ! -f "$CLONE/$COMPONENT_PATH" ]]; then
+  cp "$BASELINE_SRC" "$CLONE/$COMPONENT_PATH"
+  git -C "$CLONE" add "$COMPONENT_PATH"
+  if ! git -C "$CLONE" diff --cached --quiet -- "$COMPONENT_PATH"; then
+    git -C "$CLONE" -c user.name="cloudbox" -c user.email="cloudbox@localhost" \\
+      commit -q -m "module 10: restore demo-web baseline"
+    git -C "$CLONE" push -q origin main
+  fi
+fi
+
+argocd_refresh demo
+wait_exists demo deployment/demo-web 300
+kubectl -n demo rollout status deployment/demo-web --timeout=300s`;
+  const occurrences = value.split(anchor).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `module 10 cumulative baseline anchor occurred ${occurrences} times upstream`,
+    );
+  }
+  return value.replace(anchor, () => replacement);
 }
 
 function extractDetails(raw: string): Array<{ title: string; body: string }> {
@@ -2767,7 +2830,7 @@ data:
                               route:
                                 cluster: rustfs
                                 prefix_rewrite: /
-                                host_rewrite_literal: localhost:30900
+                                host_rewrite_literal: rustfs-svc.rustfs.svc.cluster.local:9000
                                 timeout: 0s
                               request_headers_to_remove:
                                 - forwarded
@@ -2905,7 +2968,7 @@ data:
                               local content = body:getBytes(0, body:length())
                               content = replace_all(
                                 content,
-                                "http://localhost:30900",
+                                "http://rustfs-svc.rustfs.svc.cluster.local:9000",
                                 metadata.public_base .. "/__intar-s3"
                               )
                               content = replace_all(
@@ -3119,11 +3182,13 @@ kind: Service`,
   replaceOnce(
     `            # Host the BROWSER uses for presigned URLs (the RustFS NodePort
             # as seen from the attendee's machine). Matches NODEPORT_RUSTFS_S3.
-            - name: S3_PUBLIC_ENDPOINT`,
-    `            # Cloudbox signs with the stable guest-local RustFS authority.
+            - name: S3_PUBLIC_ENDPOINT
+              value: localhost:30900`,
+    `            # Cloudbox signs with the stable in-cluster RustFS authority.
             # The sidecar rewrites rendered URLs to a route-local /__intar-s3/
             # path, then restores this authority before RustFS verifies SigV4.
-            - name: S3_PUBLIC_ENDPOINT`,
+            - name: S3_PUBLIC_ENDPOINT
+              value: rustfs-svc.rustfs.svc.cluster.local:9000`,
     "S3 public endpoint comment",
   );
   replaceOnce(

@@ -54,7 +54,7 @@ data:
                               route:
                                 cluster: rustfs
                                 prefix_rewrite: /
-                                host_rewrite_literal: localhost:30900
+                                host_rewrite_literal: rustfs-svc.rustfs.svc.cluster.local:9000
                                 timeout: 0s
                               request_headers_to_remove:
                                 - forwarded
@@ -192,7 +192,7 @@ data:
                               local content = body:getBytes(0, body:length())
                               content = replace_all(
                                 content,
-                                "http://localhost:30900",
+                                "http://rustfs-svc.rustfs.svc.cluster.local:9000",
                                 metadata.public_base .. "/__intar-s3"
                               )
                               content = replace_all(
@@ -353,11 +353,11 @@ spec:
             # gallery is empty (but the page loads) until that is enabled.
             - name: S3_BUCKET
               value: images
-            # Cloudbox signs with the stable guest-local RustFS authority.
+            # Cloudbox signs with the stable in-cluster RustFS authority.
             # The sidecar rewrites rendered URLs to a route-local /__intar-s3/
             # path, then restores this authority before RustFS verifies SigV4.
             - name: S3_PUBLIC_ENDPOINT
-              value: localhost:30900
+              value: rustfs-svc.rustfs.svc.cluster.local:9000
             # Stable marker for observability deep-links. The sidecar
             # replaces it with guidance to open the separately authorized
             # Grafana route under Workspace applications in the Intar room.

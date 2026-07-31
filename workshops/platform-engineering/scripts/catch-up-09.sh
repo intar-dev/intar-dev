@@ -138,9 +138,13 @@ module09_gallery_hard_failure=0
 module09_outcome_status=0
 module09_public_host=wa-workshop-probe.intar.app
 module09_deadline=$((SECONDS + 300))
+module09_gallery_last_state=not_checked
 
 module09_portal_curl() {
-  curl -sS --max-time 5 \
+  # Cloudbox deliberately gives its RustFS gallery listing 15 seconds. Keep
+  # the caller above that bound so it can return a useful fragment instead of
+  # being cancelled by the proof harness first.
+  curl -sS --max-time 20 \
     -H "Host: ${module09_public_host}" \
     -H "X-Forwarded-Host: ${module09_public_host}" \
     -H 'X-Forwarded-Proto: https' \
@@ -173,6 +177,13 @@ for module09_attempt in $(seq 1 60); do
       module09_portal_curl --fail \
         http://localhost:30600/gallery/grid 2>/dev/null || true
     )"
+    if [[ -z "${module09_gallery_page}" ]]; then
+      module09_gallery_last_state='grid request returned no body'
+    elif [[ "${module09_gallery_page}" == *"S3 error:"* ]]; then
+      module09_gallery_last_state='grid reported an S3 error'
+    else
+      module09_gallery_last_state='grid rendered without a canonical object URL'
+    fi
     if [[ "${module09_gallery_page}" == *"localhost:"* ]]; then
       printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\n' >&2
       module09_gallery_hard_failure=1
@@ -186,6 +197,7 @@ for module09_attempt in $(seq 1 60); do
         sed -n '1p' || true
     )
     if [[ -n "${module09_gallery_url}" ]]; then
+      module09_gallery_last_state='canonical object fetch failed or was empty'
       module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"
       module09_gallery_file="$(mktemp)"
       if module09_portal_curl --fail \
@@ -194,6 +206,7 @@ for module09_attempt in $(seq 1 60); do
         2>/dev/null &&
           [[ -s "${module09_gallery_file}" ]]; then
         module09_gallery_ready=1
+        module09_gallery_last_state=ready
       fi
       rm -f "${module09_gallery_file}"
     fi
@@ -221,7 +234,8 @@ if (( module09_trace_ready == 0 && module09_gallery_hard_failure == 0 )); then
   module09_outcome_status=1
 fi
 if (( module09_gallery_ready == 0 && module09_gallery_hard_failure == 0 )); then
-  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s\n' >&2
+  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s (%s)\n' \
+    "${module09_gallery_last_state}" >&2
   module09_outcome_status=1
 fi
 

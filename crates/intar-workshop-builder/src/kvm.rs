@@ -2216,6 +2216,8 @@ mod tests {
             "module09_trace_ready=0",
             "module09_gallery_ready=0",
             "module09_deadline=$((SECONDS + 300))",
+            "module09_gallery_last_state=not_checked",
+            "curl -sS --max-time 20",
             "module09_attempt % 6 == 0",
             "module 09 connected upload trace did not converge within 300s",
             "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s",
@@ -2239,11 +2241,14 @@ mod tests {
             "[.processes[]?.serviceName]",
             "module09_trace_ready=0",
             "module09_gallery_ready=0",
+            "module09_gallery_last_state=not_checked",
+            "curl -sS --max-time 20",
             "module09_deadline=$((SECONDS + 60))",
             "for module09_attempt in $(seq 1 12)",
             "module 09 connected upload trace did not converge within 60s",
             "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s",
             "module09_gallery_hard_failure=1",
+            "grid rendered without a canonical object URL",
         ] {
             assert!(
                 verifier_09.contains(expected),
@@ -2264,6 +2269,58 @@ mod tests {
                 script
             );
         }
+        let portal_source =
+            fs::read_to_string(root.join("runtime/source/gitops/components/portal/portal.yaml"))
+                .unwrap();
+        let signing_authority = "rustfs-svc.rustfs.svc.cluster.local:9000";
+        for anchor in [
+            format!("host_rewrite_literal: {signing_authority}"),
+            format!("\"http://{signing_authority}\","),
+            format!("- name: S3_PUBLIC_ENDPOINT\n              value: {signing_authority}"),
+        ] {
+            assert_eq!(
+                portal_source.matches(&anchor).count(),
+                1,
+                "portal presigning, response rewrite, and S3 proxy Host must share one reachable authority: {anchor}"
+            );
+        }
+        assert!(
+            !portal_source
+                .contains("- name: S3_PUBLIC_ENDPOINT\n              value: localhost:30900")
+        );
+        let module_10 = workshop
+            .manifest
+            .modules
+            .iter()
+            .find(|module| module.id == "10")
+            .unwrap();
+        let catch_up_10 = fs::read_to_string(root.join(&module_10.catch_up_script)).unwrap();
+        for expected in [
+            "source \"$REPO_ROOT/lab/common.sh\"",
+            "\"$DIR/restore.sh\" all",
+            "COMPONENT_PATH=\"gitops/components/demo/demo-web.yaml\"",
+            "BASELINE_SRC=\"$DIR/baseline/demo-web.yaml\"",
+            "if [[ ! -f \"$CLONE/$COMPONENT_PATH\" ]]",
+            "git -C \"$CLONE\" add \"$COMPONENT_PATH\"",
+            "commit -q -m \"module 10: restore demo-web baseline\"",
+            "wait_exists demo deployment/demo-web 300",
+            "rollout status deployment/demo-web --timeout=300s",
+        ] {
+            assert!(
+                catch_up_10.contains(expected),
+                "module 10 cumulative catch-up is missing '{expected}'"
+            );
+        }
+        assert!(!catch_up_10.contains("exec \"$DIR/restore.sh\" all"));
+        assert!(
+            Command::new("bash")
+                .arg("-n")
+                .arg(root.join(&module_10.catch_up_script))
+                .status()
+                .unwrap()
+                .success(),
+            "module 10 cumulative catch-up has invalid shell syntax"
+        );
         let grafana_source =
             fs::read_to_string(root.join("runtime/source/gitops/components/grafana/grafana.yaml"))
                 .unwrap();
