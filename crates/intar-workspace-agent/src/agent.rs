@@ -588,7 +588,12 @@ mod tests {
             .expect("bind readiness fixture");
         let address = listener.local_addr().expect("read readiness address");
         assert!(tcp_ready(address, Duration::from_secs(1)).await);
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .expect("accept readiness connection before timeout")
+            .expect("accept readiness connection");
 
+        drop(stream);
         drop(listener);
         assert!(!tcp_ready(address, Duration::from_millis(100)).await);
     }

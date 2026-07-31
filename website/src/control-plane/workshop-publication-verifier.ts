@@ -305,7 +305,14 @@ async function handleReport(
     .first<AuthenticatedAttempt>();
   if (!attempt) return unauthorized();
   const body = await readJson(request);
-  const report = parseReport(body);
+  const expectedProbeIds = jsonExpectedProbes(attempt.expected_probes_json).map(
+    (probe) => probe.probeId,
+  );
+  const report = parseReport(
+    body,
+    [credential],
+    new Set(expectedProbeIds),
+  );
   if (!report) return json({ error: "invalid report" }, 400);
   if (!identityMatches(report.identity, attempt)) {
     return json({ error: "stale verifier attempt" }, 409);
@@ -314,11 +321,11 @@ async function handleReport(
     return json({ error: "stale report sequence" }, 409);
   }
 
-  const expectedProbeIds = jsonExpectedProbes(attempt.expected_probes_json).map(
-    (probe) => probe.probeId,
-  );
   const probeById = new Map(report.probes.map((probe) => [probe.id, probe]));
-  const previousReport = parseStoredReport(attempt.report_json);
+  const previousReport = parseStoredReport(
+    attempt.report_json,
+    new Set(expectedProbeIds),
+  );
   const failedProbeIds = failedExpectedProbeIds(report, expectedProbeIds);
   const previousFailedProbeIds = new Set(
     previousReport
@@ -435,7 +442,11 @@ async function handleReport(
   });
 }
 
-function parseReport(value: unknown): VerifierReport | null {
+function parseReport(
+  value: unknown,
+  secrets: readonly string[] = [],
+  expectedProbeIds?: ReadonlySet<string>,
+): VerifierReport | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Record<string, unknown>;
   const identity = parseIdentity(input.identity);
@@ -451,20 +462,13 @@ function parseReport(value: unknown): VerifierReport | null {
     typeof input.terminal_ready !== "boolean" ||
     typeof input.recording_drain_completed !== "boolean" ||
     !Number.isSafeInteger(input.reported_at_unix_ms) ||
-    !Array.isArray(input.ssh_host_keys_openssh) ||
-    input.ssh_host_keys_openssh.length > 16 ||
-    input.ssh_host_keys_openssh.some(
-      (key) =>
-        typeof key !== "string" ||
-        key.length < 16 ||
-        key.length > 16_384 ||
-        /[\r\n\0]/.test(key),
-    ) ||
     !Array.isArray(input.probes) ||
     input.probes.length > 512
   ) {
     return null;
   }
+  const hostKeys = parseHostKeys(input.ssh_host_keys_openssh);
+  if (!hostKeys || (input.terminal_ready && hostKeys.length === 0)) return null;
   const probes: VerifierProbe[] = [];
   const seen = new Set<string>();
   for (const raw of input.probes) {
@@ -474,6 +478,7 @@ function parseReport(value: unknown): VerifierReport | null {
       typeof probe.id !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(probe.id) ||
       seen.has(probe.id) ||
+      (expectedProbeIds !== undefined && !expectedProbeIds.has(probe.id)) ||
       typeof probe.status !== "string" ||
       !PROBE_STATUS.has(probe.status) ||
       !Number.isSafeInteger(probe.observed_at_unix_ms)
@@ -481,22 +486,19 @@ function parseReport(value: unknown): VerifierReport | null {
       return null;
     }
     seen.add(probe.id);
-    const error =
-      typeof probe.error === "string" && probe.error.length <= 500
-        ? probe.error
-        : undefined;
+    const error = sanitizeError(probe.error, secrets);
+    if (error === null) return null;
     probes.push({
       id: probe.id,
       status: probe.status as VerifierProbe["status"],
       observed_at_unix_ms: Number(probe.observed_at_unix_ms),
-      ...(error ? { error } : {}),
+      ...(error === undefined ? {} : { error }),
     });
   }
   const error =
-    typeof input.error === "string" && input.error.length <= 500
-      ? input.error
-      : undefined;
-  return {
+    input.error === undefined ? undefined : sanitizeError(input.error, secrets);
+  if (error === null) return null;
+  const report: VerifierReport = {
     contract_version: 1,
     identity,
     sequence: Number(input.sequence),
@@ -504,18 +506,80 @@ function parseReport(value: unknown): VerifierReport | null {
     health: input.health,
     terminal_ready: input.terminal_ready,
     recording_drain_completed: input.recording_drain_completed,
-    ssh_host_keys_openssh: input.ssh_host_keys_openssh as string[],
+    ssh_host_keys_openssh: hostKeys,
     probes,
-    ...(error ? { error } : {}),
+    ...(error === undefined ? {} : { error }),
     reported_at_unix_ms: Number(input.reported_at_unix_ms),
   };
+  const serialized = JSON.stringify(report);
+  if (secrets.some((secret) => secret.length > 0 && serialized.includes(secret))) {
+    return null;
+  }
+  return report;
+}
+
+function sanitizeError(
+  value: unknown,
+  secrets: readonly string[],
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > 4096) return null;
+  let sanitized = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  for (const secret of secrets) {
+    sanitized = sanitized.replaceAll(secret, "[REDACTED]");
+  }
+  sanitized = sanitized.replace(
+    /iwpv_(?:bootstrap|checkpoint|report)_[A-Za-z0-9_-]+/g,
+    "[REDACTED]",
+  );
+  sanitized = sanitized.replace(/https?:\/\/[^\s]+/gi, (candidate) => {
+    try {
+      const url = new URL(candidate);
+      return url.origin;
+    } catch {
+      return "[REDACTED]";
+    }
+  });
+  const bounded = sanitized.slice(0, 500).trim();
+  return bounded.length === 0 ? undefined : bounded;
+}
+
+function parseHostKeys(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 16) return null;
+  const hostKeys = new Set<string>();
+  for (const raw of value) {
+    if (
+      typeof raw !== "string" ||
+      raw.length < 16 ||
+      raw.length > 4096 ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(raw)
+    ) {
+      return null;
+    }
+    const [algorithm, blob] = raw.trim().split(/[ \t]+/);
+    if (
+      !algorithm ||
+      !blob ||
+      !/^(?:ssh-(?:ed25519|rsa)|ecdsa-sha2-nistp(?:256|384|521)|sk-(?:ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/.test(
+        algorithm,
+      ) ||
+      blob.length < 16 ||
+      blob.length > 4096 ||
+      !/^[A-Za-z0-9+/]+={0,3}$/.test(blob)
+    ) {
+      return null;
+    }
+    hostKeys.add(`${algorithm} ${blob}`);
+  }
+  return [...hostKeys].sort();
 }
 
 function parseStoredReport(
   value: string | Record<string, unknown> | null,
+  expectedProbeIds: ReadonlySet<string>,
 ): VerifierReport | null {
   const stored = parseStoredObject(value);
-  return stored ? parseReport(stored) : null;
+  return stored ? parseReport(stored, [], expectedProbeIds) : null;
 }
 
 function parseStoredFailureSince(

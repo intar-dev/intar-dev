@@ -1922,7 +1922,8 @@ mod tests {
             br#"#!/usr/bin/env bash
 set -euo pipefail
 for _ in $(seq 1 100000); do printf x; done
-printf '\nuseful-stderr-marker\n' >&2
+for _ in $(seq 1 1000); do printf y >&2; done
+printf '\nINTAR_TALOS_FAILURE=nodes0,kubectl-connect,run2,oom0,restart0,wait-kubelet\n' >&2
 exit 17
 "#,
         )
@@ -1960,7 +1961,9 @@ exit 17
         .await
         .expect_err("script must fail");
         let message = error.to_string();
-        assert!(message.contains("useful-stderr-marker"));
+        assert!(message.contains(
+            "INTAR_TALOS_FAILURE=nodes0,kubectl-connect,run2,oom0,restart0,wait-kubelet"
+        ));
         assert!(message.contains("stdout tail:"));
         assert!(message.len() <= 500);
     }
