@@ -217,6 +217,18 @@ if (/S3_PUBLIC_ENDPOINT\s*\n\s*value: localhost:30900/u.test(portalAdapter)) {
     "portal must not use pod loopback for MinIO presigning and region discovery",
   );
 }
+const cloudboxOtel =
+  "- name: OTEL_EXPORTER_OTLP_ENDPOINT\n              value: http://otel-collector.observability.svc.cluster.local:4318";
+if (portalAdapter.split(cloudboxOtel).length - 1 !== 1) {
+  throw new Error("portal must use the workshop OpenTelemetry Collector");
+}
+if (
+  !portalAdapter.includes(
+    "- name: PROM_URL\n              value: http://victoria-metrics.observability.svc.cluster.local:8428",
+  )
+) {
+  throw new Error("portal must use the workshop VictoriaMetrics service");
+}
 if ((portalAdapter.match(/prefix: \/__intar-s3\//gu)?.length ?? 0) !== 2) {
   throw new Error(
     "portal adapter must have one GET/HEAD S3 route and one 405 fallback",

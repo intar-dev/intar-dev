@@ -74,6 +74,10 @@ spec:
             # http://broker-ingress.<eventing-ns>.svc.cluster.local/<ns>/<broker>
             - name: BROKER_URL
               value: http://broker-ingress.knative-eventing.svc.cluster.local/pipeline/default
+            # The pinned v0.1.0 image still defaults to the retired otel-lgtm
+            # service, so bind it to the collector deployed by this workshop.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4318
           resources:
             requests:
               cpu: 50m
@@ -107,6 +111,10 @@ spec:
               value: cloudbox123
             - name: S3_BUCKET
               value: images
+            # The pinned v0.1.0 image still defaults to the retired otel-lgtm
+            # service, so bind it to the collector deployed by this workshop.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability.svc.cluster.local:4318
           resources:
             requests:
               cpu: 50m
