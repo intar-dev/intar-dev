@@ -36,13 +36,49 @@ impl StagedCheckpoint {
     pub fn checkpoint_id(&self) -> &str {
         &self.checkpoint_id
     }
+
+    /// Returns the ordered module plan from a staged, signature-verified
+    /// reconstruction manifest. The built-in applier emits the same plan as
+    /// proof only after every catch-up and verifier has succeeded.
+    pub fn reconstruction_module_ids(&self) -> Result<Vec<String>, CheckpointError> {
+        let manifest_path = self.root.join("checkpoint.json");
+        let bytes = fs::read(&manifest_path).map_err(|source| CheckpointError::ApplyIo {
+            operation: "read reconstruction manifest",
+            path: manifest_path,
+            source,
+        })?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(CheckpointError::InvalidManifest(
+                "checkpoint.json exceeds 2 MiB".to_owned(),
+            ));
+        }
+        let manifest = serde_json::from_slice::<ReconstructionManifest>(&bytes)
+            .map_err(|error| CheckpointError::InvalidManifest(error.to_string()))?;
+        validate_reconstruction_manifest(self, &manifest)?;
+        Ok(manifest
+            .apply_steps
+            .into_iter()
+            .map(|step| step.module_id)
+            .collect())
+    }
 }
 
 pub trait CheckpointApplier: Send + Sync {
     fn apply<'a>(
         &'a self,
         checkpoint: &'a StagedCheckpoint,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CheckpointError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<CheckpointApplyProof, CheckpointError>> + Send + 'a>>;
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CheckpointApplyProof {
+    completed_module_ids: Vec<String>,
+}
+
+impl CheckpointApplyProof {
+    pub fn completed_module_ids(&self) -> &[String] {
+        &self.completed_module_ids
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -178,7 +214,8 @@ impl CheckpointApplier for CommandCheckpointApplier {
     fn apply<'a>(
         &'a self,
         checkpoint: &'a StagedCheckpoint,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CheckpointError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<CheckpointApplyProof, CheckpointError>> + Send + 'a>>
+    {
         Box::pin(async move {
             let mut command = tokio::process::Command::new(&self.program);
             command
@@ -201,7 +238,7 @@ impl CheckpointApplier for CommandCheckpointApplier {
                     diagnostic: command_diagnostic(&outcome),
                 });
             }
-            Ok(())
+            Ok(CheckpointApplyProof::default())
         })
     }
 }
@@ -210,7 +247,8 @@ impl CheckpointApplier for BuiltinCheckpointApplier {
     fn apply<'a>(
         &'a self,
         checkpoint: &'a StagedCheckpoint,
-    ) -> Pin<Box<dyn Future<Output = Result<(), CheckpointError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<CheckpointApplyProof, CheckpointError>> + Send + 'a>>
+    {
         Box::pin(async move {
             apply_reconstruction_bundle(checkpoint, &self.reconstruction_identity).await
         })
@@ -503,7 +541,7 @@ fn verify_signature(
 async fn apply_reconstruction_bundle(
     checkpoint: &StagedCheckpoint,
     reconstruction_identity: &ReconstructionIdentity,
-) -> Result<(), CheckpointError> {
+) -> Result<CheckpointApplyProof, CheckpointError> {
     let manifest_path = checkpoint.root().join("checkpoint.json");
     let manifest_bytes = fs::read(&manifest_path).map_err(|source| CheckpointError::ApplyIo {
         operation: "read reconstruction manifest",
@@ -529,13 +567,28 @@ async fn apply_reconstruction_bundle(
             path: std::env::temp_dir(),
             source,
         })?;
+    run_reconstruction_plan(
+        checkpoint,
+        &manifest,
+        reconstruction_identity,
+        bootstrap_home.path(),
+    )
+    .await
+}
+
+async fn run_reconstruction_plan(
+    checkpoint: &StagedCheckpoint,
+    manifest: &ReconstructionManifest,
+    reconstruction_identity: &ReconstructionIdentity,
+    bootstrap_home: &Path,
+) -> Result<CheckpointApplyProof, CheckpointError> {
     run_reconstruction_script(
         checkpoint.root().join(&manifest.bootstrap_script),
-        &manifest,
+        manifest,
         checkpoint.root().join("runtime/images.lock"),
         "bootstrap",
         ScriptIdentity::Root {
-            home: bootstrap_home.path(),
+            home: bootstrap_home,
             learner_user: &reconstruction_identity.user,
         },
     )
@@ -553,7 +606,7 @@ async fn apply_reconstruction_bundle(
             )?;
             run_reconstruction_script(
                 catch_up,
-                &manifest,
+                manifest,
                 execution.image_lock.clone(),
                 &format!("module {} catch-up", step.module_id),
                 ScriptIdentity::Reconstruction(reconstruction_identity),
@@ -566,41 +619,51 @@ async fn apply_reconstruction_bundle(
             )?;
             run_reconstruction_script(
                 verifier,
-                &manifest,
+                manifest,
                 execution.image_lock.clone(),
                 &format!("module {} verifier", step.module_id),
                 ScriptIdentity::Reconstruction(reconstruction_identity),
             )
             .await?;
         }
-        return Ok(());
+        return Ok(completed_reconstruction_proof(manifest));
     }
 
     for step in &manifest.apply_steps {
         run_reconstruction_script(
             checkpoint.root().join(&step.catch_up_script),
-            &manifest,
+            manifest,
             checkpoint.root().join("runtime/images.lock"),
             &format!("module {} catch-up", step.module_id),
             ScriptIdentity::Root {
-                home: bootstrap_home.path(),
+                home: bootstrap_home,
                 learner_user: &reconstruction_identity.user,
             },
         )
         .await?;
         run_reconstruction_script(
             checkpoint.root().join(&step.verify_script),
-            &manifest,
+            manifest,
             checkpoint.root().join("runtime/images.lock"),
             &format!("module {} verifier", step.module_id),
             ScriptIdentity::Root {
-                home: bootstrap_home.path(),
+                home: bootstrap_home,
                 learner_user: &reconstruction_identity.user,
             },
         )
         .await?;
     }
-    Ok(())
+    Ok(completed_reconstruction_proof(manifest))
+}
+
+fn completed_reconstruction_proof(manifest: &ReconstructionManifest) -> CheckpointApplyProof {
+    CheckpointApplyProof {
+        completed_module_ids: manifest
+            .apply_steps
+            .iter()
+            .map(|step| step.module_id.clone())
+            .collect(),
+    }
 }
 
 fn validate_reconstruction_manifest(
@@ -1821,13 +1884,18 @@ pub enum CheckpointError {
 
 #[cfg(test)]
 mod tests {
+    use super::CheckpointError;
     use super::CommandOutcome;
+    use super::ReconstructionIdentity;
     use super::ReconstructionManifest;
+    use super::ReconstructionProbeVerifier;
+    use super::ReconstructionStep;
     use super::ScriptIdentity;
     use super::StagedCheckpoint;
     use super::command_diagnostic;
     #[cfg(target_os = "linux")]
     use super::run_command_with_bounded_output;
+    use super::run_reconstruction_plan;
     use super::run_reconstruction_script;
     use super::stage_local_checkpoint;
     use super::{extract_archive, verify_digest, verify_signature};
@@ -1902,6 +1970,183 @@ mod tests {
         assert_eq!(
             fs::read(install_root.join("learner-user.ok")).expect("learner-user marker"),
             b"root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_cumulative_plan_bootstraps_once_and_stops_on_verifier_failure() {
+        async fn execute(
+            failing_verifier: Option<&str>,
+        ) -> (
+            Result<super::CheckpointApplyProof, CheckpointError>,
+            Vec<String>,
+            Vec<String>,
+        ) {
+            let temporary = TempDir::new().expect("checkpoint owner");
+            let root = temporary.path().join("root");
+            let install_root = temporary.path().join("install");
+            fs::create_dir_all(root.join("runtime")).expect("runtime directory");
+            fs::create_dir(&install_root).expect("install root");
+            let locked_image = format!(
+                "registry.example.invalid/intar/test@sha256:{}",
+                "a".repeat(64)
+            );
+            fs::write(
+                root.join("runtime/images.lock"),
+                format!("{locked_image}\n"),
+            )
+            .expect("image lock");
+            fs::create_dir_all(root.join("runtime/root")).expect("runtime source directory");
+            let runtime_source = b"cumulative fixture\n";
+            fs::write(root.join("runtime/root/fixture.txt"), runtime_source)
+                .expect("runtime source");
+
+            let write_script = |path: PathBuf, event: &str, should_fail: bool| {
+                fs::create_dir_all(path.parent().expect("script parent"))
+                    .expect("script directory");
+                let failure = if should_fail { "exit 17\n" } else { "" };
+                fs::write(
+                    path,
+                    format!(
+                        "#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' '{event}' >> \"$INTAR_WORKSHOP_INSTALL_ROOT/events\"\n{failure}"
+                    ),
+                )
+                .expect("script");
+            };
+            write_script(root.join("runtime/bootstrap.sh"), "bootstrap", false);
+
+            let module_ids = ["00", "01", "02"];
+            let mut apply_steps = Vec::new();
+            let mut probe_verifiers = Vec::new();
+            let mut manifest_steps = Vec::new();
+            let mut manifest_probe_verifiers = Vec::new();
+            for module_id in module_ids {
+                let catch_up_script = PathBuf::from(format!("scripts/{module_id}/catch-up.sh"));
+                let verify_script = PathBuf::from(format!("probes/{module_id}/verify.sh"));
+                write_script(
+                    root.join(&catch_up_script),
+                    &format!("catch-up:{module_id}"),
+                    false,
+                );
+                write_script(
+                    root.join(&verify_script),
+                    &format!("verify:{module_id}"),
+                    failing_verifier == Some(module_id),
+                );
+                apply_steps.push(ReconstructionStep {
+                    module_id: module_id.to_owned(),
+                    catch_up_script,
+                    verify_script: verify_script.clone(),
+                });
+                probe_verifiers.push(ReconstructionProbeVerifier {
+                    module_id: module_id.to_owned(),
+                    verifier_script: verify_script,
+                    probe_ids: vec![format!("probe-{module_id}")],
+                });
+                manifest_steps.push(serde_json::json!({
+                    "module_id": module_id,
+                    "catch_up_script": format!("scripts/{module_id}/catch-up.sh"),
+                    "verify_script": format!("probes/{module_id}/verify.sh"),
+                }));
+                manifest_probe_verifiers.push(serde_json::json!({
+                    "module_id": module_id,
+                    "verifier_script": format!("probes/{module_id}/verify.sh"),
+                    "probe_ids": [format!("probe-{module_id}")],
+                }));
+            }
+            let signed_manifest = serde_json::json!({
+                "schema_version": 3,
+                "workshop_slug": "cumulative-test",
+                "checkpoint_id": "checkpoint-02",
+                "install_root": "/opt/intar-workshops/cumulative-test",
+                "bootstrap_script": "runtime/bootstrap.sh",
+                "runtime_files": [{
+                    "archive_path": "runtime/root/fixture.txt",
+                    "install_path": "fixture.txt",
+                    "sha256": base16ct::lower::encode_string(&Sha256::digest(runtime_source)),
+                    "mode": 0o644,
+                }],
+                "apply_steps": manifest_steps,
+                "probe_verifiers": manifest_probe_verifiers,
+                "external_images": [locked_image],
+            });
+            fs::write(
+                root.join("checkpoint.json"),
+                serde_json::to_vec_pretty(&signed_manifest).expect("signed manifest JSON"),
+            )
+            .expect("signed reconstruction manifest");
+
+            let checkpoint = StagedCheckpoint {
+                _temporary: temporary,
+                checkpoint_id: "checkpoint-02".to_owned(),
+                root,
+            };
+            let signed_module_ids = checkpoint
+                .reconstruction_module_ids()
+                .expect("validated staged plan");
+            let event_log = install_root.join("events");
+            let manifest = ReconstructionManifest {
+                schema_version: 3,
+                workshop_slug: "cumulative-test".to_owned(),
+                checkpoint_id: checkpoint.checkpoint_id().to_owned(),
+                install_root,
+                bootstrap_script: PathBuf::from("runtime/bootstrap.sh"),
+                runtime_files: Vec::new(),
+                apply_steps,
+                probe_verifiers,
+                external_images: Vec::new(),
+            };
+            let bootstrap_home = TempDir::new().expect("bootstrap home");
+            let result = run_reconstruction_plan(
+                &checkpoint,
+                &manifest,
+                &ReconstructionIdentity {
+                    user: "root".to_owned(),
+                    home: PathBuf::from("/root"),
+                },
+                bootstrap_home.path(),
+            )
+            .await;
+            let events = fs::read_to_string(event_log)
+                .expect("event log")
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            (result, events, signed_module_ids)
+        }
+
+        let expected_module_ids = ["00", "01", "02"];
+        let (success, events, signed_module_ids) = execute(None).await;
+        assert_eq!(signed_module_ids, expected_module_ids);
+        let proof = success.expect("terminal cumulative plan must complete");
+        assert_eq!(proof.completed_module_ids(), expected_module_ids);
+        assert_eq!(
+            events,
+            [
+                "bootstrap",
+                "catch-up:00",
+                "verify:00",
+                "catch-up:01",
+                "verify:01",
+                "catch-up:02",
+                "verify:02",
+            ]
+        );
+
+        let (failure, events, signed_module_ids) = execute(Some("01")).await;
+        assert_eq!(signed_module_ids, expected_module_ids);
+        let error = failure.expect_err("a failed verifier must reject cumulative proof");
+        assert!(error.to_string().contains("module 01 verifier"));
+        assert_eq!(
+            events,
+            [
+                "bootstrap",
+                "catch-up:00",
+                "verify:00",
+                "catch-up:01",
+                "verify:01",
+            ]
         );
     }
 

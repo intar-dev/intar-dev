@@ -13,13 +13,15 @@ metadata. The crate:
   `WorkshopExecutionBackend` lifecycle;
 - requires a successful pre-seal verification, sanitization and acknowledged
   shutdown, sealed raw-zstd artifacts, and a new cold-boot verification for
-  every checkpoint;
+  every `agent_kvm` checkpoint;
 - independently hashes and multipart-uploads every image/kernel/initrd before
   posting one success result;
 - for a `hetzner_cloud` workshop, emits exactly one deterministic,
   content-addressed reconstruction bundle per checkpoint through that same
   generic artifact upload path and hands it to Intar's direct-provider
-  verification harness without starting the KVM backend; and
+  verification harness without starting the KVM backend. The harness applies
+  the terminal cumulative bundle on one clean persistent publication server;
+  and
 - posts one terminal failure and aborts the guest workflow on any non-shutdown
   error. Operator shutdown leaves the claim resumable instead of publishing a
   false terminal failure.
@@ -128,20 +130,31 @@ by the generic artifact registry; the terminal checkpoint report sends
 Signing alone is not a Hetzner compatibility proof. The builder marks each
 signed bundle as awaiting provider verification and reports no KVM image or
 local cold-boot claim. The registry pins the CI-published workspace-agent and
-Kino digests, then Intar's provider harness creates a fresh direct Hetzner
-Debian 13 server for each checkpoint through the organization's encrypted BYOK
-connection. The generation-bound workspace agent downloads the exact signed
-bundle into tmpfs, verifies and applies it, installs the probe mappings, and
-reports SSH readiness plus every expected probe.
+Kino digests, then Intar's provider harness creates one clean direct Hetzner
+Debian 13 server through the organization's encrypted BYOK connection. The
+generation-bound workspace agent downloads the exact terminal signed bundle
+into tmpfs, runs bootstrap once, then runs every checkpoint's catch-up and
+verifier in stable order on that same server. A failed catch-up or verifier
+rejects the whole cumulative proof and prevents later steps from running.
 
-The registry publishes the immutable revision only after the proof succeeds
-and the harness confirms deletion of that verifier server, Primary IPv4, and
-ephemeral SSH key. Verifier attempts are separate publication records: they
-never become learner workspaces, runtime executions, active slots, terminal
-routes, or scenario data. Their independently rounded estimated provider cost
-remains visible with the publication. `[execution.runtime_bundle_verification]`
-is never consulted by the direct-provider path and must not be used as Hetzner
-publication evidence.
+The terminal checkpoint is the sole cold-boot verification basis. Earlier
+checkpoint artifacts reference that terminal basis and must not claim an
+independent cold boot. The registry publishes the immutable revision only
+after the cumulative proof succeeds and the harness confirms deletion of the
+one verifier server, Primary IPv4, and ephemeral SSH key. The verifier attempt
+is a separate publication record: it never becomes a learner workspace,
+runtime execution, active slot, terminal route, or scenario data. Its rounded
+estimated provider cost remains visible with the publication.
+`[execution.runtime_bundle_verification]` is never consulted by the
+direct-provider path and must not be used as Hetzner publication evidence.
+
+This publication optimization does not change learner semantics. A normal
+learner is provisioned once from checkpoint 00 (or a facilitator-selected
+checkpoint for catch-up) and keeps that server while working through released
+modules incrementally. Intar does not replace the server at each module.
+Checkpoint restore or host recovery is the explicit destructive boundary: it
+revokes the old generation, deletes its server resources, and reconstructs a
+new server from the selected signed cumulative bundle.
 
 The Platform Engineering revision carries a curated learner source tree and a
 reviewed external-image inventory. Its bootstrap starts from clean Debian 13,

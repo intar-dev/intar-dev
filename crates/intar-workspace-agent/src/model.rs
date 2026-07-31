@@ -199,6 +199,9 @@ pub struct AgentReport {
     pub health: HealthStatus,
     pub terminal_ready: bool,
     pub recording_drain_completed: bool,
+    /// Ordered module steps whose signed catch-up and verifier scripts
+    /// completed successfully during this checkpoint reconstruction.
+    pub completed_module_ids: Vec<String>,
     pub ssh_host_keys_openssh: Vec<String>,
     pub probes: Vec<ProbeObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,7 +301,10 @@ impl ReportSequenceGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionIdentity, ReportSequenceGuard};
+    use super::{
+        AgentPhase, AgentReport, CONTRACT_VERSION, ExecutionIdentity, HealthStatus,
+        ReportSequenceGuard,
+    };
 
     fn identity(generation: u32) -> ExecutionIdentity {
         ExecutionIdentity {
@@ -316,5 +322,29 @@ mod tests {
         assert!(guard.accept(&identity(2), 6).is_err());
         assert!(guard.accept(&identity(1), 9).is_err());
         assert_eq!(guard.last_accepted(), 8);
+    }
+
+    #[test]
+    fn report_serializes_completed_module_attestation_in_signed_order() {
+        let report = AgentReport {
+            contract_version: CONTRACT_VERSION,
+            identity: identity(2),
+            sequence: 8,
+            phase: AgentPhase::StartingServices,
+            health: HealthStatus::Unknown,
+            terminal_ready: false,
+            recording_drain_completed: false,
+            completed_module_ids: vec!["00".to_owned(), "01".to_owned(), "02".to_owned()],
+            ssh_host_keys_openssh: Vec::new(),
+            probes: Vec::new(),
+            error: None,
+            reported_at_unix_ms: 42,
+        };
+
+        let serialized = serde_json::to_value(report).expect("agent report JSON");
+        assert_eq!(
+            serialized["completed_module_ids"],
+            serde_json::json!(["00", "01", "02"])
+        );
     }
 }

@@ -41,7 +41,9 @@ interface BootstrapRow {
 }
 
 interface AuthenticatedAttempt extends BootstrapRow {
+  covered_module_ids_json: string | string[];
   expected_probes_json: string | Array<{ moduleId: string; probeId: string }>;
+  verification_basis_checkpoint_id: string | null;
   checkpoint_first_downloaded_at: number | null;
   state: string;
   last_report_sequence: number;
@@ -63,6 +65,7 @@ interface VerifierReport {
   health: string;
   terminal_ready: boolean;
   recording_drain_completed: boolean;
+  completed_module_ids: string[];
   ssh_host_keys_openssh: string[];
   probes: VerifierProbe[];
   error?: string;
@@ -286,7 +289,9 @@ async function handleReport(
        checkpoint.compression,
        checkpoint.signature_b64,
        checkpoint.signing_key_id,
-       checkpoint.expected_probes_json
+       checkpoint.covered_module_ids_json,
+       checkpoint.expected_probes_json,
+       checkpoint.verification_basis_checkpoint_id
      FROM workshop_publication_provider_attempts attempt
      INNER JOIN workshop_publication_provider_checkpoints checkpoint
        ON checkpoint.id = attempt.provider_checkpoint_id
@@ -308,10 +313,18 @@ async function handleReport(
   const expectedProbeIds = jsonExpectedProbes(attempt.expected_probes_json).map(
     (probe) => probe.probeId,
   );
+  const expectedModuleIds = jsonStringArray(
+    attempt.covered_module_ids_json,
+    256,
+  );
+  if (expectedProbeIds.length === 0 || expectedModuleIds.length === 0) {
+    return json({ error: "invalid verifier checkpoint contract" }, 409);
+  }
   const report = parseReport(
     body,
     [credential],
     new Set(expectedProbeIds),
+    expectedModuleIds,
   );
   if (!report) return json({ error: "invalid report" }, 400);
   if (!identityMatches(report.identity, attempt)) {
@@ -325,6 +338,7 @@ async function handleReport(
   const previousReport = parseStoredReport(
     attempt.report_json,
     new Set(expectedProbeIds),
+    expectedModuleIds,
   );
   const failedProbeIds = failedExpectedProbeIds(report, expectedProbeIds);
   const previousFailedProbeIds = new Set(
@@ -372,7 +386,9 @@ async function handleReport(
     expectedProbeIds.length > 0 &&
     expectedProbeIds.every(
       (probeId) => probeById.get(probeId)?.status === "pass",
-    );
+    ) &&
+    (attempt.verification_basis_checkpoint_id === null ||
+      arraysEqual(report.completed_module_ids, expectedModuleIds));
   const proofFailed =
     report.phase === "failed" ||
     report.health === "failed" ||
@@ -446,6 +462,7 @@ function parseReport(
   value: unknown,
   secrets: readonly string[] = [],
   expectedProbeIds?: ReadonlySet<string>,
+  expectedModuleIds: readonly string[] = [],
 ): VerifierReport | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const input = value as Record<string, unknown>;
@@ -469,6 +486,18 @@ function parseReport(
   }
   const hostKeys = parseHostKeys(input.ssh_host_keys_openssh);
   if (!hostKeys || (input.terminal_ready && hostKeys.length === 0)) return null;
+  const completedModuleIds = jsonStringArray(
+    input.completed_module_ids ?? [],
+    256,
+  );
+  if (
+    completedModuleIds.length > expectedModuleIds.length ||
+    completedModuleIds.some(
+      (moduleId, index) => moduleId !== expectedModuleIds[index],
+    )
+  ) {
+    return null;
+  }
   const probes: VerifierProbe[] = [];
   const seen = new Set<string>();
   for (const raw of input.probes) {
@@ -506,13 +535,16 @@ function parseReport(
     health: input.health,
     terminal_ready: input.terminal_ready,
     recording_drain_completed: input.recording_drain_completed,
+    completed_module_ids: completedModuleIds,
     ssh_host_keys_openssh: hostKeys,
     probes,
     ...(error === undefined ? {} : { error }),
     reported_at_unix_ms: Number(input.reported_at_unix_ms),
   };
   const serialized = JSON.stringify(report);
-  if (secrets.some((secret) => secret.length > 0 && serialized.includes(secret))) {
+  if (
+    secrets.some((secret) => secret.length > 0 && serialized.includes(secret))
+  ) {
     return null;
   }
   return report;
@@ -577,9 +609,12 @@ function parseHostKeys(value: unknown): string[] | null {
 function parseStoredReport(
   value: string | Record<string, unknown> | null,
   expectedProbeIds: ReadonlySet<string>,
+  expectedModuleIds: readonly string[],
 ): VerifierReport | null {
   const stored = parseStoredObject(value);
-  return stored ? parseReport(stored, [], expectedProbeIds) : null;
+  return stored
+    ? parseReport(stored, [], expectedProbeIds, expectedModuleIds)
+    : null;
 }
 
 function parseStoredFailureSince(
@@ -767,5 +802,39 @@ function jsonExpectedProbes(
       !Array.isArray(entry) &&
       typeof (entry as Record<string, unknown>).moduleId === "string" &&
       typeof (entry as Record<string, unknown>).probeId === "string",
+  );
+}
+
+function jsonStringArray(value: unknown, maxLength: number): string[] {
+  let parsed = value;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed) || parsed.length > maxLength) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of parsed) {
+    if (
+      typeof entry !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(entry) ||
+      seen.has(entry)
+    ) {
+      return [];
+    }
+    seen.add(entry);
+    result.push(entry);
+  }
+  return result;
+}
+
+function arraysEqual(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }

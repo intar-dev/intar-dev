@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull, lte, max, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, max, ne, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { env as workerEnv } from "cloudflare:workers";
 import { requireVerifiedAgentRequest } from "@/control-plane/auth";
@@ -60,6 +60,7 @@ const MAX_ERROR_LENGTH = 4_000;
 // renew this lease; builder_host_id remains the completion fencing token.
 const WORKSHOP_PUBLICATION_CLAIM_LEASE_MS = 12 * 60 * 60 * 1_000;
 const MAX_CLAIM_ATTEMPTS = 5;
+const PUBLICATION_CANCELLED_ERROR = "publication cancelled by publisher";
 const TERMINAL_PROVIDER_STAGING_ERROR_CODES: ReadonlySet<string> = new Set([
   "hcloud_server_type_unavailable",
   "hcloud_server_type_incompatible",
@@ -74,6 +75,32 @@ const PROVIDER_FINALIZATION_GUARD_SQL = `
     FROM workshop_publication_provider_checkpoints checkpoint
     WHERE checkpoint.publication_id = publication.id
   ) = ?
+  AND (
+    NOT EXISTS (
+      SELECT 1
+      FROM workshop_publication_provider_checkpoints checkpoint
+      WHERE checkpoint.publication_id = publication.id
+        AND coalesce(
+          checkpoint.verification_basis_checkpoint_id,
+          checkpoint.id
+        ) != checkpoint.id
+    )
+    OR NOT EXISTS (
+      SELECT 1
+      FROM workshop_publication_provider_checkpoints checkpoint
+      WHERE checkpoint.publication_id = publication.id
+        AND (
+          checkpoint.verification_basis_checkpoint_id IS NULL
+          OR checkpoint.verification_basis_checkpoint_id != (
+            SELECT terminal.id
+            FROM workshop_publication_provider_checkpoints terminal
+            WHERE terminal.publication_id = publication.id
+            ORDER BY terminal.ordinal DESC
+            LIMIT 1
+          )
+        )
+    )
+  )
   AND NOT EXISTS (
     SELECT 1
     FROM workshop_publication_provider_checkpoints checkpoint
@@ -85,10 +112,40 @@ const PROVIDER_FINALIZATION_GUARD_SQL = `
         OR checkpoint.deletion_confirmed_at IS NULL
         OR checkpoint.deletion_confirmed_at < checkpoint.proof_verified_at
         OR json_array_length(checkpoint.expected_probes_json) = 0
+        OR NOT EXISTS (
+          SELECT 1
+          FROM workshop_publication_provider_checkpoints basis
+          WHERE basis.publication_id = checkpoint.publication_id
+            AND basis.id = coalesce(
+              checkpoint.verification_basis_checkpoint_id,
+              checkpoint.id
+            )
+        )
+        OR checkpoint.proof_verified_at != (
+          SELECT basis.proof_verified_at
+          FROM workshop_publication_provider_checkpoints basis
+          WHERE basis.publication_id = checkpoint.publication_id
+            AND basis.id = coalesce(
+              checkpoint.verification_basis_checkpoint_id,
+              checkpoint.id
+            )
+        )
+        OR checkpoint.deletion_confirmed_at < (
+          SELECT basis.deletion_confirmed_at
+          FROM workshop_publication_provider_checkpoints basis
+          WHERE basis.publication_id = checkpoint.publication_id
+            AND basis.id = coalesce(
+              checkpoint.verification_basis_checkpoint_id,
+              checkpoint.id
+            )
+        )
         OR (
           SELECT count(*)
           FROM workshop_publication_provider_attempts attempt
-          WHERE attempt.provider_checkpoint_id = checkpoint.id
+          WHERE attempt.provider_checkpoint_id = coalesce(
+            checkpoint.verification_basis_checkpoint_id,
+            checkpoint.id
+          )
             AND attempt.proof_verified_at IS NOT NULL
             AND attempt.proof_report_sequence IS NOT NULL
         ) != 1
@@ -103,6 +160,15 @@ const PROVIDER_FINALIZATION_GUARD_SQL = `
       AND (
         attempt.state != 'deleted'
         OR attempt.deletion_confirmed_at IS NULL
+        OR NOT EXISTS (
+          SELECT 1
+          FROM workshop_publication_provider_checkpoints covered
+          WHERE covered.publication_id = publication.id
+            AND coalesce(
+              covered.verification_basis_checkpoint_id,
+              covered.id
+            ) = attempt.provider_checkpoint_id
+        )
         OR (
           attempt.report_credential_hash IS NOT NULL
           AND attempt.report_credential_revoked_at IS NULL
@@ -168,7 +234,11 @@ export async function handleWorkshopRegistryRequest(
     /^\/registry\/v1\/workshop-bundles\/([A-Za-z0-9_-]{1,128})$/,
   );
   if (statusMatch) {
-    return handleWorkshopPublicationStatus(request, env, statusMatch[1] ?? "");
+    const publicationId = statusMatch[1] ?? "";
+    if (request.method === "DELETE") {
+      return handleWorkshopPublicationCancellation(request, env, publicationId);
+    }
+    return handleWorkshopPublicationStatus(request, env, publicationId);
   }
   if (url.pathname === `${BUILDER_PATH}/next`) {
     return handleWorkshopPublicationClaim(request, env);
@@ -239,6 +309,7 @@ async function handleWorkshopBundleUpload(
       and(
         eq(workshopPublications.organizationId, authorized.organizationId),
         eq(workshopPublications.contentHash, source.contentHash),
+        ne(workshopPublications.status, "failed"),
       ),
     )
     .limit(1);
@@ -329,6 +400,7 @@ async function handleWorkshopBundleUpload(
         and(
           eq(workshopPublications.organizationId, authorized.organizationId),
           eq(workshopPublications.contentHash, source.contentHash),
+          ne(workshopPublications.status, "failed"),
         ),
       )
       .limit(1);
@@ -380,6 +452,8 @@ async function handleWorkshopPublicationStatus(
     .select({
       checkpointId: workshopPublicationProviderCheckpoints.checkpointId,
       status: workshopPublicationProviderCheckpoints.verificationStatus,
+      verificationBasisCheckpointId:
+        workshopPublicationProviderCheckpoints.verificationBasisCheckpointId,
       error: workshopPublicationProviderCheckpoints.error,
       proofVerifiedAt: workshopPublicationProviderCheckpoints.proofVerifiedAt,
       deletionConfirmedAt:
@@ -454,6 +528,8 @@ async function handleWorkshopPublicationStatus(
             checkpoints: providerCheckpoints.map((checkpoint) => ({
               checkpoint_id: checkpoint.checkpointId,
               status: checkpoint.status,
+              verification_basis_checkpoint_id:
+                checkpoint.verificationBasisCheckpointId,
               error: checkpoint.error,
               proof_verified_at: checkpoint.proofVerifiedAt,
               deletion_confirmed_at: checkpoint.deletionConfirmedAt,
@@ -466,6 +542,164 @@ async function handleWorkshopPublicationStatus(
             })),
           },
   });
+}
+
+/**
+ * Cancels a publication only at a provider-confirmed zero-resource boundary.
+ * The guarded publication update is the allocation fence: if an attempt wins
+ * the race first, cancellation changes zero rows and returns 409 instead of
+ * losing an external resource. Active cleanup remains the verifier's job.
+ */
+async function handleWorkshopPublicationCancellation(
+  request: Request,
+  env: Cloudflare.Env,
+  publicationId: string,
+): Promise<Response> {
+  if (request.method !== "DELETE") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+  const authorized = await authorizePublisher(request, env);
+  if (!authorized) return jsonResponse({ error: "unauthorized" }, 401);
+  const publication = await drizzle(env.DB)
+    .select({
+      id: workshopPublications.id,
+      status: workshopPublications.status,
+    })
+    .from(workshopPublications)
+    .where(
+      and(
+        eq(workshopPublications.id, publicationId),
+        eq(workshopPublications.organizationId, authorized.organizationId),
+      ),
+    )
+    .limit(1);
+  const current = publication[0];
+  if (!current) return jsonResponse({ error: "not found" }, 404);
+  if (current.status === "published") {
+    return jsonResponse(
+      { error: "published workshop revisions are immutable" },
+      409,
+    );
+  }
+  if (current.status === "failed") {
+    return jsonResponse({ publication_id: current.id, status: "failed" });
+  }
+
+  const now = Date.now();
+  const payload = JSON.stringify({
+    publicationId,
+    registryTokenId: authorized.tokenId,
+    reason: PUBLICATION_CANCELLED_ERROR,
+  });
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workshop_publications
+       SET status = 'failed',
+           provider_verification_state = CASE
+             WHEN provider_verification_state IS NULL THEN NULL ELSE 'failed'
+           END,
+           error = ?, claim_expires_at = NULL, finished_at = ?, updated_at = ?
+       WHERE id = ? AND organization_id = ?
+         AND status IN ('queued', 'building')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_attempts attempt
+           INNER JOIN workshop_publication_provider_checkpoints checkpoint
+             ON checkpoint.id = attempt.provider_checkpoint_id
+           WHERE checkpoint.publication_id = workshop_publications.id
+             AND attempt.deletion_confirmed_at IS NULL
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM workshop_publication_provider_cost_ledger ledger
+           INNER JOIN workshop_publication_provider_attempts attempt
+             ON attempt.id = ledger.attempt_id
+           INNER JOIN workshop_publication_provider_checkpoints checkpoint
+             ON checkpoint.id = attempt.provider_checkpoint_id
+           WHERE checkpoint.publication_id = workshop_publications.id
+             AND ledger.deletion_confirmed_at IS NULL
+         )`,
+    ).bind(
+      PUBLICATION_CANCELLED_ERROR,
+      now,
+      now,
+      publicationId,
+      authorized.organizationId,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_publication_checkpoints
+       SET status = 'failed', error = ?, updated_at = ?
+       WHERE publication_id = ? AND status <> 'verified'
+         AND EXISTS (
+           SELECT 1 FROM workshop_publications publication
+           WHERE publication.id = ? AND publication.organization_id = ?
+             AND publication.status = 'failed' AND publication.error = ?
+         )`,
+    ).bind(
+      PUBLICATION_CANCELLED_ERROR,
+      now,
+      publicationId,
+      publicationId,
+      authorized.organizationId,
+      PUBLICATION_CANCELLED_ERROR,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_publication_provider_checkpoints
+       SET verification_status = 'failed', error = ?, updated_at = ?
+       WHERE publication_id = ? AND verification_status <> 'verified'
+         AND EXISTS (
+           SELECT 1 FROM workshop_publications publication
+           WHERE publication.id = ? AND publication.organization_id = ?
+             AND publication.status = 'failed' AND publication.error = ?
+         )`,
+    ).bind(
+      PUBLICATION_CANCELLED_ERROR,
+      now,
+      publicationId,
+      publicationId,
+      authorized.organizationId,
+      PUBLICATION_CANCELLED_ERROR,
+    ),
+    env.DB.prepare(
+      `INSERT INTO provider_audit_events (
+         id, organization_id, connection_id, actor_user_id,
+         type, payload_json, created_at
+       )
+       SELECT ?, publication.organization_id,
+              (
+                SELECT checkpoint.connection_id
+                FROM workshop_publication_provider_checkpoints checkpoint
+                WHERE checkpoint.publication_id = publication.id
+                ORDER BY checkpoint.ordinal ASC LIMIT 1
+              ),
+              ?, 'provider.publication.cancelled', ?, ?
+       FROM workshop_publications publication
+       WHERE publication.id = ? AND publication.organization_id = ?
+         AND publication.status = 'failed' AND publication.error = ?`,
+    ).bind(
+      createAppId(),
+      authorized.userId,
+      payload,
+      now,
+      publicationId,
+      authorized.organizationId,
+      PUBLICATION_CANCELLED_ERROR,
+    ),
+  ]);
+  if (results[0]?.meta.changes !== 1) {
+    const raced = await loadWorkshopPublication(env, publicationId);
+    if (raced?.status === "failed") {
+      return jsonResponse({ publication_id: publicationId, status: "failed" });
+    }
+    return jsonResponse(
+      {
+        error:
+          "publication still owns provider resources; wait for confirmed cleanup before cancelling",
+      },
+      409,
+    );
+  }
+  return jsonResponse({ publication_id: publicationId, status: "failed" });
 }
 
 async function handleWorkshopPublicationClaim(
@@ -1306,6 +1540,44 @@ interface StagedProviderCheckpointReport {
 type StagedProviderCheckpointRow =
   typeof workshopPublicationProviderCheckpoints.$inferSelect;
 
+interface ProviderVerificationBasisLayout {
+  basisIdByCheckpointRowId: Map<string, string>;
+  basisIds: Set<string>;
+  sharedTerminalBasis: boolean;
+}
+
+function providerVerificationBasisLayout(
+  rows: StagedProviderCheckpointRow[],
+): ProviderVerificationBasisLayout | null {
+  const terminal = rows[rows.length - 1];
+  if (!terminal) return null;
+  const rowIds = new Set(rows.map((row) => row.id));
+  if (rowIds.size !== rows.length) return null;
+
+  const basisIdByCheckpointRowId = new Map<string, string>();
+  for (const row of rows) {
+    const basisId = row.verificationBasisCheckpointId ?? row.id;
+    if (!rowIds.has(basisId)) return null;
+    basisIdByCheckpointRowId.set(row.id, basisId);
+  }
+
+  const legacySelfBasis = rows.every(
+    (row) =>
+      row.verificationBasisCheckpointId === null ||
+      row.verificationBasisCheckpointId === row.id,
+  );
+  const cumulativeTerminalBasis = rows.every(
+    (row) => row.verificationBasisCheckpointId === terminal.id,
+  );
+  if (!legacySelfBasis && !cumulativeTerminalBasis) return null;
+
+  return {
+    basisIdByCheckpointRowId,
+    basisIds: new Set(basisIdByCheckpointRowId.values()),
+    sharedTerminalBasis: cumulativeTerminalBasis,
+  };
+}
+
 function expectedProviderCheckpointMetadata(
   source: ValidatedWorkshopSourceBundle,
 ): Map<
@@ -1414,7 +1686,9 @@ function stagedProviderRowsMatchReports(
   rows: StagedProviderCheckpointRow[],
   reports: StagedProviderCheckpointReport[],
 ): boolean {
+  const basisLayout = providerVerificationBasisLayout(rows);
   return (
+    basisLayout !== null &&
     rows.length === reports.length &&
     rows.every((row, ordinal) => {
       const report = reports[ordinal];
@@ -1439,6 +1713,16 @@ function stagedProviderRowsMatchReports(
 
 function jsonEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function isOrderedStringPrefix(
+  prefix: readonly string[],
+  full: readonly string[],
+): boolean {
+  return (
+    prefix.length <= full.length &&
+    prefix.every((value, index) => value === full[index])
+  );
 }
 
 function validProviderPriceObservation(
@@ -1621,13 +1905,7 @@ async function failTerminalProviderStaging(input: {
            SELECT 1 FROM workshop_publication_provider_checkpoints checkpoint
            WHERE checkpoint.publication_id = workshop_publications.id
          )`,
-    ).bind(
-      reason,
-      now,
-      now,
-      input.publication.id,
-      input.builderHostId,
-    ),
+    ).bind(reason, now, now, input.publication.id, input.builderHostId),
   ]);
 
   return (
@@ -1761,6 +2039,15 @@ async function stageHetznerProviderPublication(input: {
   }
 
   const now = Date.now();
+  const providerCheckpointRowIds = reports.map(() => createAppId());
+  const verificationBasisCheckpointId =
+    providerCheckpointRowIds[providerCheckpointRowIds.length - 1];
+  if (!verificationBasisCheckpointId) {
+    return jsonResponse(
+      { error: "provider verification requires at least one checkpoint" },
+      400,
+    );
+  }
   const statements: D1PreparedStatement[] = [
     input.env.DB.prepare(
       `UPDATE workshop_publications
@@ -1778,10 +2065,11 @@ async function stageHetznerProviderPublication(input: {
            permitted_locations_json, price_observation_json,
            r2_key, sha256, size_bytes, compression, signature_b64,
            signing_key_id, workspace_agent_sha256, kino_sha256,
-           verification_status, created_at, updated_at
+           verification_status, verification_basis_checkpoint_id,
+           created_at, updated_at
          )
          SELECT ?, ?, ?, ?, ?, ?, 'hetzner_cloud', ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, 'pending', ?, ?
+                ?, ?, ?, 'pending', ?, ?, ?
          WHERE EXISTS (
            SELECT 1 FROM workshop_publications publication
            WHERE publication.id = ? AND publication.status = 'building'
@@ -1789,7 +2077,7 @@ async function stageHetznerProviderPublication(input: {
              AND publication.provider_verification_state = 'verifying'
          )`,
       ).bind(
-        createAppId(),
+        providerCheckpointRowIds[ordinal],
         input.publication.id,
         report.checkpointId,
         ordinal,
@@ -1807,6 +2095,7 @@ async function stageHetznerProviderPublication(input: {
         report.artifact.signingKeyId,
         report.artifact.workspaceAgentSha256,
         report.artifact.kinoSha256,
+        verificationBasisCheckpointId,
         now,
         now,
         input.publication.id,
@@ -1994,7 +2283,8 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
 
   const firstCheckpoint = providerCheckpoints[0];
   const guestTools = stagedGuestTools(providerCheckpoints);
-  if (!firstCheckpoint || !guestTools) return false;
+  const basisLayout = providerVerificationBasisLayout(providerCheckpoints);
+  if (!firstCheckpoint || !guestTools || !basisLayout) return false;
   const resolvedProvider = firstCheckpoint.resolvedProviderJson;
   const permittedLocations = firstCheckpoint.permittedLocationsJson;
   if (
@@ -2204,9 +2494,10 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
     }
   }
   if (
-    attempts.length < providerCheckpoints.length ||
+    attempts.length < basisLayout.basisIds.size ||
     attempts.some(
       (attempt) =>
+        !basisLayout.basisIds.has(attempt.checkpointDatabaseId) ||
         attempt.state !== "deleted" ||
         attempt.deletionConfirmedAt === null ||
         (attempt.reportCredentialHash !== null &&
@@ -2216,42 +2507,60 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
     return false;
   }
 
-  for (const checkpoint of providerCheckpoints) {
-    const checkpointAttempts = attempts.filter(
-      (attempt) => attempt.checkpointDatabaseId === checkpoint.id,
+  const checkpointByDatabaseId = new Map(
+    providerCheckpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  const attemptsByCheckpointDatabaseId = new Map<
+    string,
+    Array<(typeof attempts)[number]>
+  >();
+  for (const attempt of attempts) {
+    const checkpointAttempts =
+      attemptsByCheckpointDatabaseId.get(attempt.checkpointDatabaseId) ?? [];
+    checkpointAttempts.push(attempt);
+    attemptsByCheckpointDatabaseId.set(
+      attempt.checkpointDatabaseId,
+      checkpointAttempts,
     );
-    const proofAttempts = checkpointAttempts.filter(
+  }
+
+  const proofByBasisCheckpointId = new Map<string, (typeof attempts)[number]>();
+  for (const basisCheckpointId of basisLayout.basisIds) {
+    const basisCheckpoint = checkpointByDatabaseId.get(basisCheckpointId);
+    const basisAttempts =
+      attemptsByCheckpointDatabaseId.get(basisCheckpointId) ?? [];
+    const proofAttempts = basisAttempts.filter(
       (attempt) =>
         attempt.proofVerifiedAt !== null &&
         attempt.proofReportSequence !== null,
     );
     const proof = proofAttempts[0];
     if (
+      !basisCheckpoint ||
       proofAttempts.length !== 1 ||
       !proof ||
       proof.attemptConnectionId !== proof.checkpointConnectionId ||
-      proof.attemptConnectionId !== checkpoint.connectionId ||
+      proof.attemptConnectionId !== basisCheckpoint.connectionId ||
       proof.serverType !== resolvedProvider.serverType ||
       proof.systemImage !== resolvedProvider.systemImage ||
       !permittedLocations.includes(proof.location) ||
       !proof.serverId ||
       !proof.primaryIpId ||
       !proof.sshKeyId ||
-      proof.proofVerifiedAt !== checkpoint.proofVerifiedAt ||
+      proof.proofVerifiedAt !== basisCheckpoint.proofVerifiedAt ||
       proof.deletionConfirmedAt === null ||
       proof.checkpointFirstDownloadedAt === null ||
       proof.proofVerifiedAt === null ||
       proof.proofVerifiedAt < proof.checkpointFirstDownloadedAt ||
       proof.lastReportAt === null ||
       proof.lastReportAt < proof.checkpointFirstDownloadedAt ||
-      checkpoint.deletionConfirmedAt === null ||
-      checkpoint.deletionConfirmedAt <
+      basisCheckpoint.deletionConfirmedAt === null ||
+      basisCheckpoint.deletionConfirmedAt <
         Math.max(
-          ...checkpointAttempts.map(
+          ...basisAttempts.map(
             (attempt) => attempt.deletionConfirmedAt ?? Number.MAX_SAFE_INTEGER,
           ),
-        ) ||
-      !providerAttemptReportProvesCheckpoint(proof)
+        )
     ) {
       return false;
     }
@@ -2265,7 +2574,7 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
           entry.location === proof.location &&
           providerLedgerMatchesObservation(
             entry,
-            checkpoint.priceObservationJson,
+            basisCheckpoint.priceObservationJson,
             proof.location,
           ),
       ) ||
@@ -2276,14 +2585,14 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
           entry.location === proof.location &&
           providerLedgerMatchesObservation(
             entry,
-            checkpoint.priceObservationJson,
+            basisCheckpoint.priceObservationJson,
             proof.location,
           ),
       )
     ) {
       return false;
     }
-    for (const attempt of checkpointAttempts) {
+    for (const attempt of basisAttempts) {
       const attemptLedger = ledgerByAttempt.get(attempt.attemptId) ?? [];
       if (
         (attempt.serverId &&
@@ -2301,6 +2610,51 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
       ) {
         return false;
       }
+    }
+    proofByBasisCheckpointId.set(basisCheckpointId, proof);
+  }
+
+  for (const checkpoint of providerCheckpoints) {
+    const basisCheckpointId = basisLayout.basisIdByCheckpointRowId.get(
+      checkpoint.id,
+    );
+    const basisCheckpoint = basisCheckpointId
+      ? checkpointByDatabaseId.get(basisCheckpointId)
+      : undefined;
+    const basisAttempts = basisCheckpointId
+      ? (attemptsByCheckpointDatabaseId.get(basisCheckpointId) ?? [])
+      : [];
+    const proof = basisCheckpointId
+      ? proofByBasisCheckpointId.get(basisCheckpointId)
+      : undefined;
+    if (
+      !basisCheckpointId ||
+      !basisCheckpoint ||
+      !proof ||
+      proof.attemptConnectionId !== checkpoint.connectionId ||
+      proof.proofVerifiedAt !== checkpoint.proofVerifiedAt ||
+      !isOrderedStringPrefix(
+        checkpoint.coveredModuleIdsJson,
+        basisCheckpoint.coveredModuleIdsJson,
+      ) ||
+      checkpoint.deletionConfirmedAt === null ||
+      checkpoint.deletionConfirmedAt <
+        Math.max(
+          ...basisAttempts.map(
+            (attempt) => attempt.deletionConfirmedAt ?? Number.MAX_SAFE_INTEGER,
+          ),
+        ) ||
+      !providerAttemptReportProvesCheckpoint({
+        ...proof,
+        expectedProbes: checkpoint.expectedProbesJson,
+        ...(basisLayout.sharedTerminalBasis
+          ? {
+              expectedCompletedModuleIds: basisCheckpoint.coveredModuleIdsJson,
+            }
+          : {}),
+      })
+    ) {
+      return false;
     }
   }
 
@@ -2419,7 +2773,10 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
         checkpoint.signingKeyId,
         checkpoint.workspaceAgentSha256,
         checkpoint.kinoSha256,
-        checkpoint.proofVerifiedAt,
+        basisLayout.basisIdByCheckpointRowId.get(checkpoint.id) ===
+          checkpoint.id
+          ? checkpoint.proofVerifiedAt
+          : null,
         now,
         revisionId,
         publication.id,
@@ -2518,6 +2875,7 @@ async function finalizeVerifiedWorkshopProviderPublicationWithEnvironment(
 function providerAttemptReportProvesCheckpoint(input: {
   checkpointDatabaseId: string;
   expectedProbes: WorkshopPublicationExpectedProbe[];
+  expectedCompletedModuleIds?: string[];
   attemptId: string;
   attemptOrdinal: number;
   lastReportSequence: number;
@@ -2546,6 +2904,12 @@ function providerAttemptReportProvesCheckpoint(input: {
     report.phase !== "ready" ||
     report.health !== "healthy" ||
     report.terminal_ready !== true ||
+    (input.expectedCompletedModuleIds !== undefined &&
+      (!Array.isArray(report.completed_module_ids) ||
+        !jsonEqual(
+          report.completed_module_ids,
+          input.expectedCompletedModuleIds,
+        ))) ||
     !Number.isSafeInteger(report.reported_at_unix_ms) ||
     Number(report.reported_at_unix_ms) <= 0 ||
     !Array.isArray(report.ssh_host_keys_openssh) ||
