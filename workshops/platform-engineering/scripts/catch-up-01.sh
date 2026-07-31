@@ -5,6 +5,8 @@
 set -euo pipefail
 
 REPO_ROOT="/opt/platform-engineering-workshop"
+# shellcheck source=../common.sh
+source "$REPO_ROOT/lab/common.sh"
 
 # Idempotent: solve.sh's contract is "produce the module's end state", and it
 # may already exist (re-runs, CI, catch-up) — create-cluster.sh itself refuses
@@ -19,4 +21,4 @@ else
 fi
 
 # Wait for both nodes to be Ready (Cilium needs a moment after bootstrap).
-kubectl wait --for=condition=Ready nodes --all --timeout=300s
+wait_condition "" nodes Ready 300

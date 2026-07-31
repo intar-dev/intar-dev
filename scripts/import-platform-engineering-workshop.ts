@@ -1751,6 +1751,7 @@ exec ./lab/00-setup/verify.sh
   if (module.id === "09") {
     script = adaptModule09ObservabilityCatchUp(script);
   }
+  script = adaptTrustedConditionWaits(module.id, script);
   script = adaptTrustedScriptNarrative(module.id, script);
   if (/\/solutions(?:\/|\b)/u.test(script)) {
     throw new Error(
@@ -1758,6 +1759,124 @@ exec ./lab/00-setup/verify.sh
     );
   }
   return script;
+}
+
+function adaptTrustedConditionWaits(moduleId: string, value: string): string {
+  let adapted = value;
+  const replaceOnce = (
+    anchor: string,
+    replacement: string,
+    label: string,
+  ) => {
+    const occurrences = adapted.split(anchor).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `module ${moduleId} ${label} anchor occurred ${occurrences} times upstream`,
+      );
+    }
+    adapted = adapted.replace(anchor, replacement);
+  };
+
+  switch (moduleId) {
+    case "01":
+      replaceOnce(
+        `REPO_ROOT="/opt/platform-engineering-workshop"
+
+# Idempotent:`,
+        `REPO_ROOT="/opt/platform-engineering-workshop"
+# shellcheck source=../common.sh
+source "$REPO_ROOT/lab/common.sh"
+
+# Idempotent:`,
+        "common helper",
+      );
+      replaceOnce(
+        "kubectl wait --for=condition=Ready nodes --all --timeout=300s",
+        'wait_condition "" nodes Ready 300',
+        "all-nodes readiness",
+      );
+      break;
+    case "03":
+      replaceOnce(
+        "kubectl wait --for=condition=Established crd/clusters.postgresql.cnpg.io --timeout=180s",
+        'wait_condition "" crd/clusters.postgresql.cnpg.io Established 180',
+        "CNPG CRD readiness",
+      );
+      replaceOnce(
+        "kubectl -n demo wait --for=condition=Ready cluster/app-db --timeout=420s",
+        "wait_condition demo cluster/app-db Ready 420",
+        "app database readiness",
+      );
+      break;
+    case "04":
+      replaceOnce(
+        `# platform-api is the app that ships the XRD — wait for ArgoCD to sync it FIRST,
+# otherwise \`kubectl wait --for=condition=Established\` below hits the XRD before
+# it exists and fails IMMEDIATELY with NotFound (the --timeout only applies once
+# the object exists, not while waiting for it to appear). Then poll until the
+# API server actually serves the XRD, closing the gap between "ArgoCD applied
+# it" and "it's queryable", before waiting on the Established condition.
+wait_app platform-api
+for _ in $(seq 1 60); do
+  kubectl get xrd/workshopdatabases.platform.cloudbox.io >/dev/null 2>&1 && break
+  sleep 2
+done
+kubectl wait --for=condition=Established \\
+  xrd/workshopdatabases.platform.cloudbox.io --timeout=180s`,
+        `# platform-api is the app that ships the XRD. The null-safe condition
+# helper treats both a not-yet-served XRD and an initial null conditions field as
+# pending, closing the gap between "ArgoCD applied it" and "it's Established".
+wait_app platform-api
+wait_condition "" xrd/workshopdatabases.platform.cloudbox.io Established 180`,
+        "XRD readiness",
+      );
+      replaceOnce(
+        `kubectl -n demo wait --for=condition=Ready \\
+  workshopdatabase/my-db --timeout=600s`,
+        "wait_condition demo workshopdatabase/my-db Ready 600",
+        "workshop database readiness",
+      );
+      break;
+    case "06":
+      replaceOnce(
+        "kubectl -n demo wait --for=condition=Ready ksvc/hello --timeout=300s",
+        "wait_condition demo ksvc/hello Ready 300",
+        "Knative service readiness",
+      );
+      break;
+    case "08":
+      replaceOnce(
+        "kubectl -n demo wait --for=condition=Ready workshopdatabase/console-db --timeout=600s",
+        "wait_condition demo workshopdatabase/console-db Ready 600",
+        "console database readiness",
+      );
+      break;
+    case "09":
+      replaceOnce(
+        "kubectl -n pipeline wait --for=condition=Ready broker/default --timeout=300s",
+        "wait_condition pipeline broker/default Ready 300",
+        "broker readiness",
+      );
+      replaceOnce(
+        "kubectl -n pipeline wait --for=condition=Ready ksvc/uploader ksvc/resizer --timeout=300s",
+        `wait_condition pipeline ksvc/uploader Ready 300
+wait_condition pipeline ksvc/resizer Ready 300`,
+        "subscriber readiness",
+      );
+      replaceOnce(
+        "kubectl -n pipeline wait --for=condition=Ready trigger/resize-on-upload --timeout=300s",
+        "wait_condition pipeline trigger/resize-on-upload Ready 300",
+        "trigger readiness",
+      );
+      replaceOnce(
+        "kubectl -n pipeline wait --for=condition=Complete job/create-images-bucket --timeout=300s",
+        "wait_condition pipeline job/create-images-bucket Complete 300",
+        "bucket job completion",
+      );
+      break;
+  }
+
+  return adapted;
 }
 
 function adaptModule09ObservabilityCatchUp(value: string): string {
@@ -2334,6 +2453,13 @@ function copyRuntimePath(relativePath: string) {
       content = adaptDigestPinnedFault01(relativePath, content);
     } else if (relativePath === "lab/00-setup/verify.sh") {
       content = renderRuntimeModule00Verifier();
+    } else if (relativePath === "lab/common.sh") {
+      content = adaptRuntimeLabCommon(content);
+    } else if (
+      relativePath ===
+      "lab/05-debug-with-ai/faults/02-db-stuck/fix.sh"
+    ) {
+      content = adaptRuntimeCnpgFaultRestore(content);
     } else if (relativePath === "scripts/create-cluster.sh") {
       content = adaptCreateClusterForExternalRegistries(
         adaptTalosSystemImagePins(content),
@@ -2936,6 +3062,113 @@ kind: Service`,
     "Grafana public endpoint comment",
   );
 
+  return adapted;
+}
+
+function adaptRuntimeLabCommon(value: string): string {
+  const helperAnchor = `  echo "ERROR: $obj never appeared in ns $ns after \${timeout}s" >&2
+  return 1
+}
+
+# wait_for_cr <ns> <resource> [crd]`;
+  const helperReplacement = `  echo "ERROR: $obj never appeared in ns $ns after \${timeout}s" >&2
+  return 1
+}
+
+# wait_condition <ns-or-empty> <resource> <condition> [timeout-seconds]
+# Poll a single resource, or every item in a resource list such as "nodes",
+# until the named Kubernetes condition is True. Kubernetes can briefly expose
+# status.conditions as null while a controller initializes an object. Native
+# kubectl wait treats that valid transitional state as a fatal accessor error;
+# the null-coalescing jq generator below treats it as an empty condition list
+# and keeps polling. An empty resource list is never considered ready.
+wait_condition() {
+  local ns="$1" obj="$2" condition="$3" timeout="\${4:-300}" waited=0 state
+  while [ "$waited" -lt "$timeout" ]; do
+    if [ -n "$ns" ]; then
+      state="$(kubectl -n "$ns" get "$obj" -o json 2>/dev/null)" || state=""
+    else
+      state="$(kubectl get "$obj" -o json 2>/dev/null)" || state=""
+    fi
+    if [ -n "$state" ] && jq -e --arg condition "$condition" '
+      def has_true_condition($wanted):
+        any((.status.conditions? // [])[]?;
+          (((.type? // "") | ascii_downcase) == ($wanted | ascii_downcase)) and
+          ((((.status? // "") | tostring) | ascii_downcase) == "true"));
+      if has("items") then
+        (((.items // []) | length) > 0) and
+        all((.items // [])[]; has_true_condition($condition))
+      else
+        has_true_condition($condition)
+      end
+    ' <<<"$state" >/dev/null; then
+      echo "\${obj} condition \${condition}=True"
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  echo "ERROR: timed out after \${timeout}s waiting for \${obj} condition \${condition}=True in \${ns:-cluster scope}" >&2
+  return 1
+}
+
+# wait_for_cr <ns> <resource> [crd]`;
+  const occurrences = value.split(helperAnchor).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(
+      `lab/common.sh condition helper anchor occurred ${occurrences} times upstream`,
+    );
+  }
+  const adapted = value
+    .replace(helperAnchor, helperReplacement)
+    .replace(
+      `wait_for_cr() {
+  ns="$1"; resource="$2"; crd="\${3:-}"
+  [ -n "$crd" ] && kubectl wait --for=condition=Established "crd/$crd" --timeout=180s`,
+      `wait_for_cr() {
+  local ns="$1" resource="$2" crd="\${3:-}"
+  [ -n "$crd" ] && wait_condition "" "crd/$crd" Established 180`,
+    );
+  if (
+    !adapted.includes("wait_condition() {") ||
+    !adapted.includes("(.status.conditions? // [])[]?") ||
+    !adapted.includes(
+      '[ -n "$crd" ] && wait_condition "" "crd/$crd" Established 180',
+    ) ||
+    adapted.includes(
+      'kubectl wait --for=condition=Established "crd/$crd"',
+    )
+  ) {
+    throw new Error("lab/common.sh null-safe condition adaptation failed");
+  }
+  return adapted;
+}
+
+function adaptRuntimeCnpgFaultRestore(value: string): string {
+  const withHelper = value.replace(
+    `DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+
+kubectl -n faultlab-02 delete cluster orders-db`,
+    `DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../../../common.sh
+source "$DIR/../../../common.sh"
+
+kubectl -n faultlab-02 delete cluster orders-db`,
+  );
+  const adapted = withHelper.replace(
+    "kubectl -n faultlab-02 wait --for=condition=Ready cluster/orders-db --timeout=300s",
+    "wait_condition faultlab-02 cluster/orders-db Ready 300",
+  );
+  if (
+    adapted === value ||
+    !adapted.includes('source "$DIR/../../../common.sh"') ||
+    !adapted.includes(
+      "wait_condition faultlab-02 cluster/orders-db Ready 300",
+    ) ||
+    adapted.includes("kubectl -n faultlab-02 wait --for=condition=Ready")
+  ) {
+    throw new Error("CNPG fault restore condition adaptation failed");
+  }
   return adapted;
 }
 
