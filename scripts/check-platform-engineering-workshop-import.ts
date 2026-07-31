@@ -6,9 +6,9 @@ import { join, relative, resolve, sep } from "node:path";
 
 const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
-  "6b9281d1250ff589726626d18dc9cdabcdd93ea66d55e90be3790bb86f337839";
+  "368e5abd243cc0058bd30b55e2f35cb143d1fe5166d9bb3ae1b02b42630a47c4";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "f799e5ae21513008dabc0b0f294b82b642023ffca159948e90cc5c88d45c9d9b";
+  "3b6dad9e56adeb92a19eccdcdf05db8104f5a43f7d184c67ab0dcec3ef2f1180";
 const EXPECTED_OVERLAY_SHA256 =
   "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
 const EXPECTED_CHANGED_FILES = 2;
@@ -25,6 +25,8 @@ assertNullSafeConditionWaitContract(rawRoot, "regenerated import");
 assertNullSafeConditionWaitContract(adaptedRoot, "checked-in workshop");
 assertModule07VerifierContract(rawRoot, "regenerated import");
 assertModule07VerifierContract(adaptedRoot, "checked-in workshop");
+assertModule09OutcomeContract(rawRoot, "regenerated import");
+assertModule09OutcomeContract(adaptedRoot, "checked-in workshop");
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -282,6 +284,59 @@ function assertModule07VerifierContract(root: string, label: string) {
     if (!wrapper.includes(diagnostic)) {
       throw new Error(
         `${label} is missing bounded verifier diagnostics: ${diagnostic}`,
+      );
+    }
+  }
+}
+
+function assertModule09OutcomeContract(root: string, label: string) {
+  const catchUp = readFileSync(
+    join(root, "scripts/catch-up-09.sh"),
+    "utf8",
+  );
+  const verifier = readFileSync(
+    join(root, "scripts/verify-09.sh"),
+    "utf8",
+  );
+  for (const contract of [
+    "module09_trace_ready=0",
+    "module09_gallery_ready=0",
+    "module09_deadline=$((SECONDS + 60))",
+    "for module09_attempt in $(seq 1 12)",
+    "module 09 connected upload trace did not converge within 60s",
+    "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s",
+    "https://wa-workshop-probe\\.intar\\.app/__intar-s3/",
+    'module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"',
+    "module09_gallery_hard_failure=1",
+  ]) {
+    if (!verifier.includes(contract)) {
+      throw new Error(
+        `${label} is missing module 09 convergence contract: ${contract}`,
+      );
+    }
+  }
+  for (const contract of [
+    "trap 'rm -f \"$TMP_PNG\"' EXIT",
+    "module09_attempt % 6 == 0",
+    "module09_deadline=$((SECONDS + 300))",
+    "module 09 connected upload trace did not converge within 300s",
+    "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s",
+    "http://localhost:30600/gallery/upload 2>/dev/null || true",
+    "trap - EXIT",
+  ]) {
+    if (!catchUp.includes(contract)) {
+      throw new Error(
+        `${label} is missing trusted module 09 convergence behavior: ${contract}`,
+      );
+    }
+  }
+  for (const unsafe of [
+    "Nothing here yet",
+    "contained objects without a canonical",
+  ]) {
+    if (verifier.includes(unsafe)) {
+      throw new Error(
+        `${label} retains unsafe module 09 verifier behavior: ${unsafe}`,
       );
     }
   }

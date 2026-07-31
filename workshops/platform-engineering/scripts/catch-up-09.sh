@@ -97,6 +97,7 @@ done
 # A 1x1 PNG, embedded so the solve needs no local image file.
 PNG_B64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
 TMP_PNG="$(mktemp).png"
+trap 'rm -f "$TMP_PNG"' EXIT
 # shellcheck disable=SC2015  # macOS base64 wants -D on older releases
 echo "$PNG_B64" | base64 -d > "$TMP_PNG" 2>/dev/null || echo "$PNG_B64" | base64 -D > "$TMP_PNG"
 
@@ -104,7 +105,6 @@ echo "uploading test image through the portal (cold-starts the uploader)..."
 curl -fsS --max-time 120 -o /dev/null \
   -F "file=@${TMP_PNG};type=image/png;filename=solve-test.png" \
   http://localhost:30600/gallery/upload
-rm -f "$TMP_PNG"
 
 # The resizer scales from zero to process the event — poll S3 for its output.
 s3() {
@@ -128,3 +128,105 @@ until s3 s3api list-objects-v2 --bucket images --prefix thumbs/ \
   sleep 10; WAITED=$((WAITED + 10))
 done
 echo "thumbnail produced after ~${WAITED}s — see it in Cloudbox Console under Gallery."
+
+# The first upload can beat trace indexing or a freshly ready portal S3 client.
+# Re-drive only from this trusted catch-up while polling the exact final
+# outcomes. The participant verifier remains side-effect-free.
+module09_trace_ready=0
+module09_gallery_ready=0
+module09_gallery_hard_failure=0
+module09_outcome_status=0
+module09_public_host=wa-workshop-probe.intar.app
+module09_deadline=$((SECONDS + 300))
+
+module09_portal_curl() {
+  curl -sS --max-time 5 \
+    -H "Host: ${module09_public_host}" \
+    -H "X-Forwarded-Host: ${module09_public_host}" \
+    -H 'X-Forwarded-Proto: https' \
+    -H 'X-Forwarded-Port: 443' \
+    "$@"
+}
+
+for module09_attempt in $(seq 1 60); do
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  if (( module09_trace_ready == 0 )); then
+    module09_connected_trace="$(
+      curl -fsS --max-time 5 \
+        'http://localhost:30030/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20' \
+        2>/dev/null || true
+    )"
+    if jq -e \
+      'any(.data[]?;
+        ([.processes[]?.serviceName] | unique) as $services |
+        (["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"] -
+          $services | length == 0))' \
+      <<<"${module09_connected_trace}" >/dev/null 2>&1; then
+      module09_trace_ready=1
+    fi
+  fi
+
+  if (( module09_gallery_ready == 0 )); then
+    module09_gallery_page="$(
+      module09_portal_curl --fail \
+        http://localhost:30600/gallery/grid 2>/dev/null || true
+    )"
+    if [[ "${module09_gallery_page}" == *"localhost:"* ]]; then
+      printf 'Cloudbox gallery exposed a localhost URL through the workspace-app route\n' >&2
+      module09_gallery_hard_failure=1
+      module09_outcome_status=1
+      break
+    fi
+    module09_gallery_url=$(
+      printf '%s\n' "${module09_gallery_page}" |
+        grep -Eo 'https://wa-workshop-probe\.intar\.app/__intar-s3/[^"<[:space:]]+' |
+        sed 's/&amp;/\&/g' |
+        sed -n '1p' || true
+    )
+    if [[ -n "${module09_gallery_url}" ]]; then
+      module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"
+      module09_gallery_file="$(mktemp)"
+      if module09_portal_curl --fail \
+        --output "${module09_gallery_file}" \
+        "http://localhost:30600${module09_gallery_path}" \
+        2>/dev/null &&
+          [[ -s "${module09_gallery_file}" ]]; then
+        module09_gallery_ready=1
+      fi
+      rm -f "${module09_gallery_file}"
+    fi
+  fi
+
+  if (( module09_trace_ready == 1 && module09_gallery_ready == 1 )); then
+    break
+  fi
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  if (( module09_attempt % 6 == 0 )); then
+    curl -fsS --max-time 15 --output /dev/null \
+      -F "file=@${TMP_PNG};type=image/png;filename=solve-test.png" \
+      http://localhost:30600/gallery/upload 2>/dev/null || true
+  fi
+  if (( SECONDS >= module09_deadline )); then
+    break
+  fi
+  sleep 5
+done
+
+if (( module09_trace_ready == 0 && module09_gallery_hard_failure == 0 )); then
+  printf 'module 09 connected upload trace did not converge within 300s\n' >&2
+  module09_outcome_status=1
+fi
+if (( module09_gallery_ready == 0 && module09_gallery_hard_failure == 0 )); then
+  printf 'Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s\n' >&2
+  module09_outcome_status=1
+fi
+
+if (( module09_outcome_status != 0 )); then
+  exit 1
+fi
+rm -f "$TMP_PNG"
+trap - EXIT

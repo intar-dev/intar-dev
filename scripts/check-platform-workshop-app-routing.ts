@@ -333,7 +333,15 @@ requireOrderedText(
   "rollout status deployment/otel-collector-gateway --timeout=600s",
   "rollout status daemonset/otel-collector-agent --timeout=600s",
   "http://localhost:30030/api/health",
+  "trap 'rm -f \"$TMP_PNG\"' EXIT",
   "uploading test image through the portal",
+  "module09_trace_ready=0",
+  "module09_gallery_ready=0",
+  "module09_deadline=$((SECONDS + 300))",
+  "module09_attempt % 6 == 0",
+  "module 09 connected upload trace did not converge within 300s",
+  "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 300s",
+  "trap - EXIT",
 );
 
 requireText(
@@ -348,18 +356,27 @@ requireText(
   "/api/datasources/proxy/uid/victoriatraces/api/traces?service=cloudbox-portal&limit=20",
   '["cloudbox-portal", "cloudbox-uploader", "cloudbox-resizer"]',
   "[.processes[]?.serviceName]",
-  "VictoriaTraces datasource did not expose one connected upload trace",
+  "module09_trace_ready=0",
+  "module09_gallery_ready=0",
+  "module09_deadline=$((SECONDS + 60))",
+  "for module09_attempt in $(seq 1 12)",
+  "module 09 connected upload trace did not converge within 60s",
   "http://localhost:30600/gallery/grid",
   "Cloudbox gallery exposed a localhost URL",
   "https://wa-workshop-probe\\.intar\\.app/__intar-s3/",
   String.raw`sed 's/&amp;/\&/g'`,
-  'gallery_s3_path="${gallery_s3_url#https://wa-workshop-probe.intar.app}"',
-  "presigned S3 GET failed through /__intar-s3/",
-  "presigned S3 GET returned an empty object",
+  'module09_gallery_path="${module09_gallery_url#https://wa-workshop-probe.intar.app}"',
+  "Cloudbox gallery did not converge on a non-empty canonical /__intar-s3/ object within 60s",
+  "module09_gallery_hard_failure=1",
   "http://localhost:30600/__intar-s3/app-assets/hello.txt",
   "--head",
   '"${gallery_s3_head_status}" != "403"',
   "instead of RustFS 2xx/403",
+);
+rejectText(
+  "scripts/verify-09.sh",
+  "Nothing here yet",
+  "contained objects without a canonical",
 );
 
 requireText(
