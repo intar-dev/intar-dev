@@ -588,18 +588,15 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_readiness_requires_a_listening_tcp_socket() {
+        let unavailable = "127.0.0.1:0"
+            .parse()
+            .expect("parse unavailable readiness address");
+        assert!(!tcp_ready(unavailable, Duration::from_millis(100)).await);
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind readiness fixture");
         let address = listener.local_addr().expect("read readiness address");
         assert!(tcp_ready(address, Duration::from_secs(1)).await);
-        let (stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
-            .await
-            .expect("accept readiness connection before timeout")
-            .expect("accept readiness connection");
-
-        drop(stream);
-        drop(listener);
-        assert!(!tcp_ready(address, Duration::from_millis(100)).await);
     }
 }

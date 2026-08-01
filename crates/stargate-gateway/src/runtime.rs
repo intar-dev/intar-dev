@@ -65,6 +65,10 @@ pub async fn run(settings: ServerSettings) -> anyhow::Result<()> {
                 Ok(route_ids) => {
                     for route_id in route_ids {
                         expiry_gateway.sessions.terminate_username(&route_id).await;
+                        expiry_gateway
+                            .workspace_app_tunnels
+                            .invalidate(&route_id)
+                            .await;
                     }
                 }
                 Err(error) => {

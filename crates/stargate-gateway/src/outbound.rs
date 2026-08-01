@@ -10,6 +10,8 @@ use std::{
 
 use anyhow::{Context, bail};
 use bytes::Bytes;
+use dashmap::{DashMap, mapref::entry::Entry};
+use sha2::{Digest as _, Sha256};
 use std::borrow::Cow;
 
 use russh::{
@@ -20,11 +22,12 @@ use russh::{
 };
 use stargate_core::{RouteRecord, WorkspaceAppRouteRecord};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc as tokio_mpsc};
 use tokio_util::sync::CancellationToken;
 
 const BRIDGE_INPUT_CAPACITY: usize = 32;
 const BRIDGE_EVENT_CAPACITY: usize = 32;
+const WORKSPACE_APP_CHANNELS_PER_ROUTE: usize = 64;
 
 #[derive(Debug)]
 pub enum BridgeEvent {
@@ -166,11 +169,23 @@ struct PreparedSshTarget {
     private_key: Arc<russh::keys::PrivateKey>,
 }
 
-/// An authenticated SSH direct-tcpip stream. The SSH session handle is kept
-/// alive for exactly as long as Hyper owns this stream.
+/// An SSH direct-tcpip stream opened on a route-scoped authenticated session.
+/// The channel permit is held for exactly as long as Hyper owns this stream.
 pub struct DirectTcpIpTunnel {
-    _session: client::Handle<StrictHostKey>,
+    _session: Arc<client::Handle<StrictHostKey>>,
+    _channel_permit: OwnedSemaphorePermit,
     stream: russh::ChannelStream<Msg>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct WorkspaceAppTunnelPool {
+    routes: Arc<DashMap<String, Arc<PooledWorkspaceAppTarget>>>,
+}
+
+struct PooledWorkspaceAppTarget {
+    target_fingerprint: [u8; 32],
+    session: Mutex<Option<Arc<client::Handle<StrictHostKey>>>>,
+    channel_slots: Arc<Semaphore>,
 }
 
 impl AsyncRead for DirectTcpIpTunnel {
@@ -202,33 +217,165 @@ impl AsyncWrite for DirectTcpIpTunnel {
 }
 
 pub async fn open_workspace_app_tunnel(
+    pool: &WorkspaceAppTunnelPool,
     route: &WorkspaceAppRouteRecord,
 ) -> anyhow::Result<DirectTcpIpTunnel> {
-    let target = PreparedSshTarget::from_parts(
-        &route.target_ip,
-        route.target_ssh_port,
-        &route.target_host_key_openssh,
-        &route.target_private_key_openssh,
-    )?;
-    let session = connect_authenticated_target(target, &route.target_username).await?;
-    let channel = session
-        .channel_open_direct_tcpip(
-            "127.0.0.1",
-            u32::from(route.target_app_port),
-            "127.0.0.1",
-            0,
-        )
-        .await
-        .with_context(|| {
+    pool.open(route).await
+}
+
+impl WorkspaceAppTunnelPool {
+    async fn open(&self, route: &WorkspaceAppRouteRecord) -> anyhow::Result<DirectTcpIpTunnel> {
+        let pooled_target = self.target_for(route).await;
+        let channel_permit = pooled_target
+            .channel_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .context("workspace app route channel limiter closed")?;
+
+        // A long-lived SSH transport can disappear between the liveness check
+        // and the channel-open request. Discard it and reconnect once so an
+        // ordinary guest sshd restart does not turn an asset burst into a page
+        // full of failed requests.
+        let mut last_error = None;
+        for _ in 0..2 {
+            let session = pooled_target.session(route).await?;
+            match session
+                .channel_open_direct_tcpip(
+                    "127.0.0.1",
+                    u32::from(route.target_app_port),
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+            {
+                Ok(channel) => {
+                    return Ok(DirectTcpIpTunnel {
+                        _session: session,
+                        _channel_permit: channel_permit,
+                        stream: channel.into_stream(),
+                    });
+                }
+                Err(error) => {
+                    pooled_target.discard_session(&session).await;
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let error = last_error.expect("workspace app SSH channel was attempted");
+        Err(error).with_context(|| {
             format!(
                 "failed opening guest direct-tcpip channel to port {}",
                 route.target_app_port
             )
-        })?;
-    Ok(DirectTcpIpTunnel {
-        _session: session,
-        stream: channel.into_stream(),
-    })
+        })
+    }
+
+    async fn target_for(&self, route: &WorkspaceAppRouteRecord) -> Arc<PooledWorkspaceAppTarget> {
+        let fingerprint = workspace_app_target_fingerprint(route);
+        let replacement = Arc::new(PooledWorkspaceAppTarget::new(fingerprint));
+        let (target, replaced) = match self.routes.entry(route.route_id.clone()) {
+            Entry::Occupied(mut entry) if entry.get().target_fingerprint != fingerprint => {
+                let replaced = entry.insert(replacement.clone());
+                (replacement, Some(replaced))
+            }
+            Entry::Occupied(entry) => (entry.get().clone(), None),
+            Entry::Vacant(entry) => {
+                entry.insert(replacement.clone());
+                (replacement, None)
+            }
+        };
+        if let Some(replaced) = replaced {
+            replaced.disconnect().await;
+        }
+        target
+    }
+
+    pub(crate) async fn invalidate(&self, route_id: &str) {
+        if let Some((_, target)) = self.routes.remove(route_id) {
+            target.disconnect().await;
+        }
+    }
+}
+
+impl PooledWorkspaceAppTarget {
+    fn new(target_fingerprint: [u8; 32]) -> Self {
+        Self {
+            target_fingerprint,
+            session: Mutex::new(None),
+            channel_slots: Arc::new(Semaphore::new(WORKSPACE_APP_CHANNELS_PER_ROUTE)),
+        }
+    }
+
+    async fn session(
+        &self,
+        route: &WorkspaceAppRouteRecord,
+    ) -> anyhow::Result<Arc<client::Handle<StrictHostKey>>> {
+        let mut pooled = self.session.lock().await;
+        if let Some(session) = pooled.as_ref()
+            && !session.is_closed()
+        {
+            return Ok(session.clone());
+        }
+
+        let target = PreparedSshTarget::from_parts(
+            &route.target_ip,
+            route.target_ssh_port,
+            &route.target_host_key_openssh,
+            &route.target_private_key_openssh,
+        )?;
+        let session = Arc::new(connect_authenticated_target(target, &route.target_username).await?);
+        *pooled = Some(session.clone());
+        Ok(session)
+    }
+
+    async fn discard_session(&self, stale: &Arc<client::Handle<StrictHostKey>>) {
+        let removed = {
+            let mut pooled = self.session.lock().await;
+            match pooled.as_ref() {
+                Some(current) if Arc::ptr_eq(current, stale) => pooled.take(),
+                _ => None,
+            }
+        };
+        if let Some(session) = removed {
+            disconnect_workspace_app_session(&session).await;
+        }
+    }
+
+    async fn disconnect(&self) {
+        let session = self.session.lock().await.take();
+        if let Some(session) = session {
+            disconnect_workspace_app_session(&session).await;
+        }
+    }
+}
+
+async fn disconnect_workspace_app_session(session: &client::Handle<StrictHostKey>) {
+    let _ = session
+        .disconnect(
+            Disconnect::ByApplication,
+            "workspace app route invalidated",
+            "en-US",
+        )
+        .await;
+}
+
+fn workspace_app_target_fingerprint(route: &WorkspaceAppRouteRecord) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    for value in [route.target_username.as_bytes(), route.target_ip.as_bytes()] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    digest.update(route.target_ssh_port.to_be_bytes());
+    for value in [
+        route.target_host_key_openssh.as_bytes(),
+        route.target_private_key_openssh.as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    digest.finalize().into()
 }
 
 impl PreparedSshTarget {

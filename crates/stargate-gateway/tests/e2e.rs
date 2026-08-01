@@ -2,7 +2,10 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     net::TcpListener,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -38,6 +41,7 @@ use stargate_gateway::{
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use tokio::net::TcpListener as TokioTcpListener;
+use tokio::sync::Barrier;
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -266,6 +270,47 @@ async fn workspace_app_http_and_websocket_are_forwarded_inside_ssh() -> Result<(
 }
 
 #[tokio::test]
+async fn workspace_app_asset_burst_reuses_one_authenticated_ssh_connection() -> Result<()> {
+    const REQUESTS: usize = 32;
+
+    let harness = Harness::start().await?;
+    let session = harness.issue_workspace_app_session().await?;
+    let browser = harness.bootstrap_workspace_app(&session).await?;
+    let client = reqwest::Client::new();
+    let start = Arc::new(Barrier::new(REQUESTS + 1));
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for request_id in 0..REQUESTS {
+        let client = client.clone();
+        let start = start.clone();
+        let url = browser
+            .base_url
+            .join(&format!("hello?asset={request_id}"))?;
+        let cookie = browser.cookie.clone();
+        tasks.spawn(async move {
+            start.wait().await;
+            client
+                .get(url)
+                .header(reqwest::header::COOKIE, cookie)
+                .send()
+                .await
+        });
+    }
+
+    start.wait().await;
+    while let Some(result) = tasks.join_next().await {
+        let response = result??;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+    assert_eq!(
+        harness.target_connections.load(Ordering::SeqCst),
+        1,
+        "the asset burst should multiplex channels over one authenticated SSH transport"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_app_can_override_only_the_guest_virtual_host() -> Result<()> {
     let harness = Harness::start().await?;
     let session = harness
@@ -330,6 +375,37 @@ async fn workspace_app_route_reissue_rotates_browser_authorization() -> Result<(
     let current = reqwest::Client::new()
         .get(second_browser.base_url.join("hello")?)
         .header(reqwest::header::COOKIE, &second_browser.cookie)
+        .send()
+        .await?;
+    assert_eq!(current.status(), reqwest::StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_app_create_only_conflict_preserves_existing_authorization() -> Result<()> {
+    let harness = Harness::start().await?;
+    let first = harness.issue_workspace_app_session().await?;
+    let first_browser = harness.bootstrap_workspace_app(&first).await?;
+
+    let conflict = harness
+        .send_workspace_app_session_request(
+            "wa-01-unguessable",
+            None,
+            Duration::from_secs(60 * 60),
+            true,
+        )
+        .await?;
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.json::<serde_json::Value>().await?,
+        serde_json::json!({
+            "error": "workspace application route already exists"
+        })
+    );
+
+    let current = reqwest::Client::new()
+        .get(first_browser.base_url.join("hello")?)
+        .header(reqwest::header::COOKIE, &first_browser.cookie)
         .send()
         .await?;
     assert_eq!(current.status(), reqwest::StatusCode::OK);
@@ -412,6 +488,35 @@ async fn workspace_app_websocket_closes_at_browser_session_expiry() -> Result<()
     );
 
     assert_websocket_closes(&mut websocket, Duration::from_secs(5)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_app_websocket_closes_at_route_expiry() -> Result<()> {
+    let harness = Harness::start().await?;
+    let session = harness
+        .issue_workspace_app_session_with_lifetime(Duration::from_secs(3))
+        .await?;
+    let browser = harness.bootstrap_workspace_app(&session).await?;
+
+    let websocket_url = browser
+        .base_url
+        .join("echo")?
+        .to_string()
+        .replacen("http://", "ws://", 1);
+    let mut websocket_request = websocket_url.into_client_request()?;
+    websocket_request
+        .headers_mut()
+        .insert("cookie", browser.cookie.parse()?);
+    let (mut websocket, _) = connect_async(websocket_request).await?;
+
+    assert_websocket_closes(&mut websocket, Duration::from_secs(5)).await?;
+    let response = reqwest::Client::new()
+        .get(browser.base_url.join("hello")?)
+        .header(reqwest::header::COOKIE, &browser.cookie)
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
@@ -597,6 +702,7 @@ struct Harness {
     admin_secret: String,
     allowed_origin: String,
     public_host_public: russh::keys::ssh_key::PublicKey,
+    target_connections: Arc<AtomicUsize>,
 }
 
 impl Harness {
@@ -703,11 +809,13 @@ impl Harness {
         let target_host_key =
             russh::keys::PrivateKey::random(&mut rng, russh::keys::ssh_key::Algorithm::Ed25519)?;
         let target_host_public = target_host_key.public_key().to_openssh()?;
+        let target_connections = Arc::new(AtomicUsize::new(0));
         let target_server = TestTargetServer {
             allowed_username: "ubuntu".to_owned(),
             allowed_public_key: target_key.public_key().clone(),
             host_key: target_host_key,
             direct_channels: Arc::new(Mutex::new(HashSet::new())),
+            connections: target_connections.clone(),
         };
         let target_task =
             tokio::spawn(
@@ -743,6 +851,7 @@ impl Harness {
             admin_secret: "admin-secret".to_owned(),
             allowed_origin,
             public_host_public,
+            target_connections,
         };
 
         harness.wait_ready().await?;
@@ -875,8 +984,49 @@ impl Harness {
         route_id: &str,
         upstream_host: Option<&str>,
     ) -> Result<IssueWorkspaceAppSessionResponse> {
+        self.issue_workspace_app_session_with_options_and_lifetime(
+            route_id,
+            upstream_host,
+            Duration::from_secs(60 * 60),
+        )
+        .await
+    }
+
+    async fn issue_workspace_app_session_with_lifetime(
+        &self,
+        route_lifetime: Duration,
+    ) -> Result<IssueWorkspaceAppSessionResponse> {
+        self.issue_workspace_app_session_with_options_and_lifetime(
+            "wa-01-unguessable",
+            None,
+            route_lifetime,
+        )
+        .await
+    }
+
+    async fn issue_workspace_app_session_with_options_and_lifetime(
+        &self,
+        route_id: &str,
+        upstream_host: Option<&str>,
+        route_lifetime: Duration,
+    ) -> Result<IssueWorkspaceAppSessionResponse> {
+        let response = self
+            .send_workspace_app_session_request(route_id, upstream_host, route_lifetime, false)
+            .await?;
+        assert!(response.status().is_success(), "{}", response.text().await?);
+        Ok(response.json().await?)
+    }
+
+    async fn send_workspace_app_session_request(
+        &self,
+        route_id: &str,
+        upstream_host: Option<&str>,
+        route_lifetime: Duration,
+        create_only: bool,
+    ) -> Result<reqwest::Response> {
         let request = IssueWorkspaceAppSessionRequest {
             route_id: route_id.to_owned(),
+            create_only,
             target_username: self.target_username.clone(),
             target_ip: "127.0.0.1".to_owned(),
             target_ssh_port: self.target_addr.port(),
@@ -885,8 +1035,9 @@ impl Harness {
             target_app_port: self.app_addr.port(),
             protocol: WorkspaceAppProtocol::Http,
             upstream_host: upstream_host.map(ToOwned::to_owned),
-            route_expires_at: (OffsetDateTime::now_utc() + time::Duration::hours(1))
-                .unix_timestamp(),
+            route_expires_at: (OffsetDateTime::now_utc()
+                + time::Duration::seconds(i64::try_from(route_lifetime.as_secs())?))
+            .unix_timestamp(),
             metadata: RouteMetadata {
                 host_id: Some("host-01".to_owned()),
                 run_id: Some("runtime-01".to_owned()),
@@ -903,8 +1054,7 @@ impl Harness {
             .json(&request)
             .send()
             .await?;
-        assert!(response.status().is_success(), "{}", response.text().await?);
-        Ok(response.json().await?)
+        Ok(response)
     }
 
     async fn bootstrap_workspace_app(
@@ -1309,6 +1459,7 @@ struct TestTargetServer {
     allowed_public_key: russh::keys::ssh_key::PublicKey,
     host_key: russh::keys::PrivateKey,
     direct_channels: Arc<Mutex<HashSet<u32>>>,
+    connections: Arc<AtomicUsize>,
 }
 
 impl TestTargetServer {
@@ -1326,6 +1477,7 @@ impl server::Server for TestTargetServer {
     type Handler = Self;
 
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+        self.connections.fetch_add(1, Ordering::SeqCst);
         self.clone()
     }
 }

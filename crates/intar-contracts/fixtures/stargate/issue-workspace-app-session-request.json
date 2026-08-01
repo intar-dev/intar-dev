@@ -1,5 +1,6 @@
 {
   "route_id": "01j-workshop-app-argocd",
+  "create_only": false,
   "target_username": "user",
   "target_ip": "10.77.0.2",
   "target_ssh_port": 22,

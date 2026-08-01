@@ -75,6 +75,7 @@ export type StargateTerminalSessionResult =
 
 export interface IssueStargateWorkspaceAppSessionInput {
   routeId: string;
+  createOnly?: boolean;
   targetUsername: string;
   targetHost: string;
   targetSshPort: number;
@@ -103,6 +104,32 @@ export interface ParseStargateWorkspaceAppSessionResponseOptions {
   baseDomain: string;
   now: number;
   maximumExpiresAt: number;
+}
+
+export class StargateWorkspaceAppRouteConflictError extends Error {
+  readonly routeId: string;
+
+  constructor(routeId: string) {
+    super(`stargate workspace application route already exists: ${routeId}`);
+    this.name = "StargateWorkspaceAppRouteConflictError";
+    this.routeId = routeId;
+  }
+}
+
+export class StargateWorkspaceAppInvalidResponseError extends Error {
+  readonly routeId: string;
+  override readonly cause: unknown;
+
+  constructor(routeId: string, cause: unknown) {
+    super(
+      cause instanceof Error
+        ? cause.message
+        : "invalid stargate workspace application response",
+    );
+    this.name = "StargateWorkspaceAppInvalidResponseError";
+    this.routeId = routeId;
+    this.cause = cause;
+  }
 }
 
 export async function issueStargateTerminalSession(
@@ -239,6 +266,7 @@ export async function issueStargateWorkspaceAppSession(
     },
     body: JSON.stringify({
       route_id: input.routeId,
+      create_only: input.createOnly ?? false,
       target_username: input.targetUsername,
       target_ip: input.targetHost,
       target_ssh_port: input.targetSshPort,
@@ -258,19 +286,28 @@ export async function issueStargateWorkspaceAppSession(
       },
     }),
   });
+  if (response.status === 409) {
+    throw new StargateWorkspaceAppRouteConflictError(input.routeId);
+  }
   if (!response.ok) {
     throw new Error(
       `stargate workspace application create failed (${response.status})`,
     );
   }
-  return parseStargateWorkspaceAppSessionResponse(await response.json(), {
-    expectedRouteId: input.routeId,
-    baseDomain: requiredWorkspaceAppBaseDomain(
-      env.STARGATE_WORKSPACE_APP_BASE_DOMAIN,
-    ),
-    now: Date.now(),
-    maximumExpiresAt: input.expiresAt.getTime(),
-  });
+  try {
+    return parseStargateWorkspaceAppSessionResponse(await response.json(), {
+      expectedRouteId: input.routeId,
+      baseDomain: requiredWorkspaceAppBaseDomain(
+        env.STARGATE_WORKSPACE_APP_BASE_DOMAIN,
+      ),
+      now: Date.now(),
+      maximumExpiresAt: input.expiresAt.getTime(),
+    });
+  } catch (error) {
+    // A successful status confirms that create-only inserted this requested
+    // route. Callers may therefore compensate that exact route safely.
+    throw new StargateWorkspaceAppInvalidResponseError(input.routeId, error);
+  }
 }
 
 export function parseStargateWorkspaceAppSessionResponse(

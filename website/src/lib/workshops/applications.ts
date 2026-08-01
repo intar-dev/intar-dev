@@ -7,11 +7,12 @@ import {
   workshopWorkspaces,
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
-import { createAppId } from "@/lib/id";
 import { loadCurrentRuntimeVmTerminalTarget } from "@/lib/runtime-executions";
 import {
   deleteStargateWorkspaceAppRoute,
   issueStargateWorkspaceAppSession,
+  StargateWorkspaceAppInvalidResponseError,
+  StargateWorkspaceAppRouteConflictError,
   type StargateWorkspaceAppSessionResult,
 } from "@/lib/stargate";
 import {
@@ -21,12 +22,14 @@ import {
   workshopDb,
 } from "./shared";
 import {
-  beginWorkshopRouteIssuanceIntent,
   completeWorkshopRouteIssuanceIntent,
   markWorkshopRouteIssuanceIntentIssued,
+  reserveWorkshopApplicationRouteIssuanceIntent,
 } from "./route-issuance-intents";
+import { createWorkspaceAppRouteId } from "./workspace-app-route-id";
 
 const WORKSPACE_APP_TTL_MS = 15 * 60_000;
+const WORKSPACE_APP_ROUTE_ISSUANCE_ATTEMPTS = 8;
 
 /**
  * Opens one template-declared browser application for the participant who owns
@@ -158,66 +161,91 @@ export async function issueWorkshopWorkspaceApplication(input: {
     );
   }
 
-  const routeId = `wa-${createAppId()}`;
   const requestedExpiresAt = Date.now() + WORKSPACE_APP_TTL_MS;
-  const intentId = await beginWorkshopRouteIssuanceIntent({
-    organizationId: access.organizationId,
-    sessionId: input.sessionId,
-    workspaceId: workspace.workspaceId,
-    generationId: workspace.generationId,
-    actorUserId: input.actorUserId,
-    kind: "application",
-    routeKey: routeId,
-    capabilityExpiresAt: requestedExpiresAt,
-  });
-  if (!intentId) {
-    throw appError(
-      409,
-      "workshop_application_authorization_changed",
-      "workshop application authorization changed while the route was opening",
-    );
+  let routeId: string | undefined;
+  let intentId: string | undefined;
+  let opened: StargateWorkspaceAppSessionResult | undefined;
+  for (
+    let attempt = 0;
+    attempt < WORKSPACE_APP_ROUTE_ISSUANCE_ATTEMPTS;
+    attempt += 1
+  ) {
+    const candidateRouteId = createWorkspaceAppRouteId();
+    const reservation =
+      await reserveWorkshopApplicationRouteIssuanceIntent({
+        organizationId: access.organizationId,
+        sessionId: input.sessionId,
+        workspaceId: workspace.workspaceId,
+        generationId: workspace.generationId,
+        actorUserId: input.actorUserId,
+        routeKey: candidateRouteId,
+        capabilityExpiresAt: requestedExpiresAt,
+      });
+    if (reservation.status === "collision") continue;
+    if (reservation.status === "unauthorized") {
+      throw appError(
+        409,
+        "workshop_application_authorization_changed",
+        "workshop application authorization changed while the route was opening",
+      );
+    }
+    try {
+      opened = await issueStargateWorkspaceAppSession({
+        routeId: candidateRouteId,
+        createOnly: true,
+        targetUsername: target.target.username,
+        targetHost: target.target.host,
+        targetSshPort: target.target.port,
+        targetHostKeyOpenssh: target.target.hostKeyOpenssh,
+        targetPrivateKeyOpenssh: target.target.privateKeyOpenssh,
+        targetAppPort: application.port,
+        ...(application.upstreamHost === undefined
+          ? {}
+          : { upstreamHost: application.upstreamHost }),
+        expiresAt: new Date(requestedExpiresAt),
+        metadata: {
+          hostId: target.hostId,
+          runId: target.executionId,
+          vmId: target.vmId,
+          userId: input.actorUserId,
+        },
+      });
+    } catch (error) {
+      if (error instanceof StargateWorkspaceAppRouteConflictError) {
+        await completeWorkshopRouteIssuanceIntent(reservation.intentId);
+        continue;
+      }
+      if (error instanceof StargateWorkspaceAppInvalidResponseError) {
+        await markWorkshopRouteIssuanceIntentIssued({
+          intentId: reservation.intentId,
+          routeKey: candidateRouteId,
+        });
+        await deleteStargateWorkspaceAppRoute(candidateRouteId);
+      }
+      // A transport or non-success response cannot prove whether create-only
+      // inserted our candidate or found someone else's existing route. Never
+      // delete in that ambiguous case; an unreachable route we created expires
+      // after the bounded application TTL.
+      await completeWorkshopRouteIssuanceIntent(reservation.intentId);
+      throw error;
+    }
+    routeId = candidateRouteId;
+    intentId = reservation.intentId;
+    break;
   }
-  let opened: StargateWorkspaceAppSessionResult;
-  try {
-    opened = await issueStargateWorkspaceAppSession({
-      routeId,
-      targetUsername: target.target.username,
-      targetHost: target.target.host,
-      targetSshPort: target.target.port,
-      targetHostKeyOpenssh: target.target.hostKeyOpenssh,
-      targetPrivateKeyOpenssh: target.target.privateKeyOpenssh,
-      targetAppPort: application.port,
-      ...(application.upstreamHost === undefined
-        ? {}
-        : { upstreamHost: application.upstreamHost }),
-      expiresAt: new Date(requestedExpiresAt),
-      metadata: {
-        hostId: target.hostId,
-        runId: target.executionId,
-        vmId: target.vmId,
-        userId: input.actorUserId,
-      },
-    });
-  } catch (error) {
-    await markWorkshopRouteIssuanceIntentIssued({
-      intentId,
-      routeKey: routeId,
-    });
-    await deleteStargateWorkspaceAppRoute(routeId);
-    await completeWorkshopRouteIssuanceIntent(intentId);
-    throw error;
+  if (!routeId || !intentId || !opened) {
+    throw appError(
+      503,
+      "workshop_application_route_unavailable",
+      "could not reserve a workspace application address; retry",
+    );
   }
   const intentIssued = await markWorkshopRouteIssuanceIntentIssued({
     intentId,
     routeKey: routeId,
-    alternateRouteKey: opened.routeId === routeId ? null : opened.routeId,
   });
   if (!intentIssued) {
-    await Promise.all(
-      [...new Set([routeId, opened.routeId])].map((candidate) =>
-        deleteStargateWorkspaceAppRoute(candidate),
-      ),
-    );
+    await deleteStargateWorkspaceAppRoute(routeId);
     await completeWorkshopRouteIssuanceIntent(intentId);
     throw appError(
       409,
@@ -230,11 +258,7 @@ export async function issueWorkshopWorkspaceApplication(input: {
     opened.expiresAt > requestedExpiresAt ||
     opened.expiresAt <= Date.now()
   ) {
-    await Promise.all(
-      [...new Set([routeId, opened.routeId])].map((candidate) =>
-        deleteStargateWorkspaceAppRoute(candidate),
-      ),
-    );
+    await deleteStargateWorkspaceAppRoute(routeId);
     await completeWorkshopRouteIssuanceIntent(intentId);
     throw appError(
       502,
@@ -290,7 +314,7 @@ export async function issueWorkshopWorkspaceApplication(input: {
     )
     .returning({ id: workshopWorkspaces.id });
   if (!recorded[0]) {
-    await deleteStargateWorkspaceAppRoute(opened.routeId);
+    await deleteStargateWorkspaceAppRoute(routeId);
     await completeWorkshopRouteIssuanceIntent(intentId);
     throw appError(
       409,

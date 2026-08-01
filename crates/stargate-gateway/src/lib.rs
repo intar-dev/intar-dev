@@ -19,6 +19,8 @@ use http::StatusCode;
 use serde_json::json;
 use stargate_core::{AdminAuthSettings, Result, StargateError, TerminalTokenSettings};
 
+use crate::outbound::WorkspaceAppTunnelPool;
+
 pub use auth::AssertionValidator;
 pub use runtime::{load_settings, run};
 pub use session_registry::{SessionLease, SessionRegistry};
@@ -47,6 +49,7 @@ pub struct PublicGatewayState {
 pub struct GatewayState {
     pub store: SqliteRouteStore,
     pub sessions: SessionRegistry,
+    pub(crate) workspace_app_tunnels: WorkspaceAppTunnelPool,
     pub admin_auth: AssertionValidator,
     pub public_web: PublicGatewayState,
 }
@@ -63,6 +66,7 @@ impl GatewayState {
         Ok(Self {
             store,
             sessions: SessionRegistry::default(),
+            workspace_app_tunnels: WorkspaceAppTunnelPool::default(),
             admin_auth: AssertionValidator::new(admin_auth)?,
             public_web: PublicGatewayState {
                 public_base_url: web.public_base_url.clone(),
@@ -157,6 +161,7 @@ impl IntoResponse for GatewayHttpError {
         let status = match &self.0 {
             StargateError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             StargateError::RouteNotFound(_) => StatusCode::NOT_FOUND,
+            StargateError::WorkspaceAppRouteAlreadyExists(_) => StatusCode::CONFLICT,
             StargateError::Unauthorized => StatusCode::UNAUTHORIZED,
             StargateError::Database(_) | StargateError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -192,6 +197,9 @@ fn public_error_message(error: &StargateError) -> &'static str {
     match error {
         StargateError::Validation(_) => "validation error",
         StargateError::RouteNotFound(_) => "route not found",
+        StargateError::WorkspaceAppRouteAlreadyExists(_) => {
+            "workspace application route already exists"
+        }
         StargateError::Unauthorized => "unauthorized",
         StargateError::Database(_) | StargateError::Internal(_) => "internal server error",
         StargateError::Io(_)

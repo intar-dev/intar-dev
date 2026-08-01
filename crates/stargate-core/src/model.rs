@@ -49,6 +49,7 @@ pub struct RouteRecord {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegisteredWorkspaceAppRoute {
     pub route_id: String,
+    pub create_only: bool,
     pub target_username: String,
     pub target_ip: String,
     pub target_ssh_port: u16,
@@ -165,6 +166,7 @@ pub fn validate_workspace_app_session_request(
 
     Ok(RegisteredWorkspaceAppRoute {
         route_id: request.route_id,
+        create_only: request.create_only,
         target_username: request.target_username,
         target_ip: request.target_ip,
         target_ssh_port: request.target_ssh_port,

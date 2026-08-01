@@ -1,11 +1,14 @@
-import type { WorkshopCurrentHealth, WorkshopManifestV1 } from "@/db/schema";
+import type { WorkshopManifestV1 } from "@/db/schema";
 import { createAppId } from "@/lib/id";
 import {
   recordRuntimeVmTerminalTarget,
   updateRuntimeExecutionState,
 } from "@/lib/runtime-executions";
 import { loadRuntimeVmAccessKey } from "@/lib/runtime-vm-state";
-import { recordWorkshopModuleObservation } from "@/lib/workshops/progress";
+import {
+  assertWorkshopProbeBatchResults,
+  prepareWorkshopProbeReport,
+} from "@/lib/workshops/progress";
 import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
 
 const CONTRACT_VERSION = 1;
@@ -47,6 +50,7 @@ interface AuthenticatedGeneration extends CredentialRow {
   allocation_state: string;
   recording_drain_completed_at: number | null;
   workspace_generation_id: string;
+  organization_id: string;
   session_id: string;
   participant_user_id: string;
   manifest_json: string | WorkshopManifestV1;
@@ -437,16 +441,22 @@ async function handleReport(
     report.identity.execution_id,
     report.sequence,
   );
-  const results = await env.DB.batch([actualState, allocationState]);
-  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
-    return jsonResponse({ error: "stale report sequence" }, 409);
-  }
-  await projectWorkshopProbeProgress({
+  const progressStatements = await prepareWorkshopProbeProgress({
     env,
     generation: authenticated.generation,
     probes: report.probes,
     observedAt: now,
+    sequence: report.sequence,
   });
+  const results = await env.DB.batch([
+    actualState,
+    allocationState,
+    ...progressStatements,
+  ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    return jsonResponse({ error: "stale report sequence" }, 409);
+  }
+  assertWorkshopProbeBatchResults(results.slice(2));
   if (
     authenticated.generation.allocation_state !== "draining" &&
     report.terminal_ready &&
@@ -531,55 +541,33 @@ async function handleReport(
   });
 }
 
-async function projectWorkshopProbeProgress(input: {
+async function prepareWorkshopProbeProgress(input: {
   env: Cloudflare.Env;
   generation: AuthenticatedGeneration;
   probes: readonly SanitizedProbe[];
   observedAt: number;
-}): Promise<void> {
+  sequence: number;
+}): Promise<D1PreparedStatement[]> {
   const manifest =
     typeof input.generation.manifest_json === "string"
       ? (JSON.parse(input.generation.manifest_json) as WorkshopManifestV1)
       : input.generation.manifest_json;
-  const snapshots = new Map(input.probes.map((probe) => [probe.id, probe]));
-  const progress = await input.env.DB.prepare(
-    `SELECT module_id, technical_status, current_health
-     FROM workshop_module_progress
-     WHERE session_id = ? AND user_id = ?`,
-  )
-    .bind(input.generation.session_id, input.generation.participant_user_id)
-    .all<{
-      module_id: string;
-      technical_status: string;
-      current_health: WorkshopCurrentHealth;
-    }>();
-  const current = new Map(progress.results.map((row) => [row.module_id, row]));
-  for (const module of manifest.modules) {
-    if (module.probeIds.length === 0) continue;
-    const probes = module.probeIds.map((probeId) => snapshots.get(probeId));
-    const allPassing =
-      probes.length > 0 && probes.every((probe) => probe?.status === "pass");
-    const currentHealth: WorkshopCurrentHealth = allPassing
-      ? "passing"
-      : probes.some((probe) => probe?.status === "fail")
-        ? "failing"
-        : "unknown";
-    const existing = current.get(module.id);
-    if (
-      existing?.current_health === currentHealth &&
-      (!allPassing || existing.technical_status === "verified")
-    ) {
-      continue;
-    }
-    await recordWorkshopModuleObservation({
-      sessionId: input.generation.session_id,
-      participantUserId: input.generation.participant_user_id,
-      moduleId: module.id,
-      ...(allPassing ? { technicalStatus: "verified" as const } : {}),
-      currentHealth,
+  return prepareWorkshopProbeReport({
+    database: input.env.DB,
+    organizationId: input.generation.organization_id,
+    sessionId: input.generation.session_id,
+    participantUserId: input.generation.participant_user_id,
+    manifest,
+    probes: new Map(input.probes.map((probe) => [probe.id, probe])),
+    observedAt: input.observedAt,
+    acceptance: {
+      executionId: input.generation.execution_id,
+      allocationId: input.generation.allocation_id,
+      generation: input.generation.generation,
+      sequence: input.sequence,
       observedAt: input.observedAt,
-    });
-  }
+    },
+  });
 }
 
 async function handleArtifactGrant(
@@ -848,6 +836,7 @@ async function authenticateGeneration(
        allocation.state AS allocation_state,
        allocation.recording_drain_completed_at,
        workspace_generation.id AS workspace_generation_id,
+       session.organization_id,
        workspace.session_id,
        workspace.user_id AS participant_user_id,
        revision.manifest_json
