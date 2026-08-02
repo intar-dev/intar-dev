@@ -144,6 +144,17 @@ const providerWorkflow = await readFile(
   resolve(root, ".github/workflows/provider-workers.yml"),
   "utf8",
 );
+if (
+  countOccurrences(providerWorkflow, "uses: actions/setup-node@v6") !== 5 ||
+  countOccurrences(
+    providerWorkflow,
+    "node-version-file: apps/web/.node-version",
+  ) !== 5
+) {
+  throw new Error(
+    "Every provider job that executes Wrangler must use the pinned Node runtime",
+  );
+}
 for (const required of [
   "parent_holds_control_plane_lock:",
   "single_operator_confirmation:",
@@ -230,6 +241,38 @@ if (
 ) {
   throw new Error(
     "Control-plane wrapper must forward the sole-operator gate to providers and web",
+  );
+}
+
+const cleanD1Workflow = await readFile(
+  resolve(root, ".github/workflows/clean-d1-cutover.yml"),
+  "utf8",
+);
+if (
+  countOccurrences(cleanD1Workflow, "uses: actions/setup-node@v6") !== 1 ||
+  countOccurrences(
+    cleanD1Workflow,
+    "node-version-file: apps/web/.node-version",
+  ) !== 1
+) {
+  throw new Error("Clean-D1 Wrangler commands must use the pinned Node runtime");
+}
+
+const websiteDeployWorkflow = await readFile(
+  resolve(root, ".github/workflows/website-deploy.yml"),
+  "utf8",
+);
+const providerCapabilitiesJob = websiteDeployWorkflow
+  .split("\n  provider-capabilities:\n")[1]
+  ?.split("\n  deploy:\n")[0];
+if (
+  !providerCapabilitiesJob?.includes("uses: actions/setup-node@v6") ||
+  !providerCapabilitiesJob.includes(
+    "node-version-file: apps/web/.node-version",
+  )
+) {
+  throw new Error(
+    "Pre-web provider capability probes must use the pinned Node runtime",
   );
 }
 
