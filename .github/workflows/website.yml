@@ -119,8 +119,10 @@ jobs:
       - name: Upload browser scenario validator
         uses: actions/upload-artifact@v7
         with:
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          # run_id is stable across reruns; overwrite supports rerunning all jobs.
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
           path: apps/web/src/generated/scenario-wasm
+          overwrite: true
           if-no-files-found: error
           retention-days: 1
 
@@ -136,7 +138,7 @@ jobs:
       - name: Download browser scenario validator
         uses: actions/download-artifact@v8
         with:
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
           path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
@@ -186,7 +188,7 @@ jobs:
       - name: Download browser scenario validator
         uses: actions/download-artifact@v8
         with:
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
+          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
           path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
