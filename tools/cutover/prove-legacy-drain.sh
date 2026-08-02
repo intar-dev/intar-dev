@@ -17,6 +17,7 @@ readonly raw="${runtime_root}/d1.json"
 readonly provider="${runtime_root}/provider.json"
 readonly stargate_raw="${runtime_root}/stargate-plan.txt"
 readonly stargate="${runtime_root}/stargate.json"
+readonly drain_query="${repository_root}/tools/cutover/legacy-drain.sql"
 
 [[ "${database_name}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]
 [[ "${database_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -27,6 +28,8 @@ test -n "${CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:-}"
 test -n "${STARGATE_SSH_CONFIG:-}"
 test -f "${STARGATE_SSH_CONFIG}"
 test ! -L "${STARGATE_SSH_CONFIG}"
+test -f "${drain_query}"
+test ! -L "${drain_query}"
 
 mkdir -p "${runtime_root}" "$(dirname "${evidence}")"
 jq -n \
@@ -35,56 +38,7 @@ jq -n \
   '{name: "intar-clean-d1-legacy-drain", compatibility_date: "2026-07-09", d1_databases: [{binding: "LEGACY_DB", database_name: $name, database_id: $id}]}' \
   > "${config}"
 
-readonly drain_sql="$(tr '\n' ' ' <<'SQL'
-SELECT
-  (SELECT count(*) FROM active_runtime_slots) AS active_runtime_slots,
-  (SELECT count(*) FROM runtime_executions WHERE ended_at IS NULL) AS unended_runtime_executions,
-  (SELECT count(*) FROM hetzner_allocations WHERE deletion_confirmed_at IS NULL) AS unconfirmed_hetzner_allocations,
-  (SELECT count(*) FROM workshop_publication_provider_attempts WHERE deletion_confirmed_at IS NULL) AS unconfirmed_publication_provider_attempts,
-  (SELECT count(*) FROM runtime_provider_cost_ledger WHERE deletion_confirmed_at IS NULL) AS open_runtime_provider_cost_entries,
-  (SELECT count(*) FROM workshop_publication_provider_cost_ledger WHERE deletion_confirmed_at IS NULL) AS open_publication_provider_cost_entries,
-  (SELECT count(*) FROM organization_provider_connections WHERE state != 'disconnected') AS connected_provider_connections,
-  (SELECT count(*) FROM organization_provider_connections WHERE active_credential_version_id IS NOT NULL) AS active_provider_credentials,
-  (SELECT count(*) FROM runtime_terminal_sessions WHERE ended_at IS NULL) AS open_runtime_terminal_sessions,
-  (SELECT count(*) FROM runtime_artifacts WHERE upload_status = 'pending') AS pending_runtime_artifacts,
-  (SELECT count(*) FROM runtime_provider_artifact_upload_grants WHERE used_at IS NULL AND expires_at > cast(unixepoch('subsecond') * 1000 as integer)) AS active_provider_artifact_grants,
-  (SELECT count(*) FROM workshop_assist_grants WHERE revoked_at IS NULL AND expires_at > cast(unixepoch('subsecond') * 1000 as integer)) AS active_workshop_assist_grants,
-  (SELECT count(*) FROM workshop_help_requests WHERE status IN ('open', 'claimed')) AS active_workshop_help_requests,
-  (SELECT count(*) FROM workshop_route_issuance_intents WHERE state IN ('pending', 'issued')) AS live_workshop_route_issuance_intents,
-  (SELECT count(*) FROM runtime_allocation_locks) AS runtime_allocation_locks,
-  (SELECT count(*) FROM host_resource_reservations WHERE released_at IS NULL) AS active_host_resource_reservations,
-  (SELECT count(*) FROM host_cpu_reservations) AS active_host_cpu_reservations,
-  (SELECT count(*) FROM image_builds WHERE status IN ('queued', 'assigned', 'building')) AS active_image_builds,
-  (SELECT count(*) FROM image_build_coordination_locks) AS image_build_coordination_locks,
-  (SELECT coalesce(sum(json_array_length(doc_json, '$.vms')), 0) FROM host_desired_state) AS host_desired_vm_entries,
-  (SELECT coalesce(sum(json_array_length(doc_json, '$.builds')), 0) FROM host_desired_state) AS host_desired_build_entries,
-  (SELECT coalesce(sum(json_array_length(report_json, '$.vms')), 0) FROM host_actual_state) AS host_actual_vm_entries,
-  (SELECT coalesce(sum(json_array_length(report_json, '$.builds')), 0) FROM host_actual_state) AS host_actual_build_entries,
-  (SELECT count(*) FROM runtime_vm_actual_state WHERE phase <> 'absent') AS nonabsent_runtime_vm_actual_states,
-  (SELECT count(*)
-   FROM agent_hosts host
-   LEFT JOIN host_actual_state actual ON actual.host_id = host.id
-   LEFT JOIN host_desired_state desired ON desired.host_id = host.id
-   WHERE host.disabled = 0
-     AND ((host.role = 'agent' AND host.scenario_enabled = 1) OR host.role = 'builder')
-     AND (
-       host.connected = 0
-       OR host.last_heartbeat_at IS NULL
-       OR host.last_heartbeat_at < cast(unixepoch('subsecond') * 1000 as integer) - 90000
-       OR actual.host_id IS NULL
-       OR actual.updated_at < cast(unixepoch('subsecond') * 1000 as integer) - 90000
-       OR (desired.host_id IS NOT NULL AND actual.applied_desired_version < desired.version)
-     )) AS untrustworthy_enabled_host_reports,
-  (SELECT count(*) FROM workshop_publications WHERE status IN ('queued', 'building')) AS active_workshop_publications,
-  (SELECT count(*) FROM workshop_publication_checkpoints WHERE status IN ('pending', 'building')) AS active_workshop_publication_checkpoints,
-  (SELECT count(*) FROM workshop_publication_provider_checkpoints WHERE verification_status IN ('pending', 'allocating', 'bootstrapping', 'applying', 'proof_succeeded', 'deleting', 'cleanup_pending')) AS active_publication_provider_checkpoints,
-  (SELECT count(*) FROM workshop_sessions WHERE state NOT IN ('ended', 'cancelled')) AS nonterminal_workshop_sessions,
-  (SELECT count(*) FROM workshop_workspaces WHERE state NOT IN ('ended', 'failed')) AS nonterminal_workshop_workspaces,
-  (SELECT count(*) FROM workshop_workspace_generations WHERE state NOT IN ('archived', 'failed')) AS nonterminal_workshop_generations,
-  (SELECT count(*) FROM scenario_runs WHERE active_key IS NOT NULL) AS active_scenario_runs,
-  cast(unixepoch('subsecond') * 1000 as integer) AS observed_at;
-SQL
-)"
+readonly drain_sql="$(tr '\n' ' ' < "${drain_query}")"
 
 query_succeeded=false
 provider_succeeded=false
@@ -144,8 +98,10 @@ jq -n \
     ($d1[0][0].results[0] // null) as $row |
     ($provider[0] // null) as $provider_evidence |
     ($stargate[0] // null) as $stargate_evidence |
+    (if $row == null then null else ($row | del(.observed_at) | with_entries(select((.key | startswith("residual_")) | not))) end) as $blocking_counts |
+    (if $row == null then null else ($row | del(.observed_at) | with_entries(select(.key | startswith("residual_"))) | with_entries(.key |= sub("^residual_"; ""))) end) as $residual_counts |
     {
-      schema_version: 3,
+      schema_version: 4,
       operation: "legacy-drain",
       phase: $phase,
       source_sha: $source_sha,
@@ -155,7 +111,8 @@ jq -n \
       provider_probe_succeeded: $provider_succeeded,
       stargate_probe_succeeded: $stargate_succeeded,
       observed_at: ($row.observed_at // null),
-      counts: (if $row == null then null else ($row | del(.observed_at)) end),
+      counts: $blocking_counts,
+      residual_counts: $residual_counts,
       provider_inventory: $provider_evidence,
       stargate: $stargate_evidence,
       drained: (
@@ -163,8 +120,8 @@ jq -n \
         $provider_succeeded and
         $stargate_succeeded and
         $row != null and
-        (($row | del(.observed_at) | to_entries) | length) > 0 and
-        (($row | del(.observed_at) | to_entries) | all(.value == 0)) and
+        ($blocking_counts | length) > 0 and
+        ($blocking_counts | to_entries | all(.value == 0)) and
         $provider_evidence.provenEmpty == true and
         $stargate_evidence.healthy == true and
         $stargate_evidence.drained == true
@@ -173,7 +130,7 @@ jq -n \
   ' > "${evidence}"
 
 jq -e '
-  .schema_version == 3 and
+  .schema_version == 4 and
   .query_succeeded == true and
   .provider_probe_succeeded == true and
   .stargate_probe_succeeded == true and
