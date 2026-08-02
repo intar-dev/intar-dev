@@ -1,5 +1,6 @@
 import type {
   CanonicalProviderWrite,
+  ProviderOwnership,
   ProviderOperationResult,
 } from "@intar/provider-contracts";
 import type {
@@ -10,6 +11,7 @@ import type {
   GcpCapacityObservation,
   GcpCatalogObservation,
   GcpFoundationObservation,
+  GcpOperationalConnectionInspection,
   GcpProjectIdentity,
   GcpProjectInventory,
   GcpProjectValidation,
@@ -19,13 +21,18 @@ import type {
   RunGcpOperationRequest,
 } from "@intar/provider-contracts/gcp";
 import { ProviderServiceError } from "@intar/provider-worker-core";
-import { GcpCatalogClient, type GcpCatalogOptions } from "./catalog";
+import {
+  GcpCatalogClient,
+  requireGcpCatalogApiKey,
+  type GcpCatalogOptions,
+} from "./catalog";
 import {
   openGcpCredential,
   parseServiceAccountKey,
   sealGcpCredential,
 } from "./credential";
 import {
+  classifyOperationalInventory,
   GcpClient,
   ownershipMarker,
 } from "./gcp-client";
@@ -38,6 +45,54 @@ export interface GcpProviderRuntimeOptions {
   api?: GcpApiOptions;
   catalog?: GcpCatalogOptions;
   now?: () => Date;
+}
+
+export interface GcpProviderDeployment {
+  mode: string;
+  catalogApiKey?: string;
+}
+
+type GcpProviderDeploymentMode = "active" | "dormant";
+
+function deploymentMode(deployment: GcpProviderDeployment): GcpProviderDeploymentMode {
+  if (deployment.mode === "active" || deployment.mode === "dormant") {
+    return deployment.mode;
+  }
+  throw new ProviderServiceError({
+    code: "gcp_provider_mode_invalid",
+    message: "GCP provider deployment mode is invalid",
+    retryable: false,
+  });
+}
+
+function requireNewWorkCatalog(deployment: GcpProviderDeployment): string {
+  if (deploymentMode(deployment) === "dormant") {
+    throw new ProviderServiceError({
+      code: "gcp_provider_dormant",
+      message: "GCP provider is dormant; new connections and allocations are disabled",
+      retryable: false,
+    });
+  }
+  return requireGcpCatalogApiKey(deployment.catalogApiKey);
+}
+
+function operationStartsNewWork(kind: GcpProviderOperation["kind"]): boolean {
+  switch (kind) {
+    case "resolve_profile":
+    case "quote":
+    case "preflight_capacity":
+    case "ensure_foundation":
+    case "create_instance":
+      return true;
+    case "inspect_connection":
+    case "observe_operation":
+    case "observe_allocation":
+    case "reboot_instance":
+    case "delete_instance":
+    case "delete_disk":
+    case "sweep":
+      return false;
+  }
 }
 
 function assertRequestIdentity(input: {
@@ -157,7 +212,7 @@ async function observeCatalog(
   };
 }
 
-async function inspect(
+async function validateConnectionSetup(
   client: GcpClient,
   foundation?: ConnectGcpProjectRequest["foundation"],
 ): Promise<{
@@ -181,16 +236,42 @@ async function inspect(
   return { identity, inventory, validation };
 }
 
+async function inspectConnectedProject(
+  client: GcpClient,
+  foundation: ConnectGcpProjectRequest["foundation"],
+  runtimeConnectionOwnership: ProviderOwnership,
+): Promise<GcpOperationalConnectionInspection> {
+  const identity = await client.inspectIdentity();
+  const [grantedCleanupPermissions, inventory] = await Promise.all([
+    client.assertCleanupIamPermissions(),
+    client.inventory(),
+  ]);
+  return {
+    identity,
+    inventory,
+    validation: { grantedCleanupPermissions },
+    classification: classifyOperationalInventory(
+      inventory,
+      foundation,
+      runtimeConnectionOwnership,
+    ),
+  };
+}
+
 export async function connectProject(
   request: ConnectGcpProjectRequest,
   kekSecret: string,
-  catalogApiKey: string,
+  deployment: GcpProviderDeployment,
   options: GcpProviderRuntimeOptions = {},
 ): Promise<ConnectGcpProjectResult> {
   assertRequestIdentity(request);
+  const catalogApiKey = requireNewWorkCatalog(deployment);
   const key = parseServiceAccountKey(request.serviceAccountKeyJson);
   const client = new GcpClient(key, request.projectId, options.api);
-  const { identity, inventory, validation } = await inspect(client, request.foundation);
+  const { identity, inventory, validation } = await validateConnectionSetup(
+    client,
+    request.foundation,
+  );
   const catalog = await observeCatalog(
     client,
     catalogApiKey,
@@ -220,17 +301,24 @@ export async function connectProject(
 export async function rotateCredential(
   request: RotateGcpCredentialRequest,
   kekSecret: string,
+  deployment: GcpProviderDeployment,
   options: GcpProviderRuntimeOptions = {},
 ): Promise<RotateGcpCredentialResult> {
   assertRequestIdentity(request);
+  // Credential rotation is cleanup authority recovery, not issuance. Keep it
+  // available in dormant mode, while still rejecting an unknown deployment.
+  const mode = deploymentMode(deployment);
   const key = parseServiceAccountKey(request.serviceAccountKeyJson);
   const client = new GcpClient(key, request.projectId, options.api);
   const identity = await client.inspectIdentity();
-  await Promise.all([
-    client.assertRequiredServices(identity.projectNumber),
-    client.assertRequiredIamPermissions(),
-    client.assertMinimumQuotas(),
-  ]);
+  if (mode === "active") {
+    await Promise.all([
+      client.assertRequiredServices(identity.projectNumber),
+      client.assertRequiredIamPermissions(),
+    ]);
+  } else {
+    await client.assertCleanupIamPermissions();
+  }
   const sentinelNetwork = await client.observeResource(request.sentinelNetworkSelfLink);
   if (
     !sentinelNetwork ||
@@ -248,7 +336,12 @@ export async function rotateCredential(
     request.credentialContext,
     now(options),
   );
-  return { credential, identity, sentinelNetwork };
+  return {
+    credential,
+    identity,
+    sentinelNetwork,
+    authority: mode === "active" ? "active" : "cleanup_only",
+  };
 }
 
 function allocationWrites(
@@ -352,17 +445,29 @@ function allocationWrites(
 export async function runOperation(
   request: RunGcpOperationRequest,
   kekSecret: string,
-  catalogApiKey: string,
+  deployment: GcpProviderDeployment,
   options: GcpProviderRuntimeOptions = {},
 ): Promise<ProviderOperationResult> {
   assertRequestIdentity(request);
+  const operation: GcpProviderOperation = request.operation;
+  let catalogApiKey: string | undefined;
+  if (operationStartsNewWork(operation.kind)) {
+    catalogApiKey = requireNewWorkCatalog(deployment);
+  } else {
+    // Existing-allocation reconciliation and cleanup must remain reachable even
+    // when production is deliberately returned to dormant mode.
+    deploymentMode(deployment);
+  }
   const key = await openGcpCredential(request.credential, kekSecret, request.credentialContext);
   const client = new GcpClient(key, request.projectId, options.api);
-  const operation: GcpProviderOperation = request.operation;
   switch (operation.kind) {
     case "inspect_connection": {
       return {
-        data: await inspect(client, operation.foundation),
+        data: await inspectConnectedProject(client, operation.foundation, {
+          organizationRef: request.credentialContext.organizationId,
+          connectionRef: request.connectionId,
+          purpose: "learner_workspace",
+        }),
         canonicalWrites: [],
         mustPersistBeforeNextOperation: false,
       };
@@ -505,7 +610,11 @@ export async function runOperation(
       return { data, canonicalWrites, mustPersistBeforeNextOperation: canonicalWrites.length > 0 };
     }
     case "reboot_instance": {
-      const data = await client.rebootInstance(operation.zone, operation.instanceName);
+      const data = await client.rebootInstance(
+        operation.zone,
+        operation.instanceName,
+        operation.ownership,
+      );
       return {
         data,
         canonicalWrites: [operationWrite(request, data, options)],
@@ -523,6 +632,23 @@ export async function runOperation(
         resourceKind: "instance",
         externalId: operation.instanceName,
         name: operation.instanceName,
+        operationIds: data ? [data.id] : [],
+        state: data ? "deleting" : "deleted",
+        location: operation.zone,
+      }), ...(data ? [operationWrite(request, data, options)] : [])];
+      return { data, canonicalWrites, mustPersistBeforeNextOperation: true };
+    }
+    case "delete_disk": {
+      const data = await client.deleteDisk(
+        operation.zone,
+        operation.diskName,
+        operation.ownership,
+      );
+      const canonicalWrites = [write(request, options, {
+        operation: data ? "resource_deletion_requested" : "resource_deleted",
+        resourceKind: "boot_disk",
+        externalId: operation.diskName,
+        name: operation.diskName,
         operationIds: data ? [data.id] : [],
         state: data ? "deleting" : "deleted",
         location: operation.zone,

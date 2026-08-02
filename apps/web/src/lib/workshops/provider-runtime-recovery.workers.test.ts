@@ -281,6 +281,79 @@ describe("provider runtime recovery", () => {
     });
   });
 
+  it("routes a cleanup-only GCP certification directly into deletion without a reboot loop", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE provider_connections
+         SET state = 'rotation_required', updated_at = 100
+         WHERE id = 'connection'`,
+      ),
+      env.DB.prepare(
+        `UPDATE provider_credential_versions
+         SET authority = 'cleanup_only'
+         WHERE id = 'credential'`,
+      ),
+    ]);
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 100,
+    });
+    await makeCertificationDue(200);
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    expect(mocks.invokeProviderOperation).toHaveBeenCalledTimes(1);
+    await expectCertificationReboots(0);
+    const lifecycle = await env.DB.prepare(
+      `SELECT certification.state AS certification_state,
+              certification.error_code,
+              allocation.state AS allocation_state,
+              allocation.last_error_code,
+              allocation.deletion_requested_at,
+              execution.state AS execution_state,
+              execution.ended_at,
+              reconciliation.desired_state,
+              reconciliation.observed_state,
+              reconciliation.consecutive_failures,
+              credential.report_credential_revoked_at
+       FROM workshop_runtime_profile_certifications certification
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+        AND credential.generation = execution.generation
+       WHERE certification.id = 'certification'`,
+    ).first<Record<string, string | number | null>>();
+    expect(lifecycle).toMatchObject({
+      certification_state: "cleanup_pending",
+      error_code: "provider_credential_cleanup_only",
+      allocation_state: "cleanup_pending",
+      last_error_code: "provider_credential_cleanup_only",
+      deletion_requested_at: 200,
+      execution_state: "failed",
+      ended_at: 200,
+      desired_state: "deleted",
+      observed_state: "certification_failed",
+      consecutive_failures: 0,
+      report_credential_revoked_at: 200,
+    });
+    const operations = await env.DB.prepare(
+      `SELECT operation_kind FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation' ORDER BY created_at`,
+    ).all<{ operation_kind: string }>();
+    expect(operations.results).toEqual([{ operation_kind: "delete_instance" }]);
+  });
+
   it("proves every cumulative checkpoint and its reboot on one verifier allocation", async () => {
     await seedCumulativeCertification();
     mocks.invokeProviderOperation.mockResolvedValueOnce({

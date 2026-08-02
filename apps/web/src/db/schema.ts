@@ -57,6 +57,7 @@ export {
 export {
   accessAllowlist,
   accessRequests,
+  cleanD1Commissioning,
   jwks,
   scenarioAssignments,
   scenarioSources,

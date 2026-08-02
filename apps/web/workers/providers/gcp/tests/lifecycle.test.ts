@@ -86,7 +86,7 @@ describe("GCP allocation lifecycle", () => {
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
 
-    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc"))
+    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc", ownership))
       .resolves.toMatchObject({ name: "reset-1" });
     await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
       .resolves.toMatchObject({ name: "delete-1" });
@@ -110,7 +110,41 @@ describe("GCP allocation lifecycle", () => {
       .resolves.toBeNull();
   });
 
-  it("refuses to delete a foreign instance that occupies the deterministic name", async () => {
+  it("deletes an owned orphan boot disk and rejects a foreign one", async () => {
+    let foreign = false;
+    const methods: string[] = [];
+    const requestIds: Array<string | null> = [];
+    const client = new GcpClient(key, key.project_id, {
+      fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        methods.push(request.method);
+        if (request.method === "GET") {
+          return Response.json({
+            id: foreign ? "disk-foreign" : "disk-owned",
+            name: "intar-learner-abc",
+            selfLink: `${url.origin}${url.pathname}`,
+            labels: foreign
+              ? { "intar-managed": "true", "intar-org": "other" }
+              : ownershipLabels(ownership),
+          });
+        }
+        requestIds.push(url.searchParams.get("requestId"));
+        return Response.json(operation("delete-disk-1"));
+      }) as typeof fetch,
+      tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
+    });
+
+    await expect(client.deleteDisk("europe-west3-a", "intar-learner-abc", ownership))
+      .resolves.toMatchObject({ name: "delete-disk-1" });
+    foreign = true;
+    await expect(client.deleteDisk("europe-west3-a", "intar-learner-abc", ownership))
+      .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
+    expect(methods).toEqual(["GET", "DELETE", "GET"]);
+    expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  it("refuses to reboot or delete a foreign instance at the deterministic name", async () => {
     const methods: string[] = [];
     const client = new GcpClient(key, key.project_id, {
       fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -126,8 +160,10 @@ describe("GCP allocation lifecycle", () => {
       }) as typeof fetch,
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
+    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc", ownership))
+      .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
     await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
       .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
-    expect(methods).toEqual(["GET"]);
+    expect(methods).toEqual(["GET", "GET"]);
   });
 });

@@ -8,9 +8,24 @@ on:
         description: Type DEPLOY PROVIDER WORKERS
         required: true
         type: string
+      gcp_dormant:
+        description: Deploy the GCP provider explicitly dormant
+        required: true
+        default: false
+        type: boolean
+      gcp_dormant_confirmation:
+        description: Type DEPLOY DORMANT GCP PROVIDER when GCP is dormant
+        required: false
+        default: ""
+        type: string
       web_confirmation:
         description: Type DEPLOY WORKSHOP CONTROL PLANE
         required: true
+        type: string
+      clean_d1_cutover_run_id:
+        description: Successful clean-D1 apply run required for the first web switch
+        required: false
+        default: ""
         type: string
       single_operator_confirmation:
         description: Sole-operator confirmation when that production mode is active
@@ -34,6 +49,9 @@ jobs:
     with:
       deploy_hetzner: true
       deploy_gcp: true
+      gcp_dormant: ${{ inputs.gcp_dormant }}
+      gcp_dormant_confirmation: ${{ inputs.gcp_dormant_confirmation }}
+      parent_holds_control_plane_lock: true
       confirmation: ${{ inputs.provider_confirmation }}
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -53,9 +71,12 @@ jobs:
       single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
       provenance_workflow_path: .github/workflows/control-plane-rollout.yml
       parent_holds_control_plane_lock: true
+      clean_d1_cutover_run_id: ${{ inputs.clean_d1_cutover_run_id }}
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+      STARGATE_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
+      STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
       STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}

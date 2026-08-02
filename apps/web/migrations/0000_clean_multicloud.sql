@@ -41,6 +41,27 @@ CREATE TABLE `account` (
 	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
+CREATE TABLE `clean_d1_commissioning` (
+	`id` text PRIMARY KEY NOT NULL,
+	`database_name` text NOT NULL,
+	`database_id` text NOT NULL,
+	`baseline_sha256` text NOT NULL,
+	`source_sha` text NOT NULL,
+	`owner_github_login` text NOT NULL,
+	`owner_github_id` text NOT NULL,
+	`apply_run_id` text NOT NULL,
+	`apply_run_attempt` integer NOT NULL,
+	`status` text NOT NULL,
+	`owner_user_id` text,
+	`created_at` integer NOT NULL,
+	`updated_at` integer NOT NULL,
+	FOREIGN KEY (`owner_user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT `clean_d1_commissioning_singleton` CHECK (`id` = 'first-owner-v1'),
+	CONSTRAINT `clean_d1_commissioning_run_attempt` CHECK (`apply_run_attempt` = 1),
+	CONSTRAINT `clean_d1_commissioning_status` CHECK (`status` IN ('allowlisted', 'owner_finalized')),
+	CONSTRAINT `clean_d1_commissioning_owner_state` CHECK (((`status` = 'allowlisted' AND `owner_user_id` IS NULL) OR (`status` = 'owner_finalized' AND `owner_user_id` IS NOT NULL)))
+);
+--> statement-breakpoint
 CREATE TABLE `agent_hosts` (
 	`id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
@@ -2259,6 +2280,7 @@ CREATE TABLE `provider_credential_versions` (
   `id` text PRIMARY KEY NOT NULL,
   `connection_id` text NOT NULL,
   `version` integer NOT NULL,
+  `authority` text DEFAULT 'active' NOT NULL,
   `algorithm` text NOT NULL,
   `kek_version` text NOT NULL,
   `aad_sha256` text NOT NULL,
@@ -2274,7 +2296,7 @@ CREATE TABLE `provider_credential_versions` (
   `created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
   FOREIGN KEY (`connection_id`) REFERENCES `provider_connections`(`id`) ON DELETE restrict,
   FOREIGN KEY (`created_by`) REFERENCES `user`(`id`) ON DELETE restrict,
-  CONSTRAINT `provider_credential_versions_valid` CHECK (`version` > 0 AND `algorithm` = 'AES-256-GCM' AND length(`kek_version`) > 0 AND length(`aad_sha256`) = 64),
+  CONSTRAINT `provider_credential_versions_valid` CHECK (`version` > 0 AND `authority` IN ('active', 'cleanup_only') AND `algorithm` = 'AES-256-GCM' AND length(`kek_version`) > 0 AND length(`aad_sha256`) = 64),
   CONSTRAINT `provider_credential_versions_lifecycle_valid` CHECK (`superseded_at` IS NULL OR `superseded_at` >= `activated_at`)
 );
 --> statement-breakpoint
@@ -2291,18 +2313,20 @@ WHEN NEW.`active_credential_version_id` IS NOT NULL AND NOT EXISTS (
   WHERE credential.`id` = NEW.`active_credential_version_id`
     AND credential.`connection_id` = NEW.`id`
     AND credential.`revoked_at` IS NULL
+    AND (NEW.`state` <> 'active' OR credential.`authority` = 'active')
 )
 BEGIN
   SELECT RAISE(ABORT, 'active credential does not belong to provider connection');
 END;
 --> statement-breakpoint
 CREATE TRIGGER `provider_connections_active_credential_update_guard`
-BEFORE UPDATE OF `active_credential_version_id` ON `provider_connections`
+BEFORE UPDATE OF `active_credential_version_id`, `state` ON `provider_connections`
 WHEN NEW.`active_credential_version_id` IS NOT NULL AND NOT EXISTS (
   SELECT 1 FROM `provider_credential_versions` credential
   WHERE credential.`id` = NEW.`active_credential_version_id`
     AND credential.`connection_id` = NEW.`id`
     AND credential.`revoked_at` IS NULL
+    AND (NEW.`state` <> 'active' OR credential.`authority` = 'active')
 )
 BEGIN
   SELECT RAISE(ABORT, 'active credential does not belong to provider connection');

@@ -532,6 +532,7 @@ export interface OrganizationWorkshopsResponse {
         };
     credential: {
       version: number;
+      authority: "active" | "cleanup_only";
       fingerprint: string;
       activatedAt: number;
     } | null;

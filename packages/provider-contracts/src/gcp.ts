@@ -114,6 +114,45 @@ export interface GcpProjectInventory {
   defaultNetworkPresent: boolean;
 }
 
+export type GcpInventoryResourceKind =
+  | "instance"
+  | "disk"
+  | "address"
+  | "snapshot"
+  | "image"
+  | "instance_template"
+  | "instance_group"
+  | "forwarding_rule"
+  | "target_pool"
+  | "backend_service"
+  | "network"
+  | "subnetwork"
+  | "firewall"
+  | "route";
+
+export interface GcpClassifiedInventoryResource {
+  resourceKind: GcpInventoryResourceKind;
+  resource: GcpResourceRef;
+}
+
+export interface GcpOperationalInventoryClassification {
+  status: "empty" | "owned_resources_present" | "foreign_resources_present";
+  ownedResources: GcpClassifiedInventoryResource[];
+  foreignResources: GcpClassifiedInventoryResource[];
+  ownedComputeAssets: GcpComputeAsset[];
+  foreignComputeAssets: GcpComputeAsset[];
+  defaultNetworkPresent: boolean;
+}
+
+export interface GcpOperationalConnectionInspection {
+  identity: GcpProjectIdentity;
+  inventory: GcpProjectInventory;
+  validation: {
+    grantedCleanupPermissions: string[];
+  };
+  classification: GcpOperationalInventoryClassification;
+}
+
 export interface GcpComputeAsset {
   fullResourceName: string;
   assetType: string;
@@ -174,6 +213,7 @@ export interface RotateGcpCredentialResult {
   credential: EncryptedCredentialEnvelope;
   identity: GcpProjectIdentity;
   sentinelNetwork: GcpResourceRef;
+  authority: "active" | "cleanup_only";
 }
 
 export interface ResolveGcpProfileOperation {
@@ -252,12 +292,20 @@ export interface RebootGcpInstanceOperation {
   kind: "reboot_instance";
   zone: string;
   instanceName: string;
+  ownership: ProviderOwnership;
 }
 
 export interface DeleteGcpInstanceOperation {
   kind: "delete_instance";
   zone: string;
   instanceName: string;
+  ownership: ProviderOwnership;
+}
+
+export interface DeleteGcpDiskOperation {
+  kind: "delete_disk";
+  zone: string;
+  diskName: string;
   ownership: ProviderOwnership;
 }
 
@@ -277,6 +325,7 @@ export type GcpProviderOperation =
   | ObserveGcpAllocationOperation
   | RebootGcpInstanceOperation
   | DeleteGcpInstanceOperation
+  | DeleteGcpDiskOperation
   | SweepGcpResourcesOperation;
 
 export interface RunGcpOperationRequest extends GcpConnectionRequestBase {

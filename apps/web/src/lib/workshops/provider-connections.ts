@@ -22,12 +22,12 @@ import {
   providerConnections,
   providerCredentialVersions,
   runtimeProviderAllocations,
+  runtimeProviderResources,
   workshopRuntimeProfileCertifications,
 } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
-import { requireWorkshopMulticloudRuntimeEnabledForOrganization } from "./feature-flag";
 import {
   providerCredentialContext,
   providerCredentialEnvelope,
@@ -59,6 +59,7 @@ export interface ProviderConnectionRecord {
   updatedAt: number;
   credential: {
     version: number;
+    authority: "active" | "cleanup_only";
     fingerprint: string;
     activatedAt: number;
   } | null;
@@ -102,9 +103,6 @@ export async function connectProviderProject(input: {
   now?: number;
 }): Promise<ProviderConnectionRecord> {
   await requireOwner(input.organizationId, input.actorUserId);
-  await requireWorkshopMulticloudRuntimeEnabledForOrganization(
-    input.organizationId,
-  );
   const credentialText = requiredCredential(input.credential);
   const locations = locationsFor(input.providerKind, input.approvedLocations);
   const maxConcurrentAllocations = allocationLimit(
@@ -349,6 +347,7 @@ export async function listProviderConnections(input: {
       credential: credential
         ? {
             version: credential.version,
+            authority: credential.authority,
             fingerprint: maskFingerprint(credential.credentialFingerprint),
             activatedAt: credential.activatedAt,
           }
@@ -445,6 +444,7 @@ export async function rotateProviderCredential(input: {
     "provider_connection_sentinel",
   );
   let result: RotateHetznerCredentialResult | RotateGcpCredentialResult;
+  let credentialAuthority: "active" | "cleanup_only" = "active";
   if (connection.providerKind === "hetzner_cloud") {
     const details = await requireHetznerDetails(connection.id);
     result = await invokeProviderOperation<RotateHetznerCredentialResult>(
@@ -475,7 +475,13 @@ export async function rotateProviderCredential(input: {
           ownership,
         }),
     );
+    credentialAuthority = result.authority;
   }
+  const nextConnectionState = credentialAuthority === "active"
+    ? "active" as const
+    : await countLiveProviderAllocations(connection.id) > 0
+      ? "cleanup_pending" as const
+      : "rotation_required" as const;
   const db = drizzle(env.DB);
   await db.batch([
     db.insert(providerCredentialVersions).values(
@@ -486,6 +492,7 @@ export async function rotateProviderCredential(input: {
         credentialFingerprint: await sha256Hex(raw),
         actorUserId: input.actorUserId,
         version,
+        authority: credentialAuthority,
         now,
       }),
     ),
@@ -497,7 +504,7 @@ export async function rotateProviderCredential(input: {
       .update(providerConnections)
       .set({
         activeCredentialVersionId: credentialId,
-        state: "active",
+        state: nextConnectionState,
         lastValidatedAt: now,
         disconnectedAt: null,
         updatedAt: now,
@@ -507,10 +514,16 @@ export async function rotateProviderCredential(input: {
       organizationId: input.organizationId,
       connectionId: connection.id,
       actorUserId: input.actorUserId,
-      type: reconnecting
-        ? "provider.connection_reconnected"
-        : "provider.credential_rotated",
-      payload: { providerKind: connection.providerKind, version },
+      type: credentialAuthority === "cleanup_only"
+        ? "provider.credential_rotated_cleanup_only"
+        : reconnecting
+          ? "provider.connection_reconnected"
+          : "provider.credential_rotated",
+      payload: {
+        providerKind: connection.providerKind,
+        version,
+        authority: credentialAuthority,
+      },
       now,
     }),
   ]);
@@ -588,7 +601,7 @@ export async function inspectProviderConnection(input: {
   organizationId: string;
   connectionId: string;
   actorUserId: string;
-}): Promise<{ connectionId: string; providerKind: DirectCloudProviderKind; observedAt: number; data: unknown }> {
+}) {
   await requireOwner(input.organizationId, input.actorUserId);
   const connection = await requireConnection(input.organizationId, input.connectionId);
   const credential = await loadActiveCredential(connection);
@@ -627,8 +640,50 @@ export async function inspectProviderConnection(input: {
             },
           });
         });
+  const db = drizzle(env.DB);
+  const allocations = await db
+    .select({
+      id: runtimeProviderAllocations.id,
+      executionId: runtimeProviderAllocations.executionId,
+      state: runtimeProviderAllocations.state,
+      deterministicName: runtimeProviderAllocations.deterministicName,
+      location: runtimeProviderAllocations.location,
+      locationAttempt: runtimeProviderAllocations.locationAttempt,
+      deletionRequestedAt: runtimeProviderAllocations.deletionRequestedAt,
+      deletionConfirmedAt: runtimeProviderAllocations.deletionConfirmedAt,
+      lastErrorCode: runtimeProviderAllocations.lastErrorCode,
+    })
+    .from(runtimeProviderAllocations)
+    .where(
+      and(
+        eq(runtimeProviderAllocations.connectionId, connection.id),
+        ne(runtimeProviderAllocations.state, "deleted"),
+      ),
+    );
+  const resources = allocations.length === 0
+    ? []
+    : await db
+        .select({
+          id: runtimeProviderResources.id,
+          allocationId: runtimeProviderResources.allocationId,
+          resourceKind: runtimeProviderResources.resourceKind,
+          providerResourceId: runtimeProviderResources.providerResourceId,
+          locationAttempt: runtimeProviderResources.locationAttempt,
+          location: runtimeProviderResources.location,
+          providerState: runtimeProviderResources.providerState,
+          disappearanceConfirmedAt: runtimeProviderResources.disappearanceConfirmedAt,
+        })
+        .from(runtimeProviderResources)
+        .where(inArray(
+          runtimeProviderResources.allocationId,
+          allocations.map((allocation) => allocation.id),
+        ));
+  const runtimeAllocations = allocations.map((allocation) => ({
+    ...allocation,
+    resources: resources.filter((resource) => resource.allocationId === allocation.id),
+  }));
   const observedAt = Date.now();
-  await drizzle(env.DB)
+  await db
     .update(providerConnections)
     .set({ lastValidatedAt: observedAt, updatedAt: observedAt })
     .where(eq(providerConnections.id, connection.id));
@@ -637,6 +692,7 @@ export async function inspectProviderConnection(input: {
     providerKind: connection.providerKind,
     observedAt,
     data: result.data,
+    runtimeAllocations,
   };
 }
 
@@ -871,12 +927,14 @@ function credentialInsert(input: {
   credentialFingerprint: string;
   actorUserId: string;
   version: number;
+  authority?: "active" | "cleanup_only";
   now: number;
 }) {
   return {
     id: input.credentialId,
     connectionId: input.connectionId,
     version: input.version,
+    authority: input.authority ?? "active",
     algorithm: input.envelope.algorithm,
     kekVersion: input.envelope.kekVersion,
     aadSha256: input.envelope.aadSha256,

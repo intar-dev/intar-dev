@@ -865,7 +865,7 @@ export function createMockApiState(input?: {
       seatResources: {
         cpuMillis: 4_000,
         memoryMib: 16_384,
-        worstCaseDiskMib: 65_536,
+        worstCaseDiskMib: 32_768,
       },
       runners: [
         {
@@ -902,6 +902,30 @@ export function createMockApiState(input?: {
       ],
     },
   };
+  const runtimeProfilesForRevision = (revision: number) => [
+    {
+      id: `runtime-profile-agent-r${revision}`,
+      profileId: "agent-kvm",
+      providerKind: "agent_kvm",
+      machineType: null,
+      systemImage: "platform-workshop-debian-13-x86_64",
+      rootDiskType: null,
+      hardware: {
+        architecture: "x86_64",
+        cpuMillis: 4_000,
+        memoryMib: 16_384,
+        diskMib: 32_768,
+      },
+      locations: [],
+      certification: {
+        state: "verified",
+        connectionId: null,
+        verifiedAt: FIXED_NOW - day,
+        deletionConfirmedAt: FIXED_NOW - day,
+      },
+      compatible: true,
+    },
+  ];
   const workshopTemplate = {
     id: "template-platform-engineering",
     slug: "platform-engineering",
@@ -925,6 +949,7 @@ export function createMockApiState(input?: {
         moduleCount: 11,
         publishedAt: FIXED_NOW - day,
         current: true,
+        runtimeProfiles: runtimeProfilesForRevision(3),
       },
       {
         id: "revision-platform-engineering-2",
@@ -935,6 +960,7 @@ export function createMockApiState(input?: {
         moduleCount: 10,
         publishedAt: FIXED_NOW - 2 * day,
         current: false,
+        runtimeProfiles: runtimeProfilesForRevision(2),
       },
       {
         id: "revision-platform-engineering-1",
@@ -945,6 +971,7 @@ export function createMockApiState(input?: {
         moduleCount: 9,
         publishedAt: FIXED_NOW - 3 * day,
         current: false,
+        runtimeProfiles: runtimeProfilesForRevision(1),
       },
     ],
   };

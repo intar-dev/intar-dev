@@ -9,7 +9,10 @@ import {
   ensureDirectCloudPriceObservation,
   rootDiskGibForPriceQuote,
 } from "./cost-storage";
-import { confirmProviderResourceDisappearance } from "./provider-runtime";
+import {
+  confirmProviderResourceDisappearance,
+  sweepWorkshopProviderRuntimes,
+} from "./provider-runtime";
 
 const providerMocks = vi.hoisted(() => ({ runOperation: vi.fn() }));
 vi.mock("./provider-service", () => ({
@@ -611,6 +614,178 @@ describe("provider-neutral runtime cost ledger", () => {
       .bind("allocation-g")
       .first<{ count: number }>();
     expect(stillOpen?.count).toBe(0);
+  });
+
+  it("deletes a degraded learner with cleanup-only authority while retaining slot and cost until confirmation", async () => {
+    await seedLearnerRuntime("gcp_compute");
+    await insertPriceObservation({
+      providerKind: "gcp_compute",
+      observationId: "price-g-cleanup",
+      forecastId: "forecast-g-cleanup",
+      version: 1,
+      lines: [
+        line(
+          "gcp-core",
+          "compute_core",
+          "tax_excluded_public_list",
+          36_000_000,
+          4,
+        ),
+      ],
+    });
+    await insertLearnerAllocation(
+      "gcp_compute",
+      "price-g-cleanup",
+      "forecast-g-cleanup",
+    );
+    await insertResources("gcp_compute", [
+      ["resource-instance-g-cleanup", "instance", "instance-cleanup", START + 1_000],
+    ]);
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE provider_connections
+         SET state = 'rotation_required', updated_at = ?
+         WHERE id = 'connection-g'`,
+      ).bind(START),
+      env.DB.prepare(
+        `INSERT INTO provider_credential_versions
+           (id, connection_id, version, authority, algorithm, kek_version,
+            aad_sha256, encrypted_payload_b64, payload_iv_b64,
+            wrapped_dek_b64, dek_iv_b64, credential_fingerprint, created_by,
+            activated_at, created_at)
+         VALUES ('credential-g-cleanup', 'connection-g', 1, 'cleanup_only',
+                 'AES-256-GCM', 'v1', ?, 'payload', 'payload-iv', 'dek',
+                 'dek-iv', 'fingerprint-cleanup', 'user-g', ?, ?)`,
+      ).bind("a".repeat(64), START, START),
+      env.DB.prepare(
+        `UPDATE provider_connections
+         SET active_credential_version_id = 'credential-g-cleanup'
+         WHERE id = 'connection-g'`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_checkpoint_bundles
+           (id, template_revision_id, checkpoint_id, format, r2_key, sha256,
+            size_bytes, compression, signature_b64, signing_key_id,
+            workspace_agent_sha256, kino_sha256, created_at)
+         VALUES ('bundle-g-cleanup', 'revision-g', 'checkpoint-00',
+                 'direct_cloud_linux_x86_64_v1', 'checkpoint-00.tar.zst', ?,
+                 1, 'zstd', ?, 'test-key', ?, ?, ?)`,
+      ).bind(
+        "b".repeat(64),
+        "A".repeat(88),
+        "c".repeat(64),
+        "d".repeat(64),
+        START,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_executions
+         SET checkpoint_id = 'checkpoint-00', updated_at = ?
+         WHERE id = 'execution-g'`,
+      ).bind(START),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'degraded', last_report_at = ?, updated_at = ?
+         WHERE id = 'allocation-g'`,
+      ).bind(START, START),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_reconciliation
+           (allocation_id, desired_state, observed_state, sweep_after, updated_at)
+         VALUES ('allocation-g', 'ready', 'degraded', 0, ?)`,
+      ).bind(START),
+      env.DB.prepare(
+        `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
+         VALUES ('user-g', 'execution-g', ?)`,
+      ).bind(START),
+    ]);
+    await reconcileProviderCostLedger({
+      allocationId: "allocation-g",
+      now: START + 2_000,
+    });
+    providerMocks.runOperation.mockResolvedValue({
+      canonicalWrites: [],
+      data: {},
+    });
+    const cleanupRequestedAt = START + 100_000;
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: cleanupRequestedAt, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    expect(providerMocks.runOperation).toHaveBeenCalledTimes(1);
+    expect(providerMocks.runOperation.mock.calls[0]?.[0]).toMatchObject({
+      operation: {
+        kind: "delete_instance",
+        instanceName: "intar-g",
+        ownership: {
+          purpose: "learner_workspace",
+          workspaceRef: "workspace-g",
+        },
+      },
+    });
+    const pending = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.deletion_requested_at,
+              allocation.deletion_confirmed_at,
+              execution.state AS execution_state,
+              reconciliation.desired_state,
+              reconciliation.observed_state,
+              reconciliation.consecutive_failures,
+              slot.execution_id AS slot_execution_id,
+              ledger.deletion_confirmed_at AS ledger_deleted_at,
+              ledger.final_cost_nanos
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_executions execution ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       LEFT JOIN active_runtime_slots slot ON slot.execution_id = execution.id
+       JOIN runtime_provider_cost_ledger ledger
+         ON ledger.allocation_id = allocation.id
+       WHERE allocation.id = 'allocation-g'`,
+    ).first<Record<string, string | number | null>>();
+    expect(pending).toMatchObject({
+      allocation_state: "cleanup_pending",
+      deletion_requested_at: cleanupRequestedAt,
+      deletion_confirmed_at: null,
+      execution_state: "failed",
+      desired_state: "deleted",
+      observed_state: "cleanup_only_credential",
+      consecutive_failures: 0,
+      slot_execution_id: "execution-g",
+      ledger_deleted_at: null,
+      final_cost_nanos: null,
+    });
+
+    const deletionConfirmedAt = cleanupRequestedAt + 10_000;
+    await env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'deleted', disappearance_confirmed_at = ?,
+           updated_at = ?
+       WHERE allocation_id = 'allocation-g'`,
+    ).bind(deletionConfirmedAt, deletionConfirmedAt).run();
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: deletionConfirmedAt, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, deleted: 1 });
+    const completed = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.deletion_confirmed_at,
+              execution.state AS execution_state,
+              (SELECT count(*) FROM active_runtime_slots
+               WHERE execution_id = execution.id) AS active_slots,
+              ledger.deletion_confirmed_at AS ledger_deleted_at,
+              ledger.final_cost_nanos
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_executions execution ON execution.id = allocation.execution_id
+       JOIN runtime_provider_cost_ledger ledger
+         ON ledger.allocation_id = allocation.id
+       WHERE allocation.id = 'allocation-g'`,
+    ).first<Record<string, string | number | null>>();
+    expect(completed).toMatchObject({
+      allocation_state: "deleted",
+      deletion_confirmed_at: deletionConfirmedAt,
+      execution_state: "archived",
+      active_slots: 0,
+      ledger_deleted_at: deletionConfirmedAt,
+      final_cost_nanos: expect.any(Number),
+    });
   });
 });
 

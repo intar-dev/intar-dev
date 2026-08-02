@@ -424,6 +424,9 @@ export async function allocateProviderCertificationRuntime(input: {
       "runtime profile certification is not allocatable",
     );
   }
+  await requireWorkshopMulticloudRuntimeEnabledForOrganization(
+    row.template.organizationId,
+  );
   if (
     (row.profile.providerKind !== "hetzner_cloud" &&
       row.profile.providerKind !== "gcp_compute") ||
@@ -1171,6 +1174,21 @@ async function advanceCertification(
     : null;
   const phase =
     typeof evidence.phase === "string" ? evidence.phase : "awaiting_checkpoint_proof";
+  if (
+    gcpCredentialIsCleanupOnly(context) &&
+    phase !== "deleting" &&
+    context.allocation.state !== "deleting"
+  ) {
+    await requestCertificationCleanup({
+      context,
+      certificationId: row.id,
+      evidence,
+      errorCode: "provider_credential_cleanup_only",
+      failedReportSequence: latest?.sequence ?? null,
+      now,
+    });
+    return "pending";
+  }
   let certificationDurationMs: number | null = null;
   try {
     certificationDurationMs = certificationRuntimeDurationMs(checkpointPlan.length);
@@ -1968,6 +1986,19 @@ async function advanceLearnerHealthRecovery(
     context.allocation.state === "degraded" &&
     (lastReportAt === null || lastReportAt <= now - 90_000)
   ) {
+    if (gcpCredentialIsCleanupOnly(context)) {
+      const transitioned = await transitionCurrentProviderAttemptToCleanup({
+        context,
+        expectedLocationAttempt: context.allocation.locationAttempt,
+        errorCode: "provider_credential_cleanup_only",
+        observedState: "cleanup_only_credential",
+        message:
+          "learner VM cannot be rebooted with cleanup-only provider authority; deletion is pending",
+        now,
+      });
+      if (transitioned) await advanceProviderDeletion(context, now);
+      return;
+    }
     await rebootProviderAllocation(context, now, "learner_health_reboot");
     await drizzle(env.DB).batch([
       drizzle(env.DB)
@@ -2022,6 +2053,13 @@ async function rebootProviderAllocation(
     now,
     operationKind,
   );
+}
+
+function gcpCredentialIsCleanupOnly(
+  context: ExecutionAllocationContext,
+): boolean {
+  return context.allocation.providerKind === "gcp_compute" &&
+    context.credential.authority === "cleanup_only";
 }
 
 interface CertificationCheckpointPlan {
@@ -2568,10 +2606,18 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
     async rebootContext(context, now, operationKind) {
       const mutation = creationInputFromContext(context, now);
       if (kind === "gcp_compute") {
+        if (context.credential.authority !== "active") {
+          throw appError(
+            409,
+            "provider_credential_cleanup_only",
+            "cleanup-only provider credentials cannot reboot learner instances",
+          );
+        }
         await providerMutation(mutation, operationKind, {
           kind: "reboot_instance",
           zone: context.allocation.location,
           instanceName: context.allocation.deterministicName,
+          ownership: ownershipLabels(mutation),
         });
         return;
       }
@@ -2606,12 +2652,32 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
     async deleteContext(context, now) {
       const mutation = creationInputFromContext(context, now);
       if (kind === "gcp_compute") {
+        const instance = await loadActiveProviderResource(
+          context.allocation.id,
+          "instance",
+          context.allocation.locationAttempt,
+        );
         await providerMutation(mutation, "delete_instance", {
           kind: "delete_instance",
           zone: context.allocation.location,
           instanceName: context.allocation.deterministicName,
           ownership: ownershipLabels(mutation),
         });
+        if (!instance) {
+          const bootDisk = await loadActiveProviderResource(
+            context.allocation.id,
+            "boot_disk",
+            context.allocation.locationAttempt,
+          );
+          if (bootDisk) {
+            await providerMutation(mutation, "delete_disk", {
+              kind: "delete_disk",
+              zone: context.allocation.location,
+              diskName: resourceName(bootDisk),
+              ownership: ownershipLabels(mutation),
+            });
+          }
+        }
         return;
       }
       await discoverExpectedHetznerResources(mutation);

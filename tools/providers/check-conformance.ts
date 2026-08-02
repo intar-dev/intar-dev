@@ -125,8 +125,39 @@ expectProviderConfig(hetznerConfig, {
 expectProviderConfig(gcpConfig, {
   name: "intar-provider-gcp",
   durableObjectClass: "GcpConnectionDO",
-  requiredSecrets: ["GCP_PROVIDER_CREDENTIAL_KEK_V1", "GCP_CATALOG_API_KEY"],
+  requiredSecrets: ["GCP_PROVIDER_CREDENTIAL_KEK_V1"],
 });
+const gcpRequiredSecrets = expectObject(gcpConfig.secrets, "GCP provider secrets").required;
+if (!Array.isArray(gcpRequiredSecrets) || gcpRequiredSecrets.includes("GCP_CATALOG_API_KEY")) {
+  throw new Error("GCP catalog key must remain an optional production secret");
+}
+const gcpVars = expectObject(gcpConfig.vars, "GCP provider vars");
+if (gcpVars.GCP_PROVIDER_MODE !== "dormant") {
+  throw new Error("GCP provider checked-in configuration must default dormant");
+}
+
+const providerWorkflow = await readFile(
+  resolve(root, ".github/workflows/provider-workers.yml"),
+  "utf8",
+);
+for (const required of [
+  "parent_holds_control_plane_lock:",
+  "format('provider-workers-pr-{0}', github.event.pull_request.number)",
+  "format('provider-workers-reusable-{0}', github.run_id)",
+  "'intar-control-plane-production'",
+  '--var "GCP_PROVIDER_MODE:${provider_mode}"',
+]) {
+  if (!providerWorkflow.includes(required)) {
+    throw new Error(`Provider workflow is missing fail-closed deployment contract: ${required}`);
+  }
+}
+const controlPlaneWorkflow = await readFile(
+  resolve(root, ".github/workflows/control-plane-rollout.yml"),
+  "utf8",
+);
+if (!controlPlaneWorkflow.includes("parent_holds_control_plane_lock: true")) {
+  throw new Error("Control-plane wrapper must identify itself as the provider lock owner");
+}
 
 const webConfig = await readJsonc("apps/web/wrangler.jsonc");
 const serviceContract = [

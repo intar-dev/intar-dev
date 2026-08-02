@@ -30,6 +30,7 @@ import { resetD1Database } from "@/test/d1-migrations";
 import {
   connectProviderProject,
   disconnectProviderConnection,
+  inspectProviderConnection,
   listProviderConnections,
   rotateProviderCredential,
 } from "./provider-connections";
@@ -38,11 +39,13 @@ describe("generic Workshop BYOK connections", () => {
   beforeEach(async () => {
     await resetD1Database();
     vi.clearAllMocks();
-    mocks.requireFeature.mockResolvedValue(undefined);
+    mocks.requireFeature.mockRejectedValue(
+      new Error("issuance feature is disabled"),
+    );
     await seedIdentity();
   });
 
-  it("connects Hetzner for an owner, masks health for admins, and persists no token", async () => {
+  it("connects and inspects Hetzner with issuance disabled, masks health for admins, and persists no token", async () => {
     mocks.invoke.mockResolvedValue(hetznerConnectionResult());
 
     await expect(
@@ -86,6 +89,17 @@ describe("generic Workshop BYOK connections", () => {
       actorUserId: "admin-a",
     });
     expect(listed).toEqual([connected]);
+    await expect(
+      inspectProviderConnection({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+      }),
+    ).resolves.toMatchObject({
+      connectionId: connected.id,
+      providerKind: "hetzner_cloud",
+    });
+    expect(mocks.requireFeature).not.toHaveBeenCalled();
     await expectNoPlaintext(token);
   });
 
@@ -129,13 +143,75 @@ describe("generic Workshop BYOK connections", () => {
     await expectNoPlaintext("sensitive-private-key");
   });
 
-  it("rotates credentials without the issuance flag and disconnects only after cleanup", async () => {
+  it("keeps D1 runtime allocation and cleanup state visible during provider inspection", async () => {
+    mocks.invoke.mockResolvedValue(gcpConnectionResult());
+    const connected = await connectProviderProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      providerKind: "gcp_compute",
+      credential: JSON.stringify({
+        type: "service_account",
+        project_id: "intar-pilot-123",
+        private_key: "initial-private-key",
+      }),
+    });
+    await seedInspectionAllocations(connected.id);
+    mocks.invoke.mockResolvedValue({
+      data: {
+        classification: {
+          status: "owned_resources_present",
+          foundation: [],
+          runtime: [],
+          foreign: [],
+        },
+      },
+      canonicalWrites: [],
+    });
+
+    const inspection = await inspectProviderConnection({
+      organizationId: "org-a",
+      connectionId: connected.id,
+      actorUserId: "owner-a",
+    });
+
+    expect(inspection.data).toMatchObject({
+      classification: { status: "owned_resources_present" },
+    });
+    expect(inspection.runtimeAllocations).toHaveLength(2);
+    expect(inspection.runtimeAllocations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "allocation-ready",
+        state: "ready",
+        resources: [
+          expect.objectContaining({
+            resourceKind: "instance",
+            providerResourceId: "instance-ready",
+            disappearanceConfirmedAt: null,
+          }),
+        ],
+      }),
+      expect.objectContaining({
+        id: "allocation-cleanup",
+        state: "cleanup_pending",
+        resources: [
+          expect.objectContaining({
+            resourceKind: "boot_disk",
+            providerResourceId: "disk-cleanup",
+            disappearanceConfirmedAt: null,
+          }),
+        ],
+      }),
+    ]));
+  });
+
+  it("connects and rotates credentials with issuance disabled, then disconnects only after cleanup", async () => {
     mocks.invoke
       .mockResolvedValueOnce(gcpConnectionResult())
       .mockResolvedValueOnce({
         credential: encryptedEnvelope("rotated"),
         identity: gcpConnectionResult().identity,
         sentinelNetwork: gcpConnectionResult().foundation.network,
+        authority: "active",
       });
     const initial = JSON.stringify({
       type: "service_account",
@@ -148,9 +224,6 @@ describe("generic Workshop BYOK connections", () => {
       providerKind: "gcp_compute",
       credential: initial,
     });
-    mocks.requireFeature.mockRejectedValue(
-      new Error("issuance feature is disabled"),
-    );
     const rotatedRaw = JSON.stringify({
       type: "service_account",
       project_id: "intar-pilot-123",
@@ -166,7 +239,7 @@ describe("generic Workshop BYOK connections", () => {
       state: "active",
       credential: { version: 2 },
     });
-    expect(mocks.requireFeature).toHaveBeenCalledTimes(1);
+    expect(mocks.requireFeature).not.toHaveBeenCalled();
 
     const disconnected = await disconnectProviderConnection({
       organizationId: "org-a",
@@ -182,6 +255,59 @@ describe("generic Workshop BYOK connections", () => {
     expect(credentials[1]?.revokedAt).not.toBeNull();
     await expectNoPlaintext("initial-private-key");
     await expectNoPlaintext("rotated-private-key");
+  });
+
+  it("records dormant GCP rotation as cleanup-only instead of issuance-ready", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce(gcpConnectionResult())
+      .mockResolvedValueOnce({
+        credential: encryptedEnvelope("cleanup-only"),
+        identity: gcpConnectionResult().identity,
+        sentinelNetwork: gcpConnectionResult().foundation.network,
+        authority: "cleanup_only",
+      });
+    const connected = await connectProviderProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      providerKind: "gcp_compute",
+      credential: JSON.stringify({
+        type: "service_account",
+        project_id: "intar-pilot-123",
+        private_key: "initial-private-key",
+      }),
+    });
+    const rotated = await rotateProviderCredential({
+      organizationId: "org-a",
+      connectionId: connected.id,
+      actorUserId: "owner-a",
+      credential: JSON.stringify({
+        type: "service_account",
+        project_id: "intar-pilot-123",
+        private_key: "cleanup-private-key",
+      }),
+    });
+
+    expect(rotated).toMatchObject({
+      state: "rotation_required",
+      credential: { version: 2, authority: "cleanup_only" },
+    });
+    await expect(
+      env.DB.prepare(
+        `UPDATE provider_connections SET state = 'active' WHERE id = ?`,
+      ).bind(connected.id).run(),
+    ).rejects.toThrow(/active credential does not belong/u);
+    const credentials = await drizzle(env.DB)
+      .select({ version: providerCredentialVersions.version, authority: providerCredentialVersions.authority })
+      .from(providerCredentialVersions);
+    expect(credentials).toEqual([
+      { version: 1, authority: "active" },
+      { version: 2, authority: "cleanup_only" },
+    ]);
+    const events = await drizzle(env.DB).select().from(providerAuditEvents);
+    expect(events.at(-1)).toMatchObject({
+      type: "provider.credential_rotated_cleanup_only",
+      payloadJson: { authority: "cleanup_only" },
+    });
   });
 
   it("reconnects the stable provider identity by rotating a disconnected credential", async () => {
@@ -317,6 +443,106 @@ async function seedIdentity() {
       role: "owner",
       createdAt: now,
     },
+  ]);
+}
+
+async function seedInspectionAllocations(connectionId: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO workshop_templates
+         (id, organization_id, slug, title, summary, created_by, created_at, updated_at)
+       VALUES ('inspection-template', 'org-a', 'inspection', 'Inspection',
+               'Inspection fixture', 'owner-a', 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workshop_template_revisions
+         (id, template_id, revision, source_revision, content_hash,
+          manifest_json, published_by, published_at)
+       VALUES ('inspection-revision', 'inspection-template', 1, 'source', ?,
+               '{"schemaVersion":2}', 'owner-a', 1)`,
+    ).bind("a".repeat(64)),
+    env.DB.prepare(
+      `INSERT INTO workshop_runtime_profiles
+         (id, template_revision_id, profile_id, provider_kind, vm_id,
+          machine_type, system_image, resolved_image_id, root_disk_type,
+          architecture, cpu_millis, memory_mib, disk_mib, locations_json,
+          configuration_json, created_at)
+       VALUES ('inspection-profile', 'inspection-revision', 'gcp-e2',
+               'gcp_compute', 'learner', 'e2-standard-4', 'debian-13',
+               'debian-image-1', 'pd-balanced', 'x86_64', 4000, 16384,
+               32768, '["europe-west3-a"]', '{}', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO provider_price_observations
+         (id, provider_kind, connection_id, runtime_profile_id, currency,
+          source, raw_observation_json, observed_at, expires_at, created_at)
+       VALUES ('inspection-price', 'gcp_compute', ?, 'inspection-profile',
+               'USD', 'test', '{}', 1, 86400001, 1)`,
+    ).bind(connectionId),
+    env.DB.prepare(
+      `INSERT INTO workshop_runtime_profile_certifications
+         (id, runtime_profile_id, connection_id, state, evidence_json,
+          created_at, updated_at)
+       VALUES ('inspection-certification', 'inspection-profile', ?,
+               'verifying', '{}', 1, 1)`,
+    ).bind(connectionId),
+    ...["ready", "cleanup"].map((suffix) =>
+      env.DB.prepare(
+        `INSERT INTO runtime_executions
+           (id, user_id, organization_id, provider_kind,
+            provider_connection_id, domain_kind, domain_id, generation,
+            checkpoint_id, state, created_at, updated_at)
+         VALUES (?, 'owner-a', 'org-a', 'gcp_compute', ?,
+                 'workshop_certification', 'inspection-certification', ?,
+                 'checkpoint-00', ?, 1, 1)`,
+      ).bind(
+        `execution-${suffix}`,
+        connectionId,
+        suffix === "ready" ? 1 : 2,
+        suffix === "ready" ? "ready" : "archiving",
+      )
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_allocations
+         (id, execution_id, connection_id, runtime_profile_id,
+          price_observation_id, provider_kind, deterministic_name,
+          machine_type, resolved_image_id, location_attempts_json, location,
+          location_attempt, state, created_at, updated_at)
+       VALUES ('allocation-ready', 'execution-ready', ?, 'inspection-profile',
+               'inspection-price', 'gcp_compute', 'intar-ready',
+               'e2-standard-4', 'debian-image-1', '["europe-west3-a"]',
+               'europe-west3-a', 1, 'ready', 1, 1)`,
+    ).bind(connectionId),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_allocations
+         (id, execution_id, connection_id, runtime_profile_id,
+          price_observation_id, provider_kind, deterministic_name,
+          machine_type, resolved_image_id, location_attempts_json, location,
+          location_attempt, state, last_error_code, deletion_requested_at,
+          created_at, updated_at)
+       VALUES ('allocation-cleanup', 'execution-cleanup', ?, 'inspection-profile',
+               'inspection-price', 'gcp_compute', 'intar-cleanup',
+               'e2-standard-4', 'debian-image-1', '["europe-west3-a"]',
+               'europe-west3-a', 1, 'cleanup_pending', 'cleanup_pending', 2,
+               1, 2)`,
+    ).bind(connectionId),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_resources
+         (id, allocation_id, provider_kind, resource_kind,
+          provider_resource_id, location_attempt, location, provider_state,
+          configuration_json, created_at, updated_at)
+       VALUES ('resource-ready', 'allocation-ready', 'gcp_compute', 'instance',
+               'instance-ready', 1, 'europe-west3-a', 'RUNNING', '{}', 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_resources
+         (id, allocation_id, provider_kind, resource_kind,
+          provider_resource_id, location_attempt, location, provider_state,
+          configuration_json, created_at, updated_at)
+       VALUES ('resource-cleanup', 'allocation-cleanup', 'gcp_compute',
+               'boot_disk', 'disk-cleanup', 1, 'europe-west3-a', 'READY',
+               '{}', 1, 1)`,
+    ),
   ]);
 }
 

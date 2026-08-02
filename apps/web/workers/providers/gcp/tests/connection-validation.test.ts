@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GcpServiceAccountKey } from "@intar/provider-contracts/gcp";
 import {
+  CLEANUP_IAM_PERMISSIONS,
   GcpClient,
   REQUIRED_IAM_PERMISSIONS,
 } from "../src/gcp-client";
@@ -51,6 +52,29 @@ describe("GCP connection validation", () => {
       permissions: REQUIRED_IAM_PERMISSIONS.slice(1),
     })) as typeof fetch);
     await expect(incomplete.assertRequiredIamPermissions())
+      .rejects.toMatchObject({ shape: { code: "gcp_permission_missing" } });
+  });
+
+  it("validates cleanup authority independently from spare capacity", async () => {
+    let body: unknown;
+    const cleanup = client((async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ permissions: CLEANUP_IAM_PERMISSIONS });
+    }) as typeof fetch);
+    await expect(cleanup.assertCleanupIamPermissions()).resolves.toEqual(
+      [...CLEANUP_IAM_PERMISSIONS].sort(),
+    );
+    expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.instances.delete");
+    expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.regionOperations.get");
+    expect(CLEANUP_IAM_PERMISSIONS).not.toContain("compute.instances.create");
+    expect(CLEANUP_IAM_PERMISSIONS).not.toContain("compute.instances.reset");
+    expect(REQUIRED_IAM_PERMISSIONS).toContain("compute.instances.reset");
+    expect(body).toEqual({ permissions: CLEANUP_IAM_PERMISSIONS });
+
+    const incomplete = client((async () => Response.json({
+      permissions: CLEANUP_IAM_PERMISSIONS.slice(1),
+    })) as typeof fetch);
+    await expect(incomplete.assertCleanupIamPermissions())
       .rejects.toMatchObject({ shape: { code: "gcp_permission_missing" } });
   });
 

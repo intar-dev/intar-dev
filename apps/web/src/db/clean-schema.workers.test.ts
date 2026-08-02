@@ -17,6 +17,7 @@ describe("clean multicloud D1 baseline", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "user",
+        "clean_d1_commissioning",
         "organization",
         "scenario_course_catalogs",
         "scenario_runs",
@@ -141,6 +142,43 @@ describe("clean multicloud D1 baseline", () => {
         )
         .run(),
     ).resolves.toBeDefined();
+  });
+
+  it("rejects state-only promotion of a cleanup-only provider credential", async () => {
+    await seedIdentity();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO provider_connections (
+           id, organization_id, provider_kind, display_name, state,
+           external_project_id, project_fingerprint, created_by
+         ) VALUES ('connection-cleanup', 'org-a', 'gcp_compute', 'GCP cleanup',
+                   'rotation_required', 'project-cleanup', 'fingerprint-cleanup',
+                   'owner-a')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO provider_credential_versions (
+           id, connection_id, version, authority, algorithm, kek_version,
+           aad_sha256, encrypted_payload_b64, payload_iv_b64,
+           wrapped_dek_b64, dek_iv_b64, credential_fingerprint, created_by,
+           activated_at
+         ) VALUES ('credential-cleanup', 'connection-cleanup', 1,
+                   'cleanup_only', 'AES-256-GCM', 'v1', ?, 'payload',
+                   'payload-iv', 'wrapped-dek', 'dek-iv',
+                   'credential-fingerprint', 'owner-a', 1)`,
+      ).bind("a".repeat(64)),
+      env.DB.prepare(
+        `UPDATE provider_connections
+         SET active_credential_version_id = 'credential-cleanup'
+         WHERE id = 'connection-cleanup'`,
+      ),
+    ]);
+
+    await expect(
+      env.DB.prepare(
+        `UPDATE provider_connections SET state = 'active'
+         WHERE id = 'connection-cleanup'`,
+      ).run(),
+    ).rejects.toThrow("active credential does not belong");
   });
 
   it("pins an exact profile and rejects a connection from another provider", async () => {
@@ -276,11 +314,7 @@ describe("clean multicloud D1 baseline", () => {
              source, raw_observation_json, observed_at, expires_at
            ) VALUES (?, 'gcp_compute', ?, ?, 'USD', 'test-catalog',
                      '{"availableLocations":["europe-west3-a"]}', 1, 86400001)`,
-        ).bind(
-          `price-${suffix}`,
-          `connection-${suffix}`,
-          `profile-${suffix}`,
-        ),
+        ).bind(`price-${suffix}`, `connection-${suffix}`, `profile-${suffix}`),
         env.DB.prepare(
           `INSERT INTO runtime_executions (
              id, user_id, organization_id, provider_kind,
@@ -348,8 +382,14 @@ describe("clean multicloud D1 baseline", () => {
        FROM runtime_provider_resources ORDER BY allocation_id`,
     ).all<{ allocation_id: string; provider_resource_id: string }>();
     expect(identities.results).toEqual([
-      { allocation_id: "allocation-one", provider_resource_id: "same-project-id" },
-      { allocation_id: "allocation-two", provider_resource_id: "same-project-id" },
+      {
+        allocation_id: "allocation-one",
+        provider_resource_id: "same-project-id",
+      },
+      {
+        allocation_id: "allocation-two",
+        provider_resource_id: "same-project-id",
+      },
     ]);
     await expect(
       env.DB.prepare(

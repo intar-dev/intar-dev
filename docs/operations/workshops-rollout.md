@@ -36,8 +36,10 @@ Keep these boundaries intact:
 - no guest application port is public; Stargate forwards declared ports over
   SSH;
 - `workshops_enabled` gates the top-level product and
-  `workshop_multicloud_runtime_enabled` gates direct-cloud connect, session
-  selection, and allocation; neither flag stops cleanup or reconciliation.
+  `workshop_multicloud_runtime_enabled` gates new direct-cloud certification
+  and issuance. BYOK connection, inspection, credential rotation, and cost
+  forecasting remain available while that flag is off; neither flag stops
+  cleanup or reconciliation.
 
 The Platform Engineering Workshop requires 4 vCPU, 16 GiB RAM, and 32 GiB
 disk. Its immutable revision contains two exact profiles: Hetzner `cpx42` and
@@ -67,10 +69,10 @@ Never print or retain:
 
 ## Production identities
 
-| Provider | Worker | RPC service | Durable Object | secret |
-| --- | --- | --- | --- | --- |
-| Hetzner | `intar-provider-hetzner` | `HetznerProviderService` | `HetznerConnectionDO` | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1` |
-| GCP | `intar-provider-gcp` | `GcpProviderService` | `GcpConnectionDO` | `GCP_PROVIDER_CREDENTIAL_KEK_V1` |
+| Provider | Worker                   | RPC service              | Durable Object        | secret                               |
+| -------- | ------------------------ | ------------------------ | --------------------- | ------------------------------------ |
+| Hetzner  | `intar-provider-hetzner` | `HetznerProviderService` | `HetznerConnectionDO` | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1` |
+| GCP      | `intar-provider-gcp`     | `GcpProviderService`     | `GcpConnectionDO`     | `GCP_PROVIDER_CREDENTIAL_KEK_V1`     |
 
 Both Workers set `workers_dev: false`, `preview_urls: false`, and have no route.
 The web Worker binds them as `HETZNER_PROVIDER_SERVICE` and
@@ -106,19 +108,19 @@ exact response.
 
 Use separate least-privilege production secrets:
 
-| secret | available to |
-| --- | --- |
-| `CLOUDFLARE_ACCOUNT_ID` | protected rollout jobs |
-| `CLOUDFLARE_D1_ADMIN_API_TOKEN` | clean-D1 workflow only |
-| `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN` | Hetzner Worker deployment only |
-| `CLOUDFLARE_GCP_PROVIDER_API_TOKEN` | GCP Worker deployment only |
-| `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN` | route-less capability probe only |
-| `CLOUDFLARE_API_TOKEN` | web/R2 deployment only |
-| `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN` | exact web-version rollback only |
-| `HETZNER_PROVIDER_CREDENTIAL_KEK_V1` | Hetzner Worker deployment only |
-| `GCP_PROVIDER_CREDENTIAL_KEK_V1` | GCP Worker deployment only |
-| `GCP_CATALOG_API_KEY` | GCP Worker deployment only |
-| `STARGATE_EGRESS_IPV4_CIDRS` | web runtime configuration only |
+| secret                                  | available to                                                       |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| `CLOUDFLARE_ACCOUNT_ID`                 | protected rollout jobs                                             |
+| `CLOUDFLARE_D1_ADMIN_API_TOKEN`         | clean-D1 workflow only                                             |
+| `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN` | Hetzner Worker deployment only                                     |
+| `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`     | GCP Worker deployment only                                         |
+| `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
+| `CLOUDFLARE_API_TOKEN`                  | web/R2 deployment only                                             |
+| `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN`     | exact web-version rollback only                                    |
+| `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
+| `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
+| `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
+| `STARGATE_EGRESS_IPV4_CIDRS`            | web runtime configuration only                                     |
 
 Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
@@ -160,6 +162,20 @@ modules, 240 scheduled minutes, 85 slides and 85 note files, a 32,768 MiB
 workspace requirement, and both exact runtime profiles. Every OCI image lock
 entry must contain a lowercase SHA-256 digest.
 
+Before the clean cutover, disable new issuance in the old control plane and
+finish every old cleanup. Retain queries and provider inventories proving all
+of the following are zero or absent:
+
+- non-terminal Scenario or Workshop executions and provider allocations;
+- active runtime slots, Stargate routes, assist grants, and terminal sessions;
+- learner or verifier VMs, servers, instances, disks, addresses, Primary IPs,
+  ephemeral SSH keys, and pending provider operations.
+
+Do not make the old D1 database read-only and do not deploy the new web Worker
+while an old resource still depends on reconciliation from the old application.
+Because the new Worker never reads the old database, cutting over with a live
+old resource would orphan its cleanup state.
+
 ## 2. Create the clean D1 database
 
 Use `.github/workflows/clean-d1-cutover.yml`; see
@@ -170,7 +186,11 @@ Use `.github/workflows/clean-d1-cutover.yml`; see
 2. Review the database inventory and baseline digest artifact.
 3. Dispatch `apply` with confirmation `APPLY CLEAN D1`.
 4. If the named database already exists, provide its exact expected UUID.
-5. Record the new UUID and set the two protected `CLEAN_D1_*` variables.
+5. Record the new UUID and baseline digest from the retained apply artifact.
+6. Set `CLEAN_D1_DATABASE_ID` to that exact UUID and
+   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260801`.
+7. Verify both protected variables before dispatching any provider or web
+   rollout.
 
 The workflow requires exactly one migration,
 `apps/web/migrations/0000_clean_multicloud.sql`, applies it to the newly named
@@ -182,13 +202,50 @@ recreates state through authenticated application APIs.
 
 ## 3. Deploy providers and web
 
+Provider mutation is blocked while the protected environment remains in
+single-operator mode because the provider workflow does not yet enforce the
+web workflow's actor identity, expiry, recent-admin-attestation, and main-only
+environment-policy checks. Before continuing, either switch production to
+reviewed mode with administrator bypass disabled, a required reviewer, and
+self-review prevention, or obtain explicit acceptance of the same time-bounded
+single-operator model and implement and validate that guard in the provider
+workflow.
+
+Before dispatching the control-plane rollout, capture the complete old rollback
+unit in the rollout ticket:
+
+- exact previous `intar-dev` Worker version UUID;
+- exact previous D1 name and UUID;
+- evidence that the previous Worker version contains that D1 binding;
+- the zero-allocation, zero-route, and zero-active-slot evidence above;
+- the reviewed source SHA and the clean-D1 plan/apply workflow run IDs.
+
+This evidence is mandatory because the web workflow has no automatic rollback
+after a successful `wrangler deploy`. A later scenario-bundle or R2 evidence
+step can fail while the new web version is already serving production.
+
 Dispatch `.github/workflows/control-plane-rollout.yml` from the exact reviewed
 `main` SHA with:
 
 - provider confirmation `DEPLOY PROVIDER WORKERS`;
 - web confirmation `DEPLOY WORKSHOP CONTROL PLANE`;
 - the time-bounded sole-operator confirmation only when the protected
-  environment is explicitly configured for that commissioning mode.
+  environment is explicitly configured for that commissioning mode;
+- when GCP credentials are intentionally deferred, `gcp_dormant=true` and the
+  separate exact confirmation `DEPLOY DORMANT GCP PROVIDER`.
+
+Dormant GCP is an explicit protected deployment choice, never a fallback
+inferred from a missing `GCP_CATALOG_API_KEY`. The workflow deploys the
+route-less `intar-provider-gcp`, validates its service-binding capability
+contract, omits the catalog key from its secrets file, and removes a catalog
+secret left by a prior active deployment. Its `connect`, `resolve_profile`,
+`quote`, `preflight_capacity`, `ensure_foundation`, and `create_instance`
+operations fail before token exchange, catalog lookup, or any GCP API call.
+Read-only connection inspection, credential rotation, observation, reboot,
+deletion, sweeping, and reconciliation remain enabled so switching an activated
+provider back to dormant mode cannot orphan existing resources. Inspection and
+rotation can recover cleanup visibility or authority but cannot establish a new
+connection or issue resources.
 
 The workflow:
 
@@ -204,17 +261,49 @@ The workflow:
 Retain the provider capability artifact, Worker versions, web version, guest
 tool hashes, new D1 ID, source SHA, and workflow run IDs.
 
+The executable canonical order is therefore: clean-D1 `plan`, clean-D1
+`apply`, set and verify both `CLEAN_D1_*` variables, deploy and probe both
+provider Workers, then deploy web. Do not dispatch provider or web deployment
+against the all-zero D1 placeholder. If the control-plane workflow fails,
+inspect whether its web `Deploy` step completed before deciding whether the old
+or new compatibility unit is live.
+
 ## 4. Bootstrap the empty application
 
-With `workshops_enabled` and `workshop_multicloud_runtime_enabled` still
-disabled for the pilot organization:
+Both Workshop flags remain disabled by default for every organization. The
+first-owner bootstrap is a two-step protected-workflow handoff:
 
-1. sign in as the single owner;
-2. create the pilot organization;
-3. republish the required Scenario and Course catalogs;
-4. hydrate and publish the Platform Engineering Workshop format-v2 bundle;
-5. reconnect provider projects through the owner-only BYOK screens;
-6. create new sessions only after both profile certifications succeed.
+1. Run clean-D1 `apply` with the intended owner's exact GitHub login and numeric
+   GitHub ID. Retain the successful first-attempt run ID and apply artifact. The
+   operation atomically writes the provenance receipt and sole allowlist row.
+2. Deploy web, then sign in once through GitHub as that identity. Do not create
+   an organization yet.
+3. Run clean-D1 `bootstrap-owner` with the same identity, exact new D1 UUID, and
+   successful `apply` run ID. It verifies the immutable artifact and the sole
+   `github` account binding before granting the administrator role. Sign out and
+   in again, then record the resulting Intar user ID and bootstrap artifact.
+4. Create the pilot organization while both Workshop flags still default to
+   false.
+5. Enable `workshops_enabled` only for that exact pilot organization, leaving
+   `workshop_multicloud_runtime_enabled` false.
+6. Reconnect available provider projects through the owner-only BYOK screens
+   and validate their inspection, credential rotation, and cost forecasts while
+   `workshop_multicloud_runtime_enabled` is still false. Do not submit a GCP key
+   while the GCP Worker is explicitly dormant.
+7. Republish the required Scenario and Course catalogs.
+8. Hydrate and validate the Platform Engineering Workshop format-v2 bundle.
+9. Enable `workshop_multicloud_runtime_enabled` only for that exact pilot
+   organization immediately before provider-backed certification and issuance.
+   The multicloud flag is not a prerequisite for BYOK or forecasting, and
+   cleanup and reconciliation remain active even when issuance is disabled.
+10. Publish only after every declared profile certification succeeds, then
+    create new sessions. A revision that declares GCP cannot be published while
+    the GCP provider remains dormant.
+
+Do not enable either flag globally, and do not target another organization
+until the one-user and two-user acceptance evidence below is complete. To stop
+new issuance during an incident, remove the pilot's multicloud targeting while
+leaving provider cleanup and reconciliation deployed.
 
 Nothing is copied from the prior D1 database. Old users, memberships,
 connections, sessions, forecasts, and progress are intentionally absent.
@@ -238,6 +327,20 @@ machine type.
 
 ## 6. Connect the GCP project
 
+The initial GCP live connection and pilot are explicitly deferred and remain
+unproven while `intar-provider-gcp` is deployed in dormant mode. Dormant mode is
+useful only for build, deployment, service-binding, and capability-contract
+proof; it is not proof of catalog access, project validation, allocation, cost,
+or teardown.
+
+To activate later, add `GCP_CATALOG_API_KEY` to the protected production
+environment and redeploy with `gcp_dormant=false` and without the dormant
+confirmation. The protected workflow must pass the explicit Wrangler override
+`--var GCP_PROVIDER_MODE:active`; the checked-in configuration and any raw
+deploy remain dormant. Only after that deployment and capability probe succeed
+should the owner continue with the project connection below. Missing credentials must
+fail the non-dormant deployment; they must never select dormant mode implicitly.
+
 Use one dedicated, initially empty GCP project. Enable the required Compute and
 billing catalog APIs and grant the dedicated service account only the
 permissions needed by the provider contract. The owner submits its JSON key.
@@ -253,6 +356,10 @@ keys, IPv6, extra disk, static address, snapshot, image, load balancer, or
 public application port.
 
 ## 7. Publish and certify both profiles
+
+This stage is blocked until GCP has been activated and connected. Hydration and
+format-v2 validation may complete earlier, but publishing the Platform
+Engineering revision still requires certification of both declared profiles.
 
 Publication uses one temporary verifier VM for each declared profile. For each
 profile, require evidence that the harness:
@@ -274,6 +381,10 @@ content. Checkpoint bundles and guest tools are signed and generation-bound.
 Create a draft session by selecting exactly one revision profile and, for
 direct cloud, its compatible organization connection. The latest forecast must
 be unexpired and below the organization's ceiling before entering the lobby.
+Forecast refresh is available while the multicloud feature flag is off. An
+explicitly dormant GCP Worker has no catalog key and therefore rejects GCP quote
+operations before contacting Google; this does not prevent validating Hetzner
+forecasts during the deferred period.
 
 Review all three immutable scenarios:
 
@@ -290,8 +401,12 @@ discounts, negotiated pricing, and invoice adjustments are excluded.
 
 ## 9. Run one-user pilots
 
-Run separate one-user sessions on Hetzner `cpx42` and GCP
-`e2-standard-4`. For each provider:
+The dormant rollout cannot start either pilot because the dual-profile Platform
+Engineering revision cannot publish until both profiles are certified. After
+GCP activation and publication, run the one-user Hetzner `cpx42` session first.
+The GCP `e2-standard-4` session remains deferred and unproven until its dedicated
+project, connection, certification, and live-test window are available. Then run
+the same sequence separately for each provider:
 
 1. check in the owner as a participant and bulk-provision from checkpoint 00;
 2. require readiness within 15 minutes;
@@ -355,15 +470,27 @@ forecast versions and price-observation timestamps
 route IDs and browser traces for all seven applications
 live and final cost estimates with manual calculations
 zero-resource and zero-active-slot teardown evidence
+first-owner bootstrap mechanism, protected audit ID, and resulting user ID
+previous web version UUID and previous D1 binding evidence
 ```
 
-Successful CI or deployment alone is not runtime acceptance. Both real
-provider allocations and complete teardown evidence are mandatory.
+Successful CI, dormant GCP deployment, or capability probing alone is not GCP
+runtime acceptance. Record the GCP pilot as deferred and unproven until a real
+allocation and complete teardown evidence exist. Full multicloud acceptance
+still requires real allocations and complete teardown evidence for both
+providers.
 
 ## Rollback
 
 Rollback stops new issuance first but leaves cleanup and reconciliation active.
 Confirm or expose every provider resource before switching web versions.
+
+Before dispatch, attach the old compatibility-unit evidence captured before
+cutover and fresh evidence showing either that every new provider resource is
+deleted or that each remaining resource is explicitly visible as
+`cleanup_pending` to the owner. Record whether the failed control-plane run
+reached the web `Deploy` step. Never infer the live compatibility unit from the
+overall workflow conclusion alone.
 
 Dispatch the `rollback` operation in `.github/workflows/clean-d1-cutover.yml`
 with:

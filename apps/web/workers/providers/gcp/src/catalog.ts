@@ -44,6 +44,17 @@ export interface GcpCatalogOptions {
   now?: () => Date;
 }
 
+export function requireGcpCatalogApiKey(apiKey: unknown): string {
+  if (typeof apiKey !== "string" || !/^[A-Za-z0-9_-]{20,256}$/u.test(apiKey)) {
+    throw new ProviderServiceError({
+      code: "gcp_catalog_configuration_invalid",
+      message: "GCP public catalog is not configured",
+      retryable: false,
+    });
+  }
+  return apiKey;
+}
+
 type PriceTarget = "compute_core" | "compute_ram" | "pd_balanced" | "external_ipv4";
 
 const BILLING_POLICY: Record<
@@ -139,15 +150,8 @@ export class GcpCatalogClient {
   readonly #catalogBase: string;
   readonly #now: () => Date;
 
-  constructor(apiKey: string, options: GcpCatalogOptions = {}) {
-    if (!/^[A-Za-z0-9_-]{20,256}$/u.test(apiKey)) {
-      throw new ProviderServiceError({
-        code: "gcp_catalog_configuration_invalid",
-        message: "GCP public catalog is not configured",
-        retryable: false,
-      });
-    }
-    this.#apiKey = apiKey;
+  constructor(apiKey: string | undefined, options: GcpCatalogOptions = {}) {
+    this.#apiKey = requireGcpCatalogApiKey(apiKey);
     this.#fetcher = options.fetcher ?? fetch;
     this.#catalogBase = options.catalogBase ?? DEFAULT_CATALOG_BASE;
     this.#now = options.now ?? (() => new Date());

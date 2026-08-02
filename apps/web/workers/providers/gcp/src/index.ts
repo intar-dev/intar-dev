@@ -21,10 +21,19 @@ import {
   connectProject as connectProjectWithProvider,
   rotateCredential as rotateCredentialWithProvider,
   runOperation as runProviderOperation,
+  type GcpProviderDeployment,
 } from "./provider";
 import { safeUnknownError } from "./redaction";
 
 export { GCP_PROVIDER_CAPABILITIES } from "./capabilities";
+
+function deployment(environment: Env): GcpProviderDeployment {
+  const catalogApiKey = Reflect.get(environment, "GCP_CATALOG_API_KEY");
+  return {
+    mode: environment.GCP_PROVIDER_MODE,
+    ...(typeof catalogApiKey === "string" ? { catalogApiKey } : {}),
+  };
+}
 
 export class GcpConnectionDO extends DurableObject<Env> {
   readonly #operations = new SerializedOperationQueue();
@@ -44,7 +53,7 @@ export class GcpConnectionDO extends DurableObject<Env> {
       connectProjectWithProvider(
         request,
         this.env.GCP_PROVIDER_CREDENTIAL_KEK_V1,
-        this.env.GCP_CATALOG_API_KEY,
+        deployment(this.env),
       ),
     );
   }
@@ -56,6 +65,7 @@ export class GcpConnectionDO extends DurableObject<Env> {
       rotateCredentialWithProvider(
         request,
         this.env.GCP_PROVIDER_CREDENTIAL_KEK_V1,
+        deployment(this.env),
       ),
     );
   }
@@ -67,7 +77,7 @@ export class GcpConnectionDO extends DurableObject<Env> {
       runProviderOperation(
         request,
         this.env.GCP_PROVIDER_CREDENTIAL_KEK_V1,
-        this.env.GCP_CATALOG_API_KEY,
+        deployment(this.env),
       ),
     );
   }

@@ -2,6 +2,7 @@ import type {
   CreateGcpInstanceOperation,
   GcpAllocationObservation,
   GcpAsyncOperation,
+  GcpClassifiedInventoryResource,
   GcpComputeAsset,
   GcpFoundationObservation,
   GcpFoundationSpec,
@@ -9,6 +10,7 @@ import type {
   GcpMachineType,
   GcpProjectIdentity,
   GcpProjectInventory,
+  GcpOperationalInventoryClassification,
   GcpQuotaObservation,
   GcpResolvedImage,
   GcpResourceRef,
@@ -27,30 +29,50 @@ const REQUIRED_SERVICES = [
   "serviceusage.googleapis.com",
   "cloudasset.googleapis.com",
 ] as const;
-export const REQUIRED_IAM_PERMISSIONS = [
+export const CLEANUP_IAM_PERMISSIONS = [
   "cloudasset.assets.searchAllResources",
-  "compute.disks.create",
+  "compute.addresses.list",
+  "compute.backendServices.list",
   "compute.disks.delete",
   "compute.disks.get",
-  "compute.disks.use",
-  "compute.firewalls.create",
+  "compute.disks.list",
   "compute.firewalls.get",
+  "compute.firewalls.list",
+  "compute.forwardingRules.list",
   "compute.globalOperations.get",
-  "compute.instances.create",
+  "compute.images.list",
+  "compute.instanceGroups.list",
+  "compute.instanceTemplates.list",
   "compute.instances.delete",
   "compute.instances.get",
+  "compute.instances.list",
+  "compute.networks.get",
+  "compute.networks.list",
+  "compute.projects.get",
+  "compute.regionOperations.get",
+  "compute.routes.list",
+  "compute.snapshots.list",
+  "compute.subnetworks.get",
+  "compute.subnetworks.list",
+  "compute.targetPools.list",
+  "compute.zoneOperations.get",
+  "resourcemanager.projects.get",
+] as const;
+export const REQUIRED_IAM_PERMISSIONS = [
+  ...CLEANUP_IAM_PERMISSIONS,
+  "compute.disks.create",
+  "compute.disks.use",
+  "compute.firewalls.create",
+  "compute.instances.create",
   "compute.instances.reset",
   "compute.machineTypes.get",
   "compute.networks.create",
-  "compute.networks.get",
   "compute.networks.use",
-  "compute.projects.get",
   "compute.regions.get",
   "compute.subnetworks.create",
-  "compute.subnetworks.get",
   "compute.subnetworks.use",
   "compute.subnetworks.useExternalIp",
-  "compute.zoneOperations.get",
+  "serviceusage.services.list",
 ] as const;
 const PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
 const WORKSHOP_REGION = "europe-west3" as const;
@@ -250,6 +272,143 @@ export function labelsMatchOwnership(
   return labels !== undefined && Object.entries(expected).every(([key, value]) => labels[key] === value);
 }
 
+function labelsMatchConnection(
+  labels: Record<string, string> | undefined,
+  ownership: ProviderOwnership,
+): boolean {
+  const expected = ownershipLabels(ownership);
+  return labels !== undefined && [
+    "intar-managed",
+    "intar-provider",
+    "intar-org",
+    "intar-connection",
+  ].every((name) => labels[name] === expected[name]);
+}
+
+function labelsMatchRuntimeResource(
+  labels: Record<string, string> | undefined,
+  ownership: ProviderOwnership,
+): boolean {
+  return labelsMatchConnection(labels, ownership) && (
+    labels?.["intar-purpose"] === "learner_workspace" ||
+    labels?.["intar-purpose"] === "workshop_publication_verifier"
+  );
+}
+
+function ownedFoundationRoute(
+  resource: GcpResourceRef,
+  foundation: GcpFoundationSpec,
+  networkOwned: boolean,
+): boolean {
+  return networkOwned &&
+    resource.network?.endsWith(`/networks/${foundation.networkName}`) === true &&
+    (
+      resource.routeType === "SUBNET" ||
+      (
+        resource.routeType === "STATIC" &&
+        resource.destRange === "0.0.0.0/0" &&
+        resource.priority === 1_000 &&
+        resource.nextHopGateway?.endsWith("/global/gateways/default-internet-gateway") === true &&
+        (resource.tags?.length ?? 0) === 0
+      )
+    );
+}
+
+export function classifyOperationalInventory(
+  inventory: GcpProjectInventory,
+  foundation: GcpFoundationSpec,
+  runtimeConnectionOwnership: ProviderOwnership,
+): GcpOperationalInventoryClassification {
+  const marker = ownershipMarker(foundation.ownership);
+  const ownedFoundation = {
+    network: new Set(inventory.networks
+      .filter((resource) =>
+        resource.name === foundation.networkName && resource.description === marker,
+      )
+      .map((resource) => resource.name)),
+    subnetwork: new Set(inventory.subnetworks
+      .filter((resource) =>
+        resource.name === foundation.subnetworkName && resource.description === marker,
+      )
+      .map((resource) => resource.name)),
+    firewall: new Set(inventory.firewalls
+      .filter((resource) =>
+        resource.name === foundation.firewallName && resource.description === marker,
+      )
+      .map((resource) => resource.name)),
+  };
+  const networkOwned = ownedFoundation.network.has(foundation.networkName);
+  const ownedRoutes = new Set(inventory.routes
+    .filter((resource) => ownedFoundationRoute(resource, foundation, networkOwned))
+    .map((resource) => resource.name));
+  const collections: Array<{
+    resourceKind: GcpClassifiedInventoryResource["resourceKind"];
+    resources: GcpResourceRef[];
+    owned: (resource: GcpResourceRef) => boolean;
+  }> = [
+    { resourceKind: "instance", resources: inventory.instances, owned: (resource) =>
+      labelsMatchRuntimeResource(resource.labels, runtimeConnectionOwnership) },
+    { resourceKind: "disk", resources: inventory.disks, owned: (resource) =>
+      labelsMatchRuntimeResource(resource.labels, runtimeConnectionOwnership) },
+    { resourceKind: "address", resources: inventory.addresses, owned: () => false },
+    { resourceKind: "snapshot", resources: inventory.snapshots, owned: () => false },
+    { resourceKind: "image", resources: inventory.images, owned: () => false },
+    { resourceKind: "instance_template", resources: inventory.instanceTemplates, owned: () => false },
+    { resourceKind: "instance_group", resources: inventory.instanceGroups, owned: () => false },
+    { resourceKind: "forwarding_rule", resources: inventory.forwardingRules, owned: () => false },
+    { resourceKind: "target_pool", resources: inventory.targetPools, owned: () => false },
+    { resourceKind: "backend_service", resources: inventory.backendServices, owned: () => false },
+    { resourceKind: "network", resources: inventory.networks, owned: (resource) =>
+      ownedFoundation.network.has(resource.name) },
+    { resourceKind: "subnetwork", resources: inventory.subnetworks, owned: (resource) =>
+      ownedFoundation.subnetwork.has(resource.name) },
+    { resourceKind: "firewall", resources: inventory.firewalls, owned: (resource) =>
+      ownedFoundation.firewall.has(resource.name) },
+    { resourceKind: "route", resources: inventory.routes, owned: (resource) =>
+      ownedRoutes.has(resource.name) },
+  ];
+  const ownedResources: GcpClassifiedInventoryResource[] = [];
+  const foreignResources: GcpClassifiedInventoryResource[] = [];
+  for (const collection of collections) {
+    for (const resource of collection.resources) {
+      (collection.owned(resource) ? ownedResources : foreignResources).push({
+        resourceKind: collection.resourceKind,
+        resource,
+      });
+    }
+  }
+  const ownedAssetNames = new Map<string, Set<string>>([
+    ["compute.googleapis.com/Network", ownedFoundation.network],
+    ["compute.googleapis.com/Subnetwork", ownedFoundation.subnetwork],
+    ["compute.googleapis.com/Firewall", ownedFoundation.firewall],
+    ["compute.googleapis.com/Route", ownedRoutes],
+  ]);
+  const ownedComputeAssets: GcpComputeAsset[] = [];
+  const foreignComputeAssets: GcpComputeAsset[] = [];
+  for (const asset of inventory.computeAssets) {
+    const owned = asset.assetType === "compute.googleapis.com/Instance" ||
+        asset.assetType === "compute.googleapis.com/Disk"
+      ? labelsMatchRuntimeResource(asset.labels, runtimeConnectionOwnership)
+      : ownedAssetNames.get(asset.assetType)?.has(asset.displayName) === true;
+    (owned ? ownedComputeAssets : foreignComputeAssets).push(asset);
+  }
+  const foreignPresent = inventory.defaultNetworkPresent ||
+    foreignResources.length > 0 || foreignComputeAssets.length > 0;
+  const ownedPresent = ownedResources.length > 0 || ownedComputeAssets.length > 0;
+  return {
+    status: foreignPresent
+      ? "foreign_resources_present"
+      : ownedPresent
+        ? "owned_resources_present"
+        : "empty",
+    ownedResources,
+    foreignResources,
+    ownedComputeAssets,
+    foreignComputeAssets,
+    defaultNetworkPresent: inventory.defaultNetworkPresent,
+  };
+}
+
 export class GcpClient {
   readonly #projectId: string;
   readonly #serviceAccountEmail: string;
@@ -320,24 +479,41 @@ export class GcpClient {
     return [...enabled].sort();
   }
 
-  async assertRequiredIamPermissions(): Promise<string[]> {
+  async #assertIamPermissions(
+    required: readonly string[],
+    message: string,
+  ): Promise<string[]> {
     const response = await this.#api.resourceManager<IamPermissionsResponse>(
       `/projects/${this.#projectId}:testIamPermissions`,
       {
         method: "POST",
-        body: JSON.stringify({ permissions: REQUIRED_IAM_PERMISSIONS }),
+        body: JSON.stringify({ permissions: required }),
       },
     );
     const granted = new Set(response.permissions ?? []);
-    const missing = REQUIRED_IAM_PERMISSIONS.filter((permission) => !granted.has(permission));
+    const missing = required.filter((permission) => !granted.has(permission));
     if (missing.length > 0) {
       throw new ProviderServiceError({
         code: "gcp_permission_missing",
-        message: "GCP service account is missing required Compute permissions",
+        message,
         retryable: false,
       });
     }
     return [...granted].sort();
+  }
+
+  assertRequiredIamPermissions(): Promise<string[]> {
+    return this.#assertIamPermissions(
+      REQUIRED_IAM_PERMISSIONS,
+      "GCP service account is missing required Workshop permissions",
+    );
+  }
+
+  assertCleanupIamPermissions(): Promise<string[]> {
+    return this.#assertIamPermissions(
+      CLEANUP_IAM_PERMISSIONS,
+      "GCP service account is missing required cleanup permissions",
+    );
   }
 
   async assertMinimumQuotas(): Promise<GcpQuotaObservation[]> {
@@ -1115,11 +1291,25 @@ export class GcpClient {
     };
   }
 
-  async rebootInstance(zone: string, instanceName: string): Promise<GcpAsyncOperation> {
+  async rebootInstance(
+    zone: string,
+    instanceName: string,
+    ownership: ProviderOwnership,
+  ): Promise<GcpAsyncOperation> {
     assertAllocationIdentity(zone, instanceName);
+    const path = `/projects/${this.#projectId}/zones/${zone}/instances/${instanceName}`;
+    const instance = await this.#api.compute<ApiInstance>(path);
+    resourceRef(instance);
+    if (!labelsMatchOwnership(instance.labels, ownership)) {
+      throw new ProviderServiceError({
+        code: "gcp_allocation_ownership_mismatch",
+        message: "GCP allocation name belongs to another resource",
+        retryable: false,
+      });
+    }
     const requestId = await deterministicRequestId([this.#projectId, zone, instanceName, "reset"]);
     return this.#api.compute<GcpAsyncOperation>(
-      `/projects/${this.#projectId}/zones/${zone}/instances/${instanceName}/reset`,
+      `${path}/reset`,
       { method: "POST", body: "{}" },
       { requestId },
     );
@@ -1148,6 +1338,46 @@ export class GcpClient {
       });
     }
     const requestId = await deterministicRequestId([this.#projectId, zone, instanceName, "delete"]);
+    try {
+      return await this.#api.compute<GcpAsyncOperation>(
+        path,
+        { method: "DELETE" },
+        { requestId },
+      );
+    } catch (error) {
+      if (error instanceof GcpApiError && error.shape.code === "gcp_not_found") return null;
+      throw error;
+    }
+  }
+
+  async deleteDisk(
+    zone: string,
+    diskName: string,
+    ownership: ProviderOwnership,
+  ): Promise<GcpAsyncOperation | null> {
+    assertAllocationIdentity(zone, diskName);
+    const path = `/projects/${this.#projectId}/zones/${zone}/disks/${diskName}`;
+    let disk: ApiResource;
+    try {
+      disk = await this.#api.compute<ApiResource>(path);
+    } catch (error) {
+      if (error instanceof GcpApiError && error.shape.code === "gcp_not_found") return null;
+      throw error;
+    }
+    resourceRef(disk);
+    if (!labelsMatchOwnership(disk.labels, ownership)) {
+      throw new ProviderServiceError({
+        code: "gcp_allocation_ownership_mismatch",
+        message: "GCP boot disk name belongs to another resource",
+        retryable: false,
+      });
+    }
+    const requestId = await deterministicRequestId([
+      this.#projectId,
+      zone,
+      diskName,
+      "delete-disk",
+    ]);
     try {
       return await this.#api.compute<GcpAsyncOperation>(
         path,

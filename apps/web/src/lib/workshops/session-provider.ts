@@ -30,7 +30,6 @@ import {
 } from "./runtime-provider";
 import { requireProductionRuntimeProviderAdapter } from "./provider-runtime";
 import { invokeProviderOperation } from "./provider-service";
-import { requireWorkshopMulticloudRuntimeEnabledForOrganization } from "./feature-flag";
 import {
   providerCredentialContext,
   providerCredentialEnvelope,
@@ -107,9 +106,6 @@ export async function prepareWorkshopSessionProvider(input: {
   const resolvedProfile = storedProfile(row.profile);
   let connection: ProviderConnectionRef | null = null;
   if (row.profile.providerKind !== "agent_kvm") {
-    await requireWorkshopMulticloudRuntimeEnabledForOrganization(
-      input.organizationId,
-    );
     const connectionId = input.runtimeProvider.connectionId;
     if (!connectionId) {
       throw appError(

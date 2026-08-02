@@ -106,6 +106,10 @@ export const providerCredentialVersions = sqliteTable(
       .notNull()
       .references(() => providerConnections.id, { onDelete: "restrict" }),
     version: integer("version").notNull(),
+    authority: text("authority")
+      .$type<"active" | "cleanup_only">()
+      .default("active")
+      .notNull(),
     algorithm: text("algorithm").$type<"AES-256-GCM">().notNull(),
     kekVersion: text("kek_version").notNull(),
     aadSha256: text("aad_sha256").notNull(),
@@ -132,7 +136,7 @@ export const providerCredentialVersions = sqliteTable(
     ).on(table.connectionId, table.credentialFingerprint),
     check(
       "provider_credential_versions_valid",
-      sql`${table.version} > 0 AND ${table.algorithm} = 'AES-256-GCM' AND length(${table.kekVersion}) > 0 AND length(${table.aadSha256}) = 64`,
+      sql`${table.version} > 0 AND ${table.authority} in ('active', 'cleanup_only') AND ${table.algorithm} = 'AES-256-GCM' AND length(${table.kekVersion}) > 0 AND length(${table.aadSha256}) = 64`,
     ),
     check(
       "provider_credential_versions_lifecycle_valid",

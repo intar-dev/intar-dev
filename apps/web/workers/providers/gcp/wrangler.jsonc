@@ -6,10 +6,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "vars": {
+    "GCP_PROVIDER_MODE": "dormant"
+  },
   "secrets": {
     "required": [
-      "GCP_PROVIDER_CREDENTIAL_KEK_V1",
-      "GCP_CATALOG_API_KEY"
+      "GCP_PROVIDER_CREDENTIAL_KEK_V1"
     ]
   },
   "observability": {

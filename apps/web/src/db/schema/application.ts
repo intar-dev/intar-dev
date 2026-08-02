@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   sqliteTable,
@@ -43,6 +45,56 @@ export const accessAllowlist = sqliteTable(
     approvedAt: integer("approved_at").notNull(),
   },
   (table) => [index("access_allowlist_approved_by_idx").on(table.approvedBy)],
+);
+
+// One-row commissioning receipt for the destructive clean-D1 cutover. The
+// protected workflow writes it before the first OAuth login and finalizes it
+// only after the sole GitHub account is bound to the intended user. It is not
+// a feature flag and must never be repurposed for ordinary administrator
+// provisioning.
+export const cleanD1Commissioning = sqliteTable(
+  "clean_d1_commissioning",
+  {
+    id: text("id").primaryKey(),
+    databaseName: text("database_name").notNull(),
+    databaseId: text("database_id").notNull(),
+    baselineSha256: text("baseline_sha256").notNull(),
+    sourceSha: text("source_sha").notNull(),
+    ownerGithubLogin: text("owner_github_login").notNull(),
+    ownerGithubId: text("owner_github_id").notNull(),
+    applyRunId: text("apply_run_id").notNull(),
+    applyRunAttempt: integer("apply_run_attempt").notNull(),
+    status: text("status", {
+      enum: ["allowlisted", "owner_finalized"],
+    }).notNull(),
+    ownerUserId: text("owner_user_id").references(() => user.id, {
+      onDelete: "restrict",
+    }),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    check(
+      "clean_d1_commissioning_singleton",
+      sql`${table.id} = 'first-owner-v1'`,
+    ),
+    check(
+      "clean_d1_commissioning_run_attempt",
+      sql`${table.applyRunAttempt} = 1`,
+    ),
+    check(
+      "clean_d1_commissioning_status",
+      sql`${table.status} IN ('allowlisted', 'owner_finalized')`,
+    ),
+    check(
+      "clean_d1_commissioning_owner_state",
+      sql`(
+        (${table.status} = 'allowlisted' AND ${table.ownerUserId} IS NULL)
+        OR
+        (${table.status} = 'owner_finalized' AND ${table.ownerUserId} IS NOT NULL)
+      )`,
+    ),
+  ],
 );
 
 export const accessRequests = sqliteTable(

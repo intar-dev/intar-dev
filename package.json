@@ -22,15 +22,17 @@
   },
   "scripts": {
     "check:bootstrap": "bun tools/bootstrap/rehearse-clean-bootstrap.ts",
+    "check:clean-owner-bootstrap": "bun test tools/bootstrap/clean-owner-bootstrap.test.ts",
     "check:imports": "bun tools/check-import-boundaries.ts",
     "clean:generated": "bun tools/cleanup-generated.ts",
     "hydrate": "bun tools/workshops/platform-engineering/hydrate.ts",
     "generate:scenario-authoring": "bun tools/generate-scenario-authoring-config.ts",
     "check:providers": "bun tools/providers/check-conformance.ts",
+    "check:cutover": "vitest run tools/cutover",
     "test:providers": "bun run --cwd apps/web/workers/providers/hetzner test && bun run --cwd apps/web/workers/providers/gcp test",
     "test:web": "bun run --cwd apps/web test",
     "build:web": "bun run --cwd apps/web build",
-    "check": "bun run check:bootstrap && bun run check:imports && bun run check:providers && bun run --cwd apps/web db:baseline:check",
+    "check": "bun run check:bootstrap && bun run check:clean-owner-bootstrap && bun run check:imports && bun run check:providers && bun run check:cutover && bun run --cwd apps/web db:baseline:check",
     "test": "bun run check && bun run test:providers && bun run test:web",
     "build": "bun run check:providers && bun run build:web"
   },
