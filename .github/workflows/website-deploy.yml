@@ -743,7 +743,7 @@ jobs:
               .maintenance_fence.maintenance_version_id == $active_version_id and
               .maintenance_fence.previous_version_binding_proven == true and
               .maintenance_fence.maintenance_version_binding_proven == true and
-              .legacy_drain.schema_version == 3 and
+              .legacy_drain.schema_version == 4 and
               .legacy_drain.stargate_probe_succeeded == true and
               .legacy_drain.drained == true and
               .legacy_drain.provider_inventory.provenEmpty == true and

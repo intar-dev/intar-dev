@@ -20,6 +20,7 @@ on:
       - "packages/workshop-contracts/**"
       - "tools/check-import-boundaries.ts"
       - "tools/bootstrap/**"
+      - "tools/cutover/**"
       - "tools/providers/**"
       - "content/scenarios/build-tools.hcl"
       - "crates/intar-image-scenario/**"
