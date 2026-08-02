@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
-    net::TcpListener,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -744,11 +743,14 @@ impl Harness {
             hs256_secret: Some("admin-secret".to_owned()),
         };
 
-        let admin_addr = free_addr();
-        let public_addr = free_addr();
+        let admin_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+        let admin_addr = admin_listener.local_addr()?;
+        let public_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+        let public_addr = public_listener.local_addr()?;
         let public_ssh_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
         let public_ssh_addr = public_ssh_listener.local_addr()?;
-        let target_addr = free_addr();
+        let target_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
+        let target_addr = target_listener.local_addr()?;
         let app_listener = TokioTcpListener::bind(("127.0.0.1", 0)).await?;
         let app_addr = app_listener.local_addr()?;
         let allowed_origin = "https://stargate.example.test".to_owned();
@@ -792,8 +794,6 @@ impl Harness {
             },
         )?;
 
-        let admin_listener = TokioTcpListener::bind(admin_addr).await?;
-        let public_listener = TokioTcpListener::bind(public_addr).await?;
         let admin_router = build_admin_router(gateway.clone());
         let public_router = build_public_router(gateway.clone());
 
@@ -817,10 +817,12 @@ impl Harness {
             direct_channels: Arc::new(Mutex::new(HashSet::new())),
             connections: target_connections.clone(),
         };
-        let target_task =
-            tokio::spawn(
-                async move { target_server.run(target_addr).await.expect("target server") },
-            );
+        let target_task = tokio::spawn(async move {
+            target_server
+                .run(target_listener)
+                .await
+                .expect("target server")
+        });
         let app_task = tokio::spawn(serve_router(
             app_listener,
             Router::new()
@@ -1425,13 +1427,6 @@ async fn serve_router(listener: TokioTcpListener, router: Router) {
     axum::serve(listener, router).await.expect("router serve");
 }
 
-fn free_addr() -> std::net::SocketAddr {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-}
-
 fn client_config(expected_server_key: &russh::keys::ssh_key::PublicKey) -> Arc<client::Config> {
     let mut config = client::Config::default();
     if matches!(
@@ -1463,12 +1458,12 @@ struct TestTargetServer {
 }
 
 impl TestTargetServer {
-    async fn run(self, addr: std::net::SocketAddr) -> Result<()> {
+    async fn run(self, listener: TokioTcpListener) -> Result<()> {
         let mut config = russh::server::Config::default();
         config.keys.push(self.host_key.clone());
         let config = Arc::new(config);
         let mut server = self;
-        server.run_on_address(config, addr).await?;
+        server.run_on_socket(config, &listener).await?;
         Ok(())
     }
 }
