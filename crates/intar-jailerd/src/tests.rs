@@ -710,8 +710,9 @@ fn unsafe_test_gid() -> u32 {
 fn lifecycle_test_config(root: &Path) -> JailerdConfig {
     let mut config = test_config();
     config.jail_root = root.to_path_buf();
-    config.agent_uid = unsafe_test_uid();
-    config.agent_gid = unsafe_test_gid();
+    let metadata = std::fs::metadata(root).expect("lifecycle fixture metadata");
+    config.agent_uid = std::os::unix::fs::MetadataExt::uid(&metadata);
+    config.agent_gid = std::os::unix::fs::MetadataExt::gid(&metadata);
     config
 }
 

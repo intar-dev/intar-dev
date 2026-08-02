@@ -21,7 +21,7 @@ use intar_image_build::{
     generate_build_ssh_key, prepare_scenario_disk, render_direct_boot_qemu_command,
     render_scenario_disk_plan, write_build_seed, write_raw_zstd_artifact_with_cancel,
 };
-use intar_workshop_manifest::{WorkshopManifest, WorkspaceVm};
+use intar_workshop_manifest::{RuntimeProviderKind, WorkshopManifest, WorkspaceVm};
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -287,7 +287,7 @@ impl KvmWorkshopBackend {
             )
         })?;
         let seed_disk = generation_root.join("intarbuild.img");
-        let cpu_count = job.vm.vcpu_millis.div_ceil(1_000).max(1);
+        let cpu_count = job.vm.cpu_millis.div_ceil(1_000).max(1);
         let guest = self.launcher.boot(GuestBootRequest {
             generation_root,
             root_disk: disk.clone(),
@@ -320,22 +320,38 @@ impl WorkshopExecutionBackend for KvmWorkshopBackend {
         self.ensure_idle()?;
         enforce_single_vm_contract(request.manifest)?;
         let vm = request.manifest.workspace.vms[0].clone();
+        let agent_profiles = request
+            .manifest
+            .workspace
+            .runtime_profiles
+            .iter()
+            .filter(|profile| profile.provider == RuntimeProviderKind::AgentKvm)
+            .collect::<Vec<_>>();
+        let [profile] = agent_profiles.as_slice() else {
+            bail!("agent_kvm publication requires exactly one agent_kvm runtime profile");
+        };
+        ensure!(
+            profile.vm_id == vm.id,
+            "agent_kvm runtime profile '{}' references unexpected VM '{}'",
+            profile.id,
+            profile.vm_id
+        );
         let image = self
             .config
             .images
             .iter()
-            .find(|candidate| candidate.name == vm.image)
+            .find(|candidate| candidate.name == profile.system_image)
             .cloned()
             .with_context(|| {
                 format!(
                     "workspace image '{}' has no trusted execution mapping",
-                    vm.image
+                    profile.system_image
                 )
             })?;
         ensure!(
             image.architecture == request.architecture,
             "workspace image '{}' is configured for {:?}, not {:?}",
-            vm.image,
+            profile.system_image,
             image.architecture,
             request.architecture
         );
@@ -363,7 +379,8 @@ impl WorkshopExecutionBackend for KvmWorkshopBackend {
         let root = work.path().to_path_buf();
         let mutable_disk = root.join("mutable-0.raw");
         let qemu = qemu_config(&self.config, &root, &vm, &image.architecture);
-        let disk_plan = render_scenario_disk_plan(&image.disk, &mutable_disk, vm.disk_gib, &qemu);
+        let disk_plan =
+            render_scenario_disk_plan(&image.disk, &mutable_disk, vm.disk_mib / 1_024, &qemu);
         prepare_scenario_disk(&disk_plan).context("failed to clone and size trusted base disk")?;
         ensure!(
             !self.cancellation.is_cancelled(),
@@ -755,7 +772,7 @@ impl WorkshopExecutionBackend for KvmWorkshopBackend {
                 .context("failed to write staged direct-cloud proof initrd")?;
             let qemu = qemu_config(&self.config, &generation_root, &job.vm, &proof.architecture);
             let disk_plan =
-                render_scenario_disk_plan(&proof.disk, &root_disk, job.vm.disk_gib, &qemu);
+                render_scenario_disk_plan(&proof.disk, &root_disk, job.vm.disk_mib / 1_024, &qemu);
             prepare_scenario_disk(&disk_plan)
                 .context("failed to clone and size clean direct-cloud proof disk")?;
             let mut guest = self.launcher.boot(GuestBootRequest {
@@ -765,7 +782,7 @@ impl WorkshopExecutionBackend for KvmWorkshopBackend {
                 kernel: staged_kernel,
                 initrd: staged_initrd,
                 boot_cmdline: proof.boot_cmdline.clone(),
-                cpu_count: job.vm.vcpu_millis.div_ceil(1_000).max(1),
+                cpu_count: job.vm.cpu_millis.div_ceil(1_000).max(1),
                 memory_mib: job.vm.memory_mib,
             })?;
             if let Err(error) = guest.verify_runtime_bundle(&staged_agent, request) {
@@ -978,7 +995,7 @@ fn qemu_config(
         e2fsck_binary: config.e2fsck_binary.clone(),
         resize2fs_binary: config.resize2fs_binary.clone(),
         accelerator: config.accelerator.clone(),
-        build_cpus: vm.vcpu_millis.div_ceil(1_000).max(1),
+        build_cpus: vm.cpu_millis.div_ceil(1_000).max(1),
         build_memory_mb: vm.memory_mib,
         work_root: root.to_path_buf(),
         output_root: root.to_path_buf(),
@@ -2014,7 +2031,17 @@ mod tests {
             events: Arc::clone(&events),
         };
         let mut backend = KvmWorkshopBackend::with_launcher(config, Box::new(launcher));
-        let workshop = fixture();
+        let mut workshop = fixture();
+        workshop.manifest.workspace.runtime_profiles =
+            vec![intar_workshop_manifest::RuntimeProfile {
+                id: "agent-kvm".to_owned(),
+                provider: RuntimeProviderKind::AgentKvm,
+                vm_id: "workspace".to_owned(),
+                machine_type: None,
+                system_image: "platform-workshop-debian13".to_owned(),
+                root_disk_type: None,
+                locations: Vec::new(),
+            }];
         let bundle_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../intar-workshop-manifest/tests/fixtures/platform-engineering-workshop");
         backend
@@ -2065,8 +2092,8 @@ mod tests {
 
     #[test]
     fn reference_catch_ups_reconstruct_from_external_digests() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let workshop = intar_workshop_manifest::load_and_validate(&root).unwrap();
         assert!(
             workshop
@@ -2075,7 +2102,9 @@ mod tests {
                 .attribution
                 .contains("https://github.com/randax/Platform-Engineering-Workshop/tree/")
         );
-        let hydrated = crate::hydrate::hydrate_workshop_manifest(&root, &workshop, &[]).unwrap();
+        let profiles = crate::hydrate::resolved_profiles_for_hydration_test(&workshop);
+        let hydrated =
+            crate::hydrate::hydrate_workshop_manifest(&root, &workshop, &profiles, &[]).unwrap();
         assert_eq!(
             hydrated.workshop.attribution.url,
             "https://github.com/randax/Platform-Engineering-Workshop/tree/1b6fad43551a720b143d7a52799f81c4c89455cb"
@@ -2364,20 +2393,22 @@ mod tests {
 
         let importer = fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../scripts/import-platform-engineering-workshop.ts"),
+                .join("../../tools/workshops/platform-engineering/generate.ts"),
         )
         .unwrap();
         assert!(importer.contains("renderCatchUpScript(module)"));
         assert!(importer.contains("runtime/images.lock"));
         assert!(importer.contains("renderRuntimeBootstrap"));
         assert!(importer.contains("adaptDigestPinnedFault01"));
-        assert!(importer.contains("platform-engineering-mise.lock"));
+        assert!(
+            importer.contains("const REVIEWED_MISE_LOCK = join(CONTENT_LOCK_ROOT, \"mise.lock\")")
+        );
         assert!(importer.contains("INTAR_WORKSHOP_LEARNER_USER"));
         assert!(importer.contains("mise install --locked"));
 
         let reviewed_mise_lock = fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../scripts/platform-engineering-mise.lock"),
+                .join("../../content/workshops/platform-engineering/locks/mise.lock"),
         )
         .unwrap();
         let runtime_mise_lock = fs::read_to_string(root.join("runtime/source/mise.lock")).unwrap();
@@ -2396,8 +2427,8 @@ mod tests {
             fs::set_permissions(path, permissions).unwrap();
         }
 
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let verifier = root.join("runtime/source/lab/07-ci/verify.sh");
         let fixtures = tempfile::tempdir().unwrap();
         let bin = fixtures.path().join("bin");
@@ -2545,8 +2576,8 @@ esac
             fs::set_permissions(path, permissions).unwrap();
         }
 
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let fixtures = tempfile::tempdir().unwrap();
         let bin = fixtures.path().join("bin");
         fs::create_dir(&bin).unwrap();
@@ -2740,8 +2771,8 @@ esac
 
     #[test]
     fn reference_runtime_bootstrap_has_valid_shell_and_registry_awk() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let bootstrap = root.join("runtime/bootstrap.sh");
         let source = fs::read_to_string(&bootstrap).unwrap();
         assert!(source.contains(r#"awk 'NF {sub(/\/.*/, "", $1); print $1}'"#));
@@ -2797,8 +2828,8 @@ esac
 
     #[test]
     fn reference_talos_config_scopes_etcd_to_control_plane() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let source =
             fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
         let image_lock = fs::read_to_string(root.join("runtime/images.lock")).unwrap();
@@ -2874,8 +2905,8 @@ esac
 
     #[test]
     fn reference_talos_prepares_mount_capacity_and_reuses_kubelets_shared_mount() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let bootstrap = fs::read_to_string(root.join("runtime/bootstrap.sh")).unwrap();
         let create_cluster =
             fs::read_to_string(root.join("runtime/source/scripts/create-cluster.sh")).unwrap();
@@ -2960,8 +2991,8 @@ esac
 
     #[test]
     fn reference_talos_cni_bootstrap_is_async_bounded_and_valid_shell() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let create_cluster = root.join("runtime/source/scripts/create-cluster.sh");
         let lib = root.join("runtime/source/scripts/lib.sh");
         let source = fs::read_to_string(&create_cluster).unwrap();
@@ -3698,6 +3729,7 @@ done
         let bytes = b"exact-signed-runtime-bundle";
         let sha256 = sha256_bytes(bytes);
         let artifact = crate::contracts::RuntimeBundleArtifact {
+            format: crate::contracts::RuntimeBundleFormat::DirectCloudLinuxX86_64V1,
             sha256,
             compression: crate::contracts::RuntimeBundleCompression::Zstd,
             signature_b64: "signature".to_owned(),

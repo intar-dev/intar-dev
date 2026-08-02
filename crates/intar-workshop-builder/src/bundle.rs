@@ -155,7 +155,7 @@ fn verify_compiled_manifest(root: &Path, workshop: &ValidatedWorkshop) -> Result
     let actual: serde_json::Value =
         serde_json::from_slice(&source).context("workshop.compiled.json is not valid JSON")?;
     let expected = serde_json::to_value(CompiledWorkshop {
-        format_version: 1,
+        format_version: 2,
         scheduled_duration_minutes: workshop.scheduled_duration_minutes,
         manifest: &workshop.manifest,
     })
@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn local_bundle_requires_the_exact_configured_digest() {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let bundle = intar_workshop_manifest::build_bundle(&fixture).unwrap();
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("workshop.tar.gz");

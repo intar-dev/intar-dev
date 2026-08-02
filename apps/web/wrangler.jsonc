@@ -1,0 +1,130 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "name": "intar-dev",
+  "main": "src/worker.ts",
+  "secrets": {
+    "required": ["STARGATE_EGRESS_IPV4_CIDRS"],
+  },
+  "vars": {
+    "BETTER_AUTH_APP_NAME": "intar.dev",
+    "BETTER_AUTH_URL": "https://intar.dev",
+    "AGENT_JWT_ISSUER": "intar-agent-bridge",
+    "AGENT_JWT_AUDIENCE": "agent-connect",
+    "STARGATE_ROUTE_TTL_SECONDS": "14400",
+    "STARGATE_ADMIN_AUTH_HEADER": "cf-access-jwt-assertion",
+    "STARGATE_ADMIN_AUTH_ISSUER": "intar.dev",
+    "STARGATE_ADMIN_AUTH_AUDIENCE": "stargate-admin",
+    "STARGATE_WORKSPACE_APP_BASE_DOMAIN": "intar.app",
+    "WORKSPACE_AGENT_CONTROL_PLANE_URL": "https://intar.dev",
+    "WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON": "{}",
+  },
+  "vpc_services": [
+    {
+      "binding": "STARGATE_ADMIN_SERVICE",
+      "service_id": "019cfe24-0643-7f91-baa3-cd890fdb8af4",
+    },
+  ],
+  "services": [
+    {
+      "binding": "HETZNER_PROVIDER_SERVICE",
+      "service": "intar-provider-hetzner",
+      "entrypoint": "HetznerProviderService",
+    },
+    {
+      "binding": "GCP_PROVIDER_SERVICE",
+      "service": "intar-provider-gcp",
+      "entrypoint": "GcpProviderService",
+    },
+  ],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+  },
+  "routes": [
+    {
+      "pattern": "intar.dev",
+      "custom_domain": true,
+    },
+  ],
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      // CI replaces this fail-closed placeholder with the new clean database
+      // ID after creating `intar-dev-control-plane-v2-20260801`.
+      "database_id": "00000000-0000-0000-0000-000000000003",
+      "database_name": "intar-dev-control-plane-v2-20260801",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "VM_IMAGE_REGISTRY_BUCKET",
+      "bucket_name": "intar-dev-vm-image-registry-20260709",
+      "jurisdiction": "eu",
+    },
+    {
+      "binding": "VM_RUN_ARTIFACTS_BUCKET",
+      "bucket_name": "intar-dev-vm-run-artifacts-20260709",
+      "jurisdiction": "eu",
+    },
+  ],
+  "flagship": [
+    {
+      "binding": "FLAGS",
+      "app_id": "12f35c20-55f4-47ee-8b31-b3ad202d1f04",
+      "remote": true,
+    },
+  ],
+  "ratelimits": [
+    {
+      "name": "ACCESS_REQUEST_RATE_LIMITER",
+      "namespace_id": "88427091",
+      "simple": {
+        "limit": 20,
+        "period": 60,
+      },
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HOST_RUNTIME",
+        "class_name": "HostRuntimeDO",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentBridgeDO"],
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "ScenarioWorkflowDO",
+        "ScenarioWorkflowSchedulerDO",
+      ],
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["HostRuntimeDO"],
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": [
+        "AgentBridgeDO",
+        "ScenarioWorkflowDO",
+        "ScenarioWorkflowSchedulerDO",
+      ],
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}

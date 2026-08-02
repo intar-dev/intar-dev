@@ -121,6 +121,24 @@ impl StateStore {
         self.write(&state.inner)
     }
 
+    pub fn install_next_checkpoint(
+        &self,
+        state: &mut GenerationState,
+        checkpoint: CheckpointDescriptor,
+    ) -> Result<(), StateError> {
+        self.validate_state(&state.inner)?;
+        if !state.inner.checkpoint_applied {
+            return Err(StateError::CheckpointAdvanceBeforeProof);
+        }
+        if checkpoint.checkpoint_id == state.inner.checkpoint.checkpoint_id {
+            return Err(StateError::CheckpointAdvanceReplayed);
+        }
+        state.inner.checkpoint = checkpoint;
+        state.inner.checkpoint_applied = false;
+        state.inner.completed_module_ids.clear();
+        self.write(&state.inner)
+    }
+
     /// Reserves and persists a sequence before it is transmitted. A crash may
     /// therefore leave a harmless gap, but can never replay an accepted value.
     pub fn reserve_report_sequence(&self, state: &mut GenerationState) -> Result<u64, StateError> {
@@ -300,6 +318,10 @@ pub enum StateError {
     SequenceExhausted,
     #[error("completed workshop module proof is invalid")]
     InvalidCompletedModules,
+    #[error("the next checkpoint was issued before the current checkpoint completed")]
+    CheckpointAdvanceBeforeProof,
+    #[error("the next checkpoint replays the current checkpoint identity")]
+    CheckpointAdvanceReplayed,
 }
 
 #[cfg(test)]
@@ -395,6 +417,36 @@ mod tests {
         let loaded = store.load().expect("reload").expect("state");
         assert!(loaded.checkpoint_applied());
         assert_eq!(loaded.completed_module_ids(), ["00", "01"]);
+    }
+
+    #[test]
+    fn next_checkpoint_rearms_the_same_generation_only_after_prior_proof() {
+        let temp = TempDir::new().expect("temp dir");
+        let state_path = temp.path().join("state.json");
+        let store = StateStore::new(state_path, identity(1));
+        let mut state = store.install_bootstrap(response()).expect("bootstrap");
+        let mut next = response().checkpoint;
+        next.checkpoint_id = "01".to_owned();
+
+        store
+            .install_next_checkpoint(&mut state, next.clone())
+            .expect_err("an unproved checkpoint cannot be advanced");
+        store
+            .mark_checkpoint_applied(&mut state, vec!["00".to_owned()])
+            .expect("checkpoint proof");
+        let mut replay = next.clone();
+        replay.checkpoint_id = "00".to_owned();
+        store
+            .install_next_checkpoint(&mut state, replay)
+            .expect_err("the current checkpoint cannot be replayed");
+
+        store
+            .install_next_checkpoint(&mut state, next)
+            .expect("next checkpoint");
+        let loaded = store.load().expect("reload").expect("state");
+        assert_eq!(loaded.checkpoint().checkpoint_id, "01");
+        assert!(!loaded.checkpoint_applied());
+        assert!(loaded.completed_module_ids().is_empty());
     }
 
     #[test]

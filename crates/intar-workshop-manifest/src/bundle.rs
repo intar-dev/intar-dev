@@ -22,7 +22,7 @@ pub fn build_bundle(root: impl AsRef<Path>) -> Result<WorkshopBundle> {
     let workshop = load_and_validate(root)?;
     let mut entries = BTreeMap::new();
     let compiled = CompiledWorkshop {
-        format_version: 1,
+        format_version: 2,
         scheduled_duration_minutes: workshop.scheduled_duration_minutes,
         manifest: &workshop.manifest,
     };

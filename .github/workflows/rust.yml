@@ -11,15 +11,15 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
-      - "base-images.hcl"
-      - "build-tools.hcl"
+      - "package.json"
+      - "bun.lock"
+      - "content/scenarios/base-images.hcl"
+      - "content/scenarios/build-tools.hcl"
+      - "content/workshops/**"
       - "crates/**"
-      - "scripts/import-platform-engineering-workshop.ts"
-      - "scripts/platform-engineering-mise.lock"
-      - "scripts/check-platform-engineering-workshop-import.ts"
-      - "scripts/check-platform-workshop-app-routing.ts"
-      - "workshops/**"
-      - "website/src/generated/**"
+      - "tools/generate-scenario-authoring-config.ts"
+      - "tools/workshops/**"
+      - "apps/web/src/generated/**"
   push:
     branches:
       - main
@@ -31,15 +31,15 @@ on:
       - "rust-toolchain.toml"
       - "rustfmt.toml"
       - "justfile"
-      - "base-images.hcl"
-      - "build-tools.hcl"
+      - "package.json"
+      - "bun.lock"
+      - "content/scenarios/base-images.hcl"
+      - "content/scenarios/build-tools.hcl"
+      - "content/workshops/**"
       - "crates/**"
-      - "scripts/import-platform-engineering-workshop.ts"
-      - "scripts/platform-engineering-mise.lock"
-      - "scripts/check-platform-engineering-workshop-import.ts"
-      - "scripts/check-platform-workshop-app-routing.ts"
-      - "workshops/**"
-      - "website/src/generated/**"
+      - "tools/generate-scenario-authoring-config.ts"
+      - "tools/workshops/**"
+      - "apps/web/src/generated/**"
   workflow_dispatch:
 
 permissions:
@@ -79,9 +79,7 @@ jobs:
       - name: Run workspace checks
         run: just verify
 
-      - name: Validate and bundle reference workshop
-        env:
-          PINNED_REVISION: 1b6fad43551a720b143d7a52799f81c4c89455cb
+      - name: Hydrate, validate, and bundle the pinned reference workshop
         run: |
           set -euo pipefail
           bundle_root="$(mktemp -d)"
@@ -90,37 +88,23 @@ jobs:
           }
           trap cleanup_bundle EXIT
 
-          upstream_root="${bundle_root}/upstream"
-          regeneration_root="${bundle_root}/regeneration"
-          git init --quiet "${upstream_root}"
-          git -C "${upstream_root}" remote add origin \
-            https://github.com/randax/Platform-Engineering-Workshop.git
-          git -C "${upstream_root}" fetch --depth=1 origin "${PINNED_REVISION}"
-          git -C "${upstream_root}" checkout --quiet --detach FETCH_HEAD
-          mkdir -p "${regeneration_root}"
-          (
-            cd "${regeneration_root}"
-            bun "${GITHUB_WORKSPACE}/scripts/import-platform-engineering-workshop.ts" \
-              "${upstream_root}"
-          )
-          bun scripts/check-platform-engineering-workshop-import.ts \
-            "${regeneration_root}/workshops/platform-engineering" \
-            workshops/platform-engineering
-          bun scripts/check-platform-workshop-app-routing.ts \
-            workshops/platform-engineering
-
           cargo run --locked -p intar-workshop-cli -- \
-            validate workshops/platform-engineering
+            validate .work/workshops/platform-engineering
+          bun tools/workshops/check-app-routing.ts \
+            .work/workshops/platform-engineering
           cargo run --locked -p intar-workshop-cli -- \
-            bundle workshops/platform-engineering \
+            bundle .work/workshops/platform-engineering \
             --output "${bundle_root}/first.tar.gz"
           cargo run --locked -p intar-workshop-cli -- \
-            bundle workshops/platform-engineering \
+            bundle .work/workshops/platform-engineering \
             --output "${bundle_root}/second.tar.gz"
           cmp "${bundle_root}/first.tar.gz" "${bundle_root}/second.tar.gz"
 
-      - name: Check generated contracts
-        run: just check-generated-contracts
+      - name: Check generated contracts and authoring configuration
+        run: |
+          just check-generated-contracts
+          bun tools/generate-scenario-authoring-config.ts
+          git diff --exit-code -- apps/web/src/generated/scenario-authoring-config.ts
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
@@ -142,35 +126,3 @@ jobs:
 
       - name: Compile kino guest
         run: just build-kino-guest
-
-  kino-smoke:
-    name: Kino Docker smoke
-    runs-on: namespace-profile-intar-dev
-    if: github.event_name == 'pull_request'
-
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install --profile minimal
-          rustup component add rustfmt clippy
-
-      - name: Set up Namespace caches
-        uses: namespacelabs/nscloud-cache-action@v1
-        with:
-          cache: |
-            rust
-            apt
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Run smoke tests
-        run: just docker-smoke

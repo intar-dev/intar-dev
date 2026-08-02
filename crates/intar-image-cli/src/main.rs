@@ -18,9 +18,14 @@ use std::{fs, process::Command as ProcessCommand};
 
 mod clean_base_command;
 
-const BASE_IMAGES_PATH: &str = "base-images.hcl";
-const BUILD_TOOLS_PATH: &str = "build-tools.hcl";
+const BASE_IMAGES_PATH: &str = "content/scenarios/base-images.hcl";
+const BUILD_TOOLS_PATH: &str = "content/scenarios/build-tools.hcl";
+const BUNDLE_BASE_IMAGES_PATH: &str = "base-images.hcl";
+const BUNDLE_BUILD_TOOLS_PATH: &str = "build-tools.hcl";
+const BUNDLE_SCENARIOS_ROOT: &str = "scenarios";
 const COURSES_PATH: &str = "courses.hcl";
+const DEFAULT_SCENARIOS_ROOT: &str = "content/scenarios";
+const DEFAULT_COURSES_PATH: &str = "content/courses.hcl";
 const IMAGE_PUBLISH_TOKEN_ENV: &str = "INTAR_IMAGE_PUBLISH_TOKEN";
 const DEFAULT_BUNDLE_OUTPUT_ROOT: &str = "dist/bundles";
 const MAX_BUNDLE_TAR_BYTES: u64 = 64 * 1024 * 1024;
@@ -631,11 +636,11 @@ fn selected_scenario_paths(
         discover_course_scenarios(courses_root)?
     } else if let Some(scenario_name) = scenario_name {
         vec![discover_legacy_scenario(
-            Path::new("scenarios"),
+            Path::new(DEFAULT_SCENARIOS_ROOT),
             scenario_name,
         )?]
     } else {
-        discover_legacy_scenarios(Path::new("scenarios"))?
+        discover_legacy_scenarios(Path::new(DEFAULT_SCENARIOS_ROOT))?
     };
 
     if let Some(scenario_name) = scenario_name {
@@ -643,7 +648,7 @@ fn selected_scenario_paths(
             .into_iter()
             .find(|scenario| scenario.scenario_id == scenario_name)
             .with_context(|| {
-                let root = courses_root.unwrap_or_else(|| Path::new("scenarios"));
+                let root = courses_root.unwrap_or_else(|| Path::new(DEFAULT_SCENARIOS_ROOT));
                 format!(
                     "scenario '{}' not found under {}",
                     scenario_name,

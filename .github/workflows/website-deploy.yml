@@ -2,6 +2,47 @@ name: Website production
 run-name: "Website deploy ${{ github.ref_name }} @ ${{ github.sha }}"
 
 on:
+  workflow_call:
+    inputs:
+      confirmation:
+        description: Exact protected web deployment confirmation
+        required: true
+        type: string
+      single_operator_confirmation:
+        description: Sole-operator confirmation when that production mode is active
+        required: false
+        default: ""
+        type: string
+      provenance_workflow_path:
+        description: Exact top-level workflow path recorded in retained artifacts
+        required: false
+        default: .github/workflows/website-deploy.yml
+        type: string
+      parent_holds_control_plane_lock:
+        description: True only when the protected multicloud wrapper owns serialization
+        required: false
+        default: false
+        type: boolean
+      clean_d1_cutover_run_id:
+        description: Successful clean-D1 apply run required only while the maintenance fence is active
+        required: false
+        default: ""
+        type: string
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
+        required: true
+      STARGATE_DEPLOY_SSH_PRIVATE_KEY:
+        required: true
+      STARGATE_DEPLOY_KNOWN_HOSTS:
+        required: true
+      STARGATE_EGRESS_IPV4_CIDRS:
+        required: true
+      INTAR_IMAGE_PUBLISH_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       confirmation:
@@ -12,18 +53,24 @@ on:
         description: Type SINGLE OPERATOR WORKSHOP CONTROL PLANE only when no independent reviewer exists
         required: false
         type: string
+      clean_d1_cutover_run_id:
+        description: Successful clean-D1 apply run required only for the first clean-D1 web switch
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: website-production
+  group: ${{ inputs.parent_holds_control_plane_lock && format('website-reusable-{0}', github.run_id) || 'intar-control-plane-production' }}
   cancel-in-progress: false
+  queue: max
 
 defaults:
   run:
-    working-directory: website
+    working-directory: apps/web
 
 jobs:
   preflight:
@@ -41,6 +88,9 @@ jobs:
       RUN_ATTEMPT: ${{ github.run_attempt }}
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
+      PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
+      CLEAN_D1_CUTOVER_RUN_ID: ${{ inputs.clean_d1_cutover_run_id || '' }}
+      PARENT_HOLDS_CONTROL_PLANE_LOCK: ${{ inputs.parent_holds_control_plane_lock || false }}
 
     steps:
       - name: Checkout
@@ -52,12 +102,27 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_call|workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
           test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
           test "${RUN_ATTEMPT}" = 1
+          if [ -n "${CLEAN_D1_CUTOVER_RUN_ID}" ]; then
+            [[ "${CLEAN_D1_CUTOVER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          fi
+          case "${PROVENANCE_WORKFLOW_PATH}" in
+            .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
+            *) exit 1 ;;
+          esac
+          if [ "${PARENT_HOLDS_CONTROL_PLANE_LOCK}" = true ]; then
+            test "${PROVENANCE_WORKFLOW_PATH}" = ".github/workflows/control-plane-rollout.yml"
+          else
+            test "${PROVENANCE_WORKFLOW_PATH}" = ".github/workflows/website-deploy.yml"
+          fi
 
           environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
           case "${APPROVAL_MODE}" in
@@ -139,10 +204,15 @@ jobs:
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID }}
+          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
+          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
         run: |
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
+          [[ "${CLEAN_D1_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          test "${CLEAN_D1_DATABASE_ID}" != "00000000-0000-0000-0000-000000000003"
+          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260801"
           node - <<'NODE'
           const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
             .split(",").map((value) => value.trim()).filter(Boolean);
@@ -186,19 +256,55 @@ jobs:
           }
           NODE
 
-  provider:
-    name: Deploy provider prerequisite
+  provider-capabilities:
+    name: Validate provider capability contract
     needs: preflight
-    uses: ./.github/workflows/hcloud-provider.yml
-    with:
-      deploy: true
-      confirmation: ${{ inputs.confirmation }}
-      single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
-    secrets: inherit
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        working-directory: ${{ github.workspace }}
+        run: bun install --frozen-lockfile
+
+      - name: Reject service-binding or capability drift
+        working-directory: ${{ github.workspace }}
+        run: bun run check:providers
+
+      - name: Call both deployed services through a temporary remote binding
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+        run: >-
+          bun tools/providers/probe-live-capabilities.ts
+          "${RUNNER_TEMP}/provider-capabilities.json"
+
+      - name: Retain pre-web capability evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: pre-web-provider-capabilities-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/provider-capabilities.json
+          if-no-files-found: error
+          retention-days: 90
 
   deploy:
     name: Deploy production
-    needs: provider
+    needs: provider-capabilities
     runs-on: namespace-profile-intar-dev
     environment: production
     env:
@@ -212,6 +318,11 @@ jobs:
       RUN_ATTEMPT: ${{ github.run_attempt }}
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
+      PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
+      CLEAN_D1_CUTOVER_RUN_ID: ${{ inputs.clean_d1_cutover_run_id || '' }}
+      STARGATE_DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
+      STARGATE_DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
+      STARGATE_DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
 
     steps:
       - name: Checkout
@@ -251,7 +362,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version-file: website/.node-version
+          node-version-file: apps/web/.node-version
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -263,7 +374,8 @@ jobs:
         with:
           path: ~/.bun/install/cache
 
-      - name: Install dependencies
+      - name: Install root workspace dependencies
+        working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
       - name: Build pinned learner guest tools
@@ -305,7 +417,7 @@ jobs:
           jq -n \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg source_sha "${GITHUB_SHA}" \
-            --arg workflow_path ".github/workflows/website-deploy.yml" \
+            --arg workflow_path "${PROVENANCE_WORKFLOW_PATH}" \
             --arg workflow_run_id "${GITHUB_RUN_ID}" \
             --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg event "${GITHUB_EVENT_NAME}" \
@@ -353,19 +465,40 @@ jobs:
       - name: Pin protected runtime signing keys in deployment artifact
         env:
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
+          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
+          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
         run: |
           config="dist/server/wrangler.json"
           patched="${RUNNER_TEMP}/website-wrangler.json"
-          jq --arg keys "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}" \
-            '.vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys' \
+          jq \
+            --arg keys "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}" \
+            --arg database_id "${CLEAN_D1_DATABASE_ID}" \
+            --arg database_name "${CLEAN_D1_DATABASE_NAME}" '
+              .vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys |
+              ([.d1_databases[] | select(.binding == "DB")] | length) as $db_count |
+              if $db_count != 1 then error("expected exactly one DB binding") else . end |
+              (.d1_databases[] | select(.binding == "DB")).database_id = $database_id |
+              (.d1_databases[] | select(.binding == "DB")).database_name = $database_name
+            ' \
             "${config}" > "${patched}"
           mv "${patched}" "${config}"
+          jq -e \
+            --arg database_id "${CLEAN_D1_DATABASE_ID}" \
+            --arg database_name "${CLEAN_D1_DATABASE_NAME}" '
+              any(.d1_databases[];
+                .binding == "DB" and
+                .database_id == $database_id and
+                .database_name == $database_name)
+            ' "${config}" >/dev/null
 
       - name: Recheck sole-operator window immediately before mutation
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_call|workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
           test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
@@ -479,11 +612,183 @@ jobs:
             --jurisdiction eu \
             --remote
 
-      - name: Apply D1 migrations
+      - name: Verify the clean D1 baseline is already active
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: bun run db:migrate:production
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/clean-d1-verification.json"
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "SELECT COUNT(*) AS required_tables FROM sqlite_master WHERE type = 'table' AND name IN ('runtime_provider_allocations', 'runtime_provider_resources', 'provider_price_observations', 'workshop_session_cost_forecasts')" \
+            --json > "${result}"
+          jq -e \
+            'length == 1 and .[0].success == true and .[0].results[0].required_tables == 4' \
+            "${result}" >/dev/null
+
+      - name: Configure the pinned, restricted Stargate drain probe
+        if: ${{ inputs.clean_d1_cutover_run_id != '' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          STARGATE_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
+          STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          config="$(tools/cutover/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-stargate-ssh")"
+          test "${config}" = "${RUNNER_TEMP}/intar-stargate-ssh/config"
+          printf 'STARGATE_SSH_CONFIG=%s\n' "${config}" >> "${GITHUB_ENV}"
+
+      - name: Reprove the fenced legacy drain immediately before the first binding switch
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
+          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
+        run: |
+          set -euo pipefail
+          deployment="${RUNNER_TEMP}/pre-switch-deployment.json"
+          version="${RUNNER_TEMP}/pre-switch-version.json"
+          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          active_version_id="$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "${deployment}")"
+          bunx wrangler versions view "${active_version_id}" \
+            --name intar-dev --json > "${version}"
+          active_database_id="$(jq -er '
+            [.resources.bindings[] | select(.type == "d1" and .name == "DB")] |
+            select(length == 1) | .[0].id
+          ' "${version}")"
+
+          if [ "${active_database_id}" = "${CLEAN_D1_DATABASE_ID}" ]; then
+            bun tools/cutover/worker-version.ts active-binding \
+              "${deployment}" "${version}" "${CLEAN_D1_DATABASE_ID}" \
+              "${active_version_id}" >/dev/null
+            jq -n \
+              --arg source_sha "${GITHUB_SHA}" \
+              --arg version_id "${active_version_id}" \
+              --arg database_id "${CLEAN_D1_DATABASE_ID}" \
+              '{schema_version: 1, operation: "pre-web-switch", mode: "already-clean", source_sha: $source_sha, version_id: $version_id, database_id: $database_id}' \
+              > "${RUNNER_TEMP}/clean-d1-pre-web-switch.json"
+            exit 0
+          fi
+
+          [[ "${CLEAN_D1_CUTOVER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test -f "${STARGATE_SSH_CONFIG}"
+          apply_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CLEAN_D1_CUTOVER_RUN_ID}")"
+          workflow_id="$(jq -er '.workflow_id' <<<"${apply_run}")"
+          workflow="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}")"
+          jq -e '
+            .path == ".github/workflows/clean-d1-cutover.yml" and
+            .state == "active"
+          ' <<<"${workflow}" >/dev/null
+          jq -e \
+            --argjson run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg actor_id "${ACTOR_ID}" '
+              .id == $run_id and
+              .repository.full_name == "intar-dev/intar-dev" and
+              .event == "workflow_dispatch" and
+              .head_branch == "main" and
+              .head_sha == $sha and
+              .run_attempt == 1 and
+              .status == "completed" and
+              .conclusion == "success" and
+              ((.actor.id | tostring) == $actor_id) and
+              ((.triggering_actor.id | tostring) == $actor_id)
+            ' <<<"${apply_run}" >/dev/null
+
+          artifact_name="clean-d1-apply-${GITHUB_SHA}-${CLEAN_D1_CUTOVER_RUN_ID}"
+          artifacts="$(gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CLEAN_D1_CUTOVER_RUN_ID}/artifacts" \
+            -f name="${artifact_name}" -f per_page=100)"
+          jq -e --arg name "${artifact_name}" '
+            .total_count == 1 and
+            (.artifacts | length) == 1 and
+            .artifacts[0].name == $name and
+            .artifacts[0].expired == false and
+            (.artifacts[0].digest | test("^sha256:[0-9a-f]{64}$"))
+          ' <<<"${artifacts}" >/dev/null
+          evidence_dir="${RUNNER_TEMP}/clean-d1-cutover-evidence"
+          mkdir -p "${evidence_dir}"
+          gh run download "${CLEAN_D1_CUTOVER_RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${artifact_name}" \
+            --dir "${evidence_dir}"
+          evidence="${evidence_dir}/clean-d1-apply.json"
+          test -f "${evidence}"
+          jq -e \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
+            --arg clean_database_name "${CLEAN_D1_DATABASE_NAME}" \
+            --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
+            --arg active_version_id "${active_version_id}" '
+              .schema_version == 3 and
+              .operation == "apply" and
+              .source_sha == $source_sha and
+              .apply_run_id == $run_id and
+              .apply_run_attempt == 1 and
+              .database_name == $clean_database_name and
+              .database_id == $clean_database_id and
+              .previous_database_id != $clean_database_id and
+              .maintenance_web_version_id == $active_version_id and
+              .maintenance_fence.state == "active" and
+              .maintenance_fence.database_id == .previous_database_id and
+              .maintenance_fence.maintenance_version_id == $active_version_id and
+              .maintenance_fence.previous_version_binding_proven == true and
+              .maintenance_fence.maintenance_version_binding_proven == true and
+              .legacy_drain.schema_version == 3 and
+              .legacy_drain.stargate_probe_succeeded == true and
+              .legacy_drain.drained == true and
+              .legacy_drain.provider_inventory.provenEmpty == true and
+              .legacy_drain.stargate.healthy == true and
+              .legacy_drain.stargate.drained == true
+            ' "${evidence}" >/dev/null
+          previous_database_name="$(jq -r '.previous_database_name' "${evidence}")"
+          previous_database_id="$(jq -r '.previous_database_id' "${evidence}")"
+          bun tools/cutover/worker-version.ts active-binding \
+            "${deployment}" "${version}" "${previous_database_id}" \
+            "${active_version_id}" >/dev/null
+
+          marker="${RUNNER_TEMP}/pre-switch-fence-marker.json"
+          headers="${RUNNER_TEMP}/pre-switch-fence-headers.txt"
+          curl --fail-with-body --silent --show-error \
+            --header 'Cache-Control: no-cache' \
+            --dump-header "${headers}" \
+            --output "${marker}" \
+            https://intar.dev/.well-known/intar-clean-d1-cutover-fence
+          grep -qi '^x-intar-cutover-fence: active' "${headers}"
+          grep -qi '^cache-control: private, no-store' "${headers}"
+          jq -e \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg database_id "${previous_database_id}" \
+            --arg previous_version_id "$(jq -r '.previous_web_version_id' "${evidence}")" '
+              .schemaVersion == 1 and
+              .state == "active" and
+              .sourceSha == $source_sha and
+              .databaseId == $database_id and
+              .previousVersionId == $previous_version_id
+            ' "${marker}" >/dev/null
+          test "$(sha256sum "${marker}" | cut -d ' ' -f 1)" = \
+            "$(jq -r '.maintenance_fence.marker_sha256' "${evidence}")"
+
+          for pass in 1 2; do
+            tools/cutover/prove-legacy-drain.sh \
+              "${previous_database_name}" \
+              "${previous_database_id}" \
+              "pre-switch-${pass}" \
+              "${RUNNER_TEMP}/clean-d1-pre-switch-drain-${pass}.json"
+            if [ "${pass}" = 1 ]; then sleep 5; fi
+          done
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg version_id "${active_version_id}" \
+            --arg previous_database_id "${previous_database_id}" \
+            --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
+            --slurpfile drain "${RUNNER_TEMP}/clean-d1-pre-switch-drain-2.json" \
+            '{schema_version: 1, operation: "pre-web-switch", mode: "fenced-cutover", source_sha: $source_sha, maintenance_version_id: $version_id, previous_database_id: $previous_database_id, clean_database_id: $clean_database_id, final_drain: $drain[0]}' \
+            > "${RUNNER_TEMP}/clean-d1-pre-web-switch.json"
 
       - name: Deploy
         env:
@@ -491,6 +796,10 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
         run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
           trap 'rm -f "${secrets_file}"' EXIT
           jq -n '{STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS}' \
@@ -498,6 +807,64 @@ jobs:
           chmod 600 "${secrets_file}"
           bunx wrangler deploy --config dist/server/wrangler.json \
             --secrets-file "${secrets_file}"
+
+      - name: Verify the deployed web uses the exact clean D1 binding
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
+        run: |
+          set -euo pipefail
+          deployment="${RUNNER_TEMP}/post-switch-deployment.json"
+          version="${RUNNER_TEMP}/post-switch-version.json"
+          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          active_version_id="$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "${deployment}")"
+          bunx wrangler versions view "${active_version_id}" \
+            --name intar-dev --json > "${version}"
+          bun tools/cutover/worker-version.ts active-binding \
+            "${deployment}" "${version}" "${CLEAN_D1_DATABASE_ID}" \
+            "${active_version_id}" >/dev/null
+          fence_headers="${RUNNER_TEMP}/post-switch-fence-headers.txt"
+          curl --silent --show-error --output /dev/null \
+            --dump-header "${fence_headers}" \
+            https://intar.dev/.well-known/intar-clean-d1-cutover-fence
+          ! grep -qi '^x-intar-cutover-fence: active' "${fence_headers}"
+          jq \
+            --arg deployed_version_id "${active_version_id}" \
+            --arg database_id "${CLEAN_D1_DATABASE_ID}" '
+              .deployed_version_id = $deployed_version_id |
+              .deployed_database_id = $database_id |
+              .maintenance_fence_replaced = true
+            ' "${RUNNER_TEMP}/clean-d1-pre-web-switch.json" \
+            > "${RUNNER_TEMP}/clean-d1-web-switch.json"
+
+      - name: Retain clean-D1 web-switch evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-d1-web-switch-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clean-d1-pre-web-switch.json
+            ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
+            ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
+            ${{ runner.temp }}/clean-d1-web-switch.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Queue the exact scenario source bundle
+        working-directory: ${{ github.workspace }}
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          revision="${GITHUB_SHA:0:12}"
+          just bundle-images \
+            broken-nginx \
+            builder.sample.amd64.hcl \
+            "${revision}" \
+            false \
+            "https://intar.dev/registry/v1/bundles"
 
       - name: Recheck production guest tools before retention
         env:

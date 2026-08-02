@@ -9,7 +9,7 @@ mod validate;
 pub use bundle::*;
 pub use error::WorkshopManifestError;
 pub use model::*;
-pub use provider::{HetznerServerTypeResolver, resolve_workspace_provider};
+pub use provider::{RuntimeProfileResolver, resolve_runtime_profiles};
 pub use validate::load_and_validate;
 
 #[cfg(test)]

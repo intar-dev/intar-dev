@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    ".astro/types.d.ts",
+    "src/db/clean-schema.ts",
+    "src/db/schema/multicloud.ts",
+    "src/lib/workshops/runtime-provider.ts"
+  ],
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@intar/provider-worker-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./crypto": "./src/crypto.ts",
+    "./errors": "./src/errors.ts",
+    "./ids": "./src/ids.ts",
+    "./serialization": "./src/serialization.ts"
+  },
+  "dependencies": {
+    "@intar/provider-contracts": "workspace:*"
+  }
+}

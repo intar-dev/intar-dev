@@ -1,5 +1,0 @@
-This is the payoff slide the whole story has been building to — say what the outcome actually IS, in Bruktby's terms, because "you built a cloud" is abstract until it's someone's real product.
-
-Walk the two columns as a before/after: v1 wasn't wrong — it got them to market — but the three forces from the opening (price, jurisdiction, roadmap) each took a decision out of their hands. Today the identical product runs on infrastructure they control: the listings Postgres is CloudNativePG, the photos live in RustFS buckets on disks they own, the thumbnailer is a Knative service that costs nothing between uploads, and the whole thing was delivered by git and is traceable end to end. Data residency is now a fact they can prove to that B2B partner, not a region setting they hope is good enough.
-
-The sentence to land: "The complete outcome of today isn't 'you learned Kubernetes.' It's that a real product can run — same features, same UX — on a cloud its team owns, and you just did the migration end to end." Then the sovereignty line one more time, and hand to take-home.

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       production_run_id:
-        description: Successful first-attempt Website production run from this exact main SHA
+        description: Successful first-attempt protected web or multicloud run from this exact main SHA
         required: true
         type: string
       confirmation:
@@ -133,7 +133,10 @@ jobs:
               .head_branch == "main" and
               .head_sha == $sha and
               .run_attempt == 1 and
-              .path == ".github/workflows/website-deploy.yml"
+              (
+                .path == ".github/workflows/website-deploy.yml" or
+                .path == ".github/workflows/control-plane-rollout.yml"
+              )
             ' <<<"${run_json}" >/dev/null
 
           artifact_name="production-workshop-clean-base-${GITHUB_SHA}"
@@ -203,7 +206,7 @@ jobs:
           }
           EOF_CONFIG
           sudo target/release/intar-image-cli build-base \
-            --base-images "${GITHUB_WORKSPACE}/base-images.hcl" \
+            --base-images "${GITHUB_WORKSPACE}/content/scenarios/base-images.hcl" \
             --base trixie \
             --config "${config}" \
             --output "${output}" \

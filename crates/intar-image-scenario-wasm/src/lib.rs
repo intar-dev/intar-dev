@@ -1,7 +1,7 @@
 //! wasm-bindgen shim over `intar-image-scenario` for the in-app authoring
 //! validator. Mirrors `intar-image-cli validate` exactly: same scenario
 //! validation, same base-image catalog (embedded at compile time from the
-//! repo's base-images.hcl), same per-VM kino-config derivation, and the same
+//! repo's content/scenarios/base-images.hcl), same per-VM kino-config derivation, and the same
 //! content hash as the fs build pipeline (via the shared in-memory core).
 
 use std::collections::BTreeMap;
@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 /// The same catalog `intar-image-cli validate` loads from the repo root.
-const BASE_IMAGES_HCL: &str = include_str!("../../../base-images.hcl");
+const BASE_IMAGES_HCL: &str = include_str!("../../../content/scenarios/base-images.hcl");
 /// The same tool pins the CI bundle upload uses (kino version).
-const BUILD_TOOLS_HCL: &str = include_str!("../../../build-tools.hcl");
+const BUILD_TOOLS_HCL: &str = include_str!("../../../content/scenarios/build-tools.hcl");
 
 /// Matches builder.sample.amd64.hcl / the CI bundle upload.
 const TARGET_ARCH: &str = "amd64";
@@ -266,7 +266,7 @@ mod tests {
         // Every repo scenario is a single scenario.hcl, so these hashes must
         // equal `intar-image-cli hash --config builder.sample.amd64.hcl`.
         let scenarios_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/scenarios");
         let mut checked = 0;
         for entry in scenarios_dir.read_dir().unwrap().filter_map(Result::ok) {
             let path = entry.path().join("scenario.hcl");
@@ -294,7 +294,7 @@ mod tests {
     fn validates_a_repo_scenario() {
         let hcl = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../scenarios")
+                .join("../../content/scenarios")
                 .read_dir()
                 .unwrap()
                 .filter_map(Result::ok)

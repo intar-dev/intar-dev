@@ -9,12 +9,13 @@ use flate2::read::GzDecoder;
 use intar_image_build::{ScenarioContentHashInput, scenario_content_hash};
 
 use super::{
-    BASE_IMAGES_PATH, BUILD_TOOLS_PATH, BundleSourceFile, BundleUploadReceipt, Cli, Command,
-    PreparedBundleScenario, TAR_BLOCK_SIZE, bundle_tar_size_bytes, bundle_url_from_publish_url,
-    collect_bundle_source_files, contract_image_arch_slug, course_manifest_is_present,
-    course_manifest_path, discover_course_scenarios, discover_legacy_scenarios,
-    kino_version_from_package_id, load_bundle_course_catalog, parse_bundle_course_catalog,
-    parse_bundle_upload_response, validate_bundle_rev, validate_scenario_arg, write_bundle_archive,
+    BUNDLE_BASE_IMAGES_PATH, BUNDLE_BUILD_TOOLS_PATH, BundleSourceFile, BundleUploadReceipt, Cli,
+    Command, PreparedBundleScenario, TAR_BLOCK_SIZE, bundle_tar_size_bytes,
+    bundle_url_from_publish_url, collect_bundle_source_files, contract_image_arch_slug,
+    course_manifest_is_present, course_manifest_path, discover_course_scenarios,
+    discover_legacy_scenarios, kino_version_from_package_id, load_bundle_course_catalog,
+    parse_bundle_course_catalog, parse_bundle_upload_response, validate_bundle_rev,
+    validate_scenario_arg, write_bundle_archive,
 };
 
 fn write_scenario(scenario_dir: &std::path::Path, scenario_id: &str) {
@@ -339,8 +340,8 @@ fn flattens_nested_course_paths_with_explicit_catalog_and_tool_sources() {
             .map(|file| file.archive_path.as_str())
             .collect::<Vec<_>>(),
         [
-            BASE_IMAGES_PATH,
-            BUILD_TOOLS_PATH,
+            BUNDLE_BASE_IMAGES_PATH,
+            BUNDLE_BUILD_TOOLS_PATH,
             "scenarios/demo/assets/setup.sh",
             "scenarios/demo/scenario.hcl",
         ]

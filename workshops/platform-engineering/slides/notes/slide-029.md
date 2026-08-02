@@ -1,1 +1,0 @@
-The first real module, and the biggest identity shift of the day: every cloud provider runs an operating system under your Kubernetes that you never get to see. For the next 35 minutes, attendees take ownership of that layer.

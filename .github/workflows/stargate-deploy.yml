@@ -85,10 +85,11 @@ jobs:
 
       - name: Validate host deployment scripts
         run: |
-          test -x ops/stargate/intar-deploy-stargate
-          test -x ops/stargate/bootstrap-deploy-user
-          bash -n ops/stargate/intar-deploy-stargate
-          bash -n ops/stargate/bootstrap-deploy-user
+          test -x deploy/stargate/scripts/intar-deploy-stargate
+          test -x deploy/stargate/scripts/bootstrap-deploy-user
+          bash -n deploy/stargate/scripts/intar-deploy-stargate
+          bash -n deploy/stargate/scripts/bootstrap-deploy-user
+          bash -n tools/cutover/configure-stargate-ssh.sh
 
   deploy:
     name: ${{ inputs.operation }} production Stargate
@@ -214,46 +215,15 @@ jobs:
       - name: Configure pinned SSH identity
         id: ssh
         env:
-          DEPLOY_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
+          STARGATE_DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
+          STARGATE_DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
+          STARGATE_DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
+          STARGATE_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
+          STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          test -n "${DEPLOY_PRIVATE_KEY}"
-          test -n "${DEPLOY_KNOWN_HOSTS}"
-          install -d -m 0700 "${RUNNER_TEMP}/intar-ssh"
-          install -m 0600 /dev/null "${RUNNER_TEMP}/intar-ssh/id_ed25519"
-          install -m 0600 /dev/null "${RUNNER_TEMP}/intar-ssh/known_hosts"
-          printf '%s\n' "${DEPLOY_PRIVATE_KEY}" >"${RUNNER_TEMP}/intar-ssh/id_ed25519"
-          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" >"${RUNNER_TEMP}/intar-ssh/known_hosts"
-          public_key="$(ssh-keygen -y -P '' -f "${RUNNER_TEMP}/intar-ssh/id_ed25519")"
-          [[ "${public_key}" = ssh-ed25519\ * ]]
-          test "$(grep -cve '^[[:space:]]*$' "${RUNNER_TEMP}/intar-ssh/known_hosts")" -eq 1
-          awk '
-            $1 == "[intar.app]:2222" &&
-            $2 == "ssh-ed25519" &&
-            $3 ~ /^[A-Za-z0-9+\/=]+$/ { matches += 1 }
-            END { exit(matches == 1 ? 0 : 1) }
-          ' "${RUNNER_TEMP}/intar-ssh/known_hosts"
-
-          cat >"${RUNNER_TEMP}/intar-ssh/config" <<EOF_SSH
-          Host intar-stargate-production
-            HostName ${DEPLOY_HOST}
-            Port ${DEPLOY_PORT}
-            User ${DEPLOY_USER}
-            IdentityFile ${RUNNER_TEMP}/intar-ssh/id_ed25519
-            UserKnownHostsFile ${RUNNER_TEMP}/intar-ssh/known_hosts
-            BatchMode yes
-            IdentitiesOnly yes
-            StrictHostKeyChecking yes
-            HostKeyAlgorithms ssh-ed25519
-            PubkeyAcceptedAlgorithms ssh-ed25519
-            ConnectTimeout 10
-            ServerAliveInterval 15
-            ServerAliveCountMax 3
-            ClearAllForwardings yes
-            RequestTTY no
-          EOF_SSH
-          chmod 0600 "${RUNNER_TEMP}/intar-ssh/config"
+          config="$(tools/cutover/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-ssh")"
+          test "${config}" = "${RUNNER_TEMP}/intar-ssh/config"
 
       - name: Read host deployment plan
         run: |

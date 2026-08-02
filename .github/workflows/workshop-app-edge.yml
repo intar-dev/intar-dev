@@ -8,7 +8,7 @@ on:
       - "ops/cloudflare/workshop-app-routing.json"
       - "ops/cloudflare/workshop-app-routing.mjs"
       - "ops/cloudflare/workshop-app-routing.test.mjs"
-      - "docs/workshops-rollout.md"
+      - "docs/operations/workshops-rollout.md"
   workflow_dispatch:
     inputs:
       operation:

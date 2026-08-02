@@ -1,1 +1,0 @@
-# How today works

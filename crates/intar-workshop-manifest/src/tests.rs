@@ -64,27 +64,64 @@ fn assert_lab_invalid(markdown: &str, needle: &str) -> Result<(), Box<dyn std::e
 }
 
 #[derive(Clone)]
-struct FakeHetznerResolver(std::result::Result<HetznerServerTypeObservation, &'static str>);
+struct FakeRuntimeProfileResolver {
+    hetzner: std::result::Result<RuntimeProfileObservation, &'static str>,
+    gcp: std::result::Result<RuntimeProfileObservation, &'static str>,
+}
 
-impl HetznerServerTypeResolver for FakeHetznerResolver {
+impl RuntimeProfileResolver for FakeRuntimeProfileResolver {
     type Error = &'static str;
 
-    fn resolve_server_type(
+    fn resolve_profile(
         &self,
-        _exact_name: &str,
-    ) -> std::result::Result<HetznerServerTypeObservation, Self::Error> {
-        self.0.clone()
+        request: RuntimeProfileResolutionRequest<'_>,
+    ) -> std::result::Result<RuntimeProfileObservation, Self::Error> {
+        match request.profile.provider {
+            RuntimeProviderKind::AgentKvm => Err("agent_kvm must not call the catalog resolver"),
+            RuntimeProviderKind::HetznerCloud => self.hetzner.clone(),
+            RuntimeProviderKind::GcpCompute => self.gcp.clone(),
+        }
     }
 }
 
-fn cx43_observation() -> HetznerServerTypeObservation {
-    HetznerServerTypeObservation {
-        name: "cx43".to_owned(),
-        architecture: ProviderArchitecture::X86,
+fn cpx42_observation() -> RuntimeProfileObservation {
+    RuntimeProfileObservation {
+        provider: RuntimeProviderKind::HetznerCloud,
+        machine_type: "cpx42".to_owned(),
+        resolved_system_image: "hetzner/image/123456/debian-13".to_owned(),
+        system_image_is_immutable: true,
+        architecture: ProviderArchitecture::X86_64,
         cores: 8,
         memory_mib: 16_384,
         disk_mib: 160 * 1_024,
         deprecated: false,
+        available_locations: vec!["nbg1".to_owned(), "fsn1".to_owned(), "hel1".to_owned()],
+    }
+}
+
+fn gcp_observation() -> RuntimeProfileObservation {
+    RuntimeProfileObservation {
+        provider: RuntimeProviderKind::GcpCompute,
+        machine_type: "e2-standard-4".to_owned(),
+        resolved_system_image: "projects/debian-cloud/global/images/debian-13-20260715".to_owned(),
+        system_image_is_immutable: true,
+        architecture: ProviderArchitecture::X86_64,
+        cores: 4,
+        memory_mib: 16_384,
+        disk_mib: 32 * 1_024,
+        deprecated: false,
+        available_locations: vec![
+            "europe-west3-a".to_owned(),
+            "europe-west3-b".to_owned(),
+            "europe-west3-c".to_owned(),
+        ],
+    }
+}
+
+fn resolver() -> FakeRuntimeProfileResolver {
+    FakeRuntimeProfileResolver {
+        hetzner: Ok(cpx42_observation()),
+        gcp: Ok(gcp_observation()),
     }
 }
 
@@ -100,13 +137,33 @@ fn reference_workshop_has_eleven_modules_and_a_derived_four_hour_agenda()
     assert_eq!(workshop.scheduled_duration_minutes, 240);
     assert_eq!(workshop.manifest.workshop.default_lobby_minutes, 30);
     assert_eq!(
-        workshop.manifest.workspace.provider,
-        Some(WorkspaceProvider::HetznerCloud {
-            vm_id: "workspace".to_owned(),
-            server_type: "cx43".to_owned(),
-            system_image: "debian-13".to_owned(),
-        })
+        workshop.manifest.workspace.runtime_profiles,
+        vec![
+            RuntimeProfile {
+                id: "hetzner-cpx42".to_owned(),
+                provider: RuntimeProviderKind::HetznerCloud,
+                vm_id: "workspace".to_owned(),
+                machine_type: Some("cpx42".to_owned()),
+                system_image: "debian-13".to_owned(),
+                root_disk_type: None,
+                locations: Vec::new(),
+            },
+            RuntimeProfile {
+                id: "gcp-e2-standard-4".to_owned(),
+                provider: RuntimeProviderKind::GcpCompute,
+                vm_id: "workspace".to_owned(),
+                machine_type: Some("e2-standard-4".to_owned()),
+                system_image: "projects/debian-cloud/global/images/family/debian-13".to_owned(),
+                root_disk_type: Some("pd-balanced".to_owned()),
+                locations: vec![
+                    "europe-west3-a".to_owned(),
+                    "europe-west3-b".to_owned(),
+                    "europe-west3-c".to_owned(),
+                ],
+            },
+        ]
     );
+    assert_eq!(workshop.manifest.workspace.vms[0].disk_mib, 32_768);
     assert!(
         workshop
             .source_files
@@ -128,9 +185,34 @@ fn reference_workshop_has_eleven_modules_and_a_derived_four_hour_agenda()
     Ok(())
 }
 
+#[test]
+fn rejects_format_v1_and_missing_runtime_profiles() -> Result<(), Box<dyn std::error::Error>> {
+    let v1 = editable_fixture()?;
+    replace_manifest(v1.path(), "format_version = 2", "format_version = 1")?;
+    assert_invalid(load_and_validate(v1.path()), "expected 2");
+
+    let missing = editable_fixture()?;
+    let path = missing.path().join("workshop.hcl");
+    let source = fs::read_to_string(&path)?;
+    let start = source
+        .find("  runtime_profile \"hetzner-cpx42\"")
+        .expect("fixture must contain the Hetzner runtime profile");
+    let end = source
+        .find("  application \"gitea\"")
+        .expect("fixture must contain the first workspace application");
+    let mut result = source.clone();
+    result.replace_range(start..end, "");
+    fs::write(path, result)?;
+    assert_invalid(
+        load_and_validate(missing.path()),
+        "at least one runtime_profile block",
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
-fn rejects_symlinks_in_hetzner_runtime_source() -> Result<(), Box<dyn std::error::Error>> {
+fn rejects_symlinks_in_direct_cloud_runtime_source() -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::symlink;
 
     let root = editable_fixture()?;
@@ -143,7 +225,7 @@ fn rejects_symlinks_in_hetzner_runtime_source() -> Result<(), Box<dyn std::error
 }
 
 #[test]
-fn rejects_mismatched_hetzner_runtime_image_locks() -> Result<(), Box<dyn std::error::Error>> {
+fn rejects_mismatched_direct_cloud_runtime_image_locks() -> Result<(), Box<dyn std::error::Error>> {
     let root = editable_fixture()?;
     fs::write(
         root.path().join("runtime/source/scripts/images.lock"),
@@ -157,30 +239,30 @@ fn rejects_mismatched_hetzner_runtime_image_locks() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn validates_hetzner_provider_authoring_contract() -> Result<(), Box<dyn std::error::Error>> {
+fn validates_runtime_profile_authoring_contract() -> Result<(), Box<dyn std::error::Error>> {
     let missing = editable_fixture()?;
-    replace_manifest(missing.path(), "    server_type  = \"cx43\"\n", "")?;
+    replace_manifest(missing.path(), "    machine_type  = \"cpx42\"\n", "")?;
     assert_invalid(
         load_and_validate(missing.path()),
-        "missing required attribute 'server_type'",
+        "missing required attribute 'machine_type'",
     );
 
     let duplicate = editable_fixture()?;
     replace_manifest(
         duplicate.path(),
         "  application \"gitea\" {",
-        "  provider \"hetzner_cloud\" {\n    vm_id = \"workspace\"\n    server_type = \"cx43\"\n    system_image = \"debian-13\"\n  }\n\n  application \"gitea\" {",
+        "  runtime_profile \"hetzner-cpx42\" {\n    provider = \"hetzner_cloud\"\n    vm_id = \"workspace\"\n    machine_type = \"cpx42\"\n    system_image = \"debian-13\"\n  }\n\n  application \"gitea\" {",
     )?;
     assert_invalid(
         load_and_validate(duplicate.path()),
-        "only one workspace provider block is supported",
+        "duplicate workspace runtime profile 'hetzner-cpx42'",
     );
 
     let bad_reference = editable_fixture()?;
     replace_manifest(
         bad_reference.path(),
-        "    vm_id        = \"workspace\"",
-        "    vm_id        = \"missing\"",
+        "    vm_id         = \"workspace\"",
+        "    vm_id         = \"missing\"",
     )?;
     assert_invalid(
         load_and_validate(bad_reference.path()),
@@ -190,8 +272,8 @@ fn validates_hetzner_provider_authoring_contract() -> Result<(), Box<dyn std::er
     let multiple_vms = editable_fixture()?;
     replace_manifest(
         multiple_vms.path(),
-        "  provider \"hetzner_cloud\" {",
-        "  vm \"second\" {\n    image = \"debian13\"\n    vcpu_millis = 1000\n    memory_mib = 1024\n    disk_gib = 10\n  }\n\n  provider \"hetzner_cloud\" {",
+        "  runtime_profile \"hetzner-cpx42\" {",
+        "  vm \"second\" {\n    cpu_millis = 1000\n    memory_mib = 1024\n    disk_mib = 10240\n  }\n\n  runtime_profile \"hetzner-cpx42\" {",
     )?;
     assert_invalid(
         load_and_validate(multiple_vms.path()),
@@ -201,40 +283,64 @@ fn validates_hetzner_provider_authoring_contract() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn omitted_provider_retains_agent_kvm_without_catalog_resolution()
+fn explicit_agent_kvm_profile_resolves_without_catalog_access()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = editable_fixture()?;
-    replace_manifest(
-        root.path(),
-        "  provider \"hetzner_cloud\" {\n    vm_id        = \"workspace\"\n    server_type  = \"cx43\"\n    system_image = \"debian-13\"\n  }\n\n",
-        "",
-    )?;
-    let workshop = load_and_validate(root.path())?;
-    assert_eq!(workshop.manifest.workspace.provider, None);
-    assert_eq!(
-        resolve_workspace_provider(&workshop, &FakeHetznerResolver(Err("must not be called")))?,
-        ResolvedWorkspaceProvider::AgentKvm
+    let path = root.path().join("workshop.hcl");
+    let source = fs::read_to_string(&path)?;
+    let start = source
+        .find("  runtime_profile \"hetzner-cpx42\"")
+        .expect("fixture must contain the Hetzner runtime profile");
+    let end = source
+        .find("  application \"gitea\"")
+        .expect("fixture must contain the first workspace application");
+    let mut result = source.clone();
+    result.replace_range(
+        start..end,
+        "  runtime_profile \"agent-kvm\" {\n    provider = \"agent_kvm\"\n    vm_id = \"workspace\"\n    system_image = \"platform-workshop-debian13\"\n  }\n\n",
     );
+    fs::write(path, result)?;
+    let workshop = load_and_validate(root.path())?;
+    let profiles = resolve_runtime_profiles(
+        &workshop,
+        &FakeRuntimeProfileResolver {
+            hetzner: Err("must not be called"),
+            gcp: Err("must not be called"),
+        },
+    )?;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].provider, RuntimeProviderKind::AgentKvm);
+    assert_eq!(profiles[0].hardware.disk_mib, 32_768);
     Ok(())
 }
 
 #[test]
-fn rejects_noncanonical_hetzner_provider_names() -> Result<(), Box<dyn std::error::Error>> {
+fn rejects_noncanonical_provider_profile_values() -> Result<(), Box<dyn std::error::Error>> {
     for (source, replacement, needle) in [
         (
-            "    server_type  = \"cx43\"",
-            "    server_type  = \"CX43\"",
+            "    machine_type  = \"cpx42\"",
+            "    machine_type  = \"CPX42\"",
             "must start with a lowercase",
         ),
         (
-            "    server_type  = \"cx43\"",
-            "    server_type  = \"cx43-\"",
-            "must end with a lowercase",
+            "    system_image  = \"debian-13\"",
+            "    system_image  = \"debian_13\"",
+            "may contain only lowercase",
         ),
         (
-            "    system_image = \"debian-13\"",
-            "    system_image = \"debian_13\"",
-            "may contain only lowercase",
+            "    root_disk_type = \"pd-balanced\"",
+            "    root_disk_type = \"PD-BALANCED\"",
+            "must start with a lowercase",
+        ),
+        (
+            "    root_disk_type = \"pd-balanced\"",
+            "    root_disk_type = \"pd-ssd\"",
+            "must be 'pd-balanced'",
+        ),
+        (
+            "projects/debian-cloud/global/images/family/debian-13",
+            "debian-13",
+            "must start with 'projects/<project>/global/images/'",
         ),
     ] {
         let root = editable_fixture()?;
@@ -245,71 +351,100 @@ fn rejects_noncanonical_hetzner_provider_names() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn resolves_and_serializes_immutable_hetzner_hardware() -> Result<(), Box<dyn std::error::Error>> {
+fn resolves_and_serializes_immutable_multi_cloud_profiles() -> Result<(), Box<dyn std::error::Error>>
+{
     let workshop = load_and_validate(fixture())?;
-    let resolved =
-        resolve_workspace_provider(&workshop, &FakeHetznerResolver(Ok(cx43_observation())))?;
+    let resolved = resolve_runtime_profiles(&workshop, &resolver())?;
+    assert_eq!(resolved.len(), 2);
     assert_eq!(
-        serde_json::to_value(resolved)?,
-        serde_json::json!({
-            "kind": "hetzner_cloud",
-            "vmId": "workspace",
-            "serverType": "cx43",
-            "systemImage": "debian-13",
-            "hardware": {
-                "architecture": "x86",
-                "cores": 8,
-                "memoryMib": 16384,
-                "diskMib": 163840
+        serde_json::to_value(&resolved)?,
+        serde_json::json!([
+            {
+                "id": "hetzner-cpx42",
+                "provider": "hetzner_cloud",
+                "vmId": "workspace",
+                "machineType": "cpx42",
+                "requestedSystemImage": "debian-13",
+                "immutableSystemImage": "hetzner/image/123456/debian-13",
+                "locations": ["nbg1", "fsn1", "hel1"],
+                "hardware": {
+                    "architecture": "x86_64",
+                    "cpuMillis": 8000,
+                    "providerCpuCount": 8,
+                    "memoryMib": 16384,
+                    "diskMib": 163840
+                }
             },
-            "compatible": true
-        })
+            {
+                "id": "gcp-e2-standard-4",
+                "provider": "gcp_compute",
+                "vmId": "workspace",
+                "machineType": "e2-standard-4",
+                "requestedSystemImage": "projects/debian-cloud/global/images/family/debian-13",
+                "immutableSystemImage": "projects/debian-cloud/global/images/debian-13-20260715",
+                "rootDiskType": "pd-balanced",
+                "locations": ["europe-west3-a", "europe-west3-b", "europe-west3-c"],
+                "hardware": {
+                    "architecture": "x86_64",
+                    "cpuMillis": 4000,
+                    "providerCpuCount": 4,
+                    "memoryMib": 16384,
+                    "diskMib": 32768
+                }
+            }
+        ])
     );
     Ok(())
 }
 
 #[test]
-fn rejects_unresolvable_deprecated_arm_substituted_and_undersized_types()
+fn rejects_unresolvable_deprecated_arm_substituted_and_undersized_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
     let workshop = load_and_validate(fixture())?;
     let cases = [
         (
-            FakeHetznerResolver(Err("not found")),
-            "failed to resolve Hetzner server_type 'cx43': not found",
+            Err("not found"),
+            "failed to resolve hetzner_cloud runtime profile 'hetzner-cpx42': not found",
         ),
         (
-            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+            Ok(RuntimeProfileObservation {
                 deprecated: true,
-                ..cx43_observation()
-            })),
-            "is deprecated",
+                ..cpx42_observation()
+            }),
+            "machine_type 'cpx42' is deprecated",
         ),
         (
-            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
-                architecture: ProviderArchitecture::Arm,
-                ..cx43_observation()
-            })),
-            "must use x86 architecture",
+            Ok(RuntimeProfileObservation {
+                architecture: ProviderArchitecture::Arm64,
+                ..cpx42_observation()
+            }),
+            "must use x86_64 architecture",
         ),
         (
-            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
-                name: "cx53".to_owned(),
-                ..cx43_observation()
-            })),
-            "instead of exact requested type 'cx43'",
+            Ok(RuntimeProfileObservation {
+                machine_type: "cpx52".to_owned(),
+                ..cpx42_observation()
+            }),
+            "instead of exact requested type 'cpx42'",
         ),
         (
-            FakeHetznerResolver(Ok(HetznerServerTypeObservation {
+            Ok(RuntimeProfileObservation {
                 cores: 2,
                 memory_mib: 8_192,
-                disk_mib: 50 * 1_024,
-                ..cx43_observation()
-            })),
-            "is undersized: CPU 2000m < required 4000m, memory 8192 MiB < required 16384 MiB, disk 51200 MiB < required 65536 MiB",
+                disk_mib: 16 * 1_024,
+                ..cpx42_observation()
+            }),
+            "is undersized: CPU 2000m < required 4000m, memory 8192 MiB < required 16384 MiB, disk 16384 MiB < required 32768 MiB",
         ),
     ];
-    for (resolver, needle) in cases {
-        let result = resolve_workspace_provider(&workshop, &resolver);
+    for (hetzner, needle) in cases {
+        let result = resolve_runtime_profiles(
+            &workshop,
+            &FakeRuntimeProfileResolver {
+                hetzner,
+                gcp: Ok(gcp_observation()),
+            },
+        );
         let Err(error) = result else {
             panic!("expected provider resolution to fail with {needle:?}");
         };
@@ -317,6 +452,42 @@ fn rejects_unresolvable_deprecated_arm_substituted_and_undersized_types()
             error.to_string().contains(needle),
             "expected {error:?} to contain {needle:?}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_mutable_gcp_images_and_unavailable_locations() -> Result<(), Box<dyn std::error::Error>>
+{
+    let workshop = load_and_validate(fixture())?;
+    let cases = [
+        (
+            RuntimeProfileObservation {
+                system_image_is_immutable: false,
+                ..gcp_observation()
+            },
+            "did not resolve to an immutable identity",
+        ),
+        (
+            RuntimeProfileObservation {
+                available_locations: vec!["europe-west3-a".to_owned(), "europe-west3-b".to_owned()],
+                ..gcp_observation()
+            },
+            "unavailable in requested locations: europe-west3-c",
+        ),
+    ];
+    for (gcp, needle) in cases {
+        let result = resolve_runtime_profiles(
+            &workshop,
+            &FakeRuntimeProfileResolver {
+                hetzner: Ok(cpx42_observation()),
+                gcp: Ok(gcp),
+            },
+        );
+        let Err(error) = result else {
+            panic!("expected provider resolution to fail with {needle:?}");
+        };
+        assert!(error.to_string().contains(needle));
     }
     Ok(())
 }
@@ -701,58 +872,39 @@ fn rejects_invalid_resource_increments() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn accepts_legacy_workspace_resource_aliases() -> Result<(), Box<dyn std::error::Error>> {
-    let root = editable_fixture()?;
-    replace_manifest(root.path(), "cpu_millis  = 4000", "vcpu_millis = 4000")?;
-    replace_manifest(root.path(), "disk_mib     = 65536", "disk_gib     = 64")?;
-
-    let workshop = load_and_validate(root.path())?;
-    let workspace = workshop
-        .manifest
-        .workspace
-        .vms
-        .iter()
-        .find(|vm| vm.id == "workspace")
-        .expect("workspace VM");
-    assert_eq!(workspace.vcpu_millis, 4_000);
-    assert_eq!(workspace.disk_gib, 64);
-    Ok(())
-}
-
-#[test]
-fn rejects_duplicate_and_lossy_workspace_resource_aliases() -> Result<(), Box<dyn std::error::Error>>
-{
-    let duplicate_cpu = editable_fixture()?;
+fn rejects_v1_workspace_resource_aliases_and_lossy_disk_sizes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let legacy_cpu = editable_fixture()?;
     replace_manifest(
-        duplicate_cpu.path(),
+        legacy_cpu.path(),
         "cpu_millis  = 4000",
-        "cpu_millis  = 4000\n    vcpu_millis = 4000",
+        "vcpu_millis = 4000",
     )?;
     assert_invalid(
-        load_and_validate(duplicate_cpu.path()),
-        "must not declare both 'cpu_millis' and legacy 'vcpu_millis'",
+        load_and_validate(legacy_cpu.path()),
+        "does not support attribute 'vcpu_millis'",
     );
 
-    let duplicate_disk = editable_fixture()?;
+    let legacy_disk = editable_fixture()?;
     replace_manifest(
-        duplicate_disk.path(),
-        "disk_mib     = 65536",
-        "disk_mib     = 65536\n    disk_gib     = 64",
+        legacy_disk.path(),
+        "disk_mib     = 32768",
+        "disk_gib     = 32",
     )?;
     assert_invalid(
-        load_and_validate(duplicate_disk.path()),
-        "must not declare both 'disk_mib' and legacy 'disk_gib'",
+        load_and_validate(legacy_disk.path()),
+        "does not support attribute 'disk_gib'",
     );
 
     let lossy_disk = editable_fixture()?;
     replace_manifest(
         lossy_disk.path(),
-        "disk_mib     = 65536",
-        "disk_mib     = 65535",
+        "disk_mib     = 32768",
+        "disk_mib     = 32767",
     )?;
     assert_invalid(
         load_and_validate(lossy_disk.path()),
-        "'disk_mib' must be a whole number of GiB",
+        "in increments of 1024",
     );
     Ok(())
 }
@@ -796,18 +948,20 @@ fn bundles_are_byte_for_byte_deterministic() -> Result<(), Box<dyn std::error::E
     };
     let compiled: serde_json::Value = serde_json::from_slice(&compiled)?;
     assert_eq!(compiled["scheduled_duration_minutes"], 240);
+    assert_eq!(compiled["format_version"], 2);
     assert_eq!(
         compiled["manifest"]["workshop"]["default_lobby_minutes"],
         30
     );
     assert_eq!(
-        compiled["manifest"]["workspace"]["provider"],
-        serde_json::json!({
-            "kind": "hetzner_cloud",
-            "vm_id": "workspace",
-            "server_type": "cx43",
-            "system_image": "debian-13"
-        })
+        compiled["manifest"]["workspace"]["runtime_profiles"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        compiled["manifest"]["workspace"]["runtime_profiles"][1]["provider"],
+        "gcp_compute"
     );
     assert_eq!(
         compiled["manifest"]["modules"].as_array().map(Vec::len),

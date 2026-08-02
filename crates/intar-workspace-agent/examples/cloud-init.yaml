@@ -1,5 +1,5 @@
 #cloud-config
-# Rendered by Intar. This file intentionally contains no Hetzner credential.
+# Rendered by Intar. This file intentionally contains no cloud-provider credential.
 # Set-ID packages required by the harness must be installed before the
 # restricted workspace-agent service starts.
 packages:
@@ -25,7 +25,7 @@ write_files:
     permissions: "0600"
     content: |
       identity = { execution_id = "__EXECUTION_ID__", workspace_id = "__WORKSPACE_ID__", generation = __GENERATION__ }
-      control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+      control_plane_endpoint = "https://intar.dev/api/runtime/workspace-agent/"
       bootstrap_capability_path = "/run/intar-workspace-agent/bootstrap"
       state_path = "/var/lib/intar-workspace-agent/state.json"
       checkpoint_tmpfs_dir = "/run/intar-workspace-agent/checkpoints"

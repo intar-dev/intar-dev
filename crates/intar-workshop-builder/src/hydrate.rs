@@ -2,24 +2,39 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use intar_workshop_manifest::{
-    AgendaKind, ApplicationProtocol, ModuleTier, ReleaseMode, SlideLayout, ValidatedWorkshop,
+    AgendaKind, ApplicationProtocol, ModuleTier, ProviderArchitecture, ReleaseMode,
+    ResolvedRuntimeProfile, RuntimeProviderKind, SlideLayout, ValidatedWorkshop,
 };
 
 use crate::contracts::{
     CheckpointBuildResult, HydratedAgendaItem, HydratedAttribution, HydratedCheckpoint,
-    HydratedHint, HydratedModule, HydratedPresentation, HydratedSlide, HydratedVmImage,
-    HydratedWorkshop, HydratedWorkshopManifestV1, HydratedWorkspace, HydratedWorkspaceApplication,
-    HydratedWorkspaceVm,
+    HydratedGcpRootDiskType, HydratedHint, HydratedModule, HydratedPresentation,
+    HydratedRuntimeArchitecture, HydratedRuntimeHardware, HydratedRuntimeProfile, HydratedSlide,
+    HydratedVmImage, HydratedWorkshop, HydratedWorkshopManifestV2, HydratedWorkspace,
+    HydratedWorkspaceApplication, HydratedWorkspaceVm,
 };
 
 pub fn hydrate_workshop_manifest(
     source_root: &Path,
     source: &ValidatedWorkshop,
+    resolved_runtime_profiles: &[ResolvedRuntimeProfile],
     checkpoints: &[CheckpointBuildResult],
-) -> Result<HydratedWorkshopManifestV1> {
+) -> Result<HydratedWorkshopManifestV2> {
     let manifest = &source.manifest;
+    if resolved_runtime_profiles.len() != manifest.workspace.runtime_profiles.len()
+        || resolved_runtime_profiles
+            .iter()
+            .zip(&manifest.workspace.runtime_profiles)
+            .any(|(resolved, authored)| {
+                resolved.id != authored.id
+                    || resolved.provider != authored.provider
+                    || resolved.vm_id != authored.vm_id
+            })
+    {
+        bail!("resolved runtime profiles do not match the authored profile order and identity");
+    }
     let module_by_slide = manifest
         .agenda
         .iter()
@@ -124,18 +139,15 @@ pub fn hydrate_workshop_manifest(
             Ok(HydratedWorkspaceVm {
                 id: vm.id.clone(),
                 name: vm.id.clone(),
-                cpu_millis: vm.vcpu_millis,
+                cpu_millis: vm.cpu_millis,
                 memory_mib: vm.memory_mib,
-                disk_mib: vm
-                    .disk_gib
-                    .checked_mul(1_024)
-                    .context("workspace VM disk size exceeds u32 MiB")?,
+                disk_mib: vm.disk_mib,
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(HydratedWorkshopManifestV1 {
-        schema_version: 1,
+    Ok(HydratedWorkshopManifestV2 {
+        schema_version: 2,
         workshop: HydratedWorkshop {
             slug: manifest.workshop.id.clone(),
             title: manifest.workshop.title.clone(),
@@ -147,6 +159,10 @@ pub fn hydrate_workshop_manifest(
         workspace: HydratedWorkspace {
             lease_grace_minutes: manifest.workspace.lease_grace_minutes,
             vms: workspace_vms,
+            runtime_profiles: resolved_runtime_profiles
+                .iter()
+                .map(hydrate_runtime_profile)
+                .collect::<Result<Vec<_>>>()?,
             checkpoints: checkpoints
                 .iter()
                 .map(|checkpoint| HydratedCheckpoint {
@@ -180,6 +196,98 @@ pub fn hydrate_workshop_manifest(
         presentation: HydratedPresentation { slides },
         duration_minutes: source.scheduled_duration_minutes,
     })
+}
+
+fn hydrate_runtime_profile(profile: &ResolvedRuntimeProfile) -> Result<HydratedRuntimeProfile> {
+    if profile.hardware.architecture != ProviderArchitecture::X86_64 {
+        bail!(
+            "resolved runtime profile '{}' cannot publish unsupported architecture",
+            profile.id
+        );
+    }
+    let hardware = HydratedRuntimeHardware {
+        architecture: HydratedRuntimeArchitecture::X86_64,
+        cpu_millis: profile.hardware.cpu_millis,
+        provider_cpu_count: profile.hardware.provider_cpu_count,
+        memory_mib: profile.hardware.memory_mib,
+        disk_mib: profile.hardware.disk_mib,
+    };
+    match profile.provider {
+        RuntimeProviderKind::AgentKvm => {
+            if profile.machine_type.is_some()
+                || profile.root_disk_type.is_some()
+                || !profile.locations.is_empty()
+                || profile.requested_system_image != profile.immutable_system_image
+            {
+                bail!(
+                    "resolved agent_kvm runtime profile '{}' contains direct-cloud metadata",
+                    profile.id
+                );
+            }
+            Ok(HydratedRuntimeProfile::AgentKvm {
+                id: profile.id.clone(),
+                vm_id: profile.vm_id.clone(),
+                requested_system_image: profile.requested_system_image.clone(),
+                immutable_system_image: profile.immutable_system_image.clone(),
+                locations: Vec::new(),
+                hardware,
+            })
+        }
+        RuntimeProviderKind::HetznerCloud => {
+            let machine_type = required_machine_type(profile)?;
+            if profile.root_disk_type.is_some() || profile.locations.is_empty() {
+                bail!(
+                    "resolved hetzner_cloud runtime profile '{}' has invalid disk or location metadata",
+                    profile.id
+                );
+            }
+            Ok(HydratedRuntimeProfile::HetznerCloud {
+                id: profile.id.clone(),
+                vm_id: profile.vm_id.clone(),
+                machine_type,
+                requested_system_image: profile.requested_system_image.clone(),
+                immutable_system_image: profile.immutable_system_image.clone(),
+                locations: profile.locations.clone(),
+                hardware,
+            })
+        }
+        RuntimeProviderKind::GcpCompute => {
+            let machine_type = required_machine_type(profile)?;
+            if profile.root_disk_type.as_deref() != Some("pd-balanced")
+                || profile.locations.is_empty()
+            {
+                bail!(
+                    "resolved gcp_compute runtime profile '{}' must use pd-balanced in at least one location",
+                    profile.id
+                );
+            }
+            Ok(HydratedRuntimeProfile::GcpCompute {
+                id: profile.id.clone(),
+                vm_id: profile.vm_id.clone(),
+                machine_type,
+                requested_system_image: profile.requested_system_image.clone(),
+                immutable_system_image: profile.immutable_system_image.clone(),
+                root_disk_type: HydratedGcpRootDiskType::PdBalanced,
+                locations: profile.locations.clone(),
+                hardware,
+            })
+        }
+    }
+}
+
+fn required_machine_type(profile: &ResolvedRuntimeProfile) -> Result<String> {
+    profile
+        .machine_type
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "resolved {:?} runtime profile '{}' is missing machine_type",
+                profile.provider,
+                profile.id
+            )
+        })
 }
 
 fn read_source(root: &Path, relative: &str) -> Result<String> {
@@ -283,12 +391,58 @@ const fn application_protocol(value: ApplicationProtocol) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn resolved_profiles_for_hydration_test(
+    source: &ValidatedWorkshop,
+) -> Vec<ResolvedRuntimeProfile> {
+    source
+        .manifest
+        .workspace
+        .runtime_profiles
+        .iter()
+        .map(|profile| {
+            let vm = source
+                .manifest
+                .workspace
+                .vms
+                .iter()
+                .find(|vm| vm.id == profile.vm_id)
+                .expect("validated profile references a VM");
+            ResolvedRuntimeProfile {
+                id: profile.id.clone(),
+                provider: profile.provider,
+                vm_id: profile.vm_id.clone(),
+                machine_type: profile.machine_type.clone(),
+                requested_system_image: profile.system_image.clone(),
+                immutable_system_image: profile.system_image.clone(),
+                root_disk_type: profile.root_disk_type.clone(),
+                locations: match profile.provider {
+                    RuntimeProviderKind::HetznerCloud => vec!["nbg1".to_owned()],
+                    RuntimeProviderKind::AgentKvm | RuntimeProviderKind::GcpCompute => {
+                        profile.locations.clone()
+                    }
+                },
+                hardware: intar_workshop_manifest::ResolvedProviderHardware {
+                    architecture: ProviderArchitecture::X86_64,
+                    cpu_millis: vm.cpu_millis,
+                    provider_cpu_count: vm.cpu_millis.div_ceil(1_000),
+                    memory_mib: vm.memory_mib,
+                    disk_mib: vm.disk_mib,
+                },
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use intar_workshop_manifest::load_and_validate;
 
-    use super::{detected_license, first_http_url, hydrate_workshop_manifest, markdown_title};
+    use super::{
+        detected_license, first_http_url, hydrate_workshop_manifest, markdown_title,
+        resolved_profiles_for_hydration_test,
+    };
 
     #[test]
     fn derives_display_metadata_without_interpreting_markdown() {
@@ -311,7 +465,8 @@ mod tests {
         let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../intar-workshop-manifest/tests/fixtures/platform-engineering-workshop");
         let source = load_and_validate(&source_root)?;
-        let hydrated = hydrate_workshop_manifest(&source_root, &source, &[])?;
+        let profiles = resolved_profiles_for_hydration_test(&source);
+        let hydrated = hydrate_workshop_manifest(&source_root, &source, &profiles, &[])?;
 
         assert_eq!(hydrated.workshop.default_lobby_minutes, 30);
         assert_eq!(

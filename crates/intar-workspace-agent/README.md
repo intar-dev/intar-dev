@@ -60,7 +60,7 @@ object storage.
 
 ## Control-plane contract v1
 
-Given `control_plane_endpoint = "https://intar.dev/api/workspace-agent/"`, the
+Given `control_plane_endpoint = "https://intar.dev/api/runtime/workspace-agent/"`, the
 agent uses:
 
 | Method | Relative path | Authorization |

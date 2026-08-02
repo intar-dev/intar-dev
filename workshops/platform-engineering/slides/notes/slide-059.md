@@ -1,5 +1,0 @@
-Projects make the namespace-as-tenant idea visible. The selector in the top bar is exactly the scope switcher every cloud console has — pick a project, and Databases/Functions/Applications all list and create inside that namespace.
-
-The interesting part is "New project." It's a console-direct action (per the previous slide's rule — tenant self-service goes straight to the API), but it needs to do something privileged: create a namespace AND grant the portal access to it. So the escalation is bounded by RBAC: you hand the portal, once via git, a tightly scoped grant — it may create namespaces and rolebindings, and it may `bind` exactly one ClusterRole (portal-tenant), nothing else. That `bind` verb is the Kubernetes escalation guard: without it, an account can't create a binding to a role it doesn't already fully hold. So the portal can stand up a tenant, but it can't grant itself cluster-admin — the security lesson stays intact.
-
-That's the whole platform in one feature: the capability is granted declaratively in git (scoped, auditable, reviewable), and the action is immediate self-service in the console. Grant via git; act via console.

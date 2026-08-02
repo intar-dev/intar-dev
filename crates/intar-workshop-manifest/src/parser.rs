@@ -13,7 +13,22 @@ pub(crate) fn parse_manifest(content: &str) -> Result<WorkshopManifest> {
         )));
     }
 
-    let mut workshop = None;
+    let workshop_blocks = body
+        .blocks()
+        .filter(|block| block.identifier.as_str() == "workshop")
+        .collect::<Vec<_>>();
+    let workshop_block = match workshop_blocks.as_slice() {
+        [] => return Err(invalid("missing workshop block")),
+        [block] => *block,
+        _ => return Err(invalid("only one workshop block is supported")),
+    };
+    let (format_version, workshop) = parse_workshop(workshop_block)?;
+    if format_version != 2 {
+        return Err(invalid(format!(
+            "unsupported format_version {format_version} (expected 2)"
+        )));
+    }
+
     let mut workspace = None;
     let mut presentation = None;
     let mut modules = Vec::new();
@@ -21,7 +36,7 @@ pub(crate) fn parse_manifest(content: &str) -> Result<WorkshopManifest> {
 
     for block in body.blocks() {
         match block.identifier.as_str() {
-            "workshop" => set_once(&mut workshop, parse_workshop(block)?, "workshop")?,
+            "workshop" => {}
             "workspace" => set_once(&mut workspace, parse_workspace(block)?, "workspace")?,
             "module" => modules.push(parse_module(block)?),
             "agenda" => agenda.push(parse_agenda(block)?),
@@ -34,7 +49,6 @@ pub(crate) fn parse_manifest(content: &str) -> Result<WorkshopManifest> {
         }
     }
 
-    let (format_version, workshop) = workshop.ok_or_else(|| invalid("missing workshop block"))?;
     Ok(WorkshopManifest {
         format_version,
         workshop,
@@ -91,16 +105,12 @@ fn parse_workspace(block: &hcl::Block) -> Result<Workspace> {
         "workspace",
     )?;
     let mut vms = Vec::new();
-    let mut provider = None;
+    let mut runtime_profiles = Vec::new();
     let mut applications = Vec::new();
     for nested in block.body.blocks() {
         match nested.identifier.as_str() {
             "vm" => vms.push(parse_vm(nested)?),
-            "provider" => set_once(
-                &mut provider,
-                parse_workspace_provider(nested)?,
-                "workspace provider",
-            )?,
+            "runtime_profile" => runtime_profiles.push(parse_runtime_profile(nested)?),
             "application" => applications.push(parse_application(nested)?),
             other => {
                 return Err(invalid(format!(
@@ -113,38 +123,108 @@ fn parse_workspace(block: &hcl::Block) -> Result<Workspace> {
         lease_grace_minutes: required_u32(block, "lease_grace_minutes", "workspace")?,
         initial_checkpoint: required_string(block, "initial_checkpoint", "workspace")?,
         vms,
-        provider,
+        runtime_profiles,
         applications,
     })
 }
 
-fn parse_workspace_provider(block: &hcl::Block) -> Result<WorkspaceProvider> {
-    let kind = single_label(block, "workspace provider")?;
-    reject_nested(block, "workspace provider")?;
-    match kind.as_str() {
-        "hetzner_cloud" => {
+fn parse_runtime_profile(block: &hcl::Block) -> Result<RuntimeProfile> {
+    let id = single_label(block, "workspace runtime profile")?;
+    reject_nested(block, "workspace runtime profile")?;
+    let provider = match required_string(block, "provider", "workspace runtime profile")?.as_str() {
+        "agent_kvm" => RuntimeProviderKind::AgentKvm,
+        "hetzner_cloud" => RuntimeProviderKind::HetznerCloud,
+        "gcp_compute" => RuntimeProviderKind::GcpCompute,
+        other => {
+            return Err(invalid(format!(
+                "runtime profile '{id}' has unsupported provider '{other}'"
+            )));
+        }
+    };
+    match provider {
+        RuntimeProviderKind::AgentKvm => {
             reject_unknown_attrs(
                 block,
-                &["vm_id", "server_type", "system_image"],
-                "workspace provider 'hetzner_cloud'",
+                &["provider", "vm_id", "system_image"],
+                &format!("runtime profile '{id}'"),
             )?;
-            Ok(WorkspaceProvider::HetznerCloud {
-                vm_id: required_string(block, "vm_id", "workspace provider 'hetzner_cloud'")?,
-                server_type: required_string(
-                    block,
-                    "server_type",
-                    "workspace provider 'hetzner_cloud'",
-                )?,
+            Ok(RuntimeProfile {
+                id,
+                provider,
+                vm_id: required_string(block, "vm_id", "runtime profile 'agent_kvm'")?,
+                machine_type: None,
                 system_image: required_string(
                     block,
                     "system_image",
-                    "workspace provider 'hetzner_cloud'",
+                    "runtime profile 'agent_kvm'",
+                )?,
+                root_disk_type: None,
+                locations: Vec::new(),
+            })
+        }
+        RuntimeProviderKind::HetznerCloud => {
+            reject_unknown_attrs(
+                block,
+                &["provider", "vm_id", "machine_type", "system_image"],
+                &format!("runtime profile '{id}'"),
+            )?;
+            Ok(RuntimeProfile {
+                id,
+                provider,
+                vm_id: required_string(block, "vm_id", "runtime profile 'hetzner_cloud'")?,
+                machine_type: Some(required_string(
+                    block,
+                    "machine_type",
+                    "runtime profile 'hetzner_cloud'",
+                )?),
+                system_image: required_string(
+                    block,
+                    "system_image",
+                    "runtime profile 'hetzner_cloud'",
+                )?,
+                root_disk_type: None,
+                locations: Vec::new(),
+            })
+        }
+        RuntimeProviderKind::GcpCompute => {
+            reject_unknown_attrs(
+                block,
+                &[
+                    "provider",
+                    "vm_id",
+                    "machine_type",
+                    "system_image",
+                    "root_disk_type",
+                    "locations",
+                ],
+                &format!("runtime profile '{id}'"),
+            )?;
+            Ok(RuntimeProfile {
+                id,
+                provider,
+                vm_id: required_string(block, "vm_id", "runtime profile 'gcp_compute'")?,
+                machine_type: Some(required_string(
+                    block,
+                    "machine_type",
+                    "runtime profile 'gcp_compute'",
+                )?),
+                system_image: required_string(
+                    block,
+                    "system_image",
+                    "runtime profile 'gcp_compute'",
+                )?,
+                root_disk_type: Some(required_string(
+                    block,
+                    "root_disk_type",
+                    "runtime profile 'gcp_compute'",
+                )?),
+                locations: required_string_array(
+                    block,
+                    "locations",
+                    "runtime profile 'gcp_compute'",
                 )?,
             })
         }
-        other => Err(invalid(format!(
-            "workspace provider '{other}' is unsupported"
-        ))),
     }
 }
 
@@ -153,45 +233,14 @@ fn parse_vm(block: &hcl::Block) -> Result<WorkspaceVm> {
     reject_nested(block, "workspace vm")?;
     reject_unknown_attrs(
         block,
-        &[
-            "image",
-            "cpu_millis",
-            "vcpu_millis",
-            "memory_mib",
-            "disk_mib",
-            "disk_gib",
-        ],
+        &["cpu_millis", "memory_mib", "disk_mib"],
         "workspace vm",
     )?;
-    let vcpu_millis = required_aliased_u32(block, "cpu_millis", "vcpu_millis", "workspace vm")?;
-    let disk_gib = match (
-        optional_u32(block, "disk_mib", "workspace vm")?,
-        optional_u32(block, "disk_gib", "workspace vm")?,
-    ) {
-        (Some(_), Some(_)) => {
-            return Err(invalid(
-                "workspace vm must not declare both 'disk_mib' and legacy 'disk_gib'",
-            ));
-        }
-        (Some(disk_mib), None) if disk_mib % 1_024 == 0 => disk_mib / 1_024,
-        (Some(_), None) => {
-            return Err(invalid(
-                "workspace vm attribute 'disk_mib' must be a whole number of GiB",
-            ));
-        }
-        (None, Some(disk_gib)) => disk_gib,
-        (None, None) => {
-            return Err(invalid(
-                "workspace vm is missing required attribute 'disk_mib'",
-            ));
-        }
-    };
     Ok(WorkspaceVm {
         id,
-        image: required_string(block, "image", "workspace vm")?,
-        vcpu_millis,
+        cpu_millis: required_u32(block, "cpu_millis", "workspace vm")?,
         memory_mib: required_u32(block, "memory_mib", "workspace vm")?,
-        disk_gib,
+        disk_mib: required_u32(block, "disk_mib", "workspace vm")?,
     })
 }
 
@@ -483,26 +532,6 @@ fn optional_u32(block: &hcl::Block, key: &str, context: &str) -> Result<Option<u
             ))),
         })
         .transpose()
-}
-
-fn required_aliased_u32(
-    block: &hcl::Block,
-    key: &str,
-    legacy_key: &str,
-    context: &str,
-) -> Result<u32> {
-    match (
-        optional_u32(block, key, context)?,
-        optional_u32(block, legacy_key, context)?,
-    ) {
-        (Some(_), Some(_)) => Err(invalid(format!(
-            "{context} must not declare both '{key}' and legacy '{legacy_key}'"
-        ))),
-        (Some(value), None) | (None, Some(value)) => Ok(value),
-        (None, None) => Err(invalid(format!(
-            "{context} is missing required attribute '{key}'"
-        ))),
-    }
 }
 
 fn optional_bool(block: &hcl::Block, key: &str, context: &str) -> Result<Option<bool>> {
