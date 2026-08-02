@@ -258,6 +258,24 @@ if (
   throw new Error("Clean-D1 Wrangler commands must use the pinned Node runtime");
 }
 
+const websiteDeployWorkflow = await readFile(
+  resolve(root, ".github/workflows/website-deploy.yml"),
+  "utf8",
+);
+const providerCapabilitiesJob = websiteDeployWorkflow
+  .split("\n  provider-capabilities:\n")[1]
+  ?.split("\n  deploy:\n")[0];
+if (
+  !providerCapabilitiesJob?.includes("uses: actions/setup-node@v6") ||
+  !providerCapabilitiesJob.includes(
+    "node-version-file: apps/web/.node-version",
+  )
+) {
+  throw new Error(
+    "Pre-web provider capability probes must use the pinned Node runtime",
+  );
+}
+
 const webConfig = await readJsonc("apps/web/wrangler.jsonc");
 const serviceContract = [
   ["HETZNER_PROVIDER_SERVICE", "intar-provider-hetzner", "HetznerProviderService"],
