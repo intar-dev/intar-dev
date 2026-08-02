@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import worker from "./index";
+import worker, { HostRuntimeDO } from "./index";
 
 const env = { CUTOVER_FENCE_MARKER: '{"runId":"123"}' };
 
@@ -27,4 +27,12 @@ describe("clean D1 maintenance Worker", () => {
       expect(response.headers.get("x-intar-cutover-fence")).toBe("active");
     },
   );
+
+  it("keeps the existing host Durable Object inert and fail closed", () => {
+    const durableObject = new HostRuntimeDO();
+    const response = durableObject.fetch();
+    expect(response.status).toBe(503);
+    expect(response.headers.get("x-intar-cutover-fence")).toBe("active");
+    expect(durableObject.alarm()).toBeUndefined();
+  });
 });
