@@ -19,6 +19,7 @@ export type UiTheme = "light" | "dark";
 export interface OpenRouteOptions {
   path: string;
   sessionRole: SessionRole;
+  organizationRole?: "owner" | "admin" | "member";
   theme?: UiTheme;
   variant?: DataVariant;
   runState?: RunFixtureState;

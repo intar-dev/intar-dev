@@ -327,15 +327,11 @@ test("organization admins cannot see or request workshop publisher tokens", asyn
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("organization-workshops"), theme: "light" });
-  const organization = ui.server.state.organizationWorkshops.organization as {
-    role: string;
-  };
-  organization.role = "admin";
-  ui.server.requests.length = 0;
-
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await ui.settle();
+  await ui.open({
+    ...routeCase("organization-workshops"),
+    organizationRole: "admin",
+    theme: "light",
+  });
 
   await expect(
     page.getByRole("heading", { name: "Publisher access" }),

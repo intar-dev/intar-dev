@@ -202,6 +202,7 @@ function makeBuild(status: string, id: string) {
 
 export function createMockApiState(input?: {
   sessionRole?: SessionRole;
+  organizationRole?: "owner" | "admin" | "member";
   variant?: DataVariant;
   runState?: RunFixtureState;
 }): MockApiState {
@@ -346,7 +347,9 @@ export function createMockApiState(input?: {
       : "Platform Repair Crew",
     slug: "platform-repair-crew",
     createdAt: FIXED_NOW - 30 * day,
-    role: sessionRole === "organization-member" ? "member" : "owner",
+    role:
+      input?.organizationRole ??
+      (sessionRole === "organization-member" ? "member" : "owner"),
     members: [
       {
         memberId: "member-owner",
