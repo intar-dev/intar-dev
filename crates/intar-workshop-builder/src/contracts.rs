@@ -1,4 +1,6 @@
 use intar_contracts::catalog::{ImageFormat, ImageKey};
+use intar_workshop_manifest::RuntimeProfileObservation;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// One atomic workshop publication assigned to a trusted builder host.
@@ -10,6 +12,18 @@ pub struct WorkshopPublicationClaim {
     pub content_hash: String,
     pub required_checkpoint_ids: Vec<String>,
     pub bundle_url: String,
+    /// Trusted control-plane catalog observations for every direct-cloud
+    /// profile in the claimed source bundle. The builder independently binds
+    /// these to source profile IDs and revalidates them before producing any
+    /// publication artifact.
+    pub runtime_profile_observations: Vec<ClaimedRuntimeProfileObservation>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimedRuntimeProfileObservation {
+    pub profile_id: String,
+    pub observation: RuntimeProfileObservation,
 }
 
 /// A sealed VM image produced for a canonical checkpoint.
@@ -73,6 +87,7 @@ pub enum RuntimeBundleCompression {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBundleArtifact {
+    pub format: RuntimeBundleFormat,
     pub sha256: String,
     pub compression: RuntimeBundleCompression,
     pub signature_b64: String,
@@ -84,12 +99,18 @@ pub struct RuntimeBundleArtifact {
     pub workspace_agent_sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeBundleFormat {
+    DirectCloudLinuxX86_64V1,
+}
+
 /// The only terminal payloads accepted by the workshop publication endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WorkshopPublicationResult {
     Succeeded {
-        manifest: Box<HydratedWorkshopManifestV1>,
+        manifest: Box<HydratedWorkshopManifestV2>,
         checkpoints: Vec<CheckpointBuildResult>,
     },
     Failed {
@@ -97,9 +118,10 @@ pub enum WorkshopPublicationResult {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HydratedWorkshopManifestV1 {
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HydratedWorkshopManifestV2 {
+    #[schemars(range(min = 2, max = 2))]
     pub schema_version: u8,
     pub workshop: HydratedWorkshop,
     pub workspace: HydratedWorkspace,
@@ -109,8 +131,8 @@ pub struct HydratedWorkshopManifestV1 {
     pub duration_minutes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedWorkshop {
     pub slug: String,
     pub title: String,
@@ -120,26 +142,94 @@ pub struct HydratedWorkshop {
     pub default_lobby_minutes: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedAttribution {
     pub title: String,
     pub url: String,
     pub license: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedWorkspace {
     pub lease_grace_minutes: u32,
     pub vms: Vec<HydratedWorkspaceVm>,
+    pub runtime_profiles: Vec<HydratedRuntimeProfile>,
     pub checkpoints: Vec<HydratedCheckpoint>,
     pub initial_checkpoint_id: String,
     pub applications: Vec<HydratedWorkspaceApplication>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HydratedRuntimeProviderKind {
+    AgentKvm,
+    HetznerCloud,
+    GcpCompute,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HydratedRuntimeArchitecture {
+    X86_64,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct HydratedRuntimeHardware {
+    pub architecture: HydratedRuntimeArchitecture,
+    pub cpu_millis: u32,
+    pub provider_cpu_count: u32,
+    pub memory_mib: u32,
+    pub disk_mib: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HydratedGcpRootDiskType {
+    PdBalanced,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(
+    deny_unknown_fields,
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "provider"
+)]
+pub enum HydratedRuntimeProfile {
+    AgentKvm {
+        id: String,
+        vm_id: String,
+        requested_system_image: String,
+        immutable_system_image: String,
+        locations: Vec<String>,
+        hardware: HydratedRuntimeHardware,
+    },
+    HetznerCloud {
+        id: String,
+        vm_id: String,
+        machine_type: String,
+        requested_system_image: String,
+        immutable_system_image: String,
+        locations: Vec<String>,
+        hardware: HydratedRuntimeHardware,
+    },
+    GcpCompute {
+        id: String,
+        vm_id: String,
+        machine_type: String,
+        requested_system_image: String,
+        immutable_system_image: String,
+        root_disk_type: HydratedGcpRootDiskType,
+        locations: Vec<String>,
+        hardware: HydratedRuntimeHardware,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedWorkspaceVm {
     pub id: String,
     pub name: String,
@@ -148,16 +238,16 @@ pub struct HydratedWorkspaceVm {
     pub disk_mib: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedCheckpoint {
     pub id: String,
     pub label: String,
     pub vm_images: Vec<HydratedVmImage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedVmImage {
     pub vm_id: String,
     pub image_key: ImageKey,
@@ -174,8 +264,8 @@ impl From<&BuiltVmImage> for HydratedVmImage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedWorkspaceApplication {
     pub id: String,
     pub label: String,
@@ -187,8 +277,8 @@ pub struct HydratedWorkspaceApplication {
     pub release_module_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedModule {
     pub id: String,
     pub title: String,
@@ -205,16 +295,16 @@ pub struct HydratedModule {
     pub catch_up_checkpoint_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedHint {
     pub id: String,
     pub title: String,
     pub body_markdown: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedAgendaItem {
     pub id: String,
     pub kind: String,
@@ -227,14 +317,14 @@ pub struct HydratedAgendaItem {
     pub release: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedPresentation {
     pub slides: Vec<HydratedSlide>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HydratedSlide {
     pub id: String,
     pub layout: String,
@@ -244,4 +334,84 @@ pub struct HydratedSlide {
     pub notes_markdown: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HydratedWorkshopManifestV2;
+
+    #[test]
+    fn hydrated_v2_serialization_matches_the_tracked_contract_fixture() -> anyhow::Result<()> {
+        let source = include_str!("../fixtures/hydrated-workshop-manifest-v2.json");
+        let expected: serde_json::Value = serde_json::from_str(source)?;
+        let manifest: HydratedWorkshopManifestV2 = serde_json::from_str(source)?;
+
+        assert_eq!(serde_json::to_value(&manifest)?, expected);
+        assert_eq!(manifest.schema_version, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn hydrated_v2_rejects_missing_required_contract_fields() -> anyhow::Result<()> {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/hydrated-workshop-manifest-v2.json"
+        ))?;
+        value["workshop"]
+            .as_object_mut()
+            .expect("fixture workshop is an object")
+            .remove("attribution");
+
+        assert!(serde_json::from_value::<HydratedWorkshopManifestV2>(value).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn hydrated_v2_enforces_x86_and_provider_specific_profile_shapes() -> anyhow::Result<()> {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/hydrated-workshop-manifest-v2.json"
+        ))?;
+        for mutation in [
+            ("hardware architecture", "arm64"),
+            ("GCP root disk", "pd-ssd"),
+            ("agent discriminator", "agent_kvm"),
+        ] {
+            let mut value = fixture.clone();
+            let profile = &mut value["workspace"]["runtimeProfiles"][0];
+            match mutation.0 {
+                "hardware architecture" => profile["hardware"]["architecture"] = mutation.1.into(),
+                "GCP root disk" => profile["rootDiskType"] = mutation.1.into(),
+                "agent discriminator" => profile["provider"] = mutation.1.into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<HydratedWorkshopManifestV2>(value).is_err(),
+                "accepted invalid {}",
+                mutation.0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn hydrated_v2_accepts_agent_profile_without_cloud_metadata() -> anyhow::Result<()> {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../fixtures/hydrated-workshop-manifest-v2.json"
+        ))?;
+        let profile = value["workspace"]["runtimeProfiles"][0]
+            .as_object_mut()
+            .expect("fixture runtime profile is an object");
+        profile.insert("provider".to_owned(), "agent_kvm".into());
+        profile.remove("machineType");
+        profile.remove("rootDiskType");
+        profile.insert("locations".to_owned(), serde_json::json!([]));
+        let requested = profile["requestedSystemImage"].clone();
+        profile.insert("immutableSystemImage".to_owned(), requested);
+
+        let manifest = serde_json::from_value::<HydratedWorkshopManifestV2>(value)?;
+        assert!(matches!(
+            &manifest.workspace.runtime_profiles[0],
+            super::HydratedRuntimeProfile::AgentKvm { .. }
+        ));
+        Ok(())
+    }
 }

@@ -18,6 +18,7 @@ intar-image-build = { path = "../intar-image-build" }
 intar-image-upload = { path = "../intar-image-upload" }
 intar-workshop-manifest = { path = "../intar-workshop-manifest" }
 reqwest = { workspace = true, features = ["json", "rustls"] }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

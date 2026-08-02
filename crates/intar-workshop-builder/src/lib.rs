@@ -31,7 +31,9 @@ pub use config::{
     WorkshopBaseImageConfig, WorkshopBuilderConfig, load, parse,
 };
 pub use contracts::{
-    BuiltVmImage, CheckpointBuildResult, HydratedWorkshopManifestV1, RuntimeBundleArtifact,
+    BuiltVmImage, CheckpointBuildResult, ClaimedRuntimeProfileObservation, HydratedGcpRootDiskType,
+    HydratedRuntimeArchitecture, HydratedRuntimeHardware, HydratedRuntimeProfile,
+    HydratedRuntimeProviderKind, HydratedWorkshopManifestV2, RuntimeBundleArtifact,
     RuntimeBundleCompression, WorkshopPublicationClaim, WorkshopPublicationResult,
 };
 pub use direct_provider::DirectProviderOnlyBackend;

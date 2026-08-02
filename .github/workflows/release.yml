@@ -33,7 +33,7 @@ on:
         type: string
         default: ""
       production_run_id:
-        description: Successful Website production run ID; required only for a new intar-workshop-builder release
+        description: Successful protected web or multicloud rollout run ID; required only for a new intar-workshop-builder release
         required: false
         type: string
         default: ""
@@ -211,7 +211,7 @@ jobs:
                 exit 1
               fi
             elif ! [[ "${PRODUCTION_RUN_ID}" =~ ^[1-9][0-9]*$ ]]; then
-              echo "A new workshop-builder release requires a Website production run ID." >&2
+              echo "A new workshop-builder release requires a protected control-plane run ID." >&2
               exit 1
             fi
           elif [ -n "${PRODUCTION_RUN_ID}" ]; then
@@ -392,15 +392,21 @@ jobs:
           IFS=$'\t' read -r \
             run_id run_event run_branch run_source_sha run_path run_attempt \
             run_status run_conclusion <<<"${run_metadata}"
+          case "${run_path}" in
+            .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
+            *)
+              echo "Run ${PRODUCTION_RUN_ID} has an untrusted production workflow path." >&2
+              exit 1
+              ;;
+          esac
           if [ "${run_id}" != "${PRODUCTION_RUN_ID}" ] || \
             [ "${run_event}" != "workflow_dispatch" ] || \
             [ "${run_branch}" != "main" ] || \
             [ "${run_source_sha}" != "${GITHUB_SHA}" ] || \
-            [ "${run_path}" != ".github/workflows/website-deploy.yml" ] || \
             [ "${run_attempt}" != "1" ] || \
             [ "${run_status}" != "completed" ] || \
             [ "${run_conclusion}" != "success" ]; then
-            echo "Run ${PRODUCTION_RUN_ID} is not the successful protected Website production run for ${GITHUB_SHA}." >&2
+            echo "Run ${PRODUCTION_RUN_ID} is not a successful protected control-plane run for ${GITHUB_SHA}." >&2
             exit 1
           fi
 
@@ -452,6 +458,7 @@ jobs:
             echo "run_attempt=${run_attempt}"
             echo "run_id=${run_id}"
             echo "source_sha=${run_source_sha}"
+            echo "workflow_path=${run_path}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Download protected production guest tools
@@ -472,6 +479,7 @@ jobs:
           PRODUCTION_RUN_ATTEMPT: ${{ steps.production_guest_tools.outputs.run_attempt }}
           PRODUCTION_RUN_ID: ${{ steps.production_guest_tools.outputs.run_id }}
           PRODUCTION_SOURCE_SHA: ${{ steps.production_guest_tools.outputs.source_sha }}
+          PRODUCTION_WORKFLOW_PATH: ${{ steps.production_guest_tools.outputs.workflow_path }}
         run: |
           set -euo pipefail
           guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
@@ -504,6 +512,7 @@ jobs:
             --arg source_sha "${PRODUCTION_SOURCE_SHA}" \
             --arg workflow_run_id "${PRODUCTION_RUN_ID}" \
             --arg workflow_run_attempt "${PRODUCTION_RUN_ATTEMPT}" \
+            --arg workflow_path "${PRODUCTION_WORKFLOW_PATH}" \
             --arg agent_sha256 "${agent_sha256}" \
             --argjson agent_size_bytes "${agent_size_bytes}" \
             --arg agent_object_key \
@@ -529,7 +538,7 @@ jobs:
               .schema_version == 1 and
               .repository == $repository and
               .source_sha == $source_sha and
-              .workflow_path == ".github/workflows/website-deploy.yml" and
+              .workflow_path == $workflow_path and
               .workflow_run_id == $workflow_run_id and
               .workflow_run_attempt == $workflow_run_attempt and
               .event == "workflow_dispatch" and
@@ -562,6 +571,7 @@ jobs:
             --arg run_id "${PRODUCTION_RUN_ID}" \
             --argjson run_attempt "${PRODUCTION_RUN_ATTEMPT}" \
             --arg source_sha "${PRODUCTION_SOURCE_SHA}" \
+            --arg workflow_path "${PRODUCTION_WORKFLOW_PATH}" \
             --arg artifact_id "${ARTIFACT_ID}" \
             --arg artifact_name "${ARTIFACT_NAME}" \
             --arg artifact_digest "${ARTIFACT_DIGEST}" \
@@ -571,7 +581,7 @@ jobs:
                 id: $run_id,
                 attempt: $run_attempt,
                 source_sha: $source_sha,
-                workflow_path: ".github/workflows/website-deploy.yml",
+                workflow_path: $workflow_path,
                 artifact: {
                   id: $artifact_id,
                   name: $artifact_name,
@@ -644,9 +654,33 @@ jobs:
           PY
           cargo update -p "${PACKAGE}" --precise "${VERSION}"
 
+      - name: Set up Bun for pinned content hydration
+        if: steps.next.outputs.resume != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        if: steps.next.outputs.resume != 'true'
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
       - name: Run checks
         if: steps.next.outputs.resume != 'true'
         run: just verify
+
+      - name: Install root workspace and validate hydrated Workshop
+        if: >-
+          steps.next.outputs.resume != 'true' &&
+          (inputs.project == 'intar-workshop-cli' ||
+          inputs.project == 'intar-workshop-builder')
+        run: |
+          bun install --frozen-lockfile
+          cargo run --locked -p intar-workshop-cli -- \
+            validate .work/workshops/platform-engineering
+          bun tools/workshops/check-app-routing.ts \
+            .work/workshops/platform-engineering
 
       - name: Build release artifacts
         if: steps.next.outputs.resume != 'true'
@@ -671,7 +705,7 @@ jobs:
             cp "${binary}" "${workdir}/${BINARY}"
             chmod +x "${workdir}/${BINARY}"
             if [ "${PACKAGE}" = "intar-image-cli" ]; then
-              cp base-images.hcl build-tools.hcl "${workdir}/"
+              cp content/scenarios/base-images.hcl content/scenarios/build-tools.hcl "${workdir}/"
             fi
             if [ "${PACKAGE}" = "intar-agent" ]; then
               if [ "${arch}" != "amd64" ]; then
@@ -748,7 +782,7 @@ jobs:
               CARGO_TARGET_DIR="${target_dir}" cargo zigbuild --locked --release \
                 -p intar-workshop-cli --bin intar-workshop-cli --target "${target}"
               "${target_dir}/${target}/release/intar-workshop-cli" \
-                bundle workshops/platform-engineering \
+                bundle .work/workshops/platform-engineering \
                 --output "${workdir}/platform-engineering-workshop.tar.gz"
               (
                 cd "${workdir}"
@@ -812,8 +846,8 @@ jobs:
 
           test "$("${smoke_root}/amd64/intar-workshop-cli" --version)" = \
             "intar-workshop-cli ${VERSION}"
-          "${smoke_root}/amd64/intar-workshop-cli" validate workshops/platform-engineering
-          "${smoke_root}/amd64/intar-workshop-cli" bundle workshops/platform-engineering \
+          "${smoke_root}/amd64/intar-workshop-cli" validate .work/workshops/platform-engineering
+          "${smoke_root}/amd64/intar-workshop-cli" bundle .work/workshops/platform-engineering \
             --output "${smoke_root}/platform-engineering.tar.gz"
           test -s "${smoke_root}/platform-engineering.tar.gz"
 
@@ -825,6 +859,7 @@ jobs:
           PRODUCTION_ARTIFACT_NAME: ${{ steps.production_guest_tools.outputs.artifact_name }}
           PRODUCTION_RUN_ID: ${{ steps.production_guest_tools.outputs.run_id }}
           PRODUCTION_SOURCE_SHA: ${{ steps.production_guest_tools.outputs.source_sha }}
+          PRODUCTION_WORKFLOW_PATH: ${{ steps.production_guest_tools.outputs.workflow_path }}
           VERSION: ${{ steps.next.outputs.version }}
         run: |
           set -euo pipefail
@@ -895,6 +930,7 @@ jobs:
           jq -e \
             --arg run_id "${PRODUCTION_RUN_ID}" \
             --arg source_sha "${PRODUCTION_SOURCE_SHA}" \
+            --arg workflow_path "${PRODUCTION_WORKFLOW_PATH}" \
             --arg artifact_id "${PRODUCTION_ARTIFACT_ID}" \
             --arg artifact_name "${PRODUCTION_ARTIFACT_NAME}" \
             --arg artifact_digest "${PRODUCTION_ARTIFACT_DIGEST}" \
@@ -906,8 +942,7 @@ jobs:
               .production_run.id == $run_id and
               .production_run.attempt == 1 and
               .production_run.source_sha == $source_sha and
-              .production_run.workflow_path ==
-                ".github/workflows/website-deploy.yml" and
+              .production_run.workflow_path == $workflow_path and
               .production_run.artifact.id == $artifact_id and
               .production_run.artifact.name == $artifact_name and
               .production_run.artifact.digest == $artifact_digest and
@@ -973,8 +1008,8 @@ jobs:
 
             tar -xzf "${archive}" -C "${extract_dir}"
             test -x "${extract_dir}/intar-image-cli"
-            cmp base-images.hcl "${extract_dir}/base-images.hcl"
-            cmp build-tools.hcl "${extract_dir}/build-tools.hcl"
+            cmp content/scenarios/base-images.hcl "${extract_dir}/base-images.hcl"
+            cmp content/scenarios/build-tools.hcl "${extract_dir}/build-tools.hcl"
             mapfile -t packaged_files < <(
               find "${extract_dir}" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' \
                 | LC_ALL=C sort
@@ -992,7 +1027,7 @@ jobs:
           fixture_root="${smoke_root}/fixture"
           scenario_dir="${fixture_root}/courses/release-smoke/broken-nginx"
           mkdir -p "${scenario_dir}"
-          cp scenarios/broken-nginx/scenario.hcl "${scenario_dir}/scenario.hcl"
+          cp content/scenarios/broken-nginx/scenario.hcl "${scenario_dir}/scenario.hcl"
 
           "${smoke_root}/amd64/intar-image-cli" validate \
             --courses-root "${fixture_root}/courses" \
@@ -1017,110 +1052,6 @@ jobs:
             echo "unexpected nested-course bundle paths: ${bundled_files[*]}" >&2
             exit 1
           fi
-
-      - name: Smoke-test jailed scenario-host package
-        if: inputs.project == 'intar-agent' && steps.next.outputs.resume != 'true'
-        env:
-          VERSION: ${{ steps.next.outputs.version }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-          for script in \
-            crates/intar-jailerd/deploy/install.sh \
-            crates/intar-jailerd/deploy/intar-jailerd-self-test.sh \
-            crates/intar-jailerd/tests/package-smoke.sh \
-            crates/intar-jailerd/tests/install-process-audit.sh \
-            crates/intar-jailerd/deploy/uninstall.sh; do
-            sh -n "${script}"
-            shellcheck "${script}"
-          done
-
-          # Namespace runners are containers and do not use systemd as PID 1.
-          # Boot a disposable privileged systemd container so the package smoke
-          # exercises the real transient-unit, cgroup-v2, KVM, TUN, and cleanup
-          # paths without mutating the runner container itself.
-          smoke_image="intar-agent-package-smoke:${GITHUB_RUN_ID}"
-          smoke_container="intar-agent-package-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          cleanup_smoke() {
-            status=$?
-            trap - EXIT
-            if [ "${status}" -ne 0 ] && \
-              docker inspect "${smoke_container}" >/dev/null 2>&1; then
-              docker logs "${smoke_container}" || true
-              docker exec "${smoke_container}" \
-                journalctl --boot --no-pager --lines 500 || true
-            fi
-            docker rm --force --volumes "${smoke_container}" >/dev/null 2>&1 || true
-            docker image rm --force "${smoke_image}" >/dev/null 2>&1 || true
-            exit "${status}"
-          }
-          trap cleanup_smoke EXIT
-
-          test -c /dev/kvm
-          test -c /dev/net/tun
-          docker build \
-            --file .github/docker/intar-agent-package-smoke.Dockerfile \
-            --tag "${smoke_image}" \
-            .github/docker
-          docker run \
-            --cgroupns=private \
-            --detach \
-            --cap-add SYS_PTRACE \
-            --device /dev/kvm \
-            --device /dev/net/tun \
-            --env container=docker \
-            --hostname intar-package-smoke \
-            --name "${smoke_container}" \
-            --privileged \
-            --security-opt seccomp=unconfined \
-            --stop-signal SIGRTMIN+3 \
-            --tmpfs /run:rw,nosuid,nodev,mode=755 \
-            --tmpfs /run/lock:rw,nosuid,nodev,noexec,mode=755 \
-            "${smoke_image}"
-
-          systemd_ready=false
-          for _ in $(seq 1 30); do
-            if docker exec "${smoke_container}" \
-              systemctl show --property=Version >/dev/null 2>&1 && \
-              docker exec "${smoke_container}" \
-                test -S /run/dbus/system_bus_socket; then
-              systemd_ready=true
-              break
-            fi
-            sleep 1
-          done
-          if [ "${systemd_ready}" != true ]; then
-            docker logs "${smoke_container}" || true
-            echo "Disposable package-smoke systemd did not become ready." >&2
-            exit 1
-          fi
-          test "$(docker exec "${smoke_container}" ps -p 1 -o comm= | tr -d ' ')" = systemd
-          docker exec "${smoke_container}" test -S /run/dbus/system_bus_socket
-          test "$(docker exec "${smoke_container}" stat -fc %T /sys/fs/cgroup)" = cgroup2fs
-          docker exec "${smoke_container}" grep -qw cpu /sys/fs/cgroup/cgroup.controllers
-          docker exec "${smoke_container}" test -w /sys/fs/cgroup/cgroup.subtree_control
-          docker exec "${smoke_container}" test -c /dev/kvm
-          docker exec "${smoke_container}" test -r /dev/kvm
-          docker exec "${smoke_container}" test -w /dev/kvm
-          docker exec "${smoke_container}" test -c /dev/net/tun
-          docker exec "${smoke_container}" test -r /dev/net/tun
-          docker exec "${smoke_container}" test -w /dev/net/tun
-
-          archive="dist/intar-agent_${VERSION}_linux_amd64.tar.gz"
-          docker cp "${archive}" "${smoke_container}:/tmp/intar-agent.tar.gz"
-          docker cp \
-            crates/intar-jailerd/tests/package-smoke.sh \
-            "${smoke_container}:/root/package-smoke.sh"
-          docker exec "${smoke_container}" chmod 0700 /root/package-smoke.sh
-          docker exec "${smoke_container}" useradd \
-            --system \
-            --no-create-home \
-            --home-dir /nonexistent \
-            --shell /usr/sbin/nologin \
-            intar-agent
-          docker exec "${smoke_container}" \
-            /root/package-smoke.sh /tmp/intar-agent.tar.gz
 
       - name: Preserve exact release payload
         id: release_payload

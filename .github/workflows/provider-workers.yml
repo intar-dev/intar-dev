@@ -1,0 +1,385 @@
+name: Provider Workers
+run-name: "Provider Workers @ ${{ github.ref_name }}"
+
+on:
+  workflow_call:
+    inputs:
+      deploy_hetzner:
+        description: Deploy the validated Hetzner provider Worker
+        required: false
+        default: false
+        type: boolean
+      deploy_gcp:
+        description: Deploy the validated GCP provider Worker
+        required: false
+        default: false
+        type: boolean
+      confirmation:
+        description: Exact protected deployment confirmation
+        required: false
+        default: ""
+        type: string
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+      CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN:
+        required: false
+      CLOUDFLARE_GCP_PROVIDER_API_TOKEN:
+        required: false
+      CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
+        required: false
+      HETZNER_PROVIDER_CREDENTIAL_KEK_V1:
+        required: false
+      GCP_PROVIDER_CREDENTIAL_KEK_V1:
+        required: false
+      GCP_CATALOG_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      deploy_hetzner:
+        description: Deploy the Hetzner provider Worker
+        required: true
+        default: false
+        type: boolean
+      deploy_gcp:
+        description: Deploy the GCP provider Worker
+        required: true
+        default: false
+        type: boolean
+      confirmation:
+        description: Type DEPLOY PROVIDER WORKERS when deploying
+        required: false
+        default: ""
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/provider-workers.yml"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - "packages/provider-contracts/**"
+      - "packages/provider-testkit/**"
+      - "packages/provider-worker-core/**"
+      - "packages/workshop-contracts/**"
+      - "apps/web/workers/providers/**"
+      - "tools/providers/**"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: "provider-workers-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Validate ${{ matrix.provider }}
+    runs-on: namespace-profile-intar-dev
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - hetzner
+          - gcp
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: apps/web/.node-version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        run: bun install --frozen-lockfile
+
+      - name: Check generated Cloudflare types
+        run: >-
+          bun run --cwd apps/web/workers/providers/${{ matrix.provider }}
+          types:cf:check
+
+      - name: Typecheck
+        run: >-
+          bun run --cwd apps/web/workers/providers/${{ matrix.provider }}
+          check
+
+      - name: Test
+        run: >-
+          bun run --cwd apps/web/workers/providers/${{ matrix.provider }}
+          test
+
+      - name: Build independent deploy artifact
+        run: >-
+          bun run --cwd apps/web/workers/providers/${{ matrix.provider }}
+          build
+
+  contract:
+    name: Provider protocol capability contract
+    needs: validate
+    runs-on: namespace-profile-intar-dev
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        run: bun install --frozen-lockfile
+
+      - name: Reject provider capability drift
+        run: bun run check:providers
+
+      - name: Build the route-less live RPC probe
+        run: >-
+          bunx wrangler deploy --dry-run
+          --outdir tools/providers/live-capability-probe/.wrangler/dry-run
+          --config tools/providers/live-capability-probe/wrangler.jsonc
+
+  authorize:
+    name: Authorize protected provider mutation
+    if: ${{ inputs.deploy_hetzner == true || inputs.deploy_gcp == true }}
+    needs: contract
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Verify protected main deployment
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "intar-dev/intar-dev"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          test "${CONFIRMATION}" = "DEPLOY PROVIDER WORKERS"
+
+  deploy-hetzner:
+    name: Deploy Hetzner provider
+    if: ${{ inputs.deploy_hetzner == true }}
+    needs: authorize
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    concurrency:
+      group: intar-provider-hetzner-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        run: bun install --frozen-lockfile
+
+      - name: Validate protected Hetzner credentials
+        env:
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN }}
+          KEK: ${{ secrets.HETZNER_PROVIDER_CREDENTIAL_KEK_V1 }}
+        run: |
+          set -euo pipefail
+          test -n "${ACCOUNT_ID}"
+          test -n "${DEPLOY_TOKEN}"
+          test -n "${KEK}"
+          node -e 'const input = process.env.KEK ?? ""; const value = Buffer.from(input, "base64"); if (value.length !== 32 || value.toString("base64") !== input) process.exit(1)'
+
+      - name: Deploy route-less Hetzner provider Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN }}
+          HETZNER_PROVIDER_CREDENTIAL_KEK_V1: ${{ secrets.HETZNER_PROVIDER_CREDENTIAL_KEK_V1 }}
+        run: |
+          set -euo pipefail
+          secrets_file="${RUNNER_TEMP}/intar-provider-hetzner-secrets.json"
+          trap 'rm -f "${secrets_file}"' EXIT
+          jq -n \
+            '{HETZNER_PROVIDER_CREDENTIAL_KEK_V1: env.HETZNER_PROVIDER_CREDENTIAL_KEK_V1}' \
+            > "${secrets_file}"
+          chmod 600 "${secrets_file}"
+          bunx wrangler deploy \
+            --config apps/web/workers/providers/hetzner/wrangler.jsonc \
+            --secrets-file "${secrets_file}"
+
+  deploy-gcp:
+    name: Deploy GCP provider
+    if: ${{ inputs.deploy_gcp == true }}
+    needs: authorize
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    concurrency:
+      group: intar-provider-gcp-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        run: bun install --frozen-lockfile
+
+      - name: Validate protected GCP credentials
+        env:
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_GCP_PROVIDER_API_TOKEN }}
+          KEK: ${{ secrets.GCP_PROVIDER_CREDENTIAL_KEK_V1 }}
+          CATALOG_API_KEY: ${{ secrets.GCP_CATALOG_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${ACCOUNT_ID}"
+          test -n "${DEPLOY_TOKEN}"
+          test -n "${KEK}"
+          test -n "${CATALOG_API_KEY}"
+          node -e 'const input = process.env.KEK ?? ""; const value = Buffer.from(input, "base64"); if (value.length !== 32 || value.toString("base64") !== input) process.exit(1)'
+
+      - name: Deploy route-less GCP provider Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_GCP_PROVIDER_API_TOKEN }}
+          GCP_PROVIDER_CREDENTIAL_KEK_V1: ${{ secrets.GCP_PROVIDER_CREDENTIAL_KEK_V1 }}
+          GCP_CATALOG_API_KEY: ${{ secrets.GCP_CATALOG_API_KEY }}
+        run: |
+          set -euo pipefail
+          secrets_file="${RUNNER_TEMP}/intar-provider-gcp-secrets.json"
+          trap 'rm -f "${secrets_file}"' EXIT
+          jq -n \
+            '{GCP_PROVIDER_CREDENTIAL_KEK_V1: env.GCP_PROVIDER_CREDENTIAL_KEK_V1, GCP_CATALOG_API_KEY: env.GCP_CATALOG_API_KEY}' \
+            > "${secrets_file}"
+          chmod 600 "${secrets_file}"
+          bunx wrangler deploy \
+            --config apps/web/workers/providers/gcp/wrangler.jsonc \
+            --secrets-file "${secrets_file}"
+
+  live-capabilities:
+    name: Probe deployed provider RPC capabilities
+    if: >-
+      always() &&
+      (inputs.deploy_hetzner == true || inputs.deploy_gcp == true) &&
+      needs.contract.result == 'success' &&
+      (inputs.deploy_hetzner != true || needs.deploy-hetzner.result == 'success') &&
+      (inputs.deploy_gcp != true || needs.deploy-gcp.result == 'success')
+    needs:
+      - contract
+      - deploy-hetzner
+      - deploy-gcp
+    runs-on: namespace-profile-intar-dev
+    environment: production
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@v9
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Restore shared Bun cache
+        uses: namespacelabs/nscloud-cache-action@v1
+        with:
+          path: ~/.bun/install/cache
+
+      - name: Install the root workspace
+        run: bun install --frozen-lockfile
+
+      - name: Call both deployed services through a temporary remote binding
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+        run: >-
+          bun tools/providers/probe-live-capabilities.ts
+          "${RUNNER_TEMP}/provider-capabilities.json"
+
+      - name: Retain capability evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: provider-capabilities-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/provider-capabilities.json
+          if-no-files-found: error
+          retention-days: 90
+
+  capability-gate:
+    name: Provider deployment capability gate
+    if: ${{ always() }}
+    needs:
+      - contract
+      - deploy-hetzner
+      - deploy-gcp
+      - live-capabilities
+    runs-on: namespace-profile-intar-dev
+    steps:
+      - name: Require every requested provider deployment
+        env:
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          HETZNER_REQUESTED: ${{ inputs.deploy_hetzner }}
+          HETZNER_RESULT: ${{ needs.deploy-hetzner.result }}
+          GCP_REQUESTED: ${{ inputs.deploy_gcp }}
+          GCP_RESULT: ${{ needs.deploy-gcp.result }}
+          LIVE_RESULT: ${{ needs.live-capabilities.result }}
+        run: |
+          set -euo pipefail
+          test "${CONTRACT_RESULT}" = success
+          if [ "${HETZNER_REQUESTED}" = true ]; then
+            test "${HETZNER_RESULT}" = success
+          else
+            test "${HETZNER_RESULT}" = skipped
+          fi
+          if [ "${GCP_REQUESTED}" = true ]; then
+            test "${GCP_RESULT}" = success
+          else
+            test "${GCP_RESULT}" = skipped
+          fi
+          if [ "${HETZNER_REQUESTED}" = true ] || [ "${GCP_REQUESTED}" = true ]; then
+            test "${LIVE_RESULT}" = success
+          else
+            test "${LIVE_RESULT}" = skipped
+          fi

@@ -1,6 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-/// The normalized, version-one workshop authoring manifest.
+/// The normalized, version-two workshop authoring manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkshopManifest {
     pub format_version: u8,
@@ -26,31 +26,47 @@ pub struct Workspace {
     pub lease_grace_minutes: u32,
     pub initial_checkpoint: String,
     pub vms: Vec<WorkspaceVm>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<WorkspaceProvider>,
+    pub runtime_profiles: Vec<RuntimeProfile>,
     pub applications: Vec<WorkspaceApplication>,
 }
 
-/// Provider-specific authoring input. Absence means the existing `agent_kvm`
-/// runtime. Provider resolution happens at publication time so a source bundle
-/// remains deterministic and never needs organization cloud credentials.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProviderKind {
+    AgentKvm,
+    HetznerCloud,
+    GcpCompute,
+}
+
+impl RuntimeProviderKind {
+    pub const fn is_direct_cloud(self) -> bool {
+        matches!(self, Self::HetznerCloud | Self::GcpCompute)
+    }
+}
+
+/// One explicitly named, immutable runtime choice offered by a Workshop
+/// revision. Provider catalog resolution happens during publication; these are
+/// the exact author inputs that a resolver must prove without substitution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WorkspaceProvider {
-    HetznerCloud {
-        vm_id: String,
-        server_type: String,
-        system_image: String,
-    },
+pub struct RuntimeProfile {
+    pub id: String,
+    pub provider: RuntimeProviderKind,
+    pub vm_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_type: Option<String>,
+    pub system_image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_disk_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkspaceVm {
     pub id: String,
-    pub image: String,
-    pub vcpu_millis: u32,
+    pub cpu_millis: u32,
     pub memory_mib: u32,
-    pub disk_gib: u32,
+    pub disk_mib: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -172,51 +188,67 @@ pub struct CompiledWorkshop<'a> {
 
 /// Architecture reported by a runtime provider while resolving immutable
 /// publication metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderArchitecture {
-    X86,
-    Arm,
+    X86_64,
+    Arm64,
 }
 
-/// Normalized hardware returned by the Hetzner catalog resolver. API-specific
-/// units must be converted before constructing this value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HetznerServerTypeObservation {
-    pub name: String,
+/// Provider-neutral catalog observation. API-specific units must be converted
+/// before constructing this value. The resolver may turn an author-facing
+/// image family into an exact immutable image identity, but may not substitute
+/// another machine type or requested location.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeProfileObservation {
+    pub provider: RuntimeProviderKind,
+    pub machine_type: String,
+    pub resolved_system_image: String,
+    pub system_image_is_immutable: bool,
     pub architecture: ProviderArchitecture,
     pub cores: u32,
     pub memory_mib: u32,
     pub disk_mib: u32,
     pub deprecated: bool,
+    pub available_locations: Vec<String>,
 }
 
-/// Immutable provider metadata written into the published/hydrated manifest.
-/// The explicit `compatible` proof can only be produced by the resolver path;
-/// unverified authoring input never has this representation.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeProfileResolutionRequest<'a> {
+    pub profile: &'a RuntimeProfile,
+    pub requirements: &'a WorkspaceVm,
+}
+
+/// Immutable provider metadata written into a Workshop revision after catalog
+/// resolution. The explicit compatibility proof can only be produced by the
+/// resolver path; unverified authoring input never has this representation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind")]
-pub enum ResolvedWorkspaceProvider {
-    #[serde(rename = "agent_kvm")]
-    AgentKvm,
-    #[serde(rename = "hetzner_cloud")]
-    HetznerCloud {
-        #[serde(rename = "vmId")]
-        vm_id: String,
-        #[serde(rename = "serverType")]
-        server_type: String,
-        #[serde(rename = "systemImage")]
-        system_image: String,
-        hardware: ResolvedProviderHardware,
-        compatible: bool,
-    },
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedRuntimeProfile {
+    pub id: String,
+    pub provider: RuntimeProviderKind,
+    pub vm_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_type: Option<String>,
+    /// Author-facing image selector from the immutable Workshop source.
+    pub requested_system_image: String,
+    /// Exact provider identity resolved at publication time. For agent KVM,
+    /// checkpoint image digests are the immutable execution identity and this
+    /// retains the exact authored base-image key.
+    pub immutable_system_image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_disk_type: Option<String>,
+    pub locations: Vec<String>,
+    pub hardware: ResolvedProviderHardware,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedProviderHardware {
     pub architecture: ProviderArchitecture,
-    pub cores: u32,
+    pub cpu_millis: u32,
+    pub provider_cpu_count: u32,
     pub memory_mib: u32,
     pub disk_mib: u32,
 }

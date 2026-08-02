@@ -52,7 +52,9 @@ pub struct WorkerConfig {
     pub max_compressed_bundle_bytes: u64,
     pub max_expanded_bundle_bytes: u64,
     pub max_bundle_entries: usize,
-    /// Required when a claimed workshop selects the direct Hetzner runtime.
+    /// Required when a claimed workshop declares any direct-cloud runtime
+    /// profile. The resulting reconstruction bundles are provider-neutral and
+    /// may be certified by both Hetzner and GCP.
     /// The secret itself is never present in TOML: the config names either a
     /// root-owned file or an environment variable containing a base64 seed.
     #[serde(default)]
@@ -173,7 +175,8 @@ pub struct AuthoredImagePreparationConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeBundleVerificationConfig {
-    /// Must exactly match `workspace.provider.hetzner_cloud.system_image`.
+    /// Must match the resolved direct-cloud runtime profile system image used
+    /// for local reconstruction proof.
     pub system_image: String,
     pub architecture: ImageArchitecture,
     pub disk: PathBuf,

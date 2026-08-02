@@ -7,7 +7,10 @@ use std::path::Path;
 use anyhow::{Context as _, Result, anyhow, bail};
 use intar_contracts::catalog::{ImageArchitecture, ImageFormat, ImageKey};
 use intar_image_upload::{PublishArtifactFile, UploadImageBlob};
-use intar_workshop_manifest::{Module, ValidatedWorkshop, WorkspaceProvider};
+use intar_workshop_manifest::{
+    Module, ResolvedRuntimeProfile, RuntimeProfileObservation, RuntimeProfileResolutionRequest,
+    RuntimeProfileResolver, RuntimeProviderKind, ValidatedWorkshop, resolve_runtime_profiles,
+};
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -20,8 +23,8 @@ use crate::bundle::prepare_bundle;
 use crate::client::{PublicationRegistry, WorkshopBlobPublisher};
 use crate::config::WorkerConfig;
 use crate::contracts::{
-    BuiltVmImage, CheckpointBuildResult, RuntimeBundleCompression, WorkshopPublicationClaim,
-    WorkshopPublicationResult,
+    BuiltVmImage, CheckpointBuildResult, ClaimedRuntimeProfileObservation,
+    RuntimeBundleCompression, WorkshopPublicationClaim, WorkshopPublicationResult,
 };
 use crate::hydrate::hydrate_workshop_manifest;
 use crate::runtime_bundle::{RuntimeBundleSigner, produce_runtime_bundle};
@@ -153,24 +156,36 @@ where
     let prepared = prepare_bundle(claim, &bytes, worker)?;
     ensure_running(cancellation)?;
     let modules = stable_topological_modules(&prepared.workshop)?;
-    if matches!(
-        prepared.workshop.manifest.workspace.provider.as_ref(),
-        Some(WorkspaceProvider::HetznerCloud { .. })
-    ) {
-        let (signer, compression) = {
-            let config = worker.runtime_bundle_signing.as_ref().context(
-                "Hetzner-compatible workshop publication requires runtime bundle signing",
-            )?;
-            (RuntimeBundleSigner::load(config)?, config.compression)
-        };
+    let resolved_runtime_profiles =
+        resolve_claimed_runtime_profiles(&prepared.workshop, &claim.runtime_profile_observations)?;
+    let profiles = &prepared.workshop.manifest.workspace.runtime_profiles;
+    let has_direct_cloud = profiles
+        .iter()
+        .any(|profile| profile.provider.is_direct_cloud());
+    let has_agent_kvm = profiles
+        .iter()
+        .any(|profile| profile.provider == RuntimeProviderKind::AgentKvm);
+    let direct_signing = if has_direct_cloud {
+        let config = worker.runtime_bundle_signing.as_ref().context(
+            "direct-cloud-compatible workshop publication requires runtime bundle signing",
+        )?;
+        Some((RuntimeBundleSigner::load(config)?, config.compression))
+    } else {
+        None
+    };
+    if has_direct_cloud && !has_agent_kvm {
+        let (signer, compression) = direct_signing
+            .as_ref()
+            .context("direct-cloud runtime signing state disappeared")?;
         return build_direct_provider_publication(
             registry,
             worker,
             &prepared.root,
             &prepared.workshop,
+            &resolved_runtime_profiles,
             &modules,
-            &signer,
-            compression,
+            signer,
+            *compression,
             cancellation,
         )
         .await;
@@ -259,6 +274,24 @@ where
             })?;
         let vm_images =
             hash_and_upload_artifacts(registry, &artifacts, &mut uploaded_artifacts, cancellation)?;
+        let runtime_bundle = direct_signing
+            .as_ref()
+            .map(|(signer, compression)| {
+                produce_and_upload_runtime_bundle(
+                    registry,
+                    worker,
+                    &prepared.root,
+                    &prepared.workshop,
+                    &modules,
+                    index,
+                    signer,
+                    *compression,
+                    &mut uploaded_artifacts,
+                    cancellation,
+                )
+                .map(|bundle| bundle.artifact)
+            })
+            .transpose()?;
         checkpoints.push(CheckpointBuildResult {
             checkpoint_id: module.checkpoint.clone(),
             covered_module_ids: modules[..=index]
@@ -269,8 +302,8 @@ where
             sanitized: true,
             cold_boot_verified: true,
             runtime_bundle_cold_boot_verified: false,
-            provider_verification_pending: false,
-            runtime_bundle: None,
+            provider_verification_pending: runtime_bundle.is_some(),
+            runtime_bundle,
         });
 
         if index + 1 < modules.len() {
@@ -288,7 +321,12 @@ where
     ensure_running(cancellation)?;
     backend.finish()?;
     ensure_running(cancellation)?;
-    let manifest = hydrate_workshop_manifest(&prepared.root, &prepared.workshop, &checkpoints)?;
+    let manifest = hydrate_workshop_manifest(
+        &prepared.root,
+        &prepared.workshop,
+        &resolved_runtime_profiles,
+        &checkpoints,
+    )?;
     Ok(WorkshopPublicationResult::Succeeded {
         manifest: Box::new(manifest),
         checkpoints,
@@ -301,6 +339,7 @@ async fn build_direct_provider_publication<R>(
     worker: &WorkerConfig,
     source_root: &Path,
     source: &ValidatedWorkshop,
+    resolved_runtime_profiles: &[ResolvedRuntimeProfile],
     modules: &[&Module],
     signer: &RuntimeBundleSigner,
     compression: RuntimeBundleCompression,
@@ -313,23 +352,6 @@ where
     let mut uploaded_artifacts = BTreeSet::new();
     for (index, module) in modules.iter().enumerate() {
         ensure_running(cancellation)?;
-        let bundle =
-            produce_runtime_bundle(source_root, source, modules, index, compression, signer)
-                .with_context(|| {
-                    format!(
-                        "failed to build runtime bundle for checkpoint '{}'",
-                        module.checkpoint
-                    )
-                })?;
-        if u64::try_from(bundle.bytes.len()).unwrap_or(u64::MAX) > worker.max_expanded_bundle_bytes
-        {
-            bail!(
-                "runtime bundle for checkpoint '{}' exceeds the {} byte limit",
-                module.checkpoint,
-                worker.max_expanded_bundle_bytes
-            );
-        }
-
         cancellable(cancellation, registry.refresh_auth())
             .await
             .with_context(|| {
@@ -339,20 +361,18 @@ where
                 )
             })?;
         ensure_running(cancellation)?;
-        let mut file = tempfile::NamedTempFile::new_in(&worker.work_root)
-            .context("failed to create runtime bundle upload file")?;
-        file.write_all(&bundle.bytes)
-            .context("failed to write runtime bundle upload file")?;
-        file.as_file()
-            .sync_all()
-            .context("failed to sync runtime bundle upload file")?;
-        ensure_running(cancellation)?;
-        if uploaded_artifacts.insert(bundle.artifact.sha256.clone()) {
-            registry.upload_artifact(
-                &PublishArtifactFile::new(file.path(), &bundle.artifact.sha256)
-                    .map_err(anyhow::Error::from)?,
-            )?;
-        }
+        let bundle = produce_and_upload_runtime_bundle(
+            registry,
+            worker,
+            source_root,
+            source,
+            modules,
+            index,
+            signer,
+            compression,
+            &mut uploaded_artifacts,
+            cancellation,
+        )?;
         checkpoints.push(CheckpointBuildResult {
             checkpoint_id: module.checkpoint.clone(),
             covered_module_ids: bundle.covered_module_ids,
@@ -365,11 +385,127 @@ where
         });
     }
     ensure_running(cancellation)?;
-    let manifest = hydrate_workshop_manifest(source_root, source, &checkpoints)?;
+    let manifest =
+        hydrate_workshop_manifest(source_root, source, resolved_runtime_profiles, &checkpoints)?;
     Ok(WorkshopPublicationResult::Succeeded {
         manifest: Box::new(manifest),
         checkpoints,
     })
+}
+
+struct ClaimedProfileResolver<'a> {
+    observations: &'a [ClaimedRuntimeProfileObservation],
+}
+
+impl RuntimeProfileResolver for ClaimedProfileResolver<'_> {
+    type Error = String;
+
+    fn resolve_profile(
+        &self,
+        request: RuntimeProfileResolutionRequest<'_>,
+    ) -> std::result::Result<RuntimeProfileObservation, Self::Error> {
+        self.observations
+            .iter()
+            .find(|candidate| candidate.profile_id == request.profile.id)
+            .map(|candidate| candidate.observation.clone())
+            .ok_or_else(|| {
+                format!(
+                    "claim is missing a catalog observation for direct-cloud profile '{}'",
+                    request.profile.id
+                )
+            })
+    }
+}
+
+fn resolve_claimed_runtime_profiles(
+    workshop: &ValidatedWorkshop,
+    observations: &[ClaimedRuntimeProfileObservation],
+) -> Result<Vec<ResolvedRuntimeProfile>> {
+    let direct_profile_ids = workshop
+        .manifest
+        .workspace
+        .runtime_profiles
+        .iter()
+        .filter(|profile| profile.provider.is_direct_cloud())
+        .map(|profile| profile.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut observed_profile_ids = BTreeSet::new();
+    for claimed in observations {
+        if !direct_profile_ids.contains(claimed.profile_id.as_str()) {
+            bail!(
+                "claim contains a catalog observation for unknown or agent_kvm profile '{}'",
+                claimed.profile_id
+            );
+        }
+        if !observed_profile_ids.insert(claimed.profile_id.as_str()) {
+            bail!(
+                "claim contains duplicate catalog observations for profile '{}'",
+                claimed.profile_id
+            );
+        }
+    }
+    if observed_profile_ids != direct_profile_ids {
+        let missing = direct_profile_ids
+            .difference(&observed_profile_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        bail!(
+            "claim is missing catalog observations for direct-cloud profiles: {}",
+            missing.join(", ")
+        );
+    }
+    resolve_runtime_profiles(workshop, &ClaimedProfileResolver { observations })
+        .context("failed to resolve immutable runtime profiles for publication")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn produce_and_upload_runtime_bundle<R>(
+    registry: &R,
+    worker: &WorkerConfig,
+    source_root: &Path,
+    source: &ValidatedWorkshop,
+    modules: &[&Module],
+    index: usize,
+    signer: &RuntimeBundleSigner,
+    compression: RuntimeBundleCompression,
+    uploaded_artifacts: &mut BTreeSet<String>,
+    cancellation: &CancellationToken,
+) -> Result<crate::runtime_bundle::ProducedRuntimeBundle>
+where
+    R: WorkshopBlobPublisher,
+{
+    let module = modules
+        .get(index)
+        .context("runtime bundle module index is outside the publication")?;
+    let bundle = produce_runtime_bundle(source_root, source, modules, index, compression, signer)
+        .with_context(|| {
+        format!(
+            "failed to build runtime bundle for checkpoint '{}'",
+            module.checkpoint
+        )
+    })?;
+    if u64::try_from(bundle.bytes.len()).unwrap_or(u64::MAX) > worker.max_expanded_bundle_bytes {
+        bail!(
+            "runtime bundle for checkpoint '{}' exceeds the {} byte limit",
+            module.checkpoint,
+            worker.max_expanded_bundle_bytes
+        );
+    }
+    let mut file = tempfile::NamedTempFile::new_in(&worker.work_root)
+        .context("failed to create runtime bundle upload file")?;
+    file.write_all(&bundle.bytes)
+        .context("failed to write runtime bundle upload file")?;
+    file.as_file()
+        .sync_all()
+        .context("failed to sync runtime bundle upload file")?;
+    ensure_running(cancellation)?;
+    if uploaded_artifacts.insert(bundle.artifact.sha256.clone()) {
+        registry.upload_artifact(
+            &PublishArtifactFile::new(file.path(), &bundle.artifact.sha256)
+                .map_err(anyhow::Error::from)?,
+        )?;
+    }
+    Ok(bundle)
 }
 
 fn stable_topological_modules(source: &ValidatedWorkshop) -> Result<Vec<&Module>> {
@@ -475,8 +611,8 @@ fn validate_sealed_artifacts(
         let source_vm = source_by_vm
             .get(artifact.vm_id.as_str())
             .context("validated workshop VM disappeared")?;
-        let expected_size = u64::from(source_vm.disk_gib)
-            .checked_mul(1_024 * 1_024 * 1_024)
+        let expected_size = u64::from(source_vm.disk_mib)
+            .checked_mul(1_024 * 1_024)
             .context("workspace VM disk byte size overflow")?;
         if artifact.image_virtual_size_bytes != expected_size {
             bail!(

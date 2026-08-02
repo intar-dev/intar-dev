@@ -85,10 +85,10 @@ jobs:
 
       - name: Validate host deployment scripts
         run: |
-          test -x ops/stargate/intar-deploy-stargate
-          test -x ops/stargate/bootstrap-deploy-user
-          bash -n ops/stargate/intar-deploy-stargate
-          bash -n ops/stargate/bootstrap-deploy-user
+          test -x deploy/stargate/scripts/intar-deploy-stargate
+          test -x deploy/stargate/scripts/bootstrap-deploy-user
+          bash -n deploy/stargate/scripts/intar-deploy-stargate
+          bash -n deploy/stargate/scripts/bootstrap-deploy-user
 
   deploy:
     name: ${{ inputs.operation }} production Stargate

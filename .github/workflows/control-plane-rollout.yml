@@ -1,0 +1,61 @@
+name: Multicloud control-plane rollout
+run-name: "Multicloud rollout ${{ github.ref_name }} @ ${{ github.sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_confirmation:
+        description: Type DEPLOY PROVIDER WORKERS
+        required: true
+        type: string
+      web_confirmation:
+        description: Type DEPLOY WORKSHOP CONTROL PLANE
+        required: true
+        type: string
+      single_operator_confirmation:
+        description: Sole-operator confirmation when that production mode is active
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: intar-control-plane-production
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  providers:
+    name: Deploy both private providers
+    uses: ./.github/workflows/provider-workers.yml
+    with:
+      deploy_hetzner: true
+      deploy_gcp: true
+      confirmation: ${{ inputs.provider_confirmation }}
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN: ${{ secrets.CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN }}
+      CLOUDFLARE_GCP_PROVIDER_API_TOKEN: ${{ secrets.CLOUDFLARE_GCP_PROVIDER_API_TOKEN }}
+      CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+      HETZNER_PROVIDER_CREDENTIAL_KEK_V1: ${{ secrets.HETZNER_PROVIDER_CREDENTIAL_KEK_V1 }}
+      GCP_PROVIDER_CREDENTIAL_KEK_V1: ${{ secrets.GCP_PROVIDER_CREDENTIAL_KEK_V1 }}
+      GCP_CATALOG_API_KEY: ${{ secrets.GCP_CATALOG_API_KEY }}
+
+  web:
+    name: Deploy web after provider capability gate
+    needs: providers
+    uses: ./.github/workflows/website-deploy.yml
+    with:
+      confirmation: ${{ inputs.web_confirmation }}
+      single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
+      provenance_workflow_path: .github/workflows/control-plane-rollout.yml
+      parent_holds_control_plane_lock: true
+    secrets:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+      STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
+      INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}

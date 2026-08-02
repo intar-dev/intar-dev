@@ -1,0 +1,961 @@
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "@/lib/app-error";
+import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
+
+const mocks = vi.hoisted(() => ({ invokeProviderOperation: vi.fn() }));
+const REPORT_CREDENTIAL = "certification-report-credential-0001";
+const BOOT_A = "11111111-1111-4111-8111-111111111111";
+const BOOT_B = "22222222-2222-4222-8222-222222222222";
+const BOOT_C = "33333333-3333-4333-8333-333333333333";
+
+vi.mock("./provider-service", () => ({
+  invokeProviderOperation: mocks.invokeProviderOperation,
+}));
+import {
+  classifyProviderAllocationFailure,
+  classifyProviderOperationFailure,
+  certificationRuntimeDurationMs,
+  initialProviderReadinessTimedOut,
+  nextProviderOperationLogicalOrdinal,
+  providerLocationFallbackBootstrapEligible,
+  shouldDiscoverHetznerCreateBeforeRetry,
+  sweepWorkshopProviderRuntimes,
+} from "./provider-runtime";
+import { loadDeferredWorkshopRuntimeReplacementCandidates } from "./runtime-orchestrator";
+
+beforeEach(async () => {
+  await resetCleanD1Database();
+  vi.clearAllMocks();
+  mocks.invokeProviderOperation.mockResolvedValue({
+    canonicalWrites: [],
+    data: {},
+  });
+});
+
+describe("provider runtime recovery", () => {
+  it("derives a finite certification window from the checkpoint count", () => {
+    expect(certificationRuntimeDurationMs(1)).toBe(4.5 * 60 * 60_000);
+    expect(certificationRuntimeDurationMs(11)).toBe(44.5 * 60 * 60_000);
+    expect(() => certificationRuntimeDurationMs(0)).toThrow();
+    expect(() => certificationRuntimeDurationMs(12)).toThrow();
+  });
+
+  it("keeps a cumulative verifier alive beyond the former ninety-minute limit", async () => {
+    await seedCumulativeCertification();
+    const afterNinetyMinutes = 91 * 60_000;
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: afterNinetyMinutes,
+    });
+    await makeCertificationDue(afterNinetyMinutes + 1_000);
+    await sweepWorkshopProviderRuntimes({
+      now: afterNinetyMinutes + 1_000,
+      limit: 10,
+    });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_completion",
+      currentCheckpointOrdinal: 0,
+    });
+  });
+
+  it("persists definitive provider errors without retrying them", () => {
+    const now = 1_000;
+    expect(
+      classifyProviderOperationFailure(
+        new AppError({
+          status: 409,
+          code: "provider_quota_invalid",
+          message: "quota request is invalid",
+        }),
+        now,
+      ),
+    ).toEqual({ state: "failed", retryAt: null, errorClass: "definitive" });
+    expect(
+      classifyProviderOperationFailure(
+        new AppError({
+          status: 503,
+          code: "runtime_provider_service_unavailable",
+          message: "transport response was ambiguous",
+        }),
+        now,
+      ),
+    ).toEqual({
+      state: "retryable",
+      retryAt: 11_000,
+      errorClass: "ambiguous_rpc",
+    });
+  });
+
+  it("reconciles transport ambiguity on the same allocation but never auto-recovers definitive quota or permission failures", () => {
+    const now = 50_000;
+    expect(
+      classifyProviderAllocationFailure(
+        new AppError({
+          status: 503,
+          code: "hcloud_transport_error",
+          message: "provider response was ambiguous",
+        }),
+        now,
+      ),
+    ).toEqual({
+      disposition: "reconcile_same_allocation",
+      retryAt: 60_000,
+    });
+    for (const [status, code] of [
+      [403, "provider_permission_denied"],
+      [409, "provider_quota_insufficient"],
+    ] as const) {
+      expect(
+        classifyProviderAllocationFailure(
+          new AppError({ status, code, message: "definitive provider failure" }),
+          now,
+        ),
+      ).toEqual({
+        disposition: "cleanup_manual_retry",
+        retryAt: null,
+      });
+    }
+    for (const code of [
+      "resource_unavailable",
+      "gcp_resource_unavailable",
+    ]) {
+      expect(
+        classifyProviderAllocationFailure(
+          new AppError({
+            status: 503,
+            code,
+            message: "the selected location has no capacity",
+          }),
+          now,
+        ),
+      ).toEqual({ disposition: "fallback_location", retryAt: null });
+    }
+  });
+
+  it("bounds initial readiness at fifteen minutes without applying the steady-state heartbeat rule early", () => {
+    const createdAt = 1_000;
+    expect(
+      initialProviderReadinessTimedOut({
+        createdAt,
+        lastReportAt: null,
+        now: createdAt + 15 * 60_000 - 1,
+      }),
+    ).toBe(false);
+    expect(
+      initialProviderReadinessTimedOut({
+        createdAt,
+        lastReportAt: null,
+        now: createdAt + 15 * 60_000,
+      }),
+    ).toBe(true);
+    expect(
+      initialProviderReadinessTimedOut({
+        createdAt,
+        lastReportAt: createdAt + 10_000,
+        now: createdAt + 30 * 60_000,
+      }),
+    ).toBe(false);
+  });
+
+  it("permits in-generation location fallback only before guest bootstrap consumption", () => {
+    expect(
+      providerLocationFallbackBootstrapEligible({
+        bootstrapConsumedAt: null,
+        reportCredentialRevokedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      providerLocationFallbackBootstrapEligible({
+        bootstrapConsumedAt: undefined,
+        reportCredentialRevokedAt: undefined,
+      }),
+    ).toBe(false);
+    expect(
+      providerLocationFallbackBootstrapEligible({
+        bootstrapConsumedAt: 1,
+        reportCredentialRevokedAt: null,
+      }),
+    ).toBe(false);
+    expect(
+      providerLocationFallbackBootstrapEligible({
+        bootstrapConsumedAt: null,
+        reportCredentialRevokedAt: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("uses a new logical request identity after a failed asynchronous delete instead of colliding with attempt one", () => {
+    expect(
+      nextProviderOperationLogicalOrdinal({ state: "failed", attempt: 1 }),
+    ).toBe(2);
+    expect(
+      nextProviderOperationLogicalOrdinal({ state: "failed", attempt: 4 }),
+    ).toBe(5);
+    expect(
+      nextProviderOperationLogicalOrdinal({ state: "retryable", attempt: 4 }),
+    ).toBe(1);
+  });
+
+  it("discovers a Hetzner create left running without an action identity before any POST retry", () => {
+    for (const state of ["pending", "running", "retryable"] as const) {
+      expect(
+        shouldDiscoverHetznerCreateBeforeRetry({
+          providerKind: "hetzner_cloud",
+          operationKind: "create_server",
+          previous: { state, provider_operation_id: null },
+        }),
+      ).toBe(true);
+    }
+    expect(
+      shouldDiscoverHetznerCreateBeforeRetry({
+        providerKind: "hetzner_cloud",
+        operationKind: "create_server",
+        previous: { state: "running", provider_operation_id: "1234" },
+      }),
+    ).toBe(false);
+    expect(
+      shouldDiscoverHetznerCreateBeforeRetry({
+        providerKind: "gcp_compute",
+        operationKind: "create_instance",
+        previous: { state: "running", provider_operation_id: null },
+      }),
+    ).toBe(false);
+  });
+
+  it("durably claims a due certification so a concurrent sweeper cannot advance it twice", async () => {
+    await seedCumulativeCertification();
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 100,
+    });
+    await makeCertificationDue(200);
+
+    let releaseProvider!: () => void;
+    const providerBlocked = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    mocks.invokeProviderOperation.mockImplementationOnce(async () => {
+      await providerBlocked;
+      return { canonicalWrites: [], data: {} };
+    });
+
+    const firstSweep = sweepWorkshopProviderRuntimes({ now: 200, limit: 10 });
+    await vi.waitFor(() => {
+      expect(mocks.invokeProviderOperation).toHaveBeenCalledTimes(1);
+    });
+    const second = await sweepWorkshopProviderRuntimes({ now: 200, limit: 10 });
+    expect(second.failed).toBe(0);
+    expect(second.pending).toBe(0);
+
+    releaseProvider();
+    const first = await firstSweep;
+    expect(first.failed).toBe(0);
+    expect(first.pending).toBe(1);
+    await expectCertificationReboots(1);
+    expect(mocks.invokeProviderOperation).toHaveBeenCalledTimes(1);
+    const reconciliation = await env.DB.prepare(
+      `SELECT claim_id, claim_expires_at, sweep_after, consecutive_failures
+       FROM runtime_provider_reconciliation
+       WHERE allocation_id = 'cert-allocation'`,
+    ).first<{
+      claim_id: string | null;
+      claim_expires_at: number | null;
+      sweep_after: number;
+      consecutive_failures: number;
+    }>();
+    expect(reconciliation).toEqual({
+      claim_id: null,
+      claim_expires_at: null,
+      sweep_after: 10_200,
+      consecutive_failures: 0,
+    });
+  });
+
+  it("proves every cumulative checkpoint and its reboot on one verifier allocation", async () => {
+    await seedCumulativeCertification();
+    mocks.invokeProviderOperation.mockResolvedValueOnce({
+      canonicalWrites: [
+        {
+          operation: "operation_observed",
+          externalId: "reboot-operation-00",
+          state: "RUNNING",
+        },
+      ],
+      data: {},
+    });
+
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 100,
+    });
+    await makeCertificationDue(200);
+    await sweepWorkshopProviderRuntimes({ now: 200, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_completion",
+      currentCheckpointOrdinal: 0,
+      preRebootBootId: BOOT_A,
+    });
+    await expectCertificationReboots(1);
+
+    // A newer ready heartbeat cannot prove the reboot while the provider's
+    // asynchronous reboot operation remains unconfirmed.
+    await insertCertificationProof({
+      sequence: 2,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 300,
+    });
+    await makeCertificationDue(400);
+    await sweepWorkshopProviderRuntimes({ now: 400, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_completion",
+      currentCheckpointOrdinal: 0,
+    });
+    await env.DB.prepare(
+      `UPDATE runtime_provider_operations
+       SET state = 'succeeded', completed_at = 450, retry_at = NULL,
+           updated_at = 450
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'certification_reboot_0'`,
+    ).run();
+    await makeCertificationDue(500);
+    await sweepWorkshopProviderRuntimes({ now: 500, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_proof",
+      currentCheckpointOrdinal: 0,
+      rebootConfirmedAt: 500,
+    });
+
+    // Even after provider confirmation, a post-confirmation report from the
+    // original Linux boot is stale proof and cannot advance the checkpoint.
+    await insertCertificationProof({
+      sequence: 3,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 600,
+    });
+    await makeCertificationDue(700);
+    await sweepWorkshopProviderRuntimes({ now: 700, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_proof",
+      currentCheckpointOrdinal: 0,
+    });
+
+    await insertCertificationProof({
+      sequence: 4,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_B,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+      receivedAt: 800,
+    });
+    await makeCertificationDue(900);
+    await sweepWorkshopProviderRuntimes({ now: 900, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_checkpoint_proof",
+      currentCheckpointOrdinal: 1,
+    });
+    const advanced = await env.DB.prepare(
+      `SELECT execution.checkpoint_id, credential.checkpoint_bundle_id,
+              allocation.state
+       FROM runtime_executions execution
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+       JOIN runtime_provider_allocations allocation
+         ON allocation.execution_id = execution.id
+       WHERE execution.id = 'cert-execution'`,
+    ).first<{
+      checkpoint_id: string;
+      checkpoint_bundle_id: string;
+      state: string;
+    }>();
+    expect(advanced).toEqual({
+      checkpoint_id: "checkpoint-01",
+      checkpoint_bundle_id: "bundle-01",
+      state: "bootstrapping",
+    });
+    await expectCertificationReboots(1);
+
+    // A late report for checkpoint 00 cannot prove checkpoint 01 or trigger
+    // its reboot, even though its sequence is globally newer.
+    const commandResponse = await certificationReportRequest({
+      sequence: 5,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_B,
+      completedModuleIds: ["00"],
+      probeIds: ["probe-00"],
+    });
+    expect(commandResponse.status).toBe(200);
+    const command = await commandResponse.json<{
+      next_checkpoint?: { checkpoint_id: string; signed_url: string };
+    }>();
+    expect(command.next_checkpoint).toMatchObject({
+      checkpoint_id: "checkpoint-01",
+    });
+    expect(command.next_checkpoint?.signed_url).toMatch(
+      /^https:\/\/intar\.test\/api\/runtime\/workspace-agent\/checkpoints\//,
+    );
+    await makeCertificationDue(1_000);
+    await sweepWorkshopProviderRuntimes({ now: 1_000, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_checkpoint_proof",
+      currentCheckpointOrdinal: 1,
+    });
+    await expectCertificationReboots(1);
+
+    await insertCertificationProof({
+      sequence: 6,
+      checkpointId: "checkpoint-01",
+      bootId: BOOT_B,
+      completedModuleIds: ["00", "01"],
+      probeIds: ["probe-00", "probe-01"],
+      receivedAt: 1_100,
+    });
+    await makeCertificationDue(1_200);
+    await sweepWorkshopProviderRuntimes({ now: 1_200, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_completion",
+      currentCheckpointOrdinal: 1,
+    });
+    await expectCertificationReboots(2);
+
+    await makeCertificationDue(1_300);
+    await sweepWorkshopProviderRuntimes({ now: 1_300, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_proof",
+      currentCheckpointOrdinal: 1,
+      rebootConfirmedAt: 1_300,
+    });
+
+    await insertCertificationProof({
+      sequence: 7,
+      checkpointId: "checkpoint-01",
+      bootId: BOOT_B,
+      completedModuleIds: ["00", "01"],
+      probeIds: ["probe-00", "probe-01"],
+      receivedAt: 1_400,
+    });
+    await makeCertificationDue(1_500);
+    await sweepWorkshopProviderRuntimes({ now: 1_500, limit: 10 });
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_proof",
+      currentCheckpointOrdinal: 1,
+    });
+
+    await insertCertificationProof({
+      sequence: 8,
+      checkpointId: "checkpoint-01",
+      bootId: BOOT_C,
+      completedModuleIds: ["00", "01"],
+      probeIds: ["probe-00", "probe-01"],
+      receivedAt: 1_600,
+    });
+    await makeCertificationDue(1_700);
+    await sweepWorkshopProviderRuntimes({ now: 1_700, limit: 10 });
+    const final = await env.DB.prepare(
+      `SELECT certification.state, certification.evidence_json,
+              certification.verifier_allocation_id,
+              allocation.id AS allocation_id, allocation.state AS allocation_state,
+              execution.id AS execution_id
+       FROM workshop_runtime_profile_certifications certification
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       WHERE certification.id = 'certification'`,
+    ).first<{
+      state: string;
+      evidence_json: string;
+      verifier_allocation_id: string;
+      allocation_id: string;
+      allocation_state: string;
+      execution_id: string;
+    }>();
+    expect(final).toMatchObject({
+      state: "verifying",
+      verifier_allocation_id: "cert-allocation",
+      allocation_id: "cert-allocation",
+      allocation_state: "deleting",
+      execution_id: "cert-execution",
+    });
+    const evidence = JSON.parse(final?.evidence_json ?? "{}") as {
+      phase?: string;
+      checkpointProofsCompleted?: Array<{
+        checkpointId: string;
+        preRebootBootId: string;
+        rebootProofBootId: string;
+      }>;
+    };
+    expect(evidence.phase).toBe("deleting");
+    expect(evidence.checkpointProofsCompleted?.map((proof) => proof.checkpointId))
+      .toEqual(["checkpoint-00", "checkpoint-01"]);
+    expect(
+      evidence.checkpointProofsCompleted?.map((proof) => [
+        proof.preRebootBootId,
+        proof.rebootProofBootId,
+      ]),
+    ).toEqual([
+      [BOOT_A, BOOT_B],
+      [BOOT_B, BOOT_C],
+    ]);
+  });
+
+  it("fails closed and starts cleanup when the current checkpoint reports failure", async () => {
+    await seedCumulativeCertification();
+    await env.DB.prepare(
+      `INSERT INTO runtime_guest_reports
+         (id, execution_id, provider_kind, generation, sequence, checkpoint_id,
+          boot_id, phase, health, terminal_ready, probes_json,
+          completed_module_ids_json, report_json, reported_at, received_at)
+       VALUES ('failed-report', 'cert-execution', 'gcp_compute', 1, 1,
+               'checkpoint-00', ?, 'failed', 'failed', 0, '[]', '[]', '{}', 100, 100)`,
+    ).bind(BOOT_A).run();
+    await makeCertificationDue(200);
+    await sweepWorkshopProviderRuntimes({ now: 200, limit: 10 });
+    const row = await env.DB.prepare(
+      `SELECT certification.state, certification.error_code,
+              allocation.state AS allocation_state,
+              execution.state AS execution_state,
+              credential.report_credential_revoked_at,
+              credential.bootstrap_expires_at
+       FROM workshop_runtime_profile_certifications certification
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+        AND credential.generation = execution.generation
+       WHERE certification.id = 'certification'`,
+    ).first<{
+      state: string;
+      error_code: string;
+      allocation_state: string;
+      execution_state: string;
+      report_credential_revoked_at: number | null;
+      bootstrap_expires_at: number;
+    }>();
+    expect(row).toEqual({
+      state: "cleanup_pending",
+      error_code: "workshop_certification_guest_failed",
+      allocation_state: "cleanup_pending",
+      execution_state: "failed",
+      report_credential_revoked_at: 200,
+      bootstrap_expires_at: 200,
+    });
+    await expectCertificationReboots(0);
+  });
+
+  it("selects a durable checkpoint restore exactly until a runtime is linked", async () => {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO user (id, name, email) VALUES ('learner', 'Learner', 'learner@example.test')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO organization (id, name, slug, created_at)
+         VALUES ('org', 'Org', 'org', 1)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO member (id, organization_id, user_id, role, created_at)
+         VALUES ('membership', 'org', 'learner', 'owner', 1)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_templates
+           (id, organization_id, slug, title, summary, created_by)
+         VALUES ('template', 'org', 'workshop', 'Workshop', 'Summary', 'learner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_template_revisions
+           (id, template_id, revision, source_revision, content_hash,
+            manifest_json, published_by)
+         VALUES ('revision', 'template', 1, 'source', 'hash',
+                 '{"schemaVersion":2}', 'learner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_sessions
+           (id, organization_id, template_revision_id, title, state,
+            scheduled_start_at, lobby_opens_at, created_by)
+         VALUES ('session', 'org', 'revision', 'Session', 'live', 1000, 500,
+                 'learner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_session_members
+           (id, session_id, user_id, role, workspace_enabled, provision_state,
+            assigned_by)
+         VALUES ('roster', 'session', 'learner', 'participant', 1, 'queued',
+                 'learner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_workspaces
+           (id, session_id, user_id, state, current_generation_id,
+            last_checkpoint_id)
+         VALUES ('workspace', 'session', 'learner', 'recovering',
+                 'generation-2', 'checkpoint-01')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_workspace_generations
+           (id, workspace_id, ordinal, checkpoint_id, state)
+         VALUES ('generation-2', 'workspace', 2, 'checkpoint-01', 'queued')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_events
+           (id, organization_id, session_id, actor_user_id, type,
+            payload_json, created_at)
+         VALUES ('restore-event', 'org', 'session', 'learner',
+                 'workspace.checkpoint_restore_requested',
+                 '{"generationId":"generation-2","workspaceId":"workspace","checkpointId":"checkpoint-01"}',
+                 10)`,
+      ),
+    ]);
+
+    const pending = await loadDeferredWorkshopRuntimeReplacementCandidates();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      generation_id: "generation-2",
+      runtime_execution_id: null,
+      request_event_type: "workspace.checkpoint_restore_requested",
+    });
+
+    await env.DB.prepare(
+      `UPDATE workshop_workspace_generations
+       SET runtime_execution_id = 'execution-already-linked'
+       WHERE id = 'generation-2'`,
+    ).run();
+    await expect(
+      loadDeferredWorkshopRuntimeReplacementCandidates(),
+    ).resolves.toEqual([]);
+  });
+});
+
+async function seedCumulativeCertification(): Promise<void> {
+  const reportCredentialHash = await digestHex(REPORT_CREDENTIAL);
+  const certificationDurationMs = certificationRuntimeDurationMs(2);
+  const manifest = JSON.stringify({
+    schemaVersion: 2,
+    workspace: {
+      vms: [
+        {
+          id: "learner",
+          cpuMillis: 4_000,
+          memoryMib: 16_384,
+          diskMib: 32_768,
+        },
+      ],
+    },
+    modules: [
+      { id: "00", probeIds: ["probe-00"] },
+      { id: "01", probeIds: ["probe-01"] },
+    ],
+  });
+  const evidence = JSON.stringify({
+    proofKind: "direct_cloud_profile_certification_v1",
+    cumulativeCheckpointIds: ["checkpoint-00", "checkpoint-01"],
+    checkpointProofs: [
+      {
+        checkpointId: "checkpoint-00",
+        expectedModuleIds: ["00"],
+        expectedProbeIds: ["probe-00"],
+      },
+      {
+        checkpointId: "checkpoint-01",
+        expectedModuleIds: ["00", "01"],
+        expectedProbeIds: ["probe-00", "probe-01"],
+      },
+    ],
+    checkpointProofsCompleted: [],
+    currentCheckpointOrdinal: 0,
+    phase: "awaiting_checkpoint_proof",
+    certificationDurationMs,
+    certificationDeadlineAt: 1 + certificationDurationMs,
+  });
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO user (id, name, email, created_at, updated_at)
+       VALUES ('owner', 'Owner', 'owner@example.test', 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO organization (id, name, slug, created_at)
+       VALUES ('org', 'Org', 'org', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO member (id, organization_id, user_id, role, created_at)
+       VALUES ('member', 'org', 'owner', 'owner', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workshop_templates
+         (id, organization_id, slug, title, summary, created_by, created_at, updated_at)
+       VALUES ('template', 'org', 'workshop', 'Workshop', 'Summary', 'owner', 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workshop_template_revisions
+         (id, template_id, revision, source_revision, content_hash,
+          manifest_json, published_by, published_at)
+       VALUES ('revision', 'template', 1, 'source', ?, ?, 'owner', 1)`,
+    ).bind("a".repeat(64), manifest),
+    env.DB.prepare(
+      `INSERT INTO provider_connections
+         (id, organization_id, provider_kind, display_name, state,
+          external_project_id, project_fingerprint, created_by,
+          last_validated_at, created_at, updated_at)
+       VALUES ('connection', 'org', 'gcp_compute', 'GCP', 'active',
+               'project', 'fingerprint', 'owner', 1, 1, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO provider_credential_versions
+         (id, connection_id, version, algorithm, kek_version, aad_sha256,
+          encrypted_payload_b64, payload_iv_b64, wrapped_dek_b64, dek_iv_b64,
+          credential_fingerprint, created_by, activated_at, created_at)
+       VALUES ('credential', 'connection', 1, 'AES-256-GCM', 'v1', ?,
+               'payload', 'payload-iv', 'dek', 'dek-iv', 'fingerprint',
+               'owner', 1, 1)`,
+    ).bind("b".repeat(64)),
+    env.DB.prepare(
+      `UPDATE provider_connections
+       SET active_credential_version_id = 'credential'
+       WHERE id = 'connection'`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO gcp_connection_details
+         (connection_id, project_number, network_name, network_self_link,
+          subnet_name, subnet_self_link, subnet_cidr, firewall_name,
+          firewall_self_link, approved_zones_json, max_concurrent_allocations,
+          updated_at)
+       VALUES ('connection', '123', 'network', 'network-link', 'subnet',
+               'subnet-link', '10.0.0.0/24', 'firewall', 'firewall-link',
+               '["europe-west3-a","europe-west3-b"]', 5, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workshop_runtime_profiles
+         (id, template_revision_id, profile_id, provider_kind, vm_id,
+          machine_type, system_image, resolved_image_id, root_disk_type,
+          architecture, cpu_millis, memory_mib, disk_mib, locations_json,
+          configuration_json, created_at)
+       VALUES ('profile', 'revision', 'gcp-e2', 'gcp_compute', 'learner',
+               'e2-standard-4', 'debian-13', 'debian-image-1', 'pd-balanced',
+               'x86_64', 4000, 16384, 32768,
+               '["europe-west3-a","europe-west3-b"]', '{}', 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO workshop_runtime_profile_certifications
+         (id, runtime_profile_id, connection_id, state, verifier_allocation_id,
+          evidence_json, started_at, created_at, updated_at)
+       VALUES ('certification', 'profile', 'connection', 'verifying', NULL,
+               ?, 1, 1, 1)`,
+    ).bind(evidence),
+    env.DB.prepare(
+      `INSERT INTO provider_price_observations
+         (id, provider_kind, connection_id, runtime_profile_id, currency,
+          source, raw_observation_json, observed_at, expires_at, created_at)
+       VALUES ('cert-price', 'gcp_compute', 'connection', 'profile', 'USD',
+               'test-catalog',
+               '{"availableLocations":["europe-west3-a","europe-west3-b"]}',
+               1, 86400001, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_executions
+         (id, user_id, organization_id, host_id, provider_kind,
+          provider_connection_id, domain_kind, domain_id, generation,
+          checkpoint_id, state, lease_expires_at, created_at, updated_at)
+       VALUES ('cert-execution', 'owner', 'org', NULL, 'gcp_compute',
+               'connection', 'workshop_certification', 'certification', 1,
+               'checkpoint-00', 'provisioning', 30600001, 1, 1)`,
+    ),
+    ...["00", "01"].map((suffix) =>
+      env.DB.prepare(
+        `INSERT INTO runtime_checkpoint_bundles
+           (id, template_revision_id, checkpoint_id, format, r2_key, sha256,
+            size_bytes, compression, signature_b64, signing_key_id,
+            workspace_agent_sha256, kino_sha256, created_at)
+         VALUES (?, 'revision', ?, 'direct_cloud_linux_x86_64_v1', ?, ?,
+                 1, 'zstd', ?, 'test-key', ?, ?, 1)`,
+      ).bind(
+        `bundle-${suffix}`,
+        `checkpoint-${suffix}`,
+        `checkpoint-${suffix}.tar.zst`,
+        suffix.repeat(32),
+        "A".repeat(88),
+        "c".repeat(64),
+        "d".repeat(64),
+      ),
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_vms
+         (id, execution_id, vm_id, ordinal, runtime_vm_name, image_key_json,
+          image_sha256, cpu_millis, memory_mib, disk_mib, created_at, updated_at)
+       VALUES ('cert-vm', 'cert-execution', 'learner', 0, 'cert-vm',
+               '{"kind":"direct_cloud_checkpoint","checkpointId":"checkpoint-00","bundleId":"bundle-00"}',
+               ?, 4000, 16384, 32768, 1, 1)`,
+    ).bind("00".repeat(32)),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_allocations
+         (id, execution_id, connection_id, runtime_profile_id,
+          price_observation_id, cost_forecast_id, provider_kind,
+          deterministic_name, machine_type, resolved_image_id,
+          location_attempts_json, location, location_attempt,
+          location_attempt_started_at, state, created_at, updated_at)
+       VALUES ('cert-allocation', 'cert-execution', 'connection', 'profile',
+               'cert-price', NULL, 'gcp_compute', 'intar-certification', 'e2-standard-4',
+               'debian-image-1', '["europe-west3-a","europe-west3-b"]',
+               'europe-west3-a', 1,
+               1, 'ready', 1, 1)`,
+    ),
+    env.DB.prepare(
+      `UPDATE workshop_runtime_profile_certifications
+       SET verifier_allocation_id = 'cert-allocation'
+       WHERE id = 'certification'`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_provider_reconciliation
+         (allocation_id, desired_state, observed_state, sweep_after, updated_at)
+       VALUES ('cert-allocation', 'ready', 'ready', 0, 1)`,
+    ),
+    env.DB.prepare(
+      `INSERT INTO runtime_guest_credentials
+         (id, execution_id, workspace_id, generation, control_plane_base_url,
+          bootstrap_token_hash, bootstrap_expires_at, bootstrap_consumed_at,
+          report_credential_hash, report_credential_issued_at,
+          report_credential_expires_at, checkpoint_bundle_id,
+          checkpoint_download_token_hash, checkpoint_download_expires_at,
+          created_at, updated_at)
+       VALUES ('guest', 'cert-execution', 'certification', 1,
+               'https://intar.test', ?, 4102444800000, 1, ?, 1, 4102444800000,
+               'bundle-00', ?, 4102444800000, 1, 1)`,
+    ).bind("e".repeat(64), reportCredentialHash, "1".repeat(64)),
+  ]);
+}
+
+async function insertCertificationProof(input: {
+  sequence: number;
+  checkpointId: string;
+  bootId: string;
+  completedModuleIds: string[];
+  probeIds: string[];
+  receivedAt: number;
+}): Promise<void> {
+  const probes = input.probeIds.map((id) => ({ id, status: "pass" }));
+  await env.DB.prepare(
+    `INSERT INTO runtime_guest_reports
+       (id, execution_id, provider_kind, generation, sequence, checkpoint_id,
+        boot_id, phase, health, terminal_ready, probes_json, completed_module_ids_json,
+        report_json, reported_at, received_at)
+     VALUES (?, 'cert-execution', 'gcp_compute', 1, ?, ?, ?, 'ready', 'healthy',
+             1, ?, ?, '{}', ?, ?)`,
+  )
+    .bind(
+      `report-${input.sequence}`,
+      input.sequence,
+      input.checkpointId,
+      input.bootId,
+      JSON.stringify(probes),
+      JSON.stringify(input.completedModuleIds),
+      input.receivedAt,
+      input.receivedAt,
+    )
+    .run();
+}
+
+async function certificationReportRequest(input: {
+  sequence: number;
+  checkpointId: string;
+  bootId: string;
+  completedModuleIds: string[];
+  probeIds: string[];
+}): Promise<Response> {
+  const response = await handleWorkspaceAgentControlPlaneRequest(
+    new Request("https://intar.test/api/runtime/workspace-agent/reports", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${REPORT_CREDENTIAL}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        contract_version: 1,
+        identity: {
+          execution_id: "cert-execution",
+          workspace_id: "certification",
+          generation: 1,
+        },
+        sequence: input.sequence,
+        checkpoint_id: input.checkpointId,
+        boot_id: input.bootId,
+        phase: "ready",
+        health: "healthy",
+        terminal_ready: true,
+        recording_drain_completed: false,
+        completed_module_ids: input.completedModuleIds,
+        ssh_host_keys_openssh: ["ssh-ed25519 AAAATEST verifier"],
+        probes: input.probeIds.map((id) => ({
+          id,
+          status: "pass",
+          observed_at_unix_ms: 500,
+        })),
+        reported_at_unix_ms: 500,
+      }),
+    }),
+    env,
+  );
+  if (!response) throw new Error("workspace agent route was not handled");
+  return response;
+}
+
+async function makeCertificationDue(now: number): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE runtime_provider_allocations
+       SET state = 'ready', updated_at = ? WHERE id = 'cert-allocation'`,
+    ).bind(now),
+    env.DB.prepare(
+      `UPDATE runtime_provider_reconciliation
+       SET sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+           updated_at = ?
+       WHERE allocation_id = 'cert-allocation'`,
+    ).bind(now),
+  ]);
+}
+
+async function expectCertificationEvidence(
+  expected: Record<string, unknown>,
+): Promise<void> {
+  const row = await env.DB.prepare(
+    `SELECT evidence_json FROM workshop_runtime_profile_certifications
+     WHERE id = 'certification'`,
+  ).first<{ evidence_json: string }>();
+  expect(JSON.parse(row?.evidence_json ?? "{}")).toMatchObject(expected);
+}
+
+async function expectCertificationReboots(expected: number): Promise<void> {
+  const row = await env.DB.prepare(
+    `SELECT count(*) AS value FROM runtime_provider_operations
+     WHERE allocation_id = 'cert-allocation'
+       AND operation_kind LIKE 'certification_reboot_%'`,
+  ).first<{ value: number }>();
+  expect(row?.value).toBe(expected);
+}
+
+async function digestHex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}

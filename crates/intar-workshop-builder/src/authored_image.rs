@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail, ensure};
 use intar_contracts::catalog::ImageArchitecture;
 use intar_image_build::{QemuBuildConfig, prepare_scenario_disk, render_scenario_disk_plan};
+use intar_workshop_manifest::RuntimeProviderKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tar::{Builder, EntryType, Header, HeaderMode};
@@ -158,10 +159,27 @@ pub fn prepare_authored_image(
         "authored-image preparation requires exactly one workshop VM"
     );
     let vm = &bundle.workshop.manifest.workspace.vms[0];
+    let agent_profiles = bundle
+        .workshop
+        .manifest
+        .workspace
+        .runtime_profiles
+        .iter()
+        .filter(|profile| profile.provider == RuntimeProviderKind::AgentKvm)
+        .collect::<Vec<_>>();
+    let [profile] = agent_profiles.as_slice() else {
+        bail!("authored-image preparation requires exactly one agent_kvm runtime profile");
+    };
     ensure!(
-        vm.image == image.name,
+        profile.vm_id == vm.id,
+        "agent_kvm runtime profile '{}' references unexpected VM '{}'",
+        profile.id,
+        profile.vm_id
+    );
+    ensure!(
+        profile.system_image == image.name,
         "workshop VM image '{}' does not match configured authored image '{}'",
-        vm.image,
+        profile.system_image,
         image.name
     );
     ensure!(
@@ -218,8 +236,8 @@ pub fn prepare_authored_image(
         .parent()
         .context("authored-image output directory has no parent")?;
     prepare_output_parent(output_parent)?;
-    let nominal_disk_bytes = u64::from(vm.disk_gib)
-        .checked_mul(1024 * 1024 * 1024)
+    let nominal_disk_bytes = u64::from(vm.disk_mib)
+        .checked_mul(1024 * 1024)
         .context("workshop disk size overflow")?;
     let conservative_peak_bytes = nominal_disk_bytes
         .checked_mul(2)
@@ -248,7 +266,7 @@ pub fn prepare_authored_image(
         e2fsck_binary: config.execution.e2fsck_binary.clone(),
         resize2fs_binary: config.execution.resize2fs_binary.clone(),
         accelerator: config.execution.accelerator.clone(),
-        build_cpus: vm.vcpu_millis.div_ceil(1_000).max(1),
+        build_cpus: vm.cpu_millis.div_ceil(1_000).max(1),
         build_memory_mb: vm.memory_mib,
         work_root: staging_root.to_path_buf(),
         output_root: staging_root.to_path_buf(),
@@ -257,7 +275,7 @@ pub fn prepare_authored_image(
         qemu_exit_timeout_seconds: config.execution.shutdown_timeout_seconds,
         ..QemuBuildConfig::default()
     };
-    let disk_plan = render_scenario_disk_plan(&proof.disk, &disk, vm.disk_gib, &qemu);
+    let disk_plan = render_scenario_disk_plan(&proof.disk, &disk, vm.disk_mib / 1_024, &qemu);
     prepare_scenario_disk(&disk_plan)
         .context("failed to clone and size the pinned clean Debian disk")?;
     ensure!(
@@ -297,7 +315,7 @@ pub fn prepare_authored_image(
             kernel: proof.kernel.clone(),
             initrd: proof.initrd.clone(),
             boot_cmdline: proof.boot_cmdline.clone(),
-            cpu_count: vm.vcpu_millis.div_ceil(1_000).max(1),
+            cpu_count: vm.cpu_millis.div_ceil(1_000).max(1),
             memory_mib: vm.memory_mib,
         },
         cancellation.clone(),
@@ -1269,8 +1287,8 @@ mod tests {
 
     #[test]
     fn platform_image_verifier_is_curated_runtime_source_not_canonical_wrapper() {
-        let workshop_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let workshop_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let workshop = intar_workshop_manifest::load_and_validate(&workshop_root).unwrap();
         let module_zero = workshop
             .manifest

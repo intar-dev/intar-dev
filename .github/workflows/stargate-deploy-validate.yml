@@ -5,16 +5,16 @@ on:
     paths:
       - ".github/workflows/stargate-deploy.yml"
       - ".github/workflows/stargate-deploy-validate.yml"
-      - "ops/stargate/**"
-      - "docs/workshops-rollout.md"
+      - "deploy/stargate/**"
+      - "docs/operations/workshops-rollout.md"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/stargate-deploy.yml"
       - ".github/workflows/stargate-deploy-validate.yml"
-      - "ops/stargate/**"
-      - "docs/workshops-rollout.md"
+      - "deploy/stargate/**"
+      - "docs/operations/workshops-rollout.md"
   workflow_dispatch:
 
 permissions:
@@ -34,10 +34,10 @@ jobs:
 
       - name: Check Bash syntax
         run: |
-          test -x ops/stargate/intar-deploy-stargate
-          test -x ops/stargate/bootstrap-deploy-user
-          bash -n ops/stargate/intar-deploy-stargate
-          bash -n ops/stargate/bootstrap-deploy-user
+          test -x deploy/stargate/scripts/intar-deploy-stargate
+          test -x deploy/stargate/scripts/bootstrap-deploy-user
+          bash -n deploy/stargate/scripts/intar-deploy-stargate
+          bash -n deploy/stargate/scripts/bootstrap-deploy-user
 
       - name: Install ShellCheck
         run: |
@@ -46,8 +46,8 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          shellcheck --severity=warning ops/stargate/intar-deploy-stargate
-          shellcheck --severity=warning ops/stargate/bootstrap-deploy-user
+          shellcheck --severity=warning deploy/stargate/scripts/intar-deploy-stargate
+          shellcheck --severity=warning deploy/stargate/scripts/bootstrap-deploy-user
 
       - name: Install actionlint
         env:
@@ -65,8 +65,8 @@ jobs:
           if git grep -nI -E '[[:blank:]]+$' -- \
             .github/workflows/stargate-deploy.yml \
             .github/workflows/stargate-deploy-validate.yml \
-            ops/stargate/intar-deploy-stargate \
-            ops/stargate/bootstrap-deploy-user \
-            docs/workshops-rollout.md; then
+            deploy/stargate/scripts/intar-deploy-stargate \
+            deploy/stargate/scripts/bootstrap-deploy-user \
+            docs/operations/workshops-rollout.md; then
             exit 1
           fi

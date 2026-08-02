@@ -8,11 +8,15 @@ use anyhow::{Result, bail};
 use intar_contracts::catalog::ImageFormat;
 use intar_image_upload::{PublishArtifactFile, UploadImageBlob};
 use intar_workshop_builder::{
-    BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, ProcessOutcome, PublicationRegistry,
-    RuntimeBundleColdBoot, RuntimeBundleColdBootProof, RuntimeBundleCompression,
-    RuntimeBundleSigningConfig, SealCheckpoint, SealedVmArtifact, WorkerConfig,
-    WorkshopBlobPublisher, WorkshopExecutionBackend, WorkshopPublicationClaim,
-    WorkshopPublicationResult, process_next, process_next_until_cancelled,
+    BeginWorkshopBuild, CanonicalScript, CanonicalScriptKind, ClaimedRuntimeProfileObservation,
+    HydratedRuntimeProfile, ProcessOutcome, PublicationRegistry, RuntimeBundleColdBoot,
+    RuntimeBundleColdBootProof, RuntimeBundleCompression, RuntimeBundleSigningConfig,
+    SealCheckpoint, SealedVmArtifact, WorkerConfig, WorkshopBlobPublisher,
+    WorkshopExecutionBackend, WorkshopPublicationClaim, WorkshopPublicationResult, process_next,
+    process_next_until_cancelled,
+};
+use intar_workshop_manifest::{
+    ProviderArchitecture, RuntimeProfileObservation, RuntimeProviderKind,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -97,12 +101,7 @@ impl WorkshopExecutionBackend for FakeBackend {
             .workspace
             .vms
             .iter()
-            .map(|vm| {
-                (
-                    vm.id.clone(),
-                    u64::from(vm.disk_gib) * 1_024 * 1_024 * 1_024,
-                )
-            })
+            .map(|vm| (vm.id.clone(), u64::from(vm.disk_mib) * 1_024 * 1_024))
             .collect();
         if let Some(cancellation) = &self.cancel_on_begin {
             cancellation.cancel();
@@ -214,14 +213,16 @@ fn fixture() -> PathBuf {
 #[derive(Clone, Copy)]
 enum TestRuntime {
     AgentKvm,
-    HetznerCloud,
+    DirectCloud,
+    Mixed,
 }
 
 fn setup(runtime: TestRuntime) -> (FakeRegistry, WorkerConfig, tempfile::TempDir) {
     let temporary = tempfile::tempdir().unwrap();
     let root = match runtime {
         TestRuntime::AgentKvm => agent_kvm_fixture(&temporary),
-        TestRuntime::HetznerCloud => fixture(),
+        TestRuntime::DirectCloud => fixture(),
+        TestRuntime::Mixed => mixed_fixture(&temporary),
     };
     let bundle = intar_workshop_manifest::build_bundle(root).unwrap();
     let required_checkpoint_ids = bundle
@@ -238,6 +239,7 @@ fn setup(runtime: TestRuntime) -> (FakeRegistry, WorkerConfig, tempfile::TempDir
             content_hash: bundle.sha256,
             required_checkpoint_ids,
             bundle_url: "/agent/registry/workshop-publications/publication-01/bundle".to_owned(),
+            runtime_profile_observations: claimed_observations(runtime),
         })),
         bundle: bundle.bytes,
         results: Mutex::new(Vec::new()),
@@ -245,7 +247,7 @@ fn setup(runtime: TestRuntime) -> (FakeRegistry, WorkerConfig, tempfile::TempDir
         artifacts: Mutex::new(Vec::new()),
         refreshes: Mutex::new(0),
     };
-    let runtime_bundle_signing = matches!(runtime, TestRuntime::HetznerCloud).then(|| {
+    let runtime_bundle_signing = (!matches!(runtime, TestRuntime::AgentKvm)).then(|| {
         let signing_key_path = temporary.path().join("runtime-signing-key");
         std::fs::write(&signing_key_path, [17_u8; 32]).unwrap();
         #[cfg(unix)]
@@ -269,6 +271,74 @@ fn setup(runtime: TestRuntime) -> (FakeRegistry, WorkerConfig, tempfile::TempDir
     (registry, worker, temporary)
 }
 
+fn claimed_observations(runtime: TestRuntime) -> Vec<ClaimedRuntimeProfileObservation> {
+    if matches!(runtime, TestRuntime::AgentKvm) {
+        return Vec::new();
+    }
+    vec![
+        ClaimedRuntimeProfileObservation {
+            profile_id: "hetzner-cpx42".to_owned(),
+            observation: RuntimeProfileObservation {
+                provider: RuntimeProviderKind::HetznerCloud,
+                machine_type: "cpx42".to_owned(),
+                resolved_system_image: "hetzner/image/123456/debian-13".to_owned(),
+                system_image_is_immutable: true,
+                architecture: ProviderArchitecture::X86_64,
+                cores: 8,
+                memory_mib: 16_384,
+                disk_mib: 160 * 1_024,
+                deprecated: false,
+                available_locations: vec!["nbg1".to_owned(), "fsn1".to_owned(), "hel1".to_owned()],
+            },
+        },
+        ClaimedRuntimeProfileObservation {
+            profile_id: "gcp-e2-standard-4".to_owned(),
+            observation: RuntimeProfileObservation {
+                provider: RuntimeProviderKind::GcpCompute,
+                machine_type: "e2-standard-4".to_owned(),
+                resolved_system_image: "projects/debian-cloud/global/images/debian-13-20260715"
+                    .to_owned(),
+                system_image_is_immutable: true,
+                architecture: ProviderArchitecture::X86_64,
+                cores: 4,
+                memory_mib: 16_384,
+                disk_mib: 32 * 1_024,
+                deprecated: false,
+                available_locations: vec![
+                    "europe-west3-a".to_owned(),
+                    "europe-west3-b".to_owned(),
+                    "europe-west3-c".to_owned(),
+                ],
+            },
+        },
+    ]
+}
+
+fn mixed_fixture(temporary: &tempfile::TempDir) -> PathBuf {
+    let source = fixture();
+    let validated = intar_workshop_manifest::load_and_validate(&source).unwrap();
+    let destination = temporary.path().join("mixed-fixture");
+    for relative in validated.source_files {
+        let target = destination.join(&relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(&relative), target).unwrap();
+    }
+    let manifest_path = destination.join("workshop.hcl");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    let marker = "  runtime_profile \"hetzner-cpx42\" {";
+    assert!(manifest.contains(marker));
+    std::fs::write(
+        manifest_path,
+        manifest.replacen(
+            marker,
+            "  runtime_profile \"agent-kvm\" {\n    provider = \"agent_kvm\"\n    vm_id = \"workspace\"\n    system_image = \"platform-workshop-debian13\"\n  }\n\n  runtime_profile \"hetzner-cpx42\" {",
+            1,
+        ),
+    )
+    .unwrap();
+    destination
+}
+
 fn agent_kvm_fixture(temporary: &tempfile::TempDir) -> PathBuf {
     let source = fixture();
     let validated = intar_workshop_manifest::load_and_validate(&source).unwrap();
@@ -280,15 +350,16 @@ fn agent_kvm_fixture(temporary: &tempfile::TempDir) -> PathBuf {
     }
     let manifest_path = destination.join("workshop.hcl");
     let manifest = std::fs::read_to_string(&manifest_path).unwrap();
-    let provider = r#"
-  provider "hetzner_cloud" {
-    vm_id        = "workspace"
-    server_type  = "cx43"
-    system_image = "debian-13"
-  }
-"#;
-    assert!(manifest.contains(provider));
-    std::fs::write(manifest_path, manifest.replacen(provider, "", 1)).unwrap();
+    let start = manifest
+        .find("  runtime_profile \"hetzner-cpx42\"")
+        .unwrap();
+    let end = manifest.find("  application \"gitea\"").unwrap();
+    let mut agent_manifest = manifest;
+    agent_manifest.replace_range(
+        start..end,
+        "  runtime_profile \"agent-kvm\" {\n    provider = \"agent_kvm\"\n    vm_id = \"workspace\"\n    system_image = \"platform-workshop-debian13\"\n  }\n\n",
+    );
+    std::fs::write(manifest_path, agent_manifest).unwrap();
     destination
 }
 
@@ -388,7 +459,34 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
     );
     let json = serde_json::to_value(&results[0]).unwrap();
     assert_eq!(json["status"], "succeeded");
-    assert_eq!(json["manifest"]["schemaVersion"], 1);
+    assert_eq!(json["manifest"]["schemaVersion"], 2);
+    assert_eq!(
+        json["manifest"]["workspace"]["runtimeProfiles"][0]["provider"],
+        "agent_kvm"
+    );
+    assert_eq!(
+        json["manifest"]["workspace"]["runtimeProfiles"][0]["requestedSystemImage"],
+        "platform-workshop-debian13"
+    );
+    assert_eq!(
+        json["manifest"]["workspace"]["runtimeProfiles"][0]["immutableSystemImage"],
+        "platform-workshop-debian13"
+    );
+    assert_eq!(
+        json["manifest"]["workspace"]["runtimeProfiles"][0]["hardware"],
+        serde_json::json!({
+            "architecture": "x86_64",
+            "cpuMillis": 4000,
+            "providerCpuCount": 4,
+            "memoryMib": 16384,
+            "diskMib": 32768
+        })
+    );
+    assert!(
+        json["manifest"]["workspace"]["runtimeProfiles"][0]
+            .get("machineType")
+            .is_none()
+    );
     assert_eq!(
         json["checkpoints"][0]["vm_images"][0]["image_format"],
         "raw_zstd"
@@ -422,13 +520,13 @@ async fn builds_uploads_and_commits_all_checkpoints_in_order() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_provider_reports_deterministic_pending_bundles_without_backend_calls() {
-    let (first_registry, first_worker, _first_temporary) = setup(TestRuntime::HetznerCloud);
+    let (first_registry, first_worker, _first_temporary) = setup(TestRuntime::DirectCloud);
     let mut first_backend = FakeBackend::new();
     let first_outcome = process_next(&first_registry, &mut first_backend, &first_worker)
         .await
         .unwrap();
 
-    let (second_registry, second_worker, _second_temporary) = setup(TestRuntime::HetznerCloud);
+    let (second_registry, second_worker, _second_temporary) = setup(TestRuntime::DirectCloud);
     let mut second_backend = FakeBackend::new();
     let second_outcome = process_next(&second_registry, &mut second_backend, &second_worker)
         .await
@@ -501,6 +599,43 @@ async fn direct_provider_reports_deterministic_pending_bundles_without_backend_c
             "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"
         ]
     );
+    assert_eq!(manifest.workspace.runtime_profiles.len(), 2);
+    let HydratedRuntimeProfile::HetznerCloud {
+        id,
+        requested_system_image,
+        immutable_system_image,
+        locations,
+        hardware,
+        ..
+    } = &manifest.workspace.runtime_profiles[0]
+    else {
+        panic!("expected Hetzner profile");
+    };
+    assert_eq!(id, "hetzner-cpx42");
+    assert_eq!(requested_system_image, "debian-13");
+    assert_eq!(immutable_system_image, "hetzner/image/123456/debian-13");
+    assert_eq!(locations, &["nbg1", "fsn1", "hel1"]);
+    assert_eq!(hardware.cpu_millis, 8_000);
+    assert_eq!(hardware.provider_cpu_count, 8);
+    let HydratedRuntimeProfile::GcpCompute {
+        requested_system_image,
+        immutable_system_image,
+        hardware,
+        ..
+    } = &manifest.workspace.runtime_profiles[1]
+    else {
+        panic!("expected GCP profile");
+    };
+    assert_eq!(
+        requested_system_image,
+        "projects/debian-cloud/global/images/family/debian-13"
+    );
+    assert_eq!(
+        immutable_system_image,
+        "projects/debian-cloud/global/images/debian-13-20260715"
+    );
+    assert_eq!(hardware.cpu_millis, 4_000);
+    assert_eq!(hardware.provider_cpu_count, 4);
 
     let json = serde_json::to_value(&first_results[0]).unwrap();
     assert_eq!(json["checkpoints"][0]["vm_images"], serde_json::json!([]));
@@ -513,6 +648,10 @@ async fn direct_provider_reports_deterministic_pending_bundles_without_backend_c
     assert_eq!(
         json["checkpoints"][0]["provider_verification_pending"],
         true
+    );
+    assert_eq!(
+        json["checkpoints"][0]["runtime_bundle"]["format"],
+        "direct_cloud_linux_x86_64_v1"
     );
     assert_eq!(
         json["checkpoints"][0]["runtime_bundle"]["signing_key_id"],
@@ -547,8 +686,108 @@ async fn direct_provider_reports_deterministic_pending_bundles_without_backend_c
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_publication_fails_closed_when_a_profile_observation_is_missing() {
+    let (registry, worker, _temporary) = setup(TestRuntime::DirectCloud);
+    registry
+        .claim
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .runtime_profile_observations
+        .retain(|entry| entry.profile_id != "gcp-e2-standard-4");
+    let mut backend = FakeBackend::new();
+
+    let outcome = process_next(&registry, &mut backend, &worker)
+        .await
+        .unwrap();
+
+    let ProcessOutcome::Failed { error, .. } = outcome else {
+        panic!("expected failed publication");
+    };
+    assert!(error.contains("missing catalog observations"));
+    assert!(error.contains("gcp-e2-standard-4"));
+    assert!(backend.events.is_empty());
+    assert!(registry.images.lock().unwrap().is_empty());
+    assert!(registry.artifacts.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_publication_rejects_substituted_or_undersized_profile_before_artifacts() {
+    let (registry, worker, _temporary) = setup(TestRuntime::DirectCloud);
+    {
+        let mut claim = registry.claim.lock().unwrap();
+        let observation = &mut claim
+            .as_mut()
+            .unwrap()
+            .runtime_profile_observations
+            .iter_mut()
+            .find(|entry| entry.profile_id == "gcp-e2-standard-4")
+            .unwrap()
+            .observation;
+        observation.machine_type = "e2-standard-2".to_owned();
+        observation.cores = 2;
+    }
+    let mut backend = FakeBackend::new();
+
+    let outcome = process_next(&registry, &mut backend, &worker)
+        .await
+        .unwrap();
+
+    let ProcessOutcome::Failed { error, .. } = outcome else {
+        panic!("expected failed publication");
+    };
+    assert!(error.contains("instead of exact requested type 'e2-standard-4'"));
+    assert!(backend.events.is_empty());
+    assert!(registry.images.lock().unwrap().is_empty());
+    assert!(registry.artifacts.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_profiles_publish_agent_images_and_one_shared_direct_cloud_bundle() {
+    let (registry, worker, _temporary) = setup(TestRuntime::Mixed);
+    let mut backend = FakeBackend::new();
+
+    let outcome = process_next(&registry, &mut backend, &worker)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ProcessOutcome::Succeeded { .. }));
+    assert!(!backend.events.is_empty());
+    let results = registry.results.lock().unwrap();
+    let WorkshopPublicationResult::Succeeded {
+        manifest,
+        checkpoints,
+    } = &results[0]
+    else {
+        panic!("expected successful mixed publication");
+    };
+    assert_eq!(manifest.workspace.runtime_profiles.len(), 3);
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.vm_images.len() == 1)
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.runtime_bundle.is_some())
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.provider_verification_pending)
+    );
+    assert_eq!(registry.images.lock().unwrap().len(), 11);
+    assert_eq!(
+        registry.artifacts.lock().unwrap().len(),
+        13,
+        "two shared KVM boot artifacts plus eleven provider-neutral checkpoint bundles"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_provider_validation_failure_does_not_abort_the_backend() {
-    let (registry, mut worker, _temporary) = setup(TestRuntime::HetznerCloud);
+    let (registry, mut worker, _temporary) = setup(TestRuntime::DirectCloud);
     worker.runtime_bundle_signing = None;
     let mut backend = FakeBackend::new();
 

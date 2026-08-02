@@ -1,5 +1,5 @@
 workshop "platform-engineering-workshop" {
-  format_version = 1
+  format_version = 2
   title          = "Platform Engineering Workshop"
   summary        = "Build and operate a small internal developer platform."
   prerequisites  = ["Comfort with a terminal", "Basic Kubernetes concepts"]
@@ -12,16 +12,29 @@ workspace {
   initial_checkpoint  = "checkpoint-00"
 
   vm "workspace" {
-    image        = "platform-workshop-debian13"
     cpu_millis  = 4000
     memory_mib   = 16384
-    disk_mib     = 65536
+    disk_mib     = 32768
   }
 
-  provider "hetzner_cloud" {
-    vm_id        = "workspace"
-    server_type  = "cx43"
-    system_image = "debian-13"
+  runtime_profile "hetzner-cpx42" {
+    provider      = "hetzner_cloud"
+    vm_id         = "workspace"
+    machine_type  = "cpx42"
+    system_image  = "debian-13"
+  }
+
+  runtime_profile "gcp-e2-standard-4" {
+    provider       = "gcp_compute"
+    vm_id          = "workspace"
+    machine_type   = "e2-standard-4"
+    system_image   = "projects/debian-cloud/global/images/family/debian-13"
+    root_disk_type = "pd-balanced"
+    locations = [
+      "europe-west3-a",
+      "europe-west3-b",
+      "europe-west3-c",
+    ]
   }
 
   application "gitea" {

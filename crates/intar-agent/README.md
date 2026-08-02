@@ -168,5 +168,5 @@ seconds. A `cpu = 0.125` VM may therefore wait 360 seconds for Kino, but it uses
 the 2000-millicore boot allocation only for the first 45 seconds and then runs
 at 125 millicores. Later finalization requires an attested steady quota before
 ingress can open. See
-[Scenario Host Jailer](../../docs/scenario-host-jailer.md) for the privileged
+[Scenario Host Jailer](../../docs/operations/scenario-host-jailer.md) for the privileged
 configuration and drain-first host operations.

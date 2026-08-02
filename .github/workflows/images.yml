@@ -1,5 +1,5 @@
 name: Images
-run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || github.event_name == 'workflow_run' && format('Image publish {0}', github.event.workflow_run.head_sha) || format('Image validate {0}', github.ref_name) }}"
+run-name: "Image validate PR #${{ github.event.pull_request.number }}"
 
 on:
   pull_request:
@@ -15,50 +15,42 @@ on:
       - "crates/intar-contracts/**"
       - "crates/intar-contracts-typegen/**"
       - "crates/intar-image-*/**"
-      - "base-images.hcl"
-      - "build-tools.hcl"
+      - "content/scenarios/base-images.hcl"
+      - "content/scenarios/build-tools.hcl"
       - "builder.*.hcl"
-      - "courses.hcl"
-      - "scenarios/**"
-      - "website/migrations/**"
-      - "website/src/control-plane/auth.ts"
-      - "website/src/control-plane/bridge-v6.ts"
-      - "website/src/control-plane/host-runtime-do.ts"
-      - "website/src/control-plane/image-registry.ts"
-      - "website/src/generated/**"
-      - "website/src/lib/build-scheduler*.ts"
-      - "website/src/lib/desired-state*.ts"
-      - "website/src/lib/host-runtime-wake.ts"
-      - "website/src/lib/scenario-hosts.ts"
-      - "website/src/db/schema.ts"
-      - "website/src/pages/api/agent/hosts.ts"
-  workflow_run:
-    workflows:
-      - Website production
-    types:
-      - completed
-
+      - "content/courses.hcl"
+      - "content/scenarios/**"
+      - "apps/web/migrations/**"
+      - "apps/web/src/control-plane/auth.ts"
+      - "apps/web/src/control-plane/bridge-v6.ts"
+      - "apps/web/src/control-plane/host-runtime-do.ts"
+      - "apps/web/src/control-plane/image-registry.ts"
+      - "apps/web/src/generated/**"
+      - "apps/web/src/lib/build-scheduler*.ts"
+      - "apps/web/src/lib/desired-state*.ts"
+      - "apps/web/src/lib/host-runtime-wake.ts"
+      - "apps/web/src/lib/scenario-hosts.ts"
+      - "apps/web/src/db/schema.ts"
+      - "apps/web/src/pages/api/agent/hosts.ts"
 permissions:
   contents: read
 
+concurrency:
+  group: images-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   images:
-    name: Validate and queue images
+    name: Validate images
     runs-on: namespace-profile-intar-dev
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      (github.event.workflow_run.event == 'push' ||
-      github.event.workflow_run.event == 'workflow_dispatch') &&
-      github.event.workflow_run.head_branch == 'main')
     env:
-      SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      SOURCE_SHA: ${{ github.sha }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Verify checked out revision
@@ -95,29 +87,11 @@ jobs:
 
       - name: Verify public scenario allowlist
         run: |
-          test "$(find scenarios -mindepth 2 -maxdepth 2 -type f -name scenario.hcl -print | LC_ALL=C sort)" = \
-            "scenarios/broken-nginx/scenario.hcl"
+          test "$(find content/scenarios -mindepth 2 -maxdepth 2 -type f -name scenario.hcl -print | LC_ALL=C sort)" = \
+            "content/scenarios/broken-nginx/scenario.hcl"
 
       - name: Validate scenario definitions
         run: just validate-images
 
       - name: Render public image build input
         run: just render-images broken-nginx builder.sample.amd64.hcl
-
-      - name: Verify bundle upload token
-        if: github.event_name == 'workflow_run'
-        env:
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: |
-          if [ -z "${INTAR_IMAGE_PUBLISH_TOKEN:-}" ]; then
-            echo "INTAR_IMAGE_PUBLISH_TOKEN secret is required to upload scenario bundles." >&2
-            exit 1
-          fi
-
-      - name: Upload scenario source bundle
-        if: github.event_name == 'workflow_run'
-        env:
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: |
-          revision="${SOURCE_SHA:0:12}"
-          just bundle-images broken-nginx builder.sample.amd64.hcl "${revision}" false "https://intar.dev/registry/v1/bundles"

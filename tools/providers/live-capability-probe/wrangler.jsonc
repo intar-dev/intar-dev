@@ -1,0 +1,20 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "intar-provider-capability-probe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [
+    {
+      "binding": "HETZNER_PROVIDER_SERVICE",
+      "service": "intar-provider-hetzner",
+      "entrypoint": "HetznerProviderService"
+    },
+    {
+      "binding": "GCP_PROVIDER_SERVICE",
+      "service": "intar-provider-gcp",
+      "entrypoint": "GcpProviderService"
+    }
+  ]
+}

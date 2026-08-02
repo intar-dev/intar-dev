@@ -2273,6 +2273,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "intar-contracts",
+ "intar-workshop-builder",
  "schemars",
  "serde",
  "serde_json",
@@ -2435,6 +2436,7 @@ dependencies = [
  "reqwest",
  "russh",
  "rustix",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.0",

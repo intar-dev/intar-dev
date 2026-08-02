@@ -13,7 +13,7 @@ use tar::{Builder, EntryType, Header, HeaderMode};
 
 use crate::config::RuntimeBundleSigningConfig;
 use crate::config::WorkerConfig;
-use crate::contracts::{RuntimeBundleArtifact, RuntimeBundleCompression};
+use crate::contracts::{RuntimeBundleArtifact, RuntimeBundleCompression, RuntimeBundleFormat};
 
 const RUNTIME_BUNDLE_SCHEMA_VERSION: u8 = 3;
 const RUNTIME_SOURCE_SCHEMA_VERSION: u8 = 1;
@@ -114,8 +114,8 @@ impl RuntimeBundleSigner {
 
 /// Fail before registry authentication when an operator configured a signing
 /// source that cannot be read or decoded. A missing optional config remains
-/// valid for legacy `agent_kvm`-only builders and is rejected only if such a
-/// builder claims a direct-cloud workshop.
+/// valid for `agent_kvm`-only builders and is rejected only if such a builder
+/// claims a Workshop with a direct-cloud runtime profile.
 pub fn preflight_runtime_bundle_signing(worker: &WorkerConfig) -> Result<()> {
     if let Some(config) = &worker.runtime_bundle_signing {
         let _ = RuntimeBundleSigner::load(config)?;
@@ -208,6 +208,7 @@ pub(crate) fn produce_runtime_bundle(
     Ok(ProducedRuntimeBundle {
         bytes,
         artifact: RuntimeBundleArtifact {
+            format: RuntimeBundleFormat::DirectCloudLinuxX86_64V1,
             sha256,
             compression,
             signature_b64,
@@ -2026,8 +2027,8 @@ mod tests {
 
     #[test]
     fn platform_reference_bundles_reconstruct_ordered_checkpoint_prefixes() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workshops/platform-engineering");
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.work/workshops/platform-engineering");
         let workshop = intar_workshop_manifest::load_and_validate(&root).unwrap();
         let modules = workshop.manifest.modules.iter().collect::<Vec<_>>();
         let checkpoint_09_index = modules
@@ -2397,6 +2398,7 @@ mod tests {
     #[test]
     fn serializes_the_registry_runtime_bundle_report_contract() {
         let report = RuntimeBundleArtifact {
+            format: RuntimeBundleFormat::DirectCloudLinuxX86_64V1,
             sha256: "a".repeat(64),
             compression: RuntimeBundleCompression::Gzip,
             signature_b64: BASE64_STANDARD.encode([3_u8; 64]),
@@ -2406,6 +2408,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(report).unwrap(),
             serde_json::json!({
+                "format": "direct_cloud_linux_x86_64_v1",
                 "sha256": "a".repeat(64),
                 "compression": "gzip",
                 "signature_b64": BASE64_STANDARD.encode([3_u8; 64]),

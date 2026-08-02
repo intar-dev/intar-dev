@@ -1,0 +1,14 @@
+{
+  "name": "@intar/provider-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./hetzner": "./src/hetzner.ts",
+    "./gcp": "./src/gcp.ts"
+  },
+  "dependencies": {
+    "@intar/workshop-contracts": "workspace:*"
+  }
+}

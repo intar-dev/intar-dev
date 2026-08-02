@@ -1,0 +1,133 @@
+import { describe, expect, it } from "vitest";
+import type { GcpServiceAccountKey } from "@intar/provider-contracts/gcp";
+import { GcpClient, ownershipLabels } from "../src/gcp-client";
+
+const key = {
+  type: "service_account",
+  project_id: "intar-empty-12345",
+  private_key_id: "0123456789abcdef",
+  private_key: "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----\n",
+  client_email: "intar-runtime@intar-empty-12345.iam.gserviceaccount.com",
+  client_id: "123456789012345678901",
+  auth_uri: "https://accounts.google.com/o/oauth2/auth",
+  token_uri: "https://oauth2.googleapis.com/token",
+} satisfies GcpServiceAccountKey;
+
+const ownership = {
+  organizationRef: "org_0123456789",
+  connectionRef: "conn_0123456789",
+  purpose: "learner_workspace",
+  workspaceRef: "workspace_0123456789",
+  generation: 1,
+} as const;
+
+function operation(name: string) {
+  return {
+    id: `id-${name}`,
+    name,
+    selfLink: `https://compute.googleapis.com/compute/v1/projects/${key.project_id}/zones/europe-west3-a/operations/${name}`,
+    status: "PENDING",
+  };
+}
+
+describe("GCP allocation lifecycle", () => {
+  it("uses idempotent reboot/delete calls and sweeps only owned resources", async () => {
+    const mutationRequests: Request[] = [];
+    const ownedLabels = ownershipLabels(ownership);
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("/reset")) {
+        mutationRequests.push(request);
+        return Response.json(operation("reset-1"));
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname.endsWith("/instances/intar-learner-abc")
+      ) {
+        return Response.json({
+          id: "instance-owned",
+          name: "intar-learner-abc",
+          selfLink: `${url.origin}${url.pathname}`,
+          labels: ownedLabels,
+        });
+      }
+      if (request.method === "DELETE") {
+        mutationRequests.push(request);
+        return Response.json(operation("delete-1"));
+      }
+      const fixture = (kind: "instances" | "disks" | "addresses") => ({
+        items: {
+          "zones/europe-west3-a": {
+            [kind]: [
+              {
+                id: `${kind}-owned`,
+                name: `intar-${kind}-owned`,
+                selfLink: `https://compute.googleapis.com/compute/v1/projects/${key.project_id}/zones/europe-west3-a/${kind}/intar-owned`,
+                labels: ownedLabels,
+              },
+              {
+                id: `${kind}-foreign`,
+                name: `foreign-${kind}`,
+                selfLink: `https://compute.googleapis.com/compute/v1/projects/${key.project_id}/zones/europe-west3-a/${kind}/foreign`,
+                labels: { "intar-managed": "true", "intar-org": "other" },
+              },
+            ],
+          },
+        },
+      });
+      if (url.pathname.endsWith("/aggregated/instances")) return Response.json(fixture("instances"));
+      if (url.pathname.endsWith("/aggregated/disks")) return Response.json(fixture("disks"));
+      if (url.pathname.endsWith("/aggregated/addresses")) return Response.json(fixture("addresses"));
+      throw new Error(`Unhandled ${request.method} ${url.pathname}`);
+    }) as typeof fetch;
+    const client = new GcpClient(key, key.project_id, {
+      fetcher,
+      tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
+    });
+
+    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc"))
+      .resolves.toMatchObject({ name: "reset-1" });
+    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+      .resolves.toMatchObject({ name: "delete-1" });
+    const swept = await client.sweep(ownership);
+    expect(swept.instances).toHaveLength(1);
+    expect(swept.disks).toHaveLength(1);
+    expect(swept.addresses).toHaveLength(1);
+    expect(mutationRequests.map((request) => request.method)).toEqual(["POST", "DELETE"]);
+    const requestIds = mutationRequests.map((request) => new URL(request.url).searchParams.get("requestId"));
+    expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(requestIds[1]).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(requestIds[0]).not.toBe(requestIds[1]);
+  });
+
+  it("treats an already deleted instance as confirmed missing", async () => {
+    const client = new GcpClient(key, key.project_id, {
+      fetcher: (async () => Response.json({ error: { status: "NOT_FOUND" } }, { status: 404 })) as typeof fetch,
+      tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
+    });
+    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+      .resolves.toBeNull();
+  });
+
+  it("refuses to delete a foreign instance that occupies the deterministic name", async () => {
+    const methods: string[] = [];
+    const client = new GcpClient(key, key.project_id, {
+      fetcher: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        methods.push(request.method);
+        const url = new URL(request.url);
+        return Response.json({
+          id: "instance-foreign",
+          name: "intar-learner-abc",
+          selfLink: `${url.origin}${url.pathname}`,
+          labels: { "intar-managed": "true", "intar-org": "other" },
+        });
+      }) as typeof fetch,
+      tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
+    });
+    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+      .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
+    expect(methods).toEqual(["GET"]);
+  });
+});

@@ -1,1 +1,0 @@
-The architectural heart of the workshop. Everything from here to the end of the day — databases, platform APIs, serverless, the portal — arrives as a git commit that ArgoCD converges. Frame it that strongly.

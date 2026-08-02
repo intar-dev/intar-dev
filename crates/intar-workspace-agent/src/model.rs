@@ -195,6 +195,8 @@ pub struct AgentReport {
     pub contract_version: u16,
     pub identity: ExecutionIdentity,
     pub sequence: u64,
+    pub checkpoint_id: String,
+    pub boot_id: String,
     pub phase: AgentPhase,
     pub health: HealthStatus,
     pub terminal_ready: bool,
@@ -214,6 +216,8 @@ pub struct ReportResponse {
     pub accepted_sequence: u64,
     #[serde(default)]
     pub drain_recordings: bool,
+    #[serde(default)]
+    pub next_checkpoint: Option<CheckpointDescriptor>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -330,6 +334,8 @@ mod tests {
             contract_version: CONTRACT_VERSION,
             identity: identity(2),
             sequence: 8,
+            checkpoint_id: "checkpoint-02".to_owned(),
+            boot_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             phase: AgentPhase::StartingServices,
             health: HealthStatus::Unknown,
             terminal_ready: false,
@@ -345,6 +351,10 @@ mod tests {
         assert_eq!(
             serialized["completed_module_ids"],
             serde_json::json!(["00", "01", "02"])
+        );
+        assert_eq!(
+            serialized["boot_id"],
+            "00000000-0000-4000-8000-000000000002"
         );
     }
 }

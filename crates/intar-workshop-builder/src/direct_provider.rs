@@ -86,7 +86,7 @@ mod tests {
     fn rejects_agent_kvm_lifecycle_before_any_local_execution() {
         let workshop = load_and_validate(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../workshops/platform-engineering"
+            "/../../.work/workshops/platform-engineering"
         )))
         .unwrap();
         let mut backend = DirectProviderOnlyBackend::new();

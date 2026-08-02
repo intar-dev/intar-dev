@@ -11,6 +11,7 @@ use crate::secrets::SanitizedError;
 use crate::state::{
     GenerationState, StateError, StateStore, read_bootstrap_capability, remove_bootstrap_capability,
 };
+use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Stdio;
@@ -30,10 +31,12 @@ pub struct WorkspaceAgent {
     kino: KinoClient,
     state_store: StateStore,
     checkpoint_applier: Arc<dyn CheckpointApplier>,
+    boot_id: String,
 }
 
 impl WorkspaceAgent {
     pub fn from_config(config: AgentConfig) -> Result<Self, AgentError> {
+        let boot_id = read_linux_boot_id()?;
         let control_plane = HttpControlPlane::new(&config).map_err(AgentError::Client)?;
         let download_client = control_plane.http_client();
         let kino = KinoClient::new(config.kino_url.clone())
@@ -55,6 +58,7 @@ impl WorkspaceAgent {
             kino,
             state_store,
             checkpoint_applier,
+            boot_id,
         })
     }
 
@@ -73,6 +77,7 @@ impl WorkspaceAgent {
             kino,
             state_store,
             checkpoint_applier,
+            boot_id: "00000000-0000-4000-8000-000000000001".to_owned(),
         }
     }
 
@@ -343,6 +348,9 @@ impl WorkspaceAgent {
                 if response.drain_recordings {
                     self.complete_recording_drain(state).await?;
                 }
+                if !state.checkpoint_applied() {
+                    self.apply_checkpoint(state).await?;
+                }
                 Ok(())
             }
             Err(error) => {
@@ -361,6 +369,9 @@ impl WorkspaceAgent {
                     .await?;
                 if response.drain_recordings {
                     self.complete_recording_drain(state).await?;
+                }
+                if !state.checkpoint_applied() {
+                    self.apply_checkpoint(state).await?;
                 }
                 Ok(())
             }
@@ -387,6 +398,8 @@ impl WorkspaceAgent {
             contract_version: CONTRACT_VERSION,
             identity: self.config.identity.clone(),
             sequence,
+            checkpoint_id: state.checkpoint().checkpoint_id.clone(),
+            boot_id: self.boot_id.clone(),
             phase,
             health,
             terminal_ready,
@@ -410,6 +423,14 @@ impl WorkspaceAgent {
                 ),
                 &[],
             )));
+        }
+        if let Some(next_checkpoint) = response.next_checkpoint.as_ref() {
+            next_checkpoint
+                .validate(unix_time_ms(), self.config.max_checkpoint_bytes)
+                .map_err(|error| AgentError::Safe(self.sanitize_error(state, &error)))?;
+            self.state_store
+                .install_next_checkpoint(state, next_checkpoint.clone())
+                .map_err(AgentError::State)?;
         }
         Ok(response)
     }
@@ -519,6 +540,31 @@ impl WorkspaceAgent {
     }
 }
 
+fn read_linux_boot_id() -> Result<String, AgentError> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").map_err(|error| {
+        AgentError::Safe(SanitizedError::new(
+            format!("failed to read Linux boot identity: {error}"),
+            &[],
+        ))
+    })?;
+    let boot_id = boot_id.trim();
+    if !valid_linux_boot_id(boot_id) {
+        return Err(AgentError::Safe(SanitizedError::new(
+            "Linux boot identity is malformed",
+            &[],
+        )));
+    }
+    Ok(boot_id.to_owned())
+}
+
+fn valid_linux_boot_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
 fn fs_create_tmpfs_root(path: &Path) -> Result<(), AgentError> {
     std::fs::create_dir_all(path).map_err(|error| {
         AgentError::Safe(SanitizedError::new(
@@ -583,7 +629,7 @@ impl std::fmt::Display for SanitizedError {
 
 #[cfg(test)]
 mod tests {
-    use super::tcp_ready;
+    use super::{tcp_ready, valid_linux_boot_id};
     use std::time::Duration;
 
     #[tokio::test]
@@ -598,5 +644,12 @@ mod tests {
             .expect("bind readiness fixture");
         let address = listener.local_addr().expect("read readiness address");
         assert!(tcp_ready(address, Duration::from_secs(1)).await);
+    }
+
+    #[test]
+    fn linux_boot_identity_is_canonical_lowercase_uuid() {
+        assert!(valid_linux_boot_id("6c585ad0-cf7a-4c1e-a392-37b691c90c5d"));
+        assert!(!valid_linux_boot_id("6C585AD0-CF7A-4C1E-A392-37B691C90C5D"));
+        assert!(!valid_linux_boot_id("not-a-boot-id"));
     }
 }

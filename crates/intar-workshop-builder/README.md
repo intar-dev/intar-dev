@@ -16,11 +16,12 @@ metadata. The crate:
   every `agent_kvm` checkpoint;
 - independently hashes and multipart-uploads every image/kernel/initrd before
   posting one success result;
-- for a `hetzner_cloud` workshop, emits exactly one deterministic,
+- for direct-cloud profiles, emits exactly one deterministic,
   content-addressed reconstruction bundle per checkpoint through that same
   generic artifact upload path and hands it to Intar's direct-provider
   verification harness without starting the KVM backend. The harness applies
-  the terminal cumulative bundle on one clean persistent publication server;
+  the terminal cumulative bundle on one clean persistent verifier VM for each
+  declared profile;
   and
 - posts one terminal failure and aborts the guest workflow on any non-shutdown
   error. Operator shutdown leaves the claim resumable instead of publishing a
@@ -30,13 +31,12 @@ The crate includes the deployable `intar-workshop-builder` binary, the concrete
 `KvmWorkshopBackend`, and a fail-closed provider-only backend. The top-level
 `execution_mode` selects the host capability:
 
-- `direct_provider_only` is the production mode for Hetzner publications. It
+- `direct_provider_only` is the production mode for direct-cloud publications. It
   requires runtime-bundle signing, claims only manifests declaring
-  `hetzner_cloud`, and never preflights, constructs, or invokes a KVM backend.
+  direct-cloud profiles, and never preflights, constructs, or invokes a KVM backend.
   It forbids authored images, local runtime proof, and `execution.images`.
 - `agent_kvm` retains the existing authored-image and local checkpoint path.
-  It remains the default when `execution_mode` is omitted, preserving existing
-  configurations and claim behavior.
+  It remains the default for dedicated KVM builder configurations.
 
 `config.example.toml` is the production `direct_provider_only` configuration
 and therefore has no `[execution]`, disk, image, QEMU, or KVM setting. Run
@@ -81,14 +81,14 @@ check does not replace normal capacity monitoring.
 
 The `agent_kvm` execution mapping is deliberately operator-owned. Each
 `workspace.vm.image` resolves to one absolute raw base disk, kernel, initrd and
-boot command line in `config.example.toml`. V1 accepts only x86_64. The host rejects symlinked or
+boot command line in `config.example.toml`. The current runtime accepts only x86_64. The host rejects symlinked or
 missing files, an unsafe work root, missing KVM access, missing filesystem
 tools, architecture mismatches, and workshops with anything other than one VM
 before a build starts. V1 rejects multi-VM workshops explicitly.
 
 ## Direct-cloud reconstruction bundles
 
-A production builder for workshops whose HCL selects `hetzner_cloud` uses
+A production builder for workshops whose HCL declares only direct-cloud profiles uses
 `execution_mode = "direct_provider_only"` and requires
 `[worker.runtime_bundle_signing]`. Its claim request carries that capability;
 the registry filters atomically on the already-validated compiled manifest, so
@@ -127,11 +127,12 @@ The Ed25519 signature covers the exact compressed bytes whose SHA-256 is used
 by the generic artifact registry; the terminal checkpoint report sends
 `sha256`, `compression`, `signature_b64`, and `signing_key_id`.
 
-Signing alone is not a Hetzner compatibility proof. The builder marks each
+Signing alone is not a provider compatibility proof. The builder marks each
 signed bundle as awaiting provider verification and reports no KVM image or
 local cold-boot claim. The registry pins the CI-published workspace-agent and
-Kino digests, then Intar's provider harness creates one clean direct Hetzner
-Debian 13 server through the organization's encrypted BYOK connection. The
+Kino digests, then Intar's provider harness creates one clean Debian 13
+verifier VM for every declared profile through the organization's matching
+encrypted BYOK connection. The
 generation-bound workspace agent downloads the exact terminal signed bundle
 into tmpfs, runs bootstrap once, then runs every checkpoint's catch-up and
 verifier in stable order on that same server. A failed catch-up or verifier
@@ -140,13 +141,13 @@ rejects the whole cumulative proof and prevents later steps from running.
 The terminal checkpoint is the sole cold-boot verification basis. Earlier
 checkpoint artifacts reference that terminal basis and must not claim an
 independent cold boot. The registry publishes the immutable revision only
-after the cumulative proof succeeds and the harness confirms deletion of the
-one verifier server, Primary IPv4, and ephemeral SSH key. The verifier attempt
+after every profile's cumulative proof succeeds and the harness confirms
+deletion of every verifier instance and its provider resources. Each verifier attempt
 is a separate publication record: it never becomes a learner workspace,
 runtime execution, active slot, terminal route, or scenario data. Its rounded
 estimated provider cost remains visible with the publication.
 `[execution.runtime_bundle_verification]` is never consulted by the
-direct-provider path and must not be used as Hetzner publication evidence.
+direct-provider path and must not be used as provider certification evidence.
 
 This publication optimization does not change learner semantics. A normal
 learner is provisioned once from checkpoint 00 (or a facilitator-selected

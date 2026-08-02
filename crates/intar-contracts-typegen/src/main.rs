@@ -21,10 +21,11 @@ use intar_contracts::{
         IssueWorkspaceAppSessionResponse,
     },
 };
+use intar_workshop_builder::HydratedWorkshopManifestV2;
 use schemars::schema_for;
 
 fn main() -> Result<()> {
-    let out_dir = Path::new("website/src/generated");
+    let out_dir = Path::new("apps/web/src/generated");
     let schema_dir = out_dir.join("schemas");
     let fixture_dir = out_dir.join("fixtures");
     fs::create_dir_all(&schema_dir).context("create schema output directory")?;
@@ -32,6 +33,8 @@ fn main() -> Result<()> {
         .context("create stargate fixture directory")?;
     fs::create_dir_all(fixture_dir.join("catalog")).context("create catalog fixture directory")?;
     fs::create_dir_all(fixture_dir.join("bridge")).context("create bridge fixture directory")?;
+    fs::create_dir_all(fixture_dir.join("workshop"))
+        .context("create workshop fixture directory")?;
 
     for obsolete in [
         "schemas/catalog-scenario-manifest-v2.schema.json",
@@ -71,6 +74,10 @@ fn main() -> Result<()> {
     write_schema(
         &schema_dir.join("catalog-scenario-manifest-v3.schema.json"),
         &schema_for!(ScenarioManifestV3),
+    )?;
+    write_schema(
+        &schema_dir.join("workshop-manifest-v2.schema.json"),
+        &schema_for!(HydratedWorkshopManifestV2),
     )?;
     write_schema(
         &schema_dir.join("bridge-host-desired-state-v2.schema.json"),
@@ -121,6 +128,10 @@ fn main() -> Result<()> {
     copy_fixture(
         "crates/intar-contracts/fixtures/catalog/scenario-manifest-v3.json",
         &fixture_dir.join("catalog/scenario-manifest-v3.json"),
+    )?;
+    copy_fixture(
+        "crates/intar-workshop-builder/fixtures/hydrated-workshop-manifest-v2.json",
+        &fixture_dir.join("workshop/workshop-manifest-v2.json"),
     )?;
     copy_fixture(
         "crates/intar-contracts/fixtures/bridge/host-desired-state-v2.json",

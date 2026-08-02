@@ -39,9 +39,9 @@ pub fn load_and_validate(root: impl AsRef<Path>) -> Result<ValidatedWorkshop> {
 }
 
 fn validate_manifest(root: &Path, manifest: WorkshopManifest) -> Result<ValidatedWorkshop> {
-    if manifest.format_version != 1 {
+    if manifest.format_version != 2 {
         return Err(invalid(format!(
-            "unsupported format_version {} (expected 1)",
+            "unsupported format_version {} (expected 2)",
             manifest.format_version
         )));
     }
@@ -127,10 +127,9 @@ fn validate_workspace(
         if !vm_ids.insert(vm.id.as_str()) {
             return Err(invalid(format!("duplicate workspace vm '{}'", vm.id)));
         }
-        validate_id("workspace vm image", &vm.image)?;
-        if !(250..=32_000).contains(&vm.vcpu_millis) || vm.vcpu_millis % 250 != 0 {
+        if !(250..=32_000).contains(&vm.cpu_millis) || vm.cpu_millis % 250 != 0 {
             return Err(invalid(format!(
-                "vm '{}' vcpu_millis must be between 250 and 32000 in increments of 250",
+                "vm '{}' cpu_millis must be between 250 and 32000 in increments of 250",
                 vm.id
             )));
         }
@@ -140,33 +139,121 @@ fn validate_workspace(
                 vm.id
             )));
         }
-        if !(1..=2048).contains(&vm.disk_gib) {
+        if !(1_024..=2_097_152).contains(&vm.disk_mib) || vm.disk_mib % 1_024 != 0 {
             return Err(invalid(format!(
-                "vm '{}' disk_gib must be between 1 and 2048",
+                "vm '{}' disk_mib must be between 1024 and 2097152 in increments of 1024",
                 vm.id
             )));
         }
     }
 
-    if let Some(WorkspaceProvider::HetznerCloud {
-        vm_id,
-        server_type,
-        system_image,
-    }) = &workspace.provider
-    {
-        if workspace.vms.len() != 1 {
-            return Err(invalid(
-                "workspace provider 'hetzner_cloud' requires exactly one vm block",
-            ));
-        }
-        if !vm_ids.contains(vm_id.as_str()) {
+    if workspace.runtime_profiles.is_empty() {
+        return Err(invalid(
+            "workspace must contain at least one runtime_profile block",
+        ));
+    }
+    let mut profile_ids = HashSet::new();
+    let mut has_direct_cloud_profile = false;
+    for profile in &workspace.runtime_profiles {
+        validate_id("workspace runtime profile id", &profile.id)?;
+        if !profile_ids.insert(profile.id.as_str()) {
             return Err(invalid(format!(
-                "workspace provider 'hetzner_cloud' references unknown vm '{vm_id}'"
+                "duplicate workspace runtime profile '{}'",
+                profile.id
             )));
         }
-        validate_provider_name("Hetzner server_type", server_type)?;
-        validate_provider_name("Hetzner system_image", system_image)?;
-        include_hetzner_runtime(root, source_files)?;
+        if !vm_ids.contains(profile.vm_id.as_str()) {
+            return Err(invalid(format!(
+                "runtime profile '{}' references unknown vm '{}'",
+                profile.id, profile.vm_id
+            )));
+        }
+        match profile.provider {
+            RuntimeProviderKind::AgentKvm => {
+                validate_id(
+                    &format!("runtime profile '{}' system_image", profile.id),
+                    &profile.system_image,
+                )?;
+            }
+            RuntimeProviderKind::HetznerCloud => {
+                has_direct_cloud_profile = true;
+                let machine_type = profile.machine_type.as_deref().ok_or_else(|| {
+                    invalid(format!(
+                        "runtime profile '{}' is missing machine_type",
+                        profile.id
+                    ))
+                })?;
+                validate_provider_name(
+                    &format!("runtime profile '{}' Hetzner machine_type", profile.id),
+                    machine_type,
+                )?;
+                validate_provider_name(
+                    &format!("runtime profile '{}' Hetzner system_image", profile.id),
+                    &profile.system_image,
+                )?;
+            }
+            RuntimeProviderKind::GcpCompute => {
+                has_direct_cloud_profile = true;
+                let machine_type = profile.machine_type.as_deref().ok_or_else(|| {
+                    invalid(format!(
+                        "runtime profile '{}' is missing machine_type",
+                        profile.id
+                    ))
+                })?;
+                validate_provider_name(
+                    &format!("runtime profile '{}' GCP machine_type", profile.id),
+                    machine_type,
+                )?;
+                validate_gcp_resource_path(
+                    &format!("runtime profile '{}' GCP system_image", profile.id),
+                    &profile.system_image,
+                )?;
+                let root_disk_type = profile.root_disk_type.as_deref().ok_or_else(|| {
+                    invalid(format!(
+                        "runtime profile '{}' is missing root_disk_type",
+                        profile.id
+                    ))
+                })?;
+                validate_provider_name(
+                    &format!("runtime profile '{}' GCP root_disk_type", profile.id),
+                    root_disk_type,
+                )?;
+                if root_disk_type != "pd-balanced" {
+                    return Err(invalid(format!(
+                        "runtime profile '{}' GCP root_disk_type must be 'pd-balanced'",
+                        profile.id
+                    )));
+                }
+                if profile.locations.is_empty() {
+                    return Err(invalid(format!(
+                        "runtime profile '{}' must declare at least one GCP location",
+                        profile.id
+                    )));
+                }
+                let mut locations = HashSet::new();
+                for location in &profile.locations {
+                    validate_provider_name(
+                        &format!("runtime profile '{}' GCP location", profile.id),
+                        location,
+                    )?;
+                    if !locations.insert(location.as_str()) {
+                        return Err(invalid(format!(
+                            "runtime profile '{}' declares GCP location '{}' more than once",
+                            profile.id, location
+                        )));
+                    }
+                }
+            }
+        }
+        if profile.provider.is_direct_cloud() && workspace.vms.len() != 1 {
+            return Err(invalid(format!(
+                "direct-cloud runtime profile '{}' requires exactly one vm block",
+                profile.id
+            )));
+        }
+    }
+    if has_direct_cloud_profile {
+        include_direct_cloud_runtime(root, source_files)?;
     }
 
     let module_ids: HashSet<_> = manifest
@@ -224,7 +311,7 @@ fn validate_workspace(
 /// trusted builder can produce and sign one reconstruction artifact per
 /// checkpoint. Reject links and special files before upload; the builder then
 /// applies the stricter learner-content and OCI-inventory policy.
-fn include_hetzner_runtime(root: &Path, source_files: &mut BTreeSet<String>) -> Result<()> {
+fn include_direct_cloud_runtime(root: &Path, source_files: &mut BTreeSet<String>) -> Result<()> {
     for required in [
         "runtime/runtime.json",
         "runtime/bootstrap.sh",
@@ -645,6 +732,33 @@ fn validate_provider_name(context: &str, value: &str) -> Result<()> {
     {
         return Err(invalid(format!(
             "{context} '{value}' may contain only lowercase ASCII letters, digits, and hyphens"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_gcp_resource_path(context: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 255
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains("//")
+    {
+        return Err(invalid(format!(
+            "{context} must be a canonical lowercase GCP resource path"
+        )));
+    }
+    if value.bytes().any(|byte| {
+        !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && !matches!(byte, b'-' | b'_' | b'/')
+    }) {
+        return Err(invalid(format!(
+            "{context} must be a canonical lowercase GCP resource path"
+        )));
+    }
+    let parts = value.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 || parts[0] != "projects" || parts[2] != "global" || parts[3] != "images" {
+        return Err(invalid(format!(
+            "{context} must start with 'projects/<project>/global/images/'"
         )));
     }
     Ok(())

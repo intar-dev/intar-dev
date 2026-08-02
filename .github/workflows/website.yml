@@ -7,19 +7,28 @@ on:
     paths:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
-      - ".github/workflows/hcloud-provider.yml"
+      - ".github/workflows/control-plane-rollout.yml"
+      - ".github/workflows/clean-d1-cutover.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "justfile"
-      - "build-tools.hcl"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - "packages/provider-contracts/**"
+      - "packages/workshop-contracts/**"
+      - "tools/check-import-boundaries.ts"
+      - "tools/bootstrap/**"
+      - "tools/providers/**"
+      - "content/scenarios/build-tools.hcl"
       - "crates/intar-image-scenario/**"
       - "crates/intar-image-scenario-wasm/**"
       - "crates/intar-kino-proto/**"
       - "crates/intar-workspace-agent/**"
       - "crates/kino/**"
-      - "hcloud-provider-worker/**"
-      - "website/**"
+      - "apps/web/**"
+      - "!apps/web/workers/providers/**"
 
 permissions:
   contents: read
@@ -30,7 +39,7 @@ concurrency:
 
 defaults:
   run:
-    working-directory: website
+    working-directory: apps/web
 
 jobs:
   workspace-agent:
@@ -111,7 +120,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
-          path: website/src/generated/scenario-wasm
+          path: apps/web/src/generated/scenario-wasm
           if-no-files-found: error
           retention-days: 1
 
@@ -128,12 +137,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
-          path: website/src/generated/scenario-wasm
+          path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version-file: website/.node-version
+          node-version-file: apps/web/.node-version
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -146,7 +155,15 @@ jobs:
           path: ~/.bun/install/cache
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
+
+      - name: Check monorepo import and provider contracts
+        working-directory: ${{ github.workspace }}
+        run: |
+          bun run check:bootstrap
+          bun run check:imports
+          bun run check:providers
 
       - name: Test
         run: bun run test
@@ -170,12 +187,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: scenario-wasm-${{ github.sha }}-${{ github.run_attempt }}
-          path: website/src/generated/scenario-wasm
+          path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
-          node-version-file: website/.node-version
+          node-version-file: apps/web/.node-version
 
       - name: Install Bun setup prerequisite
         run: apt-get update && apt-get install --yes --no-install-recommends unzip
@@ -186,6 +203,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
       - name: Install pinned Playwright browsers

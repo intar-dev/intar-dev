@@ -49,7 +49,7 @@ pub(super) fn course_manifest_path(courses_root: Option<&Path>) -> Result<PathBu
                     courses_root.display()
                 )
             }),
-        None => Ok(PathBuf::from(COURSES_PATH)),
+        None => Ok(PathBuf::from(DEFAULT_COURSES_PATH)),
     }
 }
 
@@ -359,8 +359,8 @@ pub(super) fn collect_bundle_source_files(
     }
 
     let mut files = Vec::new();
-    add_bundle_file(base_images_path, BASE_IMAGES_PATH, &mut files)?;
-    add_bundle_file(build_tools_path, BUILD_TOOLS_PATH, &mut files)?;
+    add_bundle_file(base_images_path, BUNDLE_BASE_IMAGES_PATH, &mut files)?;
+    add_bundle_file(build_tools_path, BUNDLE_BUILD_TOOLS_PATH, &mut files)?;
     if let Some(course_manifest_path) = course_manifest_path {
         add_bundle_file(course_manifest_path, COURSES_PATH, &mut files)?;
     }
@@ -368,7 +368,7 @@ pub(super) fn collect_bundle_source_files(
     for scenario in scenarios {
         collect_bundle_dir(
             &scenario.scenario_dir,
-            &format!("scenarios/{}", scenario.scenario_id),
+            &format!("{BUNDLE_SCENARIOS_ROOT}/{}", scenario.scenario_id),
             &mut files,
         )?;
     }

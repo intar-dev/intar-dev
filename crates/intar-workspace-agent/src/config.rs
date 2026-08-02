@@ -262,7 +262,7 @@ mod tests {
         let parsed = toml::from_str::<AgentConfig>(
             r#"
                 identity = { execution_id = "exec-1", workspace_id = "ws-1", generation = 1 }
-                control_plane_endpoint = "http://intar.dev/api/workspace-agent/"
+                control_plane_endpoint = "http://intar.dev/api/runtime/workspace-agent/"
                 bootstrap_capability_path = "/run/intar/bootstrap"
                 state_path = "/var/lib/intar/state.json"
                 checkpoint_tmpfs_dir = "/run/intar/checkpoints"
@@ -281,7 +281,7 @@ mod tests {
         let valid = toml::from_str::<AgentConfig>(
             r#"
                 identity = { execution_id = "exec-1", workspace_id = "ws-1", generation = 1 }
-                control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+                control_plane_endpoint = "https://intar.dev/api/runtime/workspace-agent/"
                 bootstrap_capability_path = "/run/intar/bootstrap"
                 state_path = "/var/lib/intar/state.json"
                 checkpoint_tmpfs_dir = "/run/intar/checkpoints"
@@ -312,7 +312,7 @@ mod tests {
         let error = toml::from_str::<AgentConfig>(
             r#"
                 identity = { execution_id = "exec-1", workspace_id = "ws-1", generation = 1 }
-                control_plane_endpoint = "https://intar.dev/api/workspace-agent/"
+                control_plane_endpoint = "https://intar.dev/api/runtime/workspace-agent/"
                 bootstrap_capability_path = "/run/intar/bootstrap"
                 state_path = "/var/lib/intar/state.json"
                 checkpoint_tmpfs_dir = "/run/intar/checkpoints"
