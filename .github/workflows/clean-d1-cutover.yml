@@ -5,13 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Review, apply, or roll back the clean-slate cutover
+        description: Review, repair the legacy drain, apply, bootstrap, or roll back the clean-slate cutover
         required: true
         default: plan
         type: choice
         options:
           - plan
           - apply
+          - retire-legacy-host
           - bootstrap-owner
           - rollback
       database_name:
@@ -25,12 +26,22 @@ on:
         default: ""
         type: string
       previous_database_id:
-        description: Old production D1 UUID required for the apply drain gate and rollback
+        description: Old production D1 UUID required for retirement, the apply drain gate, and rollback
         required: false
         default: 6e715506-88ce-4565-85bc-66a9cf2a3c5e
         type: string
       previous_web_version_id:
         description: Exact previous intar-dev Worker version for rollback
+        required: false
+        default: ""
+        type: string
+      legacy_host_id:
+        description: Exact unused host ID to retire from the previous D1
+        required: false
+        default: ""
+        type: string
+      legacy_host_name:
+        description: Exact unused host name to retire from the previous D1
         required: false
         default: ""
         type: string
@@ -60,7 +71,7 @@ on:
         default: ""
         type: string
       confirmation:
-        description: Type PLAN CLEAN D1, APPLY CLEAN D1, BOOTSTRAP CLEAN D1 OWNER, or ROLLBACK CLEAN D1
+        description: Type PLAN CLEAN D1, APPLY CLEAN D1, RETIRE LEGACY HOST, BOOTSTRAP CLEAN D1 OWNER, or ROLLBACK CLEAN D1
         required: true
         type: string
 
@@ -85,6 +96,8 @@ jobs:
       EXPECTED_DATABASE_ID: ${{ inputs.expected_database_id }}
       PREVIOUS_DATABASE_ID: ${{ inputs.previous_database_id }}
       PREVIOUS_WEB_VERSION_ID: ${{ inputs.previous_web_version_id }}
+      LEGACY_HOST_ID: ${{ inputs.legacy_host_id }}
+      LEGACY_HOST_NAME: ${{ inputs.legacy_host_name }}
       ISSUANCE_DISABLED: ${{ inputs.issuance_disabled }}
       BOOTSTRAP_OWNER_GITHUB_LOGIN: ${{ inputs.bootstrap_owner_github_login }}
       BOOTSTRAP_OWNER_GITHUB_ID: ${{ inputs.bootstrap_owner_github_id }}
@@ -134,6 +147,15 @@ jobs:
               [[ "${PREVIOUS_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
               test -z "${APPLY_RUN_ID}"
               ;;
+            retire-legacy-host)
+              test "${CONFIRMATION}" = "RETIRE LEGACY HOST"
+              [[ "${PREVIOUS_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+              [[ "${LEGACY_HOST_ID}" =~ ^[a-z0-9][a-z0-9-]{0,127}$ ]]
+              [[ "${LEGACY_HOST_NAME}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]
+              test -z "${EXPECTED_DATABASE_ID}"
+              test -z "${PREVIOUS_WEB_VERSION_ID}"
+              test -z "${APPLY_RUN_ID}"
+              ;;
             bootstrap-owner)
               test "${CONFIRMATION}" = "BOOTSTRAP CLEAN D1 OWNER"
               [[ "${EXPECTED_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -149,6 +171,11 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
+
+          if [ "${OPERATION}" != retire-legacy-host ]; then
+            test -z "${LEGACY_HOST_ID}"
+            test -z "${LEGACY_HOST_NAME}"
+          fi
 
           if [ "${OPERATION}" != plan ]; then
             environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
@@ -284,7 +311,8 @@ jobs:
           bash -n \
             tools/cutover/configure-stargate-ssh.sh \
             tools/cutover/deploy-maintenance-fence.sh \
-            tools/cutover/prove-legacy-drain.sh
+            tools/cutover/prove-legacy-drain.sh \
+            tools/cutover/retire-unused-legacy-host.sh
           bun run check:cutover
 
       - name: Inventory D1 without mutation
@@ -312,9 +340,11 @@ jobs:
               test "${observed_id}" = "${EXPECTED_DATABASE_ID}"
             fi
           fi
-          if [ "${OPERATION}" = apply ]; then
+          if [ "${OPERATION}" = apply ] || [ "${OPERATION}" = retire-legacy-host ]; then
             test "${previous_count}" = 1
             test -n "${previous_name}"
+          fi
+          if [ "${OPERATION}" = apply ]; then
             test "${observed_id:-not-created}" != "${PREVIOUS_DATABASE_ID}"
             test "${EXPECTED_DATABASE_ID:-not-provided}" != "${PREVIOUS_DATABASE_ID}"
           fi
@@ -408,6 +438,35 @@ jobs:
             $policies[0].type == "branch" and
             $policies[0].name == "main"
           ' <<<"${branch_policies}" >/dev/null
+
+      - name: Retire the exact unused legacy host
+        if: ${{ inputs.operation == 'retire-legacy-host' }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_D1_ADMIN_API_TOKEN }}
+          PREVIOUS_DATABASE_NAME: ${{ steps.inventory.outputs.previous_database_name }}
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          test -n "${PREVIOUS_DATABASE_NAME}"
+          bash tools/cutover/retire-unused-legacy-host.sh \
+            "${PREVIOUS_DATABASE_NAME}" \
+            "${PREVIOUS_DATABASE_ID}" \
+            "${LEGACY_HOST_ID}" \
+            "${LEGACY_HOST_NAME}" \
+            "${RUNNER_TEMP}/clean-d1-legacy-host-retirement.json"
+          jq . "${RUNNER_TEMP}/clean-d1-legacy-host-retirement.json" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Retain legacy-host retirement evidence
+        if: ${{ always() && inputs.operation == 'retire-legacy-host' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-d1-legacy-host-retirement-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/clean-d1-legacy-host-retirement.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Configure the pinned, restricted Stargate drain probe
         if: ${{ inputs.operation == 'apply' }}
