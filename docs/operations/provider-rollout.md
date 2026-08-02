@@ -16,15 +16,22 @@ The web Worker binds them as `HETZNER_PROVIDER_SERVICE` and
 
 ## Deployment gate
 
-> **Provider-mutation approval blocker:** the current provider workflow has not
-> yet implemented the same actor identity, expiry, recent-admin-attestation, and
-> main-only environment-policy checks used by the web deployment's
-> single-operator mode. Do not mutate either provider while production is in
-> single-operator mode. Proceed only after either (a) production is placed in
-> reviewed mode with administrator bypass disabled, a required reviewer, and
-> self-review prevention, or (b) the risk of the same explicitly accepted,
-> time-bounded single-operator model is approved and that guard is implemented
-> and validated in the provider workflow.
+Provider mutations use the same protected approval modes as the clean-D1 and
+web workflows. In `reviewed` mode the production environment must disable
+administrator bypass, require at least one reviewer, and prevent self-review;
+the single-operator confirmation must be empty. In the explicitly configured
+`single-operator` commissioning mode, the dispatch must include
+`SINGLE OPERATOR WORKSHOP CONTROL PLANE` and match the protected GitHub login
+and numeric user ID. Its expiry must be in the future and at most seven days
+away, and the protected administrator attestation must be no more than 15
+minutes old. Both modes require a first-attempt run from exact `main` and an
+environment deployment policy containing only the `main` branch.
+
+The provider workflow evaluates this policy once before authorizing the
+deployment and again immediately before each Hetzner and GCP mutation. A direct
+provider dispatch supplies `single_operator_confirmation` itself. The protected
+control-plane wrapper forwards its identically named input to both provider and
+web workflows.
 
 The canonical clean-slate production order is:
 

@@ -51,6 +51,7 @@ jobs:
       deploy_gcp: true
       gcp_dormant: ${{ inputs.gcp_dormant }}
       gcp_dormant_confirmation: ${{ inputs.gcp_dormant_confirmation }}
+      single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
       parent_holds_control_plane_lock: true
       confirmation: ${{ inputs.provider_confirmation }}
     secrets:

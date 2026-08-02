@@ -76,6 +76,10 @@ function expectObject(value: unknown, label: string): JsonObject {
   return value as JsonObject;
 }
 
+function countOccurrences(source: string, expected: string): number {
+  return source.split(expected).length - 1;
+}
+
 function expectProviderConfig(
   config: JsonObject,
   expected: {
@@ -142,13 +146,73 @@ const providerWorkflow = await readFile(
 );
 for (const required of [
   "parent_holds_control_plane_lock:",
+  "single_operator_confirmation:",
   "format('provider-workers-pr-{0}', github.event.pull_request.number)",
   "format('provider-workers-reusable-{0}', github.run_id)",
   "'intar-control-plane-production'",
   '--var "GCP_PROVIDER_MODE:${provider_mode}"',
+  "Recheck protected Hetzner mutation window",
+  "Recheck protected GCP mutation window",
 ]) {
   if (!providerWorkflow.includes(required)) {
     throw new Error(`Provider workflow is missing fail-closed deployment contract: ${required}`);
+  }
+}
+if (countOccurrences(providerWorkflow, "single_operator_confirmation:") !== 2) {
+  throw new Error(
+    "Provider workflow must expose the sole-operator input for call and dispatch",
+  );
+}
+if (
+  countOccurrences(
+    providerWorkflow,
+    "SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}",
+  ) !== 3
+) {
+  throw new Error(
+    "Every provider mutation gate must receive the sole-operator confirmation",
+  );
+}
+for (const requiredGateClause of [
+  ".can_admins_bypass == false",
+  ".prevent_self_review == true",
+  "((.reviewers // []) | length) > 0",
+  '([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0',
+  '[[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]',
+  '[[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]',
+  'test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"',
+  'test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"',
+  'test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"',
+  'test "${RUN_ATTEMPT}" = "1"',
+  'test "${remaining_seconds}" -gt 0',
+  'test "${remaining_seconds}" -le 604800',
+  'test "${attestation_age}" -ge 0',
+  'test "${attestation_age}" -le 900',
+  'test "${GITHUB_REF}" = "refs/heads/main"',
+  '$policies[0].name == "main"',
+]) {
+  if (countOccurrences(providerWorkflow, requiredGateClause) !== 3) {
+    throw new Error(
+      `Every provider mutation gate must enforce: ${requiredGateClause}`,
+    );
+  }
+}
+const providerStepNames = [
+  ...providerWorkflow.matchAll(/^\s{6}- name: (.+)$/gm),
+].map((match) => match[1]);
+for (const [guard, mutation] of [
+  [
+    "Recheck protected Hetzner mutation window",
+    "Deploy route-less Hetzner provider Worker",
+  ],
+  [
+    "Recheck protected GCP mutation window",
+    "Deploy route-less GCP provider Worker",
+  ],
+] as const) {
+  const guardIndex = providerStepNames.indexOf(guard);
+  if (guardIndex < 0 || providerStepNames[guardIndex + 1] !== mutation) {
+    throw new Error(`${guard} must run immediately before ${mutation}`);
   }
 }
 const controlPlaneWorkflow = await readFile(
@@ -157,6 +221,16 @@ const controlPlaneWorkflow = await readFile(
 );
 if (!controlPlaneWorkflow.includes("parent_holds_control_plane_lock: true")) {
   throw new Error("Control-plane wrapper must identify itself as the provider lock owner");
+}
+if (
+  countOccurrences(
+    controlPlaneWorkflow,
+    "single_operator_confirmation: ${{ inputs.single_operator_confirmation }}",
+  ) !== 2
+) {
+  throw new Error(
+    "Control-plane wrapper must forward the sole-operator gate to providers and web",
+  );
 }
 
 const webConfig = await readJsonc("apps/web/wrangler.jsonc");

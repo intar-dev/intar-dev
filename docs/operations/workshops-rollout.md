@@ -202,14 +202,16 @@ recreates state through authenticated application APIs.
 
 ## 3. Deploy providers and web
 
-Provider mutation is blocked while the protected environment remains in
-single-operator mode because the provider workflow does not yet enforce the
-web workflow's actor identity, expiry, recent-admin-attestation, and main-only
-environment-policy checks. Before continuing, either switch production to
-reviewed mode with administrator bypass disabled, a required reviewer, and
-self-review prevention, or obtain explicit acceptance of the same time-bounded
-single-operator model and implement and validate that guard in the provider
-workflow.
+Provider mutation uses the same protected approval modes as the clean-D1 and
+web workflows. Reviewed mode requires administrator bypass disabled, a required
+reviewer, and self-review prevention. The explicitly configured single-operator
+commissioning mode requires the exact confirmation, protected actor login and
+numeric ID, an unexpired window of at most seven days, and an administrator
+attestation no more than 15 minutes old. Both modes are restricted to a
+first-attempt exact-`main` run and a production deployment policy containing
+only `main`. The provider workflow checks the policy at authorization and again
+immediately before each provider mutation; the control-plane wrapper forwards
+the same single-operator confirmation to providers and web.
 
 Before dispatching the control-plane rollout, capture the complete old rollback
 unit in the rollout ticket:
