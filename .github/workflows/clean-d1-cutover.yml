@@ -31,7 +31,7 @@ on:
         default: 6e715506-88ce-4565-85bc-66a9cf2a3c5e
         type: string
       previous_web_version_id:
-        description: Exact previous intar-dev Worker version for rollback
+        description: Exact previous intar-dev Worker version required for apply recovery and rollback
         required: false
         default: ""
         type: string
@@ -145,6 +145,7 @@ jobs:
             apply)
               test "${CONFIRMATION}" = "APPLY CLEAN D1"
               [[ "${PREVIOUS_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+              [[ "${PREVIOUS_WEB_VERSION_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
               test -z "${APPLY_RUN_ID}"
               ;;
             retire-legacy-host)
@@ -312,6 +313,7 @@ jobs:
             tools/cutover/configure-stargate-ssh.sh \
             tools/cutover/deploy-maintenance-fence.sh \
             tools/cutover/prove-legacy-drain.sh \
+            tools/cutover/resume-maintenance-fence.sh \
             tools/cutover/retire-unused-legacy-host.sh
           bun run check:cutover
 
@@ -479,6 +481,29 @@ jobs:
           test "${config}" = "${RUNNER_TEMP}/intar-stargate-ssh/config"
           printf 'STARGATE_SSH_CONFIG=%s\n' "${config}" >> "${GITHUB_ENV}"
 
+      - name: Recover an exact same-revision maintenance fence before draining
+        if: ${{ inputs.operation == 'apply' }}
+        id: pre_drain_recovery
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WEB_ROLLBACK_API_TOKEN }}
+          PREVIOUS_DATABASE_NAME: ${{ steps.inventory.outputs.previous_database_name }}
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_ACCOUNT_ID}"
+          test -n "${CLOUDFLARE_API_TOKEN}"
+          test -n "${PREVIOUS_DATABASE_NAME}"
+          tools/cutover/resume-maintenance-fence.sh \
+            "${PREVIOUS_DATABASE_NAME}" \
+            "${PREVIOUS_DATABASE_ID}" \
+            "${PREVIOUS_WEB_VERSION_ID}" \
+            "${RUNNER_TEMP}/clean-d1-pre-drain-recovery.json"
+          restored="$(jq -r '.restored' "${RUNNER_TEMP}/clean-d1-pre-drain-recovery.json")"
+          [[ "${restored}" =~ ^(true|false)$ ]]
+          echo "restored=${restored}" >> "${GITHUB_OUTPUT}"
+          jq . "${RUNNER_TEMP}/clean-d1-pre-drain-recovery.json" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Prove the old control plane is initially drained
         if: ${{ inputs.operation == 'apply' }}
         env:
@@ -493,11 +518,49 @@ jobs:
           test -n "${CLOUDFLARE_PROVIDER_PROBE_API_TOKEN}"
           test -n "${PREVIOUS_DATABASE_NAME}"
           test -f "${STARGATE_SSH_CONFIG}"
-          tools/cutover/prove-legacy-drain.sh \
-            "${PREVIOUS_DATABASE_NAME}" \
-            "${PREVIOUS_DATABASE_ID}" \
-            initial \
-            "${RUNNER_TEMP}/clean-d1-legacy-drain-initial.json"
+          if [ "${{ steps.pre_drain_recovery.outputs.restored }}" = true ]; then
+            succeeded=false
+            for attempt in 1 2 3 4 5 6 7 8 9; do
+              attempt_evidence="${RUNNER_TEMP}/clean-d1-legacy-drain-initial-attempt-${attempt}.json"
+              if tools/cutover/prove-legacy-drain.sh \
+                "${PREVIOUS_DATABASE_NAME}" \
+                "${PREVIOUS_DATABASE_ID}" \
+                "initial-${attempt}" \
+                "${attempt_evidence}"; then
+                cp "${attempt_evidence}" \
+                  "${RUNNER_TEMP}/clean-d1-legacy-drain-initial.json"
+                succeeded=true
+                break
+              fi
+              jq -e '
+                .schema_version == 4 and
+                .query_succeeded == true and
+                .provider_probe_succeeded == true and
+                .stargate_probe_succeeded == true and
+                .drained == false and
+                .provider_inventory.connectionCount > 0 and
+                .provider_inventory.provenEmpty == true and
+                .stargate.healthy == true and
+                .stargate.drained == true and
+                .counts.untrustworthy_enabled_host_reports > 0 and
+                (.counts | to_entries | all(
+                  if .key == "untrustworthy_enabled_host_reports"
+                  then .value > 0
+                  else .value == 0
+                  end
+                ))
+              ' "${attempt_evidence}" >/dev/null
+              test "${attempt}" -lt 9
+              sleep 15
+            done
+            test "${succeeded}" = true
+          else
+            tools/cutover/prove-legacy-drain.sh \
+              "${PREVIOUS_DATABASE_NAME}" \
+              "${PREVIOUS_DATABASE_ID}" \
+              initial \
+              "${RUNNER_TEMP}/clean-d1-legacy-drain-initial.json"
+          fi
           jq . "${RUNNER_TEMP}/clean-d1-legacy-drain-initial.json" \
             >> "${GITHUB_STEP_SUMMARY}"
 
@@ -552,8 +615,12 @@ jobs:
         with:
           name: clean-d1-legacy-drain-${{ github.sha }}-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/clean-d1-pre-drain-recovery.json
+            ${{ runner.temp }}/intar-clean-d1-resume-${{ github.run_id }}/
             ${{ runner.temp }}/clean-d1-legacy-drain-initial.json
+            ${{ runner.temp }}/clean-d1-legacy-drain-initial-attempt-*.json
             ${{ runner.temp }}/clean-d1-maintenance-fence.json
+            ${{ runner.temp }}/intar-clean-d1-maintenance-${{ github.run_id }}/
             ${{ runner.temp }}/clean-d1-legacy-drain-fenced-1.json
             ${{ runner.temp }}/clean-d1-legacy-drain-fenced-2.json
             ${{ runner.temp }}/clean-d1-legacy-drain.json
@@ -776,9 +843,10 @@ jobs:
             --arg previous_database_id "${PREVIOUS_DATABASE_ID}" \
             --arg previous_web_version_id "${{ steps.maintenance_fence.outputs.previous_version_id }}" \
             --arg maintenance_web_version_id "${{ steps.maintenance_fence.outputs.maintenance_version_id }}" \
+            --slurpfile pre_drain_recovery "${RUNNER_TEMP}/clean-d1-pre-drain-recovery.json" \
             --slurpfile legacy_drain "${RUNNER_TEMP}/clean-d1-legacy-drain.json" \
             --slurpfile maintenance_fence "${RUNNER_TEMP}/clean-d1-maintenance-fence.json" \
-            '{schema_version: 3, operation: "apply", source_sha: $source_sha, database_name: $database_name, database_id: $database_id, baseline_sha256: $baseline_sha256, bootstrap_owner_github_login: $bootstrap_owner_github_login, bootstrap_owner_github_id: $bootstrap_owner_github_id, apply_run_id: $apply_run_id, apply_run_attempt: $apply_run_attempt, commissioning_id: "first-owner-v1", commissioning_status: "allowlisted", bootstrap_owner_allowlisted: true, previous_database_name: $previous_database_name, previous_database_id: $previous_database_id, previous_web_version_id: $previous_web_version_id, maintenance_web_version_id: $maintenance_web_version_id, maintenance_fence: $maintenance_fence[0], legacy_drain: $legacy_drain[0], old_database_deleted: false}' \
+            '{schema_version: 4, operation: "apply", source_sha: $source_sha, database_name: $database_name, database_id: $database_id, baseline_sha256: $baseline_sha256, bootstrap_owner_github_login: $bootstrap_owner_github_login, bootstrap_owner_github_id: $bootstrap_owner_github_id, apply_run_id: $apply_run_id, apply_run_attempt: $apply_run_attempt, commissioning_id: "first-owner-v1", commissioning_status: "allowlisted", bootstrap_owner_allowlisted: true, previous_database_name: $previous_database_name, previous_database_id: $previous_database_id, previous_web_version_id: $previous_web_version_id, maintenance_web_version_id: $maintenance_web_version_id, pre_drain_recovery: $pre_drain_recovery[0], maintenance_fence: $maintenance_fence[0], legacy_drain: $legacy_drain[0], old_database_deleted: false}' \
             > "${RUNNER_TEMP}/clean-d1-apply.json"
 
       - name: Upload apply evidence
@@ -866,7 +934,7 @@ jobs:
             --arg login "${canonical_login}" \
             --arg id "${canonical_id}" \
             --arg apply_run_id "${APPLY_RUN_ID}" '
-              .schema_version == 3 and
+              .schema_version == 4 and
               .operation == "apply" and
               .source_sha == $source_sha and
               .database_name == $database_name and
@@ -883,12 +951,46 @@ jobs:
               (.previous_web_version_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
               (.maintenance_web_version_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
               .maintenance_web_version_id != .previous_web_version_id and
+              .pre_drain_recovery.schema_version == 1 and
+              .pre_drain_recovery.operation == "resume-maintenance-fence" and
+              .pre_drain_recovery.source_sha == .source_sha and
+              .pre_drain_recovery.run_id == .apply_run_id and
+              .pre_drain_recovery.run_attempt == 1 and
+              .pre_drain_recovery.database_name == .previous_database_name and
+              .pre_drain_recovery.database_id == .previous_database_id and
+              .pre_drain_recovery.expected_previous_version_id == .previous_web_version_id and
+              .pre_drain_recovery.after_active_version_id == .previous_web_version_id and
+              (.pre_drain_recovery.before_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
+              (.pre_drain_recovery.restore_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
+              .pre_drain_recovery.active_traffic_percentage == 100 and
+              .pre_drain_recovery.before_active_binding_proven == true and
+              .pre_drain_recovery.previous_version_binding_proven == true and
+              .pre_drain_recovery.after_active_binding_proven == true and
+              .pre_drain_recovery.database_mutated == false and
+              .pre_drain_recovery.routes_mutated == false and
+              .pre_drain_recovery.crons_mutated == false and
+              (
+                (.pre_drain_recovery.restored == false and .pre_drain_recovery.fence_detected == false and .pre_drain_recovery.before_deployment_id == .pre_drain_recovery.restore_deployment_id and .pre_drain_recovery.origin_run_id == null and .pre_drain_recovery.origin_run_conclusion == null and .pre_drain_recovery.active_fence_tag == null and .pre_drain_recovery.active_fence_tag_proven == false and .pre_drain_recovery.wrangler_version_deploy_ndjson == "") or
+                (.pre_drain_recovery.restored == true and .pre_drain_recovery.fence_detected == true and .pre_drain_recovery.before_deployment_id != .pre_drain_recovery.restore_deployment_id and (.pre_drain_recovery.marker_sha256 | test("^[0-9a-f]{64}$")) and (.pre_drain_recovery.origin_run_id | test("^[1-9][0-9]*$")) and (.pre_drain_recovery.origin_run_conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")) and .pre_drain_recovery.active_fence_tag == ("clean-d1-fence-" + .pre_drain_recovery.origin_run_id) and .pre_drain_recovery.active_fence_tag_proven == true and (.pre_drain_recovery.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+              ) and
+              .maintenance_fence.schema_version == 2 and
+              .maintenance_fence.operation == "activate-maintenance-fence" and
+              .maintenance_fence.source_sha == .source_sha and
+              .maintenance_fence.run_id == .apply_run_id and
+              .maintenance_fence.run_attempt == 1 and
+              .maintenance_fence.database_name == .previous_database_name and
               .maintenance_fence.state == "active" and
               .maintenance_fence.database_id == .previous_database_id and
               .maintenance_fence.previous_version_id == .previous_web_version_id and
+              .maintenance_fence.previous_version_id == .pre_drain_recovery.after_active_version_id and
               .maintenance_fence.maintenance_version_id == .maintenance_web_version_id and
+              (.maintenance_fence.maintenance_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
               .maintenance_fence.previous_version_binding_proven == true and
               .maintenance_fence.maintenance_version_binding_proven == true and
+              (
+                (.maintenance_fence.reused == true and .maintenance_fence.upload_did_not_activate == false and .maintenance_fence.exact_version_deployed == false and .maintenance_fence.wrangler_version_upload_ndjson == "" and .maintenance_fence.wrangler_version_deploy_ndjson == "") or
+                (.maintenance_fence.reused == false and .maintenance_fence.upload_did_not_activate == true and .maintenance_fence.exact_version_deployed == true and (.maintenance_fence.wrangler_version_upload_ndjson | contains("\"type\":\"version-upload\"")) and (.maintenance_fence.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+              ) and
               .legacy_drain.schema_version == 4 and
               .legacy_drain.query_succeeded == true and
               .legacy_drain.provider_probe_succeeded == true and
