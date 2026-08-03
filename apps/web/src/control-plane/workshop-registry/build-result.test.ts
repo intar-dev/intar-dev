@@ -71,6 +71,28 @@ describe("workshop builder manifest handoff", () => {
       rawManifest: reported,
     });
 
+    // Rust serde emits the internally tagged enum discriminator before its
+    // variant fields. JSON object member order is not semantically relevant,
+    // so the trust comparison must accept that real builder wire shape.
+    const rustWireReported = structuredClone(reported);
+    const rustWireProfile = rustWireReported.workspace.runtimeProfiles[0]!;
+    const { provider, ...profileFields } = rustWireProfile;
+    rustWireReported.workspace.runtimeProfiles[0] = {
+      provider,
+      ...profileFields,
+    } as typeof rustWireProfile;
+    expect(Object.keys(rustWireReported.workspace.runtimeProfiles[0]!)[0]).toBe(
+      "provider",
+    );
+    expect(
+      validateWorkshopBuilderManifest({
+        source,
+        checkpoints,
+        resolutions: [hetznerResolution()],
+        rawManifest: rustWireReported,
+      }).workshop.slug,
+    ).toBe("registry-workshop");
+
     const slide = canonical.presentation.slides.find(
       (entry) => entry.id === "slide-01",
     );
