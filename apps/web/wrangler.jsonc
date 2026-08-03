@@ -56,9 +56,9 @@
     {
       "binding": "DB",
       // CI replaces this fail-closed placeholder with the new clean database
-      // ID after creating `intar-dev-control-plane-v2-20260803`.
+      // ID after creating `intar-dev-control-plane-v2-20260803-r2`.
       "database_id": "00000000-0000-0000-0000-000000000003",
-      "database_name": "intar-dev-control-plane-v2-20260803",
+      "database_name": "intar-dev-control-plane-v2-20260803-r2",
       "migrations_dir": "migrations",
     },
   ],

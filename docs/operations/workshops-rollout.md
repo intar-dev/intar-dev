@@ -129,7 +129,7 @@ provider Worker envelope-encrypts them.
 Set these protected variables before the web cutover:
 
 - `CLEAN_D1_DATABASE_ID` to the UUID returned by the clean-D1 apply workflow;
-- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803`;
+- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r2`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
 - the existing production-review variables required by the web workflow.
@@ -188,7 +188,7 @@ Use `.github/workflows/clean-d1-cutover.yml`; see
 4. If the named database already exists, provide its exact expected UUID.
 5. Record the new UUID and baseline digest from the retained apply artifact.
 6. Set `CLEAN_D1_DATABASE_ID` to that exact UUID and
-   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803`.
+   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r2`.
 7. Verify both protected variables before dispatching any provider or web
    rollout.
 

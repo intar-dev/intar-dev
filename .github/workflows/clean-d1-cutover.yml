@@ -18,7 +18,7 @@ on:
       database_name:
         description: Explicit name of the new clean production database
         required: true
-        default: intar-dev-control-plane-v2-20260803
+        default: intar-dev-control-plane-v2-20260803-r2
         type: string
       expected_database_id:
         description: Optional expected new D1 UUID; required when the database already exists
