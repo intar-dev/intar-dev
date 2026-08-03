@@ -758,9 +758,12 @@ jobs:
               .pre_drain_recovery.database_mutated == false and
               .pre_drain_recovery.routes_mutated == false and
               .pre_drain_recovery.crons_mutated == false and
+              .pre_drain_recovery.restore_propagation.max_attempts == 12 and
+              .pre_drain_recovery.restore_propagation.interval_seconds == 5 and
+              .pre_drain_recovery.restore_propagation.request_timeout_seconds == 5 and
               (
-                (.pre_drain_recovery.restored == false and .pre_drain_recovery.fence_detected == false and .pre_drain_recovery.before_deployment_id == .pre_drain_recovery.restore_deployment_id and .pre_drain_recovery.origin_run_id == null and .pre_drain_recovery.origin_run_conclusion == null and .pre_drain_recovery.active_fence_tag == null and .pre_drain_recovery.active_fence_tag_proven == false and .pre_drain_recovery.wrangler_version_deploy_ndjson == "") or
-                (.pre_drain_recovery.restored == true and .pre_drain_recovery.fence_detected == true and .pre_drain_recovery.before_deployment_id != .pre_drain_recovery.restore_deployment_id and (.pre_drain_recovery.marker_sha256 | test("^[0-9a-f]{64}$")) and (.pre_drain_recovery.origin_run_id | test("^[1-9][0-9]*$")) and (.pre_drain_recovery.origin_run_conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")) and .pre_drain_recovery.active_fence_tag == ("clean-d1-fence-" + .pre_drain_recovery.origin_run_id) and .pre_drain_recovery.active_fence_tag_proven == true and (.pre_drain_recovery.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+                (.pre_drain_recovery.restored == false and .pre_drain_recovery.fence_detected == false and .pre_drain_recovery.before_deployment_id == .pre_drain_recovery.restore_deployment_id and .pre_drain_recovery.origin_run_id == null and .pre_drain_recovery.origin_run_conclusion == null and .pre_drain_recovery.active_fence_tag == null and .pre_drain_recovery.active_fence_tag_proven == false and .pre_drain_recovery.wrangler_version_deploy_ndjson == "" and .pre_drain_recovery.restore_propagation.required == false and .pre_drain_recovery.restore_propagation.attempts == 0 and .pre_drain_recovery.restore_propagation.marker_clear_attempt == null and .pre_drain_recovery.restore_propagation.root_healthy_attempt == null and .pre_drain_recovery.restore_propagation.final_marker_http_status == null and .pre_drain_recovery.restore_propagation.final_root_http_status == null and .pre_drain_recovery.restore_propagation.proven == false and .pre_drain_recovery.restore_propagation.attempts_ndjson == "") or
+                (.pre_drain_recovery.restored == true and .pre_drain_recovery.fence_detected == true and .pre_drain_recovery.before_deployment_id != .pre_drain_recovery.restore_deployment_id and (.pre_drain_recovery.marker_sha256 | test("^[0-9a-f]{64}$")) and (.pre_drain_recovery.origin_run_id | test("^[1-9][0-9]*$")) and (.pre_drain_recovery.origin_run_conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")) and .pre_drain_recovery.active_fence_tag == ("clean-d1-fence-" + .pre_drain_recovery.origin_run_id) and .pre_drain_recovery.active_fence_tag_proven == true and (.pre_drain_recovery.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")) and .pre_drain_recovery.restore_propagation.required == true and .pre_drain_recovery.restore_propagation.attempts >= 1 and .pre_drain_recovery.restore_propagation.attempts <= .pre_drain_recovery.restore_propagation.max_attempts and .pre_drain_recovery.restore_propagation.marker_clear_attempt >= 1 and .pre_drain_recovery.restore_propagation.marker_clear_attempt <= .pre_drain_recovery.restore_propagation.attempts and .pre_drain_recovery.restore_propagation.root_healthy_attempt >= 1 and .pre_drain_recovery.restore_propagation.root_healthy_attempt <= .pre_drain_recovery.restore_propagation.attempts and (.pre_drain_recovery.restore_propagation.final_marker_http_status | test("^[234][0-9]{2}$")) and .pre_drain_recovery.restore_propagation.final_root_http_status == "200" and .pre_drain_recovery.restore_propagation.proven == true and (.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\"root_healthy\":true")) and (.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\"marker_clear\":true")))
               ) and
               .maintenance_fence.schema_version == 2 and
               .maintenance_fence.operation == "activate-maintenance-fence" and
@@ -773,6 +776,12 @@ jobs:
               .maintenance_fence.previous_version_id == .previous_web_version_id and
               .maintenance_fence.maintenance_version_id == $active_version_id and
               .maintenance_fence.maintenance_deployment_id == $active_deployment_id and
+              .maintenance_fence.marker_probe_attempts >= 1 and
+              .maintenance_fence.marker_probe_attempts <= .maintenance_fence.propagation_max_attempts and
+              .maintenance_fence.workshop_503_probe_attempts >= 1 and
+              .maintenance_fence.workshop_503_probe_attempts <= .maintenance_fence.marker_probe_attempts and
+              .maintenance_fence.propagation_max_attempts == 12 and
+              .maintenance_fence.propagation_retry_seconds == 2 and
               .maintenance_fence.previous_version_binding_proven == true and
               .maintenance_fence.maintenance_version_binding_proven == true and
               (

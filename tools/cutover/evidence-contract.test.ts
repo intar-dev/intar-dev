@@ -94,6 +94,38 @@ describe("clean-D1 evidence contract", () => {
     }
   });
 
+  it("pins bounded restore propagation evidence in both consumers", () => {
+    for (const consumer of [bootstrapConsumer, websiteConsumer]) {
+      for (const requiredCheck of [
+        ".pre_drain_recovery.restore_propagation.max_attempts == 12",
+        ".pre_drain_recovery.restore_propagation.interval_seconds == 5",
+        ".pre_drain_recovery.restore_propagation.request_timeout_seconds == 5",
+        ".pre_drain_recovery.restore_propagation.required == false",
+        ".pre_drain_recovery.restore_propagation.attempts == 0",
+        ".pre_drain_recovery.restore_propagation.marker_clear_attempt == null",
+        ".pre_drain_recovery.restore_propagation.root_healthy_attempt == null",
+        ".pre_drain_recovery.restore_propagation.final_marker_http_status == null",
+        ".pre_drain_recovery.restore_propagation.final_root_http_status == null",
+        ".pre_drain_recovery.restore_propagation.proven == false",
+        '.pre_drain_recovery.restore_propagation.attempts_ndjson == ""',
+        ".pre_drain_recovery.restore_propagation.required == true",
+        ".pre_drain_recovery.restore_propagation.attempts >= 1",
+        ".pre_drain_recovery.restore_propagation.attempts <= .pre_drain_recovery.restore_propagation.max_attempts",
+        ".pre_drain_recovery.restore_propagation.marker_clear_attempt >= 1",
+        ".pre_drain_recovery.restore_propagation.marker_clear_attempt <= .pre_drain_recovery.restore_propagation.attempts",
+        ".pre_drain_recovery.restore_propagation.root_healthy_attempt >= 1",
+        ".pre_drain_recovery.restore_propagation.root_healthy_attempt <= .pre_drain_recovery.restore_propagation.attempts",
+        '.pre_drain_recovery.restore_propagation.final_marker_http_status | test("^[234][0-9]{2}$")',
+        '.pre_drain_recovery.restore_propagation.final_root_http_status == "200"',
+        ".pre_drain_recovery.restore_propagation.proven == true",
+        '.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\\"root_healthy\\":true")',
+        '.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\\"marker_clear\\":true")',
+      ]) {
+        expect(consumer).toContain(requiredCheck);
+      }
+    }
+  });
+
   it("requires exact maintenance upload and deployment evidence in both consumers", () => {
     for (const consumer of [bootstrapConsumer, websiteConsumer]) {
       for (const requiredCheck of [
@@ -107,6 +139,21 @@ describe("clean-D1 evidence contract", () => {
       }
       expect(consumer).toContain(".maintenance_fence.reused == true");
       expect(consumer).toContain(".maintenance_fence.reused == false");
+    }
+  });
+
+  it("pins bounded maintenance activation propagation in both consumers", () => {
+    for (const consumer of [bootstrapConsumer, websiteConsumer]) {
+      for (const requiredCheck of [
+        ".maintenance_fence.marker_probe_attempts >= 1",
+        ".maintenance_fence.marker_probe_attempts <= .maintenance_fence.propagation_max_attempts",
+        ".maintenance_fence.workshop_503_probe_attempts >= 1",
+        ".maintenance_fence.workshop_503_probe_attempts <= .maintenance_fence.marker_probe_attempts",
+        ".maintenance_fence.propagation_max_attempts == 12",
+        ".maintenance_fence.propagation_retry_seconds == 2",
+      ]) {
+        expect(consumer).toContain(requiredCheck);
+      }
     }
   });
 });

@@ -44,7 +44,10 @@ D1 state is never accepted as a substitute for provider or Stargate inventory.
 After that initial proof, CI uploads a tiny maintenance version under the
 existing `intar-dev` identity and exact old D1 binding without activating it.
 It proves the current deployment is unchanged, then promotes only the captured
-version UUID to 100 percent traffic. This version-only flow does not reconcile
+version UUID to 100 percent traffic. Because the deployment API can become
+canonical before the new version reaches the runner's edge location, CI waits
+boundedly for the exact public marker and `503` behavior before continuing.
+This version-only flow does not reconcile
 the existing custom domain, cron trigger, or Durable Object lifecycle. The
 exact marker endpoint is the only successful HTTP route; all other traffic
 receives a no-store `503`. CI waits for old requests to quiesce and proves the
@@ -54,7 +57,9 @@ If a later step fails and leaves that fence active, a fresh first-attempt
 dispatch at the exact same `main` SHA validates the marker, origin workflow,
 version tag, previous version, and old D1 binding. It then restores exactly the
 recorded previous version at 100 percent traffic before rerunning the unchanged
-strict initial drain. Only stale runner or builder reports may be retried while
+strict initial drain. Recovery likewise waits boundedly until the public fence
+header disappears and the normal root page is healthy. Only stale runner or
+builder reports may be retried while
 they reconnect; every other drain failure remains immediately blocking. CI
 retains structured Wrangler upload/deploy output and recovery attempts even
 when a later proof fails. The web deployment verifies the successful apply

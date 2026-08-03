@@ -27,6 +27,8 @@ readonly observed_marker="${runtime_root}/observed-marker.json"
 readonly observed_headers="${runtime_root}/observed-headers.txt"
 readonly existing_marker="${runtime_root}/existing-marker.json"
 readonly existing_headers="${runtime_root}/existing-headers.txt"
+readonly propagation_max_attempts=12
+readonly propagation_retry_seconds=2
 
 [[ "${database_name}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]
 [[ "${database_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -189,16 +191,41 @@ if [ ! -e "${deploy_output}" ]; then
   : > "${deploy_output}"
 fi
 
-curl --fail-with-body --silent --show-error \
-  --header 'Cache-Control: no-cache' \
-  --dump-header "${observed_headers}" \
-  --output "${observed_marker}" \
-  https://intar.dev/.well-known/intar-clean-d1-cutover-fence
+marker_probe_attempts=0
+workshop_503_probe_attempts=0
+propagation_observed=false
+status=""
+for ((attempt = 1; attempt <= propagation_max_attempts; attempt++)); do
+  marker_probe_attempts="${attempt}"
+  marker_status="$({ curl --silent --show-error \
+    --connect-timeout 1 \
+    --max-time 3 \
+    --header 'Cache-Control: no-cache' \
+    --dump-header "${observed_headers}" \
+    --output "${observed_marker}" \
+    --write-out '%{http_code}' \
+    https://intar.dev/.well-known/intar-clean-d1-cutover-fence; } || true)"
+  if [ "${marker_status}" = 200 ] && \
+    test "$(<"${marker}")" = "$(<"${observed_marker}")" && \
+    grep -qi '^x-intar-cutover-fence: active' "${observed_headers}" && \
+    grep -qi '^cache-control: private, no-store' "${observed_headers}"; then
+    workshop_503_probe_attempts="$((workshop_503_probe_attempts + 1))"
+    status="$({ curl --silent --show-error --connect-timeout 1 --max-time 3 \
+      --output /dev/null --write-out '%{http_code}' \
+      --request POST https://intar.dev/api/workshops; } || true)"
+    if [ "${status}" = 503 ]; then
+      propagation_observed=true
+      break
+    fi
+  fi
+  if [ "${attempt}" -lt "${propagation_max_attempts}" ]; then
+    sleep "${propagation_retry_seconds}"
+  fi
+done
+test "${propagation_observed}" = true
 test "$(<"${marker}")" = "$(<"${observed_marker}")"
 grep -qi '^x-intar-cutover-fence: active' "${observed_headers}"
 grep -qi '^cache-control: private, no-store' "${observed_headers}"
-status="$({ curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  --request POST https://intar.dev/api/workshops; } || true)"
 test "${status}" = 503
 
 jq -n \
@@ -213,6 +240,10 @@ jq -n \
   --argjson reused "${reused}" \
   --argjson upload_did_not_activate "${upload_did_not_activate}" \
   --argjson exact_version_deployed "${exact_version_deployed}" \
+  --argjson marker_probe_attempts "${marker_probe_attempts}" \
+  --argjson workshop_503_probe_attempts "${workshop_503_probe_attempts}" \
+  --argjson propagation_max_attempts "${propagation_max_attempts}" \
+  --argjson propagation_retry_seconds "${propagation_retry_seconds}" \
   --rawfile wrangler_version_upload_ndjson "${upload_output}" \
   --rawfile wrangler_version_deploy_ndjson "${deploy_output}" \
   --arg marker_sha256 "$(sha256sum "${observed_marker}" | cut -d ' ' -f 1)" '
@@ -231,6 +262,10 @@ jq -n \
       reused: $reused,
       upload_did_not_activate: $upload_did_not_activate,
       exact_version_deployed: $exact_version_deployed,
+      marker_probe_attempts: $marker_probe_attempts,
+      workshop_503_probe_attempts: $workshop_503_probe_attempts,
+      propagation_max_attempts: $propagation_max_attempts,
+      propagation_retry_seconds: $propagation_retry_seconds,
       wrangler_version_upload_ndjson: $wrangler_version_upload_ndjson,
       wrangler_version_deploy_ndjson: $wrangler_version_deploy_ndjson,
       previous_version_binding_proven: true,
@@ -249,6 +284,12 @@ jq -e \
    .database_id == $database_id and
    .maintenance_version_id != .previous_version_id and
    (.maintenance_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
+   .marker_probe_attempts >= 1 and
+   .marker_probe_attempts <= .propagation_max_attempts and
+   .workshop_503_probe_attempts >= 1 and
+   .workshop_503_probe_attempts <= .marker_probe_attempts and
+   .propagation_max_attempts == 12 and
+   .propagation_retry_seconds == 2 and
    (if .reused then
       .upload_did_not_activate == false and
       .exact_version_deployed == false and
