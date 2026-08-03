@@ -87,6 +87,92 @@ describe("clean-D1 evidence contract", () => {
     expect(websiteConsumer).toContain(
       "bunx wrangler deployments status --name intar-dev --json",
     );
+    expect(websiteConsumer).toContain(
+      "CLOUDFLARE_VERSION_API_TOKEN: ${{ secrets.CLOUDFLARE_WEB_ROLLBACK_API_TOKEN }}",
+    );
+  });
+
+  it("restores the exact old version before resuming the unchanged strict drain", () => {
+    const restore = websiteConsumer.indexOf(
+      "tools/cutover/restore-successful-maintenance-fence.sh",
+    );
+    const resumedDrain = websiteConsumer.indexOf(
+      '"${RUNNER_TEMP}/clean-d1-pre-switch-resumed.json"',
+    );
+    const refence = websiteConsumer.indexOf(
+      "tools/cutover/reactivate-maintenance-fence.sh",
+      resumedDrain,
+    );
+    const finalDrain = websiteConsumer.indexOf(
+      '"pre-switch-${pass}"',
+    );
+    expect(restore).toBeGreaterThan(-1);
+    expect(resumedDrain).toBeGreaterThan(restore);
+    expect(refence).toBeGreaterThan(resumedDrain);
+    expect(finalDrain).toBeGreaterThan(refence);
+    expect(websiteConsumer).toContain(
+      'test "${resumed_strict_drain}" = true',
+    );
+    expect(websiteConsumer).toContain(
+      'mode: "restored-strict-drain-refenced-cutover"',
+    );
+  });
+
+  it("treats stale host reports only as a retry condition, never drain success", () => {
+    expect(websiteConsumer).toContain(
+      ".counts.untrustworthy_enabled_host_reports > 0",
+    );
+    expect(websiteConsumer).toContain(
+      'if .key == "untrustworthy_enabled_host_reports"',
+    );
+    expect(websiteConsumer).toContain("else .value == 0");
+    expect(websiteConsumer).toContain("sleep 15");
+    expect(websiteConsumer).not.toContain("fence_induced_allowance");
+  });
+
+  it("retains partial pre-switch evidence before deployment can run", () => {
+    const attempt = websiteConsumer.indexOf(
+      'operation: "pre-web-switch-attempt"',
+    );
+    const firstWrangler = websiteConsumer.indexOf(
+      "bunx wrangler deployments status --name intar-dev --json",
+    );
+    expect(attempt).toBeGreaterThan(-1);
+    expect(firstWrangler).toBeGreaterThan(attempt);
+
+    const partialRetention = between(
+      websiteDeployWorkflow,
+      "- name: Retain partial clean-D1 pre-switch evidence",
+      "- name: Deploy",
+    );
+    expect(partialRetention).toContain(
+      "if: ${{ always() && inputs.clean_d1_cutover_run_id != '' }}",
+    );
+    expect(partialRetention).toContain("clean-d1-pre-switch-attempt.json");
+    expect(partialRetention).toContain(
+      "intar-clean-d1-pre-switch-restore-${{ github.run_id }}",
+    );
+    expect(partialRetention).toContain("clean-d1-pre-switch-resumed-attempt-*.json");
+    expect(partialRetention).toContain(
+      "intar-clean-d1-pre-switch-reactivate-${{ github.run_id }}-*",
+    );
+    expect(partialRetention).toContain("if-no-files-found: error");
+  });
+
+  it("guarantees exact maintenance reactivation on resumed-drain failure", () => {
+    const trap = websiteConsumer.indexOf("restore_maintenance_on_exit()");
+    const restore = websiteConsumer.indexOf(
+      "tools/cutover/restore-successful-maintenance-fence.sh",
+    );
+    const disable = websiteConsumer.indexOf("refence_required=false");
+    expect(trap).toBeGreaterThan(-1);
+    expect(restore).toBeGreaterThan(trap);
+    expect(disable).toBeGreaterThan(restore);
+    expect(websiteConsumer).toContain("recovery");
+    expect(websiteConsumer).toContain("trap restore_maintenance_on_exit EXIT");
+    expect(websiteConsumer).toContain("trap 'exit 130' INT");
+    expect(websiteConsumer).toContain("trap 'exit 143' TERM");
+    expect(websiteConsumer).toContain("trap - EXIT INT TERM");
   });
 
   it("pins maintenance-fence schema v2 at its producer and both consumers", () => {
