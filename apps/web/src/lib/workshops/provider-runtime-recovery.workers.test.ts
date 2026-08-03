@@ -17,12 +17,15 @@ import {
   classifyProviderAllocationFailure,
   classifyProviderOperationFailure,
   certificationRuntimeDurationMs,
+  confirmProviderResourceDisappearance,
+  hetznerResourceKindForReconcile,
   initialProviderReadinessTimedOut,
   nextProviderOperationLogicalOrdinal,
   providerLocationFallbackBootstrapEligible,
   shouldDiscoverHetznerCreateBeforeRetry,
   sweepWorkshopProviderRuntimes,
 } from "./provider-runtime";
+import { reconcileProviderCostLedger } from "./provider-cost-ledger";
 import { loadDeferredWorkshopRuntimeReplacementCandidates } from "./runtime-orchestrator";
 
 beforeEach(async () => {
@@ -35,6 +38,303 @@ beforeEach(async () => {
 });
 
 describe("provider runtime recovery", () => {
+  it("translates provider-neutral resource kinds before Hetzner reconciliation", () => {
+    expect(hetznerResourceKindForReconcile("instance")).toBe("server");
+    expect(hetznerResourceKindForReconcile("ipv4")).toBe("primary_ip");
+    expect(hetznerResourceKindForReconcile("ssh_key")).toBe("ssh_key");
+    expect(() => hetznerResourceKindForReconcile("boot_disk")).toThrow(
+      /unsupported resource kind/u,
+    );
+  });
+
+  it("repairs false Hetzner disappearance before cumulative verifier reboot and deletion", async () => {
+    await seedFalseDisappearedHetznerCertification();
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-01",
+      bootId: BOOT_B,
+      completedModuleIds: ["00", "01"],
+      probeIds: ["probe-00", "probe-01"],
+      receivedAt: 100,
+      providerKind: "hetzner_cloud",
+    });
+    const firstProvider = installPresentHetznerProviderMock();
+    await makeCertificationDue(200);
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+
+    expect(firstProvider).toHaveBeenCalledTimes(2);
+    const firstReconcile = firstProvider.mock.calls[0]?.[0];
+    expect(firstReconcile?.operation).toMatchObject({ kind: "reconcile" });
+    expect(
+      firstReconcile?.operation.resources
+        ?.map((resource) => resource.resourceKind)
+        .sort(),
+    ).toEqual(["primary_ip", "server", "ssh_key"]);
+    expect(
+      firstReconcile?.operation.resources?.every(
+        (resource) =>
+          resource.ownership.workshopPublicationRef === "publication" &&
+          resource.ownership.checkpointRef === "checkpoint-00",
+      ),
+    ).toBe(true);
+    expect(firstProvider.mock.calls[1]?.[0]?.operation).toMatchObject({
+      kind: "reboot_server",
+      serverId: 158742066,
+      deterministicName: "intar-certification",
+      ownership: {
+        workshopPublicationRef: "publication",
+        checkpointRef: "checkpoint-00",
+      },
+    });
+    await expectHetznerResourcesPresent();
+    await expectCertificationEvidence({
+      phase: "awaiting_reboot_completion",
+      currentCheckpointOrdinal: 1,
+    });
+
+    // Reproduce the stale local disappearance once more at teardown. The
+    // adapter must observe and restore all identities before choosing which
+    // provider resources to delete.
+    await markHetznerResourcesFalselyDisappeared(300);
+    await setCertificationPhase("deleting", 300);
+    vi.clearAllMocks();
+    const deleteProvider = installPresentHetznerProviderMock();
+    await makeCertificationDue(300);
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 300, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+
+    const operations = deleteProvider.mock.calls.map(
+      ([request]) => request.operation,
+    );
+    expect(operations[0]).toMatchObject({ kind: "reconcile" });
+    expect(
+      operations.filter((operation) => operation.kind === "delete_resource"),
+    ).toEqual([
+      expect.objectContaining({
+        resourceKind: "server",
+        externalId: 158742066,
+        deterministicName: "intar-certification",
+        ownership: expect.objectContaining({
+          workshopPublicationRef: "publication",
+          checkpointRef: "checkpoint-00",
+        }),
+      }),
+      expect.objectContaining({
+        resourceKind: "primary_ip",
+        externalId: 143328111,
+        deterministicName: "intar-certification-ipv4",
+        ownership: expect.objectContaining({
+          workshopPublicationRef: "publication",
+          checkpointRef: "checkpoint-00",
+        }),
+      }),
+      expect.objectContaining({
+        resourceKind: "ssh_key",
+        externalId: 116370220,
+        deterministicName: "intar-certification-ssh",
+        ownership: expect.objectContaining({
+          workshopPublicationRef: "publication",
+          checkpointRef: "checkpoint-00",
+        }),
+      }),
+    ]);
+    expect(operations.at(-1)).toMatchObject({ kind: "reconcile" });
+    for (const operation of [operations[0], operations.at(-1)]) {
+      expect(
+        operation?.resources?.every(
+          (resource) => resource.ownership.checkpointRef === "checkpoint-00",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("fails closed when Hetzner reconciliation omits a requested verifier resource", async () => {
+    await seedFalseDisappearedHetznerCertification();
+    await insertCertificationProof({
+      sequence: 1,
+      checkpointId: "checkpoint-01",
+      bootId: BOOT_B,
+      completedModuleIds: ["00", "01"],
+      probeIds: ["probe-00", "probe-01"],
+      receivedAt: 100,
+      providerKind: "hetzner_cloud",
+    });
+    await setCertificationPhase("deleting", 200);
+    const provider = installUncoveredHetznerProviderMock();
+    await makeCertificationDue(200);
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 1, pending: 0 });
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider.mock.calls[0]?.[0]?.operation).toMatchObject({
+      kind: "reconcile",
+    });
+    const lifecycle = await env.DB.prepare(
+      `SELECT allocation.state, allocation.deletion_requested_at,
+              allocation.deletion_confirmed_at, certification.state AS certification_state,
+              json_extract(certification.evidence_json, '$.phase') AS certification_phase
+       FROM runtime_provider_allocations allocation
+       JOIN workshop_runtime_profile_certifications certification
+         ON certification.verifier_allocation_id = allocation.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<{
+      state: string;
+      deletion_requested_at: number | null;
+      deletion_confirmed_at: number | null;
+      certification_state: string;
+      certification_phase: string;
+    }>();
+    expect(lifecycle).toEqual({
+      state: "ready",
+      deletion_requested_at: null,
+      deletion_confirmed_at: null,
+      certification_state: "verifying",
+      certification_phase: "deleting",
+    });
+    const mutations = await env.DB.prepare(
+      `SELECT operation_kind FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation'
+         AND (operation_kind LIKE 'delete_%'
+           OR operation_kind LIKE 'certification_reboot_%')`,
+    ).all<{ operation_kind: string }>();
+    expect(mutations.results).toEqual([]);
+  });
+
+  it("keeps a missing GCP ephemeral IPv4 and its ledger closed after a present instance observation", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      ...[
+        ["gcp-core", "compute_core", 4_000_000_000],
+        ["gcp-ram", "compute_ram", 16_000_000_000],
+        ["gcp-ip", "external_ipv4", 1_000_000_000],
+      ].map(([sku, resourceKind, quantityNanos]) =>
+        env.DB.prepare(
+          `INSERT INTO provider_price_line_items
+             (id, observation_id, sku, resource_kind, location, raw_price,
+              price_nanos, unit, quantity_nanos, billing_increment_seconds,
+              minimum_duration_seconds, tax_treatment, metadata_json)
+           VALUES (?, 'cert-price', ?, ?, 'europe-west3-a', '0.01',
+                   10000000, 'hour', ?, 1, 60,
+                   'tax_excluded_public_list', '{}')`,
+        ).bind(`cert-price-${sku}`, sku, resourceKind, quantityNanos),
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_resources
+           (id, allocation_id, provider_kind, resource_kind,
+            provider_resource_id, location_attempt, location, provider_state,
+            configuration_json, provider_created_at, created_at, updated_at)
+         VALUES ('resource-instance', 'cert-allocation', 'gcp_compute',
+                 'instance', 'instance-9001', 1, 'europe-west3-a',
+                 'RUNNING', '{"deterministicName":"intar-certification"}',
+                 1, 1, 1)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_resources
+           (id, allocation_id, provider_kind, resource_kind,
+            provider_resource_id, location_attempt, location, provider_state,
+            configuration_json, provider_created_at, created_at, updated_at)
+         VALUES ('resource-ipv4', 'cert-allocation', 'gcp_compute',
+                 'ipv4', 'instance-9001:ephemeral-ipv4', 1,
+                 'europe-west3-a', 'present',
+                 '{"deterministicName":"intar-certification-ipv4","address":"192.0.2.42","lifecycle":"ephemeral_with_instance"}',
+                 1, 1, 1)`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET external_ipv4 = '192.0.2.42', updated_at = 1
+         WHERE id = 'cert-allocation'`,
+      ),
+    ]);
+    await expect(
+      reconcileProviderCostLedger({ allocationId: "cert-allocation", now: 2 }),
+    ).resolves.toMatchObject({ inserted: 3, reopened: 0, closed: 0 });
+    await confirmProviderResourceDisappearance({
+      allocationId: "cert-allocation",
+      locationAttempt: 1,
+      resourceKind: "ipv4",
+      now: 50,
+    });
+    await expect(
+      reconcileProviderCostLedger({ allocationId: "cert-allocation", now: 50 }),
+    ).resolves.toMatchObject({ inserted: 0, reopened: 0, closed: 1 });
+    await env.DB.prepare(
+      `UPDATE runtime_provider_allocations
+       SET state = 'creating', external_ipv4 = '192.0.2.42', updated_at = 60
+       WHERE id = 'cert-allocation'`,
+    ).run();
+    mocks.invokeProviderOperation.mockResolvedValue({
+      canonicalWrites: [
+        {
+          requestId: "observe-without-ipv4",
+          connectionId: "connection",
+          observedAt: new Date(100).toISOString(),
+          operation: "resource_observed",
+          resourceKind: "instance",
+          externalId: "instance-9001",
+          name: "intar-certification",
+          operationIds: [],
+          state: "RUNNING",
+          location: "europe-west3-a",
+        },
+      ],
+      data: { status: "present" },
+    });
+    await env.DB.prepare(
+      `UPDATE runtime_provider_reconciliation
+       SET sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+           updated_at = 100
+       WHERE allocation_id = 'cert-allocation'`,
+    ).run();
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 100, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    expect(mocks.invokeProviderOperation).toHaveBeenCalledTimes(1);
+    expect(mocks.invokeProviderOperation.mock.calls[0]?.[1]).toBeTypeOf(
+      "function",
+    );
+    const state = await env.DB.prepare(
+      `SELECT allocation.external_ipv4, allocation.state AS allocation_state,
+              instance.provider_state AS instance_state,
+              instance.disappearance_confirmed_at AS instance_disappeared_at,
+              ipv4.provider_state AS ipv4_state,
+              ipv4.disappearance_confirmed_at AS ipv4_disappeared_at,
+              ipv4_ledger.deletion_confirmed_at AS ipv4_ledger_deleted_at,
+              ipv4_ledger.final_cost_nanos AS ipv4_final_cost_nanos,
+              (SELECT count(*) FROM runtime_provider_cost_ledger ledger
+               WHERE ledger.allocation_id = allocation.id
+                 AND ledger.resource_kind = 'instance'
+                 AND ledger.deletion_confirmed_at IS NULL) AS open_instance_lines
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_provider_resources instance
+         ON instance.allocation_id = allocation.id
+        AND instance.resource_kind = 'instance'
+       JOIN runtime_provider_resources ipv4
+         ON ipv4.allocation_id = allocation.id
+        AND ipv4.resource_kind = 'ipv4'
+       JOIN runtime_provider_cost_ledger ipv4_ledger
+         ON ipv4_ledger.provider_resource_id = ipv4.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<Record<string, string | number | null>>();
+    expect(state).toMatchObject({
+      external_ipv4: null,
+      allocation_state: "bootstrapping",
+      instance_state: "RUNNING",
+      instance_disappeared_at: null,
+      ipv4_state: "deleted",
+      ipv4_disappeared_at: 50,
+      ipv4_ledger_deleted_at: 50,
+      ipv4_final_cost_nanos: expect.any(Number),
+      open_instance_lines: 2,
+    });
+  });
+
   it("derives a finite certification window from the checkpoint count", () => {
     expect(certificationRuntimeDurationMs(1)).toBe(4.5 * 60 * 60_000);
     expect(certificationRuntimeDurationMs(11)).toBe(44.5 * 60 * 60_000);
@@ -718,7 +1018,14 @@ describe("provider runtime recovery", () => {
   });
 });
 
-async function seedCumulativeCertification(): Promise<void> {
+async function seedCumulativeCertification(input?: {
+  providerKind?: "gcp_compute" | "hetzner_cloud";
+}): Promise<void> {
+  const providerKind = input?.providerKind ?? "gcp_compute";
+  const isHetzner = providerKind === "hetzner_cloud";
+  const locations = isHetzner
+    ? ["nbg1", "fsn1", "hel1"]
+    : ["europe-west3-a", "europe-west3-b"];
   const reportCredentialHash = await digestHex(REPORT_CREDENTIAL);
   const certificationDurationMs = certificationRuntimeDurationMs(2);
   const manifest = JSON.stringify({
@@ -740,6 +1047,7 @@ async function seedCumulativeCertification(): Promise<void> {
   });
   const evidence = JSON.stringify({
     proofKind: "direct_cloud_profile_certification_v1",
+    publicationId: "publication",
     cumulativeCheckpointIds: ["checkpoint-00", "checkpoint-01"],
     checkpointProofs: [
       {
@@ -759,6 +1067,29 @@ async function seedCumulativeCertification(): Promise<void> {
     certificationDurationMs,
     certificationDeadlineAt: 1 + certificationDurationMs,
   });
+  const connectionDetails = isHetzner
+    ? env.DB.prepare(
+        `INSERT INTO hetzner_connection_details
+           (connection_id, sentinel_firewall_id, approved_locations_json,
+            max_concurrent_allocations, native_currency, updated_at)
+         VALUES ('connection', 'firewall-1', ?, 5, 'EUR', 1)`,
+      ).bind(JSON.stringify(locations))
+    : env.DB.prepare(
+        `INSERT INTO gcp_connection_details
+           (connection_id, project_number, network_name, network_self_link,
+            subnet_name, subnet_self_link, subnet_cidr, firewall_name,
+            firewall_self_link, approved_zones_json, max_concurrent_allocations,
+            updated_at)
+         VALUES ('connection', '123', 'network', 'network-link', 'subnet',
+                 'subnet-link', '10.0.0.0/24', 'firewall', 'firewall-link',
+                 ?, 5, 1)`,
+      ).bind(JSON.stringify(locations));
+  const profileId = isHetzner ? "hetzner-cpx42" : "gcp-e2";
+  const machineType = isHetzner ? "cpx42" : "e2-standard-4";
+  const resolvedImageId = isHetzner ? "debian-13" : "debian-image-1";
+  const rootDiskType = isHetzner ? null : "pd-balanced";
+  const currency = isHetzner ? "EUR" : "USD";
+  const location = locations[0]!;
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO user (id, name, email, created_at, updated_at)
@@ -788,9 +1119,9 @@ async function seedCumulativeCertification(): Promise<void> {
          (id, organization_id, provider_kind, display_name, state,
           external_project_id, project_fingerprint, created_by,
           last_validated_at, created_at, updated_at)
-       VALUES ('connection', 'org', 'gcp_compute', 'GCP', 'active',
+       VALUES ('connection', 'org', ?, ?, 'active',
                'project', 'fingerprint', 'owner', 1, 1, 1)`,
-    ),
+    ).bind(providerKind, isHetzner ? "Hetzner" : "GCP"),
     env.DB.prepare(
       `INSERT INTO provider_credential_versions
          (id, connection_id, version, algorithm, kek_version, aad_sha256,
@@ -805,26 +1136,23 @@ async function seedCumulativeCertification(): Promise<void> {
        SET active_credential_version_id = 'credential'
        WHERE id = 'connection'`,
     ),
-    env.DB.prepare(
-      `INSERT INTO gcp_connection_details
-         (connection_id, project_number, network_name, network_self_link,
-          subnet_name, subnet_self_link, subnet_cidr, firewall_name,
-          firewall_self_link, approved_zones_json, max_concurrent_allocations,
-          updated_at)
-       VALUES ('connection', '123', 'network', 'network-link', 'subnet',
-               'subnet-link', '10.0.0.0/24', 'firewall', 'firewall-link',
-               '["europe-west3-a","europe-west3-b"]', 5, 1)`,
-    ),
+    connectionDetails,
     env.DB.prepare(
       `INSERT INTO workshop_runtime_profiles
          (id, template_revision_id, profile_id, provider_kind, vm_id,
           machine_type, system_image, resolved_image_id, root_disk_type,
           architecture, cpu_millis, memory_mib, disk_mib, locations_json,
           configuration_json, created_at)
-       VALUES ('profile', 'revision', 'gcp-e2', 'gcp_compute', 'learner',
-               'e2-standard-4', 'debian-13', 'debian-image-1', 'pd-balanced',
-               'x86_64', 4000, 16384, 32768,
-               '["europe-west3-a","europe-west3-b"]', '{}', 1)`,
+       VALUES ('profile', 'revision', ?, ?, 'learner',
+               ?, 'debian-13', ?, ?, 'x86_64', 4000, 16384, 32768,
+               ?, '{}', 1)`,
+    ).bind(
+      profileId,
+      providerKind,
+      machineType,
+      resolvedImageId,
+      rootDiskType,
+      JSON.stringify(locations),
     ),
     env.DB.prepare(
       `INSERT INTO workshop_runtime_profile_certifications
@@ -837,20 +1165,39 @@ async function seedCumulativeCertification(): Promise<void> {
       `INSERT INTO provider_price_observations
          (id, provider_kind, connection_id, runtime_profile_id, currency,
           source, raw_observation_json, observed_at, expires_at, created_at)
-       VALUES ('cert-price', 'gcp_compute', 'connection', 'profile', 'USD',
-               'test-catalog',
-               '{"availableLocations":["europe-west3-a","europe-west3-b"]}',
-               1, 86400001, 1)`,
+       VALUES ('cert-price', ?, 'connection', 'profile', ?, 'test-catalog',
+               ?, 1, 86400001, 1)`,
+    ).bind(
+      providerKind,
+      currency,
+      JSON.stringify({ availableLocations: locations }),
     ),
+    ...(isHetzner
+      ? (["instance", "ipv4"] as const).map((resourceKind) =>
+          env.DB.prepare(
+            `INSERT INTO provider_price_line_items
+               (id, observation_id, sku, resource_kind, location, raw_price,
+                price_nanos, unit, quantity_nanos, billing_increment_seconds,
+                minimum_duration_seconds, tax_treatment, metadata_json)
+             VALUES (?, 'cert-price', ?, ?, ?, '0.01', 10000000,
+                     'hour', 1000000000, 3600, 3600, 'provider_gross', '{}')`,
+          ).bind(
+            `cert-price-${resourceKind}`,
+            `test-${resourceKind}`,
+            resourceKind,
+            location,
+          ),
+        )
+      : []),
     env.DB.prepare(
       `INSERT INTO runtime_executions
          (id, user_id, organization_id, host_id, provider_kind,
           provider_connection_id, domain_kind, domain_id, generation,
           checkpoint_id, state, lease_expires_at, created_at, updated_at)
-       VALUES ('cert-execution', 'owner', 'org', NULL, 'gcp_compute',
+       VALUES ('cert-execution', 'owner', 'org', NULL, ?,
                'connection', 'workshop_certification', 'certification', 1,
                'checkpoint-00', 'provisioning', 30600001, 1, 1)`,
-    ),
+    ).bind(providerKind),
     ...["00", "01"].map((suffix) =>
       env.DB.prepare(
         `INSERT INTO runtime_checkpoint_bundles
@@ -885,10 +1232,15 @@ async function seedCumulativeCertification(): Promise<void> {
           location_attempts_json, location, location_attempt,
           location_attempt_started_at, state, created_at, updated_at)
        VALUES ('cert-allocation', 'cert-execution', 'connection', 'profile',
-               'cert-price', NULL, 'gcp_compute', 'intar-certification', 'e2-standard-4',
-               'debian-image-1', '["europe-west3-a","europe-west3-b"]',
-               'europe-west3-a', 1,
+               'cert-price', NULL, ?, 'intar-certification', ?,
+               ?, ?, ?, 1,
                1, 'ready', 1, 1)`,
+    ).bind(
+      providerKind,
+      machineType,
+      resolvedImageId,
+      JSON.stringify(locations),
+      location,
     ),
     env.DB.prepare(
       `UPDATE workshop_runtime_profile_certifications
@@ -922,6 +1274,7 @@ async function insertCertificationProof(input: {
   completedModuleIds: string[];
   probeIds: string[];
   receivedAt: number;
+  providerKind?: "gcp_compute" | "hetzner_cloud";
 }): Promise<void> {
   const probes = input.probeIds.map((id) => ({ id, status: "pass" }));
   await env.DB.prepare(
@@ -929,11 +1282,12 @@ async function insertCertificationProof(input: {
        (id, execution_id, provider_kind, generation, sequence, checkpoint_id,
         boot_id, phase, health, terminal_ready, probes_json, completed_module_ids_json,
         report_json, reported_at, received_at)
-     VALUES (?, 'cert-execution', 'gcp_compute', 1, ?, ?, ?, 'ready', 'healthy',
+     VALUES (?, 'cert-execution', ?, 1, ?, ?, ?, 'ready', 'healthy',
              1, ?, ?, '{}', ?, ?)`,
   )
     .bind(
       `report-${input.sequence}`,
+      input.providerKind ?? "gcp_compute",
       input.sequence,
       input.checkpointId,
       input.bootId,
@@ -1021,6 +1375,208 @@ async function expectCertificationReboots(expected: number): Promise<void> {
        AND operation_kind LIKE 'certification_reboot_%'`,
   ).first<{ value: number }>();
   expect(row?.value).toBe(expected);
+}
+
+interface TestHetznerOwnership {
+  workshopPublicationRef: string;
+  checkpointRef: string;
+}
+
+interface TestHetznerResourceRequest {
+  resourceKind: "server" | "primary_ip" | "ssh_key";
+  externalId: number;
+  deterministicName: string;
+  ownership: TestHetznerOwnership;
+}
+
+interface TestHetznerOperation {
+  kind: string;
+  resources?: TestHetznerResourceRequest[];
+  serverId?: number;
+  resourceKind?: string;
+  externalId?: number;
+}
+
+interface TestHetznerRequest {
+  requestId: string;
+  connectionId: string;
+  operation: TestHetznerOperation;
+}
+
+function installPresentHetznerProviderMock() {
+  const ids = {
+    server: 158742066,
+    primary_ip: 143328111,
+    ssh_key: 116370220,
+  } as const;
+  const runOperation = vi.fn(async (request: TestHetznerRequest) => {
+    if (request.operation.kind !== "reconcile") {
+      return { canonicalWrites: [], data: {} };
+    }
+    const resources = request.operation.resources ?? [];
+    return {
+      canonicalWrites: resources.map((resource) => ({
+        requestId: request.requestId,
+        connectionId: request.connectionId,
+        observedAt: new Date(200).toISOString(),
+        operation: "resource_observed",
+        resourceKind: resource.resourceKind,
+        externalId: ids[resource.resourceKind],
+        name: resource.deterministicName,
+        state: "running",
+        ...(resource.resourceKind === "primary_ip"
+          ? { publicIpv4: "192.0.2.42" }
+          : {}),
+      })),
+      data: { resources: resources.map(() => ({ status: "present" })) },
+    };
+  });
+  mocks.invokeProviderOperation.mockImplementation(
+    async (
+      providerKind: string,
+      invoke: (binding: { runOperation: typeof runOperation }) => Promise<unknown>,
+    ) => {
+      expect(providerKind).toBe("hetzner_cloud");
+      return invoke({ runOperation });
+    },
+  );
+  return runOperation;
+}
+
+function installUncoveredHetznerProviderMock() {
+  const runOperation = vi.fn(async (request: TestHetznerRequest) => ({
+    canonicalWrites: [],
+    data: {
+      resources: (request.operation.resources ?? []).map(() => ({
+        status: "ownership_mismatch",
+      })),
+    },
+  }));
+  mocks.invokeProviderOperation.mockImplementation(
+    async (
+      providerKind: string,
+      invoke: (binding: { runOperation: typeof runOperation }) => Promise<unknown>,
+    ) => {
+      expect(providerKind).toBe("hetzner_cloud");
+      return invoke({ runOperation });
+    },
+  );
+  return runOperation;
+}
+
+async function seedFalseDisappearedHetznerCertification(): Promise<void> {
+  await seedCumulativeCertification({ providerKind: "hetzner_cloud" });
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE workshop_runtime_profile_certifications
+       SET evidence_json = json_set(
+             evidence_json,
+             '$.currentCheckpointOrdinal', 1,
+             '$.phase', 'awaiting_checkpoint_proof',
+             '$.checkpointProofsCompleted', json(?)
+           ),
+           updated_at = 50
+       WHERE id = 'certification'`,
+    ).bind(JSON.stringify([{ checkpointId: "checkpoint-00" }])),
+    env.DB.prepare(
+      `UPDATE runtime_executions
+       SET checkpoint_id = 'checkpoint-01', updated_at = 50
+       WHERE id = 'cert-execution'`,
+    ),
+    env.DB.prepare(
+      `UPDATE runtime_guest_credentials
+       SET checkpoint_bundle_id = 'bundle-01', updated_at = 50
+       WHERE execution_id = 'cert-execution'`,
+    ),
+    ...(
+      [
+        ["instance", "158742066", "intar-certification"],
+        ["ipv4", "143328111", "intar-certification-ipv4"],
+        ["ssh_key", "116370220", "intar-certification-ssh"],
+      ] as const
+    ).map(([resourceKind, providerResourceId, deterministicName]) =>
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_resources
+           (id, allocation_id, provider_kind, resource_kind,
+            provider_resource_id, location_attempt, location, provider_state,
+            configuration_json, provider_created_at,
+            disappearance_confirmed_at, created_at, updated_at)
+         VALUES (?, 'cert-allocation', 'hetzner_cloud', ?, ?, 1, 'nbg1',
+                 'deleted', ?, 1, 50, 1, 50)`,
+      ).bind(
+        `resource-${resourceKind}`,
+        resourceKind,
+        providerResourceId,
+        JSON.stringify({ deterministicName }),
+      ),
+    ),
+  ]);
+}
+
+async function markHetznerResourcesFalselyDisappeared(
+  now: number,
+): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'deleted', disappearance_confirmed_at = ?,
+           updated_at = ?
+       WHERE allocation_id = 'cert-allocation'`,
+    ).bind(now, now),
+    env.DB.prepare(
+      `UPDATE runtime_provider_allocations
+       SET external_ipv4 = NULL, updated_at = ?
+       WHERE id = 'cert-allocation'`,
+    ).bind(now),
+  ]);
+}
+
+async function setCertificationPhase(
+  phase: string,
+  now: number,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE workshop_runtime_profile_certifications
+     SET evidence_json = json_set(evidence_json, '$.phase', ?), updated_at = ?
+     WHERE id = 'certification'`,
+  )
+    .bind(phase, now)
+    .run();
+}
+
+async function expectHetznerResourcesPresent(): Promise<void> {
+  const resources = await env.DB.prepare(
+    `SELECT resource_kind, provider_state, disappearance_confirmed_at
+     FROM runtime_provider_resources
+     WHERE allocation_id = 'cert-allocation'
+     ORDER BY resource_kind`,
+  ).all<{
+    resource_kind: string;
+    provider_state: string;
+    disappearance_confirmed_at: number | null;
+  }>();
+  expect(resources.results).toEqual([
+    {
+      resource_kind: "instance",
+      provider_state: "running",
+      disappearance_confirmed_at: null,
+    },
+    {
+      resource_kind: "ipv4",
+      provider_state: "running",
+      disappearance_confirmed_at: null,
+    },
+    {
+      resource_kind: "ssh_key",
+      provider_state: "running",
+      disappearance_confirmed_at: null,
+    },
+  ]);
+  const allocation = await env.DB.prepare(
+    `SELECT external_ipv4 FROM runtime_provider_allocations
+     WHERE id = 'cert-allocation'`,
+  ).first<{ external_ipv4: string | null }>();
+  expect(allocation?.external_ipv4).toBe("192.0.2.42");
 }
 
 async function digestHex(value: string): Promise<string> {

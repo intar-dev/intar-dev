@@ -1,5 +1,6 @@
 import type {
   CatalogObservation,
+  DeleteResourceOperation,
   HcloudAction,
   HcloudFirewall,
   HcloudFirewallRule,
@@ -15,6 +16,7 @@ import type {
   ProviderConnectionSentinelOwnershipLabels,
   ProjectInventory,
   ReconcileResourceRef,
+  RebootServerOperation,
   ResourceObservation,
   SentinelSpec,
 } from "./contracts";
@@ -110,6 +112,12 @@ export interface DeleteResourceResult {
   action: HcloudAction | null;
   alreadyMissing: boolean;
 }
+
+type MutableHcloudResource =
+  | HcloudServer
+  | HcloudPrimaryIp
+  | HcloudSshKey
+  | HcloudFirewall;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1250,10 +1258,16 @@ export class HcloudClient {
   }
 
   async deleteResource(
-    resourceKind: "server" | "primary_ip" | "ssh_key" | "firewall",
-    id: number,
+    operation: DeleteResourceOperation,
   ): Promise<DeleteResourceResult> {
-    assertPositiveId(id, `${resourceKind} id`);
+    const { resourceKind, externalId: id } = operation;
+    const target = await this.#ownedMutationTarget({
+      resourceKind,
+      externalId: id,
+      deterministicName: operation.deterministicName,
+      ownership: operation.ownership,
+    });
+    if (!target) return { action: null, alreadyMissing: true };
     const path =
       resourceKind === "server"
         ? `/servers/${id}`
@@ -1277,8 +1291,21 @@ export class HcloudClient {
     }
   }
 
-  async rebootServer(serverId: number): Promise<HcloudAction> {
-    assertPositiveId(serverId, "server id");
+  async rebootServer(operation: RebootServerOperation): Promise<HcloudAction> {
+    const serverId = operation.serverId;
+    const target = await this.#ownedMutationTarget({
+      resourceKind: "server",
+      externalId: serverId,
+      deterministicName: operation.deterministicName,
+      ownership: operation.ownership,
+    });
+    if (!target) {
+      throw new ProviderServiceError({
+        code: "hcloud_mutation_target_missing",
+        message: "Hetzner server is missing",
+        retryable: false,
+      });
+    }
     const response = await this.#request<{ action: HcloudAction }>(
       "POST",
       `/servers/${serverId}/actions/reboot`,
@@ -1378,6 +1405,70 @@ export class HcloudClient {
       );
     }
     return this.getFirewall(id);
+  }
+
+  async #ownedMutationTarget(
+    ref: ReconcileResourceRef,
+  ): Promise<MutableHcloudResource | null> {
+    if (
+      !["server", "primary_ip", "ssh_key", "firewall"].includes(
+        (ref as { resourceKind?: string }).resourceKind ?? "",
+      )
+    ) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message: "Hetzner mutation resource kind is invalid",
+        retryable: false,
+      });
+    }
+    if (
+      typeof (ref as { deterministicName?: unknown }).deterministicName !== "string" ||
+      !isRecord((ref as { ownership?: unknown }).ownership)
+    ) {
+      throw new ProviderServiceError({
+        code: "hcloud_mutation_ownership_required",
+        message: "Hetzner mutation requires a deterministic name and ownership labels",
+        retryable: false,
+      });
+    }
+    assertPositiveId(ref.externalId ?? 0, `${ref.resourceKind} id`);
+    assertDeterministicName(ref.deterministicName);
+    // Validate the complete discriminated ownership shape before making any
+    // provider request. This also rejects caller-supplied extra scoped labels.
+    ownershipToLabels(ref.ownership);
+
+    // List by deterministic name first so a duplicate owned name cannot be
+    // silently selected by ID. Fetch the exact target by ID last, immediately
+    // before the mutating request, to minimize the validation-to-use window.
+    const candidates = await this.#resourcesByName(ref.resourceKind, ref.deterministicName);
+    const target = await this.#resourceById(ref.resourceKind, ref.externalId!);
+    if (!target) return null;
+
+    if (
+      target.name !== ref.deterministicName ||
+      !labelsMatchOwnership(target.labels, ref.ownership)
+    ) {
+      throw new ProviderServiceError({
+        code: "hcloud_mutation_ownership_mismatch",
+        message: "Hetzner resource ownership could not be verified",
+        retryable: false,
+      });
+    }
+
+    const exactCandidates = candidates.filter(
+      (candidate) => candidate.name === ref.deterministicName,
+    );
+    if (
+      exactCandidates.length > 1 ||
+      (exactCandidates.length === 1 && exactCandidates[0]!.id !== target.id)
+    ) {
+      throw new ProviderServiceError({
+        code: "hcloud_mutation_ownership_ambiguous",
+        message: "Hetzner resource ownership is ambiguous",
+        retryable: false,
+      });
+    }
+    return target;
   }
 
   async #resourcesByName(

@@ -350,7 +350,7 @@ export async function runOperation(
       return { data: result, canonicalWrites, mustPersistBeforeNextOperation: true };
     }
     case "delete_resource": {
-      const result = await client.deleteResource(operation.resourceKind, operation.externalId);
+      const result = await client.deleteResource(operation);
       const canonicalWrites = [
         canonicalWrite(
           request,
@@ -361,7 +361,7 @@ export async function runOperation(
                 : "resource_deleted",
             resourceKind: operation.resourceKind,
             externalId: operation.externalId,
-            ...(operation.name ? { name: operation.name } : {}),
+            name: operation.deterministicName,
             actionIds: result.action ? [result.action.id] : [],
             state: result.action ? "deleting" : "deleted",
           },
@@ -380,7 +380,7 @@ export async function runOperation(
       };
     }
     case "reboot_server": {
-      const action = await client.rebootServer(operation.serverId);
+      const action = await client.rebootServer(operation);
       return {
         data: action,
         canonicalWrites: [actionWrite(request, action, options)],

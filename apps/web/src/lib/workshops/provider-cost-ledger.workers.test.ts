@@ -248,6 +248,34 @@ describe("provider-neutral runtime cost ledger", () => {
       200_000_000,
       240_000_000,
     ]);
+
+    await env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'running', disappearance_confirmed_at = NULL
+       WHERE allocation_id = ? AND resource_kind != 'ssh_key'`,
+    )
+      .bind("allocation-h")
+      .run();
+    await expect(
+      reconcileProviderCostLedger({
+        allocationId: "allocation-h",
+        now: deletedAt + 1,
+      }),
+    ).resolves.toMatchObject({ inserted: 0, reopened: 4, closed: 0 });
+    const reopenedRows = await env.DB.prepare(
+      `SELECT deletion_confirmed_at, final_cost_nanos
+       FROM runtime_provider_cost_ledger`,
+    ).all<{
+      deletion_confirmed_at: number | null;
+      final_cost_nanos: number | null;
+    }>();
+    expect(reopenedRows.results).toHaveLength(4);
+    expect(
+      reopenedRows.results.every(
+        (row) =>
+          row.deletion_confirmed_at === null && row.final_cost_nanos === null,
+      ),
+    ).toBe(true);
   });
 
   it("attributes certification resources to an observation without a session forecast", async () => {
@@ -487,6 +515,149 @@ describe("provider-neutral runtime cost ledger", () => {
       cleanup_pending_count: 0,
       finalized_at: deletedAt,
     });
+  });
+
+  it("reopens a synthetic GCP IPv4 and its ledger after the instance reappears", async () => {
+    await seedLearnerRuntime("gcp_compute");
+    await insertPriceObservation({
+      providerKind: "gcp_compute",
+      observationId: "price-g-reappeared",
+      forecastId: "forecast-g-reappeared",
+      version: 1,
+      lines: [
+        line(
+          "gcp-core",
+          "compute_core",
+          "tax_excluded_public_list",
+          36_000_000,
+          4,
+        ),
+        line(
+          "gcp-ram",
+          "compute_ram",
+          "tax_excluded_public_list",
+          4_000_000,
+          16,
+        ),
+        line(
+          "gcp-disk",
+          "pd_balanced",
+          "tax_excluded_public_list",
+          100_000_000,
+          32,
+          "gib_month",
+        ),
+        line(
+          "gcp-ip",
+          "external_ipv4",
+          "tax_excluded_public_list",
+          5_000_000,
+        ),
+      ],
+    });
+    await insertLearnerAllocation(
+      "gcp_compute",
+      "price-g-reappeared",
+      "forecast-g-reappeared",
+    );
+    await insertResources("gcp_compute", [
+      [
+        "resource-instance-g-reappeared",
+        "instance",
+        "instance-reappeared",
+        START + 1_000,
+      ],
+      [
+        "resource-disk-g-reappeared",
+        "boot_disk",
+        "disk-reappeared",
+        START + 1_000,
+      ],
+    ]);
+    await env.DB.prepare(
+      "UPDATE runtime_provider_allocations SET external_ipv4 = ? WHERE id = ?",
+    )
+      .bind("203.0.113.99", "allocation-g")
+      .run();
+    await expect(
+      reconcileProviderCostLedger({
+        allocationId: "allocation-g",
+        now: START + 2_000,
+      }),
+    ).resolves.toMatchObject({ inserted: 4, reopened: 0, closed: 0 });
+
+    const missingAt = START + 60_000;
+    await env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'deleted', disappearance_confirmed_at = ?,
+           updated_at = ?
+       WHERE allocation_id = ? AND resource_kind IN ('instance', 'ipv4')`,
+    )
+      .bind(missingAt, missingAt, "allocation-g")
+      .run();
+    await expect(
+      reconcileProviderCostLedger({
+        allocationId: "allocation-g",
+        now: missingAt,
+      }),
+    ).resolves.toMatchObject({ inserted: 0, reopened: 0, closed: 3 });
+
+    const reappearedAt = missingAt + 1_000;
+    await env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'running', disappearance_confirmed_at = NULL,
+           updated_at = ?
+       WHERE allocation_id = ? AND resource_kind = 'instance'`,
+    )
+      .bind(reappearedAt, "allocation-g")
+      .run();
+    await expect(
+      reconcileProviderCostLedger({
+        allocationId: "allocation-g",
+        now: reappearedAt,
+      }),
+    ).resolves.toMatchObject({ inserted: 0, reopened: 3, closed: 0 });
+
+    const ipv4 = await env.DB.prepare(
+      `SELECT provider_state, configuration_json,
+              disappearance_confirmed_at, updated_at
+       FROM runtime_provider_resources
+       WHERE allocation_id = ? AND resource_kind = 'ipv4'`,
+    )
+      .bind("allocation-g")
+      .first<{
+        provider_state: string;
+        configuration_json: string;
+        disappearance_confirmed_at: number | null;
+        updated_at: number;
+      }>();
+    expect(ipv4).toMatchObject({
+      provider_state: "running",
+      disappearance_confirmed_at: null,
+      updated_at: reappearedAt,
+    });
+    expect(JSON.parse(ipv4?.configuration_json ?? "{}")).toMatchObject({
+      address: "203.0.113.99",
+      lifecycle: "ephemeral_with_instance",
+    });
+    const ledger = await env.DB.prepare(
+      `SELECT resource_kind, deletion_confirmed_at, final_cost_nanos
+       FROM runtime_provider_cost_ledger
+       WHERE allocation_id = ? ORDER BY resource_kind, sku`,
+    )
+      .bind("allocation-g")
+      .all<{
+        resource_kind: string;
+        deletion_confirmed_at: number | null;
+        final_cost_nanos: number | null;
+      }>();
+    expect(ledger.results).toHaveLength(4);
+    expect(
+      ledger.results.every(
+        (row) =>
+          row.deletion_confirmed_at === null && row.final_cost_nanos === null,
+      ),
+    ).toBe(true);
   });
 
   it("keeps an orphaned GCP boot disk and its cost ledger open after the instance disappears", async () => {

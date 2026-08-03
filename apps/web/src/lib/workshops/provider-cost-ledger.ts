@@ -28,6 +28,7 @@ type BillableResourceKind = "instance" | "boot_disk" | "ipv4";
 
 export interface ProviderCostLedgerReconciliation {
   inserted: number;
+  reopened: number;
   closed: number;
   skipped: "unsupported_execution_domain" | "no_resources" | null;
 }
@@ -90,6 +91,7 @@ export async function reconcileProviderCostLedger(input: {
   ) {
     return {
       inserted: 0,
+      reopened: 0,
       closed: 0,
       skipped: "unsupported_execution_domain",
     };
@@ -136,7 +138,7 @@ export async function reconcileProviderCostLedger(input: {
       ),
     );
   if (resources.length === 0) {
-    return { inserted: 0, closed: 0, skipped: "no_resources" };
+    return { inserted: 0, reopened: 0, closed: 0, skipped: "no_resources" };
   }
 
   if (
@@ -224,11 +226,41 @@ export async function reconcileProviderCostLedger(input: {
       });
     inserted += result.meta.changes;
   }
+  const reopened = await reopenObservedProviderCostLedgerLines({
+    allocationId: input.allocationId,
+    now,
+  });
   const closed = await closeDisappearedProviderCostLedgerLines({
     allocationId: input.allocationId,
     now,
   });
-  return { inserted, closed, skipped: null };
+  return { inserted, reopened, closed, skipped: null };
+}
+
+/**
+ * Reopen a ledger line when an ownership-verified provider observation proves
+ * that a previously missing resource is still present. Provider resource IDs
+ * cannot reappear inside one allocation after real deletion, so this repairs
+ * only a transient or incorrectly classified absence.
+ */
+export async function reopenObservedProviderCostLedgerLines(input: {
+  allocationId: string;
+  now?: number;
+}): Promise<number> {
+  const now = input.now ?? Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE runtime_provider_cost_ledger
+     SET deletion_confirmed_at = NULL, final_cost_nanos = NULL, updated_at = ?
+     WHERE allocation_id = ? AND deletion_confirmed_at IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM runtime_provider_resources resource
+         WHERE resource.id = runtime_provider_cost_ledger.provider_resource_id
+           AND resource.disappearance_confirmed_at IS NULL
+       )`,
+  )
+    .bind(now, input.allocationId)
+    .run();
+  return result.meta.changes;
 }
 
 /** Close open ledger rows at the provider-confirmed disappearance timestamp. */
@@ -430,6 +462,29 @@ async function ensureGcpEphemeralIpv4Resource(input: {
       "provider IPv4 identity changed within one allocation",
     );
   }
+  await db
+    .update(runtimeProviderResources)
+    .set({
+      providerState: instance.providerState,
+      configurationJson: {
+        deterministicName: `${input.allocation.deterministicName}-ipv4`,
+        address: input.allocation.externalIpv4,
+        lifecycle: "ephemeral_with_instance",
+      },
+      disappearanceConfirmedAt: instance.disappearanceConfirmedAt,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(runtimeProviderResources.allocationId, input.allocation.id),
+        eq(
+          runtimeProviderResources.locationAttempt,
+          input.allocation.locationAttempt,
+        ),
+        eq(runtimeProviderResources.resourceKind, "ipv4"),
+        eq(runtimeProviderResources.providerResourceId, providerResourceId),
+      ),
+    );
 }
 
 function priceAppliesToResource(
