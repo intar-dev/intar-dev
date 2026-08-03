@@ -18,7 +18,7 @@ on:
       database_name:
         description: Explicit name of the new clean production database
         required: true
-        default: intar-dev-control-plane-v2-20260801
+        default: intar-dev-control-plane-v2-20260803
         type: string
       expected_database_id:
         description: Optional expected new D1 UUID; required when the database already exists
@@ -1143,12 +1143,42 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_WEB_ROLLBACK_API_TOKEN }}
         run: |
           set -euo pipefail
-          bunx wrangler rollback "${PREVIOUS_WEB_VERSION_ID}" \
+          deploy_output="${RUNNER_TEMP}/web-rollback-version-deploy.ndjson"
+          deploy_result="${RUNNER_TEMP}/web-rollback-version-deploy.json"
+          test ! -e "${deploy_output}"
+          WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
+            bunx wrangler versions deploy "${PREVIOUS_WEB_VERSION_ID}@100%" \
             --name intar-dev \
             --yes \
             --message "Clean-D1 rollback from ${GITHUB_SHA}; new database retained offline"
+          bun tools/cutover/wrangler-output.ts version-deploy \
+            "${deploy_output}" intar-dev > "${deploy_result}"
+          restore_deployment_id="$(jq -er '.deploymentId' "${deploy_result}")"
+          [[ "${restore_deployment_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg version_id "${PREVIOUS_WEB_VERSION_ID}" \
+            --arg deployment_id "${restore_deployment_id}" \
+            --arg database_id "${PREVIOUS_DATABASE_ID}" \
+            --rawfile wrangler_version_deploy_ndjson "${deploy_output}" '
+              {
+                schema_version: 1,
+                operation: "rollback-version-deploy",
+                source_sha: $source_sha,
+                version_id: $version_id,
+                deployment_id: $deployment_id,
+                traffic_percentage: 100,
+                database_id: $database_id,
+                wrangler_version_deploy_ndjson: $wrangler_version_deploy_ndjson,
+                database_mutated: false,
+                routes_mutated: false,
+                crons_mutated: false,
+                durable_object_lifecycle_mutated: false
+              }
+            ' > "${RUNNER_TEMP}/clean-d1-rollback-mutation.json"
           {
             printf 'rolled_back_web_version=%s\n' "${PREVIOUS_WEB_VERSION_ID}"
+            printf 'rollback_deployment_id=%s\n' "${restore_deployment_id}"
             printf 'restored_database_id=%s\n' "${PREVIOUS_DATABASE_ID}"
             printf 'new_database_deleted=false\n'
           } | tee -a "${GITHUB_STEP_SUMMARY}"
@@ -1163,7 +1193,14 @@ jobs:
           deployment="${RUNNER_TEMP}/web-rollback-deployment.json"
           version="${RUNNER_TEMP}/web-rollback-active-version.json"
           binding="${RUNNER_TEMP}/web-rollback-binding.json"
+          deploy_output="${RUNNER_TEMP}/web-rollback-version-deploy.ndjson"
+          deploy_result="${RUNNER_TEMP}/web-rollback-version-deploy.json"
+          propagation="${RUNNER_TEMP}/web-rollback-propagation.ndjson"
+          test -f "${deploy_output}"
+          test -f "${deploy_result}"
+          restore_deployment_id="$(jq -er '.deploymentId' "${deploy_result}")"
           bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          test "$(jq -er '.id' "${deployment}")" = "${restore_deployment_id}"
           bunx wrangler versions view "${PREVIOUS_WEB_VERSION_ID}" \
             --name intar-dev --json > "${version}"
           bun tools/cutover/worker-version.ts active-binding \
@@ -1174,23 +1211,141 @@ jobs:
             --arg database_id "${PREVIOUS_DATABASE_ID}" '
               .versionId == $version_id and .databaseId == $database_id
             ' "${binding}" >/dev/null
+
+          : > "${propagation}"
+          propagation_proven=false
+          propagation_attempts=0
+          marker_clear_attempt=""
+          root_healthy_attempt=""
+          final_marker_status=""
+          final_root_status=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            propagation_attempts="${attempt}"
+            marker_headers="${RUNNER_TEMP}/web-rollback-marker-${attempt}.headers"
+            root_headers="${RUNNER_TEMP}/web-rollback-root-${attempt}.headers"
+            final_marker_status="$({ curl --silent --show-error \
+              --connect-timeout 2 --max-time 5 \
+              --header 'Cache-Control: no-cache' \
+              --dump-header "${marker_headers}" --output /dev/null \
+              --write-out '%{http_code}' \
+              https://intar.dev/.well-known/intar-clean-d1-cutover-fence; } || true)"
+            final_root_status="$({ curl --silent --show-error \
+              --connect-timeout 2 --max-time 5 \
+              --header 'Cache-Control: no-cache' \
+              --dump-header "${root_headers}" --output /dev/null \
+              --write-out '%{http_code}' https://intar.dev/; } || true)"
+            [[ "${final_marker_status}" =~ ^[0-9]{3}$ ]] || final_marker_status=000
+            [[ "${final_root_status}" =~ ^[0-9]{3}$ ]] || final_root_status=000
+            marker_fence_count="$(grep -Eic '^x-intar-cutover-fence:[[:space:]]*active[[:space:]]*$' "${marker_headers}" 2>/dev/null || true)"
+            root_fence_count="$(grep -Eic '^x-intar-cutover-fence:[[:space:]]*active[[:space:]]*$' "${root_headers}" 2>/dev/null || true)"
+            [[ "${marker_fence_count}" =~ ^[0-9]+$ ]]
+            [[ "${root_fence_count}" =~ ^[0-9]+$ ]]
+            test "${marker_fence_count}" -le 1
+            test "${root_fence_count}" -le 1
+            marker_clear=false
+            root_healthy=false
+            if [[ "${final_marker_status}" =~ ^[234][0-9]{2}$ ]] && [ "${marker_fence_count}" = 0 ]; then
+              marker_clear=true
+              test -n "${marker_clear_attempt}" || marker_clear_attempt="${attempt}"
+            fi
+            if [ "${final_root_status}" = 200 ] && [ "${root_fence_count}" = 0 ]; then
+              root_healthy=true
+              test -n "${root_healthy_attempt}" || root_healthy_attempt="${attempt}"
+            fi
+            jq -cn \
+              --argjson attempt "${attempt}" \
+              --arg marker_http_status "${final_marker_status}" \
+              --argjson marker_fence_header_count "${marker_fence_count}" \
+              --argjson marker_clear "${marker_clear}" \
+              --arg root_http_status "${final_root_status}" \
+              --argjson root_fence_header_count "${root_fence_count}" \
+              --argjson root_healthy "${root_healthy}" \
+              '{attempt: $attempt, marker_http_status: $marker_http_status, marker_fence_header_count: $marker_fence_header_count, marker_clear: $marker_clear, root_http_status: $root_http_status, root_fence_header_count: $root_fence_header_count, root_healthy: $root_healthy}' \
+              >> "${propagation}"
+            if [ "${marker_clear}" = true ] && [ "${root_healthy}" = true ]; then
+              propagation_proven=true
+              break
+            fi
+            if [ "${attempt}" -lt 12 ]; then sleep 5; fi
+          done
+          test "${propagation_proven}" = true
           jq -n \
             --arg source_sha "${GITHUB_SHA}" \
             --arg version_id "${PREVIOUS_WEB_VERSION_ID}" \
+            --arg deployment_id "${restore_deployment_id}" \
             --arg database_id "${PREVIOUS_DATABASE_ID}" \
+            --argjson propagation_attempts "${propagation_attempts}" \
+            --arg marker_clear_attempt "${marker_clear_attempt}" \
+            --arg root_healthy_attempt "${root_healthy_attempt}" \
+            --arg final_marker_status "${final_marker_status}" \
+            --arg final_root_status "${final_root_status}" \
+            --rawfile wrangler_version_deploy_ndjson "${deploy_output}" \
+            --rawfile propagation_attempts_ndjson "${propagation}" \
             --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
               {
-                schema_version: 1,
+                schema_version: 2,
                 operation: "rollback",
                 source_sha: $source_sha,
                 active_version_id: $version_id,
+                deployment_id: $deployment_id,
                 active_traffic_percentage: 100,
                 database_id: $database_id,
                 exact_binding_proven: true,
+                exact_version_deployed: true,
+                wrangler_version_deploy_ndjson: $wrangler_version_deploy_ndjson,
+                public_propagation: {
+                  max_attempts: 12,
+                  interval_seconds: 5,
+                  request_timeout_seconds: 5,
+                  attempts: $propagation_attempts,
+                  marker_clear_attempt: ($marker_clear_attempt | tonumber),
+                  root_healthy_attempt: ($root_healthy_attempt | tonumber),
+                  final_marker_http_status: $final_marker_status,
+                  final_root_http_status: $final_root_status,
+                  proven: true,
+                  attempts_ndjson: $propagation_attempts_ndjson
+                },
+                database_mutated: false,
+                routes_mutated: false,
+                crons_mutated: false,
+                durable_object_lifecycle_mutated: false,
                 new_database_deleted: false,
                 observed_at: $observed_at
               }
             ' > "${RUNNER_TEMP}/clean-d1-rollback.json"
+          jq -e \
+            --arg version_id "${PREVIOUS_WEB_VERSION_ID}" \
+            --arg deployment_id "${restore_deployment_id}" \
+            --arg database_id "${PREVIOUS_DATABASE_ID}" '
+              .schema_version == 2 and
+              .operation == "rollback" and
+              .active_version_id == $version_id and
+              .deployment_id == $deployment_id and
+              .active_traffic_percentage == 100 and
+              .database_id == $database_id and
+              .exact_binding_proven == true and
+              .exact_version_deployed == true and
+              (.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")) and
+              .public_propagation.max_attempts == 12 and
+              .public_propagation.interval_seconds == 5 and
+              .public_propagation.request_timeout_seconds == 5 and
+              .public_propagation.attempts >= 1 and
+              .public_propagation.attempts <= .public_propagation.max_attempts and
+              .public_propagation.marker_clear_attempt >= 1 and
+              .public_propagation.marker_clear_attempt <= .public_propagation.attempts and
+              .public_propagation.root_healthy_attempt >= 1 and
+              .public_propagation.root_healthy_attempt <= .public_propagation.attempts and
+              (.public_propagation.final_marker_http_status | test("^[234][0-9]{2}$")) and
+              .public_propagation.final_root_http_status == "200" and
+              .public_propagation.proven == true and
+              (.public_propagation.attempts_ndjson | contains("\"marker_clear\":true")) and
+              (.public_propagation.attempts_ndjson | contains("\"root_healthy\":true")) and
+              .database_mutated == false and
+              .routes_mutated == false and
+              .crons_mutated == false and
+              .durable_object_lifecycle_mutated == false and
+              .new_database_deleted == false
+            ' "${RUNNER_TEMP}/clean-d1-rollback.json" >/dev/null
           jq . "${RUNNER_TEMP}/clean-d1-rollback.json" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Retain rollback activation evidence
@@ -1198,6 +1353,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: clean-d1-rollback-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/clean-d1-rollback.json
+          path: |
+            ${{ runner.temp }}/clean-d1-rollback.json
+            ${{ runner.temp }}/clean-d1-rollback-mutation.json
+            ${{ runner.temp }}/web-rollback-version-deploy.ndjson
+            ${{ runner.temp }}/web-rollback-version-deploy.json
+            ${{ runner.temp }}/web-rollback-deployment.json
+            ${{ runner.temp }}/web-rollback-active-version.json
+            ${{ runner.temp }}/web-rollback-binding.json
+            ${{ runner.temp }}/web-rollback-propagation.ndjson
+            ${{ runner.temp }}/web-rollback-marker-*.headers
+            ${{ runner.temp }}/web-rollback-root-*.headers
           if-no-files-found: warn
           retention-days: 90

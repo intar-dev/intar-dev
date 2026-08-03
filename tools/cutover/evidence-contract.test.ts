@@ -77,6 +77,18 @@ describe("clean-D1 evidence contract", () => {
     expect(websiteConsumer).not.toContain(".schema_version == 3");
   });
 
+  it("exposes the Wrangler token to the pre-switch version proof", () => {
+    expect(websiteConsumer).toContain(
+      "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
+    );
+    expect(websiteConsumer).toContain(
+      "CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}",
+    );
+    expect(websiteConsumer).toContain(
+      "bunx wrangler deployments status --name intar-dev --json",
+    );
+  });
+
   it("pins maintenance-fence schema v2 at its producer and both consumers", () => {
     expect(maintenanceFenceScript).toContain("schema_version: 2");
     expect(maintenanceFenceScript).toContain(".schema_version == 2");
