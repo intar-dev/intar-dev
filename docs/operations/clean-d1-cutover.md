@@ -41,6 +41,17 @@ service, zero terminal routes, application routes, and browser sessions, the
 `intar.app` base domain, 60/900 second TTLs, and ready application migrations.
 D1 state is never accepted as a substitute for provider or Stargate inventory.
 
+The single baseline is larger than [D1's per-query SQL
+limit](https://developers.cloudflare.com/d1/platform/limits/). CI therefore
+does not submit it through `d1 migrations apply`, which sends a complete
+migration as one remote query. It deterministically wraps the exact baseline
+with Wrangler's migration table and one ledger row, then uses D1's [atomic
+file-import path](https://developers.cloudflare.com/d1/best-practices/import-export-data/).
+Local validation and production use the same generated import, and CI rechecks
+its digest immediately before upload. A failed import leaves the database at
+its pre-import state and may resume only from an absent or empty migration
+ledger.
+
 After that initial proof, CI uploads a tiny maintenance version under the
 existing `intar-dev` identity and exact old D1 binding without activating it.
 It proves the current deployment is unchanged, then promotes only the captured

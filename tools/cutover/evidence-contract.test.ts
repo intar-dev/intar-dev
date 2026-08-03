@@ -32,6 +32,11 @@ const applyProducer = between(
   "- name: Apply or resume the exact baseline and owner commissioning",
   "- name: Upload apply evidence",
 );
+const localBaselineValidation = between(
+  cleanD1Workflow,
+  "- name: Validate the single clean baseline locally",
+  "- name: Rehearse the clean bootstrap twice",
+);
 const bootstrapConsumer = between(
   cleanD1Workflow,
   "- name: Verify the successful apply run and immutable evidence",
@@ -44,6 +49,21 @@ const websiteConsumer = between(
 );
 
 describe("clean-D1 evidence contract", () => {
+  it("imports the oversized baseline through the atomic file endpoint", () => {
+    expect(localBaselineValidation).toContain("build-clean-d1-import.ts");
+    for (const producer of [localBaselineValidation, applyProducer]) {
+      expect(producer).toContain("d1 execute DB \\");
+      expect(producer).toContain('--file "${baseline_import}"');
+      expect(producer).not.toContain("d1 migrations apply");
+    }
+    expect(localBaselineValidation).toContain(
+      'sha256sum "${baseline_import}"',
+    );
+    expect(applyProducer).toContain(
+      'sha256sum --check "${RUNNER_TEMP}/clean-d1-baseline-import.sha256"',
+    );
+  });
+
   it("pins apply schema v4 at its producer and both consumers", () => {
     expect(applyProducer).toContain(
       '{schema_version: 4, operation: "apply"',

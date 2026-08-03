@@ -285,11 +285,19 @@ jobs:
           )
           test "${#migrations[@]}" = 1
           test "${migrations[0]}" = 0000_clean_multicloud.sql
+          baseline_import="${RUNNER_TEMP}/clean-d1-baseline-import.sql"
+          bun tools/cutover/build-clean-d1-import.ts \
+            "apps/web/migrations/${migrations[0]}" > "${baseline_import}"
+          test -s "${baseline_import}"
+          sha256sum "${baseline_import}" \
+            > "${RUNNER_TEMP}/clean-d1-baseline-import.sha256"
           rm -rf apps/web/.wrangler/clean-ci-state
-          bunx wrangler d1 migrations apply DB \
+          bunx wrangler d1 execute DB \
             --local \
             --config apps/web/wrangler.local.jsonc \
-            --persist-to apps/web/.wrangler/clean-ci-state
+            --persist-to apps/web/.wrangler/clean-ci-state \
+            --file "${baseline_import}" \
+            --yes
           schema_sql="SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE type IN ('table', 'index', 'trigger', 'view') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name != 'd1_migrations' ORDER BY type, name"
           bunx wrangler d1 execute DB \
             --local \
@@ -667,8 +675,11 @@ jobs:
         run: |
           set -euo pipefail
           baseline_file="apps/web/migrations/0000_clean_multicloud.sql"
+          baseline_import="${RUNNER_TEMP}/clean-d1-baseline-import.sql"
           baseline_sha256="$(cut -d ' ' -f 1 "${RUNNER_TEMP}/clean-d1-baseline.sha256")"
           database_id="${{ steps.target.outputs.database_id }}"
+          test -s "${baseline_import}"
+          sha256sum --check "${RUNNER_TEMP}/clean-d1-baseline-import.sha256"
           identity="$(
             bun tools/bootstrap/clean-owner-bootstrap.ts identity \
               "${BOOTSTRAP_OWNER_GITHUB_LOGIN}" \
@@ -713,9 +724,11 @@ jobs:
                 'length == 1 and .[0].success == true and (.[0].results | length) == 0' \
                 "${empty_ledger}" >/dev/null
             fi
-            bunx wrangler d1 migrations apply DB \
+            bunx wrangler d1 execute DB \
               --remote \
-              --config apps/web/wrangler.cutover.json
+              --config apps/web/wrangler.cutover.json \
+              --file "${baseline_import}" \
+              --yes
           else
             test "${migration_table_count}" = 1
           fi
