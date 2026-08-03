@@ -9,6 +9,10 @@ export interface ActiveWorkerVersion {
   databaseId: string;
 }
 
+export interface ActiveWorkerRuntimeVersion extends ActiveWorkerVersion {
+  sessionNamespaceId: string;
+}
+
 export function assertActiveWorkerVersion(
   deployment: unknown,
   version: unknown,
@@ -66,6 +70,75 @@ export function assertVersionDatabaseBinding(
   );
 }
 
+export function assertActiveWorkerRuntimeVersion(
+  deployment: unknown,
+  version: unknown,
+  expectedDatabaseId: string,
+  expectedSessionNamespaceId: string,
+  expectedVersionId?: string,
+): ActiveWorkerRuntimeVersion {
+  const active = assertActiveWorkerVersion(
+    deployment,
+    version,
+    expectedDatabaseId,
+    expectedVersionId,
+  );
+  return {
+    ...active,
+    sessionNamespaceId: assertSessionNamespaceBinding(
+      version,
+      expectedSessionNamespaceId,
+    ),
+  };
+}
+
+export function assertVersionRuntimeBindings(
+  version: unknown,
+  expectedDatabaseId: string,
+  expectedSessionNamespaceId: string,
+  expectedVersionId?: string,
+): ActiveWorkerRuntimeVersion {
+  const active = assertVersionDatabaseBinding(
+    version,
+    expectedDatabaseId,
+    expectedVersionId,
+  );
+  return {
+    ...active,
+    sessionNamespaceId: assertSessionNamespaceBinding(
+      version,
+      expectedSessionNamespaceId,
+    ),
+  };
+}
+
+function assertSessionNamespaceBinding(
+  version: unknown,
+  expectedSessionNamespaceId: string,
+): string {
+  const versionRecord = record(version, "version");
+  const resources = record(versionRecord.resources, "version.resources");
+  const bindings = array(resources.bindings, "version.resources.bindings");
+  const sessionBindings = bindings
+    .map((binding, index) => record(binding, `version.resources.bindings[${index}]`))
+    .filter(
+      (binding) => binding.type === "kv_namespace" && binding.name === "SESSION",
+    );
+  if (sessionBindings.length !== 1) {
+    throw new Error("the Worker version must have exactly one KV binding named SESSION");
+  }
+  const namespaceId = text(
+    sessionBindings[0]!.namespace_id,
+    "SESSION namespace id",
+  );
+  if (namespaceId !== expectedSessionNamespaceId) {
+    throw new Error(
+      "the Worker SESSION binding does not match the expected namespace",
+    );
+  }
+  return namespaceId;
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "active-binding") {
@@ -86,6 +159,32 @@ async function main(): Promise<void> {
     const result = assertVersionDatabaseBinding(
       JSON.parse(await readFile(versionPath, "utf8")),
       databaseId,
+      expectedVersionId || undefined,
+    );
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (command === "active-runtime-bindings") {
+    const [deploymentPath, versionPath, databaseId, sessionNamespaceId, expectedVersionId] =
+      args;
+    if (!deploymentPath || !versionPath || !databaseId || !sessionNamespaceId) usage();
+    const result = assertActiveWorkerRuntimeVersion(
+      JSON.parse(await readFile(deploymentPath, "utf8")),
+      JSON.parse(await readFile(versionPath, "utf8")),
+      databaseId,
+      sessionNamespaceId,
+      expectedVersionId || undefined,
+    );
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (command === "version-runtime-bindings") {
+    const [versionPath, databaseId, sessionNamespaceId, expectedVersionId] = args;
+    if (!versionPath || !databaseId || !sessionNamespaceId) usage();
+    const result = assertVersionRuntimeBindings(
+      JSON.parse(await readFile(versionPath, "utf8")),
+      databaseId,
+      sessionNamespaceId,
       expectedVersionId || undefined,
     );
     process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -122,7 +221,7 @@ function number(value: unknown, label: string): number {
 
 function usage(): never {
   throw new Error(
-    "usage: worker-version.ts active-binding <deployment.json> <version.json> <database-id> [version-id] | version-binding <version.json> <database-id> [version-id]",
+    "usage: worker-version.ts active-binding <deployment.json> <version.json> <database-id> [version-id] | version-binding <version.json> <database-id> [version-id] | active-runtime-bindings <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id] | version-runtime-bindings <version.json> <database-id> <session-namespace-id> [version-id]",
   );
 }
 

@@ -214,7 +214,7 @@ jobs:
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
           [[ "${CLEAN_D1_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
           test "${CLEAN_D1_DATABASE_ID}" != "00000000-0000-0000-0000-000000000003"
-          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260803-r2"
+          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260803-r3"
           node - <<'NODE'
           const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
             .split(",").map((value) => value.trim()).filter(Boolean);
@@ -470,11 +470,12 @@ jobs:
       - name: Build deployment artifact
         run: bun run build:deploy
 
-      - name: Pin protected runtime signing keys in deployment artifact
+      - name: Pin protected runtime bindings in deployment artifact
         env:
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
           CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           config="dist/server/wrangler.json"
           patched="${RUNNER_TEMP}/website-wrangler.json"
@@ -492,11 +493,15 @@ jobs:
           mv "${patched}" "${config}"
           jq -e \
             --arg database_id "${CLEAN_D1_DATABASE_ID}" \
-            --arg database_name "${CLEAN_D1_DATABASE_NAME}" '
-              any(.d1_databases[];
-                .binding == "DB" and
-                .database_id == $database_id and
-                .database_name == $database_name)
+            --arg database_name "${CLEAN_D1_DATABASE_NAME}" \
+            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
+              ([.d1_databases[] | select(.binding == "DB")]) as $databases |
+              ([.kv_namespaces[] | select(.binding == "SESSION")]) as $sessions |
+              ($databases | length) == 1 and
+              $databases[0].database_id == $database_id and
+              $databases[0].database_name == $database_name and
+              ($sessions | length) == 1 and
+              $sessions[0].id == $session_namespace_id
             ' "${config}" >/dev/null
 
       - name: Recheck sole-operator window immediately before mutation
@@ -945,11 +950,15 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Deploy
+      - name: Activate exact immutable web version
+        id: exact_web_activation
+        working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
+          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
           test -n "${CLOUDFLARE_ACCOUNT_ID}"
@@ -960,39 +969,23 @@ jobs:
           jq -n '{STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS}' \
             > "${secrets_file}"
           chmod 600 "${secrets_file}"
-          bunx wrangler deploy --config dist/server/wrangler.json \
-            --secrets-file "${secrets_file}"
+          tools/cutover/activate-web-version.sh \
+            apps/web/dist/server/wrangler.json \
+            "${CLEAN_D1_DATABASE_ID}" \
+            "${SESSION_KV_NAMESPACE_ID}" \
+            "${secrets_file}" \
+            "${RUNNER_TEMP}/exact-web-version-activation.json"
 
-      - name: Verify the deployed web uses the exact clean D1 binding
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
-        run: |
-          set -euo pipefail
-          deployment="${RUNNER_TEMP}/post-switch-deployment.json"
-          version="${RUNNER_TEMP}/post-switch-version.json"
-          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
-          active_version_id="$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "${deployment}")"
-          bunx wrangler versions view "${active_version_id}" \
-            --name intar-dev --json > "${version}"
-          bun tools/cutover/worker-version.ts active-binding \
-            "${deployment}" "${version}" "${CLEAN_D1_DATABASE_ID}" \
-            "${active_version_id}" >/dev/null
-          fence_headers="${RUNNER_TEMP}/post-switch-fence-headers.txt"
-          curl --silent --show-error --output /dev/null \
-            --dump-header "${fence_headers}" \
-            https://intar.dev/.well-known/intar-clean-d1-cutover-fence
-          ! grep -qi '^x-intar-cutover-fence: active' "${fence_headers}"
-          jq \
-            --arg deployed_version_id "${active_version_id}" \
-            --arg database_id "${CLEAN_D1_DATABASE_ID}" '
-              .deployed_version_id = $deployed_version_id |
-              .deployed_database_id = $database_id |
-              .maintenance_fence_replaced = true
-            ' "${RUNNER_TEMP}/clean-d1-pre-web-switch.json" \
-            > "${RUNNER_TEMP}/clean-d1-web-switch.json"
+      - name: Retain exact web-version activation attempt
+        if: ${{ always() && steps.exact_web_activation.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/exact-web-version-activation.json
+            ${{ runner.temp }}/intar-web-version-${{ github.run_id }}/
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Retain clean-D1 web-switch evidence
         uses: actions/upload-artifact@v7
@@ -1005,7 +998,8 @@ jobs:
             ${{ runner.temp }}/clean-d1-pre-switch-maintenance-reactivation.json
             ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
             ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
-            ${{ runner.temp }}/clean-d1-web-switch.json
+            ${{ runner.temp }}/exact-web-version-activation.json
+            ${{ runner.temp }}/intar-web-version-${{ github.run_id }}/
           if-no-files-found: error
           retention-days: 90
 
