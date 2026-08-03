@@ -52,13 +52,19 @@
   "triggers": {
     "crons": ["* * * * *"],
   },
+  "kv_namespaces": [
+    {
+      "binding": "SESSION",
+      "id": "87ad9df7e37e4ced900553aa1a7775a1",
+    },
+  ],
   "d1_databases": [
     {
       "binding": "DB",
       // CI replaces this fail-closed placeholder with the new clean database
-      // ID after creating `intar-dev-control-plane-v2-20260803-r2`.
+      // ID after creating `intar-dev-control-plane-v2-20260803-r3`.
       "database_id": "00000000-0000-0000-0000-000000000003",
-      "database_name": "intar-dev-control-plane-v2-20260803-r2",
+      "database_name": "intar-dev-control-plane-v2-20260803-r3",
       "migrations_dir": "migrations",
     },
   ],

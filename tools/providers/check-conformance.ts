@@ -277,6 +277,20 @@ if (
 }
 
 const webConfig = await readJsonc("apps/web/wrangler.jsonc");
+const sessionNamespaces = Array.isArray(webConfig.kv_namespaces)
+  ? webConfig.kv_namespaces.map((binding) =>
+      expectObject(binding, "web SESSION KV binding"),
+    )
+  : [];
+if (
+  sessionNamespaces.length !== 1 ||
+  sessionNamespaces[0]?.binding !== "SESSION" ||
+  sessionNamespaces[0]?.id !== "87ad9df7e37e4ced900553aa1a7775a1"
+) {
+  throw new Error(
+    "Production web must pin the existing SESSION KV namespace exactly",
+  );
+}
 const serviceContract = [
   ["HETZNER_PROVIDER_SERVICE", "intar-provider-hetzner", "HetznerProviderService"],
   ["GCP_PROVIDER_SERVICE", "intar-provider-gcp", "GcpProviderService"],

@@ -129,7 +129,7 @@ provider Worker envelope-encrypts them.
 Set these protected variables before the web cutover:
 
 - `CLEAN_D1_DATABASE_ID` to the UUID returned by the clean-D1 apply workflow;
-- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r2`;
+- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r3`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
 - the existing production-review variables required by the web workflow.
@@ -188,7 +188,7 @@ Use `.github/workflows/clean-d1-cutover.yml`; see
 4. If the named database already exists, provide its exact expected UUID.
 5. Record the new UUID and baseline digest from the retained apply artifact.
 6. Set `CLEAN_D1_DATABASE_ID` to that exact UUID and
-   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r2`.
+   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r3`.
 7. Verify both protected variables before dispatching any provider or web
    rollout.
 
@@ -222,9 +222,15 @@ unit in the rollout ticket:
 - the zero-allocation, zero-route, and zero-active-slot evidence above;
 - the reviewed source SHA and the clean-D1 plan/apply workflow run IDs.
 
-This evidence is mandatory because the web workflow has no automatic rollback
-after a successful `wrangler deploy`. A later scenario-bundle or R2 evidence
-step can fail while the new web version is already serving production.
+This evidence remains mandatory even though web activation is now fail-safe.
+CI uploads an inert immutable version with automatic resource provisioning
+disabled, proves its exact D1, `SESSION` KV, and Durable Object bindings, then
+deploys that exact version UUID at 100 percent. A failed or ambiguous activation
+restores the exact previously active version before the job exits. Routes and
+crons require the separate trigger deployment command, and Durable Object
+lifecycle changes require a regular `wrangler deploy`; neither command is used
+by web activation. A later scenario-bundle or R2 evidence step can still fail
+after the new web version is already serving production.
 
 Dispatch `.github/workflows/control-plane-rollout.yml` from the exact reviewed
 `main` SHA with:

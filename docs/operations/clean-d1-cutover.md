@@ -136,10 +136,13 @@ matching user.
 
 After `apply`, copy the recorded UUID into the protected production variable
 `CLEAN_D1_DATABASE_ID` and set `CLEAN_D1_DATABASE_NAME` to
-`intar-dev-control-plane-v2-20260803-r2`. The checked-in all-zero UUID is a
+`intar-dev-control-plane-v2-20260803-r3`. The checked-in all-zero UUID is a
 fail-closed build placeholder. The production web workflow replaces it only in
 the built artifact, verifies the live baseline through that exact binding, and
-refuses to deploy while either protected variable is absent or mismatched.
+refuses to deploy while either protected variable is absent or mismatched. The
+production config also pins the existing Astro `SESSION` KV namespace
+`87ad9df7e37e4ced900553aa1a7775a1`; CI proves both bindings before uploading
+and again after exact-version activation.
 
 ## Cutover order
 
@@ -154,8 +157,12 @@ refuses to deploy while either protected variable is absent or mismatched.
 4. Deploy the route-less Hetzner and GCP provider Workers independently.
 5. Call each service's `capabilities()` RPC and compare the result to the
    generated protocol-v1 contract.
-6. Deploy the web artifact with only the new D1 binding and both provider
-   service bindings. For this first switch, pass the successful clean-D1
+6. Upload the web artifact as an inert immutable version with the new D1,
+   existing `SESSION` KV, and both provider service bindings, prove the exact
+   bindings, then deploy that version UUID at 100 percent. Do not run the
+   separate trigger deployment or regular deployment commands, so routes,
+   crons, and Durable Object lifecycle stay untouched. For this first switch,
+   pass the successful clean-D1
    `apply` run ID as `clean_d1_cutover_run_id`. Later deployments detect the
    already-clean active binding and do not require that input.
 7. Sign in once through GitHub as the seeded owner. Do not create any

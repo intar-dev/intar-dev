@@ -45,7 +45,22 @@ const bootstrapConsumer = between(
 const websiteConsumer = between(
   websiteDeployWorkflow,
   "- name: Reprove the fenced legacy drain immediately before the first binding switch",
-  "- name: Deploy",
+  "- name: Activate exact immutable web version",
+);
+const runtimeBindingPin = between(
+  websiteDeployWorkflow,
+  "- name: Pin protected runtime bindings in deployment artifact",
+  "- name: Recheck sole-operator window immediately before mutation",
+);
+const webActivation = between(
+  websiteDeployWorkflow,
+  "- name: Activate exact immutable web version",
+  "- name: Retain exact web-version activation attempt",
+);
+const activationRetention = between(
+  websiteDeployWorkflow,
+  "- name: Retain exact web-version activation attempt",
+  "- name: Retain clean-D1 web-switch evidence",
 );
 
 describe("clean-D1 evidence contract", () => {
@@ -143,7 +158,7 @@ describe("clean-D1 evidence contract", () => {
     const partialRetention = between(
       websiteDeployWorkflow,
       "- name: Retain partial clean-D1 pre-switch evidence",
-      "- name: Deploy",
+      "- name: Activate exact immutable web version",
     );
     expect(partialRetention).toContain(
       "if: ${{ always() && inputs.clean_d1_cutover_run_id != '' }}",
@@ -157,6 +172,30 @@ describe("clean-D1 evidence contract", () => {
       "intar-clean-d1-pre-switch-reactivate-${{ github.run_id }}-*",
     );
     expect(partialRetention).toContain("if-no-files-found: error");
+  });
+
+  it("pins the existing SESSION namespace in the freshly built artifact", () => {
+    expect(runtimeBindingPin).toContain(
+      "SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1",
+    );
+    expect(runtimeBindingPin).toContain(".kv_namespaces[]");
+    expect(runtimeBindingPin).toContain('.binding == "SESSION"');
+    expect(runtimeBindingPin).toContain("($sessions | length) == 1");
+    expect(runtimeBindingPin).toContain("$sessions[0].id == $session_namespace_id");
+  });
+
+  it("activates only the exact uploaded version and retains failure evidence", () => {
+    expect(webActivation).toContain("tools/cutover/activate-web-version.sh");
+    expect(webActivation).toContain("apps/web/dist/server/wrangler.json");
+    expect(webActivation).not.toMatch(/bunx wrangler deploy(?:\s|\\)/);
+    expect(websiteDeployWorkflow).not.toContain("wrangler triggers deploy");
+    expect(activationRetention).toContain(
+      "if: ${{ always() && steps.exact_web_activation.outcome != 'skipped' }}",
+    );
+    expect(activationRetention).toContain(
+      "intar-web-version-${{ github.run_id }}",
+    );
+    expect(activationRetention).toContain("if-no-files-found: error");
   });
 
   it("guarantees exact maintenance reactivation on resumed-drain failure", () => {
