@@ -279,8 +279,8 @@ describe("Workshop multicloud Flagship targeting", () => {
       "workflow_dispatch:",
       "group: intar-control-plane-production",
       "environment: production",
-      "CLOUDFLARE_FLAGSHIP_API_TOKEN",
-      "Flagship Read, Flagship Evaluate, and Flagship Write only",
+      "secrets.CLOUDFLARE_API_TOKEN",
+      "Flagship Read, Flagship Evaluate, and Flagship Write are added explicitly",
       "EXPECTED_CURRENT_SHA256",
       "SINGLE_OPERATOR_ADMIN_ATTESTED_AT",
       "Reauthorize immediately before Flagship mutation",
@@ -298,7 +298,10 @@ describe("Workshop multicloud Flagship targeting", () => {
     ]) {
       expect(workflow).toContain(required);
     }
-    expect(workflow).not.toContain("secrets.CLOUDFLARE_API_TOKEN");
+    expect(
+      workflow.match(/secrets\.CLOUDFLARE_API_TOKEN/g)?.length,
+    ).toBe(4);
+    expect(workflow).not.toContain("CLOUDFLARE_FLAGSHIP_API_TOKEN");
     expect(workflow).not.toContain("--add-rule-json");
     expect(workflow).not.toContain("flags rules delete");
     expect(workflow).not.toContain("wrangler deploy");
