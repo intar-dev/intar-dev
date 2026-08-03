@@ -198,8 +198,9 @@ jobs:
       - name: Capture and validate current Flagship state
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # Dedicated account token: Flagship Read, Flagship Evaluate, and Flagship Write only.
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_FLAGSHIP_API_TOKEN }}
+          # Existing account token; its established deployment permissions are preserved and
+          # Flagship Read, Flagship Evaluate, and Flagship Write are added explicitly.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           umask 077
@@ -227,7 +228,7 @@ jobs:
       - name: Verify current target and non-target evaluations
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_FLAGSHIP_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           umask 077
@@ -326,7 +327,7 @@ jobs:
         if: ${{ inputs.operation != 'plan' }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_FLAGSHIP_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           umask 077
@@ -415,7 +416,7 @@ jobs:
         if: ${{ inputs.operation != 'plan' && always() }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_FLAGSHIP_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           umask 077

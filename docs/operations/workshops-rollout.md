@@ -107,7 +107,9 @@ exact response.
 
 ## Protected GitHub configuration
 
-Use separate least-privilege production secrets:
+Use protected production secrets. Provider, D1, probe, rollback, and edge
+credentials remain separate; the existing account token intentionally serves
+both web/R2 deployment and protected Flagship targeting:
 
 | secret                                  | available to                                                       |
 | --------------------------------------- | ------------------------------------------------------------------ |
@@ -116,9 +118,8 @@ Use separate least-privilege production secrets:
 | `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN` | Hetzner Worker deployment only                                     |
 | `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`     | GCP Worker deployment only                                         |
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
-| `CLOUDFLARE_API_TOKEN`                  | web/R2 deployment only                                             |
+| `CLOUDFLARE_API_TOKEN`                  | web/R2 deployment and protected Flagship targeting                 |
 | `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN`     | exact web-version rollback only                                    |
-| `CLOUDFLARE_FLAGSHIP_API_TOKEN`         | Flagship Read, Flagship Evaluate, and Flagship Write only           |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
@@ -322,10 +323,11 @@ Use `.github/workflows/workshop-multicloud-flag.yml`; never change this flag
 from a workstation or the Cloudflare dashboard. The workflow has the same
 production environment, exact-main, first-attempt, reviewed/single-operator,
 and `intar-control-plane-production` serialization fences as the control-plane
-rollout. Its dedicated `CLOUDFLARE_FLAGSHIP_API_TOKEN` must have only the
-account-level `Flagship Read`, `Flagship Evaluate`, and `Flagship Write`
-permissions. Wrangler reads the complete flag before updating it and the
-workflow evaluates both the target and non-target contexts after propagation.
+rollout. The existing account token in `CLOUDFLARE_API_TOKEN` must preserve its
+deployment permissions and additionally have account-level `Flagship Read`,
+`Flagship Evaluate`, and `Flagship Write`. Wrangler reads the complete flag
+before updating it and the workflow evaluates both the target and non-target
+contexts after propagation.
 
 First retain a plan from current `main`:
 

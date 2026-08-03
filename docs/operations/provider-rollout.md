@@ -87,11 +87,12 @@ reconciliation or deletion.
 
 Apply and remove the organization rule only through the protected
 `.github/workflows/workshop-multicloud-flag.yml` plan/apply/remove workflow.
-It uses a dedicated token with only the account-level `Flagship Read`,
-`Flagship Evaluate`, and `Flagship Write` permissions, rejects any rule or
-default outside the exact pilot contract, and retains before/after and
-target/control evaluation evidence. Direct dashboard or workstation changes
-are outside the production operator boundary.
+It uses the existing account token from `CLOUDFLARE_API_TOKEN`. Preserve that
+token's established deployment permissions and add the account-level
+`Flagship Read`, `Flagship Evaluate`, and `Flagship Write` permissions. The
+workflow rejects any rule or default outside the exact pilot contract and
+retains before/after and target/control evaluation evidence. Direct dashboard
+or workstation flag changes are outside the production operator boundary.
 
 ### Explicit dormant GCP deployment
 
