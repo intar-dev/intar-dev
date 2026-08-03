@@ -51,7 +51,7 @@ const workshopManifest = {
       memoryMiB: 16_384,
       diskMiB: 32_768,
     },
-    runtimeProfiles: ["hetzner-cpx42", "gcp-e2-standard-4"],
+    runtimeProfiles: ["hetzner-cpx42"],
   },
 };
 const workshopManifestJson = stableJson(workshopManifest);
@@ -71,7 +71,6 @@ const ids = {
   template: "bootstrap-workshop-platform-engineering",
   revision: `bootstrap-workshop-revision-${workshopContentHash.slice(0, 16)}`,
   hetznerProfile: "bootstrap-profile-hetzner-cpx42",
-  gcpProfile: "bootstrap-profile-gcp-e2-standard-4",
   publication: "bootstrap-publication-platform-engineering",
   checkpoint: "bootstrap-publication-checkpoint-00",
 } as const;
@@ -106,7 +105,7 @@ try {
         courseSourceRevision,
         workshopSourceRevision: workshopSourceLock.revision,
         workshopContentHash,
-        runtimeProfiles: ["hetzner-cpx42", "gcp-e2-standard-4"],
+        runtimeProfiles: ["hetzner-cpx42"],
         productionMutated: false,
       },
       null,
@@ -282,21 +281,6 @@ function seedBootstrap(db: Database): void {
     diskMiB: 163_840,
     locations: ["nbg1", "fsn1", "hel1"],
   });
-  insertRuntimeProfile(db, {
-    id: ids.gcpProfile,
-    profileId: "gcp-e2-standard-4",
-    providerKind: "gcp_compute",
-    machineType: "e2-standard-4",
-    systemImage: "projects/debian-cloud/global/images/family/debian-13",
-    resolvedImageId:
-      "projects/debian-cloud/global/images/debian-13-bootstrap-rehearsal",
-    rootDiskType: "pd-balanced",
-    cpuMillis: 4_000,
-    memoryMiB: 16_384,
-    diskMiB: 32_768,
-    locations: ["europe-west3-a", "europe-west3-b", "europe-west3-c"],
-  });
-
   db.query(
     `UPDATE workshop_templates
      SET current_revision_id = ?, updated_at = ?
@@ -424,7 +408,7 @@ function verifyBootstrap(db: Database): void {
     workshop_registry_tokens: 1,
     workshop_templates: 1,
     workshop_template_revisions: 1,
-    workshop_runtime_profiles: 2,
+    workshop_runtime_profiles: 1,
     workshop_publications: 1,
     workshop_publication_checkpoints: 1,
   } as const;
@@ -470,11 +454,6 @@ function verifyBootstrap(db: Database): void {
   }>;
   assert(
     isDeepStrictEqual(profiles, [
-      {
-        profile_id: "gcp-e2-standard-4",
-        provider_kind: "gcp_compute",
-        machine_type: "e2-standard-4",
-      },
       {
         profile_id: "hetzner-cpx42",
         provider_kind: "hetzner_cloud",
