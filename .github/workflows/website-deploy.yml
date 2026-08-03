@@ -658,6 +658,7 @@ jobs:
           deployment="${RUNNER_TEMP}/pre-switch-deployment.json"
           version="${RUNNER_TEMP}/pre-switch-version.json"
           bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          active_deployment_id="$(jq -er '.id | select(type == "string" and test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))' "${deployment}")"
           active_version_id="$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "${deployment}")"
           bunx wrangler versions view "${active_version_id}" \
             --name intar-dev --json > "${version}"
@@ -728,8 +729,9 @@ jobs:
             --arg run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
             --arg clean_database_name "${CLEAN_D1_DATABASE_NAME}" \
             --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
+            --arg active_deployment_id "${active_deployment_id}" \
             --arg active_version_id "${active_version_id}" '
-              .schema_version == 3 and
+              .schema_version == 4 and
               .operation == "apply" and
               .source_sha == $source_sha and
               .apply_run_id == $run_id and
@@ -738,11 +740,45 @@ jobs:
               .database_id == $clean_database_id and
               .previous_database_id != $clean_database_id and
               .maintenance_web_version_id == $active_version_id and
+              .pre_drain_recovery.schema_version == 1 and
+              .pre_drain_recovery.operation == "resume-maintenance-fence" and
+              .pre_drain_recovery.source_sha == .source_sha and
+              .pre_drain_recovery.run_id == .apply_run_id and
+              .pre_drain_recovery.run_attempt == 1 and
+              .pre_drain_recovery.database_name == .previous_database_name and
+              .pre_drain_recovery.database_id == .previous_database_id and
+              .pre_drain_recovery.expected_previous_version_id == .previous_web_version_id and
+              .pre_drain_recovery.after_active_version_id == .previous_web_version_id and
+              (.pre_drain_recovery.before_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
+              (.pre_drain_recovery.restore_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
+              .pre_drain_recovery.active_traffic_percentage == 100 and
+              .pre_drain_recovery.before_active_binding_proven == true and
+              .pre_drain_recovery.previous_version_binding_proven == true and
+              .pre_drain_recovery.after_active_binding_proven == true and
+              .pre_drain_recovery.database_mutated == false and
+              .pre_drain_recovery.routes_mutated == false and
+              .pre_drain_recovery.crons_mutated == false and
+              (
+                (.pre_drain_recovery.restored == false and .pre_drain_recovery.fence_detected == false and .pre_drain_recovery.before_deployment_id == .pre_drain_recovery.restore_deployment_id and .pre_drain_recovery.origin_run_id == null and .pre_drain_recovery.origin_run_conclusion == null and .pre_drain_recovery.active_fence_tag == null and .pre_drain_recovery.active_fence_tag_proven == false and .pre_drain_recovery.wrangler_version_deploy_ndjson == "") or
+                (.pre_drain_recovery.restored == true and .pre_drain_recovery.fence_detected == true and .pre_drain_recovery.before_deployment_id != .pre_drain_recovery.restore_deployment_id and (.pre_drain_recovery.marker_sha256 | test("^[0-9a-f]{64}$")) and (.pre_drain_recovery.origin_run_id | test("^[1-9][0-9]*$")) and (.pre_drain_recovery.origin_run_conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")) and .pre_drain_recovery.active_fence_tag == ("clean-d1-fence-" + .pre_drain_recovery.origin_run_id) and .pre_drain_recovery.active_fence_tag_proven == true and (.pre_drain_recovery.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+              ) and
+              .maintenance_fence.schema_version == 2 and
+              .maintenance_fence.operation == "activate-maintenance-fence" and
+              .maintenance_fence.source_sha == .source_sha and
+              .maintenance_fence.run_id == .apply_run_id and
+              .maintenance_fence.run_attempt == 1 and
+              .maintenance_fence.database_name == .previous_database_name and
               .maintenance_fence.state == "active" and
               .maintenance_fence.database_id == .previous_database_id and
+              .maintenance_fence.previous_version_id == .previous_web_version_id and
               .maintenance_fence.maintenance_version_id == $active_version_id and
+              .maintenance_fence.maintenance_deployment_id == $active_deployment_id and
               .maintenance_fence.previous_version_binding_proven == true and
               .maintenance_fence.maintenance_version_binding_proven == true and
+              (
+                (.maintenance_fence.reused == true and .maintenance_fence.upload_did_not_activate == false and .maintenance_fence.exact_version_deployed == false and .maintenance_fence.wrangler_version_upload_ndjson == "" and .maintenance_fence.wrangler_version_deploy_ndjson == "") or
+                (.maintenance_fence.reused == false and .maintenance_fence.upload_did_not_activate == true and .maintenance_fence.exact_version_deployed == true and (.maintenance_fence.wrangler_version_upload_ndjson | contains("\"type\":\"version-upload\"")) and (.maintenance_fence.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+              ) and
               .legacy_drain.schema_version == 4 and
               .legacy_drain.stargate_probe_succeeded == true and
               .legacy_drain.drained == true and

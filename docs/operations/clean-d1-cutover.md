@@ -41,14 +41,26 @@ service, zero terminal routes, application routes, and browser sessions, the
 `intar.app` base domain, 60/900 second TTLs, and ready application migrations.
 D1 state is never accepted as a substitute for provider or Stargate inventory.
 
-After that initial proof, CI atomically deploys a tiny maintenance version under
-the existing `intar-dev` identity and exact old D1 binding. The exact marker
-endpoint is the only successful HTTP route; all other traffic receives a
-no-store `503`. CI waits for old requests to quiesce and proves the complete D1
-Hetzner, host, and Stargate drain twice more. If a later step fails, this fence remains active.
-The web deployment verifies the successful apply artifact and active maintenance
-version, repeats the full drain twice immediately before replacing it, and then
-proves the deployed version has exactly the clean `DB` binding.
+After that initial proof, CI uploads a tiny maintenance version under the
+existing `intar-dev` identity and exact old D1 binding without activating it.
+It proves the current deployment is unchanged, then promotes only the captured
+version UUID to 100 percent traffic. This version-only flow does not reconcile
+the existing custom domain, cron trigger, or Durable Object lifecycle. The
+exact marker endpoint is the only successful HTTP route; all other traffic
+receives a no-store `503`. CI waits for old requests to quiesce and proves the
+complete D1, Hetzner, host, and Stargate drain twice more.
+
+If a later step fails and leaves that fence active, a fresh first-attempt
+dispatch at the exact same `main` SHA validates the marker, origin workflow,
+version tag, previous version, and old D1 binding. It then restores exactly the
+recorded previous version at 100 percent traffic before rerunning the unchanged
+strict initial drain. Only stale runner or builder reports may be retried while
+they reconnect; every other drain failure remains immediately blocking. CI
+retains structured Wrangler upload/deploy output and recovery attempts even
+when a later proof fails. The web deployment verifies the successful apply
+artifact and active maintenance version, repeats the full drain twice
+immediately before replacing it, and then proves the deployed version has
+exactly the clean `DB` binding.
 
 `rollback` requires issuance to be disabled, verifies exactly one `DB` binding
 on the selected previous Worker version, and restores that version. It then
@@ -117,8 +129,10 @@ refuses to deploy while either protected variable is absent or mismatched.
    local databases.
 2. Dispatch `plan` from the exact reviewed `main` SHA and retain its evidence.
 3. Fully drain the old control plane, then dispatch `apply` with its exact D1
-   UUID plus the owner GitHub login and numeric ID. Retain the zero-count drain
-   evidence, new database ID, commissioning marker, and apply artifact.
+   UUID, exact active Worker version UUID, and the owner GitHub login and
+   numeric ID. Retain the zero-count drain evidence, recovery and version
+   activation evidence, new database ID, commissioning marker, and apply
+   artifact.
 4. Deploy the route-less Hetzner and GCP provider Workers independently.
 5. Call each service's `capabilities()` RPC and compare the result to the
    generated protocol-v1 contract.
