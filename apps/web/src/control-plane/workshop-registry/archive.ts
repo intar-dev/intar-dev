@@ -163,6 +163,29 @@ export function hydrateWorkshopManifest(params: {
   checkpoints: WorkshopCheckpointBuildReport[];
   resolvedProfiles?: ResolvedWorkshopRuntimeProfile[];
 }): WorkshopManifestV2 {
+  return hydrateWorkshopManifestWithMarkdown(params, "canonical");
+}
+
+/**
+ * Hydrate the exact source representation reported by the trusted builder.
+ * This verification-only form is never persisted or served to learners.
+ */
+export function hydrateRawWorkshopManifest(params: {
+  source: ValidatedWorkshopSourceBundle;
+  checkpoints: WorkshopCheckpointBuildReport[];
+  resolvedProfiles?: ResolvedWorkshopRuntimeProfile[];
+}): WorkshopManifestV2 {
+  return hydrateWorkshopManifestWithMarkdown(params, "source");
+}
+
+function hydrateWorkshopManifestWithMarkdown(
+  params: {
+    source: ValidatedWorkshopSourceBundle;
+    checkpoints: WorkshopCheckpointBuildReport[];
+    resolvedProfiles?: ResolvedWorkshopRuntimeProfile[];
+  },
+  markdownMode: "canonical" | "source",
+): WorkshopManifestV2 {
   const sourceManifest = record(
     params.source.compiledManifest.manifest,
     "manifest",
@@ -182,8 +205,11 @@ export function hydrateWorkshopManifest(params: {
   const presentationAssets = new Set(
     stringArray(presentation.assets, "manifest.presentation.assets"),
   );
-  const readMarkdown = (path: string) =>
-    hydrateMarkdownSource(params.source.files, path, presentationAssets);
+  const readMarkdown =
+    markdownMode === "source"
+      ? (path: string) => readUtf8Source(params.source.files, path)
+      : (path: string) =>
+          hydrateMarkdownSource(params.source.files, path, presentationAssets);
 
   const modules = sourceModules.map((module) => {
     const id = string(module.id, "module id");

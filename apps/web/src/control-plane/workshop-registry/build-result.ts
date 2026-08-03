@@ -9,7 +9,9 @@ import {
 } from "@/control-plane/image-registry/shared";
 import { validateWorkshopManifest } from "@/lib/workshops/validation";
 import {
+  hydrateRawWorkshopManifest,
   hydrateWorkshopManifest,
+  type ResolvedWorkshopRuntimeProfile,
   type ValidatedWorkshopSourceBundle,
   type WorkshopCheckpointBuildReport,
 } from "./archive";
@@ -52,28 +54,146 @@ export async function validateWorkshopBuilderResult(input: {
     hasAgentKvm,
     hasDirectCloud,
   });
-  const verifiedProviderCheckpointIds = hasDirectCloud
-    ? new Set(checkpoints.map((checkpoint) => checkpoint.checkpointId))
-    : undefined;
-  const manifest = validateWorkshopManifest(input.rawManifest, {
-    ...(verifiedProviderCheckpointIds
-      ? { verifiedProviderCheckpointIds }
-      : {}),
-  });
-  validateResolvedProfiles(manifest, input.resolutions);
-
-  const expected = hydrateWorkshopManifest({
+  const manifest = validateWorkshopBuilderManifest({
     source: input.source,
     checkpoints,
-    resolvedProfiles: manifest.workspace.runtimeProfiles,
+    resolutions: input.resolutions,
+    rawManifest: input.rawManifest,
   });
-  if (!jsonEqual(expected, manifest)) {
+
+  return { manifest, checkpoints, hasAgentKvm, hasDirectCloud };
+}
+
+/**
+ * Verify the builder's exact raw-source hydration, then return the registry's
+ * canonical Markdown hydration. This keeps source and profile authority in
+ * the control plane without requiring the Rust builder to duplicate the
+ * registry's asset rewriting and deterministic Mermaid renderer.
+ */
+export function validateWorkshopBuilderManifest(input: {
+  source: ValidatedWorkshopSourceBundle;
+  checkpoints: WorkshopCheckpointBuildReport[];
+  resolutions: PublicationProfileResolution[];
+  rawManifest: unknown;
+}): WorkshopManifestV2 {
+  const hasDirectCloud = input.resolutions.some(
+    (resolution) => resolution.declaration.provider !== "agent_kvm",
+  );
+  const verifiedProviderCheckpointIds = hasDirectCloud
+    ? new Set(input.checkpoints.map((checkpoint) => checkpoint.checkpointId))
+    : undefined;
+  const validationOptions = verifiedProviderCheckpointIds
+    ? { verifiedProviderCheckpointIds }
+    : {};
+  const reported = validateWorkshopManifest(
+    input.rawManifest,
+    validationOptions,
+  );
+  validateResolvedProfiles(reported, input.resolutions);
+  const trustedProfiles = materializeResolvedProfiles(input.resolutions);
+
+  const expectedSourceHydration = hydrateRawWorkshopManifest({
+    source: input.source,
+    checkpoints: input.checkpoints,
+    resolvedProfiles: trustedProfiles,
+  });
+  if (!jsonEqual(expectedSourceHydration, reported)) {
     throw new Error(
       "hydrated manifest does not exactly match the validated source and checkpoint result",
     );
   }
 
-  return { manifest, checkpoints, hasAgentKvm, hasDirectCloud };
+  const canonical = validateWorkshopManifest(
+    hydrateWorkshopManifest({
+      source: input.source,
+      checkpoints: input.checkpoints,
+      resolvedProfiles: trustedProfiles,
+    }),
+    validationOptions,
+  );
+  validateResolvedProfiles(canonical, input.resolutions);
+  return canonical;
+}
+
+function materializeResolvedProfiles(
+  resolutions: PublicationProfileResolution[],
+): ResolvedWorkshopRuntimeProfile[] {
+  return resolutions.map((resolution) => {
+    const declaration = resolution.declaration;
+    if (declaration.provider === "agent_kvm") {
+      if (
+        resolution.connectionId !== null ||
+        resolution.claimedObservation !== null
+      ) {
+        throw new Error(
+          `agent_kvm profile ${declaration.id} has unexpected provider state`,
+        );
+      }
+      return {
+        id: declaration.id,
+        provider: "agent_kvm",
+        vmId: declaration.vmId,
+        requestedSystemImage: declaration.systemImage,
+        immutableSystemImage: declaration.systemImage,
+        locations: [],
+        hardware: {
+          architecture: "x86_64",
+          cpuMillis: declaration.requirements.cpuMillis,
+          providerCpuCount: Math.ceil(
+            declaration.requirements.cpuMillis / 1_000,
+          ),
+          memoryMib: declaration.requirements.memoryMib,
+          diskMib: declaration.requirements.diskMib,
+        },
+      };
+    }
+
+    const claimed = resolution.claimedObservation;
+    const observation = claimed?.observation;
+    if (
+      !resolution.connectionId ||
+      !claimed ||
+      claimed.profile_id !== declaration.id ||
+      !observation ||
+      observation.provider !== declaration.provider ||
+      observation.architecture !== "x86_64" ||
+      observation.deprecated ||
+      !observation.system_image_is_immutable
+    ) {
+      throw new Error(
+        `runtime profile ${declaration.id} has invalid pinned provider state`,
+      );
+    }
+    const hardware = {
+      architecture: "x86_64" as const,
+      cpuMillis: observation.cores * 1_000,
+      providerCpuCount: observation.cores,
+      memoryMib: observation.memory_mib,
+      diskMib: observation.disk_mib,
+    };
+    return declaration.provider === "hetzner_cloud"
+      ? {
+          id: declaration.id,
+          provider: "hetzner_cloud",
+          vmId: declaration.vmId,
+          machineType: observation.machine_type,
+          requestedSystemImage: declaration.systemImage,
+          immutableSystemImage: observation.resolved_system_image,
+          locations: observation.available_locations,
+          hardware,
+        }
+      : {
+          id: declaration.id,
+          provider: "gcp_compute",
+          vmId: declaration.vmId,
+          machineType: observation.machine_type,
+          requestedSystemImage: declaration.systemImage,
+          immutableSystemImage: observation.resolved_system_image,
+          rootDiskType: "pd-balanced",
+          locations: observation.available_locations,
+          hardware,
+        };
+  });
 }
 
 async function validateCheckpointReports(input: {
@@ -421,6 +541,7 @@ function validateResolvedProfiles(
       profile.machineType !== observation.machine_type ||
       profile.immutableSystemImage !== observation.resolved_system_image ||
       !jsonEqual(profile.locations, observation.available_locations) ||
+      profile.hardware.cpuMillis !== observation.cores * 1_000 ||
       profile.hardware.providerCpuCount !== observation.cores ||
       profile.hardware.memoryMib !== observation.memory_mib ||
       profile.hardware.diskMib !== observation.disk_mib

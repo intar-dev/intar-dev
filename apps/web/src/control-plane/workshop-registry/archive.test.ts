@@ -11,6 +11,7 @@ vi.mock("@/lib/scenario-course-catalogs", () => ({
 }));
 import {
   hydrateWorkshopManifest,
+  hydrateRawWorkshopManifest,
   validateWorkshopSourceBundle,
   WorkshopBundleValidationError,
   type WorkshopCheckpointBuildReport,
@@ -311,7 +312,17 @@ describe("workshop source bundle validation", () => {
         checkpoint("checkpoint-01", "b"),
       ],
     });
+    const sourceManifest = hydrateRawWorkshopManifest({
+      source,
+      checkpoints: [
+        checkpoint("checkpoint-00", "a"),
+        checkpoint("checkpoint-01", "b"),
+      ],
+    });
     const slide = manifest.presentation.slides.find(
+      (entry) => entry.id === "slide-01",
+    );
+    const sourceSlide = sourceManifest.presentation.slides.find(
       (entry) => entry.id === "slide-01",
     );
     expect(slide?.bodyMarkdown).toContain(
@@ -321,6 +332,8 @@ describe("workshop source bundle validation", () => {
       /data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+/,
     );
     expect(slide?.bodyMarkdown).not.toContain("```mermaid");
+    expect(sourceSlide?.bodyMarkdown).toContain("![Flow](../assets/flow.svg)");
+    expect(sourceSlide?.bodyMarkdown).toContain("```mermaid");
   });
 
   it("rejects undeclared bundled image references", async () => {
