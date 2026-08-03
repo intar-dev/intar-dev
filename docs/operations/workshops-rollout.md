@@ -118,6 +118,7 @@ Use separate least-privilege production secrets:
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
 | `CLOUDFLARE_API_TOKEN`                  | web/R2 deployment only                                             |
 | `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN`     | exact web-version rollback only                                    |
+| `CLOUDFLARE_FLAGSHIP_API_TOKEN`         | Flagship Read, Flagship Evaluate, and Flagship Write only           |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
@@ -314,6 +315,73 @@ Do not enable either flag globally, and do not target another organization
 until the one-user and two-user acceptance evidence below is complete. To stop
 new issuance during an incident, remove the pilot's multicloud targeting while
 leaving provider cleanup and reconciliation deployed.
+
+### Protected organization targeting
+
+Use `.github/workflows/workshop-multicloud-flag.yml`; never change this flag
+from a workstation or the Cloudflare dashboard. The workflow has the same
+production environment, exact-main, first-attempt, reviewed/single-operator,
+and `intar-control-plane-production` serialization fences as the control-plane
+rollout. Its dedicated `CLOUDFLARE_FLAGSHIP_API_TOKEN` must have only the
+account-level `Flagship Read`, `Flagship Evaluate`, and `Flagship Write`
+permissions. Wrangler reads the complete flag before updating it and the
+workflow evaluates both the target and non-target contexts after propagation.
+
+First retain a plan from current `main`:
+
+```sh
+gh workflow run workshop-multicloud-flag.yml \
+  --repo intar-dev/intar-dev \
+  --ref main \
+  -f operation=plan \
+  -f organization_id=<exact-organization-id> \
+  -f expected_current_sha256='' \
+  -f confirmation='PLAN WORKSHOP MULTICLOUD FLAG' \
+  -f single_operator_confirmation=''
+```
+
+Review the retained `plan.json`, both before-evaluation documents, and
+`SHA256SUMS`. The only accepted pre-state has a boolean false default and either
+no rules or the one exact `organizationId equals <exact-organization-id>` rule.
+Any other rule, rollout, organization, default, variation shape, or flag type is
+unexpected drift and fails closed. Copy `observedSha256` from the plan artifact
+into the apply dispatch:
+
+```sh
+gh workflow run workshop-multicloud-flag.yml \
+  --repo intar-dev/intar-dev \
+  --ref main \
+  -f operation=apply \
+  -f organization_id=<exact-organization-id> \
+  -f expected_current_sha256=<observed-sha256> \
+  -f confirmation='TARGET WORKSHOP MULTICLOUD FLAG' \
+  -f single_operator_confirmation='SINGLE OPERATOR WORKSHOP CONTROL PLANE'
+```
+
+Omit the sole-operator confirmation in reviewed mode. Apply re-reads the flag,
+requires the exact plan digest, enables the flag while preserving its false
+default, and adds only the exact organization rule without a rollout. It polls
+for propagation and retains the before/after definitions, target and non-target
+evaluations, recent changelog, run provenance, and verified SHA-256 manifest.
+The target evaluation must be true and the control evaluation false.
+
+The workflow treats a non-zero update response as ambiguous rather than proof
+that no write occurred. While the job is still running, it always re-reads and
+evaluates the canonical state. If the requested state cannot be proved, it
+disables the multicloud flag, restores the false default, and clears the
+already-exclusive rule set before reporting failure. Evidence is sealed and
+uploaded before the final outcome is enforced. Runner loss, force cancellation,
+or a job timeout after Cloudflare accepts a write can still bypass this in-job
+recovery, so the protected workflow remains the exclusive writer and live flag
+state must be verified before issuing or resuming Workshop resources.
+
+To stop new certification and issuance, run a fresh plan, retain its new
+`observedSha256`, then dispatch the same workflow with `operation=remove` and
+confirmation `REMOVE WORKSHOP MULTICLOUD FLAG`. After proving the pilot rule is
+the sole rule, remove replaces the rules with the exact empty set; it does not
+disable reconciliation or deletion. Both pilot and control evaluations must be
+false afterward. The workflow refuses to touch a flag containing any
+additional rule.
 
 Nothing is copied from the prior D1 database. Old users, memberships,
 connections, sessions, forecasts, and progress are intentionally absent.
