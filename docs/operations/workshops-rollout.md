@@ -42,10 +42,11 @@ Keep these boundaries intact:
   cleanup or reconciliation.
 
 The Platform Engineering Workshop requires 4 vCPU, 16 GiB RAM, and 32 GiB
-disk. Its immutable revision contains two exact profiles: Hetzner `cpx42` and
-GCP `e2-standard-4` with a 32 GiB `pd-balanced` boot disk in
-`europe-west3-a`, then `b`, then `c`. Intar does not resize or substitute either
-profile.
+disk. The first immutable production revision contains the exact Hetzner
+`cpx42` profile. GCP remains implemented but operationally deferred; adding
+`e2-standard-4` with a 32 GiB `pd-balanced` boot disk in `europe-west3-a`, then
+`b`, then `c` creates a later immutable revision after GCP can be certified.
+Intar does not resize or substitute either profile.
 
 ## Operator boundary
 
@@ -159,8 +160,9 @@ It cannot reach production.
 
 The hydrated Platform Engineering manifest must report format 2, eleven
 modules, 240 scheduled minutes, 85 slides and 85 note files, a 32,768 MiB
-workspace requirement, and both exact runtime profiles. Every OCI image lock
-entry must contain a lowercase SHA-256 digest.
+workspace requirement, and exactly the `hetzner-cpx42` runtime profile for the
+first production revision. Every OCI image lock entry must contain a lowercase
+SHA-256 digest.
 
 Before the clean cutover, disable new issuance in the old control plane and
 finish every old cleanup. Retain queries and provider inventories proving all
@@ -363,11 +365,13 @@ publication. Learner instances have no guest service account, project-wide SSH
 keys, IPv6, extra disk, static address, snapshot, image, load balancer, or
 public application port.
 
-## 7. Publish and certify both profiles
+## 7. Publish and certify every declared profile
 
-This stage is blocked until GCP has been activated and connected. Hydration and
-format-v2 validation may complete earlier, but publishing the Platform
-Engineering revision still requires certification of both declared profiles.
+The first production revision declares only `hetzner-cpx42`, so it can be
+published while GCP remains dormant. Adding `gcp-e2-standard-4` later creates a
+new immutable revision, and that revision remains blocked until GCP is active,
+connected, and certifiable. No publication may skip one of its declared
+profiles.
 
 Publication uses one temporary verifier VM for each declared profile. For each
 profile, require evidence that the harness:
@@ -379,7 +383,8 @@ profile, require evidence that the harness:
 5. opened all seven declared applications through Stargate;
 6. deleted the verifier and confirmed all provider resources absent;
 7. stored the signed content-addressed reconstruction bundles;
-8. published the immutable revision only after both certifications completed.
+8. published the immutable revision only after all declared certifications
+   completed.
 
 The learner does not receive catch-up solutions as ordinary participant
 content. Checkpoint bundles and guest tools are signed and generation-bound.
@@ -409,14 +414,13 @@ discounts, negotiated pricing, and invoice adjustments are excluded.
 
 ## 9. Run one-user pilots
 
-The dormant rollout cannot start either pilot because the dual-profile Platform
-Engineering revision cannot publish until both profiles are certified. After
-GCP activation and publication, run the one-user Hetzner `cpx42` session first.
-The GCP `e2-standard-4` session remains deferred and unproven until its dedicated
-project, connection, certification, and live-test window are available. Then run
-the same sequence separately for each provider:
+Publish and test the Hetzner-only revision first. The GCP `e2-standard-4`
+revision and session remain deferred and unproven until the dedicated project,
+connection, certification, and live-test window are available. Run the same
+sequence separately for each provider when its revision is published:
 
-1. check in the owner as a participant and bulk-provision from checkpoint 00;
+1. schedule the sole owner as facilitator with **Learner workspace** selected,
+   then check in and bulk-provision that workspace from checkpoint 00;
 2. require readiness within 15 minutes;
 3. verify the guest reports the pinned generation, SSH host key, terminal,
    probes, and healthy phase;

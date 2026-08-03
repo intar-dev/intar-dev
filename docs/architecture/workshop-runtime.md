@@ -60,14 +60,15 @@ identity, architecture, disk policy, and permitted locations. Publication
 fails if any declared profile cannot be certified. Session creation never
 substitutes a provider, machine type, image, or location set.
 
-The Platform Engineering Workshop declares:
+The first Platform Engineering production revision declares
+`hetzner-cpx42`: Hetzner CPX42 with Debian 13. A later immutable revision may
+add `gcp-e2-standard-4`: GCP `e2-standard-4`, a 32 GiB `pd-balanced` boot disk,
+and Frankfurt zones `europe-west3-a`, `b`, then `c`, after that profile can be
+certified.
 
-- `hetzner-cpx42`: Hetzner CPX42 with Debian 13;
-- `gcp-e2-standard-4`: GCP `e2-standard-4`, a 32 GiB `pd-balanced` boot disk,
-  and Frankfurt zones `europe-west3-a`, `b`, then `c`.
-
-Both consume the same `direct_cloud_linux_x86_64_v1` checkpoint bundles.
-Bundles contain no OCI layers; the guest pulls every declared image by digest.
+Compatible profiles consume the same `direct_cloud_linux_x86_64_v1`
+checkpoint bundles. Bundles contain no OCI layers; the guest pulls every
+declared image by digest.
 
 ## Allocation state machine
 

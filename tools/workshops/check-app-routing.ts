@@ -58,6 +58,23 @@ const applicationBlock = (manifest: string, id: string) => {
 };
 
 const manifest = read("workshop.hcl");
+const runtimeProfileIds = [...manifest.matchAll(/runtime_profile "([^"]+)"/gu)].map(
+  (match) => match[1],
+);
+if (
+  runtimeProfileIds.length !== 1 ||
+  runtimeProfileIds[0] !== "hetzner-cpx42"
+) {
+  throw new Error(
+    `the first production revision must declare only hetzner-cpx42; observed ${JSON.stringify(runtimeProfileIds)}`,
+  );
+}
+if (
+  !manifest.includes('provider      = "hetzner_cloud"') ||
+  manifest.includes('provider       = "gcp_compute"')
+) {
+  throw new Error("the first production revision has an unexpected provider");
+}
 const knative = applicationBlock(manifest, "knative");
 for (const expected of [
   "port           = 31080",
@@ -733,7 +750,7 @@ rejectText(
 requireText(
   "facilitator/module-00.md",
   "dedicated Intar workspace",
-  "Hetzner CPX42 or GCP e2-standard-4",
+  "Hetzner CPX42",
   "registry egress",
   "Intar recovery path",
 );
@@ -745,7 +762,16 @@ rejectText(
   "Codespaces",
   "airplane mode",
   "prework email",
+  "or GCP e2-standard-4",
 );
+requireText(
+  "hints/module-00-02.md",
+  "first Platform Engineering production revision",
+  "pins CPX42 for Hetzner sessions",
+  "later immutable revision",
+  "separately certified GCP profile",
+);
+rejectText("hints/module-00-02.md", "for GCP sessions");
 requireText(
   "slides/slide-005.md",
   "inside your **own workspace**",
