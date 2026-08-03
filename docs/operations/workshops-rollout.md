@@ -129,7 +129,7 @@ provider Worker envelope-encrypts them.
 Set these protected variables before the web cutover:
 
 - `CLEAN_D1_DATABASE_ID` to the UUID returned by the clean-D1 apply workflow;
-- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260801`;
+- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
 - the existing production-review variables required by the web workflow.
@@ -188,7 +188,7 @@ Use `.github/workflows/clean-d1-cutover.yml`; see
 4. If the named database already exists, provide its exact expected UUID.
 5. Record the new UUID and baseline digest from the retained apply artifact.
 6. Set `CLEAN_D1_DATABASE_ID` to that exact UUID and
-   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260801`.
+   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803`.
 7. Verify both protected variables before dispatching any provider or web
    rollout.
 
@@ -503,10 +503,13 @@ with:
 - exact previous D1 UUID.
 
 The workflow verifies that the previous web version contains the previous D1
-binding, then restores that web version. It does not run old code against the
-new database and does not delete either database. Provider Workers, KEKs, and
-encrypted credential state remain available until every cloud resource is
-confirmed deleted.
+binding, then deploys that exact existing version at 100 percent traffic. It
+waits boundedly until the maintenance fence is absent and the root page is
+healthy. The operation does not mutate routes, crons, either D1 database, or
+Durable Object lifecycle. It does not run old code against the new database and
+does not delete either database. Provider Workers, KEKs, and encrypted
+credential state remain available until every cloud resource is confirmed
+deleted.
 
 Deleting the old D1, new D1, old Worker identities, credentials, or KEKs is a
 separate destructive action that requires explicit confirmation after the

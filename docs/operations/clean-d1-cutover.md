@@ -79,11 +79,13 @@ immediately before replacing it, and then proves the deployed version has
 exactly the clean `DB` binding.
 
 `rollback` requires issuance to be disabled, verifies exactly one `DB` binding
-on the selected previous Worker version, and restores that version. It then
-queries the deployment and version again and retains proof that exactly that
-version receives 100 percent of traffic with the old D1 binding. Finding the old
-UUID in an unrelated variable or binding is not sufficient. It never deletes
-the new database.
+on the selected previous Worker version, and deploys that exact existing version
+at 100 percent traffic. It then queries the deployment and version again, waits
+boundedly for the public fence to disappear and the root page to recover, and
+retains the structured deployment and propagation proof. This version-only
+operation does not mutate routes, crons, the D1 databases, or Durable Object
+lifecycle. Finding the old UUID in an unrelated variable or binding is not
+sufficient. It never deletes the new database.
 
 Every mutating operation uses the same reviewed or time-bounded single-operator
 production gate as the web deployment. It verifies the exact `main` SHA,
@@ -116,8 +118,8 @@ verified owner to complete OAuth after the web cutover.
 The production environment must provide the scoped
 `CLOUDFLARE_D1_ADMIN_API_TOKEN`, `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN`, and
 `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`, plus the restricted
-`STARGATE_DEPLOY_SSH_PRIVATE_KEY` and pinned `STARGATE_DEPLOY_KNOWN_HOSTS`. The rollback token must be able to upload
-and deploy an `intar-dev` version; the provider-probe token must be able to run a
+`STARGATE_DEPLOY_SSH_PRIVATE_KEY` and pinned `STARGATE_DEPLOY_KNOWN_HOSTS`. The rollback token must be able to inspect
+and deploy an existing `intar-dev` version; the provider-probe token must be able to run a
 temporary remote Worker with the old D1 and `intar-hcloud-provider` service
 bindings. CI fails closed if either scope is insufficient. No plaintext Hetzner
 credential is added to GitHub: the probe uses the existing encrypted envelope
@@ -134,7 +136,7 @@ matching user.
 
 After `apply`, copy the recorded UUID into the protected production variable
 `CLEAN_D1_DATABASE_ID` and set `CLEAN_D1_DATABASE_NAME` to
-`intar-dev-control-plane-v2-20260801`. The checked-in all-zero UUID is a
+`intar-dev-control-plane-v2-20260803`. The checked-in all-zero UUID is a
 fail-closed build placeholder. The production web workflow replaces it only in
 the built artifact, verifies the live baseline through that exact binding, and
 refuses to deploy while either protected variable is absent or mismatched.
