@@ -22,8 +22,10 @@ readonly after_deployment="${runtime_root}/after-deployment.json"
 readonly after_version="${runtime_root}/after-version.json"
 readonly deploy_output="${runtime_root}/wrangler-version-deploy.ndjson"
 readonly deploy_result="${runtime_root}/wrangler-version-deploy.json"
-readonly after_marker="${runtime_root}/after-marker.json"
-readonly after_marker_headers="${runtime_root}/after-marker-headers.txt"
+readonly propagation_log="${runtime_root}/public-propagation.ndjson"
+readonly propagation_max_attempts=12
+readonly propagation_interval_seconds=5
+readonly propagation_request_timeout_seconds=5
 
 [[ "${database_name}" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]
 [[ "${database_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
@@ -73,6 +75,14 @@ origin_run_id=""
 origin_run_conclusion=""
 active_fence_tag=""
 active_fence_tag_proven=false
+propagation_attempts=0
+marker_clear_attempt=""
+root_healthy_attempt=""
+after_marker_status=""
+after_root_status=""
+restore_propagation_proven=false
+test ! -e "${propagation_log}"
+: > "${propagation_log}"
 if [ "${fence_header_count}" = 1 ]; then
   fence_detected=true
   test "${marker_status}" = 200
@@ -144,14 +154,76 @@ if [ "${fence_header_count}" = 1 ]; then
     "${after_deployment}" "${after_version}" "${database_id}" \
     "${previous_version_id}" >/dev/null
 
-  after_marker_status="$(curl --silent --show-error \
-    --header 'Cache-Control: no-cache' \
-    --dump-header "${after_marker_headers}" \
-    --output "${after_marker}" \
-    --write-out '%{http_code}' \
-    https://intar.dev/.well-known/intar-clean-d1-cutover-fence)"
-  [[ "${after_marker_status}" =~ ^[0-9]{3}$ ]]
-  test "$(grep -Eic '^x-intar-cutover-fence:[[:space:]]*active[[:space:]]*$' "${after_marker_headers}" || true)" = 0
+  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    propagation_attempts="${attempt}"
+    attempt_marker="${runtime_root}/after-marker-${attempt}.json"
+    attempt_marker_headers="${runtime_root}/after-marker-${attempt}-headers.txt"
+    attempt_root_headers="${runtime_root}/after-root-${attempt}-headers.txt"
+    after_marker_status="$({ curl --silent --show-error \
+      --connect-timeout 2 \
+      --max-time "${propagation_request_timeout_seconds}" \
+      --header 'Cache-Control: no-cache' \
+      --dump-header "${attempt_marker_headers}" \
+      --output "${attempt_marker}" \
+      --write-out '%{http_code}' \
+      https://intar.dev/.well-known/intar-clean-d1-cutover-fence; } || true)"
+    if ! [[ "${after_marker_status}" =~ ^[0-9]{3}$ ]]; then
+      after_marker_status=000
+    fi
+    after_fence_header_count="$(grep -Eic '^x-intar-cutover-fence:[[:space:]]*active[[:space:]]*$' "${attempt_marker_headers}" 2>/dev/null || true)"
+    [[ "${after_fence_header_count}" =~ ^[0-9]+$ ]]
+    test "${after_fence_header_count}" -le 1
+
+    after_root_status="$({ curl --silent --show-error \
+      --connect-timeout 2 \
+      --max-time "${propagation_request_timeout_seconds}" \
+      --header 'Cache-Control: no-cache' \
+      --dump-header "${attempt_root_headers}" \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      https://intar.dev/; } || true)"
+    if ! [[ "${after_root_status}" =~ ^[0-9]{3}$ ]]; then
+      after_root_status=000
+    fi
+    after_root_fence_header_count="$(grep -Eic '^x-intar-cutover-fence:[[:space:]]*active[[:space:]]*$' "${attempt_root_headers}" 2>/dev/null || true)"
+    [[ "${after_root_fence_header_count}" =~ ^[0-9]+$ ]]
+    test "${after_root_fence_header_count}" -le 1
+
+    marker_clear=false
+    if [[ "${after_marker_status}" =~ ^[234][0-9]{2}$ ]] && \
+      [ "${after_fence_header_count}" = 0 ]; then
+      marker_clear=true
+      if [ -z "${marker_clear_attempt}" ]; then
+        marker_clear_attempt="${attempt}"
+      fi
+    fi
+    root_healthy=false
+    if [ "${after_root_status}" = 200 ] && \
+      [ "${after_root_fence_header_count}" = 0 ]; then
+      root_healthy=true
+      if [ -z "${root_healthy_attempt}" ]; then
+        root_healthy_attempt="${attempt}"
+      fi
+    fi
+    jq -cn \
+      --argjson attempt "${attempt}" \
+      --arg marker_http_status "${after_marker_status}" \
+      --argjson marker_fence_header_count "${after_fence_header_count}" \
+      --argjson marker_clear "${marker_clear}" \
+      --arg root_http_status "${after_root_status}" \
+      --argjson root_fence_header_count "${after_root_fence_header_count}" \
+      --argjson root_healthy "${root_healthy}" \
+      '{attempt: $attempt, marker_http_status: $marker_http_status, marker_fence_header_count: $marker_fence_header_count, marker_clear: $marker_clear, root_http_status: $root_http_status, root_fence_header_count: $root_fence_header_count, root_healthy: $root_healthy}' \
+      >> "${propagation_log}"
+    if [ "${marker_clear}" = true ] && [ "${root_healthy}" = true ]; then
+      restore_propagation_proven=true
+      break
+    fi
+    if [ "${attempt}" -lt "${propagation_max_attempts}" ]; then
+      sleep "${propagation_interval_seconds}"
+    fi
+  done
+  test "${restore_propagation_proven}" = true
 else
   test "${before_version_id}" = "${previous_version_id}"
   restore_deployment_id="${before_deployment_id}"
@@ -180,7 +252,17 @@ jq -n \
   --arg origin_run_conclusion "${origin_run_conclusion}" \
   --arg active_fence_tag "${active_fence_tag}" \
   --argjson active_fence_tag_proven "${active_fence_tag_proven}" \
+  --argjson propagation_max_attempts "${propagation_max_attempts}" \
+  --argjson propagation_interval_seconds "${propagation_interval_seconds}" \
+  --argjson propagation_request_timeout_seconds "${propagation_request_timeout_seconds}" \
+  --argjson propagation_attempts "${propagation_attempts}" \
+  --arg marker_clear_attempt "${marker_clear_attempt}" \
+  --arg root_healthy_attempt "${root_healthy_attempt}" \
+  --arg after_marker_status "${after_marker_status}" \
+  --arg after_root_status "${after_root_status}" \
+  --argjson restore_propagation_proven "${restore_propagation_proven}" \
   --rawfile wrangler_version_deploy_ndjson "${deploy_output}" \
+  --rawfile propagation_attempts_ndjson "${propagation_log}" \
   --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {
       schema_version: 1,
@@ -204,6 +286,19 @@ jq -n \
       after_active_version_id: $previous_version_id,
       active_traffic_percentage: 100,
       wrangler_version_deploy_ndjson: $wrangler_version_deploy_ndjson,
+      restore_propagation: {
+        required: $restored,
+        max_attempts: $propagation_max_attempts,
+        interval_seconds: $propagation_interval_seconds,
+        request_timeout_seconds: $propagation_request_timeout_seconds,
+        attempts: $propagation_attempts,
+        marker_clear_attempt: (if $marker_clear_attempt == "" then null else ($marker_clear_attempt | tonumber) end),
+        root_healthy_attempt: (if $root_healthy_attempt == "" then null else ($root_healthy_attempt | tonumber) end),
+        final_marker_http_status: (if $after_marker_status == "" then null else $after_marker_status end),
+        final_root_http_status: (if $after_root_status == "" then null else $after_root_status end),
+        proven: $restore_propagation_proven,
+        attempts_ndjson: $propagation_attempts_ndjson
+      },
       before_active_binding_proven: true,
       previous_version_binding_proven: true,
       after_active_binding_proven: true,
@@ -227,6 +322,9 @@ jq -e \
     (.restore_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
     .after_active_version_id == $previous_version_id and
     .active_traffic_percentage == 100 and
+    .restore_propagation.max_attempts == 12 and
+    .restore_propagation.interval_seconds == 5 and
+    .restore_propagation.request_timeout_seconds == 5 and
     .before_active_binding_proven == true and
     .previous_version_binding_proven == true and
     .after_active_binding_proven == true and
@@ -234,7 +332,7 @@ jq -e \
     .routes_mutated == false and
     .crons_mutated == false and
     (
-      (.restored == false and .fence_detected == false and .before_active_version_id == $previous_version_id and .before_deployment_id == .restore_deployment_id and .origin_run_id == null and .active_fence_tag == null and .active_fence_tag_proven == false and .wrangler_version_deploy_ndjson == "") or
-      (.restored == true and .fence_detected == true and .before_active_version_id != $previous_version_id and .before_deployment_id != .restore_deployment_id and (.marker_sha256 | test("^[0-9a-f]{64}$")) and (.origin_run_id | test("^[1-9][0-9]*$")) and .active_fence_tag == ("clean-d1-fence-" + .origin_run_id) and .active_fence_tag_proven == true and (.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
+      (.restored == false and .fence_detected == false and .before_active_version_id == $previous_version_id and .before_deployment_id == .restore_deployment_id and .origin_run_id == null and .active_fence_tag == null and .active_fence_tag_proven == false and .wrangler_version_deploy_ndjson == "" and .restore_propagation.required == false and .restore_propagation.attempts == 0 and .restore_propagation.marker_clear_attempt == null and .restore_propagation.root_healthy_attempt == null and .restore_propagation.final_marker_http_status == null and .restore_propagation.final_root_http_status == null and .restore_propagation.proven == false and .restore_propagation.attempts_ndjson == "") or
+      (.restored == true and .fence_detected == true and .before_active_version_id != $previous_version_id and .before_deployment_id != .restore_deployment_id and (.marker_sha256 | test("^[0-9a-f]{64}$")) and (.origin_run_id | test("^[1-9][0-9]*$")) and .active_fence_tag == ("clean-d1-fence-" + .origin_run_id) and .active_fence_tag_proven == true and (.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")) and .restore_propagation.required == true and .restore_propagation.attempts >= 1 and .restore_propagation.attempts <= .restore_propagation.max_attempts and .restore_propagation.marker_clear_attempt >= 1 and .restore_propagation.marker_clear_attempt <= .restore_propagation.attempts and .restore_propagation.root_healthy_attempt >= 1 and .restore_propagation.root_healthy_attempt <= .restore_propagation.attempts and (.restore_propagation.final_marker_http_status | test("^[234][0-9]{2}$")) and .restore_propagation.final_root_http_status == "200" and .restore_propagation.proven == true and (.restore_propagation.attempts_ndjson | contains("\"root_healthy\":true")) and (.restore_propagation.attempts_ndjson | contains("\"marker_clear\":true")))
     )
   ' "${evidence}" >/dev/null

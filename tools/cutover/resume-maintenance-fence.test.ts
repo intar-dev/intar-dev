@@ -65,6 +65,63 @@ describe("same-revision maintenance-fence recovery", () => {
     expect(script).toContain('test "${before_version_id}" = "${previous_version_id}"');
   });
 
+  test("waits boundedly for the restored version to reach the public origin", () => {
+    const finalBindingProof = script.lastIndexOf(
+      '"${after_deployment}" "${after_version}" "${database_id}"',
+    );
+    const propagationLoop = script.indexOf(
+      "for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do",
+    );
+    expect(finalBindingProof).toBeGreaterThan(-1);
+    expect(propagationLoop).toBeGreaterThan(finalBindingProof);
+    expect(script).toContain("readonly propagation_max_attempts=12");
+    expect(script).toContain("readonly propagation_interval_seconds=5");
+    expect(script).toContain("readonly propagation_request_timeout_seconds=5");
+    expect(
+      script.match(/--max-time "\$\{propagation_request_timeout_seconds\}"/g),
+    ).toHaveLength(2);
+    expect(script).toContain('sleep "${propagation_interval_seconds}"');
+    expect(script).toContain("https://intar.dev/");
+    expect(script).toContain('[ "${after_root_status}" = 200 ]');
+    expect(script).toContain('[ "${after_fence_header_count}" = 0 ]');
+    expect(script).toContain("restore_propagation_proven=true");
+    expect(script).toContain("restore_propagation: {");
+    expect(script).toContain("attempts: $propagation_attempts");
+    expect(script).toContain("marker_clear_attempt:");
+    expect(script).toContain("root_healthy_attempt:");
+    expect(script).toContain("attempts_ndjson: $propagation_attempts_ndjson");
+    expect(script).toContain("schema_version: 1");
+  });
+
+  test("proves marker clearance and root health in the same retry attempt", () => {
+    const maxAttempts = Number(
+      script.match(/readonly propagation_max_attempts=(\d+)/)?.[1],
+    );
+    const loopAttempts = script
+      .match(/for attempt in ([\d ]+); do/)?.[1]
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+
+    expect(maxAttempts).toBe(12);
+    expect(loopAttempts).toEqual(
+      Array.from({ length: maxAttempts }, (_, index) => index + 1),
+    );
+    expect(script).toMatch(
+      /if \[ "\$\{marker_clear\}" = true \] && \[ "\$\{root_healthy\}" = true \]; then\n\s+restore_propagation_proven=true\n\s+break/,
+    );
+    expect(script).toContain('test "${restore_propagation_proven}" = true');
+    expect(script).toContain(
+      '.restore_propagation.final_root_http_status == "200"',
+    );
+    expect(script).toContain(
+      '.restore_propagation.attempts_ndjson | contains("\\"root_healthy\\":true")',
+    );
+    expect(script).toContain(
+      '.restore_propagation.attempts_ndjson | contains("\\"marker_clear\\":true")',
+    );
+  });
+
   test("retries the unchanged strict drain only after restoration", () => {
     const recovery = workflow.indexOf(
       "Recover an exact same-revision maintenance fence before draining",
