@@ -85,6 +85,14 @@ credential rotation, or cost forecasting. Removing its targeting stops new
 direct-cloud certification and issuance but must not stop provider
 reconciliation or deletion.
 
+Apply and remove the organization rule only through the protected
+`.github/workflows/workshop-multicloud-flag.yml` plan/apply/remove workflow.
+It uses a dedicated token with only the account-level `Flagship Read`,
+`Flagship Evaluate`, and `Flagship Write` permissions, rejects any rule or
+default outside the exact pilot contract, and retains before/after and
+target/control evaluation evidence. Direct dashboard or workstation changes
+are outside the production operator boundary.
+
 ### Explicit dormant GCP deployment
 
 The checked-in GCP Wrangler configuration defaults to dormant. When no GCP

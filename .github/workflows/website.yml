@@ -9,6 +9,7 @@ on:
       - ".github/workflows/website.yml"
       - ".github/workflows/control-plane-rollout.yml"
       - ".github/workflows/clean-d1-cutover.yml"
+      - ".github/workflows/workshop-multicloud-flag.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -21,6 +22,7 @@ on:
       - "tools/check-import-boundaries.ts"
       - "tools/bootstrap/**"
       - "tools/cutover/**"
+      - "tools/flagship/**"
       - "tools/providers/**"
       - "content/scenarios/build-tools.hcl"
       - "crates/intar-image-scenario/**"
@@ -165,6 +167,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           bun run check:bootstrap
+          bun run check:flagship
           bun run check:imports
           bun run check:providers
 
