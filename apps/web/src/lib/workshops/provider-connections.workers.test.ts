@@ -68,6 +68,36 @@ describe("generic Workshop BYOK connections", () => {
       providerKind: "hetzner_cloud",
       credential: token,
     });
+    const invocation = mocks.invoke.mock.calls[0]?.[1] as
+      | ((binding: {
+          connectProject(request: unknown): Promise<{
+            ok: true;
+            value: unknown;
+          }>;
+        }) => Promise<unknown>)
+      | undefined;
+    if (!invocation) throw new Error("Hetzner provider invocation was not captured");
+    let providerRequest: unknown;
+    await invocation({
+      connectProject: async (request) => {
+        providerRequest = request;
+        return { ok: true, value: hetznerConnectionResult() };
+      },
+    });
+    expect(providerRequest).toMatchObject({
+      sentinel: {
+        ownership: {
+          purpose: "provider_connection_sentinel",
+        },
+      },
+    });
+    expect(providerRequest).not.toHaveProperty("sentinel.ownership.workspaceRef");
+    expect(providerRequest).not.toHaveProperty("sentinel.ownership.generation");
+    expect(providerRequest).not.toHaveProperty(
+      "sentinel.ownership.workshopPublicationRef",
+    );
+    expect(providerRequest).not.toHaveProperty("sentinel.ownership.checkpointRef");
+    expect(providerRequest).not.toHaveProperty("sentinel.ownership.attempt");
     expect(connected).toMatchObject({
       providerKind: "hetzner_cloud",
       state: "active",

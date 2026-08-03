@@ -54,6 +54,7 @@ const connectRequest: ConnectProjectRequest = {
     ownership: {
       organizationRef: "org_0123456789",
       connectionRef: "conn_0123456789",
+      purpose: "provider_connection_sentinel",
     },
     stargateEgressIpv4Cidrs: ["198.51.100.7/32"],
   },
@@ -79,6 +80,7 @@ function listKeyFor(pathname: string): string | undefined {
 
 describe("provider operation boundary", () => {
   it("validates the project, proves write access, then seals the token", async () => {
+    let createdFirewallBody: unknown;
     const sentinel: HcloudFirewall = {
       id: 7001,
       name: connectRequest.sentinel.name,
@@ -90,6 +92,7 @@ describe("provider operation boundary", () => {
       const key = listKeyFor(url.pathname);
       if (key) {
         if (url.pathname === "/v1/firewalls" && request.method === "POST") {
+          createdFirewallBody = await request.json();
           return json({ firewall: sentinel, actions: [] });
         }
         return json({ [key]: [], meta: {} });
@@ -180,6 +183,9 @@ describe("provider operation boundary", () => {
     });
 
     expect(result.sentinel.id).toBe(7001);
+    expect(createdFirewallBody).toMatchObject({
+      labels: { intar_purpose: "provider_connection_sentinel" },
+    });
     expect(result.catalog.serverTypes).toEqual([]);
     expect(result.canonicalWrites[0]).toMatchObject({
       operation: "resource_created",
@@ -439,6 +445,49 @@ describe("provider operation boundary", () => {
     expect(writeProofs).toBe(1);
     expect(result.sentinel.id).toBe(sentinel.id);
     expect(JSON.stringify(result.credential)).not.toContain("r".repeat(64));
+  });
+
+  it("rejects credential rotation without exact sentinel ownership", async () => {
+    let providerCalls = 0;
+    for (const invalidOwnership of [
+      {
+        organizationRef: "org_0123456789",
+        connectionRef: "conn_0123456789",
+      },
+      {
+        organizationRef: "org_0123456789",
+        connectionRef: "conn_0123456789",
+        purpose: "learner_workspace",
+      },
+    ]) {
+      await expect(
+        rotateCredential(
+          {
+            requestId: "request-rotate-invalid",
+            connectionId: context.connectionId,
+            credentialContext: {
+              ...context,
+              credentialId: "cred_0123456799",
+              version: 2,
+            },
+            token: "v".repeat(64),
+            sentinelId: 7001,
+            sentinelName: connectRequest.sentinel.name,
+            ownership: invalidOwnership as never,
+          },
+          kekSecret(),
+          {
+            client: {
+              fetcher: mockFetch(() => {
+                providerCalls += 1;
+                return json({ firewall: null });
+              }),
+            },
+          },
+        ),
+      ).rejects.toThrow("Invalid provider sentinel ownership purpose");
+    }
+    expect(providerCalls).toBe(0);
   });
 
   it("does not seal a read-only credential during rotation", async () => {

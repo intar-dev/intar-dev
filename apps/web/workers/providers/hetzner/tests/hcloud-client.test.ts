@@ -93,6 +93,79 @@ function serverFixture(): HcloudServer {
 }
 
 describe("HcloudClient", () => {
+  it("labels provider connection sentinels as a distinct ownership purpose", () => {
+    const sentinel = {
+      organizationRef: "org-ref",
+      connectionRef: "connection-ref",
+      purpose: "provider_connection_sentinel",
+    } as const;
+    expect(ownershipToLabels(sentinel)).toEqual({
+      intar_managed: "true",
+      intar_provider: "hetzner_cloud",
+      intar_org: "org-ref",
+      intar_connection: "connection-ref",
+      intar_purpose: "provider_connection_sentinel",
+    });
+    expect(labelsMatchOwnership(ownershipToLabels(sentinel), sentinel)).toBe(
+      true,
+    );
+    expect(
+      labelsMatchOwnership(
+        ownershipToLabels({
+          organizationRef: sentinel.organizationRef,
+          connectionRef: sentinel.connectionRef,
+          purpose: "learner_workspace",
+        }),
+        sentinel,
+      ),
+    ).toBe(false);
+    expect(
+      labelsMatchOwnership(
+        { ...ownershipToLabels(sentinel), intar_workspace: "workspace-ref" },
+        sentinel,
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects scoped references on provider connection sentinels", () => {
+    expect(() =>
+      ownershipToLabels({
+        organizationRef: "org-ref",
+        connectionRef: "connection-ref",
+        purpose: "provider_connection_sentinel",
+        workspaceRef: "workspace-ref",
+      } as never),
+    ).toThrow("Provider sentinel ownership cannot include scoped references");
+    expect(() =>
+      ownershipToLabels({
+        connectionRef: "connection-ref",
+        purpose: "provider_connection_sentinel",
+      } as never),
+    ).toThrow("Invalid organization ownership reference");
+  });
+
+  it("rejects a sentinel request with no explicit ownership purpose", async () => {
+    let fetchCalls = 0;
+    const client = new HcloudClient("b".repeat(64), {
+      fetcher: mockFetch(() => {
+        fetchCalls += 1;
+        return json({ firewalls: [], meta: {} });
+      }),
+    });
+
+    await expect(
+      client.ensureSentinel({
+        name: "intar-fw-org1",
+        ownership: {
+          organizationRef: "org-ref",
+          connectionRef: "connection-ref",
+        } as never,
+        stargateEgressIpv4Cidrs: ["198.51.100.7/32"],
+      }),
+    ).rejects.toThrow("Invalid provider sentinel ownership purpose");
+    expect(fetchCalls).toBe(0);
+  });
+
   it("pins learner ownership to its physical location attempt", () => {
     expect(
       ownershipToLabels({
@@ -601,45 +674,88 @@ describe("HcloudClient", () => {
   });
 
   it("creates or updates one persistent SSH-only firewall sentinel", async () => {
-    let createBody: { rules: unknown[] } | undefined;
+    let createBody:
+      | { labels: Record<string, string>; rules: unknown[] }
+      | undefined;
+    const sentinelOwnership = {
+      organizationRef: ownership.organizationRef,
+      connectionRef: ownership.connectionRef,
+      purpose: "provider_connection_sentinel",
+    } as const;
     const firewall: HcloudFirewall = {
       id: 7001,
       name: "intar-fw-org1",
-      labels: ownershipToLabels({
-        organizationRef: ownership.organizationRef,
-        connectionRef: ownership.connectionRef,
-      }),
+      labels: ownershipToLabels(sentinelOwnership),
       rules: sentinelRules(["198.51.100.7/32"]),
     };
     const client = new HcloudClient("b".repeat(64), {
       fetcher: mockFetch(async (request) => {
         if (request.method === "GET") return json({ firewalls: [], meta: {} });
-        createBody = (await request.json()) as { rules: unknown[] };
+        createBody = (await request.json()) as {
+          labels: Record<string, string>;
+          rules: unknown[];
+        };
         return json({ firewall, actions: [] });
       }),
     });
     const result = await client.ensureSentinel({
       name: firewall.name,
-      ownership: {
-        organizationRef: ownership.organizationRef,
-        connectionRef: ownership.connectionRef,
-      },
+      ownership: sentinelOwnership,
       stargateEgressIpv4Cidrs: ["198.51.100.7/32"],
     });
 
     expect(result.created).toBe(true);
+    expect(createBody?.labels).toEqual(ownershipToLabels(sentinelOwnership));
     expect(createBody?.rules).toEqual(sentinelRules(["198.51.100.7/32"]));
     expect(JSON.stringify(createBody?.rules)).not.toContain("direction\":\"out");
   });
 
+  it("rejects a created firewall that drops the sentinel ownership purpose", async () => {
+    const sentinelOwnership = {
+      organizationRef: ownership.organizationRef,
+      connectionRef: ownership.connectionRef,
+      purpose: "provider_connection_sentinel",
+    } as const;
+    const client = new HcloudClient("b".repeat(64), {
+      fetcher: mockFetch((request) => {
+        if (request.method === "GET") return json({ firewalls: [], meta: {} });
+        return json({
+          firewall: {
+            id: 7001,
+            name: "intar-fw-org1",
+            labels: ownershipToLabels({
+              organizationRef: sentinelOwnership.organizationRef,
+              connectionRef: sentinelOwnership.connectionRef,
+              purpose: "learner_workspace",
+            }),
+            rules: sentinelRules(["198.51.100.7/32"]),
+          },
+          actions: [],
+        });
+      }),
+    });
+
+    await expect(
+      client.ensureSentinel({
+        name: "intar-fw-org1",
+        ownership: sentinelOwnership,
+        stargateEgressIpv4Cidrs: ["198.51.100.7/32"],
+      }),
+    ).rejects.toMatchObject({
+      shape: { code: "hcloud_invalid_response", retryable: true },
+    });
+  });
+
   it("proves write access even when an existing sentinel already has the desired rules", async () => {
+    const sentinelOwnership = {
+      organizationRef: ownership.organizationRef,
+      connectionRef: ownership.connectionRef,
+      purpose: "provider_connection_sentinel",
+    } as const;
     const firewall: HcloudFirewall = {
       id: 7001,
       name: "intar-fw-org1",
-      labels: ownershipToLabels({
-        organizationRef: ownership.organizationRef,
-        connectionRef: ownership.connectionRef,
-      }),
+      labels: ownershipToLabels(sentinelOwnership),
       rules: sentinelRules(["198.51.100.7/32"]),
     };
     let setRulesCalls = 0;
@@ -653,10 +769,7 @@ describe("HcloudClient", () => {
 
     const result = await client.ensureSentinel({
       name: firewall.name,
-      ownership: {
-        organizationRef: ownership.organizationRef,
-        connectionRef: ownership.connectionRef,
-      },
+      ownership: sentinelOwnership,
       stargateEgressIpv4Cidrs: ["198.51.100.7/32"],
     });
     expect(result.created).toBe(false);
@@ -914,7 +1027,8 @@ describe("HcloudClient", () => {
     const sentinelOwnership = {
       organizationRef: ownership.organizationRef,
       connectionRef: ownership.connectionRef,
-    };
+      purpose: "provider_connection_sentinel",
+    } as const;
     const allowed: HcloudFirewall = {
       id: 1,
       name: "intar-fw-org1",
@@ -928,6 +1042,24 @@ describe("HcloudClient", () => {
         ownership: sentinelOwnership,
       }),
     ).not.toThrow();
+    expect(() =>
+      client.assertDedicatedProject(
+        {
+          ...emptyInventory(),
+          firewalls: [
+            {
+              ...allowed,
+              labels: ownershipToLabels({
+                organizationRef: sentinelOwnership.organizationRef,
+                connectionRef: sentinelOwnership.connectionRef,
+                purpose: "learner_workspace",
+              }),
+            },
+          ],
+        },
+        { name: allowed.name, ownership: sentinelOwnership },
+      ),
+    ).toThrow("empty except for its Intar firewall sentinel");
     expect(() =>
       client.assertDedicatedProject(
         { ...inventory, sshKeys: [{ id: 2, name: "foreign", fingerprint: "x", public_key: "x", labels: {} }] },

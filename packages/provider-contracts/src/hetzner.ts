@@ -35,6 +35,16 @@ interface BaseOwnershipLabels {
   connectionRef: string;
 }
 
+export interface ProviderConnectionSentinelOwnershipLabels
+  extends BaseOwnershipLabels {
+  purpose: "provider_connection_sentinel";
+  workspaceRef?: never;
+  generation?: never;
+  workshopPublicationRef?: never;
+  checkpointRef?: never;
+  attempt?: never;
+}
+
 export interface LearnerWorkspaceOwnershipLabels
   extends BaseOwnershipLabels {
   purpose?: "learner_workspace";
@@ -56,6 +66,7 @@ export interface WorkshopPublicationVerifierOwnershipLabels
 }
 
 export type OwnershipLabels =
+  | ProviderConnectionSentinelOwnershipLabels
   | LearnerWorkspaceOwnershipLabels
   | WorkshopPublicationVerifierOwnershipLabels;
 
@@ -258,7 +269,7 @@ export interface CatalogObservation {
 
 export interface SentinelSpec {
   name: string;
-  ownership: OwnershipLabels;
+  ownership: ProviderConnectionSentinelOwnershipLabels;
   stargateEgressIpv4Cidrs: string[];
 }
 
@@ -280,7 +291,7 @@ export interface RotateCredentialRequest extends ConnectionRequestBase {
   token: string;
   sentinelId: number;
   sentinelName: string;
-  ownership: OwnershipLabels;
+  ownership: ProviderConnectionSentinelOwnershipLabels;
 }
 
 export interface ConnectProjectResult {
