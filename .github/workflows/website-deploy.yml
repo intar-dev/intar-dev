@@ -33,6 +33,8 @@ on:
         required: true
       CLOUDFLARE_API_TOKEN:
         required: true
+      CLOUDFLARE_WEB_ROLLBACK_API_TOKEN:
+        required: true
       CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
         required: true
       STARGATE_DEPLOY_SSH_PRIVATE_KEY:
@@ -311,6 +313,7 @@ jobs:
     name: Deploy production
     needs: provider-capabilities
     runs-on: namespace-profile-intar-dev
+    timeout-minutes: 60
     environment: production
     env:
       GH_TOKEN: ${{ github.token }}
@@ -651,11 +654,19 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_VERSION_API_TOKEN: ${{ secrets.CLOUDFLARE_WEB_ROLLBACK_API_TOKEN }}
           CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
           CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
           CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
         run: |
           set -euo pipefail
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg apply_run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
+            --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema_version: 1, operation: "pre-web-switch-attempt", state: "started", source_sha: $source_sha, run_id: $run_id, apply_run_id: (if $apply_run_id == "" then null else $apply_run_id end), started_at: $started_at}' \
+            > "${RUNNER_TEMP}/clean-d1-pre-switch-attempt.json"
           deployment="${RUNNER_TEMP}/pre-switch-deployment.json"
           version="${RUNNER_TEMP}/pre-switch-version.json"
           bunx wrangler deployments status --name intar-dev --json > "${deployment}"
@@ -730,8 +741,7 @@ jobs:
             --arg run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
             --arg clean_database_name "${CLEAN_D1_DATABASE_NAME}" \
             --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
-            --arg active_deployment_id "${active_deployment_id}" \
-            --arg active_version_id "${active_version_id}" '
+            '
               .schema_version == 4 and
               .operation == "apply" and
               .source_sha == $source_sha and
@@ -740,7 +750,7 @@ jobs:
               .database_name == $clean_database_name and
               .database_id == $clean_database_id and
               .previous_database_id != $clean_database_id and
-              .maintenance_web_version_id == $active_version_id and
+              .maintenance_web_version_id == .maintenance_fence.maintenance_version_id and
               .pre_drain_recovery.schema_version == 1 and
               .pre_drain_recovery.operation == "resume-maintenance-fence" and
               .pre_drain_recovery.source_sha == .source_sha and
@@ -775,8 +785,7 @@ jobs:
               .maintenance_fence.state == "active" and
               .maintenance_fence.database_id == .previous_database_id and
               .maintenance_fence.previous_version_id == .previous_web_version_id and
-              .maintenance_fence.maintenance_version_id == $active_version_id and
-              .maintenance_fence.maintenance_deployment_id == $active_deployment_id and
+              (.maintenance_fence.maintenance_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
               .maintenance_fence.marker_probe_attempts >= 1 and
               .maintenance_fence.marker_probe_attempts <= .maintenance_fence.propagation_max_attempts and
               .maintenance_fence.workshop_503_probe_attempts >= 1 and
@@ -798,33 +807,102 @@ jobs:
             ' "${evidence}" >/dev/null
           previous_database_name="$(jq -r '.previous_database_name' "${evidence}")"
           previous_database_id="$(jq -r '.previous_database_id' "${evidence}")"
+          previous_version_id="$(jq -er '.previous_web_version_id' "${evidence}")"
+          maintenance_version_id="$(jq -er '.maintenance_fence.maintenance_version_id' "${evidence}")"
+          marker_sha256="$(jq -er '.maintenance_fence.marker_sha256' "${evidence}")"
+          case "${active_version_id}" in
+            "${previous_version_id}"|"${maintenance_version_id}") ;;
+            *) echo "active version is not a resumable cutover version" >&2; exit 1 ;;
+          esac
           bun tools/cutover/worker-version.ts active-binding \
             "${deployment}" "${version}" "${previous_database_id}" \
             "${active_version_id}" >/dev/null
 
-          marker="${RUNNER_TEMP}/pre-switch-fence-marker.json"
-          headers="${RUNNER_TEMP}/pre-switch-fence-headers.txt"
-          curl --fail-with-body --silent --show-error \
-            --header 'Cache-Control: no-cache' \
-            --dump-header "${headers}" \
-            --output "${marker}" \
-            https://intar.dev/.well-known/intar-clean-d1-cutover-fence
-          grep -qi '^x-intar-cutover-fence: active' "${headers}"
-          grep -qi '^cache-control: private, no-store' "${headers}"
-          jq -e \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg database_id "${previous_database_id}" \
-            --arg previous_version_id "$(jq -r '.previous_web_version_id' "${evidence}")" '
-              .schemaVersion == 1 and
-              .state == "active" and
-              .sourceSha == $source_sha and
-              .databaseId == $database_id and
-              .previousVersionId == $previous_version_id
-            ' "${marker}" >/dev/null
-          test "$(sha256sum "${marker}" | cut -d ' ' -f 1)" = \
-            "$(jq -r '.maintenance_fence.marker_sha256' "${evidence}")"
+          refence_required=true
+          restore_maintenance_on_exit() {
+            exit_status="$?"
+            trap - EXIT INT TERM
+            if [ "${refence_required}" = true ]; then
+              if ! CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
+                tools/cutover/reactivate-maintenance-fence.sh \
+                  "${previous_database_name}" \
+                  "${previous_database_id}" \
+                  "${previous_version_id}" \
+                  "${maintenance_version_id}" \
+                  "${CLEAN_D1_CUTOVER_RUN_ID}" \
+                  "${marker_sha256}" \
+                  recovery \
+                  "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-recovery.json"; then
+                exit 1
+              fi
+            fi
+            exit "${exit_status}"
+          }
+          trap restore_maintenance_on_exit EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
+            tools/cutover/restore-successful-maintenance-fence.sh \
+              "${previous_database_name}" \
+              "${previous_database_id}" \
+              "${previous_version_id}" \
+              "${maintenance_version_id}" \
+              "${CLEAN_D1_CUTOVER_RUN_ID}" \
+              "${RUNNER_TEMP}/clean-d1-pre-switch-restore.json"
+
+          resumed_strict_drain=false
+          for attempt in 1 2 3 4 5 6 7 8 9; do
+            attempt_evidence="${RUNNER_TEMP}/clean-d1-pre-switch-resumed-attempt-${attempt}.json"
+            if tools/cutover/prove-legacy-drain.sh \
+              "${previous_database_name}" \
+              "${previous_database_id}" \
+              "resume-${attempt}" \
+              "${attempt_evidence}"; then
+              cp "${attempt_evidence}" \
+                "${RUNNER_TEMP}/clean-d1-pre-switch-resumed.json"
+              resumed_strict_drain=true
+              break
+            fi
+            jq -e '
+              .schema_version == 4 and
+              .query_succeeded == true and
+              .provider_probe_succeeded == true and
+              .stargate_probe_succeeded == true and
+              .drained == false and
+              .provider_inventory.connectionCount > 0 and
+              .provider_inventory.provenEmpty == true and
+              .stargate.healthy == true and
+              .stargate.drained == true and
+              .counts.untrustworthy_enabled_host_reports > 0 and
+              (.counts | to_entries | all(
+                if .key == "untrustworthy_enabled_host_reports"
+                then .value > 0
+                else .value == 0
+                end
+              ))
+            ' "${attempt_evidence}" >/dev/null
+            test "${attempt}" -lt 9
+            sleep 15
+          done
+          test "${resumed_strict_drain}" = true
+
+          CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
+            tools/cutover/reactivate-maintenance-fence.sh \
+              "${previous_database_name}" \
+              "${previous_database_id}" \
+              "${previous_version_id}" \
+              "${maintenance_version_id}" \
+              "${CLEAN_D1_CUTOVER_RUN_ID}" \
+              "${marker_sha256}" \
+              normal \
+              "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-reactivation.json"
+          active_version_id="${maintenance_version_id}"
+          refence_required=false
+          trap - EXIT INT TERM
 
           for pass in 1 2; do
+            sleep 15
             tools/cutover/prove-legacy-drain.sh \
               "${previous_database_name}" \
               "${previous_database_id}" \
@@ -837,9 +915,35 @@ jobs:
             --arg version_id "${active_version_id}" \
             --arg previous_database_id "${previous_database_id}" \
             --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
+            --slurpfile restore "${RUNNER_TEMP}/clean-d1-pre-switch-restore.json" \
+            --slurpfile resumed "${RUNNER_TEMP}/clean-d1-pre-switch-resumed.json" \
+            --slurpfile maintenance "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-reactivation.json" \
             --slurpfile drain "${RUNNER_TEMP}/clean-d1-pre-switch-drain-2.json" \
-            '{schema_version: 1, operation: "pre-web-switch", mode: "fenced-cutover", source_sha: $source_sha, maintenance_version_id: $version_id, previous_database_id: $previous_database_id, clean_database_id: $clean_database_id, final_drain: $drain[0]}' \
+            '{schema_version: 1, operation: "pre-web-switch", mode: "restored-strict-drain-refenced-cutover", source_sha: $source_sha, maintenance_version_id: $version_id, previous_database_id: $previous_database_id, clean_database_id: $clean_database_id, exact_restore: $restore[0], resumed_strict_drain: $resumed[0], maintenance_fence: $maintenance[0], final_drain: $drain[0]}' \
             > "${RUNNER_TEMP}/clean-d1-pre-web-switch.json"
+
+      - name: Retain partial clean-D1 pre-switch evidence
+        if: ${{ always() && inputs.clean_d1_cutover_run_id != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-d1-pre-switch-attempt-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/clean-d1-pre-switch-attempt.json
+            ${{ runner.temp }}/pre-switch-deployment.json
+            ${{ runner.temp }}/pre-switch-version.json
+            ${{ runner.temp }}/clean-d1-cutover-evidence/
+            ${{ runner.temp }}/clean-d1-pre-switch-restore.json
+            ${{ runner.temp }}/intar-clean-d1-pre-switch-restore-${{ github.run_id }}/
+            ${{ runner.temp }}/clean-d1-pre-switch-resumed-attempt-*.json
+            ${{ runner.temp }}/clean-d1-pre-switch-resumed.json
+            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-reactivation.json
+            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-recovery.json
+            ${{ runner.temp }}/intar-clean-d1-pre-switch-reactivate-${{ github.run_id }}-*/
+            ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
+            ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
+            ${{ runner.temp }}/clean-d1-pre-web-switch.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Deploy
         env:
@@ -896,6 +1000,9 @@ jobs:
           name: clean-d1-web-switch-${{ github.sha }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/clean-d1-pre-web-switch.json
+            ${{ runner.temp }}/clean-d1-pre-switch-restore.json
+            ${{ runner.temp }}/clean-d1-pre-switch-resumed.json
+            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-reactivation.json
             ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
             ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
             ${{ runner.temp }}/clean-d1-web-switch.json
