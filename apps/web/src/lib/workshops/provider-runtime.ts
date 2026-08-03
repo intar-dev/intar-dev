@@ -1143,14 +1143,14 @@ async function advanceCertification(
           updatedAt: now,
         })
         .where(eq(workshopRuntimeProfileCertifications.id, row.id));
-      if (context.certificationPublicationId) {
+      if (context.certificationOwnership) {
         await env.DB.prepare(
           `UPDATE workshop_publications
            SET status = 'failed', certification_state = 'failed',
                finished_at = ?, updated_at = ?
            WHERE id = ? AND status = 'building'`,
         )
-          .bind(now, now, context.certificationPublicationId)
+          .bind(now, now, context.certificationOwnership.publicationId)
           .run();
       }
       return "deleted";
@@ -1541,10 +1541,10 @@ async function advanceCertification(
         "certification lost its final deletion fence",
       );
     }
-    if (context.certificationPublicationId) {
+    if (context.certificationOwnership) {
       await finalizeCertifiedWorkshopRevision({
         env,
-        publicationId: context.certificationPublicationId,
+        publicationId: context.certificationOwnership.publicationId,
         now,
       });
     }
@@ -1696,14 +1696,8 @@ async function advanceProviderCreation(
       location: context.allocation.location,
       locationAttempt: context.allocation.locationAttempt,
       kinoProbes: await loadRuntimeKinoProbes(context.profile.templateRevisionId),
-      ...(context.domainKind === "workshop_certification" &&
-      context.certificationPublicationId
-        ? {
-            certification: {
-              publicationId: context.certificationPublicationId,
-              checkpointId: context.bundle.checkpointId,
-            },
-          }
+      ...(context.certificationOwnership
+        ? { certification: context.certificationOwnership }
         : {}),
       now,
     });
@@ -2588,20 +2582,22 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
             ),
           ),
         );
-      await providerMutation(mutation, "reconcile", {
+      const requestedResources = resources.map((resource) => ({
+        resourceKind: hetznerResourceKindForReconcile(resource.resourceKind),
+        externalId: Number(resource.providerResourceId),
+        deterministicName: resourceName(resource),
+        ownership: ownershipLabels(mutation),
+      }));
+      const writes = await providerMutation(mutation, "reconcile", {
         kind: "reconcile",
-        resources: resources.map((resource) => ({
-          resourceKind: resource.resourceKind,
-          externalId: Number(resource.providerResourceId),
-          deterministicName: resourceName(resource),
-          ownership: ownershipLabels(mutation),
-        })),
+        resources: requestedResources,
         actionIds: await pendingHetznerActionIds(
           context.allocation.id,
           context.allocation.locationAttempt,
           now,
         ),
       });
+      requireCompleteHetznerReconcileCoverage(requestedResources, writes);
     },
     async rebootContext(context, now, operationKind) {
       const mutation = creationInputFromContext(context, now);
@@ -2621,8 +2617,11 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
         });
         return;
       }
+      // Repair a stale local disappearance classification from an
+      // ownership-verified provider observation before selecting the server.
+      await adapter.observeContext(context, now);
       const instances = await drizzle(env.DB)
-        .select({ id: runtimeProviderResources.providerResourceId })
+        .select()
         .from(runtimeProviderResources)
         .where(
           and(
@@ -2636,8 +2635,9 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
           ),
         )
         .limit(1);
-      const serverId = Number(instances[0]?.id);
-      if (!Number.isSafeInteger(serverId) || serverId <= 0) {
+      const instance = instances[0];
+      const serverId = Number(instance?.providerResourceId);
+      if (!instance || !Number.isSafeInteger(serverId) || serverId <= 0) {
         throw appError(
           409,
           "provider_instance_missing",
@@ -2647,6 +2647,8 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
       await providerMutation(mutation, operationKind, {
         kind: "reboot_server",
         serverId,
+        deterministicName: resourceName(instance),
+        ownership: ownershipLabels(mutation),
       });
     },
     async deleteContext(context, now) {
@@ -2680,7 +2682,9 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
         }
         return;
       }
-      await discoverExpectedHetznerResources(mutation);
+      // Observe before filtering active resources. Otherwise cleanup could
+      // skip a still-billable server or Primary IP and falsely confirm it gone.
+      await adapter.observeContext(context, now);
       const resources = await drizzle(env.DB)
         .select()
         .from(runtimeProviderResources)
@@ -2707,7 +2711,8 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
           kind: "delete_resource",
           resourceKind: resourceKind.provider,
           externalId: Number(resource.providerResourceId),
-          name: resourceName(resource),
+          deterministicName: resourceName(resource),
+          ownership: ownershipLabels(mutation),
         });
       }
     },
@@ -3741,7 +3746,11 @@ async function providerMutation(
       input.context.providerKind,
       (binding) => binding.runOperation(request),
     );
-    await persistCanonicalWrites(input, result.canonicalWrites);
+    await persistCanonicalWrites(input, result.canonicalWrites, {
+      gcpAllocationObservation:
+        input.context.providerKind === "gcp_compute" &&
+        operationKind === "observe_allocation",
+    });
     const providerOperations = normalizeProviderOperationWrites(result.canonicalWrites);
     if (repeatable) {
       await persistObservedProviderOperations({
@@ -4674,6 +4683,7 @@ async function deterministicProviderRequestId(
 async function persistCanonicalWrites(
   input: CreationInput,
   writes: readonly CanonicalProviderWrite[],
+  options: { gcpAllocationObservation?: boolean } = {},
 ) {
   const db = drizzle(env.DB);
   const fence = await db
@@ -4695,6 +4705,7 @@ async function persistCanonicalWrites(
     );
   }
   let gcpInstanceObserved = false;
+  let gcpInstanceObservedWithoutPublicIpv4 = false;
   for (const write of writes) {
     if (write.operation === "resource_created" || write.operation === "resource_observed") {
       if (
@@ -4703,6 +4714,7 @@ async function persistCanonicalWrites(
         write.resourceKind === "instance"
       ) {
         gcpInstanceObserved = true;
+        gcpInstanceObservedWithoutPublicIpv4 = !write.publicIpv4;
       }
       const externalId = String(write.externalId);
       const existing = await db
@@ -4820,6 +4832,46 @@ async function persistCanonicalWrites(
       )
       .run();
   }
+  if (
+    options.gcpAllocationObservation &&
+    gcpInstanceObservedWithoutPublicIpv4
+  ) {
+    // An owned, present GCP instance with no ONE_TO_ONE_NAT address is
+    // authoritative absence. Clear any address retained from an earlier
+    // observation and keep its synthetic billable IPv4 resource closed.
+    await db.batch([
+      db
+        .update(runtimeProviderAllocations)
+        .set({ externalIpv4: null, updatedAt: input.now })
+        .where(
+          and(
+            eq(runtimeProviderAllocations.id, input.allocationId),
+            eq(
+              runtimeProviderAllocations.locationAttempt,
+              input.locationAttempt,
+            ),
+            eq(runtimeProviderAllocations.location, input.location),
+          ),
+        ),
+      db
+        .update(runtimeProviderResources)
+        .set({
+          providerState: "deleted",
+          disappearanceConfirmedAt: sql`coalesce(${runtimeProviderResources.disappearanceConfirmedAt}, ${input.now})`,
+          updatedAt: input.now,
+        })
+        .where(
+          and(
+            eq(runtimeProviderResources.allocationId, input.allocationId),
+            eq(
+              runtimeProviderResources.locationAttempt,
+              input.locationAttempt,
+            ),
+            eq(runtimeProviderResources.resourceKind, "ipv4"),
+          ),
+        ),
+    ]);
+  }
   await reconcileProviderCostLedger({
     allocationId: input.allocationId,
     now: input.now,
@@ -4896,6 +4948,45 @@ function normalizeResourceKind(value: string): "instance" | "boot_disk" | "ipv4"
   if (value === "instance" || value === "boot_disk" || value === "ipv4" || value === "ssh_key") return value;
   // Provider action writes are stored as operations, never billable resources.
   throw appError(502, "provider_resource_kind_invalid", "provider returned an invalid resource kind");
+}
+
+export function hetznerResourceKindForReconcile(
+  value: "instance" | "boot_disk" | "ipv4" | "ssh_key",
+): "server" | "primary_ip" | "ssh_key" {
+  if (value === "instance") return "server";
+  if (value === "ipv4") return "primary_ip";
+  if (value === "ssh_key") return "ssh_key";
+  throw appError(
+    500,
+    "provider_resource_kind_invalid",
+    "Hetzner allocations contain an unsupported resource kind",
+  );
+}
+
+function requireCompleteHetznerReconcileCoverage(
+  requested: readonly {
+    resourceKind: "server" | "primary_ip" | "ssh_key";
+    externalId: number;
+  }[],
+  writes: readonly CanonicalProviderWrite[],
+): void {
+  for (const resource of requested) {
+    const matching = writes.filter(
+      (write) =>
+        (write.operation === "resource_created" ||
+          write.operation === "resource_observed" ||
+          write.operation === "resource_deleted") &&
+        write.resourceKind === resource.resourceKind &&
+        String(write.externalId) === String(resource.externalId),
+    );
+    if (matching.length !== 1) {
+      throw appError(
+        502,
+        "provider_reconcile_coverage_incomplete",
+        "Hetzner reconciliation did not account for every requested resource",
+      );
+    }
+  }
 }
 
 function resourceName(
@@ -5274,7 +5365,10 @@ interface ExecutionAllocationContext extends AllocationContext {
   generation: number;
   domainKind: "workshop" | "workshop_certification";
   workspaceId: string;
-  certificationPublicationId: string | null;
+  certificationOwnership: {
+    publicationId: string;
+    checkpointId: string;
+  } | null;
   allocation: typeof runtimeProviderAllocations.$inferSelect;
 }
 
@@ -5383,9 +5477,9 @@ async function loadExecutionAllocation(executionId: string): Promise<ExecutionAl
       "the selected direct-cloud runtime profile is incomplete",
     );
   }
-  const certificationPublicationId =
+  const certificationOwnership =
     root.execution.domainKind === "workshop_certification"
-      ? await loadCertificationPublicationId(root.execution.domainId)
+      ? await loadCertificationOwnership(root.execution.domainId)
       : null;
   return {
         providerKind: root.allocation.providerKind,
@@ -5395,7 +5489,7 @@ async function loadExecutionAllocation(executionId: string): Promise<ExecutionAl
           ? "workshop_certification"
           : "workshop",
         workspaceId: root.execution.domainId,
-        certificationPublicationId,
+        certificationOwnership,
         allocation: root.allocation,
         profile: provider.profile as typeof provider.profile & {
           machineType: string;
@@ -5408,17 +5502,31 @@ async function loadExecutionAllocation(executionId: string): Promise<ExecutionAl
       };
 }
 
-async function loadCertificationPublicationId(
+async function loadCertificationOwnership(
   certificationId: string,
-): Promise<string | null> {
-  const row = await env.DB.prepare(
-    `SELECT json_extract(evidence_json, '$.publicationId') AS publication_id
-     FROM workshop_runtime_profile_certifications
-     WHERE id = ?`,
-  )
-    .bind(certificationId)
-    .first<{ publication_id: string | null }>();
-  return row?.publication_id ?? null;
+): Promise<{ publicationId: string; checkpointId: string }> {
+  const rows = await drizzle(env.DB)
+    .select({ evidence: workshopRuntimeProfileCertifications.evidenceJson })
+    .from(workshopRuntimeProfileCertifications)
+    .where(eq(workshopRuntimeProfileCertifications.id, certificationId))
+    .limit(1);
+  const evidence = rows[0]?.evidence;
+  const publicationId = evidence?.publicationId;
+  const checkpointId = evidence
+    ? certificationStringList(evidence.cumulativeCheckpointIds)?.[0]
+    : undefined;
+  if (
+    typeof publicationId !== "string" ||
+    publicationId.length === 0 ||
+    !checkpointId
+  ) {
+    throw appError(
+      409,
+      "workshop_certification_identity_invalid",
+      "verifier allocation has no stable publication and checkpoint ownership identity",
+    );
+  }
+  return { publicationId, checkpointId };
 }
 
 function creationInputFromContext(context: ExecutionAllocationContext, now: number): CreationInput {
@@ -5436,14 +5544,8 @@ function creationInputFromContext(context: ExecutionAllocationContext, now: numb
     locationAttempt: context.allocation.locationAttempt,
     sshPublicKey: "unused-during-reconciliation",
     cloudInit: "",
-    ...(context.domainKind === "workshop_certification" &&
-    context.certificationPublicationId
-      ? {
-          certification: {
-            publicationId: context.certificationPublicationId,
-            checkpointId: context.bundle.checkpointId,
-          },
-        }
+    ...(context.certificationOwnership
+      ? { certification: context.certificationOwnership }
       : {}),
     now,
   };

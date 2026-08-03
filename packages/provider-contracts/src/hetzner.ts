@@ -339,7 +339,8 @@ export interface DeleteResourceOperation {
   kind: "delete_resource";
   resourceKind: "server" | "primary_ip" | "ssh_key" | "firewall";
   externalId: number;
-  name?: string;
+  deterministicName: string;
+  ownership: OwnershipLabels;
 }
 
 export interface GetActionOperation {
@@ -351,6 +352,8 @@ export interface GetActionOperation {
 export interface RebootServerOperation {
   kind: "reboot_server";
   serverId: number;
+  deterministicName: string;
+  ownership: OwnershipLabels;
 }
 
 export interface ReconcileResourceRef {

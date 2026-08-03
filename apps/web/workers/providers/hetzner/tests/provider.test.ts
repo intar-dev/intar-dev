@@ -531,7 +531,13 @@ describe("provider operation boundary", () => {
     const kek = parseKek(kekSecret());
     const credential = await sealCredential(connectRequest.token, kek, context);
     kek.fill(0);
-    let deletionPath = "";
+    const sentinel: HcloudFirewall = {
+      id: 7001,
+      name: connectRequest.sentinel.name,
+      labels: ownershipToLabels(connectRequest.sentinel.ownership),
+      rules: [],
+    };
+    const observed: string[] = [];
     const result = await runOperation(
       {
         requestId: "request-disconnect-0001",
@@ -542,14 +548,20 @@ describe("provider operation boundary", () => {
           kind: "delete_resource",
           resourceKind: "firewall",
           externalId: 7001,
-          name: connectRequest.sentinel.name,
+          deterministicName: connectRequest.sentinel.name,
+          ownership: connectRequest.sentinel.ownership,
         },
       },
       kekSecret(),
       {
         client: {
           fetcher: mockFetch((request) => {
-            deletionPath = new URL(request.url).pathname;
+            const url = new URL(request.url);
+            observed.push(`${request.method} ${url.pathname}`);
+            if (request.method === "GET" && url.pathname === "/v1/firewalls") {
+              return json({ firewalls: [sentinel], meta: {} });
+            }
+            if (request.method === "GET") return json({ firewall: sentinel });
             return new Response(null, { status: 204 });
           }),
         },
@@ -557,7 +569,11 @@ describe("provider operation boundary", () => {
       },
     );
 
-    expect(deletionPath).toBe("/v1/firewalls/7001");
+    expect(observed).toEqual([
+      "GET /v1/firewalls",
+      "GET /v1/firewalls/7001",
+      "DELETE /v1/firewalls/7001",
+    ]);
     expect(result.canonicalWrites).toEqual([
       expect.objectContaining({
         operation: "resource_deleted",
@@ -566,5 +582,70 @@ describe("provider operation boundary", () => {
         state: "deleted",
       }),
     ]);
+  });
+
+  it("rejects legacy mutation calls without ownership before contacting Hetzner", async () => {
+    const { sealCredential, parseKek } = await import("../src/crypto");
+    const kek = parseKek(kekSecret());
+    const credential = await sealCredential(connectRequest.token, kek, context);
+    kek.fill(0);
+    let fetchCalls = 0;
+
+    await expect(
+      runOperation(
+        {
+          requestId: "request-legacy-reboot-0001",
+          connectionId: context.connectionId,
+          credentialContext: context,
+          credential,
+          operation: { kind: "reboot_server", serverId: 9001 } as never,
+        },
+        kekSecret(),
+        {
+          client: {
+            fetcher: mockFetch(() => {
+              fetchCalls += 1;
+              throw new Error("must not contact Hetzner");
+            }),
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      shape: {
+        code: "hcloud_mutation_ownership_required",
+        retryable: false,
+      },
+    });
+    await expect(
+      runOperation(
+        {
+          requestId: "request-legacy-delete-0001",
+          connectionId: context.connectionId,
+          credentialContext: context,
+          credential,
+          operation: {
+            kind: "delete_resource",
+            resourceKind: "server",
+            externalId: 9001,
+            name: "intar-vm-legacy",
+          } as never,
+        },
+        kekSecret(),
+        {
+          client: {
+            fetcher: mockFetch(() => {
+              fetchCalls += 1;
+              throw new Error("must not contact Hetzner");
+            }),
+          },
+        },
+      ),
+    ).rejects.toMatchObject({
+      shape: {
+        code: "hcloud_mutation_ownership_required",
+        retryable: false,
+      },
+    });
+    expect(fetchCalls).toBe(0);
   });
 });

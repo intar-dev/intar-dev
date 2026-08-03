@@ -1112,22 +1112,226 @@ describe("HcloudClient", () => {
     expect(labelsMatchOwnership(ownedIp.labels, ownership)).toBe(true);
   });
 
-  it("deletes the persistent firewall sentinel only as an explicit resource step", async () => {
-    let observedPath = "";
-    let observedMethod = "";
+  it("revalidates deterministic name and ownership immediately before deletion", async () => {
+    const observed: string[] = [];
+    const server = serverFixture();
     const client = new HcloudClient("f".repeat(64), {
       fetcher: mockFetch((request) => {
         const url = new URL(request.url);
-        observedPath = url.pathname;
-        observedMethod = request.method;
-        return new Response(null, { status: 204 });
+        observed.push(`${request.method} ${url.pathname}`);
+        if (request.method === "GET" && url.pathname === "/v1/servers") {
+          return json({ servers: [server], meta: {} });
+        }
+        if (request.method === "GET" && url.pathname === `/v1/servers/${server.id}`) {
+          return json({ server });
+        }
+        if (request.method === "DELETE" && url.pathname === `/v1/servers/${server.id}`) {
+          return json({
+            action: {
+              id: 9101,
+              status: "running",
+              command: "delete_server",
+              progress: 0,
+              started: "2026-07-22T12:00:00Z",
+              finished: null,
+              error: null,
+              resources: [{ id: server.id, type: "server" }],
+            },
+          });
+        }
+        throw new Error(`unexpected request ${request.method} ${url.pathname}`);
       }),
     });
-    await expect(client.deleteResource("firewall", 7001)).resolves.toEqual({
-      action: null,
+    await expect(
+      client.deleteResource({
+        kind: "delete_resource",
+        resourceKind: "server",
+        externalId: server.id,
+        deterministicName: server.name,
+        ownership,
+      }),
+    ).resolves.toMatchObject({
+      action: { id: 9101, command: "delete_server" },
       alreadyMissing: false,
     });
-    expect(observedMethod).toBe("DELETE");
-    expect(observedPath).toBe("/v1/firewalls/7001");
+    expect(observed).toEqual([
+      "GET /v1/servers",
+      `GET /v1/servers/${server.id}`,
+      `DELETE /v1/servers/${server.id}`,
+    ]);
+  });
+
+  it("fails closed when the resource at a delete ID has foreign ownership", async () => {
+    const server = serverFixture();
+    const methods: string[] = [];
+    const client = new HcloudClient("f".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        methods.push(request.method);
+        if (url.pathname === "/v1/servers") {
+          return json({ servers: [server], meta: {} });
+        }
+        return json({
+          server: {
+            ...server,
+            labels: { ...server.labels, intar_org: "foreign-org" },
+          },
+        });
+      }),
+    });
+    await expect(
+      client.deleteResource({
+        kind: "delete_resource",
+        resourceKind: "server",
+        externalId: server.id,
+        deterministicName: server.name,
+        ownership,
+      }),
+    ).rejects.toMatchObject({
+      shape: {
+        code: "hcloud_mutation_ownership_mismatch",
+        retryable: false,
+      },
+    });
+    expect(methods).toEqual(["GET", "GET"]);
+  });
+
+  it("fails closed when the resource at a delete ID has another name", async () => {
+    const server = serverFixture();
+    const methods: string[] = [];
+    const client = new HcloudClient("f".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        methods.push(request.method);
+        if (url.pathname === "/v1/servers") {
+          return json({ servers: [], meta: {} });
+        }
+        return json({ server: { ...server, name: "intar-vm-foreign" } });
+      }),
+    });
+    await expect(
+      client.deleteResource({
+        kind: "delete_resource",
+        resourceKind: "server",
+        externalId: server.id,
+        deterministicName: server.name,
+        ownership,
+      }),
+    ).rejects.toMatchObject({
+      shape: {
+        code: "hcloud_mutation_ownership_mismatch",
+        retryable: false,
+      },
+    });
+    expect(methods).toEqual(["GET", "GET"]);
+  });
+
+  it("fails closed when a deterministic mutation name is ambiguous", async () => {
+    const server = serverFixture();
+    const methods: string[] = [];
+    const client = new HcloudClient("f".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        methods.push(request.method);
+        if (url.pathname === "/v1/servers") {
+          return json({ servers: [server, { ...server, id: 9002 }], meta: {} });
+        }
+        return json({ server });
+      }),
+    });
+    await expect(
+      client.deleteResource({
+        kind: "delete_resource",
+        resourceKind: "server",
+        externalId: server.id,
+        deterministicName: server.name,
+        ownership,
+      }),
+    ).rejects.toMatchObject({
+      shape: {
+        code: "hcloud_mutation_ownership_ambiguous",
+        retryable: false,
+      },
+    });
+    expect(methods).toEqual(["GET", "GET"]);
+  });
+
+  it("treats a missing delete target as already deleted without mutating a replacement", async () => {
+    const server = serverFixture();
+    const methods: string[] = [];
+    const client = new HcloudClient("f".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        methods.push(request.method);
+        if (url.pathname === "/v1/servers") {
+          return json({ servers: [{ ...server, id: 9002 }], meta: {} });
+        }
+        return json({ error: { code: "not_found", message: "missing" } }, { status: 404 });
+      }),
+    });
+    await expect(
+      client.deleteResource({
+        kind: "delete_resource",
+        resourceKind: "server",
+        externalId: server.id,
+        deterministicName: server.name,
+        ownership,
+      }),
+    ).resolves.toEqual({ action: null, alreadyMissing: true });
+    expect(methods).toEqual(["GET", "GET"]);
+  });
+
+  it("revalidates ownership before reboot and rejects a missing server", async () => {
+    const server = serverFixture();
+    let missing = false;
+    const observed: string[] = [];
+    const client = new HcloudClient("f".repeat(64), {
+      fetcher: mockFetch((request) => {
+        const url = new URL(request.url);
+        observed.push(`${request.method} ${url.pathname}`);
+        if (url.pathname === "/v1/servers") {
+          return json({ servers: missing ? [] : [server], meta: {} });
+        }
+        if (request.method === "GET") {
+          return missing
+            ? json({ error: { code: "not_found", message: "missing" } }, { status: 404 })
+            : json({ server });
+        }
+        return json({
+          action: {
+            id: 9102,
+            status: "running",
+            command: "reboot_server",
+            progress: 0,
+            started: "2026-07-22T12:00:00Z",
+            finished: null,
+            error: null,
+            resources: [{ id: server.id, type: "server" }],
+          },
+        });
+      }),
+    });
+    const operation = {
+      kind: "reboot_server",
+      serverId: server.id,
+      deterministicName: server.name,
+      ownership,
+    } as const;
+    await expect(client.rebootServer(operation)).resolves.toMatchObject({ id: 9102 });
+    expect(observed).toEqual([
+      "GET /v1/servers",
+      `GET /v1/servers/${server.id}`,
+      `POST /v1/servers/${server.id}/actions/reboot`,
+    ]);
+
+    missing = true;
+    observed.length = 0;
+    await expect(client.rebootServer(operation)).rejects.toMatchObject({
+      shape: { code: "hcloud_mutation_target_missing", retryable: false },
+    });
+    expect(observed).toEqual([
+      "GET /v1/servers",
+      `GET /v1/servers/${server.id}`,
+    ]);
   });
 });
