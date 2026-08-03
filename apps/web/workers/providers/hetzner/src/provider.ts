@@ -12,6 +12,7 @@ import type {
 import type { ProviderCapacityObservation } from "@intar/provider-contracts";
 import { openCredential, parseKek, sealCredential } from "./crypto";
 import {
+  assertProviderConnectionSentinelOwnership,
   HcloudClient,
   labelsMatchOwnership,
   type HcloudClientOptions,
@@ -138,6 +139,7 @@ export async function rotateCredential(
   options: ProviderRuntimeOptions = {},
 ): Promise<RotateCredentialResult> {
   assertRequestIdentity(request);
+  assertProviderConnectionSentinelOwnership(request.ownership);
   const client = new HcloudClient(request.token, options.client);
   const sentinel = await client.getFirewall(request.sentinelId);
   if (

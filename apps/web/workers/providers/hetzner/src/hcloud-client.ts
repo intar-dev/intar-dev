@@ -12,6 +12,7 @@ import type {
   HcloudSshKey,
   NamedHcloudResource,
   OwnershipLabels,
+  ProviderConnectionSentinelOwnershipLabels,
   ProjectInventory,
   ReconcileResourceRef,
   ResourceObservation,
@@ -171,13 +172,32 @@ export function assertDeterministicName(name: string): void {
 }
 
 function assertLabelRef(value: string, field: string): void {
-  if (!/^[A-Za-z0-9._-]{1,63}$/u.test(value)) {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9._-]{1,63}$/u.test(value)
+  ) {
     throw new ProviderServiceError({
       code: "invalid_provider_request",
       message: `Invalid ${field} ownership reference`,
       retryable: false,
     });
   }
+}
+
+export function assertProviderConnectionSentinelOwnership(
+  ownership: ProviderConnectionSentinelOwnershipLabels,
+): void {
+  if (
+    (ownership as { purpose?: unknown }).purpose !==
+    "provider_connection_sentinel"
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "Invalid provider sentinel ownership purpose",
+      retryable: false,
+    });
+  }
+  ownershipToLabels(ownership);
 }
 
 export function ownershipToLabels(ownership: OwnershipLabels): Record<string, string> {
@@ -189,6 +209,32 @@ export function ownershipToLabels(ownership: OwnershipLabels): Record<string, st
     intar_org: ownership.organizationRef,
     intar_connection: ownership.connectionRef,
   };
+  if (ownership.purpose === "provider_connection_sentinel") {
+    const untrustedOwnership = ownership as OwnershipLabels & {
+      workspaceRef?: unknown;
+      generation?: unknown;
+      workshopPublicationRef?: unknown;
+      checkpointRef?: unknown;
+      attempt?: unknown;
+    };
+    if (
+      untrustedOwnership.workspaceRef !== undefined ||
+      untrustedOwnership.generation !== undefined ||
+      untrustedOwnership.workshopPublicationRef !== undefined ||
+      untrustedOwnership.checkpointRef !== undefined ||
+      untrustedOwnership.attempt !== undefined
+    ) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message: "Provider sentinel ownership cannot include scoped references",
+        retryable: false,
+      });
+    }
+    return {
+      ...labels,
+      intar_purpose: ownership.purpose,
+    };
+  }
   if (ownership.purpose === "workshop_publication_verifier") {
     if (
       ("workspaceRef" in ownership &&
@@ -279,7 +325,17 @@ export function labelsMatchOwnership(
 ): boolean {
   if (!labels) return false;
   const expected = ownershipToLabels(ownership);
-  return Object.entries(expected).every(([key, value]) => labels[key] === value);
+  if (!Object.entries(expected).every(([key, value]) => labels[key] === value)) {
+    return false;
+  }
+  if (ownership.purpose !== "provider_connection_sentinel") return true;
+  return [
+    "intar_workspace",
+    "intar_generation",
+    "intar_publication",
+    "intar_checkpoint",
+    "intar_attempt",
+  ].every((key) => labels[key] === undefined);
 }
 
 export function sentinelRules(cidrs: string[]): HcloudFirewallRule[] {
@@ -447,6 +503,24 @@ function isIpv4Address(value: unknown): value is string {
         Number(octet) <= 255,
     )
   );
+}
+
+function validatedCreatedFirewall(
+  value: unknown,
+  input: SentinelSpec,
+): HcloudFirewall {
+  if (
+    !isRecord(value) ||
+    !Number.isSafeInteger(value.id) ||
+    Number(value.id) < 1 ||
+    value.name !== input.name ||
+    !isStringRecord(value.labels) ||
+    !labelsMatchOwnership(value.labels, input.ownership) ||
+    !Array.isArray(value.rules)
+  ) {
+    throw invalidResourceResponse("firewall sentinel");
+  }
+  return value as unknown as HcloudFirewall;
 }
 
 function validatedCreatedPrimaryIp(
@@ -881,8 +955,12 @@ export class HcloudClient {
 
   assertDedicatedProject(
     inventory: ProjectInventory,
-    permittedSentinel: { name: string; ownership: OwnershipLabels },
+    permittedSentinel: {
+      name: string;
+      ownership: ProviderConnectionSentinelOwnershipLabels;
+    },
   ): void {
+    assertProviderConnectionSentinelOwnership(permittedSentinel.ownership);
     const acceptableFirewalls = inventory.firewalls.filter(
       (firewall) =>
         firewall.name === permittedSentinel.name &&
@@ -1004,6 +1082,7 @@ export class HcloudClient {
 
   async ensureSentinel(spec: SentinelSpec): Promise<EnsureSentinelResult> {
     assertDeterministicName(spec.name);
+    assertProviderConnectionSentinelOwnership(spec.ownership);
     const labels = ownershipToLabels(spec.ownership);
     const rules = sentinelRules(spec.stargateEgressIpv4Cidrs);
     const candidates = await this.#list<HcloudFirewall>(
@@ -1043,8 +1122,9 @@ export class HcloudClient {
       labels,
       rules,
     });
+    const firewall = validatedCreatedFirewall(response.firewall, spec);
     return {
-      firewall: response.firewall,
+      firewall,
       actions: sanitizedActions(response.actions),
       created: true,
     };
