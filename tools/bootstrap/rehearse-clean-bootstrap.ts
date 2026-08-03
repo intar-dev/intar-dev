@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { buildCleanD1Import } from "../cutover/build-clean-d1-import";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const baselinePath = resolve(
@@ -118,7 +119,14 @@ try {
 
 function applyBaseline(db: Database): void {
   assert(baselineStatements.length > 0, "the clean baseline contains no statements");
-  for (const statement of baselineStatements) db.exec(statement);
+  db.exec(buildCleanD1Import(baseline));
+  const ledger = db
+    .query("SELECT name FROM d1_migrations ORDER BY id")
+    .all() as Array<{ name: string }>;
+  assert(
+    isDeepStrictEqual(ledger, [{ name: "0000_clean_multicloud.sql" }]),
+    "the clean baseline import did not record the exact migration ledger",
+  );
 }
 
 function seedBootstrap(db: Database): void {
