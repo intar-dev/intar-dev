@@ -214,7 +214,7 @@ jobs:
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
           [[ "${CLEAN_D1_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
           test "${CLEAN_D1_DATABASE_ID}" != "00000000-0000-0000-0000-000000000003"
-          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260803"
+          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260803-r2"
           node - <<'NODE'
           const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
             .split(",").map((value) => value.trim()).filter(Boolean);

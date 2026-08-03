@@ -136,7 +136,7 @@ matching user.
 
 After `apply`, copy the recorded UUID into the protected production variable
 `CLEAN_D1_DATABASE_ID` and set `CLEAN_D1_DATABASE_NAME` to
-`intar-dev-control-plane-v2-20260803`. The checked-in all-zero UUID is a
+`intar-dev-control-plane-v2-20260803-r2`. The checked-in all-zero UUID is a
 fail-closed build placeholder. The production web workflow replaces it only in
 the built artifact, verifies the live baseline through that exact binding, and
 refuses to deploy while either protected variable is absent or mismatched.
