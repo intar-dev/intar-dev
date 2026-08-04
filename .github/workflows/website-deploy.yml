@@ -698,11 +698,11 @@ jobs:
               column_1: "content_hash"
             }]
           ' "${before}" >/dev/null; then
+            patch_sql="$(< "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql")"
             bunx wrangler d1 execute DB \
               --remote \
               --config dist/server/wrangler.json \
-              --file "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql" \
-              --yes \
+              --command "${patch_sql}" \
               --json > "${apply}"
             jq -e 'length > 0 and all(.[]; .success == true)' "${apply}" >/dev/null
           else
