@@ -143,7 +143,7 @@ describe("provider runtime recovery", () => {
     }
   });
 
-  it("waits for Hetzner server disappearance before deleting its Primary IP", async () => {
+  it("uses attempt order while waiting to delete a Hetzner Primary IP", async () => {
     await seedFalseDisappearedHetznerCertification();
     await env.DB.batch([
       env.DB.prepare(
@@ -174,6 +174,13 @@ describe("provider runtime recovery", () => {
     expect(
       provider.deleteOperations().map((operation) => operation.resourceKind),
     ).toEqual(["server", "ssh_key"]);
+    const invertedReconcileOrder = await env.DB.prepare(
+      `UPDATE runtime_provider_operations
+       SET created_at = CASE attempt WHEN 1 THEN 250 ELSE 200 END
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'reconcile' AND attempt IN (1, 2)`,
+    ).run();
+    expect(invertedReconcileOrder.meta.changes).toBe(2);
     provider.completeServerDeletion();
     await env.DB.prepare(
       `UPDATE runtime_provider_reconciliation
