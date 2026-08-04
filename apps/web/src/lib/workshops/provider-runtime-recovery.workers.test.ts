@@ -124,15 +124,6 @@ describe("provider runtime recovery", () => {
         }),
       }),
       expect.objectContaining({
-        resourceKind: "primary_ip",
-        externalId: 143328111,
-        deterministicName: "intar-certification-ipv4",
-        ownership: expect.objectContaining({
-          workshopPublicationRef: "publication",
-          checkpointRef: "checkpoint-00",
-        }),
-      }),
-      expect.objectContaining({
         resourceKind: "ssh_key",
         externalId: 116370220,
         deterministicName: "intar-certification-ssh",
@@ -150,6 +141,143 @@ describe("provider runtime recovery", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("waits for Hetzner server disappearance before deleting its Primary IP", async () => {
+    await seedFalseDisappearedHetznerCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE workshop_runtime_profile_certifications
+         SET state = 'cleanup_pending', error_code = 'test_cleanup', updated_at = 200
+         WHERE id = 'certification'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'cleanup_pending', last_error_code = 'test_cleanup',
+             deletion_requested_at = 200, updated_at = 200
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET desired_state = 'deleted', observed_state = 'cleanup_pending',
+             sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+             updated_at = 200
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+    ]);
+    const provider = installStatefulHetznerCleanupMock();
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1, deleted: 0 });
+
+    expect(
+      provider.deleteOperations().map((operation) => operation.resourceKind),
+    ).toEqual(["server", "ssh_key"]);
+    provider.completeServerDeletion();
+    await env.DB.prepare(
+      `UPDATE runtime_provider_reconciliation
+       SET sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+           updated_at = 300
+       WHERE allocation_id = 'cert-allocation'`,
+    ).run();
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 300, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 0, deleted: 1 });
+    expect(
+      provider.deleteOperations().map((operation) => operation.resourceKind),
+    ).toEqual(["server", "ssh_key", "primary_ip"]);
+
+    const cleanup = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.deletion_confirmed_at,
+              certification.state AS certification_state,
+              certification.deletion_confirmed_at AS certification_deleted_at,
+              execution.state AS execution_state,
+              (SELECT count(*) FROM runtime_provider_resources resource
+               WHERE resource.allocation_id = allocation.id
+                 AND resource.disappearance_confirmed_at IS NULL) AS present_resources
+       FROM runtime_provider_allocations allocation
+       JOIN workshop_runtime_profile_certifications certification
+         ON certification.verifier_allocation_id = allocation.id
+       JOIN runtime_executions execution ON execution.id = allocation.execution_id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<Record<string, string | number | null>>();
+    expect(cleanup).toMatchObject({
+      allocation_state: "deleted",
+      deletion_confirmed_at: 300,
+      certification_state: "failed",
+      certification_deleted_at: 300,
+      execution_state: "archived",
+      present_resources: 0,
+    });
+  });
+
+  it("does not let an expired delete action block resources already proven absent", async () => {
+    await seedFalseDisappearedHetznerCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE workshop_runtime_profile_certifications
+         SET state = 'cleanup_pending', error_code = 'test_cleanup', updated_at = 200
+         WHERE id = 'certification'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'cleanup_pending', last_error_code = 'test_cleanup',
+             deletion_requested_at = 200, updated_at = 200
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET desired_state = 'deleted', observed_state = 'cleanup_pending',
+             sweep_after = 0, updated_at = 200
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_operations
+           (id, allocation_id, provider_kind, operation_kind, location_attempt,
+            provider_operation_id, request_id, state, attempt, created_at, updated_at)
+         VALUES ('stale-delete', 'cert-allocation', 'hetzner_cloud',
+                 'delete_server', 1, '987654', 'stale-delete-request',
+                 'running', 1, 100, 100)`,
+      ),
+    ]);
+    const runOperation = vi.fn(async (request: TestHetznerRequest) => {
+      expect(request.operation).toMatchObject({ kind: "reconcile", actionIds: [] });
+      const resources = request.operation.resources ?? [];
+      return {
+        canonicalWrites: resources.map((resource) => ({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          operation: "resource_deleted",
+          resourceKind: resource.resourceKind,
+          externalId: resource.externalId,
+          name: resource.deterministicName,
+          state: "deleted",
+        })),
+        data: { resources: resources.map(() => ({ status: "missing" })) },
+      };
+    });
+    mocks.invokeProviderOperation.mockImplementation(
+      async (
+        providerKind: string,
+        invoke: (binding: { runOperation: typeof runOperation }) => Promise<unknown>,
+      ) => {
+        expect(providerKind).toBe("hetzner_cloud");
+        return invoke({ runOperation });
+      },
+    );
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 300, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 0, deleted: 1 });
+    expect(runOperation).toHaveBeenCalledTimes(2);
+    expect(
+      runOperation.mock.calls.every(
+        ([request]) => request.operation.kind === "reconcile",
+      ),
+    ).toBe(true);
   });
 
   it("fails closed when Hetzner reconciliation omits a requested verifier resource", async () => {
@@ -1477,9 +1605,11 @@ interface TestHetznerResourceRequest {
 interface TestHetznerOperation {
   kind: string;
   resources?: TestHetznerResourceRequest[];
+  actionIds?: number[];
   serverId?: number;
   resourceKind?: string;
   externalId?: number;
+  deterministicName?: string;
 }
 
 interface TestHetznerRequest {
@@ -1526,6 +1656,95 @@ function installPresentHetznerProviderMock() {
     },
   );
   return runOperation;
+}
+
+function installStatefulHetznerCleanupMock() {
+  const present = {
+    server: true,
+    primary_ip: true,
+    ssh_key: true,
+  };
+  const ids = {
+    server: 158742066,
+    primary_ip: 143328111,
+    ssh_key: 116370220,
+  } as const;
+  const deletions: TestHetznerOperation[] = [];
+  const runOperation = vi.fn(async (request: TestHetznerRequest) => {
+    if (request.operation.kind === "reconcile") {
+      const resources = request.operation.resources ?? [];
+      return {
+        canonicalWrites: resources.map((resource) => ({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          observedAt: new Date(200).toISOString(),
+          operation: present[resource.resourceKind]
+            ? "resource_observed"
+            : "resource_deleted",
+          resourceKind: resource.resourceKind,
+          externalId: ids[resource.resourceKind],
+          name: resource.deterministicName,
+          state: present[resource.resourceKind] ? "running" : "deleted",
+          ...(resource.resourceKind === "primary_ip" &&
+          present.primary_ip
+            ? { publicIpv4: "192.0.2.42" }
+            : {}),
+        })),
+        data: {
+          resources: resources.map((resource) => ({
+            status: present[resource.resourceKind] ? "present" : "missing",
+          })),
+        },
+      };
+    }
+    if (request.operation.kind !== "delete_resource") {
+      return { canonicalWrites: [], data: {} };
+    }
+    deletions.push(request.operation);
+    const resourceKind = request.operation.resourceKind as
+      | "server"
+      | "primary_ip"
+      | "ssh_key";
+    if (resourceKind === "primary_ip" && present.server) {
+      throw new Error("Primary IP deletion was attempted while its server was present");
+    }
+    if (resourceKind !== "server") present[resourceKind] = false;
+    return {
+      canonicalWrites: [
+        {
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          observedAt: new Date(200).toISOString(),
+          operation:
+            resourceKind === "server"
+              ? "resource_deletion_requested"
+              : "resource_deleted",
+          resourceKind,
+          externalId: ids[resourceKind],
+          name: request.operation.deterministicName,
+          state: resourceKind === "server" ? "deleting" : "deleted",
+        },
+      ],
+      data: {},
+    };
+  });
+  mocks.invokeProviderOperation.mockImplementation(
+    async (
+      providerKind: string,
+      invoke: (binding: { runOperation: typeof runOperation }) => Promise<unknown>,
+    ) => {
+      expect(providerKind).toBe("hetzner_cloud");
+      return invoke({ runOperation });
+    },
+  );
+  return {
+    completeServerDeletion() {
+      present.server = false;
+    },
+    deleteOperations() {
+      return deletions;
+    },
+  };
 }
 
 function installUncoveredHetznerProviderMock() {
