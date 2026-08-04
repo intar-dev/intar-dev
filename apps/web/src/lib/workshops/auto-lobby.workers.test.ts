@@ -9,6 +9,8 @@ import {
   organization,
   user,
   workshopEvents,
+  workshopPublications,
+  workshopRegistryTokens,
   workshopRuntimeProfileCertifications,
   workshopRuntimeProfiles,
   workshopSessions,
@@ -144,12 +146,13 @@ describe("workshop automatic lobby", () => {
 });
 
 async function createSession(lobbyOpensAt: number): Promise<string> {
+  const workshopManifest = manifest();
   const template = await createWorkshopTemplate({
     organizationId: "org",
     actorUserId: "owner",
     sourceRevision: `source-${lobbyOpensAt}`,
     contentHash: lobbyOpensAt.toString(16).padStart(64, "0").slice(-64),
-    manifest: manifest(),
+    manifest: workshopManifest,
   });
   const profileId = `profile-${template.revision.id}`;
   await drizzle(env.DB).batch([
@@ -175,6 +178,37 @@ async function createSession(lobbyOpensAt: number): Promise<string> {
       evidenceJson: { source: "test-fixture" },
       verifiedAt: lobbyOpensAt,
       deletionConfirmedAt: lobbyOpensAt,
+      createdAt: lobbyOpensAt,
+      updatedAt: lobbyOpensAt,
+    }),
+    drizzle(env.DB).insert(workshopRegistryTokens).values({
+      id: `registry-token-${template.revision.id}`,
+      organizationId: "org",
+      name: "Published fixture token",
+      tokenPrefix: "intar_fixture",
+      tokenHash: `hash-${template.revision.id}`,
+      createdBy: "owner",
+      createdAt: lobbyOpensAt,
+    }),
+    drizzle(env.DB).insert(workshopPublications).values({
+      id: `publication-${template.revision.id}`,
+      organizationId: "org",
+      workshopSlug: workshopManifest.workshop.slug,
+      contentHash: template.revision.contentHash,
+      sourceR2Key: `workshops/${template.revision.id}/source.tar.zst`,
+      compiledManifestJson: workshopManifest as unknown as Record<
+        string,
+        unknown
+      >,
+      requiredCheckpointIdsJson: workshopManifest.workspace.checkpoints.map(
+        (checkpoint) => checkpoint.id,
+      ),
+      status: "published",
+      submittedBy: "owner",
+      registryTokenId: `registry-token-${template.revision.id}`,
+      publishedRevisionId: template.revision.id,
+      certificationState: "verified",
+      finishedAt: lobbyOpensAt,
       createdAt: lobbyOpensAt,
       updatedAt: lobbyOpensAt,
     }),

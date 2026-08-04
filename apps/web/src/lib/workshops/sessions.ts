@@ -5,6 +5,9 @@ import {
   workshopAssistGrants,
   workshopEvents,
   workshopHelpRequests,
+  workshopPublications,
+  workshopRuntimeProfileCertifications,
+  workshopRuntimeProfiles,
   workshopSessionMembers,
   workshopSessionRuntimeSelections,
   workshopSessions,
@@ -206,6 +209,62 @@ export async function createWorkshopSession(params: {
       404,
       "workshop_template_revision_not_found",
       "workshop template revision not found",
+    );
+  }
+  const publications = await db
+    .select({ id: workshopPublications.id })
+    .from(workshopPublications)
+    .where(
+      and(
+        eq(workshopPublications.organizationId, params.organizationId),
+        eq(workshopPublications.publishedRevisionId, revision.revisionId),
+        eq(workshopPublications.status, "published"),
+      ),
+    )
+    .limit(1);
+  if (!publications[0]) {
+    throw appError(
+      409,
+      "workshop_template_revision_not_published",
+      "the selected workshop revision has not completed publication",
+    );
+  }
+  const profileCertifications = await db
+    .select({
+      profileId: workshopRuntimeProfiles.profileId,
+      certificationState: workshopRuntimeProfileCertifications.state,
+      verifiedAt: workshopRuntimeProfileCertifications.verifiedAt,
+      deletionConfirmedAt:
+        workshopRuntimeProfileCertifications.deletionConfirmedAt,
+    })
+    .from(workshopRuntimeProfiles)
+    .leftJoin(
+      workshopRuntimeProfileCertifications,
+      eq(
+        workshopRuntimeProfileCertifications.runtimeProfileId,
+        workshopRuntimeProfiles.id,
+      ),
+    )
+    .where(
+      eq(workshopRuntimeProfiles.templateRevisionId, revision.revisionId),
+    );
+  const declaredProfileIds = new Set(
+    revision.manifest.workspace.runtimeProfiles.map((profile) => profile.id),
+  );
+  if (
+    profileCertifications.length !== declaredProfileIds.size ||
+    profileCertifications.some(
+      (profile) =>
+        !declaredProfileIds.has(profile.profileId) ||
+        profile.certificationState !== "verified" ||
+        profile.verifiedAt === null ||
+        profile.deletionConfirmedAt === null,
+    )
+  ) {
+    throw appError(
+      409,
+      "workshop_template_revision_not_certified",
+      "every runtime profile in the selected workshop revision must pass certification and cleanup",
     );
   }
   const preparedProvider = await prepareWorkshopSessionProvider({

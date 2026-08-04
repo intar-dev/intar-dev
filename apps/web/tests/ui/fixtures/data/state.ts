@@ -952,6 +952,7 @@ export function createMockApiState(input?: {
         moduleCount: 11,
         publishedAt: FIXED_NOW - day,
         current: true,
+        schedulable: true,
         runtimeProfiles: runtimeProfilesForRevision(3),
       },
       {
@@ -963,6 +964,7 @@ export function createMockApiState(input?: {
         moduleCount: 10,
         publishedAt: FIXED_NOW - 2 * day,
         current: false,
+        schedulable: true,
         runtimeProfiles: runtimeProfilesForRevision(2),
       },
       {
@@ -974,6 +976,7 @@ export function createMockApiState(input?: {
         moduleCount: 9,
         publishedAt: FIXED_NOW - 3 * day,
         current: false,
+        schedulable: true,
         runtimeProfiles: runtimeProfilesForRevision(1),
       },
     ],

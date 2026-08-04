@@ -929,7 +929,7 @@ function TemplateLedger({
                 <MetaLine
                   className="mt-2"
                   items={[
-                    `revision ${template.latestRevision}`,
+                    `${template.currentRevisionId ? "revision" : "staged revision"} ${template.latestRevision}`,
                     `${template.moduleCount} modules`,
                     `${template.durationMinutes} min`,
                     template.slug,
@@ -1281,10 +1281,12 @@ function ScheduleWorkshopDialog({
   onCreated: (sessionId: string) => Promise<void>;
 }) {
   const readyTemplates = data.templates.filter(
-    (template) => template.status === "ready",
+    (template) => template.revisions.some((revision) => revision.schedulable),
   );
   const revisionOptions = readyTemplates.flatMap((template) =>
-    template.revisions.map((revision) => ({ template, revision })),
+    template.revisions
+      .filter((revision) => revision.schedulable)
+      .map((revision) => ({ template, revision })),
   );
   const [templateRevisionId, setTemplateRevisionId] = useState(
     readyTemplates[0]?.currentRevisionId ??
@@ -1441,15 +1443,17 @@ function ScheduleWorkshopDialog({
                 >
                   {readyTemplates.map((template) => (
                     <optgroup key={template.id} label={template.title}>
-                      {template.revisions.map((revision) => (
-                        <option key={revision.id} value={revision.id}>
-                          r{revision.revision}
-                          {revision.current ? " · current" : ""} ·{" "}
-                          {revision.moduleCount} modules ·{" "}
-                          {revision.durationMinutes} min
-                          {` · ${revision.runtimeProfiles.length} profile${revision.runtimeProfiles.length === 1 ? "" : "s"}`}
-                        </option>
-                      ))}
+                      {template.revisions
+                        .filter((revision) => revision.schedulable)
+                        .map((revision) => (
+                          <option key={revision.id} value={revision.id}>
+                            r{revision.revision}
+                            {revision.current ? " · current" : ""} ·{" "}
+                            {revision.moduleCount} modules ·{" "}
+                            {revision.durationMinutes} min
+                            {` · ${revision.runtimeProfiles.length} profile${revision.runtimeProfiles.length === 1 ? "" : "s"}`}
+                          </option>
+                        ))}
                     </optgroup>
                   ))}
                 </select>
@@ -1575,7 +1579,8 @@ function ScheduleWorkshopDialog({
           <div className="rounded-lg border border-dashed px-4 py-8 text-center">
             <p className="text-sm font-semibold">No template is ready</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Wait for the checkpoint build to finish before scheduling.
+              Wait for the checkpoint build and runtime-profile certification
+              to finish before scheduling.
             </p>
           </div>
         )}
@@ -1860,8 +1865,10 @@ function TemplateStatusBadge({
   status: OrganizationWorkshopTemplate["status"];
 }) {
   if (status === "ready") return <Badge variant="success">Ready</Badge>;
+  if (status === "cleanup_pending")
+    return <Badge variant="warning">Cleanup pending</Badge>;
   if (status === "failed")
-    return <Badge variant="destructive">Build failed</Badge>;
+    return <Badge variant="destructive">Publication failed</Badge>;
   return <Badge variant="warning">Building</Badge>;
 }
 
