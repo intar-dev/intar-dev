@@ -650,10 +650,17 @@ jobs:
           before="${RUNNER_TEMP}/workshop-republication-index-before.json"
           apply="${RUNNER_TEMP}/workshop-republication-index-apply.json"
           after="${RUNNER_TEMP}/workshop-republication-index-after.json"
+          delete_operations_before="${RUNNER_TEMP}/confirmed-provider-delete-operations-before.json"
+          delete_operations_apply="${RUNNER_TEMP}/confirmed-provider-delete-operations-apply.json"
+          delete_operations_after="${RUNNER_TEMP}/confirmed-provider-delete-operations-after.json"
           jq -n '[{success: false, state: "not_started"}]' > "${before}"
           jq -n '[{success: false, state: "not_started"}]' > "${apply}"
           jq -n '[{success: false, state: "not_started"}]' > "${after}"
+          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_before}"
+          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_apply}"
+          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_after}"
           index_query="SELECT indexes.name, indexes.\"unique\" AS is_unique, indexes.partial, count(columns.name) AS column_count, max(CASE WHEN columns.seqno = 0 THEN columns.name END) AS column_0, max(CASE WHEN columns.seqno = 1 THEN columns.name END) AS column_1 FROM pragma_index_list('workshop_template_revisions') AS indexes JOIN pragma_index_info(indexes.name) AS columns GROUP BY indexes.name, indexes.\"unique\", indexes.partial ORDER BY indexes.name"
+          delete_operation_query="SELECT count(*) AS residuals FROM runtime_provider_operations AS operation JOIN runtime_provider_allocations AS allocation ON allocation.id = operation.allocation_id AND allocation.location_attempt = operation.location_attempt WHERE operation.state IN ('pending','running','retryable') AND allocation.state = 'deleted' AND allocation.deletion_confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM runtime_provider_resources AS resource WHERE resource.allocation_id = operation.allocation_id AND resource.location_attempt = operation.location_attempt AND resource.disappearance_confirmed_at IS NOT NULL AND ((resource.resource_kind = 'instance' AND (operation.operation_kind = 'delete_server' OR operation.operation_kind GLOB 'delete_server:*' OR operation.operation_kind = 'delete_instance' OR operation.operation_kind GLOB 'delete_instance:*')) OR (resource.resource_kind = 'boot_disk' AND (operation.operation_kind = 'delete_disk' OR operation.operation_kind GLOB 'delete_disk:*')) OR (resource.resource_kind = 'ipv4' AND (operation.operation_kind = 'delete_primary_ip' OR operation.operation_kind GLOB 'delete_primary_ip:*')) OR (resource.resource_kind = 'ssh_key' AND (operation.operation_kind = 'delete_ssh_key' OR operation.operation_kind GLOB 'delete_ssh_key:*'))))"
 
           bunx wrangler d1 execute DB \
             --remote \
@@ -729,8 +736,38 @@ jobs:
               column_1: "content_hash"
             }]
           ' "${after}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${delete_operation_query}" \
+            --json > "${delete_operations_before}"
+          jq -e '
+            length == 1 and .[0].success == true and
+            (.[0].results[0].residuals | type == "number") and
+            .[0].results[0].residuals >= 0
+          ' "${delete_operations_before}" >/dev/null
+
+          delete_operations_sql="$(< "${GITHUB_WORKSPACE}/ops/cloudflare/finalize-confirmed-provider-delete-operations.sql")"
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${delete_operations_sql}" \
+            --json > "${delete_operations_apply}"
+          jq -e 'length > 0 and all(.[]; .success == true)' "${delete_operations_apply}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${delete_operation_query}" \
+            --json > "${delete_operations_after}"
+          jq -e '
+            length == 1 and .[0].success == true and
+            .[0].results[0].residuals == 0
+          ' "${delete_operations_after}" >/dev/null
           sha256sum \
             "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql" \
+            "${GITHUB_WORKSPACE}/ops/cloudflare/finalize-confirmed-provider-delete-operations.sql" \
             > "${RUNNER_TEMP}/workshop-republication-index-patch.sha256"
 
       - name: Retain clean D1 schema-patch evidence
@@ -742,6 +779,9 @@ jobs:
             ${{ runner.temp }}/workshop-republication-index-before.json
             ${{ runner.temp }}/workshop-republication-index-apply.json
             ${{ runner.temp }}/workshop-republication-index-after.json
+            ${{ runner.temp }}/confirmed-provider-delete-operations-before.json
+            ${{ runner.temp }}/confirmed-provider-delete-operations-apply.json
+            ${{ runner.temp }}/confirmed-provider-delete-operations-after.json
             ${{ runner.temp }}/workshop-republication-index-patch.sha256
           if-no-files-found: error
           retention-days: 90

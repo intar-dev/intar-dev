@@ -24,7 +24,7 @@
     "check:bootstrap": "bun tools/bootstrap/rehearse-clean-bootstrap.ts",
     "check:clean-owner-bootstrap": "bun test tools/bootstrap/clean-owner-bootstrap.test.ts",
     "check:flagship": "bun test tools/flagship/workshop-multicloud-targeting.test.ts",
-    "check:schema-patches": "bun test ops/cloudflare/allow-failed-workshop-republication.test.ts",
+    "check:schema-patches": "bun test ops/cloudflare/*.test.ts",
     "check:imports": "bun tools/check-import-boundaries.ts",
     "clean:generated": "bun tools/cleanup-generated.ts",
     "hydrate": "bun tools/workshops/platform-engineering/hydrate.ts",
