@@ -40,8 +40,11 @@ import {
   workshopAssistGrants,
   workshopEvents,
   workshopHelpRequests,
+  workshopPublications,
+  workshopRegistryTokens,
   workshopSessionMembers,
   workshopSessions,
+  workshopTemplates,
   workshopTemplateRevisions,
   workshopRuntimeProfileCertifications,
   workshopRuntimeProfiles,
@@ -307,6 +310,239 @@ describe("standalone workshops", () => {
     ).rejects.toMatchObject({
       status: 409,
       code: "workshop_version_conflict",
+    });
+  });
+
+  it("projects an uncertified staged template without fabricated ready metadata", async () => {
+    const setup = await createTemplateFixture();
+    const db = drizzle(env.DB);
+    await db.batch([
+      db
+        .update(workshopTemplates)
+        .set({ currentRevisionId: null })
+        .where(eq(workshopTemplates.id, setup.templateId)),
+      db
+        .update(workshopRuntimeProfileCertifications)
+        .set({
+          state: "verifying",
+          verifiedAt: null,
+          deletionConfirmedAt: null,
+        })
+        .where(
+          eq(
+            workshopRuntimeProfileCertifications.id,
+            `cert-${setup.revisionId}`,
+          ),
+        ),
+    ]);
+
+    const organizationView = await getOrganizationWorkshopsProjection({
+      organizationId: "org-a",
+      userId: "owner-a",
+    });
+
+    expect(organizationView.templates[0]).toMatchObject({
+      latestRevision: 1,
+      currentRevisionId: null,
+      revisionCount: 1,
+      durationMinutes: 45,
+      moduleCount: 2,
+      status: "building",
+      revisions: [
+        {
+          revision: 1,
+          current: false,
+          durationMinutes: 45,
+          moduleCount: 2,
+          runtimeProfiles: [
+            {
+              certification: { state: "verifying" },
+              compatible: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    await db
+      .update(workshopRuntimeProfileCertifications)
+      .set({ state: "cleanup_pending" })
+      .where(
+        eq(
+          workshopRuntimeProfileCertifications.id,
+          `cert-${setup.revisionId}`,
+        ),
+      );
+    const cleanupView = await getOrganizationWorkshopsProjection({
+      organizationId: "org-a",
+      userId: "owner-a",
+    });
+    expect(cleanupView.templates[0]?.status).toBe("cleanup_pending");
+  });
+
+  it("schedules only published revisions with complete profile certification", async () => {
+    const setup = await createTemplateFixture();
+    const staged = await publishWorkshopTemplateRevision({
+      organizationId: "org-a",
+      templateId: setup.templateId,
+      actorUserId: "owner-a",
+      sourceRevision: "source-staged",
+      contentHash: "b".repeat(64),
+      manifest: workshopManifest({ summary: "A staged revision." }),
+    });
+    const db = drizzle(env.DB);
+    const now = Date.now();
+    await db.batch([
+      db.insert(workshopRuntimeProfiles).values({
+        id: `profile-${staged.id}`,
+        templateRevisionId: staged.id,
+        profileId: "agent-x86",
+        providerKind: "agent_kvm",
+        vmId: "workshop",
+        machineType: null,
+        systemImage: "workshop-test",
+        resolvedImageId: null,
+        rootDiskType: null,
+        architecture: "x86_64",
+        cpuMillis: 4_000,
+        memoryMib: 16_384,
+        diskMib: 102_400,
+        locationsJson: [],
+        configurationJson: {},
+        createdAt: now,
+      }),
+      db.insert(workshopRuntimeProfileCertifications).values({
+        id: `cert-${staged.id}`,
+        runtimeProfileId: `profile-${staged.id}`,
+        connectionId: null,
+        state: "verifying",
+        evidenceJson: {},
+        createdAt: now,
+        updatedAt: now,
+      }),
+      db.insert(workshopRegistryTokens).values({
+        id: `registry-token-${staged.id}`,
+        organizationId: "org-a",
+        name: "Staged publication token",
+        tokenPrefix: "intar_staged",
+        tokenHash: `hash-${staged.id}`,
+        createdBy: "owner-a",
+        createdAt: now,
+      }),
+      db.insert(workshopPublications).values({
+        id: `publication-${staged.id}`,
+        organizationId: "org-a",
+        workshopSlug: "platform-engineering",
+        contentHash: "b".repeat(64),
+        sourceR2Key: `workshops/${staged.id}/source.tar.zst`,
+        compiledManifestJson: staged.manifest as unknown as Record<
+          string,
+          unknown
+        >,
+        requiredCheckpointIdsJson: ["checkpoint-00"],
+        status: "building",
+        submittedBy: "owner-a",
+        registryTokenId: `registry-token-${staged.id}`,
+        publishedRevisionId: staged.id,
+        certificationState: "verifying",
+        createdAt: now,
+        updatedAt: now,
+      }),
+      db
+        .update(workshopTemplates)
+        .set({ currentRevisionId: setup.revisionId })
+        .where(eq(workshopTemplates.id, setup.templateId)),
+    ]);
+
+    const organizationView = await getOrganizationWorkshopsProjection({
+      organizationId: "org-a",
+      userId: "owner-a",
+    });
+    expect(organizationView.templates[0]).toMatchObject({
+      latestRevision: 1,
+      currentRevisionId: setup.revisionId,
+      status: "ready",
+      revisions: [
+        { id: staged.id, revision: 2, current: false, schedulable: false },
+        {
+          id: setup.revisionId,
+          revision: 1,
+          current: true,
+          schedulable: true,
+        },
+      ],
+    });
+
+    await expect(
+      createWorkshopSession({
+        organizationId: "org-a",
+        actorUserId: "owner-a",
+        templateRevisionId: staged.id,
+        runtimeProvider: { profileId: "agent-x86" },
+        title: "Unpublished staged revision",
+        scheduledStartAt: now + 60 * 60_000,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "workshop_template_revision_not_published",
+    });
+  });
+
+  it("rejects a published revision while any declared profile remains uncertified", async () => {
+    const manifest = workshopManifest();
+    const primaryProfile = manifest.workspace.runtimeProfiles[0];
+    if (!primaryProfile || primaryProfile.provider !== "agent_kvm") {
+      throw new Error("test fixture requires an agent_kvm runtime profile");
+    }
+    manifest.workspace.runtimeProfiles.push({
+      ...primaryProfile,
+      id: "agent-x86-secondary",
+    });
+    const setup = await createTemplateFixture(manifest);
+    const now = Date.now();
+    const db = drizzle(env.DB);
+    await db.batch([
+      db.insert(workshopRuntimeProfiles).values({
+        id: `profile-secondary-${setup.revisionId}`,
+        templateRevisionId: setup.revisionId,
+        profileId: "agent-x86-secondary",
+        providerKind: "agent_kvm",
+        vmId: primaryProfile.vmId,
+        machineType: null,
+        systemImage: primaryProfile.requestedSystemImage,
+        resolvedImageId: null,
+        rootDiskType: null,
+        architecture: primaryProfile.hardware.architecture,
+        cpuMillis: primaryProfile.hardware.cpuMillis,
+        memoryMib: primaryProfile.hardware.memoryMib,
+        diskMib: primaryProfile.hardware.diskMib,
+        locationsJson: [],
+        configurationJson: {},
+        createdAt: now,
+      }),
+      db.insert(workshopRuntimeProfileCertifications).values({
+        id: `cert-secondary-${setup.revisionId}`,
+        runtimeProfileId: `profile-secondary-${setup.revisionId}`,
+        connectionId: null,
+        state: "pending",
+        evidenceJson: {},
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ]);
+
+    await expect(
+      createWorkshopSession({
+        organizationId: "org-a",
+        actorUserId: "owner-a",
+        templateRevisionId: setup.revisionId,
+        runtimeProvider: { profileId: "agent-x86" },
+        title: "Partially certified revision",
+        scheduledStartAt: now + 60 * 60_000,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "workshop_template_revision_not_certified",
     });
   });
 
@@ -2607,6 +2843,34 @@ async function createTemplateFixture(manifest = workshopManifest()) {
       evidenceJson: { source: "test-fixture" },
       verifiedAt: now,
       deletionConfirmedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }),
+    db.insert(workshopRegistryTokens).values({
+      id: `registry-token-${created.revision.id}`,
+      organizationId: "org-a",
+      name: "Published fixture token",
+      tokenPrefix: "intar_fixture",
+      tokenHash: `hash-${created.revision.id}`,
+      createdBy: "owner-a",
+      createdAt: now,
+    }),
+    db.insert(workshopPublications).values({
+      id: `publication-${created.revision.id}`,
+      organizationId: "org-a",
+      workshopSlug: manifest.workshop.slug,
+      contentHash: created.revision.contentHash,
+      sourceR2Key: `workshops/${created.revision.id}/source.tar.zst`,
+      compiledManifestJson: manifest as unknown as Record<string, unknown>,
+      requiredCheckpointIdsJson: manifest.workspace.checkpoints.map(
+        (checkpoint) => checkpoint.id,
+      ),
+      status: "published",
+      submittedBy: "owner-a",
+      registryTokenId: `registry-token-${created.revision.id}`,
+      publishedRevisionId: created.revision.id,
+      certificationState: "verified",
+      finishedAt: now,
       createdAt: now,
       updatedAt: now,
     }),

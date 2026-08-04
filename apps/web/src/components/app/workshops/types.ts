@@ -447,7 +447,7 @@ export interface OrganizationWorkshopTemplate {
   revisionCount: number;
   durationMinutes: number;
   moduleCount: number;
-  status: "building" | "ready" | "failed";
+  status: "building" | "ready" | "failed" | "cleanup_pending";
   updatedAt: number;
   revisions: Array<{
     id: string;
@@ -458,6 +458,7 @@ export interface OrganizationWorkshopTemplate {
     moduleCount: number;
     publishedAt: number;
     current: boolean;
+    schedulable: boolean;
     runtimeProfiles: Array<{
       id: string;
       profileId: string;

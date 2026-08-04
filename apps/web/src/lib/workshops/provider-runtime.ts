@@ -4139,7 +4139,7 @@ async function providerMutation(
       providerOperations,
       result.data,
     );
-    await db
+    const operationUpdated = await db
       .update(runtimeProviderOperations)
       .set({
         providerOperationId: repeatable ? null : providerOperations[0]?.id ?? null,
@@ -4164,9 +4164,36 @@ async function providerMutation(
         and(
           eq(runtimeProviderOperations.id, operationId),
           eq(runtimeProviderOperations.locationAttempt, input.locationAttempt),
+          inArray(runtimeProviderOperations.state, [
+            "pending",
+            "running",
+            "retryable",
+          ]),
         ),
       );
-    if (providerOperationState.state === "failed") {
+    if (providerDeleteOperationTargetsResource(operationKind)) {
+      await terminalizeConfirmedProviderDeleteOperations({
+        allocationId: input.allocationId,
+        locationAttempt: input.locationAttempt,
+        now: input.now,
+      });
+    }
+    const persistedOperationState =
+      providerOperationState.state === "failed" &&
+      operationUpdated.meta.changes === 1
+        ? await env.DB.prepare(
+            `SELECT state
+             FROM runtime_provider_operations
+             WHERE id = ? AND location_attempt = ?`,
+          )
+            .bind(operationId, input.locationAttempt)
+            .first<{ state: string }>()
+        : null;
+    if (
+      providerOperationState.state === "failed" &&
+      operationUpdated.meta.changes === 1 &&
+      persistedOperationState?.state === "failed"
+    ) {
       await markAllocationProviderOperationFailed(
         input.allocationId,
         input.locationAttempt,
@@ -4196,6 +4223,11 @@ async function providerMutation(
         and(
           eq(runtimeProviderOperations.id, operationId),
           eq(runtimeProviderOperations.locationAttempt, input.locationAttempt),
+          inArray(runtimeProviderOperations.state, [
+            "pending",
+            "running",
+            "retryable",
+          ]),
         ),
       );
     throw error;
@@ -4654,17 +4686,9 @@ async function pendingHetznerActionIds(
     activeResources.map((resource) => resource.resourceKind),
   );
   return operations.flatMap((operation) => {
-    const deletionTarget =
-      operation.operationKind === "delete_server" ||
-      operation.operationKind.startsWith("delete_server:")
-        ? "instance"
-        : operation.operationKind === "delete_primary_ip" ||
-            operation.operationKind.startsWith("delete_primary_ip:")
-          ? "ipv4"
-          : operation.operationKind === "delete_ssh_key" ||
-              operation.operationKind.startsWith("delete_ssh_key:")
-            ? "ssh_key"
-            : null;
+    const deletionTarget = providerDeleteOperationResourceKind(
+      operation.operationKind,
+    );
     // Provider action history expires before resource identity. Once an owned
     // target is confirmed absent, do not let its stale delete action block cleanup.
     if (deletionTarget && !activeKinds.has(deletionTarget)) return [];
@@ -5274,6 +5298,98 @@ async function persistCanonicalWrites(
   });
 }
 
+const CONFIRMED_DELETE_OPERATION_RESOURCE_MATCH = `(
+  (resource.resource_kind = 'instance' AND (
+    operation.operation_kind = 'delete_server' OR
+    operation.operation_kind GLOB 'delete_server:*' OR
+    operation.operation_kind = 'delete_instance' OR
+    operation.operation_kind GLOB 'delete_instance:*'
+  )) OR
+  (resource.resource_kind = 'boot_disk' AND (
+    operation.operation_kind = 'delete_disk' OR
+    operation.operation_kind GLOB 'delete_disk:*'
+  )) OR
+  (resource.resource_kind = 'ipv4' AND (
+    operation.operation_kind = 'delete_primary_ip' OR
+    operation.operation_kind GLOB 'delete_primary_ip:*'
+  )) OR
+  (resource.resource_kind = 'ssh_key' AND (
+    operation.operation_kind = 'delete_ssh_key' OR
+    operation.operation_kind GLOB 'delete_ssh_key:*'
+  ))
+)`;
+
+function providerDeleteOperationResourceKind(
+  operationKind: string,
+): "instance" | "boot_disk" | "ipv4" | "ssh_key" | null {
+  for (const [prefix, resourceKind] of [
+    ["delete_server", "instance"],
+    ["delete_instance", "instance"],
+    ["delete_disk", "boot_disk"],
+    ["delete_primary_ip", "ipv4"],
+    ["delete_ssh_key", "ssh_key"],
+  ] as const) {
+    if (
+      operationKind === prefix ||
+      operationKind.startsWith(`${prefix}:`)
+    ) {
+      return resourceKind;
+    }
+  }
+  return null;
+}
+
+function providerDeleteOperationTargetsResource(operationKind: string): boolean {
+  return providerDeleteOperationResourceKind(operationKind) !== null;
+}
+
+function terminalizeConfirmedProviderDeleteOperationsStatement(input: {
+  allocationId: string;
+  locationAttempt: number;
+  now: number;
+}) {
+  return env.DB.prepare(
+    `UPDATE runtime_provider_operations AS operation
+     SET state = 'succeeded', retry_at = NULL,
+         last_polled_at = COALESCE(last_polled_at, ?),
+         completed_at = COALESCE(completed_at, ?),
+         error_class = NULL, error_code = NULL,
+         sanitized_result_json = json_set(
+           COALESCE(sanitized_result_json, '{}'),
+           '$.confirmedAbsent', json('true')
+         ),
+         updated_at = ?
+     WHERE operation.allocation_id = ?
+       AND operation.location_attempt = ?
+       AND operation.state IN ('pending','running','retryable')
+       AND EXISTS (
+         SELECT 1
+         FROM runtime_provider_resources AS resource
+         WHERE resource.allocation_id = operation.allocation_id
+           AND resource.location_attempt = operation.location_attempt
+           AND resource.disappearance_confirmed_at IS NOT NULL
+           AND ${CONFIRMED_DELETE_OPERATION_RESOURCE_MATCH}
+       )`,
+  ).bind(
+    input.now,
+    input.now,
+    input.now,
+    input.allocationId,
+    input.locationAttempt,
+  );
+}
+
+async function terminalizeConfirmedProviderDeleteOperations(input: {
+  allocationId: string;
+  locationAttempt: number;
+  now: number;
+}): Promise<number> {
+  const result = await terminalizeConfirmedProviderDeleteOperationsStatement(
+    input,
+  ).run();
+  return result.meta.changes;
+}
+
 export async function confirmProviderResourceDisappearance(input: {
   allocationId: string;
   locationAttempt: number;
@@ -5299,7 +5415,6 @@ export async function confirmProviderResourceDisappearance(input: {
     )
     .first<{ pending: number }>();
   if (pendingGcpCreate) return;
-  const db = drizzle(env.DB);
   if (
     !(await providerLocationAttemptIsCurrent(
       input.allocationId,
@@ -5308,34 +5423,32 @@ export async function confirmProviderResourceDisappearance(input: {
   ) {
     return;
   }
-  await db
-    .update(runtimeProviderResources)
-    .set({
-      providerState: "deleted",
-      disappearanceConfirmedAt: input.now,
-      updatedAt: input.now,
-    })
-    .where(
-      and(
-        eq(runtimeProviderResources.allocationId, input.allocationId),
-        eq(runtimeProviderResources.locationAttempt, input.locationAttempt),
-        eq(runtimeProviderResources.resourceKind, input.resourceKind),
-      ),
-    );
+  const statements = [
+    env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'deleted', disappearance_confirmed_at = ?,
+           updated_at = ?
+       WHERE allocation_id = ? AND location_attempt = ?
+         AND resource_kind = ?`,
+    ).bind(
+      input.now,
+      input.now,
+      input.allocationId,
+      input.locationAttempt,
+      input.resourceKind,
+    ),
+    terminalizeConfirmedProviderDeleteOperationsStatement(input),
+  ];
   if (input.resourceKind === "ipv4") {
-    await db
-      .update(runtimeProviderAllocations)
-      .set({ externalIpv4: null, updatedAt: input.now })
-      .where(
-        and(
-          eq(runtimeProviderAllocations.id, input.allocationId),
-          eq(
-            runtimeProviderAllocations.locationAttempt,
-            input.locationAttempt,
-          ),
-        ),
-      );
+    statements.push(
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET external_ipv4 = NULL, updated_at = ?
+         WHERE id = ? AND location_attempt = ?`,
+      ).bind(input.now, input.allocationId, input.locationAttempt),
+    );
   }
+  await env.DB.batch(statements);
 }
 
 function normalizeResourceKind(value: string): "instance" | "boot_disk" | "ipv4" | "ssh_key" {

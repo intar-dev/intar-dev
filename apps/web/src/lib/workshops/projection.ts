@@ -10,6 +10,7 @@ import {
   runtimeVms,
   workshopRuntimeProfileCertifications,
   workshopRuntimeProfiles,
+  workshopPublications,
   workshopSessionMembers,
   workshopSessionRuntimeSelections,
   workshopTemplateRevisions,
@@ -185,20 +186,44 @@ export async function getOrganizationWorkshopsProjection(params: {
       const current = revisions.find(
         (revision) => revision.id === template.currentRevisionId,
       );
-      return {
-        id: template.id,
-        slug: template.slug,
-        title: template.title,
-        summary: template.summary,
-        latestRevision: current?.revision ?? template.currentRevision ?? 0,
-        currentRevisionId: template.currentRevisionId,
-        revisionCount: revisions.length,
-        durationMinutes: current?.manifest.durationMinutes ?? 0,
-        moduleCount: current?.manifest.modules.length ?? 0,
-        status: "ready" as const,
-        updatedAt: template.updatedAt,
-        revisions: await Promise.all(
-          revisions.map(async (revision) => ({
+      const displayed = current ?? revisions[0];
+      if (!displayed) {
+        throw appError(
+          500,
+          "workshop_template_revision_missing",
+          "workshop template has no staged or certified revision",
+        );
+      }
+      const publishedRevisionRows = await workshopDb()
+        .select({ revisionId: workshopPublications.publishedRevisionId })
+        .from(workshopPublications)
+        .where(
+          and(
+            eq(workshopPublications.organizationId, detail.id),
+            eq(workshopPublications.status, "published"),
+            inArray(
+              workshopPublications.publishedRevisionId,
+              revisions.map((revision) => revision.id),
+            ),
+          ),
+        );
+      const publishedRevisionIds = new Set(
+        publishedRevisionRows.flatMap((publication) =>
+          publication.revisionId === null ? [] : [publication.revisionId],
+        ),
+      );
+      const revisionProjections = await Promise.all(
+        revisions.map(async (revision) => {
+          const currentRevision = revision.id === template.currentRevisionId;
+          const declaredProfileIds = new Set(
+            revision.manifest.workspace.runtimeProfiles.map(
+              (profile) => profile.id,
+            ),
+          );
+          const runtimeProfiles = await projectRevisionRuntimeProfiles(
+            revision.id,
+          );
+          return {
             id: revision.id,
             revision: revision.revision,
             sourceRevision: revision.sourceRevision,
@@ -206,10 +231,48 @@ export async function getOrganizationWorkshopsProjection(params: {
             durationMinutes: revision.manifest.durationMinutes,
             moduleCount: revision.manifest.modules.length,
             publishedAt: revision.publishedAt,
-            current: revision.id === template.currentRevisionId,
-            runtimeProfiles: await projectRevisionRuntimeProfiles(revision.id),
-          })),
-        ),
+            current: currentRevision,
+            schedulable:
+              publishedRevisionIds.has(revision.id) &&
+              runtimeProfiles.length === declaredProfileIds.size &&
+              runtimeProfiles.length > 0 &&
+              runtimeProfiles.every(
+                (profile) =>
+                  declaredProfileIds.has(profile.profileId) &&
+                  profile.compatible,
+              ),
+            runtimeProfiles,
+          };
+        }),
+      );
+      const displayedProjection = revisionProjections.find(
+        (revision) => revision.id === displayed?.id,
+      );
+      const hasCleanupPending = displayedProjection?.runtimeProfiles.some(
+        (profile) => profile.certification.state === "cleanup_pending",
+      );
+      const hasFailedCertification = displayedProjection?.runtimeProfiles.some(
+        (profile) => profile.certification.state === "failed",
+      );
+      return {
+        id: template.id,
+        slug: template.slug,
+        title: template.title,
+        summary: template.summary,
+        latestRevision: displayed.revision,
+        currentRevisionId: template.currentRevisionId,
+        revisionCount: revisions.length,
+        durationMinutes: displayed.manifest.durationMinutes,
+        moduleCount: displayed.manifest.modules.length,
+        status: displayedProjection?.schedulable
+          ? ("ready" as const)
+          : hasCleanupPending
+            ? ("cleanup_pending" as const)
+            : hasFailedCertification
+              ? ("failed" as const)
+              : ("building" as const),
+        updatedAt: template.updatedAt,
+        revisions: revisionProjections,
       };
     }),
   );

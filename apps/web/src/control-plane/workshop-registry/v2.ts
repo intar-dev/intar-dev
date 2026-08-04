@@ -23,6 +23,7 @@ import { isWorkshopsEnabledForOrganization } from "@/lib/workshops/feature-flag"
 import { hashWorkshopRegistryToken } from "@/lib/workshops/registry-tokens";
 import { cancelWorkshopPublicationVerifierRuntimes } from "@/lib/workshops/provider-runtime";
 import {
+  MAX_COMPILED_MANIFEST_BYTES,
   validateWorkshopSourceBundle,
   WorkshopBundleValidationError,
   type ValidatedWorkshopSourceBundle,
@@ -46,6 +47,20 @@ const PUBLICATION_PATH = "/registry/v1/workshop-bundles";
 const BUILDER_PATH = "/agent/registry/workshop-publications";
 const CLAIM_LEASE_MS = 12 * 60 * 60 * 1_000;
 const MAX_ERROR_LENGTH = 4_000;
+const CERTIFICATION_CHECKPOINT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const CERTIFICATION_PHASES: ReadonlySet<string> = new Set([
+  "pending",
+  "allocating",
+  "awaiting_checkpoint_proof",
+  "awaiting_reboot_completion",
+  "awaiting_reboot_proof",
+  "deleting",
+  "verified",
+  "failed_before_provider_mutation",
+  "cancelled_before_allocation",
+  "location_fallback",
+  "cleanup_pending",
+]);
 
 type PublisherAuthorization = {
   tokenId: string;
@@ -275,6 +290,7 @@ async function handleStatus(
           profileId: workshopRuntimeProfiles.profileId,
           providerKind: workshopRuntimeProfiles.providerKind,
           state: workshopRuntimeProfileCertifications.state,
+          evidence: workshopRuntimeProfileCertifications.evidenceJson,
           errorCode: workshopRuntimeProfileCertifications.errorCode,
           startedAt: workshopRuntimeProfileCertifications.startedAt,
           verifiedAt: workshopRuntimeProfileCertifications.verifiedAt,
@@ -317,16 +333,131 @@ async function handleStatus(
       error: checkpoint.error,
       verified_at: checkpoint.verifiedAt,
     })),
-    certifications: certifications.map((certification) => ({
-      profile_id: certification.profileId,
-      provider_kind: certification.providerKind,
-      state: certification.state,
-      error_code: certification.errorCode,
-      started_at: certification.startedAt,
-      verified_at: certification.verifiedAt,
-      deletion_confirmed_at: certification.deletionConfirmedAt,
-    })),
+    certifications: certifications.map((certification) => {
+      const progress = certificationProgress(certification.evidence);
+      return {
+        profile_id: certification.profileId,
+        provider_kind: certification.providerKind,
+        state: certification.state,
+        phase: progress.phase,
+        current_checkpoint_id: progress.currentCheckpointId,
+        completed_checkpoint_ids: progress.completedCheckpointIds,
+        completed_checkpoint_count: progress.completedCheckpointIds.length,
+        total_checkpoint_count: progress.totalCheckpointCount,
+        error_code: certification.errorCode,
+        started_at: certification.startedAt,
+        verified_at: certification.verifiedAt,
+        deletion_confirmed_at: certification.deletionConfirmedAt,
+      };
+    }),
   });
+}
+
+type CertificationProgress = {
+  phase: string | null;
+  currentCheckpointId: string | null;
+  completedCheckpointIds: string[];
+  totalCheckpointCount: number;
+};
+
+function certificationProgress(value: unknown): CertificationProgress {
+  const empty = (phase: string | null): CertificationProgress => ({
+    phase,
+    currentCheckpointId: null,
+    completedCheckpointIds: [],
+    totalCheckpointCount: 0,
+  });
+  if (!isRecord(value)) return empty(null);
+
+  const phase =
+    typeof value.phase === "string" && CERTIFICATION_PHASES.has(value.phase)
+      ? value.phase
+      : null;
+  if (value.proofKind !== "direct_cloud_profile_certification_v1") {
+    return empty(phase);
+  }
+
+  const checkpointIds = certificationCheckpointIds(value);
+  if (!checkpointIds) return empty(phase);
+
+  const completedCheckpointIds = certificationCompletedCheckpointIds(
+    value.checkpointProofsCompleted,
+    checkpointIds,
+  );
+  const ordinal = value.currentCheckpointOrdinal;
+  const currentCheckpointId =
+    typeof ordinal === "number" &&
+    Number.isSafeInteger(ordinal) &&
+    ordinal >= 0 &&
+    ordinal < checkpointIds.length
+      ? checkpointIds[ordinal]!
+      : null;
+  return {
+    phase,
+    currentCheckpointId,
+    completedCheckpointIds,
+    totalCheckpointCount: checkpointIds.length,
+  };
+}
+
+function certificationCheckpointIds(
+  evidence: Record<string, unknown>,
+): string[] | null {
+  const cumulative = evidence.cumulativeCheckpointIds;
+  const proofs = evidence.checkpointProofs;
+  if (
+    !Array.isArray(cumulative) ||
+    !Array.isArray(proofs) ||
+    cumulative.length === 0 ||
+    proofs.length !== cumulative.length
+  ) {
+    return null;
+  }
+  const checkpointIds: string[] = [];
+  let serializedCheckpointIdBytes = 2;
+  for (const [ordinal, candidate] of cumulative.entries()) {
+    const proof = proofs[ordinal];
+    if (
+      !isCertificationCheckpointId(candidate) ||
+      !isRecord(proof) ||
+      proof.checkpointId !== candidate
+    ) {
+      return null;
+    }
+    serializedCheckpointIdBytes +=
+      candidate.length + 2 + (ordinal === 0 ? 0 : 1);
+    if (serializedCheckpointIdBytes > MAX_COMPILED_MANIFEST_BYTES) return null;
+    checkpointIds.push(candidate);
+  }
+  return new Set(checkpointIds).size === checkpointIds.length
+    ? checkpointIds
+    : null;
+}
+
+function certificationCompletedCheckpointIds(
+  value: unknown,
+  checkpointIds: readonly string[],
+): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > checkpointIds.length
+  ) {
+    return [];
+  }
+  const completed: string[] = [];
+  for (const [ordinal, candidate] of value.entries()) {
+    const expected = checkpointIds[ordinal];
+    if (!isRecord(candidate) || candidate.checkpointId !== expected) return [];
+    completed.push(expected!);
+  }
+  return completed;
+}
+
+function isCertificationCheckpointId(value: unknown): value is string {
+  return (
+    typeof value === "string" && CERTIFICATION_CHECKPOINT_ID.test(value)
+  );
 }
 
 async function handleCancellation(
