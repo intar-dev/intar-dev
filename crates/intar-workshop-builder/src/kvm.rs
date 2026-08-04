@@ -2791,6 +2791,7 @@ esac
         );
         assert!(source.contains("mise install --locked"));
         assert!(source.contains("umask 0022"));
+        assert!(source.contains("systemctl enable --now docker"));
         let install_packages = source
             .lines()
             .find(|line| line.starts_with("apt-get install "))
@@ -3060,6 +3061,13 @@ esac
         assert!(
             source.contains("Could not merge the normal kubeconfig after Talos bootstrap recovery")
         );
+        assert!(source.contains("configure_talos_restart_policy() {"));
+        assert!(source.contains("--filter \"label=talos.owned=true\""));
+        assert!(source.contains("--filter \"label=talos.cluster.name=${CLUSTER_NAME}\""));
+        assert!(source.contains("${#talos_container_ids[@]} != EXPECTED_TALOS_NODE_COUNT"));
+        assert!(source.contains("docker update \\\n    --restart=unless-stopped"));
+        assert!(source.contains("{{.HostConfig.RestartPolicy.Name}}"));
+        assert!(source.contains("[[ \"${restart_policy}\" == \"unless-stopped\" ]]"));
         assert!(source.contains("cleanup_cluster_bootstrap_files"));
         assert!(source.contains("trap cleanup_cluster_bootstrap EXIT"));
         assert_eq!(source.matches("report_cluster_create_tail").count(), 3);
@@ -3117,6 +3125,7 @@ esac
             .find("wait --for=condition=Ready nodes --all")
             .unwrap();
         let require_create_success = source.find("wait_for_cluster_create_success\n").unwrap();
+        let configure_restart_recovery = source.find("configure_talos_restart_policy\n").unwrap();
         let normal_context = source
             .rfind("kubectl config use-context \"admin@${CLUSTER_NAME}\"")
             .unwrap();
@@ -3128,7 +3137,8 @@ esac
         assert!(!pre_cilium_gate.contains("get --raw=/readyz"));
         assert!(cilium_install < nodes_ready);
         assert!(nodes_ready < require_create_success);
-        assert!(require_create_success < normal_context);
+        assert!(require_create_success < configure_restart_recovery);
+        assert!(configure_restart_recovery < normal_context);
         assert!(
             Command::new("bash")
                 .arg("-n")
