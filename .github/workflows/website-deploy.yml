@@ -641,6 +641,111 @@ jobs:
             'length == 1 and .[0].success == true and .[0].results[0].required_tables == 4' \
             "${result}" >/dev/null
 
+      - name: Apply compatible clean D1 schema patches
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          before="${RUNNER_TEMP}/workshop-republication-index-before.json"
+          apply="${RUNNER_TEMP}/workshop-republication-index-apply.json"
+          after="${RUNNER_TEMP}/workshop-republication-index-after.json"
+          jq -n '[{success: false, state: "not_started"}]' > "${before}"
+          jq -n '[{success: false, state: "not_started"}]' > "${apply}"
+          jq -n '[{success: false, state: "not_started"}]' > "${after}"
+          index_query="SELECT indexes.name, indexes.\"unique\" AS is_unique, indexes.partial, count(columns.name) AS column_count, max(CASE WHEN columns.seqno = 0 THEN columns.name END) AS column_0, max(CASE WHEN columns.seqno = 1 THEN columns.name END) AS column_1 FROM pragma_index_list('workshop_template_revisions') AS indexes JOIN pragma_index_info(indexes.name) AS columns GROUP BY indexes.name, indexes.\"unique\", indexes.partial ORDER BY indexes.name"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${index_query}" \
+            --json > "${before}"
+          jq -e '
+            length == 1 and .[0].success == true and
+            ((.[0].results | map(select(
+                .column_count == 2 and
+                .column_0 == "template_id" and
+                .column_1 == "content_hash"
+              ))) as $content_indexes |
+              ($content_indexes == [{
+                name: "workshop_template_revisions_content_uidx",
+                is_unique: 1,
+                partial: 0,
+                column_count: 2,
+                column_0: "template_id",
+                column_1: "content_hash"
+              }] or $content_indexes == [{
+                name: "workshop_template_revisions_content_idx",
+                is_unique: 0,
+                partial: 0,
+                column_count: 2,
+                column_0: "template_id",
+                column_1: "content_hash"
+              }]))
+          ' "${before}" >/dev/null
+
+          if jq -e '
+            (.[0].results | map(select(
+              .column_count == 2 and
+              .column_0 == "template_id" and
+              .column_1 == "content_hash"
+            ))) == [{
+              name: "workshop_template_revisions_content_uidx",
+              is_unique: 1,
+              partial: 0,
+              column_count: 2,
+              column_0: "template_id",
+              column_1: "content_hash"
+            }]
+          ' "${before}" >/dev/null; then
+            bunx wrangler d1 execute DB \
+              --remote \
+              --config dist/server/wrangler.json \
+              --file "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql" \
+              --yes \
+              --json > "${apply}"
+            jq -e 'length > 0 and all(.[]; .success == true)' "${apply}" >/dev/null
+          else
+            jq -n '[{success: true, already_applied: true}]' > "${apply}"
+          fi
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${index_query}" \
+            --json > "${after}"
+          jq -e '
+            length == 1 and .[0].success == true and
+            (.[0].results | map(select(
+              .column_count == 2 and
+              .column_0 == "template_id" and
+              .column_1 == "content_hash"
+            ))) == [{
+              name: "workshop_template_revisions_content_idx",
+              is_unique: 0,
+              partial: 0,
+              column_count: 2,
+              column_0: "template_id",
+              column_1: "content_hash"
+            }]
+          ' "${after}" >/dev/null
+          sha256sum \
+            "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql" \
+            > "${RUNNER_TEMP}/workshop-republication-index-patch.sha256"
+
+      - name: Retain clean D1 schema-patch evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-d1-schema-patches-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/workshop-republication-index-before.json
+            ${{ runner.temp }}/workshop-republication-index-apply.json
+            ${{ runner.temp }}/workshop-republication-index-after.json
+            ${{ runner.temp }}/workshop-republication-index-patch.sha256
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Configure the pinned, restricted Stargate drain probe
         if: ${{ inputs.clean_d1_cutover_run_id != '' }}
         working-directory: ${{ github.workspace }}
