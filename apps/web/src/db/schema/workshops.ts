@@ -108,7 +108,7 @@ export const workshopTemplateRevisions = sqliteTable(
       table.templateId,
       table.revision,
     ),
-    uniqueIndex("workshop_template_revisions_content_uidx").on(
+    index("workshop_template_revisions_content_idx").on(
       table.templateId,
       table.contentHash,
     ),

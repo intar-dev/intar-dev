@@ -1239,7 +1239,7 @@ CREATE INDEX `workshop_templates_org_updated_idx` ON `workshop_templates` (`orga
 --> statement-breakpoint
 CREATE UNIQUE INDEX `workshop_template_revisions_number_uidx` ON `workshop_template_revisions` (`template_id`, `revision`);
 --> statement-breakpoint
-CREATE UNIQUE INDEX `workshop_template_revisions_content_uidx` ON `workshop_template_revisions` (`template_id`, `content_hash`);
+CREATE INDEX `workshop_template_revisions_content_idx` ON `workshop_template_revisions` (`template_id`, `content_hash`);
 --> statement-breakpoint
 CREATE INDEX `workshop_template_revisions_template_published_idx` ON `workshop_template_revisions` (`template_id`, `published_at`);
 --> statement-breakpoint
