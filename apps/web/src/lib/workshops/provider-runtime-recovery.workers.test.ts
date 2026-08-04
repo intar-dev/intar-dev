@@ -654,6 +654,71 @@ describe("provider runtime recovery", () => {
     expect(operations.results).toEqual([{ operation_kind: "delete_instance" }]);
   });
 
+  it("recovers a publisher cancellation fence by deleting the verifier without another reboot", async () => {
+    await seedCumulativeCertification();
+    await seedCertificationPublication();
+    await env.DB.prepare(
+      `UPDATE workshop_publications
+       SET certification_state = 'cleanup_pending',
+           error = 'publication cancelled by publisher', updated_at = 100
+       WHERE id = 'publication'`,
+    ).run();
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0 });
+
+    const lifecycle = await env.DB.prepare(
+      `SELECT publication.status AS publication_status,
+              publication.certification_state AS publication_certification_state,
+              certification.state AS certification_state,
+              certification.error_code,
+              allocation.state AS allocation_state,
+              allocation.deletion_requested_at,
+              execution.state AS execution_state,
+              reconciliation.desired_state,
+              credential.report_credential_revoked_at
+       FROM workshop_publications publication
+       JOIN workshop_runtime_profiles profile
+         ON profile.template_revision_id = publication.published_revision_id
+       JOIN workshop_runtime_profile_certifications certification
+         ON certification.runtime_profile_id = profile.id
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+        AND credential.generation = execution.generation
+       WHERE publication.id = 'publication'`,
+    ).first<Record<string, string | number | null>>();
+    expect(lifecycle).toMatchObject({
+      publication_status: "failed",
+      publication_certification_state: "failed",
+      certification_state: "failed",
+      error_code: "publication_cancelled",
+      allocation_state: "deleted",
+      deletion_requested_at: 200,
+      execution_state: "archived",
+      desired_state: "deleted",
+      report_credential_revoked_at: 200,
+    });
+    await expectCertificationReboots(0);
+    const operations = await env.DB.prepare(
+      `SELECT operation_kind FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation' ORDER BY created_at`,
+    ).all<{ operation_kind: string }>();
+    expect(operations.results.map((row) => row.operation_kind)).toContain(
+      "delete_instance",
+    );
+    expect(
+      operations.results.some((row) =>
+        row.operation_kind.startsWith("certification_reboot_"),
+      ),
+    ).toBe(false);
+  });
+
   it("proves every cumulative checkpoint and its reboot on one verifier allocation", async () => {
     await seedCumulativeCertification();
     mocks.invokeProviderOperation.mockResolvedValueOnce({
@@ -1264,6 +1329,26 @@ async function seedCumulativeCertification(input?: {
                'https://intar.test', ?, 4102444800000, 1, ?, 1, 4102444800000,
                'bundle-00', ?, 4102444800000, 1, 1)`,
     ).bind("e".repeat(64), reportCredentialHash, "1".repeat(64)),
+  ]);
+}
+
+async function seedCertificationPublication(): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO workshop_registry_tokens
+         (id, organization_id, name, token_prefix, token_hash, created_by, created_at)
+       VALUES ('registry-token', 'org', 'Test publisher', 'intar_test', ?, 'owner', 1)`,
+    ).bind("f".repeat(64)),
+    env.DB.prepare(
+      `INSERT INTO workshop_publications
+         (id, organization_id, workshop_slug, content_hash, source_r2_key,
+          compiled_manifest_json, required_checkpoint_ids_json, status,
+          submitted_by, registry_token_id, published_revision_id,
+          certification_state, created_at, updated_at)
+       VALUES ('publication', 'org', 'workshop', ?, 'source-bundle', '{}',
+               '["checkpoint-00","checkpoint-01"]', 'building', 'owner',
+               'registry-token', 'revision', 'verifying', 1, 1)`,
+    ).bind("9".repeat(64)),
   ]);
 }
 

@@ -11,6 +11,10 @@ import type { PublicationProfileResolution } from "./provider";
 
 const STAGING_ATTEMPTS = 3;
 
+export const WORKSHOP_PUBLICATION_CANCELLED_ERROR =
+  "publication cancelled by publisher";
+export const WORKSHOP_PUBLICATION_CANCELLED_CODE = "publication_cancelled";
+
 export interface StagedWorkshopRevision {
   templateId: string;
   revisionId: string;
@@ -387,6 +391,67 @@ export async function finalizeCertifiedWorkshopRevision(input: {
     throw new Error("published workshop revision failed to advance its template pointer");
   }
   return true;
+}
+
+/**
+ * Fail a staged publication only after every direct-cloud verifier has either
+ * never allocated or has durable provider deletion confirmation. This keeps a
+ * cancellation/failure from presenting as finished while a paid resource is
+ * still alive, including publications with more than one direct profile.
+ */
+export async function finalizeFailedWorkshopPublicationAfterCleanup(input: {
+  env: Cloudflare.Env;
+  publicationId: string;
+  now?: number;
+}): Promise<boolean> {
+  const now = input.now ?? Date.now();
+  const result = await input.env.DB.prepare(
+    `UPDATE workshop_publications
+     SET status = 'failed', certification_state = 'failed',
+         error = COALESCE(error, 'workshop runtime profile certification failed'),
+         claim_expires_at = NULL, finished_at = COALESCE(finished_at, ?),
+         updated_at = ?
+     WHERE id = ? AND status IN ('building', 'failed')
+       AND certification_state IN ('verifying', 'cleanup_pending')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM workshop_runtime_profiles profile
+         LEFT JOIN workshop_runtime_profile_certifications certification
+           ON certification.runtime_profile_id = profile.id
+         LEFT JOIN runtime_provider_allocations allocation
+           ON allocation.id = certification.verifier_allocation_id
+         WHERE profile.template_revision_id = workshop_publications.published_revision_id
+           AND (
+             certification.id IS NULL
+             OR certification.state IN ('pending', 'verifying', 'cleanup_pending')
+             OR (
+               certification.verifier_allocation_id IS NOT NULL
+               AND (
+                 allocation.id IS NULL
+                 OR allocation.state != 'deleted'
+                 OR allocation.deletion_confirmed_at IS NULL
+               )
+             )
+           )
+       )`,
+  )
+    .bind(now, now, input.publicationId)
+    .run();
+  if (result.meta.changes === 1) {
+    await input.env.DB.prepare(
+      `UPDATE workshop_publication_checkpoints
+       SET status = CASE WHEN status = 'verified' THEN status ELSE 'failed' END,
+           error = CASE
+             WHEN status = 'verified' THEN error
+             ELSE COALESCE(error, 'workshop runtime profile certification failed')
+           END,
+           updated_at = ?
+       WHERE publication_id = ?`,
+    )
+      .bind(now, input.publicationId)
+      .run();
+  }
+  return result.meta.changes === 1;
 }
 
 export async function failWorkshopCertification(input: {

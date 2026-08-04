@@ -51,7 +51,11 @@ import {
   resolveWorkspaceGuestTools,
   revokeWorkspaceAgentGeneration,
 } from "./workspace-agent-control-plane";
-import { finalizeCertifiedWorkshopRevision } from "@/control-plane/workshop-registry/publication-state";
+import {
+  finalizeCertifiedWorkshopRevision,
+  finalizeFailedWorkshopPublicationAfterCleanup,
+  WORKSHOP_PUBLICATION_CANCELLED_CODE,
+} from "@/control-plane/workshop-registry/publication-state";
 import {
   ensureDirectCloudPriceObservation,
   getWorkshopCostProjection,
@@ -402,6 +406,8 @@ export async function allocateProviderCertificationRuntime(input: {
       and(
         eq(workshopRuntimeProfileCertifications.id, input.certificationId),
         eq(workshopRuntimeProfileCertifications.state, "pending"),
+        eq(workshopPublications.status, "building"),
+        eq(workshopPublications.certificationState, "verifying"),
         eq(providerConnections.state, "active"),
       ),
     )
@@ -518,11 +524,27 @@ export async function allocateProviderCertificationRuntime(input: {
       const stillPending = await db
         .select({ id: workshopRuntimeProfileCertifications.id })
         .from(workshopRuntimeProfileCertifications)
+        .innerJoin(
+          workshopRuntimeProfiles,
+          eq(
+            workshopRuntimeProfiles.id,
+            workshopRuntimeProfileCertifications.runtimeProfileId,
+          ),
+        )
+        .innerJoin(
+          workshopPublications,
+          eq(
+            workshopPublications.publishedRevisionId,
+            workshopRuntimeProfiles.templateRevisionId,
+          ),
+        )
         .where(
           and(
             eq(workshopRuntimeProfileCertifications.id, row.certification.id),
             eq(workshopRuntimeProfileCertifications.state, "pending"),
             isNull(workshopRuntimeProfileCertifications.verifierAllocationId),
+            eq(workshopPublications.status, "building"),
+            eq(workshopPublications.certificationState, "verifying"),
           ),
         )
         .limit(1);
@@ -621,6 +643,16 @@ export async function allocateProviderCertificationRuntime(input: {
                 isNull(
                   workshopRuntimeProfileCertifications.verifierAllocationId,
                 ),
+                sql`EXISTS (
+                  SELECT 1
+                  FROM workshop_runtime_profiles profile
+                  JOIN workshop_publications publication
+                    ON publication.published_revision_id = profile.template_revision_id
+                  WHERE profile.id = ${workshopRuntimeProfileCertifications.runtimeProfileId}
+                    AND publication.id = ${row.publication.id}
+                    AND publication.status = 'building'
+                    AND publication.certification_state = 'verifying'
+                )`,
               ),
             ),
         ]);
@@ -694,82 +726,107 @@ export async function allocateProviderCertificationRuntime(input: {
     },
   });
   const { execution, executionId, allocationId, deterministicName } = claimed;
-  let providerAttempted = false;
-  try {
-    const creation = await prepareProviderCreationInput({
-      allocationId,
-      execution,
-      context,
-      deterministicName,
-      location,
-      locationAttempt: 1,
-      kinoProbes: manifest.modules.flatMap((module) =>
-        module.probeIds.map((probeId) => ({ moduleId: module.id, probeId })),
-      ),
-      reportExpiresAt: leaseExpiresAt,
-      certification: {
-        publicationId: row.publication.id,
-        checkpointId,
-      },
-      now,
-    });
-    providerAttempted = true;
-    await directProviderAdapter(row.profile.providerKind).createResources(
-      creation,
-    );
-    const bootstrapping = await db
-      .update(runtimeProviderAllocations)
-      .set({ state: "bootstrapping", updatedAt: now })
-      .where(
-        and(
-          eq(runtimeProviderAllocations.id, allocationId),
-          eq(runtimeProviderAllocations.locationAttempt, 1),
-          eq(runtimeProviderAllocations.state, "creating"),
-        ),
-      );
-    if (bootstrapping.meta.changes !== 1) return allocationId;
-    await updateRuntimeExecutionState({
-      executionId,
-      expectedGeneration: 1,
-      state: "provisioning",
-      leaseExpiresAt,
-      observedAt: now,
-    });
-    await db
-      .update(workshopRuntimeProfileCertifications)
-      .set({
-        evidenceJson: {
-          ...evidence,
-          currentCheckpointOrdinal: 0,
-          phase: "awaiting_checkpoint_proof",
-          certificationDurationMs,
-          certificationDeadlineAt: leaseExpiresAt,
-        },
-        updatedAt: now,
-      })
-      .where(eq(workshopRuntimeProfileCertifications.id, row.certification.id));
-    return allocationId;
-  } catch (error) {
-    const code = error instanceof AppError ? error.code : "provider_allocation_failed";
-    const fallbackScheduled = await handleCertificationAllocationFailure({
-      certificationId: row.certification.id,
-      publicationId: row.publication.id,
-      executionId,
-      allocationId,
-      locationAttempt: 1,
-      providerAttempted,
-      error,
-      errorCode: code,
-      evidence: {
-        ...evidence,
-        certificationDurationMs,
-        certificationDeadlineAt: leaseExpiresAt,
-      },
-      now,
-    });
-    if (fallbackScheduled) return allocationId;
-    throw error;
-  }
+  return withRuntimeAllocationLock({
+    key: `workshop-certification:${row.certification.id}:${executionId}:g1`,
+    now,
+    operation: async () => {
+      const publicationIntent = await db
+        .select({
+          status: workshopPublications.status,
+          certificationState: workshopPublications.certificationState,
+        })
+        .from(workshopPublications)
+        .where(eq(workshopPublications.id, row.publication.id))
+        .limit(1);
+      if (
+        publicationIntent[0]?.status !== "building" ||
+        publicationIntent[0]?.certificationState !== "verifying"
+      ) {
+        const current = await loadExecutionAllocation(executionId);
+        if (current?.domainKind === "workshop_certification") {
+          await advanceCertification(current, now);
+        }
+        return allocationId;
+      }
+      let providerAttempted = false;
+      try {
+        const creation = await prepareProviderCreationInput({
+          allocationId,
+          execution,
+          context,
+          deterministicName,
+          location,
+          locationAttempt: 1,
+          kinoProbes: manifest.modules.flatMap((module) =>
+            module.probeIds.map((probeId) => ({ moduleId: module.id, probeId })),
+          ),
+          reportExpiresAt: leaseExpiresAt,
+          certification: {
+            publicationId: row.publication.id,
+            checkpointId,
+          },
+          now,
+        });
+        providerAttempted = true;
+        await directProviderAdapter(
+          row.profile.providerKind as DirectCloudKind,
+        ).createResources(creation);
+        const bootstrapping = await db
+          .update(runtimeProviderAllocations)
+          .set({ state: "bootstrapping", updatedAt: now })
+          .where(
+            and(
+              eq(runtimeProviderAllocations.id, allocationId),
+              eq(runtimeProviderAllocations.locationAttempt, 1),
+              eq(runtimeProviderAllocations.state, "creating"),
+            ),
+          );
+        if (bootstrapping.meta.changes !== 1) return allocationId;
+        await updateRuntimeExecutionState({
+          executionId,
+          expectedGeneration: 1,
+          state: "provisioning",
+          leaseExpiresAt,
+          observedAt: now,
+        });
+        await db
+          .update(workshopRuntimeProfileCertifications)
+          .set({
+            evidenceJson: {
+              ...evidence,
+              currentCheckpointOrdinal: 0,
+              phase: "awaiting_checkpoint_proof",
+              certificationDurationMs,
+              certificationDeadlineAt: leaseExpiresAt,
+            },
+            updatedAt: now,
+          })
+          .where(eq(workshopRuntimeProfileCertifications.id, row.certification.id));
+        return allocationId;
+      } catch (error) {
+        const code =
+          error instanceof AppError ? error.code : "provider_allocation_failed";
+        const fallbackScheduled = await handleCertificationAllocationFailure({
+          certificationId: row.certification.id,
+          publicationId: row.publication.id,
+          executionId,
+          allocationId,
+          locationAttempt: 1,
+          providerAttempted,
+          error,
+          errorCode: code,
+          evidence: {
+            ...evidence,
+            certificationDurationMs,
+            certificationDeadlineAt: leaseExpiresAt,
+          },
+          now,
+        });
+        if (fallbackScheduled) return allocationId;
+        throw error;
+      }
+    },
+  });
 }
 
 export async function archiveProviderWorkshopRuntime(input: {
@@ -816,16 +873,286 @@ export async function archiveProviderWorkshopRuntime(input: {
   return confirmProviderDeletion(context, now);
 }
 
+/**
+ * Persist publisher cancellation before advancing verifier deletion. The
+ * publication remains building/cleanup_pending until every provider resource
+ * has durable deletion confirmation, so a caller can never mistake a request
+ * for completed cleanup.
+ */
+export async function cancelWorkshopPublicationVerifierRuntimes(input: {
+  publicationId: string;
+  organizationId: string;
+  now?: number;
+}): Promise<"cleanup_pending" | "failed"> {
+  const now = input.now ?? Date.now();
+  await env.DB.prepare(
+    `UPDATE workshop_publications
+     SET status = CASE
+           WHEN published_revision_id IS NULL THEN 'failed' ELSE status
+         END,
+         certification_state = CASE
+           WHEN published_revision_id IS NULL THEN CASE
+             WHEN certification_state IS NULL THEN NULL ELSE 'failed'
+           END
+           ELSE 'cleanup_pending'
+         END,
+         error = 'publication cancelled by publisher',
+         claim_expires_at = NULL,
+         finished_at = CASE
+           WHEN published_revision_id IS NULL THEN COALESCE(finished_at, ?)
+           ELSE finished_at
+         END,
+         updated_at = ?
+     WHERE id = ? AND organization_id = ?
+       AND status IN ('queued', 'building')`,
+  )
+    .bind(now, now, input.publicationId, input.organizationId)
+    .run();
+
+  const publication = await env.DB.prepare(
+    `SELECT status, published_revision_id AS revision_id
+     FROM workshop_publications
+     WHERE id = ? AND organization_id = ?`,
+  )
+    .bind(input.publicationId, input.organizationId)
+    .first<{ status: string; revision_id: string | null }>();
+  if (!publication) return "failed";
+  if (publication.status === "published") {
+    throw appError(
+      409,
+      "workshop_publication_immutable",
+      "published workshop revisions are immutable",
+    );
+  }
+  if (!publication.revision_id) return "failed";
+
+  if (publication.status === "failed") {
+    if (!(await cancelledPublicationHasActiveVerifierResources(input.publicationId))) {
+      return "failed";
+    }
+    await env.DB.prepare(
+      `UPDATE workshop_publications
+       SET certification_state = 'cleanup_pending',
+           error = COALESCE(error, 'publication cancelled by publisher'),
+           claim_expires_at = NULL, updated_at = ?
+       WHERE id = ? AND organization_id = ? AND status = 'failed'`,
+    )
+      .bind(now, input.publicationId, input.organizationId)
+      .run();
+  }
+
+  try {
+    await reconcileCancelledWorkshopPublication(input.publicationId, now);
+  } catch {
+    return "cleanup_pending";
+  }
+  return (await cancelledPublicationHasActiveVerifierResources(
+    input.publicationId,
+  ))
+    ? "cleanup_pending"
+    : "failed";
+}
+
+async function cancelledPublicationHasActiveVerifierResources(
+  publicationId: string,
+): Promise<boolean> {
+  const active = await env.DB.prepare(
+    `SELECT 1 AS present
+     FROM workshop_runtime_profiles profile
+     JOIN workshop_runtime_profile_certifications certification
+       ON certification.runtime_profile_id = profile.id
+     JOIN runtime_provider_allocations allocation
+       ON allocation.id = certification.verifier_allocation_id
+     JOIN workshop_publications publication
+       ON publication.published_revision_id = profile.template_revision_id
+     WHERE publication.id = ?
+       AND (allocation.state != 'deleted' OR allocation.deletion_confirmed_at IS NULL)
+     LIMIT 1`,
+  )
+    .bind(publicationId)
+    .first<{ present: number }>();
+  return active?.present === 1;
+}
+
+async function advanceCancelledPublicationVerifierRuntimes(
+  publicationId: string,
+  now: number,
+): Promise<void> {
+  const active = await env.DB.prepare(
+    `SELECT execution.id AS execution_id
+     FROM workshop_runtime_profiles profile
+     JOIN workshop_runtime_profile_certifications certification
+       ON certification.runtime_profile_id = profile.id
+     JOIN runtime_provider_allocations allocation
+       ON allocation.id = certification.verifier_allocation_id
+     JOIN runtime_executions execution
+       ON execution.id = allocation.execution_id
+     JOIN workshop_publications publication
+       ON publication.published_revision_id = profile.template_revision_id
+     WHERE publication.id = ?
+       AND publication.certification_state = 'cleanup_pending'
+       AND (allocation.state != 'deleted' OR allocation.deletion_confirmed_at IS NULL)`,
+  )
+    .bind(publicationId)
+    .all<{ execution_id: string }>();
+  for (const row of active.results) {
+    const context = await loadExecutionAllocation(row.execution_id);
+    if (
+      !context ||
+      context.domainKind !== "workshop_certification" ||
+      context.certificationOwnership?.publicationId !== publicationId
+    ) {
+      continue;
+    }
+    try {
+      await withRuntimeAllocationLock({
+        key: `workshop-certification:${context.workspaceId}:${context.executionId}:g${context.generation}`,
+        now,
+        operation: async () => {
+          const current = await loadExecutionAllocation(context.executionId);
+          if (
+            !current ||
+            current.domainKind !== "workshop_certification" ||
+            current.certificationOwnership?.publicationId !== publicationId
+          ) {
+            return;
+          }
+          await advanceCertification(current, now);
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "runtime_allocation_busy") {
+        throw error;
+      }
+    }
+  }
+}
+
+async function markUnallocatedCancelledCertifications(
+  publicationId: string,
+  now: number,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE workshop_runtime_profile_certifications
+     SET state = 'failed', error_code = ?,
+         deletion_confirmed_at = COALESCE(deletion_confirmed_at, ?),
+         evidence_json = json_set(
+           evidence_json,
+           '$.phase', 'cancelled_before_allocation',
+           '$.cleanupRequestedAt', ?
+         ),
+         updated_at = ?
+     WHERE state = 'pending' AND verifier_allocation_id IS NULL
+       AND runtime_profile_id IN (
+         SELECT profile.id
+         FROM workshop_runtime_profiles profile
+         JOIN workshop_publications publication
+           ON publication.published_revision_id = profile.template_revision_id
+         WHERE publication.id = ?
+           AND publication.certification_state = 'cleanup_pending'
+       )`,
+  )
+    .bind(
+      WORKSHOP_PUBLICATION_CANCELLED_CODE,
+      now,
+      now,
+      now,
+      publicationId,
+    )
+    .run();
+}
+
+async function reconcileCancelledWorkshopPublication(
+  publicationId: string,
+  now: number,
+): Promise<void> {
+  await markUnallocatedCancelledCertifications(publicationId, now);
+  await advanceCancelledPublicationVerifierRuntimes(publicationId, now);
+  await env.DB.prepare(
+    `UPDATE workshop_runtime_profile_certifications
+     SET state = 'failed', error_code = COALESCE(error_code, ?),
+         deletion_confirmed_at = allocation_deletion_confirmed_at,
+         updated_at = ?
+     FROM (
+       SELECT id AS allocation_id, deletion_confirmed_at AS allocation_deletion_confirmed_at
+       FROM runtime_provider_allocations
+       WHERE state = 'deleted' AND deletion_confirmed_at IS NOT NULL
+     ) deleted
+     WHERE verifier_allocation_id = deleted.allocation_id
+       AND state = 'cleanup_pending'
+       AND runtime_profile_id IN (
+         SELECT profile.id
+         FROM workshop_runtime_profiles profile
+         JOIN workshop_publications publication
+           ON publication.published_revision_id = profile.template_revision_id
+         WHERE publication.id = ?
+           AND publication.certification_state = 'cleanup_pending'
+       )`,
+  )
+    .bind(WORKSHOP_PUBLICATION_CANCELLED_CODE, now, publicationId)
+    .run();
+  await finalizeFailedWorkshopPublicationAfterCleanup({
+    env,
+    publicationId,
+    now,
+  });
+}
+
+async function reconcileCancelledWorkshopPublications(now: number): Promise<void> {
+  const publications = await env.DB.prepare(
+    `SELECT id FROM workshop_publications
+     WHERE status IN ('building', 'failed')
+       AND certification_state = 'cleanup_pending'`,
+  ).all<{ id: string }>();
+  for (const publication of publications.results) {
+    try {
+      await reconcileCancelledWorkshopPublication(publication.id, now);
+    } catch {
+      // Isolate provider or credential failures so another publication cannot
+      // starve the whole minute sweep. The due-allocation pass below records
+      // the individual failure and schedules its retry.
+    }
+  }
+}
+
 export async function sweepWorkshopProviderRuntimes(input: {
   now?: number;
   limit?: number;
 } = {}): Promise<{ inspected: number; deleted: number; pending: number; failed: number }> {
   const now = input.now ?? Date.now();
   const limit = Math.max(1, Math.min(100, input.limit ?? 25));
+  await reconcileCancelledWorkshopPublications(now);
   const pendingCertifications = await drizzle(env.DB)
     .select({ id: workshopRuntimeProfileCertifications.id })
     .from(workshopRuntimeProfileCertifications)
-    .where(eq(workshopRuntimeProfileCertifications.state, "pending"))
+    .innerJoin(
+      workshopRuntimeProfiles,
+      eq(
+        workshopRuntimeProfiles.id,
+        workshopRuntimeProfileCertifications.runtimeProfileId,
+      ),
+    )
+    .innerJoin(
+      workshopTemplateRevisions,
+      eq(
+        workshopTemplateRevisions.id,
+        workshopRuntimeProfiles.templateRevisionId,
+      ),
+    )
+    .innerJoin(
+      workshopPublications,
+      eq(
+        workshopPublications.publishedRevisionId,
+        workshopTemplateRevisions.id,
+      ),
+    )
+    .where(
+      and(
+        eq(workshopRuntimeProfileCertifications.state, "pending"),
+        eq(workshopPublications.status, "building"),
+        eq(workshopPublications.certificationState, "verifying"),
+      ),
+    )
     .limit(limit);
   const result = {
     inspected: pendingCertifications.length,
@@ -988,6 +1315,7 @@ export async function sweepWorkshopProviderRuntimes(input: {
       });
     }
   }
+  await reconcileCancelledWorkshopPublications(now);
   return result;
 }
 
@@ -1118,6 +1446,35 @@ async function advanceCertification(
     );
   }
   if (row.state === "verified") return "deleted";
+  if (context.certificationOwnership && row.state === "verifying") {
+    const publication = await drizzle(env.DB)
+      .select({
+        status: workshopPublications.status,
+        certificationState: workshopPublications.certificationState,
+      })
+      .from(workshopPublications)
+      .where(
+        eq(
+          workshopPublications.id,
+          context.certificationOwnership.publicationId,
+        ),
+      )
+      .limit(1);
+    if (
+      publication[0]?.status === "building" &&
+      publication[0]?.certificationState === "cleanup_pending"
+    ) {
+      await requestCertificationCleanup({
+        context,
+        certificationId: row.id,
+        evidence: row.evidenceJson,
+        errorCode: WORKSHOP_PUBLICATION_CANCELLED_CODE,
+        failedReportSequence: null,
+        now,
+      });
+      return "pending";
+    }
+  }
   if (row.state === "cleanup_pending" || context.allocation.state === "cleanup_pending") {
     if (
       context.allocation.state === "cleanup_pending" &&
@@ -1144,14 +1501,11 @@ async function advanceCertification(
         })
         .where(eq(workshopRuntimeProfileCertifications.id, row.id));
       if (context.certificationOwnership) {
-        await env.DB.prepare(
-          `UPDATE workshop_publications
-           SET status = 'failed', certification_state = 'failed',
-               finished_at = ?, updated_at = ?
-           WHERE id = ? AND status = 'building'`,
-        )
-          .bind(now, now, context.certificationOwnership.publicationId)
-          .run();
+        await finalizeFailedWorkshopPublicationAfterCleanup({
+          env,
+          publicationId: context.certificationOwnership.publicationId,
+          now,
+        });
       }
       return "deleted";
     }

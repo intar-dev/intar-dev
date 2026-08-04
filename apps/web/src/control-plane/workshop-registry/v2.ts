@@ -21,6 +21,7 @@ import {
 import { createAppId } from "@/lib/id";
 import { isWorkshopsEnabledForOrganization } from "@/lib/workshops/feature-flag";
 import { hashWorkshopRegistryToken } from "@/lib/workshops/registry-tokens";
+import { cancelWorkshopPublicationVerifierRuntimes } from "@/lib/workshops/provider-runtime";
 import {
   validateWorkshopSourceBundle,
   WorkshopBundleValidationError,
@@ -45,7 +46,6 @@ const PUBLICATION_PATH = "/registry/v1/workshop-bundles";
 const BUILDER_PATH = "/agent/registry/workshop-publications";
 const CLAIM_LEASE_MS = 12 * 60 * 60 * 1_000;
 const MAX_ERROR_LENGTH = 4_000;
-const CANCELLED_ERROR = "publication cancelled by publisher";
 
 type PublisherAuthorization = {
   tokenId: string;
@@ -354,64 +354,16 @@ async function handleCancellation(
       409,
     );
   }
-  if (current[0].status === "failed") {
-    return jsonResponse({ publication_id: publicationId, status: "failed" });
-  }
   const now = Date.now();
-  const results = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE workshop_publications
-       SET status = 'failed', certification_state = CASE
-             WHEN certification_state IS NULL THEN NULL ELSE 'failed' END,
-           error = ?, claim_expires_at = NULL, finished_at = ?, updated_at = ?
-       WHERE id = ? AND organization_id = ? AND status IN ('queued', 'building')
-         AND NOT EXISTS (
-           SELECT 1
-           FROM workshop_runtime_profiles profile
-           JOIN workshop_runtime_profile_certifications certification
-             ON certification.runtime_profile_id = profile.id
-           JOIN runtime_provider_allocations allocation
-             ON allocation.id = certification.verifier_allocation_id
-           WHERE profile.template_revision_id = workshop_publications.published_revision_id
-             AND (allocation.state != 'deleted' OR allocation.deletion_confirmed_at IS NULL)
-         )`,
-    ).bind(
-      CANCELLED_ERROR,
-      now,
-      now,
-      publicationId,
-      authorized.organizationId,
-    ),
-    env.DB.prepare(
-      `UPDATE workshop_runtime_profile_certifications
-       SET state = CASE WHEN state = 'verified' THEN state ELSE 'failed' END,
-           error_code = CASE WHEN state = 'verified' THEN error_code ELSE 'publication_cancelled' END,
-           updated_at = ?
-       WHERE runtime_profile_id IN (
-         SELECT profile.id FROM workshop_runtime_profiles profile
-         JOIN workshop_publications publication
-           ON publication.published_revision_id = profile.template_revision_id
-         WHERE publication.id = ? AND publication.status = 'failed'
-       )`,
-    ).bind(now, publicationId),
-    env.DB.prepare(
-      `UPDATE workshop_publication_checkpoints
-       SET status = CASE WHEN status = 'verified' THEN status ELSE 'failed' END,
-           error = CASE WHEN status = 'verified' THEN error ELSE ? END,
-           updated_at = ?
-       WHERE publication_id = ? AND EXISTS (
-         SELECT 1 FROM workshop_publications publication
-         WHERE publication.id = ? AND publication.status = 'failed'
-       )`,
-    ).bind(CANCELLED_ERROR, now, publicationId, publicationId),
-  ]);
-  if (results[0]?.meta.changes !== 1) {
-    return jsonResponse(
-      { error: "publication still owns provider resources; cleanup must finish first" },
-      409,
-    );
-  }
-  return jsonResponse({ publication_id: publicationId, status: "failed" });
+  const status = await cancelWorkshopPublicationVerifierRuntimes({
+    publicationId,
+    organizationId: authorized.organizationId,
+    now,
+  });
+  return jsonResponse(
+    { publication_id: publicationId, status },
+    status === "cleanup_pending" ? 202 : 200,
+  );
 }
 
 async function handleClaim(
