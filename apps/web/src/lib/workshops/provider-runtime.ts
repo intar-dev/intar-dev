@@ -3052,23 +3052,36 @@ function directAdapter(kind: DirectCloudKind): ProductionRuntimeProviderAdapter 
             isNull(runtimeProviderResources.disappearanceConfirmedAt),
           ),
         );
-      for (const resourceKind of [
-        { stored: "instance", provider: "server" },
-        { stored: "ipv4", provider: "primary_ip" },
-        { stored: "ssh_key", provider: "ssh_key" },
-      ] as const) {
-        const resource = resources.find(
-          (candidate) => candidate.resourceKind === resourceKind.stored,
-        );
-        if (!resource) continue;
-        await providerMutation(mutation, `delete_${resourceKind.provider}`, {
+      const instance = resources.find(
+        (candidate) => candidate.resourceKind === "instance",
+      );
+      const ipv4 = resources.find(
+        (candidate) => candidate.resourceKind === "ipv4",
+      );
+      const sshKey = resources.find(
+        (candidate) => candidate.resourceKind === "ssh_key",
+      );
+      const deleteResource = async (
+        resource: (typeof resources)[number],
+        providerKind: "server" | "primary_ip" | "ssh_key",
+      ) => {
+        await providerMutation(mutation, `delete_${providerKind}`, {
           kind: "delete_resource",
-          resourceKind: resourceKind.provider,
+          resourceKind: providerKind,
           externalId: Number(resource.providerResourceId),
           deterministicName: resourceName(resource),
           ownership: ownershipLabels(mutation),
         });
+      };
+      if (instance) {
+        // Server deletion is asynchronous and the Primary IP remains attached
+        // until the server disappears. Defer that IP to the next verified sweep.
+        await deleteResource(instance, "server");
+        if (sshKey) await deleteResource(sshKey, "ssh_key");
+        return;
       }
+      if (ipv4) await deleteResource(ipv4, "primary_ip");
+      if (sshKey) await deleteResource(sshKey, "ssh_key");
     },
   };
   return adapter;
@@ -4619,13 +4632,42 @@ async function pendingHetznerActionIds(
   locationAttempt: number,
   now: number,
 ): Promise<number[]> {
-  const operations = await pendingProviderOperations(
-    allocationId,
-    "hetzner_cloud",
-    locationAttempt,
-    now,
+  const [operations, activeResources] = await Promise.all([
+    pendingProviderOperations(
+      allocationId,
+      "hetzner_cloud",
+      locationAttempt,
+      now,
+    ),
+    drizzle(env.DB)
+      .select({ resourceKind: runtimeProviderResources.resourceKind })
+      .from(runtimeProviderResources)
+      .where(
+        and(
+          eq(runtimeProviderResources.allocationId, allocationId),
+          eq(runtimeProviderResources.locationAttempt, locationAttempt),
+          isNull(runtimeProviderResources.disappearanceConfirmedAt),
+        ),
+      ),
+  ]);
+  const activeKinds = new Set(
+    activeResources.map((resource) => resource.resourceKind),
   );
   return operations.flatMap((operation) => {
+    const deletionTarget =
+      operation.operationKind === "delete_server" ||
+      operation.operationKind.startsWith("delete_server:")
+        ? "instance"
+        : operation.operationKind === "delete_primary_ip" ||
+            operation.operationKind.startsWith("delete_primary_ip:")
+          ? "ipv4"
+          : operation.operationKind === "delete_ssh_key" ||
+              operation.operationKind.startsWith("delete_ssh_key:")
+            ? "ssh_key"
+            : null;
+    // Provider action history expires before resource identity. Once an owned
+    // target is confirmed absent, do not let its stale delete action block cleanup.
+    if (deletionTarget && !activeKinds.has(deletionTarget)) return [];
     if (!operation.providerOperationId) return [];
     const id = Number(operation.providerOperationId);
     return Number.isSafeInteger(id) && id > 0 ? [id] : [];
