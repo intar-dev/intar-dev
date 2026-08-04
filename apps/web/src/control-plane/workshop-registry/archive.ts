@@ -14,7 +14,7 @@ import type { WorkshopManifestV2 } from "@/db/schema";
 
 const COMPILED_MANIFEST_PATH = "workshop.compiled.json";
 const MAX_COMPRESSED_BUNDLE_BYTES = 64 * 1024 * 1024;
-const MAX_COMPILED_MANIFEST_BYTES = 2 * 1024 * 1024;
+export const MAX_COMPILED_MANIFEST_BYTES = 2 * 1024 * 1024;
 const WORKSHOP_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SOURCE_LAYOUTS = new Set([
   "cover",
