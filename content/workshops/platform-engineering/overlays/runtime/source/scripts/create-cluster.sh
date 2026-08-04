@@ -128,6 +128,44 @@ readonly EXPECTED_TALOS_NODE_COUNT=$((TALOS_CONTROLPLANE_COUNT + TALOS_WORKER_CO
 readonly TALOS_NODE_REGISTRATION_TIMEOUT_SECONDS=1200
 readonly TALOS_DOCKER_INSPECT_TIMEOUT_SECONDS=5
 
+configure_talos_restart_policy() {
+  local container_ids_output container_id restart_policy
+  local -a talos_container_ids=()
+
+  if ! container_ids_output="$(
+    docker ps -aq \
+      --filter "label=talos.owned=true" \
+      --filter "label=talos.cluster.name=${CLUSTER_NAME}"
+  )"; then
+    die "Could not enumerate Talos node containers for restart recovery"
+  fi
+  while IFS= read -r container_id; do
+    [[ -z "${container_id}" ]] || talos_container_ids+=("${container_id}")
+  done <<<"${container_ids_output}"
+
+  if (( ${#talos_container_ids[@]} != EXPECTED_TALOS_NODE_COUNT )); then
+    die "Expected ${EXPECTED_TALOS_NODE_COUNT} Talos node containers before configuring restart recovery; found ${#talos_container_ids[@]}"
+  fi
+  if ! docker update \
+    --restart=unless-stopped \
+    "${talos_container_ids[@]}" >/dev/null; then
+    die "Could not configure Talos node containers for host-reboot recovery"
+  fi
+  for container_id in "${talos_container_ids[@]}"; do
+    if ! restart_policy="$(
+      docker inspect \
+        --format '{{.HostConfig.RestartPolicy.Name}}' \
+        "${container_id}"
+    )"; then
+      die "Could not inspect a Talos node container restart policy"
+    fi
+    [[ "${restart_policy}" == "unless-stopped" ]] || {
+      die "Talos node container restart policy is '${restart_policy}', expected 'unless-stopped'"
+    }
+  done
+  ok "Talos node containers will recover after a learner-host reboot"
+}
+
 cleanup_destroyed_cluster_contexts() {
   local contexts current_context other_context talosconfig_path
 
@@ -1080,6 +1118,7 @@ fi
 # command must complete successfully and merge its kubeconfig normally.
 step "Completing Talos cluster creation"
 wait_for_cluster_create_success
+configure_talos_restart_policy
 if [[ "${cluster_create_state}" == "recovered" ]]; then
   if ! talosctl \
     --context "${CLUSTER_NAME}" \

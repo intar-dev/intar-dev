@@ -8,9 +8,9 @@ const PINNED_REVISION = "1b6fad43551a720b143d7a52799f81c4c89455cb";
 const EXPECTED_RAW_TREE_SHA256 =
   "3379919ee02075348a737271637b1a2145372c0323fde7d2b5a62a307e673aa5";
 const EXPECTED_ADAPTED_TREE_SHA256 =
-  "22b1a28c20975cf83d6f960895f82139ec150347624d35a422fdf0e1d3dcd17a";
+  "dbe7fdc9fb143cfc4fa7aa4499062de55052a29f77cf16c39bcaf7a15ece2bc4";
 const EXPECTED_OVERLAY_SHA256 =
-  "d812453117d4dc2ba3c47b21c7e3d865c1efbfd7aed8253b84ec411803e25b8f";
+  "6fd7d68f412220156f18d43ff6d68920b5b1d6af5a31c647356b02194d3cca76";
 const EXPECTED_CHANGED_FILES = 2;
 
 const rawRoot = resolve(process.argv[2] ?? "");
@@ -32,6 +32,7 @@ assertModule10CumulativeContract(adaptedRoot, "checked-in workshop");
 assertPortalSigningAuthority(adaptedRoot);
 assertCloudboxRuntimeEndpoints(rawRoot, "regenerated import");
 assertCloudboxRuntimeEndpoints(adaptedRoot, "checked-in workshop");
+assertTalosRestartRecoveryContract(adaptedRoot);
 
 const raw = snapshot(rawRoot);
 const adapted = snapshot(adaptedRoot);
@@ -245,6 +246,43 @@ function assertNullSafeConditionWaitContract(root: string, label: string) {
     )
   ) {
     throw new Error(`${label} retains an unsafe CNPG fault restore wait`);
+  }
+}
+
+function assertTalosRestartRecoveryContract(root: string) {
+  const script = readFileSync(
+    join(root, "runtime/source/scripts/create-cluster.sh"),
+    "utf8",
+  );
+  for (const contract of [
+    "configure_talos_restart_policy() {",
+    '--filter "label=talos.owned=true"',
+    '--filter "label=talos.cluster.name=${CLUSTER_NAME}"',
+    "${#talos_container_ids[@]} != EXPECTED_TALOS_NODE_COUNT",
+    "docker update \\",
+    "--restart=unless-stopped",
+    "{{.HostConfig.RestartPolicy.Name}}",
+    '[[ "${restart_policy}" == "unless-stopped" ]]',
+  ]) {
+    if (!script.includes(contract)) {
+      throw new Error(
+        `checked-in workshop is missing Talos restart-recovery contract: ${contract}`,
+      );
+    }
+  }
+  const clusterCreated = script.indexOf("wait_for_cluster_create_success\n");
+  const restartConfigured = script.indexOf("configure_talos_restart_policy\n");
+  const normalContext = script.lastIndexOf(
+    'kubectl config use-context "admin@${CLUSTER_NAME}"',
+  );
+  if (
+    clusterCreated < 0 ||
+    restartConfigured <= clusterCreated ||
+    normalContext <= restartConfigured
+  ) {
+    throw new Error(
+      "checked-in workshop does not configure Talos restart recovery immediately after cluster creation",
+    );
   }
 }
 
