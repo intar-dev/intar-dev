@@ -1963,7 +1963,7 @@ async function latestCertificationRebootOperation(input: {
     `SELECT state, provider_operation_id, retry_at, error_code
      FROM runtime_provider_operations
      WHERE allocation_id = ? AND location_attempt = ? AND operation_kind = ?
-     ORDER BY created_at DESC, attempt DESC
+     ORDER BY attempt DESC, created_at DESC
      LIMIT 1`,
   )
     .bind(input.allocationId, input.locationAttempt, input.operationKind)
@@ -3985,7 +3985,7 @@ async function providerMutation(
     `SELECT id, request_id, state, attempt, provider_operation_id
      FROM runtime_provider_operations
      WHERE allocation_id = ? AND location_attempt = ? AND operation_kind = ?
-     ORDER BY created_at DESC, attempt DESC
+     ORDER BY attempt DESC, created_at DESC
      LIMIT 1`,
   )
     .bind(input.allocationId, input.locationAttempt, operationKind)
