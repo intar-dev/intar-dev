@@ -1370,6 +1370,247 @@ describe("provider runtime recovery", () => {
     await expectCertificationReboots(0);
   });
 
+  it("latches a failed checkpoint report across a later applying report", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO runtime_guest_reports
+           (id, execution_id, provider_kind, generation, sequence, checkpoint_id,
+            boot_id, phase, health, terminal_ready, probes_json,
+            completed_module_ids_json, report_json, reported_at, received_at)
+         VALUES ('failed-report', 'cert-execution', 'gcp_compute', 1, 1,
+                 'checkpoint-00', ?, 'failed', 'failed', 0, '[]', '[]', '{}', 100, 100)`,
+      ).bind(BOOT_A),
+      env.DB.prepare(
+        `INSERT INTO runtime_guest_reports
+           (id, execution_id, provider_kind, generation, sequence, checkpoint_id,
+            boot_id, phase, health, terminal_ready, probes_json,
+            completed_module_ids_json, report_json, reported_at, received_at)
+         VALUES ('restarted-applying-report', 'cert-execution', 'gcp_compute', 1, 2,
+                 'checkpoint-00', ?, 'applying_checkpoint', 'unknown', 0,
+                 '[]', '[]', '{}', 150, 150)`,
+      ).bind(BOOT_A),
+    ]);
+    await makeCertificationDue(200);
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+
+    const lifecycle = await env.DB.prepare(
+      `SELECT certification.state, certification.error_code,
+              certification.evidence_json,
+              allocation.state AS allocation_state,
+              execution.state AS execution_state,
+              credential.report_credential_revoked_at
+       FROM workshop_runtime_profile_certifications certification
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+        AND credential.generation = execution.generation
+       WHERE certification.id = 'certification'`,
+    ).first<{
+      state: string;
+      error_code: string;
+      evidence_json: string;
+      allocation_state: string;
+      execution_state: string;
+      report_credential_revoked_at: number | null;
+    }>();
+    expect(lifecycle).toMatchObject({
+      state: "cleanup_pending",
+      error_code: "workshop_certification_guest_failed",
+      allocation_state: "cleanup_pending",
+      execution_state: "failed",
+      report_credential_revoked_at: 200,
+    });
+    expect(JSON.parse(lifecycle?.evidence_json ?? "{}")).toMatchObject({
+      failedReportSequence: 1,
+      cleanupRequestedAt: 200,
+    });
+    await expectCertificationReboots(0);
+  });
+
+  it("sweeps a certification allocation left failed by the workspace-agent handler", async () => {
+    await seedCumulativeCertification();
+
+    const reportResponse = await certificationReportRequest({
+      sequence: 1,
+      checkpointId: "checkpoint-00",
+      bootId: BOOT_A,
+      completedModuleIds: [],
+      probeIds: [],
+      phase: "failed",
+      health: "failed",
+      terminalReady: false,
+    });
+    expect(reportResponse.status).toBe(200);
+    await expect(reportResponse.json()).resolves.toMatchObject({
+      accepted_sequence: 1,
+    });
+
+    const reported = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.last_report_sequence,
+              execution.state AS execution_state,
+              reconciliation.sweep_after,
+              reconciliation.claim_id
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<Record<string, string | number | null>>();
+    expect(reported).toMatchObject({
+      allocation_state: "failed",
+      last_report_sequence: 1,
+      execution_state: "failed",
+      sweep_after: 0,
+      claim_id: null,
+    });
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toMatchObject({ inspected: 1, failed: 0, pending: 1 });
+
+    const cleaned = await env.DB.prepare(
+      `SELECT certification.state, certification.error_code,
+              certification.evidence_json,
+              allocation.state AS allocation_state,
+              execution.state AS execution_state,
+              reconciliation.desired_state,
+              credential.report_credential_revoked_at
+       FROM workshop_runtime_profile_certifications certification
+       JOIN runtime_provider_allocations allocation
+         ON allocation.id = certification.verifier_allocation_id
+       JOIN runtime_executions execution
+         ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       JOIN runtime_guest_credentials credential
+         ON credential.execution_id = execution.id
+        AND credential.generation = execution.generation
+       WHERE certification.id = 'certification'`,
+    ).first<{
+      state: string;
+      error_code: string;
+      evidence_json: string;
+      allocation_state: string;
+      execution_state: string;
+      desired_state: string;
+      report_credential_revoked_at: number | null;
+    }>();
+    expect(cleaned).toMatchObject({
+      state: "cleanup_pending",
+      error_code: "workshop_certification_guest_failed",
+      allocation_state: "cleanup_pending",
+      execution_state: "failed",
+      desired_state: "deleted",
+      report_credential_revoked_at: 200,
+    });
+    expect(JSON.parse(cleaned?.evidence_json ?? "{}")).toMatchObject({
+      failedReportSequence: 1,
+      cleanupRequestedAt: 200,
+    });
+    await expectCertificationReboots(0);
+  });
+
+  it("does not sweep a failed learner allocation as certification work", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO workshop_sessions
+           (id, organization_id, template_revision_id, title, state,
+            scheduled_start_at, lobby_opens_at, created_by)
+         VALUES ('session', 'org', 'revision', 'Session', 'live', 1000, 500,
+                 'owner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_session_runtime_selections
+           (session_id, runtime_profile_id, profile_id, provider_kind,
+            connection_id, resolved_profile_json)
+         VALUES ('session', 'profile', 'gcp-e2', 'gcp_compute', 'connection', '{}')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_session_cost_forecasts
+           (id, session_id, version, price_observation_id, provider_kind,
+            currency, participant_count, trigger, expected_cost_nanos,
+            lease_ceiling_cost_nanos, one_restore_cost_nanos,
+            assumptions_json, exclusions_json, expires_at, created_by)
+         VALUES ('learner-forecast', 'session', 1, 'cert-price', 'gcp_compute',
+                 'USD', 1, 'session_created', 1, 1, 1, '[]', '[]', 1000,
+                 'owner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_session_members
+           (id, session_id, user_id, role, workspace_enabled, provision_state,
+            assigned_by)
+         VALUES ('roster', 'session', 'owner', 'participant', 1, 'failed',
+                 'owner')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_workspaces
+           (id, session_id, user_id, state)
+         VALUES ('workspace', 'session', 'owner', 'failed')`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO workshop_workspace_generations
+           (id, workspace_id, ordinal, checkpoint_id, state)
+         VALUES ('learner-generation', 'workspace', 1, 'checkpoint-00', 'failed')`,
+      ),
+      env.DB.prepare(
+        `UPDATE workshop_workspaces
+         SET current_generation_id = 'learner-generation'
+         WHERE id = 'workspace'`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_executions
+           (id, user_id, organization_id, provider_kind,
+            provider_connection_id, domain_kind, domain_id, generation,
+            checkpoint_id, state, lease_expires_at, created_at, updated_at)
+         VALUES ('learner-execution', 'owner', 'org', 'gcp_compute',
+                 'connection', 'workshop', 'workspace', 1, 'checkpoint-00',
+                 'failed', 1000, 1, 1)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_allocations
+           (id, execution_id, connection_id, runtime_profile_id,
+            price_observation_id, cost_forecast_id, provider_kind,
+            deterministic_name, machine_type, resolved_image_id,
+            location_attempts_json, location, location_attempt,
+            location_attempt_started_at, state, created_at, updated_at)
+         VALUES ('learner-allocation', 'learner-execution', 'connection',
+                 'profile', 'cert-price', 'learner-forecast', 'gcp_compute',
+                 'intar-learner', 'e2-standard-4', 'debian-image-1',
+                 '["europe-west3-a","europe-west3-b"]', 'europe-west3-a',
+                 1, 1, 'failed', 1, 1)`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_reconciliation
+           (allocation_id, desired_state, observed_state, sweep_after, updated_at)
+         VALUES ('learner-allocation', 'ready', 'failed', 0, 1)`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET sweep_after = 1000 WHERE allocation_id = 'cert-allocation'`,
+      ),
+    ]);
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 200, limit: 10 }),
+    ).resolves.toEqual({ inspected: 0, deleted: 0, pending: 0, failed: 0 });
+    expect(mocks.invokeProviderOperation).not.toHaveBeenCalled();
+    const allocation = await env.DB.prepare(
+      `SELECT state FROM runtime_provider_allocations
+       WHERE id = 'learner-allocation'`,
+    ).first<{ state: string }>();
+    expect(allocation?.state).toBe("failed");
+  });
+
   it("selects a durable checkpoint restore exactly until a runtime is linked", async () => {
     await env.DB.batch([
       env.DB.prepare(
@@ -1758,7 +1999,11 @@ async function certificationReportRequest(input: {
   bootId: string;
   completedModuleIds: string[];
   probeIds: string[];
+  phase?: "ready" | "failed";
+  health?: "healthy" | "failed";
+  terminalReady?: boolean;
 }): Promise<Response> {
+  const terminalReady = input.terminalReady ?? true;
   const response = await handleWorkspaceAgentControlPlaneRequest(
     new Request("https://intar.test/api/runtime/workspace-agent/reports", {
       method: "POST",
@@ -1776,12 +2021,14 @@ async function certificationReportRequest(input: {
         sequence: input.sequence,
         checkpoint_id: input.checkpointId,
         boot_id: input.bootId,
-        phase: "ready",
-        health: "healthy",
-        terminal_ready: true,
+        phase: input.phase ?? "ready",
+        health: input.health ?? "healthy",
+        terminal_ready: terminalReady,
         recording_drain_completed: false,
         completed_module_ids: input.completedModuleIds,
-        ssh_host_keys_openssh: ["ssh-ed25519 AAAATEST verifier"],
+        ssh_host_keys_openssh: terminalReady
+          ? ["ssh-ed25519 AAAATEST verifier"]
+          : [],
         probes: input.probeIds.map((id) => ({
           id,
           status: "pass",
