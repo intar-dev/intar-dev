@@ -1204,7 +1204,7 @@ export async function sweepWorkshopProviderRuntimes(input: {
           ]),
           and(
             eq(runtimeExecutions.domainKind, "workshop_certification"),
-            eq(runtimeProviderAllocations.state, "ready"),
+            inArray(runtimeProviderAllocations.state, ["ready", "failed"]),
           ),
           and(
             eq(runtimeExecutions.domainKind, "workshop"),
@@ -2487,12 +2487,15 @@ async function latestCertificationProof(
   executionId: string,
   checkpointId: string,
 ): Promise<CertificationProof | null> {
+  // Certification fails closed: a restarted agent may emit newer progress
+  // after reporting failure, but that retry must not erase the failed proof.
   const row = await env.DB.prepare(
     `SELECT sequence, checkpoint_id, boot_id, phase, health, terminal_ready,
             completed_module_ids_json, probes_json, received_at
      FROM runtime_guest_reports
      WHERE execution_id = ? AND checkpoint_id = ?
-     ORDER BY sequence DESC
+     ORDER BY CASE WHEN phase = 'failed' OR health = 'failed' THEN 1 ELSE 0 END DESC,
+              sequence DESC
      LIMIT 1`,
   )
     .bind(executionId, checkpointId)
