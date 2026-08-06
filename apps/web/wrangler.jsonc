@@ -61,9 +61,9 @@
   "d1_databases": [
     {
       "binding": "DB",
-      // CI replaces this fail-closed placeholder with the new clean database
-      // ID after creating `intar-dev-control-plane-v2-20260803-r3`.
-      "database_id": "00000000-0000-0000-0000-000000000003",
+      // D1 has no supported database-name mutation; the UUID is the stable
+      // production identity and must remain paired with its actual name.
+      "database_id": "1aade7e2-85e6-4304-9851-2bc71e082476",
       "database_name": "intar-dev-control-plane-v2-20260803-r3",
       "migrations_dir": "migrations",
     },

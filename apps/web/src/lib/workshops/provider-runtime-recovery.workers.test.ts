@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "@/lib/app-error";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
 
 const mocks = vi.hoisted(() => ({ invokeProviderOperation: vi.fn() }));
@@ -29,7 +29,7 @@ import { reconcileProviderCostLedger } from "./provider-cost-ledger";
 import { loadDeferredWorkshopRuntimeReplacementCandidates } from "./runtime-orchestrator";
 
 beforeEach(async () => {
-  await resetCleanD1Database();
+  await resetDatabase();
   vi.clearAllMocks();
   mocks.invokeProviderOperation.mockResolvedValue({
     canonicalWrites: [],

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 import {
   WORKSHOP_PROVIDER_PREFLIGHT_TTL_MS,
   countWorkshopRequestedSeats,
@@ -11,7 +11,7 @@ import {
 const NOW = Date.UTC(2026, 7, 2, 0, 0, 0);
 
 beforeEach(async () => {
-  await resetCleanD1Database();
+  await resetDatabase();
   await seedSession();
 });
 

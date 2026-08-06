@@ -1,9 +1,4 @@
-/**
- * Schema entrypoint for the clean-slate database.
- *
- * During the cutover the former `schema.ts` remains coupled to the offline
- * rollback database. New provider/runtime code imports this module only.
- */
+/** Narrow schema entrypoint for provider and runtime code. */
 export {
   account,
   invitation,

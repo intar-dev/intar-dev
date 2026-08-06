@@ -117,7 +117,7 @@ function uuid(value: unknown, label: string): string {
 
 function usage(): never {
   throw new Error(
-    "usage: wrangler-output.ts version-upload|version-deploy <wrangler-output.ndjson> <worker-name>",
+    "usage: tools/deploy/wrangler-output.ts version-upload|version-deploy <wrangler-output.ndjson> <worker-name>",
   );
 }
 

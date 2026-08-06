@@ -23,23 +23,12 @@ on:
         required: false
         default: false
         type: boolean
-      clean_d1_cutover_run_id:
-        description: Successful clean-D1 apply run required only while the maintenance fence is active
-        required: false
-        default: ""
-        type: string
     secrets:
       CLOUDFLARE_ACCOUNT_ID:
         required: true
       CLOUDFLARE_API_TOKEN:
         required: true
-      CLOUDFLARE_WEB_ROLLBACK_API_TOKEN:
-        required: true
       CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
-        required: true
-      STARGATE_DEPLOY_SSH_PRIVATE_KEY:
-        required: true
-      STARGATE_DEPLOY_KNOWN_HOSTS:
         required: true
       STARGATE_EGRESS_IPV4_CIDRS:
         required: true
@@ -54,11 +43,6 @@ on:
       single_operator_confirmation:
         description: Type SINGLE OPERATOR WORKSHOP CONTROL PLANE only when no independent reviewer exists
         required: false
-        type: string
-      clean_d1_cutover_run_id:
-        description: Successful clean-D1 apply run required only for the first clean-D1 web switch
-        required: false
-        default: ""
         type: string
 
 permissions:
@@ -91,7 +75,6 @@ jobs:
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
-      CLEAN_D1_CUTOVER_RUN_ID: ${{ inputs.clean_d1_cutover_run_id || '' }}
       PARENT_HOLDS_CONTROL_PLANE_LOCK: ${{ inputs.parent_holds_control_plane_lock || false }}
 
     steps:
@@ -113,9 +96,6 @@ jobs:
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
           test "${RUN_ATTEMPT}" = 1
-          if [ -n "${CLEAN_D1_CUTOVER_RUN_ID}" ]; then
-            [[ "${CLEAN_D1_CUTOVER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
-          fi
           case "${PROVENANCE_WORKFLOW_PATH}" in
             .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
             *) exit 1 ;;
@@ -206,15 +186,10 @@ jobs:
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID }}
-          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
-          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
         run: |
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
-          [[ "${CLEAN_D1_DATABASE_ID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
-          test "${CLEAN_D1_DATABASE_ID}" != "00000000-0000-0000-0000-000000000003"
-          test "${CLEAN_D1_DATABASE_NAME}" = "intar-dev-control-plane-v2-20260803-r3"
           node - <<'NODE'
           const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
             .split(",").map((value) => value.trim()).filter(Boolean);
@@ -327,10 +302,6 @@ jobs:
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
-      CLEAN_D1_CUTOVER_RUN_ID: ${{ inputs.clean_d1_cutover_run_id || '' }}
-      STARGATE_DEPLOY_HOST: ${{ vars.STARGATE_DEPLOY_HOST }}
-      STARGATE_DEPLOY_PORT: ${{ vars.STARGATE_DEPLOY_PORT }}
-      STARGATE_DEPLOY_USER: ${{ vars.STARGATE_DEPLOY_USER }}
 
     steps:
       - name: Checkout
@@ -470,36 +441,25 @@ jobs:
       - name: Build deployment artifact
         run: bun run build:deploy
 
-      - name: Pin protected runtime bindings in deployment artifact
+      - name: Pin protected runtime configuration in deployment artifact
         env:
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
-          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
-          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
           SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           config="dist/server/wrangler.json"
           patched="${RUNNER_TEMP}/website-wrangler.json"
           jq \
             --arg keys "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}" \
-            --arg database_id "${CLEAN_D1_DATABASE_ID}" \
-            --arg database_name "${CLEAN_D1_DATABASE_NAME}" '
-              .vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys |
-              ([.d1_databases[] | select(.binding == "DB")] | length) as $db_count |
-              if $db_count != 1 then error("expected exactly one DB binding") else . end |
-              (.d1_databases[] | select(.binding == "DB")).database_id = $database_id |
-              (.d1_databases[] | select(.binding == "DB")).database_name = $database_name
-            ' \
+            '.vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys' \
             "${config}" > "${patched}"
           mv "${patched}" "${config}"
           jq -e \
-            --arg database_id "${CLEAN_D1_DATABASE_ID}" \
-            --arg database_name "${CLEAN_D1_DATABASE_NAME}" \
             --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
               ([.d1_databases[] | select(.binding == "DB")]) as $databases |
               ([.kv_namespaces[] | select(.binding == "SESSION")]) as $sessions |
               ($databases | length) == 1 and
-              $databases[0].database_id == $database_id and
-              $databases[0].database_name == $database_name and
+              $databases[0].database_id == "1aade7e2-85e6-4304-9851-2bc71e082476" and
+              $databases[0].database_name == "intar-dev-control-plane-v2-20260803-r3" and
               ($sessions | length) == 1 and
               $sessions[0].id == $session_namespace_id
             ' "${config}" >/dev/null
@@ -625,473 +585,64 @@ jobs:
             --jurisdiction eu \
             --remote
 
-      - name: Verify the clean D1 baseline is already active
+      - name: Apply production D1 migrations
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          result="${RUNNER_TEMP}/clean-d1-verification.json"
+          bun run db:migrate:production |
+            tee "${RUNNER_TEMP}/production-d1-migrations.log"
+
+      - name: Verify production D1 state
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          ledger="${RUNNER_TEMP}/production-d1-ledger.json"
+          result="${RUNNER_TEMP}/production-d1-verification.json"
           bunx wrangler d1 execute DB \
             --remote \
             --config dist/server/wrangler.json \
-            --command "SELECT COUNT(*) AS required_tables FROM sqlite_master WHERE type = 'table' AND name IN ('runtime_provider_allocations', 'runtime_provider_resources', 'provider_price_observations', 'workshop_session_cost_forecasts')" \
+            --command "SELECT id, name, applied_at FROM d1_migrations ORDER BY id" \
+            --json > "${ledger}"
+          jq -e '
+            length == 1 and
+            .[0].success == true and
+            (.[0].results | map(.name) | .[0:2]) == [
+              "0000_clean_multicloud.sql",
+              "0001_finalize_production_schema.sql"
+            ]
+          ' "${ledger}" >/dev/null
+          schema_query="SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('runtime_provider_allocations', 'runtime_provider_resources', 'provider_price_observations', 'workshop_session_cost_forecasts')) AS required_tables, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'clean_d1_commissioning') AS obsolete_tables, (SELECT COUNT(*) FROM pragma_index_list('workshop_template_revisions') WHERE name = 'workshop_template_revisions_content_idx' AND \"unique\" = 0) AS current_content_indexes, (SELECT COUNT(*) FROM pragma_index_list('workshop_template_revisions') WHERE name = 'workshop_template_revisions_content_uidx') AS obsolete_content_indexes, (SELECT COUNT(*) FROM d1_migrations WHERE name = '0001_finalize_production_schema.sql') AS finalization_migrations, (SELECT COUNT(*) FROM runtime_provider_operations AS operation JOIN runtime_provider_allocations AS allocation ON allocation.id = operation.allocation_id AND allocation.location_attempt = operation.location_attempt WHERE operation.state IN ('pending','running','retryable') AND allocation.state = 'deleted' AND allocation.deletion_confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM runtime_provider_resources AS resource WHERE resource.allocation_id = operation.allocation_id AND resource.location_attempt = operation.location_attempt AND resource.disappearance_confirmed_at IS NOT NULL AND ((resource.resource_kind = 'instance' AND (operation.operation_kind = 'delete_server' OR operation.operation_kind GLOB 'delete_server:*' OR operation.operation_kind = 'delete_instance' OR operation.operation_kind GLOB 'delete_instance:*')) OR (resource.resource_kind = 'boot_disk' AND (operation.operation_kind = 'delete_disk' OR operation.operation_kind GLOB 'delete_disk:*')) OR (resource.resource_kind = 'ipv4' AND (operation.operation_kind = 'delete_primary_ip' OR operation.operation_kind GLOB 'delete_primary_ip:*')) OR (resource.resource_kind = 'ssh_key' AND (operation.operation_kind = 'delete_ssh_key' OR operation.operation_kind GLOB 'delete_ssh_key:*'))))) AS residual_delete_operations"
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config dist/server/wrangler.json \
+            --command "${schema_query}" \
             --json > "${result}"
-          jq -e \
-            'length == 1 and .[0].success == true and .[0].results[0].required_tables == 4' \
-            "${result}" >/dev/null
-
-      - name: Apply compatible clean D1 schema patches
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          before="${RUNNER_TEMP}/workshop-republication-index-before.json"
-          apply="${RUNNER_TEMP}/workshop-republication-index-apply.json"
-          after="${RUNNER_TEMP}/workshop-republication-index-after.json"
-          delete_operations_before="${RUNNER_TEMP}/confirmed-provider-delete-operations-before.json"
-          delete_operations_apply="${RUNNER_TEMP}/confirmed-provider-delete-operations-apply.json"
-          delete_operations_after="${RUNNER_TEMP}/confirmed-provider-delete-operations-after.json"
-          jq -n '[{success: false, state: "not_started"}]' > "${before}"
-          jq -n '[{success: false, state: "not_started"}]' > "${apply}"
-          jq -n '[{success: false, state: "not_started"}]' > "${after}"
-          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_before}"
-          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_apply}"
-          jq -n '[{success: false, state: "not_started"}]' > "${delete_operations_after}"
-          index_query="SELECT indexes.name, indexes.\"unique\" AS is_unique, indexes.partial, count(columns.name) AS column_count, max(CASE WHEN columns.seqno = 0 THEN columns.name END) AS column_0, max(CASE WHEN columns.seqno = 1 THEN columns.name END) AS column_1 FROM pragma_index_list('workshop_template_revisions') AS indexes JOIN pragma_index_info(indexes.name) AS columns GROUP BY indexes.name, indexes.\"unique\", indexes.partial ORDER BY indexes.name"
-          delete_operation_query="SELECT count(*) AS residuals FROM runtime_provider_operations AS operation JOIN runtime_provider_allocations AS allocation ON allocation.id = operation.allocation_id AND allocation.location_attempt = operation.location_attempt WHERE operation.state IN ('pending','running','retryable') AND allocation.state = 'deleted' AND allocation.deletion_confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM runtime_provider_resources AS resource WHERE resource.allocation_id = operation.allocation_id AND resource.location_attempt = operation.location_attempt AND resource.disappearance_confirmed_at IS NOT NULL AND ((resource.resource_kind = 'instance' AND (operation.operation_kind = 'delete_server' OR operation.operation_kind GLOB 'delete_server:*' OR operation.operation_kind = 'delete_instance' OR operation.operation_kind GLOB 'delete_instance:*')) OR (resource.resource_kind = 'boot_disk' AND (operation.operation_kind = 'delete_disk' OR operation.operation_kind GLOB 'delete_disk:*')) OR (resource.resource_kind = 'ipv4' AND (operation.operation_kind = 'delete_primary_ip' OR operation.operation_kind GLOB 'delete_primary_ip:*')) OR (resource.resource_kind = 'ssh_key' AND (operation.operation_kind = 'delete_ssh_key' OR operation.operation_kind GLOB 'delete_ssh_key:*'))))"
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${index_query}" \
-            --json > "${before}"
           jq -e '
-            length == 1 and .[0].success == true and
-            ((.[0].results | map(select(
-                .column_count == 2 and
-                .column_0 == "template_id" and
-                .column_1 == "content_hash"
-              ))) as $content_indexes |
-              ($content_indexes == [{
-                name: "workshop_template_revisions_content_uidx",
-                is_unique: 1,
-                partial: 0,
-                column_count: 2,
-                column_0: "template_id",
-                column_1: "content_hash"
-              }] or $content_indexes == [{
-                name: "workshop_template_revisions_content_idx",
-                is_unique: 0,
-                partial: 0,
-                column_count: 2,
-                column_0: "template_id",
-                column_1: "content_hash"
-              }]))
-          ' "${before}" >/dev/null
-
-          if jq -e '
-            (.[0].results | map(select(
-              .column_count == 2 and
-              .column_0 == "template_id" and
-              .column_1 == "content_hash"
-            ))) == [{
-              name: "workshop_template_revisions_content_uidx",
-              is_unique: 1,
-              partial: 0,
-              column_count: 2,
-              column_0: "template_id",
-              column_1: "content_hash"
+            length == 1 and
+            .[0].success == true and
+            .[0].results == [{
+              required_tables: 4,
+              obsolete_tables: 0,
+              current_content_indexes: 1,
+              obsolete_content_indexes: 0,
+              finalization_migrations: 1,
+              residual_delete_operations: 0
             }]
-          ' "${before}" >/dev/null; then
-            patch_sql="$(< "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql")"
-            bunx wrangler d1 execute DB \
-              --remote \
-              --config dist/server/wrangler.json \
-              --command "${patch_sql}" \
-              --json > "${apply}"
-            jq -e 'length > 0 and all(.[]; .success == true)' "${apply}" >/dev/null
-          else
-            jq -n '[{success: true, already_applied: true}]' > "${apply}"
-          fi
+          ' "${result}" >/dev/null
 
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${index_query}" \
-            --json > "${after}"
-          jq -e '
-            length == 1 and .[0].success == true and
-            (.[0].results | map(select(
-              .column_count == 2 and
-              .column_0 == "template_id" and
-              .column_1 == "content_hash"
-            ))) == [{
-              name: "workshop_template_revisions_content_idx",
-              is_unique: 0,
-              partial: 0,
-              column_count: 2,
-              column_0: "template_id",
-              column_1: "content_hash"
-            }]
-          ' "${after}" >/dev/null
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${delete_operation_query}" \
-            --json > "${delete_operations_before}"
-          jq -e '
-            length == 1 and .[0].success == true and
-            (.[0].results[0].residuals | type == "number") and
-            .[0].results[0].residuals >= 0
-          ' "${delete_operations_before}" >/dev/null
-
-          delete_operations_sql="$(< "${GITHUB_WORKSPACE}/ops/cloudflare/finalize-confirmed-provider-delete-operations.sql")"
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${delete_operations_sql}" \
-            --json > "${delete_operations_apply}"
-          jq -e 'length > 0 and all(.[]; .success == true)' "${delete_operations_apply}" >/dev/null
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${delete_operation_query}" \
-            --json > "${delete_operations_after}"
-          jq -e '
-            length == 1 and .[0].success == true and
-            .[0].results[0].residuals == 0
-          ' "${delete_operations_after}" >/dev/null
-          sha256sum \
-            "${GITHUB_WORKSPACE}/ops/cloudflare/allow-failed-workshop-republication.sql" \
-            "${GITHUB_WORKSPACE}/ops/cloudflare/finalize-confirmed-provider-delete-operations.sql" \
-            > "${RUNNER_TEMP}/workshop-republication-index-patch.sha256"
-
-      - name: Retain clean D1 schema-patch evidence
+      - name: Retain production D1 migration evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: clean-d1-schema-patches-${{ github.sha }}-${{ github.run_id }}
+          name: production-d1-migrations-${{ github.sha }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/workshop-republication-index-before.json
-            ${{ runner.temp }}/workshop-republication-index-apply.json
-            ${{ runner.temp }}/workshop-republication-index-after.json
-            ${{ runner.temp }}/confirmed-provider-delete-operations-before.json
-            ${{ runner.temp }}/confirmed-provider-delete-operations-apply.json
-            ${{ runner.temp }}/confirmed-provider-delete-operations-after.json
-            ${{ runner.temp }}/workshop-republication-index-patch.sha256
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Configure the pinned, restricted Stargate drain probe
-        if: ${{ inputs.clean_d1_cutover_run_id != '' }}
-        working-directory: ${{ github.workspace }}
-        env:
-          STARGATE_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.STARGATE_DEPLOY_SSH_PRIVATE_KEY }}
-          STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          config="$(tools/cutover/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-stargate-ssh")"
-          test "${config}" = "${RUNNER_TEMP}/intar-stargate-ssh/config"
-          printf 'STARGATE_SSH_CONFIG=%s\n' "${config}" >> "${GITHUB_ENV}"
-
-      - name: Reprove the fenced legacy drain immediately before the first binding switch
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_D1_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_VERSION_API_TOKEN: ${{ secrets.CLOUDFLARE_WEB_ROLLBACK_API_TOKEN }}
-          CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
-          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
-          CLEAN_D1_DATABASE_NAME: ${{ vars.CLEAN_D1_DATABASE_NAME }}
-        run: |
-          set -euo pipefail
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg apply_run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
-            --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema_version: 1, operation: "pre-web-switch-attempt", state: "started", source_sha: $source_sha, run_id: $run_id, apply_run_id: (if $apply_run_id == "" then null else $apply_run_id end), started_at: $started_at}' \
-            > "${RUNNER_TEMP}/clean-d1-pre-switch-attempt.json"
-          deployment="${RUNNER_TEMP}/pre-switch-deployment.json"
-          version="${RUNNER_TEMP}/pre-switch-version.json"
-          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
-          active_deployment_id="$(jq -er '.id | select(type == "string" and test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))' "${deployment}")"
-          active_version_id="$(jq -er '.versions | select(length == 1) | .[0] | select(.percentage == 100) | .version_id' "${deployment}")"
-          bunx wrangler versions view "${active_version_id}" \
-            --name intar-dev --json > "${version}"
-          active_database_id="$(jq -er '
-            [.resources.bindings[] | select(.type == "d1" and .name == "DB")] |
-            select(length == 1) | .[0].id
-          ' "${version}")"
-
-          if [ "${active_database_id}" = "${CLEAN_D1_DATABASE_ID}" ]; then
-            bun tools/cutover/worker-version.ts active-binding \
-              "${deployment}" "${version}" "${CLEAN_D1_DATABASE_ID}" \
-              "${active_version_id}" >/dev/null
-            jq -n \
-              --arg source_sha "${GITHUB_SHA}" \
-              --arg version_id "${active_version_id}" \
-              --arg database_id "${CLEAN_D1_DATABASE_ID}" \
-              '{schema_version: 1, operation: "pre-web-switch", mode: "already-clean", source_sha: $source_sha, version_id: $version_id, database_id: $database_id}' \
-              > "${RUNNER_TEMP}/clean-d1-pre-web-switch.json"
-            exit 0
-          fi
-
-          [[ "${CLEAN_D1_CUTOVER_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
-          test -f "${STARGATE_SSH_CONFIG}"
-          apply_run="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CLEAN_D1_CUTOVER_RUN_ID}")"
-          workflow_id="$(jq -er '.workflow_id' <<<"${apply_run}")"
-          workflow="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}")"
-          jq -e '
-            .path == ".github/workflows/clean-d1-cutover.yml" and
-            .state == "active"
-          ' <<<"${workflow}" >/dev/null
-          jq -e \
-            --argjson run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
-            --arg sha "${GITHUB_SHA}" \
-            --arg actor_id "${ACTOR_ID}" '
-              .id == $run_id and
-              .repository.full_name == "intar-dev/intar-dev" and
-              .event == "workflow_dispatch" and
-              .head_branch == "main" and
-              .head_sha == $sha and
-              .run_attempt == 1 and
-              .status == "completed" and
-              .conclusion == "success" and
-              ((.actor.id | tostring) == $actor_id) and
-              ((.triggering_actor.id | tostring) == $actor_id)
-            ' <<<"${apply_run}" >/dev/null
-
-          artifact_name="clean-d1-apply-${GITHUB_SHA}-${CLEAN_D1_CUTOVER_RUN_ID}"
-          artifacts="$(gh api --method GET \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${CLEAN_D1_CUTOVER_RUN_ID}/artifacts" \
-            -f name="${artifact_name}" -f per_page=100)"
-          jq -e --arg name "${artifact_name}" '
-            .total_count == 1 and
-            (.artifacts | length) == 1 and
-            .artifacts[0].name == $name and
-            .artifacts[0].expired == false and
-            (.artifacts[0].digest | test("^sha256:[0-9a-f]{64}$"))
-          ' <<<"${artifacts}" >/dev/null
-          evidence_dir="${RUNNER_TEMP}/clean-d1-cutover-evidence"
-          mkdir -p "${evidence_dir}"
-          gh run download "${CLEAN_D1_CUTOVER_RUN_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "${artifact_name}" \
-            --dir "${evidence_dir}"
-          evidence="${evidence_dir}/clean-d1-apply.json"
-          test -f "${evidence}"
-          jq -e \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${CLEAN_D1_CUTOVER_RUN_ID}" \
-            --arg clean_database_name "${CLEAN_D1_DATABASE_NAME}" \
-            --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
-            '
-              .schema_version == 4 and
-              .operation == "apply" and
-              .source_sha == $source_sha and
-              .apply_run_id == $run_id and
-              .apply_run_attempt == 1 and
-              .database_name == $clean_database_name and
-              .database_id == $clean_database_id and
-              .previous_database_id != $clean_database_id and
-              .maintenance_web_version_id == .maintenance_fence.maintenance_version_id and
-              .pre_drain_recovery.schema_version == 1 and
-              .pre_drain_recovery.operation == "resume-maintenance-fence" and
-              .pre_drain_recovery.source_sha == .source_sha and
-              .pre_drain_recovery.run_id == .apply_run_id and
-              .pre_drain_recovery.run_attempt == 1 and
-              .pre_drain_recovery.database_name == .previous_database_name and
-              .pre_drain_recovery.database_id == .previous_database_id and
-              .pre_drain_recovery.expected_previous_version_id == .previous_web_version_id and
-              .pre_drain_recovery.after_active_version_id == .previous_web_version_id and
-              (.pre_drain_recovery.before_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
-              (.pre_drain_recovery.restore_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
-              .pre_drain_recovery.active_traffic_percentage == 100 and
-              .pre_drain_recovery.before_active_binding_proven == true and
-              .pre_drain_recovery.previous_version_binding_proven == true and
-              .pre_drain_recovery.after_active_binding_proven == true and
-              .pre_drain_recovery.database_mutated == false and
-              .pre_drain_recovery.routes_mutated == false and
-              .pre_drain_recovery.crons_mutated == false and
-              .pre_drain_recovery.restore_propagation.max_attempts == 12 and
-              .pre_drain_recovery.restore_propagation.interval_seconds == 5 and
-              .pre_drain_recovery.restore_propagation.request_timeout_seconds == 5 and
-              (
-                (.pre_drain_recovery.restored == false and .pre_drain_recovery.fence_detected == false and .pre_drain_recovery.before_deployment_id == .pre_drain_recovery.restore_deployment_id and .pre_drain_recovery.origin_run_id == null and .pre_drain_recovery.origin_run_conclusion == null and .pre_drain_recovery.active_fence_tag == null and .pre_drain_recovery.active_fence_tag_proven == false and .pre_drain_recovery.wrangler_version_deploy_ndjson == "" and .pre_drain_recovery.restore_propagation.required == false and .pre_drain_recovery.restore_propagation.attempts == 0 and .pre_drain_recovery.restore_propagation.marker_clear_attempt == null and .pre_drain_recovery.restore_propagation.root_healthy_attempt == null and .pre_drain_recovery.restore_propagation.final_marker_http_status == null and .pre_drain_recovery.restore_propagation.final_root_http_status == null and .pre_drain_recovery.restore_propagation.proven == false and .pre_drain_recovery.restore_propagation.attempts_ndjson == "") or
-                (.pre_drain_recovery.restored == true and .pre_drain_recovery.fence_detected == true and .pre_drain_recovery.before_deployment_id != .pre_drain_recovery.restore_deployment_id and (.pre_drain_recovery.marker_sha256 | test("^[0-9a-f]{64}$")) and (.pre_drain_recovery.origin_run_id | test("^[1-9][0-9]*$")) and (.pre_drain_recovery.origin_run_conclusion | IN("failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure")) and .pre_drain_recovery.active_fence_tag == ("clean-d1-fence-" + .pre_drain_recovery.origin_run_id) and .pre_drain_recovery.active_fence_tag_proven == true and (.pre_drain_recovery.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")) and .pre_drain_recovery.restore_propagation.required == true and .pre_drain_recovery.restore_propagation.attempts >= 1 and .pre_drain_recovery.restore_propagation.attempts <= .pre_drain_recovery.restore_propagation.max_attempts and .pre_drain_recovery.restore_propagation.marker_clear_attempt >= 1 and .pre_drain_recovery.restore_propagation.marker_clear_attempt <= .pre_drain_recovery.restore_propagation.attempts and .pre_drain_recovery.restore_propagation.root_healthy_attempt >= 1 and .pre_drain_recovery.restore_propagation.root_healthy_attempt <= .pre_drain_recovery.restore_propagation.attempts and (.pre_drain_recovery.restore_propagation.final_marker_http_status | test("^[234][0-9]{2}$")) and .pre_drain_recovery.restore_propagation.final_root_http_status == "200" and .pre_drain_recovery.restore_propagation.proven == true and (.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\"root_healthy\":true")) and (.pre_drain_recovery.restore_propagation.attempts_ndjson | contains("\"marker_clear\":true")))
-              ) and
-              .maintenance_fence.schema_version == 2 and
-              .maintenance_fence.operation == "activate-maintenance-fence" and
-              .maintenance_fence.source_sha == .source_sha and
-              .maintenance_fence.run_id == .apply_run_id and
-              .maintenance_fence.run_attempt == 1 and
-              .maintenance_fence.database_name == .previous_database_name and
-              .maintenance_fence.state == "active" and
-              .maintenance_fence.database_id == .previous_database_id and
-              .maintenance_fence.previous_version_id == .previous_web_version_id and
-              (.maintenance_fence.maintenance_deployment_id | test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")) and
-              .maintenance_fence.marker_probe_attempts >= 1 and
-              .maintenance_fence.marker_probe_attempts <= .maintenance_fence.propagation_max_attempts and
-              .maintenance_fence.workshop_503_probe_attempts >= 1 and
-              .maintenance_fence.workshop_503_probe_attempts <= .maintenance_fence.marker_probe_attempts and
-              .maintenance_fence.propagation_max_attempts == 12 and
-              .maintenance_fence.propagation_retry_seconds == 2 and
-              .maintenance_fence.previous_version_binding_proven == true and
-              .maintenance_fence.maintenance_version_binding_proven == true and
-              (
-                (.maintenance_fence.reused == true and .maintenance_fence.upload_did_not_activate == false and .maintenance_fence.exact_version_deployed == false and .maintenance_fence.wrangler_version_upload_ndjson == "" and .maintenance_fence.wrangler_version_deploy_ndjson == "") or
-                (.maintenance_fence.reused == false and .maintenance_fence.upload_did_not_activate == true and .maintenance_fence.exact_version_deployed == true and (.maintenance_fence.wrangler_version_upload_ndjson | contains("\"type\":\"version-upload\"")) and (.maintenance_fence.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\"")))
-              ) and
-              .legacy_drain.schema_version == 4 and
-              .legacy_drain.stargate_probe_succeeded == true and
-              .legacy_drain.drained == true and
-              .legacy_drain.provider_inventory.provenEmpty == true and
-              .legacy_drain.stargate.healthy == true and
-              .legacy_drain.stargate.drained == true
-            ' "${evidence}" >/dev/null
-          previous_database_name="$(jq -r '.previous_database_name' "${evidence}")"
-          previous_database_id="$(jq -r '.previous_database_id' "${evidence}")"
-          previous_version_id="$(jq -er '.previous_web_version_id' "${evidence}")"
-          maintenance_version_id="$(jq -er '.maintenance_fence.maintenance_version_id' "${evidence}")"
-          marker_sha256="$(jq -er '.maintenance_fence.marker_sha256' "${evidence}")"
-          case "${active_version_id}" in
-            "${previous_version_id}"|"${maintenance_version_id}") ;;
-            *) echo "active version is not a resumable cutover version" >&2; exit 1 ;;
-          esac
-          bun tools/cutover/worker-version.ts active-binding \
-            "${deployment}" "${version}" "${previous_database_id}" \
-            "${active_version_id}" >/dev/null
-
-          refence_required=true
-          restore_maintenance_on_exit() {
-            exit_status="$?"
-            trap - EXIT INT TERM
-            if [ "${refence_required}" = true ]; then
-              if ! CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
-                tools/cutover/reactivate-maintenance-fence.sh \
-                  "${previous_database_name}" \
-                  "${previous_database_id}" \
-                  "${previous_version_id}" \
-                  "${maintenance_version_id}" \
-                  "${CLEAN_D1_CUTOVER_RUN_ID}" \
-                  "${marker_sha256}" \
-                  recovery \
-                  "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-recovery.json"; then
-                exit 1
-              fi
-            fi
-            exit "${exit_status}"
-          }
-          trap restore_maintenance_on_exit EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-
-          CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
-            tools/cutover/restore-successful-maintenance-fence.sh \
-              "${previous_database_name}" \
-              "${previous_database_id}" \
-              "${previous_version_id}" \
-              "${maintenance_version_id}" \
-              "${CLEAN_D1_CUTOVER_RUN_ID}" \
-              "${RUNNER_TEMP}/clean-d1-pre-switch-restore.json"
-
-          resumed_strict_drain=false
-          for attempt in 1 2 3 4 5 6 7 8 9; do
-            attempt_evidence="${RUNNER_TEMP}/clean-d1-pre-switch-resumed-attempt-${attempt}.json"
-            if tools/cutover/prove-legacy-drain.sh \
-              "${previous_database_name}" \
-              "${previous_database_id}" \
-              "resume-${attempt}" \
-              "${attempt_evidence}"; then
-              cp "${attempt_evidence}" \
-                "${RUNNER_TEMP}/clean-d1-pre-switch-resumed.json"
-              resumed_strict_drain=true
-              break
-            fi
-            jq -e '
-              .schema_version == 4 and
-              .query_succeeded == true and
-              .provider_probe_succeeded == true and
-              .stargate_probe_succeeded == true and
-              .drained == false and
-              .provider_inventory.connectionCount > 0 and
-              .provider_inventory.provenEmpty == true and
-              .stargate.healthy == true and
-              .stargate.drained == true and
-              .counts.untrustworthy_enabled_host_reports > 0 and
-              (.counts | to_entries | all(
-                if .key == "untrustworthy_enabled_host_reports"
-                then .value > 0
-                else .value == 0
-                end
-              ))
-            ' "${attempt_evidence}" >/dev/null
-            test "${attempt}" -lt 9
-            sleep 15
-          done
-          test "${resumed_strict_drain}" = true
-
-          CLOUDFLARE_API_TOKEN="${CLOUDFLARE_VERSION_API_TOKEN}" \
-            tools/cutover/reactivate-maintenance-fence.sh \
-              "${previous_database_name}" \
-              "${previous_database_id}" \
-              "${previous_version_id}" \
-              "${maintenance_version_id}" \
-              "${CLEAN_D1_CUTOVER_RUN_ID}" \
-              "${marker_sha256}" \
-              normal \
-              "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-reactivation.json"
-          active_version_id="${maintenance_version_id}"
-          refence_required=false
-          trap - EXIT INT TERM
-
-          for pass in 1 2; do
-            sleep 15
-            tools/cutover/prove-legacy-drain.sh \
-              "${previous_database_name}" \
-              "${previous_database_id}" \
-              "pre-switch-${pass}" \
-              "${RUNNER_TEMP}/clean-d1-pre-switch-drain-${pass}.json"
-            if [ "${pass}" = 1 ]; then sleep 5; fi
-          done
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg version_id "${active_version_id}" \
-            --arg previous_database_id "${previous_database_id}" \
-            --arg clean_database_id "${CLEAN_D1_DATABASE_ID}" \
-            --slurpfile restore "${RUNNER_TEMP}/clean-d1-pre-switch-restore.json" \
-            --slurpfile resumed "${RUNNER_TEMP}/clean-d1-pre-switch-resumed.json" \
-            --slurpfile maintenance "${RUNNER_TEMP}/clean-d1-pre-switch-maintenance-reactivation.json" \
-            --slurpfile drain "${RUNNER_TEMP}/clean-d1-pre-switch-drain-2.json" \
-            '{schema_version: 1, operation: "pre-web-switch", mode: "restored-strict-drain-refenced-cutover", source_sha: $source_sha, maintenance_version_id: $version_id, previous_database_id: $previous_database_id, clean_database_id: $clean_database_id, exact_restore: $restore[0], resumed_strict_drain: $resumed[0], maintenance_fence: $maintenance[0], final_drain: $drain[0]}' \
-            > "${RUNNER_TEMP}/clean-d1-pre-web-switch.json"
-
-      - name: Retain partial clean-D1 pre-switch evidence
-        if: ${{ always() && inputs.clean_d1_cutover_run_id != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: clean-d1-pre-switch-attempt-${{ github.sha }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/clean-d1-pre-switch-attempt.json
-            ${{ runner.temp }}/pre-switch-deployment.json
-            ${{ runner.temp }}/pre-switch-version.json
-            ${{ runner.temp }}/clean-d1-cutover-evidence/
-            ${{ runner.temp }}/clean-d1-pre-switch-restore.json
-            ${{ runner.temp }}/intar-clean-d1-pre-switch-restore-${{ github.run_id }}/
-            ${{ runner.temp }}/clean-d1-pre-switch-resumed-attempt-*.json
-            ${{ runner.temp }}/clean-d1-pre-switch-resumed.json
-            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-reactivation.json
-            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-recovery.json
-            ${{ runner.temp }}/intar-clean-d1-pre-switch-reactivate-${{ github.run_id }}-*/
-            ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
-            ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
-            ${{ runner.temp }}/clean-d1-pre-web-switch.json
+            ${{ runner.temp }}/production-d1-migrations.log
+            ${{ runner.temp }}/production-d1-ledger.json
+            ${{ runner.temp }}/production-d1-verification.json
           if-no-files-found: error
           retention-days: 90
 
@@ -1102,7 +653,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
-          CLEAN_D1_DATABASE_ID: ${{ vars.CLEAN_D1_DATABASE_ID }}
           SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
@@ -1114,9 +664,13 @@ jobs:
           jq -n '{STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS}' \
             > "${secrets_file}"
           chmod 600 "${secrets_file}"
-          tools/cutover/activate-web-version.sh \
+          database_id="$(jq -er '
+            [.d1_databases[] | select(.binding == "DB")] |
+            select(length == 1) | .[0].database_id
+          ' apps/web/dist/server/wrangler.json)"
+          tools/deploy/activate-web-version.sh \
             apps/web/dist/server/wrangler.json \
-            "${CLEAN_D1_DATABASE_ID}" \
+            "${database_id}" \
             "${SESSION_KV_NAMESPACE_ID}" \
             "${secrets_file}" \
             "${RUNNER_TEMP}/exact-web-version-activation.json"
@@ -1128,23 +682,7 @@ jobs:
           name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/exact-web-version-activation.json
-            ${{ runner.temp }}/intar-web-version-${{ github.run_id }}/
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Retain clean-D1 web-switch evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: clean-d1-web-switch-${{ github.sha }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/clean-d1-pre-web-switch.json
-            ${{ runner.temp }}/clean-d1-pre-switch-restore.json
-            ${{ runner.temp }}/clean-d1-pre-switch-resumed.json
-            ${{ runner.temp }}/clean-d1-pre-switch-maintenance-reactivation.json
-            ${{ runner.temp }}/clean-d1-pre-switch-drain-1.json
-            ${{ runner.temp }}/clean-d1-pre-switch-drain-2.json
-            ${{ runner.temp }}/exact-web-version-activation.json
-            ${{ runner.temp }}/intar-web-version-${{ github.run_id }}/
+            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}/
           if-no-files-found: error
           retention-days: 90
 

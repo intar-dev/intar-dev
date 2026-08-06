@@ -8,7 +8,6 @@ on:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
       - ".github/workflows/control-plane-rollout.yml"
-      - ".github/workflows/clean-d1-cutover.yml"
       - ".github/workflows/workshop-multicloud-flag.yml"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,8 +19,7 @@ on:
       - "packages/provider-contracts/**"
       - "packages/workshop-contracts/**"
       - "tools/check-import-boundaries.ts"
-      - "tools/bootstrap/**"
-      - "tools/cutover/**"
+      - "tools/deploy/**"
       - "tools/flagship/**"
       - "tools/providers/**"
       - "content/scenarios/build-tools.hcl"
@@ -166,10 +164,11 @@ jobs:
       - name: Check monorepo import and provider contracts
         working-directory: ${{ github.workspace }}
         run: |
-          bun run check:bootstrap
           bun run check:flagship
           bun run check:imports
           bun run check:providers
+          bun run check:deploy
+          bun run check:database-migrations
 
       - name: Test
         run: bun run test

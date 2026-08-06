@@ -5,10 +5,10 @@ import type { WorkshopManifestV2 } from "@intar/workshop-contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 import { workshopPublications } from "@/db/schema";
 import { cancelWorkshopPublicationVerifierRuntimes } from "@/lib/workshops/provider-runtime";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 import { stageWorkshopRevision } from "./publication-state";
 
-beforeEach(resetCleanD1Database);
+beforeEach(resetDatabase);
 
 describe("clean workshop publication state", () => {
   it("publishes an agent_kvm revision only after recording its profile certification", async () => {

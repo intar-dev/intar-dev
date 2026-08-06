@@ -221,7 +221,7 @@ function number(value: unknown, label: string): number {
 
 function usage(): never {
   throw new Error(
-    "usage: worker-version.ts active-binding <deployment.json> <version.json> <database-id> [version-id] | version-binding <version.json> <database-id> [version-id] | active-runtime-bindings <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id] | version-runtime-bindings <version.json> <database-id> <session-namespace-id> [version-id]",
+    "usage: tools/deploy/worker-version.ts active-binding <deployment.json> <version.json> <database-id> [version-id] | version-binding <version.json> <database-id> [version-id] | active-runtime-bindings <deployment.json> <version.json> <database-id> <session-namespace-id> [version-id] | version-runtime-bindings <version.json> <database-id> <session-namespace-id> [version-id]",
   );
 }
 

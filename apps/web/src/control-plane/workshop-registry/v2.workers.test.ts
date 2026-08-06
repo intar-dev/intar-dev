@@ -2,7 +2,7 @@
 
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 
 const featureFlagMocks = vi.hoisted(() => ({
   isWorkshopsEnabledForOrganization: vi.fn(),
@@ -20,7 +20,7 @@ import { handleWorkshopRegistryRequest } from "./v2";
 const REGISTRY_TOKEN = `intar_ws_${"a".repeat(64)}`;
 
 beforeEach(async () => {
-  await resetCleanD1Database();
+  await resetDatabase();
   vi.clearAllMocks();
   featureFlagMocks.isWorkshopsEnabledForOrganization.mockResolvedValue(true);
   await seedPublication();

@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "$#" -ne 5 ]; then
+  echo "usage: tools/deploy/activate-web-version.sh <wrangler-config> <database-id> <session-namespace-id> <secrets-file> <evidence.json>" >&2
+  exit 64
+fi
+
 readonly config="$1"
 readonly database_id="$2"
 readonly session_namespace_id="$3"
 readonly secrets_file="$4"
 readonly evidence="$5"
 readonly worker_name="intar-dev"
-readonly session_namespace_title="intar-dev-session"
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-web-version-${GITHUB_RUN_ID:-local}"
+readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-web-deploy-${GITHUB_RUN_ID:-local}"
 readonly before_deployment="${runtime_root}/before-deployment.json"
 readonly before_version="${runtime_root}/before-version.json"
-readonly reference_version="${runtime_root}/reference-app-version.json"
-readonly before_public_state="${runtime_root}/before-public-state.json"
-readonly namespace_inventory="${runtime_root}/session-kv-inventory.json"
+readonly before_health="${runtime_root}/before-health.json"
 readonly upload_output="${runtime_root}/wrangler-version-upload.ndjson"
 readonly upload_result="${runtime_root}/wrangler-version-upload.json"
 readonly uploaded_version="${runtime_root}/uploaded-version.json"
@@ -41,36 +43,22 @@ test -n "${GITHUB_SHA:-}"
 test -n "${GITHUB_RUN_ID:-}"
 test -n "${GITHUB_RUN_ATTEMPT:-}"
 
-probe_public_state() {
+probe_root_health() {
   local label="$1"
   local output="$2"
-  local fence_headers="${runtime_root}/${label}-fence-headers.txt"
   local root_headers="${runtime_root}/${label}-root-headers.txt"
-  local fence_status
   local root_status
-  local fence_active=false
 
-  fence_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-    --header 'Cache-Control: no-cache' --output /dev/null \
-    --dump-header "${fence_headers}" --write-out '%{http_code}' \
-    https://intar.dev/.well-known/intar-clean-d1-cutover-fence; } || true)"
   root_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
     --header 'Cache-Control: no-cache' --output /dev/null \
     --dump-header "${root_headers}" --write-out '%{http_code}' \
     https://intar.dev/; } || true)"
-  if grep -qi '^x-intar-cutover-fence: active' "${fence_headers}"; then
-    fence_active=true
-  fi
   jq -n \
-    --arg fence_status "${fence_status}" \
     --arg root_status "${root_status}" \
-    --argjson fence_active "${fence_active}" \
-    '{fence_status: $fence_status, root_status: $root_status, fence_active: $fence_active}' \
+    --arg url "https://intar.dev/" \
+    '{url: $url, root_status: $root_status, healthy: ($root_status == "200")}' \
     > "${output}"
-  jq -e '
-    (.fence_status | test("^[1-5][0-9]{2}$")) and
-    (.root_status | test("^[1-5][0-9]{2}$"))
-  ' "${output}" >/dev/null
+  jq -e '.healthy == true' "${output}" >/dev/null
 }
 
 jq -n \
@@ -92,35 +80,10 @@ jq -e \
     $databases[0].database_id == $database_id and
     ($sessions | length) == 1 and
     $sessions[0].id == $session_namespace_id and
-    .migrations == [
-      {tag: "v1", new_sqlite_classes: ["AgentBridgeDO"]},
-      {tag: "v2", new_sqlite_classes: [
-        "ScenarioWorkflowDO",
-        "ScenarioWorkflowSchedulerDO"
-      ]},
-      {tag: "v3", new_sqlite_classes: ["HostRuntimeDO"]},
-      {tag: "v4", deleted_classes: [
-        "AgentBridgeDO",
-        "ScenarioWorkflowDO",
-        "ScenarioWorkflowSchedulerDO"
-      ]}
-    ]
+    (.migrations | type) == "array" and
+    (.migrations | length) >= 1 and
+    (.migrations[-1].tag | type) == "string"
   ' "${config}" >/dev/null
-
-curl --fail-with-body --silent --show-error \
-  --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces?per_page=1000" \
-  --output "${namespace_inventory}"
-jq -e \
-  --arg namespace_id "${session_namespace_id}" \
-  --arg namespace_title "${session_namespace_title}" '
-    .success == true and
-    (.errors | length) == 0 and
-    ([.result[] | select(.title == $namespace_title)] | length) == 1 and
-    ([.result[] | select(
-      .id == $namespace_id and .title == $namespace_title
-    )] | length) == 1
-  ' "${namespace_inventory}" >/dev/null
 
 bunx wrangler deployments status --name "${worker_name}" --json \
   > "${before_deployment}"
@@ -133,54 +96,26 @@ before_version_id="$(jq -er '
 [[ "${before_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
 bunx wrangler versions view "${before_version_id}" \
   --name "${worker_name}" --json > "${before_version}"
-jq -e --arg version_id "${before_version_id}" '.id == $version_id' \
-  "${before_version}" >/dev/null
-
-pre_switch_evidence="${RUNNER_TEMP:-/tmp}/clean-d1-pre-web-switch.json"
-test -f "${pre_switch_evidence}"
-pre_switch_mode="$(jq -er '.mode' "${pre_switch_evidence}")"
-reference_version_id="$(jq -er \
-  --arg before_version_id "${before_version_id}" '
-    if .mode == "already-clean" then
-      .version_id | select(. == $before_version_id)
-    elif .mode == "restored-strict-drain-refenced-cutover" then
-      .exact_restore.previous_version_id
-    else
-      error("unsupported pre-switch mode")
-    end
-  ' "${pre_switch_evidence}")"
-[[ "${reference_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-bunx wrangler versions view "${reference_version_id}" \
-  --name "${worker_name}" --json > "${reference_version}"
-jq -e --arg version_id "${reference_version_id}" '
+bun "${repository_root}/tools/deploy/worker-version.ts" \
+  active-runtime-bindings "${before_deployment}" "${before_version}" \
+  "${database_id}" "${session_namespace_id}" "${before_version_id}" \
+  >/dev/null
+jq -e --arg version_id "${before_version_id}" '
   .id == $version_id and
-  .resources.script_runtime.migration_tag == "v4" and
+  (.resources.script_runtime.migration_tag | type) == "string" and
   ([.resources.bindings[] | select(
     .type == "durable_object_namespace" and
     .name == "HOST_RUNTIME" and
     .class_name == "HostRuntimeDO"
+  )] | length) == 1 and
+  ([.resources.bindings[] | select(
+    .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
   )] | length) == 1
-' "${reference_version}" >/dev/null
-jq -e --arg migration_tag "$(jq -er '.resources.script_runtime.migration_tag' "${reference_version}")" '
+' "${before_version}" >/dev/null
+jq -e --arg migration_tag "$(jq -er '.resources.script_runtime.migration_tag' "${before_version}")" '
   .migrations[-1].tag == $migration_tag
 ' "${config}" >/dev/null
-probe_public_state "before" "${before_public_state}"
-case "${pre_switch_mode}" in
-  already-clean)
-    jq -e '
-      .fence_active == false and
-      .root_status == "200"
-    ' "${before_public_state}" >/dev/null
-    ;;
-  restored-strict-drain-refenced-cutover)
-    jq -e '
-      .fence_status == "200" and
-      .fence_active == true and
-      .root_status == "503"
-    ' "${before_public_state}" >/dev/null
-    ;;
-  *) exit 1 ;;
-esac
+probe_root_health "before" "${before_health}"
 
 restore_required=false
 uploaded_version_id=""
@@ -196,7 +131,7 @@ restore_previous_on_exit() {
   : > "${rollback_attempts}"
   : > "${rollback_propagation_attempts}"
   rollback_control_plane_proven=false
-  rollback_public_state_proven=false
+  rollback_health_proven=false
   rollback_deployment_id=""
   rollback_command_attempts=0
   rollback_reconcile_attempts=0
@@ -247,13 +182,13 @@ restore_previous_on_exit() {
     WRANGLER_OUTPUT_FILE_PATH="${rollback_output}" \
       bunx wrangler versions deploy "${before_version_id}@100%" \
         --name "${worker_name}" \
-        --message "Restore exact pre-switch version after run ${GITHUB_RUN_ID} attempt ${attempt}" \
+        --message "Restore previous web version after run ${GITHUB_RUN_ID} attempt ${attempt}" \
         --yes
     command_status="$?"
     receipt_status=-1
     receipt_deployment_id=""
     if [ "${command_status}" -eq 0 ]; then
-      bun "${repository_root}/tools/cutover/wrangler-output.ts" version-deploy \
+      bun "${repository_root}/tools/deploy/wrangler-output.ts" version-deploy \
         "${rollback_output}" "${worker_name}" > "${rollback_result}"
       receipt_status="$?"
       if [ "${receipt_status}" -eq 0 ]; then
@@ -276,50 +211,48 @@ restore_previous_on_exit() {
   rollback_propagation_observed_attempt=0
   if [ "${rollback_control_plane_proven}" = true ]; then
     for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-      rollback_state="${runtime_root}/rollback-public-state-${attempt}.json"
-      probe_public_state "rollback-${attempt}" "${rollback_state}"
+      rollback_state="${runtime_root}/rollback-health-${attempt}.json"
+      probe_root_health "rollback-${attempt}" "${rollback_state}"
       probe_status="$?"
-      public_state_matches=false
-      if [ "${probe_status}" -eq 0 ] && jq -s -e '.[0] == .[1]' \
-        "${before_public_state}" "${rollback_state}" >/dev/null; then
-        public_state_matches=true
-        rollback_public_state_proven=true
+      root_healthy=false
+      if [ "${probe_status}" -eq 0 ]; then
+        root_healthy=true
+        rollback_health_proven=true
         rollback_propagation_observed_attempt="${attempt}"
       fi
       jq -cn \
         --argjson attempt "${attempt}" \
         --argjson probe_status "${probe_status}" \
-        --argjson public_state_matches "${public_state_matches}" \
+        --argjson root_healthy "${root_healthy}" \
         --slurpfile observed "${rollback_state}" \
-        '{attempt: $attempt, probe_status: $probe_status, public_state_matches: $public_state_matches, observed: $observed[0]}' \
+        '{attempt: $attempt, probe_status: $probe_status, root_healthy: $root_healthy, observed: $observed[0]}' \
         >> "${rollback_propagation_attempts}"
-      if [ "${public_state_matches}" = true ]; then break; fi
+      if [ "${root_healthy}" = true ]; then break; fi
       if [ "${attempt}" -lt 12 ]; then sleep 2; fi
     done
   fi
   rollback_proven=false
   if [ "${rollback_control_plane_proven}" = true ] && \
-    [ "${rollback_public_state_proven}" = true ]; then
+    [ "${rollback_health_proven}" = true ]; then
     rollback_proven=true
   fi
   jq -n \
     --arg source_sha "${GITHUB_SHA}" \
     --arg run_id "${GITHUB_RUN_ID}" \
     --arg before_version_id "${before_version_id}" \
-    --arg pre_switch_mode "${pre_switch_mode}" \
     --arg attempted_version_id "${uploaded_version_id}" \
     --arg rollback_deployment_id "${rollback_deployment_id}" \
     --argjson original_exit_status "${exit_status}" \
     --argjson rollback_command_attempts "${rollback_command_attempts}" \
     --argjson rollback_reconcile_attempts "${rollback_reconcile_attempts}" \
     --argjson rollback_control_plane_proven "${rollback_control_plane_proven}" \
-    --argjson rollback_public_state_proven "${rollback_public_state_proven}" \
+    --argjson rollback_health_proven "${rollback_health_proven}" \
     --argjson rollback_propagation_observed_attempt "${rollback_propagation_observed_attempt}" \
     --argjson rollback_proven "${rollback_proven}" \
-    --slurpfile before_public_state "${before_public_state}" \
+    --slurpfile before_health "${before_health}" \
     --rawfile rollback_attempts_ndjson "${rollback_attempts}" \
     --rawfile rollback_propagation_attempts_ndjson "${rollback_propagation_attempts}" \
-    '{schema_version: 1, operation: "restore-exact-web-version", source_sha: $source_sha, run_id: $run_id, original_exit_status: $original_exit_status, pre_switch_mode: $pre_switch_mode, before_version_id: $before_version_id, attempted_version_id: (if $attempted_version_id == "" then null else $attempted_version_id end), rollback_command_attempts: $rollback_command_attempts, rollback_reconcile_attempts: $rollback_reconcile_attempts, rollback_deployment_id: (if $rollback_deployment_id == "" then null else $rollback_deployment_id end), rollback_control_plane_proven: $rollback_control_plane_proven, rollback_public_state_proven: $rollback_public_state_proven, rollback_propagation_max_attempts: 12, rollback_propagation_retry_seconds: 2, rollback_propagation_observed_attempt: $rollback_propagation_observed_attempt, rollback_proven: $rollback_proven, before_public_state: $before_public_state[0], rollback_attempts_ndjson: $rollback_attempts_ndjson, rollback_propagation_attempts_ndjson: $rollback_propagation_attempts_ndjson, routes_mutated: false, crons_mutated: false, durable_object_lifecycle_mutated: false}' \
+    '{schema_version: 1, operation: "restore-exact-web-version", source_sha: $source_sha, run_id: $run_id, original_exit_status: $original_exit_status, before_version_id: $before_version_id, attempted_version_id: (if $attempted_version_id == "" then null else $attempted_version_id end), rollback_command_attempts: $rollback_command_attempts, rollback_reconcile_attempts: $rollback_reconcile_attempts, rollback_deployment_id: (if $rollback_deployment_id == "" then null else $rollback_deployment_id end), rollback_control_plane_proven: $rollback_control_plane_proven, rollback_health_proven: $rollback_health_proven, rollback_propagation_max_attempts: 12, rollback_propagation_retry_seconds: 2, rollback_propagation_observed_attempt: $rollback_propagation_observed_attempt, rollback_proven: $rollback_proven, before_health: $before_health[0], rollback_attempts_ndjson: $rollback_attempts_ndjson, rollback_propagation_attempts_ndjson: $rollback_propagation_attempts_ndjson, routes_mutated: false, crons_mutated: false, durable_object_lifecycle_mutated: false}' \
     > "${rollback_evidence}"
   set -e
   exit "${exit_status}"
@@ -334,12 +267,12 @@ WRANGLER_OUTPUT_FILE_PATH="${upload_output}" \
   bunx wrangler versions upload \
     --name "${worker_name}" \
     --config "${config}" \
-    --tag "clean-d1-web-${GITHUB_RUN_ID}" \
-    --message "Clean D1 web version for run ${GITHUB_RUN_ID}" \
+    --tag "web-deploy-${GITHUB_RUN_ID}" \
+    --message "Web deployment for run ${GITHUB_RUN_ID}" \
     --secrets-file "${secrets_file}" \
     --strict \
     --experimental-provision=false
-bun "${repository_root}/tools/cutover/wrangler-output.ts" version-upload \
+bun "${repository_root}/tools/deploy/wrangler-output.ts" version-upload \
   "${upload_output}" "${worker_name}" > "${upload_result}"
 uploaded_version_id="$(jq -er '.versionId' "${upload_result}")"
 [[ "${uploaded_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
@@ -347,7 +280,7 @@ test "${uploaded_version_id}" != "${before_version_id}"
 
 bunx wrangler versions view "${uploaded_version_id}" \
   --name "${worker_name}" --json > "${uploaded_version}"
-bun "${repository_root}/tools/cutover/worker-version.ts" \
+bun "${repository_root}/tools/deploy/worker-version.ts" \
   version-runtime-bindings "${uploaded_version}" "${database_id}" \
   "${session_namespace_id}" "${uploaded_version_id}" >/dev/null
 jq -e '
@@ -370,7 +303,7 @@ jq -s -e '
     ($uploaded | durable_object_bindings) and
   $uploaded.resources.script_runtime.migration_tag ==
     $reference.resources.script_runtime.migration_tag
-' "${reference_version}" "${uploaded_version}" >/dev/null
+' "${before_version}" "${uploaded_version}" >/dev/null
 
 bunx wrangler deployments status --name "${worker_name}" --json \
   > "${after_upload_deployment}"
@@ -390,9 +323,9 @@ test ! -e "${deploy_output}"
 WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
   bunx wrangler versions deploy "${uploaded_version_id}@100%" \
     --name "${worker_name}" \
-    --message "Activate exact clean D1 web version for run ${GITHUB_RUN_ID}" \
+    --message "Activate web version for run ${GITHUB_RUN_ID}" \
     --yes
-bun "${repository_root}/tools/cutover/wrangler-output.ts" version-deploy \
+bun "${repository_root}/tools/deploy/wrangler-output.ts" version-deploy \
   "${deploy_output}" "${worker_name}" > "${deploy_result}"
 deployed_deployment_id="$(jq -er '.deploymentId' "${deploy_result}")"
 
@@ -401,7 +334,7 @@ bunx wrangler deployments status --name "${worker_name}" --json \
 bunx wrangler versions view "${uploaded_version_id}" \
   --name "${worker_name}" --json > "${after_version}"
 test "$(jq -er '.id' "${after_deployment}")" = "${deployed_deployment_id}"
-bun "${repository_root}/tools/cutover/worker-version.ts" \
+bun "${repository_root}/tools/deploy/worker-version.ts" \
   active-runtime-bindings "${after_deployment}" "${after_version}" \
   "${database_id}" "${session_namespace_id}" "${uploaded_version_id}" \
   >/dev/null
@@ -410,28 +343,18 @@ bun "${repository_root}/tools/cutover/worker-version.ts" \
 propagation_proven=false
 propagation_observed_attempt=0
 for attempt in $(seq 1 12); do
-  fence_headers="${runtime_root}/fence-headers-${attempt}.txt"
-  root_headers="${runtime_root}/root-headers-${attempt}.txt"
-  fence_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-    --header 'Cache-Control: no-cache' --output /dev/null \
-    --dump-header "${fence_headers}" --write-out '%{http_code}' \
-    https://intar.dev/.well-known/intar-clean-d1-cutover-fence; } || true)"
-  root_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-    --header 'Cache-Control: no-cache' --output /dev/null \
-    --dump-header "${root_headers}" --write-out '%{http_code}' \
-    https://intar.dev/; } || true)"
-  fence_active=false
-  if grep -qi '^x-intar-cutover-fence: active' "${fence_headers}"; then
-    fence_active=true
+  health_state="${runtime_root}/after-health-${attempt}.json"
+  root_healthy=false
+  if probe_root_health "after-${attempt}" "${health_state}"; then
+    root_healthy=true
   fi
   jq -cn \
     --argjson attempt "${attempt}" \
-    --arg fence_status "${fence_status}" \
-    --arg root_status "${root_status}" \
-    --argjson fence_active "${fence_active}" \
-    '{attempt: $attempt, fence_status: $fence_status, root_status: $root_status, fence_active: $fence_active}' \
+    --argjson root_healthy "${root_healthy}" \
+    --slurpfile observed "${health_state}" \
+    '{attempt: $attempt, root_healthy: $root_healthy, observed: $observed[0]}' \
     >> "${propagation_attempts}"
-  if [ "${fence_active}" = false ] && [ "${root_status}" = 200 ]; then
+  if [ "${root_healthy}" = true ]; then
     propagation_proven=true
     propagation_observed_attempt="${attempt}"
     break
@@ -446,15 +369,13 @@ jq -n \
   --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" \
   --arg before_deployment_id "${before_deployment_id}" \
   --arg before_version_id "${before_version_id}" \
-  --arg pre_switch_mode "${pre_switch_mode}" \
-  --arg reference_version_id "${reference_version_id}" \
   --arg uploaded_version_id "${uploaded_version_id}" \
   --arg deployed_deployment_id "${deployed_deployment_id}" \
   --arg database_id "${database_id}" \
   --arg session_namespace_id "${session_namespace_id}" \
-  --arg session_namespace_title "${session_namespace_title}" \
   --argjson propagation_observed_attempt "${propagation_observed_attempt}" \
-  --slurpfile before_public_state "${before_public_state}" \
+  --slurpfile before_health "${before_health}" \
+  --rawfile propagation_attempts_ndjson "${propagation_attempts}" \
   --rawfile wrangler_version_upload_ndjson "${upload_output}" \
   --rawfile wrangler_version_deploy_ndjson "${deploy_output}" '
     {
@@ -465,14 +386,13 @@ jq -n \
       run_attempt: $run_attempt,
       before_deployment_id: $before_deployment_id,
       before_version_id: $before_version_id,
-      pre_switch_mode: $pre_switch_mode,
-      reference_version_id: $reference_version_id,
+      reference_version_id: $before_version_id,
       uploaded_version_id: $uploaded_version_id,
       deployed_deployment_id: $deployed_deployment_id,
       database_id: $database_id,
       session_namespace_id: $session_namespace_id,
-      session_namespace_title: $session_namespace_title,
-      namespace_inventory_proven: true,
+      current_active_version_used_as_reference: true,
+      before_health_proven: true,
       uploaded_runtime_bindings_proven: true,
       upload_did_not_activate: true,
       exact_version_deployed: true,
@@ -483,7 +403,9 @@ jq -n \
       propagation_max_attempts: 12,
       propagation_retry_seconds: 2,
       propagation_observed_attempt: $propagation_observed_attempt,
-      before_public_state: $before_public_state[0],
+      after_health_proven: true,
+      before_health: $before_health[0],
+      propagation_attempts_ndjson: $propagation_attempts_ndjson,
       routes_mutated: false,
       crons_mutated: false,
       durable_object_lifecycle_mutated: false,
@@ -499,7 +421,9 @@ jq -e \
     .database_id == $database_id and
     .session_namespace_id == $session_namespace_id and
     .uploaded_version_id != .before_version_id and
-    .namespace_inventory_proven == true and
+    .reference_version_id == .before_version_id and
+    .current_active_version_used_as_reference == true and
+    .before_health_proven == true and
     .uploaded_runtime_bindings_proven == true and
     .upload_did_not_activate == true and
     .exact_version_deployed == true and
@@ -507,11 +431,13 @@ jq -e \
     .runtime_secret_binding_proven == true and
     .durable_object_binding_set_unchanged == true and
     .durable_object_migration_tag_unchanged == true and
+    .after_health_proven == true and
     .propagation_observed_attempt >= 1 and
     .propagation_observed_attempt <= .propagation_max_attempts and
     .routes_mutated == false and
     .crons_mutated == false and
     .durable_object_lifecycle_mutated == false and
+    (.propagation_attempts_ndjson | contains("\"root_healthy\":true")) and
     (.wrangler_version_upload_ndjson | contains("\"type\":\"version-upload\"")) and
     (.wrangler_version_deploy_ndjson | contains("\"type\":\"version-deploy\""))
   ' "${evidence}" >/dev/null

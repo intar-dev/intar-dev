@@ -185,7 +185,7 @@ describe("domain-neutral runtime executions", () => {
     ).rejects.toMatchObject({ code: "runtime_execution_invalid" });
   });
 
-  it("creates generation-one executions and slots for clean-schema scenario runs", async () => {
+  it("creates generation-one executions and slots for current-schema scenario runs", async () => {
     await resetD1Database();
     await seedRuntimeOwner(false);
     const db = drizzle(env.DB);

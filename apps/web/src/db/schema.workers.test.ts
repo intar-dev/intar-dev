@@ -1,11 +1,11 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 import { recordProviderOperationObservation } from "@/lib/workshops/provider-runtime";
 
-beforeEach(resetCleanD1Database);
+beforeEach(resetDatabase);
 
-describe("clean multicloud D1 baseline", () => {
+describe("production D1 schema", () => {
   it("initializes the complete schema without legacy provider tables", async () => {
     const tables = await env.DB.prepare(
       `SELECT name FROM sqlite_schema
@@ -17,7 +17,6 @@ describe("clean multicloud D1 baseline", () => {
     expect(names).toEqual(
       expect.arrayContaining([
         "user",
-        "clean_d1_commissioning",
         "organization",
         "scenario_course_catalogs",
         "scenario_runs",
@@ -46,6 +45,7 @@ describe("clean multicloud D1 baseline", () => {
     );
     expect(names).not.toEqual(
       expect.arrayContaining([
+        "clean_d1_commissioning",
         "hetzner_allocations",
         "organization_provider_connections",
         "runtime_provider_checkpoint_artifacts",
@@ -53,6 +53,22 @@ describe("clean multicloud D1 baseline", () => {
         "workshop_session_runtime_providers",
       ]),
     );
+
+    const contentIndexes = await env.DB.prepare(
+      `SELECT name, "unique" AS is_unique
+       FROM pragma_index_list('workshop_template_revisions')
+       WHERE name IN (
+         'workshop_template_revisions_content_idx',
+         'workshop_template_revisions_content_uidx'
+       )
+       ORDER BY name`,
+    ).all<{ name: string; is_unique: number }>();
+    expect(contentIndexes.results).toEqual([
+      {
+        name: "workshop_template_revisions_content_idx",
+        is_unique: 0,
+      },
+    ]);
 
     const foreignKeyViolations = await env.DB.prepare(
       "PRAGMA foreign_key_check",

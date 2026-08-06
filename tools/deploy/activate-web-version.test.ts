@@ -37,13 +37,6 @@ function runAmbiguousActivation(restoreFailures: number) {
   writeFileSync(restoreCount, "0");
   writeFileSync(secrets, '{"STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n');
   writeFileSync(
-    join(runnerTemp, "clean-d1-pre-web-switch.json"),
-    JSON.stringify({
-      mode: "restored-strict-drain-refenced-cutover",
-      exact_restore: { previous_version_id: beforeVersionId },
-    }),
-  );
-  writeFileSync(
     config,
     JSON.stringify({
       name: "intar-dev",
@@ -85,11 +78,7 @@ if [ "$1 $2" = "deployments status" ]; then
 fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
-  if [ "$version" = "$UPLOADED_VERSION_ID" ]; then
-    jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"}],script_runtime:{migration_tag:"v4"}}}'
-  else
-    jq -cn --arg id "$version" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"}],script_runtime:{migration_tag:"v4"}}}'
-  fi
+  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"}],script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -143,31 +132,16 @@ esac
 set -u
 output=""
 headers=""
-url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --dump-header) headers="$2"; shift 2 ;;
-    http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
-if [[ "$url" == *"/storage/kv/namespaces"* ]]; then
-  jq -cn --arg id "$SESSION_NAMESPACE_ID" '{success:true,errors:[],result:[{id:$id,title:"intar-dev-session"}]}' > "$output"
-  exit 0
-fi
 current="$(<"$MOCK_STATE")"
 if [ -n "$headers" ]; then : > "$headers"; fi
-if [[ "$url" == *"/.well-known/intar-clean-d1-cutover-fence"* ]]; then
-  if [ "$current" = "$BEFORE_VERSION_ID" ]; then
-    printf 'x-intar-cutover-fence: active\r\n' > "$headers"
-    printf '200'
-  else
-    printf '404'
-  fi
-else
-  if [ "$current" = "$BEFORE_VERSION_ID" ]; then printf '503'; else printf '200'; fi
-fi
+if [ "$current" = "$BEFORE_VERSION_ID" ]; then printf '200'; else printf '503'; fi
 `,
   );
   writeFileSync(join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
@@ -178,7 +152,7 @@ fi
   const result = spawnSync(
     "bash",
     [
-      join(repositoryRoot, "tools/cutover/activate-web-version.sh"),
+      join(repositoryRoot, "tools/deploy/activate-web-version.sh"),
       config,
       databaseId,
       sessionNamespaceId,
@@ -211,7 +185,7 @@ fi
       },
     },
   );
-  const runtime = join(runnerTemp, "intar-web-version-12345");
+  const runtime = join(runnerTemp, "intar-web-deploy-12345");
   return {
     result,
     state: readFileSync(state, "utf8"),
@@ -229,7 +203,7 @@ describe("exact web-version activation", () => {
     const deploy = script.indexOf(
       'bunx wrangler versions deploy "${uploaded_version_id}@100%"',
     );
-    const activeBindingProof = script.indexOf("active-runtime-bindings");
+    const activeBindingProof = script.indexOf("active-runtime-bindings", deploy);
     expect(upload).toBeGreaterThan(-1);
     expect(uploadedBindingProof).toBeGreaterThan(upload);
     expect(deploy).toBeGreaterThan(uploadedBindingProof);
@@ -273,22 +247,20 @@ describe("exact web-version activation", () => {
     expect(script).toContain("rollback_proven: $rollback_proven");
   });
 
-  it("proves the existing namespace rather than provisioning a replacement", () => {
+  it("uses the current active version as the binding and lifecycle reference", () => {
     expect(script).toContain(
-      "/storage/kv/namespaces?per_page=1000",
+      'active-runtime-bindings "${before_deployment}" "${before_version}"',
     );
-    expect(script).toContain('session_namespace_title="intar-dev-session"');
-    expect(script).toContain("namespace_inventory_proven: true");
+    expect(script).toContain('"${before_version}" "${uploaded_version}"');
+    expect(script).toContain("current_active_version_used_as_reference: true");
   });
 
-  it("accepts only a healthy application or the exact maintenance fence as rollback baseline", () => {
-    expect(script).toContain('case "${pre_switch_mode}" in');
-    expect(script).toContain("already-clean)");
-    expect(script).toContain('.root_status == "200"');
-    expect(script).toContain("restored-strict-drain-refenced-cutover)");
-    expect(script).toContain('.fence_status == "200"');
-    expect(script).toContain(".fence_active == true");
-    expect(script).toContain('.root_status == "503"');
+  it("requires the production root to be healthy before and after activation", () => {
+    expect(script).toContain('probe_root_health "before" "${before_health}"');
+    expect(script).toContain('probe_root_health "after-${attempt}" "${health_state}"');
+    expect(script).toContain('https://intar.dev/');
+    expect(script).toContain("before_health_proven: true");
+    expect(script).toContain("after_health_proven: true");
   });
 
   it("reconciles an ambiguous activation and retries exact restore through public propagation", () => {
@@ -302,7 +274,7 @@ describe("exact web-version activation", () => {
         attempted_version_id: uploadedVersionId,
         rollback_command_attempts: 2,
         rollback_control_plane_proven: true,
-        rollback_public_state_proven: true,
+        rollback_health_proven: true,
         rollback_propagation_observed_attempt: 1,
         rollback_proven: true,
       });
@@ -312,9 +284,9 @@ describe("exact web-version activation", () => {
       expect(String(run.rollback.rollback_attempts_ndjson)).toContain(
         '"exact_previous_version_active":true',
       );
-      expect(
-        String(run.rollback.rollback_propagation_attempts_ndjson),
-      ).toContain('"public_state_matches":true');
+      expect(String(run.rollback.rollback_propagation_attempts_ndjson)).toContain(
+        '"root_healthy":true',
+      );
     } finally {
       run.cleanup();
     }
@@ -329,7 +301,7 @@ describe("exact web-version activation", () => {
         rollback_command_attempts: 6,
         rollback_reconcile_attempts: 7,
         rollback_control_plane_proven: false,
-        rollback_public_state_proven: false,
+        rollback_health_proven: false,
         rollback_proven: false,
       });
     } finally {
