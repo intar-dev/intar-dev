@@ -13,16 +13,11 @@ Common commands:
 ```sh
 bun install --frozen-lockfile
 just check
-just check-bootstrap
 just test
 just build
 just check-hydrated
 just check-generated
 ```
-
-`just check-bootstrap` applies the clean baseline to a fresh in-memory database
-and proves that the credential-free owner/content bootstrap is idempotent. It
-never connects to production.
 
 `just clean-generated` removes only allowlisted repository output. It preserves
 the root `node_modules/`, Bun cache, Cargo cache, and root `target/`.

@@ -1,12 +1,8 @@
-# Clean-slate multicloud Workshops rollout
+# Multicloud Workshops operations
 
-This runbook cuts Intar over to the final Workshop schema and deploys the
-provider-neutral learner runtime for `agent_kvm`, Hetzner Cloud, and GCP
-Compute. It deliberately does not migrate existing D1 data or accept v1
-Workshop manifests.
-
-The old web artifact and old D1 database remain an inseparable rollback unit.
-The new web artifact reads only the new database.
+This runbook operates the provider-neutral learner runtime for `agent_kvm`,
+Hetzner Cloud, and GCP Compute. It covers reviewed production deployment,
+provider connection, publication, certification, pilots, and incident response.
 
 ## Architecture and invariants
 
@@ -107,19 +103,17 @@ exact response.
 
 ## Protected GitHub configuration
 
-Use protected production secrets. Provider, D1, probe, rollback, and edge
-credentials remain separate; the existing account token intentionally serves
-both web/R2 deployment and protected Flagship targeting:
+Use protected production secrets. Provider, probe, and web credentials remain
+separate; the existing account token intentionally serves D1 migrations,
+web/R2 deployment, and protected Flagship targeting:
 
 | secret                                  | available to                                                       |
 | --------------------------------------- | ------------------------------------------------------------------ |
 | `CLOUDFLARE_ACCOUNT_ID`                 | protected rollout jobs                                             |
-| `CLOUDFLARE_D1_ADMIN_API_TOKEN`         | clean-D1 workflow only                                             |
 | `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN` | Hetzner Worker deployment only                                     |
 | `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`     | GCP Worker deployment only                                         |
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
-| `CLOUDFLARE_API_TOKEN`                  | web/R2 deployment and protected Flagship targeting                 |
-| `CLOUDFLARE_WEB_ROLLBACK_API_TOKEN`     | exact web-version rollback only                                    |
+| `CLOUDFLARE_API_TOKEN`                  | D1 migrations, web/R2 deployment, and protected Flagship targeting |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
@@ -129,13 +123,15 @@ Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
 provider Worker envelope-encrypts them.
 
-Set these protected variables before the web cutover:
+Keep these protected runtime variables current:
 
-- `CLEAN_D1_DATABASE_ID` to the UUID returned by the clean-D1 apply workflow;
-- `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r3`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID`;
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
 - the existing production-review variables required by the web workflow.
+
+The production D1 name and UUID are permanent resource configuration in
+`apps/web/wrangler.jsonc`. A D1 identity change is a reviewed code change; it is
+not an environment-variable override.
 
 Provider KEKs are never passed to Astro build or web deployment jobs. The web
 deployment token is never passed to provider jobs.
@@ -147,7 +143,6 @@ and browser checks to pass. The repository-level commands are:
 
 ```sh
 bun install --frozen-lockfile
-just check-bootstrap
 just check
 just test
 just build
@@ -155,59 +150,37 @@ just check-generated
 just check-hydrated
 ```
 
-`just check-bootstrap` creates a fresh in-memory database, applies the single
-baseline, seeds owner/organization plus Scenario, Course, and Workshop
-publication state twice, compares the complete state, and checks foreign keys.
-It cannot reach production.
-
 The hydrated Platform Engineering manifest must report format 2, eleven
 modules, 240 scheduled minutes, 85 slides and 85 note files, a 32,768 MiB
 workspace requirement, and exactly the `hetzner-cpx42` runtime profile for the
 first production revision. Every OCI image lock entry must contain a lowercase
 SHA-256 digest.
 
-Before the clean cutover, disable new issuance in the old control plane and
-finish every old cleanup. Retain queries and provider inventories proving all
-of the following are zero or absent:
+For changes that affect provider lifecycle, deletion, or reconciliation, review
+the live provider inventory and the non-terminal allocation and operation rows
+before deployment. Never remove provider authority or reconciliation while a
+learner, verifier, resource, operation, route, or active slot remains.
 
-- non-terminal Scenario or Workshop executions and provider allocations;
-- active runtime slots, Stargate routes, assist grants, and terminal sessions;
-- learner or verifier VMs, servers, instances, disks, addresses, Primary IPs,
-  ephemeral SSH keys, and pending provider operations.
+## 2. Maintain the production D1 schema
 
-Do not make the old D1 database read-only and do not deploy the new web Worker
-while an old resource still depends on reconciliation from the old application.
-Because the new Worker never reads the old database, cutting over with a live
-old resource would orphan its cleanup state.
+`apps/web/wrangler.jsonc` pins the production database and
+`apps/web/migrations/*.sql` is its canonical ordered migration stream. Create a
+new migration with `wrangler d1 migrations create DB <name>`, apply it locally
+with `bun run --cwd apps/web db:migrate:local`, and commit it with the code that
+uses it. Do not apply schema files with `wrangler d1 execute`, edit the
+`d1_migrations` ledger, or seed production with workstation SQL.
 
-## 2. Create the clean D1 database
-
-Use `.github/workflows/clean-d1-cutover.yml`; see
-[`clean-d1-cutover.md`](clean-d1-cutover.md).
-
-1. Dispatch `plan` on the exact reviewed `main` SHA with confirmation
-   `PLAN CLEAN D1`.
-2. Review the database inventory and baseline digest artifact.
-3. Dispatch `apply` with confirmation `APPLY CLEAN D1`.
-4. If the named database already exists, provide its exact expected UUID.
-5. Record the new UUID and baseline digest from the retained apply artifact.
-6. Set `CLEAN_D1_DATABASE_ID` to that exact UUID and
-   `CLEAN_D1_DATABASE_NAME` to `intar-dev-control-plane-v2-20260803-r3`.
-7. Verify both protected variables before dispatching any provider or web
-   rollout.
-
-The workflow requires exactly one migration,
-`apps/web/migrations/0000_clean_multicloud.sql`, applies it to the newly named
-database, and verifies the generic allocation, resource, price, and forecast
-tables. It does not clear, copy, read, or delete the old database.
-
-Do not manually seed D1 with SQL. After deployment, the owner signs in and
-recreates state through authenticated application APIs.
+The website deployment applies pending migrations through the checked-in
+binding, verifies the resulting production schema, and retains the migration
+log and verification result before web activation. Each migration must leave
+the currently active Worker functional for the short interval before the new
+version is activated. Review destructive or narrowing changes as a separate
+data-lifecycle operation rather than hiding them in an application deployment.
 
 ## 3. Deploy providers and web
 
-Provider mutation uses the same protected approval modes as the clean-D1 and
-web workflows. Reviewed mode requires administrator bypass disabled, a required
+Provider mutation uses the same protected approval modes as the web workflow.
+Reviewed mode requires administrator bypass disabled, a required
 reviewer, and self-review prevention. The explicitly configured single-operator
 commissioning mode requires the exact confirmation, protected actor login and
 numeric ID, an unexpired window of at most seven days, and an administrator
@@ -217,24 +190,20 @@ only `main`. The provider workflow checks the policy at authorization and again
 immediately before each provider mutation; the control-plane wrapper forwards
 the same single-operator confirmation to providers and web.
 
-Before dispatching the control-plane rollout, capture the complete old rollback
-unit in the rollout ticket:
+Before dispatching the control-plane rollout, record the reviewed source SHA,
+currently active `intar-dev` Worker version UUID, and current D1 UUID and
+binding. CI uploads an immutable version, proves its exact D1, `SESSION` KV, and
+Durable Object bindings, then activates that exact version UUID at 100 percent.
+A failed or ambiguous activation restores the exact previously active version
+before the job exits.
 
-- exact previous `intar-dev` Worker version UUID;
-- exact previous D1 name and UUID;
-- evidence that the previous Worker version contains that D1 binding;
-- the zero-allocation, zero-route, and zero-active-slot evidence above;
-- the reviewed source SHA and the clean-D1 plan/apply workflow run IDs.
-
-This evidence remains mandatory even though web activation is now fail-safe.
-CI uploads an inert immutable version with automatic resource provisioning
-disabled, proves its exact D1, `SESSION` KV, and Durable Object bindings, then
-deploys that exact version UUID at 100 percent. A failed or ambiguous activation
-restores the exact previously active version before the job exits. Routes and
-crons require the separate trigger deployment command, and Durable Object
-lifecycle changes require a regular `wrangler deploy`; neither command is used
-by web activation. A later scenario-bundle or R2 evidence step can still fail
-after the new web version is already serving production.
+Routes and crons require the separate trigger deployment command, and Durable
+Object lifecycle changes require a regular `wrangler deploy`; neither command
+is performed by exact web-version activation. Plan and review those changes as
+separate production mutations. A later scenario-bundle step can still fail
+after the new web version is already serving production, so inspect the
+activation evidence rather than inferring the live version from the overall job
+conclusion.
 
 Dispatch `.github/workflows/control-plane-rollout.yml` from the exact reviewed
 `main` SHA with:
@@ -266,51 +235,41 @@ The workflow:
 3. calls both deployed `capabilities()` services through the remote probe;
 4. fails closed on any protocol mismatch;
 5. builds the Astro web artifact;
-6. replaces the fail-closed D1 placeholder only in that artifact;
-7. verifies the live clean baseline through the exact new binding;
-8. deploys web and publishes the content-addressed workspace-agent/Kino bytes.
+6. verifies the permanent D1 and `SESSION` KV bindings in the built artifact;
+7. publishes the content-addressed workspace-agent and Kino bytes;
+8. applies pending D1 migrations and verifies the production schema;
+9. activates the exact immutable web version with automatic previous-version
+   restoration on activation failure;
+10. queues the exact Scenario source bundle.
 
-Retain the provider capability artifact, Worker versions, web version, guest
-tool hashes, new D1 ID, source SHA, and workflow run IDs.
+Retain the provider capability artifact, provider Worker versions, D1 migration
+and verification artifact, web activation artifact, guest tool hashes, D1 UUID,
+source SHA, and workflow run IDs. The executable order is therefore provider
+deployment and capability probing, ordered D1 migrations, then exact web-version
+activation.
 
-The executable canonical order is therefore: clean-D1 `plan`, clean-D1
-`apply`, set and verify both `CLEAN_D1_*` variables, deploy and probe both
-provider Workers, then deploy web. Do not dispatch provider or web deployment
-against the all-zero D1 placeholder. If the control-plane workflow fails,
-inspect whether its web `Deploy` step completed before deciding whether the old
-or new compatibility unit is live.
+## 4. Operate the pilot organization
 
-## 4. Bootstrap the empty application
+Both Workshop flags remain disabled by default for every organization:
 
-Both Workshop flags remain disabled by default for every organization. The
-first-owner bootstrap is a two-step protected-workflow handoff:
+1. select the existing pilot organization and record its organization and owner
+   IDs;
+2. target `workshops_enabled` only to that exact organization, leaving
+   `workshop_multicloud_runtime_enabled` false;
+3. connect available provider projects through the owner-only BYOK screens and
+   validate inspection, credential rotation, and cost forecasts while the
+   multicloud flag remains false. Do not submit a GCP key while the GCP Worker
+   is explicitly dormant;
+4. publish or update the required Scenario and Course catalogs;
+5. hydrate and validate the Platform Engineering Workshop format-v2 bundle;
+6. enable `workshop_multicloud_runtime_enabled` only for that organization
+   immediately before provider-backed certification and issuance;
+7. publish only after every declared profile certification succeeds, then
+   create new sessions. A revision that declares GCP cannot be published while
+   the GCP provider remains dormant.
 
-1. Run clean-D1 `apply` with the intended owner's exact GitHub login and numeric
-   GitHub ID. Retain the successful first-attempt run ID and apply artifact. The
-   operation atomically writes the provenance receipt and sole allowlist row.
-2. Deploy web, then sign in once through GitHub as that identity. Do not create
-   an organization yet.
-3. Run clean-D1 `bootstrap-owner` with the same identity, exact new D1 UUID, and
-   successful `apply` run ID. It verifies the immutable artifact and the sole
-   `github` account binding before granting the administrator role. Sign out and
-   in again, then record the resulting Intar user ID and bootstrap artifact.
-4. Create the pilot organization while both Workshop flags still default to
-   false.
-5. Enable `workshops_enabled` only for that exact pilot organization, leaving
-   `workshop_multicloud_runtime_enabled` false.
-6. Reconnect available provider projects through the owner-only BYOK screens
-   and validate their inspection, credential rotation, and cost forecasts while
-   `workshop_multicloud_runtime_enabled` is still false. Do not submit a GCP key
-   while the GCP Worker is explicitly dormant.
-7. Republish the required Scenario and Course catalogs.
-8. Hydrate and validate the Platform Engineering Workshop format-v2 bundle.
-9. Enable `workshop_multicloud_runtime_enabled` only for that exact pilot
-   organization immediately before provider-backed certification and issuance.
-   The multicloud flag is not a prerequisite for BYOK or forecasting, and
-   cleanup and reconciliation remain active even when issuance is disabled.
-10. Publish only after every declared profile certification succeeds, then
-    create new sessions. A revision that declares GCP cannot be published while
-    the GCP provider remains dormant.
+The multicloud flag is not a prerequisite for BYOK or forecasting, and cleanup
+and reconciliation remain active even when issuance is disabled.
 
 Do not enable either flag globally, and do not target another organization
 until the one-user and two-user acceptance evidence below is complete. To stop
@@ -384,9 +343,6 @@ the sole rule, remove replaces the rules with the exact empty set; it does not
 disable reconciliation or deletion. Both pilot and control evaluations must be
 false afterward. The workflow refuses to touch a flag containing any
 additional rule.
-
-Nothing is copied from the prior D1 database. Old users, memberships,
-connections, sessions, forecasts, and progress are intentionally absent.
 
 ## 5. Connect the Hetzner project
 
@@ -538,8 +494,7 @@ Retain non-secret identifiers and artifacts:
 ```text
 reviewed commit and pull request
 validation and production workflow run IDs
-clean D1 plan/apply artifacts, name, UUID, and baseline SHA-256
-old D1 UUID retained offline
+D1 migration log, verification result, name, and UUID
 Hetzner and GCP Worker versions and capability response
 web Worker version and bound D1 UUID
 workspace-agent and Kino SHA-256 values
@@ -552,8 +507,8 @@ forecast versions and price-observation timestamps
 route IDs and browser traces for all seven applications
 live and final cost estimates with manual calculations
 zero-resource and zero-active-slot teardown evidence
-first-owner bootstrap mechanism, protected audit ID, and resulting user ID
-previous web version UUID and previous D1 binding evidence
+previous and activated web version UUIDs and D1 binding evidence
+automatic restoration evidence when an activation attempt fails
 ```
 
 Successful CI, dormant GCP deployment, or capability probing alone is not GCP
@@ -562,35 +517,18 @@ allocation and complete teardown evidence exist. Full multicloud acceptance
 still requires real allocations and complete teardown evidence for both
 providers.
 
-## Rollback
+## Incident response
 
-Rollback stops new issuance first but leaves cleanup and reconciliation active.
-Confirm or expose every provider resource before switching web versions.
+Stop new certification and issuance first by removing the pilot organization's
+multicloud targeting. Leave provider cleanup, reconciliation, KEKs, and
+encrypted connection state available until every cloud resource is confirmed
+deleted or explicitly visible to the owner as `cleanup_pending`.
 
-Before dispatch, attach the old compatibility-unit evidence captured before
-cutover and fresh evidence showing either that every new provider resource is
-deleted or that each remaining resource is explicitly visible as
-`cleanup_pending` to the owner. Record whether the failed control-plane run
-reached the web `Deploy` step. Never infer the live compatibility unit from the
-overall workflow conclusion alone.
-
-Dispatch the `rollback` operation in `.github/workflows/clean-d1-cutover.yml`
-with:
-
-- confirmation `ROLLBACK CLEAN D1`;
-- issuance-disabled confirmation;
-- exact previous web version UUID;
-- exact previous D1 UUID.
-
-The workflow verifies that the previous web version contains the previous D1
-binding, then deploys that exact existing version at 100 percent traffic. It
-waits boundedly until the maintenance fence is absent and the root page is
-healthy. The operation does not mutate routes, crons, either D1 database, or
-Durable Object lifecycle. It does not run old code against the new database and
-does not delete either database. Provider Workers, KEKs, and encrypted
-credential state remain available until every cloud resource is confirmed
-deleted.
-
-Deleting the old D1, new D1, old Worker identities, credentials, or KEKs is a
-separate destructive action that requires explicit confirmation after the
-rollback window.
+If exact web-version activation fails or its result is ambiguous, the deployment
+helper restores the previously active version before exiting. Verify the live
+version UUID, D1 binding, and root health from the retained activation evidence;
+do not infer production state from the overall workflow conclusion. If a fault
+appears after activation completed, keep issuance disabled and ship a reviewed
+fix through `main` and the protected production workflow. Do not switch Worker
+versions, D1 bindings, routes, crons, or Durable Object lifecycle from a
+workstation.
