@@ -244,24 +244,19 @@ if (
   );
 }
 
-const cleanD1Workflow = await readFile(
-  resolve(root, ".github/workflows/clean-d1-cutover.yml"),
-  "utf8",
-);
-if (
-  countOccurrences(cleanD1Workflow, "uses: actions/setup-node@v6") !== 1 ||
-  countOccurrences(
-    cleanD1Workflow,
-    "node-version-file: apps/web/.node-version",
-  ) !== 1
-) {
-  throw new Error("Clean-D1 Wrangler commands must use the pinned Node runtime");
-}
-
 const websiteDeployWorkflow = await readFile(
   resolve(root, ".github/workflows/website-deploy.yml"),
   "utf8",
 );
+if (
+  !websiteDeployWorkflow.includes(
+    "${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}/",
+  )
+) {
+  throw new Error(
+    "Website deployment must retain the exact-version helper runtime evidence",
+  );
+}
 const providerCapabilitiesJob = websiteDeployWorkflow
   .split("\n  provider-capabilities:\n")[1]
   ?.split("\n  deploy:\n")[0];

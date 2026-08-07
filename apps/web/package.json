@@ -28,7 +28,7 @@
     "astro": "astro",
     "db:migrate:local": "wrangler d1 migrations apply DB --local --config wrangler.local.jsonc --persist-to .wrangler/local-ui-state",
     "db:migrate:production": "wrangler d1 migrations apply DB --remote --config wrangler.jsonc",
-    "db:baseline:check": "tsc --noEmit -p tsconfig.clean-schema.json && vitest run src/lib/workshops/runtime-provider.test.ts && vitest run --config vitest.workers.config.ts src/db/clean-schema.workers.test.ts"
+    "db:schema:check": "tsc --noEmit -p tsconfig.provider-runtime-schema.json && vitest run src/lib/workshops/runtime-provider.test.ts && vitest run --config vitest.workers.config.ts src/db/schema.workers.test.ts"
   },
   "dependencies": {
     "@intar/provider-contracts": "workspace:*",

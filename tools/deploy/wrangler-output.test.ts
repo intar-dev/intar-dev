@@ -14,7 +14,7 @@ const session = {
   wrangler_version: "4.118.0",
 };
 
-describe("structured Wrangler output", () => {
+describe("structured Wrangler deployment output", () => {
   it("extracts an exact uploaded version", () => {
     expect(
       assertWranglerVersionUpload(

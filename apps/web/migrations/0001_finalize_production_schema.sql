@@ -1,3 +1,10 @@
+DROP INDEX IF EXISTS `workshop_template_revisions_content_uidx`;
+--> statement-breakpoint
+DROP INDEX IF EXISTS `workshop_template_revisions_content_idx`;
+--> statement-breakpoint
+CREATE INDEX `workshop_template_revisions_content_idx`
+  ON `workshop_template_revisions` (`template_id`, `content_hash`);
+--> statement-breakpoint
 WITH confirmed_delete_operations AS (
   SELECT
     operation.id,
@@ -63,3 +70,5 @@ SET state = 'succeeded',
        WHERE confirmed_delete_operations.id = runtime_provider_operations.id)
     )
 WHERE id IN (SELECT id FROM confirmed_delete_operations);
+--> statement-breakpoint
+DROP TABLE `clean_d1_commissioning`;

@@ -10,7 +10,7 @@ const migrationSources = import.meta.glob<string>(
   },
 );
 
-export const cleanD1Migrations = Object.entries(migrationSources)
+export const databaseMigrations = Object.entries(migrationSources)
   .map(([path, raw]) => ({
     name: path.split("/").at(-1) ?? path,
     queries: raw
@@ -20,7 +20,7 @@ export const cleanD1Migrations = Object.entries(migrationSources)
   }))
   .sort((left, right) => left.name.localeCompare(right.name));
 
-export async function resetCleanD1Database(): Promise<void> {
+export async function resetDatabase(): Promise<void> {
   await reset();
-  await applyD1Migrations(env.DB, cleanD1Migrations);
+  await applyD1Migrations(env.DB, databaseMigrations);
 }

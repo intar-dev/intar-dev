@@ -7,7 +7,7 @@ import {
   assertVersionRuntimeBindings,
 } from "./worker-version";
 
-const oldDatabaseId = "6e715506-88ce-4565-85bc-66a9cf2a3c5e";
+const databaseId = "33333333-4444-4555-8666-777777777777";
 const versionId = "11111111-2222-4333-8444-555555555555";
 const sessionNamespaceId = "87ad9df7e37e4ced900553aa1a7775a1";
 
@@ -18,15 +18,15 @@ function version(bindings: unknown[]) {
   };
 }
 
-describe("clean D1 Worker binding evidence", () => {
+describe("production Worker binding evidence", () => {
   it("accepts one 100 percent active version with the exact DB binding", () => {
     expect(
       assertActiveWorkerVersion(
         { versions: [{ version_id: versionId, percentage: 100 }] },
-        version([{ type: "d1", name: "DB", id: oldDatabaseId }]),
-        oldDatabaseId,
+        version([{ type: "d1", name: "DB", id: databaseId }]),
+        databaseId,
       ),
-    ).toEqual({ versionId, databaseId: oldDatabaseId });
+    ).toEqual({ versionId, databaseId });
   });
 
   it("rejects split traffic, extra DB bindings, and suffix-shaped spoofing", () => {
@@ -38,23 +38,23 @@ describe("clean D1 Worker binding evidence", () => {
             { version_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", percentage: 10 },
           ],
         },
-        version([{ type: "d1", name: "DB", id: oldDatabaseId }]),
-        oldDatabaseId,
+        version([{ type: "d1", name: "DB", id: databaseId }]),
+        databaseId,
       ),
     ).toThrow(/exactly one/);
     expect(() =>
       assertVersionDatabaseBinding(
         version([
-          { type: "d1", name: "DB", id: oldDatabaseId },
-          { type: "d1", name: "DB", id: oldDatabaseId },
+          { type: "d1", name: "DB", id: databaseId },
+          { type: "d1", name: "DB", id: databaseId },
         ]),
-        oldDatabaseId,
+        databaseId,
       ),
     ).toThrow(/exactly one/);
     expect(() =>
       assertVersionDatabaseBinding(
-        version([{ type: "plain_text", name: "NOTE", text: oldDatabaseId }]),
-        oldDatabaseId,
+        version([{ type: "plain_text", name: "NOTE", text: databaseId }]),
+        databaseId,
       ),
     ).toThrow(/exactly one/);
   });
@@ -63,14 +63,14 @@ describe("clean D1 Worker binding evidence", () => {
     expect(() =>
       assertActiveWorkerVersion(
         { versions: [{ version_id: versionId, percentage: 100 }] },
-        version([{ type: "d1", name: "DB", id: oldDatabaseId }]),
+        version([{ type: "d1", name: "DB", id: databaseId }]),
         "00000000-0000-4000-8000-000000000001",
       ),
     ).toThrow(/expected database/);
     expect(() =>
       assertVersionDatabaseBinding(
-        version([{ type: "d1", name: "DB", id: oldDatabaseId }]),
-        oldDatabaseId,
+        version([{ type: "d1", name: "DB", id: databaseId }]),
+        databaseId,
         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       ),
     ).toThrow(/expected version/);
@@ -78,7 +78,7 @@ describe("clean D1 Worker binding evidence", () => {
 
   it("accepts the exact DB and SESSION bindings on an uploaded or active version", () => {
     const runtimeVersion = version([
-      { type: "d1", name: "DB", id: oldDatabaseId },
+      { type: "d1", name: "DB", id: databaseId },
       {
         type: "kv_namespace",
         name: "SESSION",
@@ -88,24 +88,24 @@ describe("clean D1 Worker binding evidence", () => {
     expect(
       assertVersionRuntimeBindings(
         runtimeVersion,
-        oldDatabaseId,
+        databaseId,
         sessionNamespaceId,
         versionId,
       ),
-    ).toEqual({ versionId, databaseId: oldDatabaseId, sessionNamespaceId });
+    ).toEqual({ versionId, databaseId, sessionNamespaceId });
     expect(
       assertActiveWorkerRuntimeVersion(
         { versions: [{ version_id: versionId, percentage: 100 }] },
         runtimeVersion,
-        oldDatabaseId,
+        databaseId,
         sessionNamespaceId,
         versionId,
       ),
-    ).toEqual({ versionId, databaseId: oldDatabaseId, sessionNamespaceId });
+    ).toEqual({ versionId, databaseId, sessionNamespaceId });
   });
 
   it("rejects a missing, duplicate, or wrong SESSION namespace binding", () => {
-    const databaseBinding = { type: "d1", name: "DB", id: oldDatabaseId };
+    const databaseBinding = { type: "d1", name: "DB", id: databaseId };
     const sessionBinding = {
       type: "kv_namespace",
       name: "SESSION",
@@ -114,14 +114,14 @@ describe("clean D1 Worker binding evidence", () => {
     expect(() =>
       assertVersionRuntimeBindings(
         version([databaseBinding]),
-        oldDatabaseId,
+        databaseId,
         sessionNamespaceId,
       ),
     ).toThrow(/exactly one KV binding/);
     expect(() =>
       assertVersionRuntimeBindings(
         version([databaseBinding, sessionBinding, sessionBinding]),
-        oldDatabaseId,
+        databaseId,
         sessionNamespaceId,
       ),
     ).toThrow(/exactly one KV binding/);
@@ -131,7 +131,7 @@ describe("clean D1 Worker binding evidence", () => {
           databaseBinding,
           { ...sessionBinding, namespace_id: `${sessionNamespaceId}spoof` },
         ]),
-        oldDatabaseId,
+        databaseId,
         sessionNamespaceId,
       ),
     ).toThrow(/expected namespace/);

@@ -16,8 +16,8 @@ The web Worker binds them as `HETZNER_PROVIDER_SERVICE` and
 
 ## Deployment gate
 
-Provider mutations use the same protected approval modes as the clean-D1 and
-web workflows. In `reviewed` mode the production environment must disable
+Provider mutations use the same protected approval modes as the web workflow.
+In `reviewed` mode the production environment must disable
 administrator bypass, require at least one reviewer, and prevent self-review;
 the single-operator confirmation must be empty. In the explicitly configured
 `single-operator` commissioning mode, the dispatch must include
@@ -33,20 +33,20 @@ provider dispatch supplies `single_operator_confirmation` itself. The protected
 control-plane wrapper forwards its identically named input to both provider and
 web workflows.
 
-The canonical clean-slate production order is:
+The canonical production order is:
 
-1. run clean-D1 `plan` and retain its inventory and baseline digest;
-2. run clean-D1 `apply` and retain the new database UUID;
-3. set and verify `CLEAN_D1_DATABASE_ID` and
-   `CLEAN_D1_DATABASE_NAME` in the protected production environment;
-4. dispatch `.github/workflows/control-plane-rollout.yml`, which deploys and
-   probes both provider Workers before invoking web deployment.
+1. merge the exact reviewed revision to `main` and verify that
+   `apps/web/wrangler.jsonc` still pins the intended production D1 database;
+2. dispatch `.github/workflows/control-plane-rollout.yml`, which deploys and
+   probes both provider Workers before invoking web deployment;
+3. retain the provider capability, D1 migration, and exact web-version
+   activation evidence, then verify the public control plane.
 
-Do not deploy a provider as a workaround for an incomplete D1 cutover, and do
-not deploy web against the checked-in all-zero database placeholder. Before
-step 1, disable old issuance and retain proof of zero old provider allocations,
-VMs, disks, IPs, keys, operations, Stargate routes, and global active slots.
-The new application cannot reconcile rows left only in the old database.
+The web workflow applies the ordered D1 migration stream before activating the
+new immutable Worker version. A failed or ambiguous activation restores the
+previously active version before the job exits. Do not deploy a provider as a
+workaround for a web or D1 failure, and never patch the production D1 binding
+from a workstation or a GitHub environment variable.
 
 For a provider-affecting change, `.github/workflows/provider-workers.yml`
 installs the single root Bun workspace, runs package and provider conformance
@@ -56,11 +56,11 @@ Workers before invoking the web deployment. A regular web deployment performs
 the same capability-contract gate but never redeploys a provider.
 
 Direct production dispatches of `provider-workers.yml` share the
-`intar-control-plane-production` concurrency group with clean-D1 and web
-mutations. Pull-request validation remains scoped to its PR. When the protected
-control-plane wrapper calls the reusable provider workflow, it passes
-`parent_holds_control_plane_lock=true`; the child then uses a run-unique group so
-it cannot deadlock against the lock already held by its parent.
+`intar-control-plane-production` concurrency group with web and other
+control-plane mutations. Pull-request validation remains scoped to its PR. When
+the protected control-plane wrapper calls the reusable provider workflow, it
+passes `parent_holds_control_plane_lock=true`; the child then uses a run-unique
+group so it cannot deadlock against the lock already held by its parent.
 
 The conformance gate verifies the RPC value returned by each service:
 
@@ -76,11 +76,10 @@ Any mismatch blocks the web deployment. Provider KEKs are available only to
 the corresponding protected deployment job and are not passed to Astro build
 or web deployment jobs.
 
-Both Workshop feature flags remain default-off globally. After the separately
-recorded first-owner bootstrap handoff creates the pilot organization, target
-`workshops_enabled` only to that organization. Target
-`workshop_multicloud_runtime_enabled` immediately before certification and
-issuance. The multicloud flag does not gate BYOK connection, inspection,
+Both Workshop feature flags remain default-off globally. After the pilot
+organization exists, target `workshops_enabled` only to that organization.
+Target `workshop_multicloud_runtime_enabled` immediately before certification
+and issuance. The multicloud flag does not gate BYOK connection, inspection,
 credential rotation, or cost forecasting. Removing its targeting stops new
 direct-cloud certification and issuance but must not stop provider
 reconciliation or deletion.
@@ -140,10 +139,9 @@ deployment tokens, and CI retains the non-secret response as rollout evidence.
 Durable Object lifecycle changes require `wrangler deploy`; version upload alone
 does not apply them. New provider Workers use SQLite-backed Durable Objects.
 
-Before provider deployment, record the previous web Worker version UUID, its
-previous D1 UUID and binding, the reviewed source SHA, and the zero-resource
-inventory. Provider Workers use new route-less identities and may remain
-deployed during a web/D1 rollback so cleanup can continue. Rollback evidence
-must identify every allocation/resource/operation and show it deleted or
+Before provider deployment, record the active web Worker version UUID, its D1
+UUID and binding, and the reviewed source SHA. Provider Workers may remain
+deployed during web recovery so cleanup can continue. Recovery evidence must
+identify every allocation, resource, and operation and show it deleted or
 owner-visible as `cleanup_pending`; do not delete provider KEKs while any such
 state remains.

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resetCleanD1Database } from "@/test/clean-d1-migrations";
+import { resetDatabase } from "@/test/database-migrations";
 import {
   finalizeWorkshopCostAfterAllocationDeletion,
   reconcileProviderCostLedger,
@@ -27,7 +27,7 @@ const HOUR_MS = 60 * 60 * 1_000;
 const START = Date.UTC(2026, 6, 30, 10, 0, 0);
 
 beforeEach(async () => {
-  await resetCleanD1Database();
+  await resetDatabase();
   providerMocks.runOperation.mockReset();
 });
 

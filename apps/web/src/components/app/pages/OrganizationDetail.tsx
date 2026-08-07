@@ -52,7 +52,7 @@ export function OrganizationDetail() {
     void authClient.organization.setActive({ organizationId: detail.id });
   }, [detail?.id]);
 
-  // Search params may still contain a pre-cutover value in the address bar.
+  // Search params may still contain a stale value in the address bar.
   // Normalize defensively here as well as in validateSearch so no invalid tab
   // leaves the controlled tab set without a selected panel.
   const requestedTab = isOrganizationDetailTab(routeSearch.tab)

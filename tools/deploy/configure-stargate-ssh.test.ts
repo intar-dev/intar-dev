@@ -18,7 +18,7 @@ describe("pinned Stargate SSH configuration", () => {
     const outputDirectory = join(fixture.root, "configured");
     const result = spawnSync(
       "bash",
-      ["tools/cutover/configure-stargate-ssh.sh", outputDirectory],
+      ["tools/deploy/configure-stargate-ssh.sh", outputDirectory],
       { cwd: process.cwd(), env: fixture.environment, encoding: "utf8" },
     );
 
@@ -38,7 +38,7 @@ describe("pinned Stargate SSH configuration", () => {
     const fixture = await sshFixture();
     const wrongHost = spawnSync(
       "bash",
-      ["tools/cutover/configure-stargate-ssh.sh", join(fixture.root, "wrong-host")],
+      ["tools/deploy/configure-stargate-ssh.sh", join(fixture.root, "wrong-host")],
       {
         cwd: process.cwd(),
         env: { ...fixture.environment, STARGATE_DEPLOY_HOST: "example.com" },
@@ -49,7 +49,7 @@ describe("pinned Stargate SSH configuration", () => {
 
     const extraHost = spawnSync(
       "bash",
-      ["tools/cutover/configure-stargate-ssh.sh", join(fixture.root, "extra-host")],
+      ["tools/deploy/configure-stargate-ssh.sh", join(fixture.root, "extra-host")],
       {
         cwd: process.cwd(),
         env: {

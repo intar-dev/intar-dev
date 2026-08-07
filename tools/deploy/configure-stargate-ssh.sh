@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 if [ "$#" -ne 1 ]; then
-  echo "usage: configure-stargate-ssh.sh <output-directory>" >&2
+  echo "usage: tools/deploy/configure-stargate-ssh.sh <output-directory>" >&2
   exit 64
 fi
 

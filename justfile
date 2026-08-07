@@ -11,20 +11,18 @@ check-rust:
     cargo check --workspace
 
 check-js:
-    bun run check:bootstrap
     bun run check:imports
     bun run check:providers
+    bun run check:deploy
+    bun run check:database-migrations
     bun run --cwd apps/web types:cf:check
-    bun run --cwd apps/web db:baseline:check
+    bun run --cwd apps/web db:schema:check
     bun run --cwd apps/web/workers/providers/hetzner types:cf:check
     bun run --cwd apps/web/workers/providers/hetzner check
     bun run --cwd apps/web/workers/providers/gcp types:cf:check
     bun run --cwd apps/web/workers/providers/gcp check
 
 check: check-rust check-js
-
-check-bootstrap:
-    bun run check:bootstrap
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings

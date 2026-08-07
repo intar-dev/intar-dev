@@ -89,7 +89,7 @@ jobs:
           test -x deploy/stargate/scripts/bootstrap-deploy-user
           bash -n deploy/stargate/scripts/intar-deploy-stargate
           bash -n deploy/stargate/scripts/bootstrap-deploy-user
-          bash -n tools/cutover/configure-stargate-ssh.sh
+          bash -n tools/deploy/configure-stargate-ssh.sh
 
   deploy:
     name: ${{ inputs.operation }} production Stargate
@@ -222,7 +222,7 @@ jobs:
           STARGATE_DEPLOY_KNOWN_HOSTS: ${{ secrets.STARGATE_DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          config="$(tools/cutover/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-ssh")"
+          config="$(tools/deploy/configure-stargate-ssh.sh "${RUNNER_TEMP}/intar-ssh")"
           test "${config}" = "${RUNNER_TEMP}/intar-ssh/config"
 
       - name: Read host deployment plan

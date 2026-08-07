@@ -69,9 +69,9 @@ bun run db:migrate:production
 Create future migrations with `wrangler d1 migrations create DB <name>`. Do not
 apply schema files with `wrangler d1 execute` or edit the migration ledger by
 hand. The production workflow builds the exact commit, applies pending
-migrations, and then deploys the new Worker. Migrations and Worker changes are
-therefore a single forward-only cutover: a migration must leave the currently
-deployed Worker functional enough for the short interval before replacement.
+migrations, and then deploys the new Worker. The deployment is forward-only: a
+migration must leave the currently deployed Worker functional enough for the
+short interval before replacement.
 
 Pull requests run the test/build and UI quality gates. A merge to `main` that
 changes the website automatically builds that exact commit and deploys it
