@@ -8,6 +8,7 @@ import {
   agentHosts,
   imageBuilds,
   organization,
+  runtimeExecutions,
   scenarioRuns,
   user,
   workshopPublications,
@@ -21,7 +22,7 @@ describe("host history database invariant", () => {
     await resetD1Database();
   });
 
-  it("rejects direct host deletion when scenario history exists", async () => {
+  it("keeps a host when scenario history exists", async () => {
     const db = drizzle(env.DB);
     const now = Date.now();
     await db.insert(user).values({
@@ -59,8 +60,11 @@ describe("host history database invariant", () => {
     });
 
     await expect(
-      db.delete(agentHosts).where(eq(agentHosts.id, "host-history")),
-    ).rejects.toThrow();
+      deleteAgentHostPreservingHistory(db, {
+        hostId: "host-history",
+        userId: "user-history",
+      }),
+    ).resolves.toBe(false);
 
     await expect(
       db
@@ -180,7 +184,94 @@ describe("host history database invariant", () => {
       },
     ]);
   });
+
+  it.each([null, "failed"] as const)(
+    "detaches failed terminal history with certification state %s",
+    async (certificationState) => {
+      const db = drizzle(env.DB);
+      await seedBuilderHistory("failed", certificationState);
+
+      await expect(
+        deleteAgentHostPreservingHistory(db, {
+          hostId: "builder-history",
+          userId: "user-builder-history",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        db
+          .select({ builderHostId: workshopPublications.builderHostId })
+          .from(workshopPublications)
+          .where(eq(workshopPublications.id, "publication-history")),
+      ).resolves.toEqual([{ builderHostId: null }]);
+    },
+  );
+
+  it("fails closed for a legacy published row without verified certification", async () => {
+    const db = drizzle(env.DB);
+    await seedBuilderHistory("published", null);
+
+    await expect(
+      deleteAgentHostPreservingHistory(db, {
+        hostId: "builder-history",
+        userId: "user-builder-history",
+      }),
+    ).resolves.toBe(false);
+    await expect(builderPublicationHostId()).resolves.toBe("builder-history");
+  });
+
+  it("keeps terminal references attached while an image build is active", async () => {
+    const db = drizzle(env.DB);
+    await seedBuilderHistory("published", "verified");
+    await db
+      .update(imageBuilds)
+      .set({ status: "assigned", phase: "queued" })
+      .where(eq(imageBuilds.id, "image-build-history"));
+
+    await expect(
+      deleteAgentHostPreservingHistory(db, {
+        hostId: "builder-history",
+        userId: "user-builder-history",
+      }),
+    ).resolves.toBe(false);
+    await expect(builderPublicationHostId()).resolves.toBe("builder-history");
+  });
+
+  it("keeps terminal references attached while a workshop runtime is active", async () => {
+    const db = drizzle(env.DB);
+    await seedBuilderHistory("published", "verified");
+    // This test isolates the host-deletion guard; workshop authorization is
+    // covered separately and would otherwise require a complete live roster.
+    await env.DB.prepare(
+      "DROP TRIGGER runtime_executions_workshop_member_insert_guard",
+    ).run();
+    await db.insert(runtimeExecutions).values({
+      id: "runtime-builder-history",
+      userId: "user-builder-history",
+      organizationId: "org-builder-history",
+      hostId: "builder-history",
+      domainKind: "workshop",
+      domainId: "workshop-builder-history",
+      generation: 1,
+      state: "ready",
+    });
+
+    await expect(
+      deleteAgentHostPreservingHistory(db, {
+        hostId: "builder-history",
+        userId: "user-builder-history",
+      }),
+    ).resolves.toBe(false);
+    await expect(builderPublicationHostId()).resolves.toBe("builder-history");
+  });
 });
+
+async function builderPublicationHostId(): Promise<string | null | undefined> {
+  const rows = await drizzle(env.DB)
+    .select({ builderHostId: workshopPublications.builderHostId })
+    .from(workshopPublications)
+    .where(eq(workshopPublications.id, "publication-history"));
+  return rows[0]?.builderHostId;
+}
 
 async function seedBuilderHistory(
   status: "failed" | "published",
