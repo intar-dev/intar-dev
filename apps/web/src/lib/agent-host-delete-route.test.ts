@@ -12,12 +12,16 @@ const agentBridgeMock = vi.hoisted(() => ({
 const hostRuntimeMock = vi.hoisted(() => ({
   retireHostRuntime: vi.fn(),
 }));
+const hostDeletionMock = vi.hoisted(() => ({
+  deleteAgentHostPreservingHistory: vi.fn(),
+  nonDetachableWorkshopPublication: vi.fn(() => "unfinished-publication"),
+}));
 const dbMock = vi.hoisted(() => {
   const state = {
     referencedRuns: [] as Array<{ runId: string }>,
     activeWorkshopRuntimes: [] as Array<{ executionId: string }>,
+    unfinishedWorkshopPublications: [] as Array<{ publicationId: string }>,
     activeBuilds: [] as Array<{ buildId: string }>,
-    deletedHosts: [] as Array<{ id: string }>,
     limitedSelectCall: 0,
   };
   const db = {
@@ -31,20 +35,14 @@ const dbMock = vi.hoisted(() => {
               ? state.referencedRuns
               : state.limitedSelectCall === 1
                 ? state.activeWorkshopRuntimes
-                : state.activeBuilds;
+                : state.limitedSelectCall === 2
+                  ? state.unfinishedWorkshopPublications
+                  : state.activeBuilds;
           state.limitedSelectCall += 1;
           return Promise.resolve(rows);
         }),
       };
       query.from.mockReturnValue(query);
-      query.where.mockReturnValue(query);
-      return query;
-    }),
-    delete: vi.fn(() => {
-      const query = {
-        where: vi.fn(),
-        returning: vi.fn(() => Promise.resolve(state.deletedHosts)),
-      };
       query.where.mockReturnValue(query);
       return query;
     }),
@@ -57,6 +55,7 @@ const dbMock = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
+vi.mock("@/lib/agent-host-deletion", () => hostDeletionMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
@@ -68,8 +67,8 @@ describe("agent host deletion", () => {
     vi.clearAllMocks();
     dbMock.state.referencedRuns = [];
     dbMock.state.activeWorkshopRuntimes = [];
+    dbMock.state.unfinishedWorkshopPublications = [];
     dbMock.state.activeBuilds = [];
-    dbMock.state.deletedHosts = [{ id: "host-1" }];
     dbMock.state.limitedSelectCall = 0;
     agentBridgeMock.requireAdminUserContext.mockResolvedValue({
       ok: true,
@@ -79,6 +78,7 @@ describe("agent host deletion", () => {
       id: "host-1",
       role: "agent",
     });
+    hostDeletionMock.deleteAgentHostPreservingHistory.mockResolvedValue(true);
     hostRuntimeMock.retireHostRuntime.mockResolvedValue(undefined);
   });
 
@@ -97,11 +97,13 @@ describe("agent host deletion", () => {
       code: "host_has_run_history",
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).not.toHaveBeenCalled();
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).not.toHaveBeenCalled();
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 
-  it("deletes a drained builder without mutating image builds", async () => {
+  it("deletes a drained builder through the history-preserving transaction", async () => {
     agentBridgeMock.loadHostForUser.mockResolvedValue({
       id: "host-1",
       role: "builder",
@@ -114,8 +116,12 @@ describe("agent host deletion", () => {
       ok: true,
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
-    expect(dbMock.db.select).toHaveBeenCalledTimes(6);
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).toHaveBeenCalledWith(dbMock.db, {
+      hostId: "host-1",
+      userId: "user-1",
+    });
     expect(hostRuntimeMock.retireHostRuntime).toHaveBeenCalledWith("host-1");
   });
 
@@ -133,7 +139,29 @@ describe("agent host deletion", () => {
       code: "host_has_active_workshop_runtimes",
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).not.toHaveBeenCalled();
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).not.toHaveBeenCalled();
+    expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
+  });
+
+  it("requires unfinished workshop publications to complete or clean up first", async () => {
+    dbMock.state.unfinishedWorkshopPublications = [
+      { publicationId: "publication-1" },
+    ];
+
+    const response = await deleteHostRequest();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "host has unfinished workshop publications and must be completed or cleaned up first",
+      code: "host_has_unfinished_workshop_publications",
+      hostId: "host-1",
+    });
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).not.toHaveBeenCalled();
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 
@@ -152,23 +180,27 @@ describe("agent host deletion", () => {
       code: "host_has_active_builds",
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).not.toHaveBeenCalled();
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).not.toHaveBeenCalled();
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 
   it("fails closed when a run appears between the initial check and delete", async () => {
-    dbMock.state.deletedHosts = [];
+    hostDeletionMock.deleteAgentHostPreservingHistory.mockResolvedValue(false);
 
     const response = await deleteHostRequest();
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error:
-        "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
+        "host deletion conflicted with new history, unfinished work, or a concurrent update",
       code: "host_delete_conflict",
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed when a build is assigned after the builder precheck", async () => {
@@ -178,19 +210,20 @@ describe("agent host deletion", () => {
     });
     // The precheck sees no active build. An empty RETURNING result represents
     // the atomic NOT EXISTS guard observing a raced assignment.
-    dbMock.state.deletedHosts = [];
+    hostDeletionMock.deleteAgentHostPreservingHistory.mockResolvedValue(false);
 
     const response = await deleteHostRequest();
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toEqual({
       error:
-        "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
+        "host deletion conflicted with new history, unfinished work, or a concurrent update",
       code: "host_delete_conflict",
       hostId: "host-1",
     });
-    expect(dbMock.db.delete).toHaveBeenCalledTimes(1);
-    expect(dbMock.db.select).toHaveBeenCalledTimes(6);
+    expect(
+      hostDeletionMock.deleteAgentHostPreservingHistory,
+    ).toHaveBeenCalledTimes(1);
     expect(hostRuntimeMock.retireHostRuntime).not.toHaveBeenCalled();
   });
 });

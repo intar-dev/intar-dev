@@ -9,6 +9,13 @@ const migrationSql = readFileSync(
   ),
   "utf8",
 );
+const retiredBuilderHistoryMigrationSql = readFileSync(
+  new URL(
+    "../../apps/web/migrations/0002_allow_retired_builder_history_detach.sql",
+    import.meta.url,
+  ),
+  "utf8",
+).replaceAll("--> statement-breakpoint", "");
 
 describe("production schema finalization migration", () => {
   for (const [name, indexSql] of [
@@ -107,6 +114,69 @@ describe("production schema finalization migration", () => {
   }
 });
 
+describe("retired builder history migration", () => {
+  test("allows only builder-host detachment on a published publication", () => {
+    const database = retiredBuilderHistoryFixture();
+    try {
+      database.exec(retiredBuilderHistoryMigrationSql);
+
+      expect(() =>
+        database
+          .query(
+            `UPDATE workshop_publications
+             SET error = 'tampered'
+             WHERE id = 'publication-a'`,
+          )
+          .run(),
+      ).toThrow(/published workshop publication is immutable/u);
+      expect(() =>
+        database
+          .query(
+            `UPDATE workshop_publications
+             SET builder_host_id = NULL, error = 'tampered'
+             WHERE id = 'publication-a'`,
+          )
+          .run(),
+      ).toThrow(/published workshop publication is immutable/u);
+      expect(() =>
+        database
+          .query(
+            `UPDATE workshop_publications
+             SET builder_host_id = 'builder-b'
+             WHERE id = 'publication-a'`,
+          )
+          .run(),
+      ).toThrow(/published workshop publication is immutable/u);
+
+      expect(() =>
+        database
+          .query(
+            `UPDATE workshop_publications
+             SET builder_host_id = NULL
+             WHERE id = 'publication-a'`,
+          )
+          .run(),
+      ).not.toThrow();
+      expect(
+        database
+          .query(
+            `SELECT status, certification_state, builder_host_id, error
+             FROM workshop_publications
+             WHERE id = 'publication-a'`,
+          )
+          .get(),
+      ).toEqual({
+        status: "published",
+        certification_state: "verified",
+        builder_host_id: null,
+        error: null,
+      });
+    } finally {
+      database.close(false);
+    }
+  });
+});
+
 function fixture(indexSql: string): Database {
   const database = new Database(":memory:", { strict: true });
   database.exec(`
@@ -159,6 +229,46 @@ function fixture(indexSql: string): Database {
        NULL, NULL, 'provider', 'pending', NULL, 100),
       ('unrelated', 'deleted', 'reconcile', 1, 'running', 600,
        NULL, NULL, 'provider', 'pending', NULL, 100);
+  `);
+  return database;
+}
+
+function retiredBuilderHistoryFixture(): Database {
+  const database = new Database(":memory:", { strict: true });
+  database.exec(`
+    CREATE TABLE workshop_publications (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL,
+      workshop_slug TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      source_r2_key TEXT NOT NULL,
+      compiled_manifest_json TEXT NOT NULL,
+      required_checkpoint_ids_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      submitted_by TEXT NOT NULL,
+      registry_token_id TEXT NOT NULL,
+      builder_host_id TEXT,
+      published_revision_id TEXT,
+      error TEXT,
+      claimed_at INTEGER,
+      finished_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      claim_expires_at INTEGER,
+      runtime_profile_resolutions_json TEXT NOT NULL,
+      certification_state TEXT
+    );
+    CREATE TRIGGER workshop_publications_published_immutable
+    BEFORE UPDATE ON workshop_publications
+    WHEN OLD.status = 'published'
+    BEGIN
+      SELECT RAISE(ABORT, 'published workshop publication is immutable');
+    END;
+    INSERT INTO workshop_publications VALUES (
+      'publication-a', 'org-a', 'workshop-a', 'hash-a', 'source-a', '{}', '[]',
+      'published', 'user-a', 'token-a', 'builder-a', 'revision-a', NULL, 100,
+      200, 50, 200, NULL, '[]', 'verified'
+    );
   `);
   return database;
 }

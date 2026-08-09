@@ -1,14 +1,14 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { and, eq, inArray, notExists } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  agentHosts,
   hostActualState,
   hostDesiredState,
   imageBuilds,
   runtimeExecutions,
   scenarioRuns,
+  workshopPublications,
 } from "@/db/schema";
 import type {
   DesiredBuildV1,
@@ -23,6 +23,10 @@ import {
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
+import {
+  deleteAgentHostPreservingHistory,
+  nonDetachableWorkshopPublication,
+} from "@/lib/agent-host-deletion";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 import { retireHostRuntime } from "@/lib/host-runtime-wake";
 
@@ -129,6 +133,20 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     return hostHasActiveWorkshopRuntimesResponse(host.id);
   }
 
+  const unfinishedWorkshopPublications = await db
+    .select({ publicationId: workshopPublications.id })
+    .from(workshopPublications)
+    .where(
+      and(
+        eq(workshopPublications.builderHostId, host.id),
+        nonDetachableWorkshopPublication(),
+      ),
+    )
+    .limit(1);
+  if (unfinishedWorkshopPublications.length > 0) {
+    return hostHasUnfinishedWorkshopPublicationsResponse(host.id);
+  }
+
   if (host.role === "builder") {
     const activeBuilds = await db
       .select({ buildId: imageBuilds.id })
@@ -145,60 +163,15 @@ export const DELETE: APIRoute = async ({ request, params }) => {
     }
   }
 
-  const runGuard = () =>
-    notExists(
-      db
-        .select({ runId: scenarioRuns.runId })
-        .from(scenarioRuns)
-        .where(eq(scenarioRuns.hostId, host.id)),
-    );
-  const activeBuildGuard = () =>
-    notExists(
-      db
-        .select({ buildId: imageBuilds.id })
-        .from(imageBuilds)
-        .where(
-          and(
-            eq(imageBuilds.hostId, host.id),
-            inArray(imageBuilds.status, ["assigned", "building"]),
-          ),
-        ),
-    );
-  const activeWorkshopRuntimeGuard = () =>
-    notExists(
-      db
-        .select({ executionId: runtimeExecutions.id })
-        .from(runtimeExecutions)
-        .where(
-          and(
-            eq(runtimeExecutions.hostId, host.id),
-            eq(runtimeExecutions.domainKind, "workshop"),
-            inArray(runtimeExecutions.state, [
-              "queued",
-              "provisioning",
-              "ready",
-              "archiving",
-            ]),
-          ),
-        ),
-    );
-  const deletedHosts = await db
-    .delete(agentHosts)
-    .where(
-      and(
-        eq(agentHosts.id, hostId),
-        eq(agentHosts.userId, authz.context.userId),
-        runGuard(),
-        activeWorkshopRuntimeGuard(),
-        host.role === "builder" ? activeBuildGuard() : undefined,
-      ),
-    )
-    .returning({ id: agentHosts.id });
-  if (deletedHosts.length === 0) {
+  const deleted = await deleteAgentHostPreservingHistory(db, {
+    hostId: host.id,
+    userId: authz.context.userId,
+  });
+  if (!deleted) {
     return jsonResponse(
       {
         error:
-          "host deletion conflicted with a new run, active workshop runtime, active build, or concurrent update",
+          "host deletion conflicted with new history, unfinished work, or a concurrent update",
         code: "host_delete_conflict",
         hostId: host.id,
       },
@@ -249,6 +222,20 @@ function hostHasActiveWorkshopRuntimesResponse(hostId: string): Response {
       error:
         "host has active workshop runtimes and must be drained or recovered first",
       code: "host_has_active_workshop_runtimes",
+      hostId,
+    },
+    { status: 409 },
+  );
+}
+
+function hostHasUnfinishedWorkshopPublicationsResponse(
+  hostId: string,
+): Response {
+  return jsonResponse(
+    {
+      error:
+        "host has unfinished workshop publications and must be completed or cleaned up first",
+      code: "host_has_unfinished_workshop_publications",
       hostId,
     },
     { status: 409 },
