@@ -19,9 +19,9 @@ import { startGithubSignIn } from "@/lib/auth-client";
 
 const errorMessages: Record<string, string> = {
   unable_to_create_session:
-    "We couldn't complete sign-in. Your GitHub username isn't on the allowlist yet.",
+    "We couldn't complete sign-in. Beta access requires an active invite claim.",
   unable_to_create_user:
-    "We couldn't create your account. Your GitHub username may not have workshop access yet.",
+    "We couldn't create your account. Open the beta invite link an administrator sent you.",
   signup_disabled: "Sign-ups are disabled for this provider.",
   state_mismatch: "Your sign-in session expired. Please try again.",
   please_restart_the_process: "Your sign-in session expired. Please try again.",
@@ -35,17 +35,11 @@ const errorMessages: Record<string, string> = {
     "GitHub didn't return an email. Please check your GitHub email settings.",
 };
 
-const allowlistErrors = new Set([
-  "unable_to_create_session",
-  "unable_to_create_user",
-]);
-
 export function Landing() {
   const errorFromQuery =
     typeof window === "undefined"
       ? null
       : new URLSearchParams(window.location.search).get("error");
-  const normalizedError = normalizeErrorCode(errorFromQuery);
   const errorMessage = friendlyMessageFor(errorFromQuery) ?? null;
   const session = useSession();
   const signedIn = Boolean(session.data?.user);
@@ -71,17 +65,7 @@ export function Landing() {
         <div className="mx-auto w-full max-w-7xl px-[var(--page-inset)] pt-4">
           <Alert variant="destructive">
             <AlertTitle>Sign-in failed</AlertTitle>
-            <AlertDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span>{errorMessage}</span>
-              {normalizedError && allowlistErrors.has(normalizedError) ? (
-                <Link
-                  to="/request-access"
-                  className="font-semibold underline underline-offset-4"
-                >
-                  Request access
-                </Link>
-              ) : null}
-            </AlertDescription>
+            <AlertDescription>{errorMessage}</AlertDescription>
           </Alert>
         </div>
       ) : null}

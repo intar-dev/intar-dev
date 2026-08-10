@@ -42,20 +42,20 @@ test.describe("focused state accessibility", () => {
     });
   }
 
-  test("request access success announcement", async ({
+  test("beta invite ready announcement", async ({
     page,
     ui,
   }, testInfo) => {
-    await ui.open({ ...routeCase("request-access"), theme: "light" });
-    await page.getByLabel("GitHub username").fill("newoperator");
-    await page.getByRole("button", { name: "Request access" }).click();
+    await ui.open({ ...routeCase("join-beta"), theme: "light" });
 
     const status = page.getByRole("status");
     await expect(
-      page.getByRole("heading", { name: "Request received" }),
+      page.getByRole("heading", { name: "Claim your beta invite" }),
     ).toBeVisible();
-    await expect(status).toContainText(/Review can begin/i);
-    await expect(status.locator("..")).toBeFocused();
+    await expect(status).toContainText(/remains unconsumed until you confirm/i);
+    await expect(
+      page.getByRole("button", { name: "Continue with GitHub" }),
+    ).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
   });
 

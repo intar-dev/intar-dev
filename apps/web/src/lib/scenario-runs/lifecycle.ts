@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { appError } from "@/lib/app-error";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import { issueBetaAccessFencedRoute } from "@/lib/beta-route-issuance";
 import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
@@ -25,6 +27,7 @@ import {
 } from "@/lib/run-state";
 import { selectOverdueRunLeases } from "@/lib/scenario-run-leases";
 import {
+  deleteStargateRoute,
   issueStargateTerminalSession,
   stargateRouteTtlMs,
 } from "@/lib/stargate";
@@ -51,6 +54,7 @@ import {
 export async function startScenarioRunForUser(params: {
   scenarioId: string;
   userId: string;
+  betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
 }): Promise<{
@@ -458,24 +462,31 @@ export async function createScenarioSshSessionForUser(params: {
     runId: row.runId,
     vmId: vm.id,
   });
-  return issueStargateTerminalSession({
-    routeUsername,
-    targetUsername,
-    targetHost: host,
-    targetPort: port,
-    targetHostKeyOpenssh,
-    targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
-    expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
-    mode: requestedMode,
-    authorizedClientPublicKeysOpenssh: profileKeys.map(
-      (key) => key.publicKeyOpenssh,
-    ),
-    metadata: {
-      hostId: row.hostId,
-      runId: row.runId,
-      vmId: vm.id,
-      userId: row.userId,
-    },
+  return issueBetaAccessFencedRoute({
+    userId: params.userId,
+    routeId: routeUsername,
+    revoke: deleteStargateRoute,
+    issuedRouteIds: (session) => [session.routeUsername],
+    issue: () =>
+      issueStargateTerminalSession({
+        routeUsername,
+        targetUsername,
+        targetHost: host,
+        targetPort: port,
+        targetHostKeyOpenssh,
+        targetPrivateKeyOpenssh: targetKey.privateKeyOpenssh,
+        expiresAt: new Date(Date.now() + stargateRouteTtlMs()),
+        mode: requestedMode,
+        authorizedClientPublicKeysOpenssh: profileKeys.map(
+          (key) => key.publicKeyOpenssh,
+        ),
+        metadata: {
+          hostId: row.hostId,
+          runId: row.runId,
+          vmId: vm.id,
+          userId: row.userId,
+        },
+      }),
   });
 }
 

@@ -4,7 +4,10 @@ import { drizzle } from "drizzle-orm/d1";
 import { agentHosts, member } from "@/db/schema";
 import type { AgentHostRole } from "@/db/schema";
 import { auth } from "@/lib/auth";
-import { isAllowlisted } from "@/lib/allowlist";
+import {
+  getBetaAccess,
+  type BetaAdmissionEpoch,
+} from "@/lib/allowlist";
 import { getUserRole, isAdminRole } from "@/lib/authz";
 
 const ONLINE_HEARTBEAT_TTL_MS = 90_000;
@@ -45,6 +48,8 @@ export interface AgentHostRow {
 
 export interface UserContext {
   userId: string;
+  /** Exact active admission observed while authenticating this request. */
+  betaAdmission: BetaAdmissionEpoch;
   role: string | null;
   isAdmin: boolean;
   organizationIds: string[];
@@ -109,7 +114,6 @@ export async function requireUserContext(
   const sessionUser = session?.user as {
     id: string;
     role?: string | null;
-    username?: string | null;
   } | null;
   const authSession = session?.session as
     | { activeOrganizationId?: string | null }
@@ -122,18 +126,21 @@ export async function requireUserContext(
     };
   }
 
-  const memberships = await drizzle(env.DB)
-    .select({ organizationId: member.organizationId })
-    .from(member)
-    .where(eq(member.userId, sessionUser.id));
-  const organizationIds = memberships.map((row) => row.organizationId);
-  const hasGithubAccess = await isAllowlisted(sessionUser.username);
-  if (!hasGithubAccess && organizationIds.length === 0) {
+  // Access is checked before loading tenant context. Membership is not a
+  // substitute for beta entitlement and must never revive a blocked user.
+  const betaAccess = await getBetaAccess(sessionUser.id);
+  if (betaAccess?.state !== "active") {
     return {
       ok: false,
       response: jsonResponse({ error: "access revoked" }, { status: 403 }),
     };
   }
+
+  const memberships = await drizzle(env.DB)
+    .select({ organizationId: member.organizationId })
+    .from(member)
+    .where(eq(member.userId, sessionUser.id));
+  const organizationIds = memberships.map((row) => row.organizationId);
 
   const role = getUserRole(sessionUser);
   const activeOrganizationId =
@@ -146,6 +153,11 @@ export async function requireUserContext(
     ok: true,
     context: {
       userId: sessionUser.id,
+      betaAdmission: {
+        sourceInviteId: betaAccess.sourceInviteId,
+        sourceLeaseId: betaAccess.sourceLeaseId,
+        grantedAt: betaAccess.grantedAt,
+      },
       role,
       isAdmin: isAdminRole(role),
       organizationIds,

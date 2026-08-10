@@ -40,6 +40,7 @@ import {
   workshopTemplateRevisions,
   workshopTemplates,
 } from "@/db/schema";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { createWorkshopCostForecast } from "./cost-storage";
 import {
@@ -189,6 +190,7 @@ async function seedDirectCloudFixture(
     role: "owner",
     createdAt: date,
   });
+  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner-a", now: NOW });
   await db.insert(workshopTemplates).values({
     id: "template-a",
     organizationId: "org-a",

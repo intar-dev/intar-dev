@@ -60,6 +60,31 @@ export async function startOrganizationSignIn(
   const errorCallbackURL =
     options?.errorCallbackURL ??
     `${window.location.origin}/organizations/${encodeURIComponent(slug)}/sign-in`;
+  const session = await getClientSession();
+  if (session) {
+    const response = await fetch("/api/account-links/sso/start", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ organizationSlug: slug }),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      redirectUrl?: unknown;
+      error?: unknown;
+    } | null;
+    if (!response.ok || typeof body?.redirectUrl !== "string") {
+      throw new Error(
+        typeof body?.error === "string"
+          ? body.error
+          : "Organization sign-in failed",
+      );
+    }
+    const redirectUrl = requireHttpsSsoRedirect(body.redirectUrl);
+    window.location.assign(redirectUrl);
+    return { ...body, redirectUrl };
+  }
+
   const result = await authClient.signIn.sso({
     organizationSlug: slug,
     callbackURL,
@@ -72,10 +97,27 @@ export async function startOrganizationSignIn(
   }
 
   if ("data" in result && result.data?.redirect && result.data.url) {
-    window.location.href = result.data.url;
+    window.location.assign(requireHttpsSsoRedirect(result.data.url));
   }
 
   return result;
+}
+
+function requireHttpsSsoRedirect(value: string): string {
+  let redirect: URL;
+  try {
+    redirect = new URL(value, window.location.origin);
+  } catch {
+    throw new Error(
+      "Organization identity provider returned an invalid redirect",
+    );
+  }
+  if (redirect.protocol !== "https:") {
+    throw new Error(
+      "Organization identity provider returned an unsafe redirect",
+    );
+  }
+  return redirect.href;
 }
 
 export async function getClientSession(): Promise<AppSessionData | null> {
@@ -85,6 +127,20 @@ export async function getClientSession(): Promise<AppSessionData | null> {
   }
 
   return "data" in result ? result.data : null;
+}
+
+export async function getClientBetaAccessState(): Promise<
+  "active" | "restricted"
+> {
+  const response = await fetch("/api/access-invites/current", {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const body = (await response.json().catch(() => null)) as {
+    state?: unknown;
+  } | null;
+  return response.ok && body?.state === "active" ? "active" : "restricted";
 }
 
 export async function startGithubSignIn(options?: {

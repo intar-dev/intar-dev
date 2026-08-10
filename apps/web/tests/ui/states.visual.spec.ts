@@ -118,17 +118,12 @@ test.describe("focused visual states", () => {
     await expectRouteScreenshot(page, "catalog-authored-light-desktop");
   });
 
-  test("request access success", async ({ page, ui }) => {
-    await ui.open({ ...routeCase("request-access"), theme: "light" });
-    await page.getByLabel("GitHub username").fill("newoperator");
-    await page
-      .getByLabel(/How will you use the workshop/i)
-      .fill("Preparing for an on-call rotation.");
-    await page.getByRole("button", { name: "Request access" }).click();
+  test("beta invite ready", async ({ page, ui }) => {
+    await ui.open({ ...routeCase("join-beta"), theme: "light" });
     await expect(
-      page.getByRole("heading", { name: /Request received/i }),
+      page.getByRole("heading", { name: "Claim your beta invite" }),
     ).toBeVisible();
-    await expectRouteScreenshot(page, "request-access-success-light-desktop");
+    await expectRouteScreenshot(page, "join-beta-ready-light-desktop");
   });
 
   test("landing returning learner", async ({ page, ui }) => {
@@ -215,13 +210,17 @@ test.describe("focused visual states", () => {
     });
   }
 
-  test("people access mutation", async ({ page, ui }) => {
+  test("people invite revocation", async ({ page, ui }) => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
-    await page.getByRole("button", { name: "Approve" }).first().click();
-    await expect(
-      page.getByText("No pending requests right now."),
-    ).toBeVisible();
-    await expectRouteScreenshot(page, "people-access-approved-light-desktop");
+    const inviteRow = page
+      .getByRole("row")
+      .filter({ hasText: "August workshop cohort" });
+    await inviteRow.getByRole("button", { name: "Revoke" }).click();
+    const dialog = page.getByRole("dialog", { name: "Revoke this invite?" });
+    await dialog.getByLabel("Revocation reason code").fill("link_compromised");
+    await dialog.getByRole("button", { name: "Revoke invite" }).click();
+    await expect(inviteRow.getByText("Revoked", { exact: true })).toBeVisible();
+    await expectRouteScreenshot(page, "people-invite-revoked-light-desktop");
   });
 
   test("authoring validation result", async ({ page, ui }) => {

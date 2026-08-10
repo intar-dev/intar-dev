@@ -17,6 +17,7 @@ import {
   type WorkshopManifestV2,
 } from "@/db/schema";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { openDueWorkshopLobbies } from "./auto-lobby";
 import { WORKSHOPS_FEATURE_FLAG } from "./feature-flag";
@@ -51,6 +52,11 @@ describe("workshop automatic lobby", () => {
         createdAt,
       }),
     ]);
+    await grantFixtureBetaAccess({
+      d1: env.DB,
+      userId: "owner",
+      now: createdAt.getTime(),
+    });
   });
 
   it("opens a due lobby once and atomically releases gate modules", async () => {

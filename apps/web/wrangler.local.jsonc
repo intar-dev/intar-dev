@@ -60,7 +60,7 @@
   ],
   "ratelimits": [
     {
-      "name": "ACCESS_REQUEST_RATE_LIMITER",
+      "name": "ACCESS_INVITE_RATE_LIMITER",
       "namespace_id": "88427091",
       "simple": {
         "limit": 20,

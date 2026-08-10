@@ -5,6 +5,7 @@ import type { WorkshopManifestV2 } from "@intar/workshop-contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 import { workshopPublications } from "@/db/schema";
 import { cancelWorkshopPublicationVerifierRuntimes } from "@/lib/workshops/provider-runtime";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetDatabase } from "@/test/database-migrations";
 import { stageWorkshopRevision } from "./publication-state";
 
@@ -233,6 +234,9 @@ async function seedPublication() {
          disabled, connected
        ) VALUES ('builder-a', 'builder-user', 'org-a', 'Builder', 'builder', 0, 0, 1)`,
     ),
+  ]);
+  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner-a", now: 1 });
+  await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO workshop_registry_tokens (
          id, organization_id, name, token_prefix, token_hash, created_by

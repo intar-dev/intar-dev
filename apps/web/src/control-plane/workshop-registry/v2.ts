@@ -6,6 +6,7 @@ import {
   jsonResponse,
 } from "@/control-plane/image-registry/shared";
 import {
+  accessAllowlist,
   workshopPublicationCheckpoints,
   workshopPublications,
   workshopRegistryTokens,
@@ -64,8 +65,12 @@ const CERTIFICATION_PHASES: ReadonlySet<string> = new Set([
 
 type PublisherAuthorization = {
   tokenId: string;
+  tokenHash: string;
   organizationId: string;
   userId: string;
+  sourceInviteId: string;
+  sourceLeaseId: string;
+  grantedAt: number;
 };
 
 type BuilderAuthorization = {
@@ -200,36 +205,71 @@ async function handleUpload(
 
   const now = Date.now();
   try {
-    await env.DB.batch([
+    const results = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO workshop_publications (
            id, organization_id, workshop_slug, content_hash, source_r2_key,
            compiled_manifest_json, required_checkpoint_ids_json, status,
            submitted_by, registry_token_id, runtime_profile_resolutions_json,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, '[]', ?, ?)`,
+         )
+         SELECT ?, token.organization_id, ?, ?, ?, ?, ?, 'queued',
+                token.created_by, token.id, '[]', ?, ?
+         FROM workshop_registry_tokens AS token
+         INNER JOIN access_allowlist AS access
+           ON access.user_id = token.created_by
+         WHERE token.id = ?
+           AND token.token_hash = ?
+           AND token.organization_id = ?
+           AND token.created_by = ?
+           AND token.revoked_at IS NULL
+           AND (token.expires_at IS NULL OR token.expires_at > ?)
+           AND access.state = 'active'
+           AND access.source_invite_id = ?
+           AND access.source_lease_id = ?
+           AND access.granted_at = ?`,
       ).bind(
         publicationId,
-        authorized.organizationId,
         source.workshopSlug,
         source.contentHash,
         sourceKey,
         JSON.stringify(source.compiledManifest),
         JSON.stringify(source.requiredCheckpointIds),
-        authorized.userId,
+        now,
+        now,
         authorized.tokenId,
+        authorized.tokenHash,
+        authorized.organizationId,
+        authorized.userId,
         now,
-        now,
+        authorized.sourceInviteId,
+        authorized.sourceLeaseId,
+        authorized.grantedAt,
       ),
       ...source.requiredCheckpointIds.map((checkpointId) =>
         env.DB.prepare(
           `INSERT INTO workshop_publication_checkpoints (
              id, publication_id, checkpoint_id, status, sanitized,
              cold_boot_verified, created_at, updated_at
-           ) VALUES (?, ?, ?, 'pending', 0, 0, ?, ?)`,
-        ).bind(createAppId(), publicationId, checkpointId, now, now),
+           )
+           SELECT ?, ?, ?, 'pending', 0, 0, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM workshop_publications WHERE id = ?
+           )`,
+        ).bind(
+          createAppId(),
+          publicationId,
+          checkpointId,
+          now,
+          now,
+          publicationId,
+        ),
       ),
     ]);
+    if (results[0]?.meta.changes !== 1) {
+      await env.VM_IMAGE_REGISTRY_BUCKET.delete(writtenKeys);
+      return unauthorized();
+    }
   } catch (error) {
     const raced = await db
       .select({ id: workshopPublications.id, status: workshopPublications.status })
@@ -872,11 +912,22 @@ async function authorizePublisher(
   const rows = await db
     .select({
       id: workshopRegistryTokens.id,
+      tokenHash: workshopRegistryTokens.tokenHash,
       organizationId: workshopRegistryTokens.organizationId,
       userId: workshopRegistryTokens.createdBy,
       expiresAt: workshopRegistryTokens.expiresAt,
+      sourceInviteId: accessAllowlist.sourceInviteId,
+      sourceLeaseId: accessAllowlist.sourceLeaseId,
+      grantedAt: accessAllowlist.grantedAt,
     })
     .from(workshopRegistryTokens)
+    .innerJoin(
+      accessAllowlist,
+      and(
+        eq(accessAllowlist.userId, workshopRegistryTokens.createdBy),
+        eq(accessAllowlist.state, "active"),
+      ),
+    )
     .where(
       and(
         eq(workshopRegistryTokens.tokenHash, tokenHash),
@@ -900,8 +951,12 @@ async function authorizePublisher(
     .where(eq(workshopRegistryTokens.id, row.id));
   return {
     tokenId: row.id,
+    tokenHash: row.tokenHash,
     organizationId: row.organizationId,
     userId: row.userId,
+    sourceInviteId: row.sourceInviteId,
+    sourceLeaseId: row.sourceLeaseId,
+    grantedAt: row.grantedAt,
   };
 }
 

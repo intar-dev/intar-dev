@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "@/lib/app-error";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetDatabase } from "@/test/database-migrations";
 import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspace-agent";
 
@@ -1942,6 +1943,7 @@ async function seedCumulativeCertification(input?: {
 }
 
 async function seedCertificationPublication(): Promise<void> {
+  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner", now: 1 });
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO workshop_registry_tokens

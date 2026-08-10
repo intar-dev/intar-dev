@@ -14,6 +14,8 @@ const oauthQuery = new URLSearchParams({
   state: "fixed-state",
 }).toString();
 
+export const BETA_INVITE_CODE = `intar_beta_${"A".repeat(43)}`;
+
 export const ROUTE_CASES = [
   { id: "landing", path: "/", sessionRole: "anonymous" },
   {
@@ -22,8 +24,8 @@ export const ROUTE_CASES = [
     sessionRole: "anonymous",
   },
   {
-    id: "request-access",
-    path: "/request-access",
+    id: "join-beta",
+    path: `/join#invite=${BETA_INVITE_CODE}`,
     sessionRole: "anonymous",
   },
   {

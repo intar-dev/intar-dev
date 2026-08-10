@@ -4,13 +4,14 @@ import {
   type RunProjectionOutcome,
   type SocketAttachment,
 } from "./host-runtime-do/base";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, exists, isNull, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   parseBridgeMessageV6,
   serializeBridgeMessageV6,
 } from "@/control-plane/bridge-v6";
 import {
+  accessAllowlist,
   agentHosts,
   hostActualState,
   hostResourceReservations,
@@ -58,6 +59,7 @@ import { recordWorkshopProbeReport } from "@/lib/workshops/progress";
 import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
 import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
 import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 
 export const WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS = 90_000;
 export const WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE = 8;
@@ -191,6 +193,34 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return jsonResponse({ error: "missing host id" }, 400);
     }
 
+    const parsedBetaAdmission = parseBetaAdmissionHeaders(request.headers);
+    if (!parsedBetaAdmission.valid) {
+      return jsonResponse({ error: "invalid beta admission" }, 401);
+    }
+    const betaAdmission = parsedBetaAdmission.admission;
+    const admission = await this.loadHostConnectionAdmission(hostId);
+    if (!admission) {
+      return jsonResponse({ error: "host not found" }, 404);
+    }
+    if (admission.disabled) {
+      await this.retireRuntimeState(hostId, "host disabled");
+      return jsonResponse({ error: "host is disabled" }, 403);
+    }
+    if (admission.organizationId === null) {
+      if (admission.betaAdmission === null) {
+        await this.retireRuntimeState(hostId, "beta access revoked");
+        return jsonResponse({ error: "beta access is revoked" }, 403);
+      }
+      if (!sameBetaAdmission(betaAdmission, admission.betaAdmission)) {
+        return jsonResponse({ error: "stale beta admission" }, 401);
+      }
+    } else if (betaAdmission !== null) {
+      return jsonResponse(
+        { error: "invalid organization host admission" },
+        401,
+      );
+    }
+
     await this.persistKnownHostId(hostId);
 
     const connectedAt = Date.now();
@@ -203,6 +233,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
     server.serializeAttachment({
       hostId,
       sessionId: null,
+      betaSourceInviteId: betaAdmission?.sourceInviteId ?? null,
+      betaSourceLeaseId: betaAdmission?.sourceLeaseId ?? null,
+      betaAdmissionGrantedAt: betaAdmission?.grantedAt ?? null,
       connectedAt,
       helloReceived: false,
       bridgeProtocol: null,
@@ -264,16 +297,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
       request.headers.get("x-agent-host-id")?.trim() ??
       (await this.loadKnownHostId()) ??
       "";
-    for (const socket of this.ctx.getWebSockets()) {
-      try {
-        socket.close(1001, "host retired");
-      } catch {
-        // The socket may already be closing; retirement remains idempotent.
-      }
-    }
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
-    this.knownHostId = null;
+    await this.retireRuntimeState(hostId, "host retired", 1001);
     return jsonResponse({ ok: true, hostId });
   }
 
@@ -435,8 +459,18 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    const host = await this.loadRequiredHost(attachment.hostId);
-    if (host.activeSessionId !== attachment.sessionId) {
+    if (
+      !(await this.isCurrentHostSessionAdmission(
+        attachment.hostId,
+        attachment.sessionId,
+        betaAdmissionFromAttachment(attachment),
+      ))
+    ) {
+      await this.rejectClientHelloAdmission(
+        ws,
+        attachment.hostId,
+        "host admission is no longer active",
+      );
       return;
     }
 
@@ -525,7 +559,55 @@ export class HostRuntimeDO extends HostRuntimeBase {
 
     await this.persistKnownHostId(message.host_id);
     const db = drizzle(this.env.DB);
-    await db.batch([
+    const socketBetaAdmission = betaAdmissionFromAttachment(attachment);
+    const personalAdmission =
+      host.organizationId === null && socketBetaAdmission !== null
+        ? exists(
+            db
+              .select({ userId: accessAllowlist.userId })
+              .from(accessAllowlist)
+              .where(
+                and(
+                  eq(accessAllowlist.userId, host.userId),
+                  eq(accessAllowlist.state, "active"),
+                  eq(
+                    accessAllowlist.sourceInviteId,
+                    socketBetaAdmission.sourceInviteId,
+                  ),
+                  eq(
+                    accessAllowlist.sourceLeaseId,
+                    socketBetaAdmission.sourceLeaseId,
+                  ),
+                  eq(accessAllowlist.grantedAt, socketBetaAdmission.grantedAt),
+                ),
+              ),
+          )
+        : undefined;
+    const activationFence =
+      host.organizationId === null
+        ? personalAdmission
+          ? and(
+              eq(agentHosts.id, message.host_id),
+              eq(agentHosts.userId, host.userId),
+              isNull(agentHosts.organizationId),
+              eq(agentHosts.disabled, false),
+              personalAdmission,
+            )
+          : undefined
+        : and(
+            eq(agentHosts.id, message.host_id),
+            eq(agentHosts.organizationId, host.organizationId),
+            eq(agentHosts.disabled, false),
+          );
+    if (!activationFence) {
+      await this.rejectClientHelloAdmission(
+        ws,
+        message.host_id,
+        "beta admission required",
+      );
+      return;
+    }
+    const [activated] = await db.batch([
       db
         .update(agentHosts)
         .set({
@@ -542,14 +624,38 @@ export class HostRuntimeDO extends HostRuntimeBase {
           agentVersion: message.agent_version,
           updatedAt: now,
         })
-        .where(eq(agentHosts.id, message.host_id)),
+        .where(activationFence)
+        .returning({ id: agentHosts.id }),
       // host_actual_state has no session column. Clearing it in the same
       // transaction as the session swap makes any subsequently accepted row
       // current-session evidence, without relying on millisecond timestamps.
       db
         .delete(hostActualState)
-        .where(eq(hostActualState.hostId, message.host_id)),
+        .where(
+          and(
+            eq(hostActualState.hostId, message.host_id),
+            exists(
+              db
+                .select({ id: agentHosts.id })
+                .from(agentHosts)
+                .where(
+                  and(
+                    eq(agentHosts.id, message.host_id),
+                    eq(agentHosts.activeSessionId, sessionId),
+                  ),
+                ),
+            ),
+          ),
+        ),
     ]);
+    if (!activated.length) {
+      await this.rejectClientHelloAdmission(
+        ws,
+        message.host_id,
+        "host admission changed during hello",
+      );
+      return;
+    }
 
     // Persist the session fence before trusting the hello architecture. Bulk
     // catalog reconciliation cannot see actual-state reports from before this
@@ -572,6 +678,20 @@ export class HostRuntimeDO extends HostRuntimeBase {
       throw error;
     }
     const desiredState = reconciliation.desiredState;
+    const admissionStillCurrent = await this.isCurrentHostSessionAdmission(
+      message.host_id,
+      sessionId,
+      socketBetaAdmission,
+    );
+    if (!admissionStillCurrent) {
+      await this.rollbackPendingClientHello(db, host, sessionId);
+      await this.rejectClientHelloAdmission(
+        ws,
+        message.host_id,
+        "host admission changed during hello",
+      );
+      return;
+    }
     if (
       !desiredState ||
       reconciliation.outcome === "stale_host_snapshot" ||
@@ -1336,14 +1456,19 @@ export class HostRuntimeDO extends HostRuntimeBase {
       // Make the host lookup the final await. Re-read the attachment after it
       // resolves, then validate and send synchronously so a replacement socket
       // cannot interleave between the active-session check and delivery.
-      const host = await this.loadRequiredHost(hostId);
+      const admissionStillCurrent = await this.isCurrentHostSessionAdmission(
+        hostId,
+        attachment.sessionId,
+        betaAdmissionFromAttachment(attachment),
+      );
       const latestAttachment = this.readSocketAttachment(ws);
       if (
+        !admissionStillCurrent ||
         ws.readyState !== WebSocket.OPEN ||
         latestAttachment?.bridgeProtocol !== "v6" ||
         !latestAttachment.sessionId ||
         latestAttachment.hostId !== hostId ||
-        host.activeSessionId !== latestAttachment.sessionId
+        latestAttachment.sessionId !== attachment.sessionId
       ) {
         return;
       }
@@ -1450,6 +1575,131 @@ export class HostRuntimeDO extends HostRuntimeBase {
     }
   }
 
+  private async loadHostConnectionAdmission(hostId: string): Promise<{
+    organizationId: string | null;
+    disabled: boolean;
+    betaAdmission: BetaAdmissionEpoch | null;
+  } | null> {
+    const row = await this.env.DB.prepare(
+      `SELECT host.organization_id,
+              host.disabled,
+              CASE WHEN access.state = 'active' THEN access.source_invite_id END AS beta_source_invite_id,
+              CASE WHEN access.state = 'active' THEN access.source_lease_id END AS beta_source_lease_id,
+              CASE WHEN access.state = 'active' THEN access.granted_at END AS beta_granted_at
+       FROM agent_hosts host
+       LEFT JOIN access_allowlist access ON access.user_id = host.user_id
+       WHERE host.id = ?1
+       LIMIT 1`,
+    )
+      .bind(hostId)
+      .first<{
+        organization_id: string | null;
+        disabled: number;
+        beta_source_invite_id: string | null;
+        beta_source_lease_id: string | null;
+        beta_granted_at: number | null;
+      }>();
+    return row
+      ? {
+          organizationId: row.organization_id,
+          disabled: row.disabled !== 0,
+          betaAdmission: admissionFromDatabaseRow(row),
+        }
+      : null;
+  }
+
+  private async rejectClientHelloAdmission(
+    ws: WebSocket,
+    hostId: string,
+    reason: string,
+  ): Promise<void> {
+    const admission = await this.loadHostConnectionAdmission(hostId);
+    if (
+      !admission ||
+      admission.disabled ||
+      (admission.organizationId === null && admission.betaAdmission === null)
+    ) {
+      await this.retireRuntimeState(hostId, reason);
+      return;
+    }
+    try {
+      ws.close(1008, reason);
+    } catch {
+      // The rejected socket may already be closing.
+    }
+  }
+
+  private async isCurrentHostSessionAdmission(
+    hostId: string,
+    sessionId: string,
+    betaAdmission: BetaAdmissionEpoch | null,
+  ): Promise<boolean> {
+    const row = await this.env.DB.prepare(
+      `SELECT 1 AS admitted
+       FROM agent_hosts host
+       LEFT JOIN access_allowlist access ON access.user_id = host.user_id
+       WHERE host.id = ?1
+         AND host.active_session_id = ?2
+         AND host.disabled = 0
+         AND (
+           (
+             host.organization_id IS NOT NULL
+             AND ?3 IS NULL
+             AND ?4 IS NULL
+             AND ?5 IS NULL
+           )
+           OR (
+             host.organization_id IS NULL
+             AND access.state = 'active'
+             AND access.source_invite_id = ?3
+             AND access.source_lease_id = ?4
+             AND access.granted_at = ?5
+           )
+         )
+       LIMIT 1`,
+    )
+      .bind(
+        hostId,
+        sessionId,
+        betaAdmission?.sourceInviteId ?? null,
+        betaAdmission?.sourceLeaseId ?? null,
+        betaAdmission?.grantedAt ?? null,
+      )
+      .first<{ admitted: number }>();
+    return row?.admitted === 1;
+  }
+
+  private async retireRuntimeState(
+    hostId: string,
+    reason: string,
+    closeCode = 1008,
+  ): Promise<void> {
+    const sockets = hostId
+      ? this.ctx.getWebSockets(`host:${hostId}`)
+      : this.ctx.getWebSockets();
+    for (const socket of sockets) {
+      try {
+        socket.close(closeCode, reason);
+      } catch {
+        // Retirement is idempotent and the socket may already be closing.
+      }
+    }
+    const now = Date.now();
+    await this.env.DB.prepare(
+      `UPDATE agent_hosts
+       SET connected = 0,
+           active_session_id = NULL,
+           disconnected_at = coalesce(disconnected_at, ?2),
+           updated_at = ?2
+       WHERE id = ?1`,
+    )
+      .bind(hostId, now)
+      .run();
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.knownHostId = null;
+  }
+
   private async reconcileScenarioImageCacheIfDue(input: {
     db: DrizzleD1Database;
     hostId: string;
@@ -1484,6 +1734,95 @@ export class HostRuntimeDO extends HostRuntimeBase {
       this.nextScenarioImageCacheReconciliationAtMs = nextAt;
     }
   }
+}
+
+function parseBetaAdmissionHeaders(headers: Headers):
+  | { valid: true; admission: BetaAdmissionEpoch | null }
+  | { valid: false } {
+  const sourceInviteId = headers.get("x-agent-beta-source-invite-id");
+  const sourceLeaseId = headers.get("x-agent-beta-source-lease-id");
+  const grantedAtValue = headers.get("x-agent-beta-admission-granted-at");
+  if (
+    sourceInviteId === null &&
+    sourceLeaseId === null &&
+    grantedAtValue === null
+  ) {
+    return { valid: true, admission: null };
+  }
+  if (
+    !validAdmissionId(sourceInviteId) ||
+    !validAdmissionId(sourceLeaseId) ||
+    !grantedAtValue ||
+    !/^\d{1,16}$/u.test(grantedAtValue)
+  ) {
+    return { valid: false };
+  }
+  const grantedAt = Number(grantedAtValue);
+  if (!Number.isSafeInteger(grantedAt) || grantedAt < 0) {
+    return { valid: false };
+  }
+  return {
+    valid: true,
+    admission: { sourceInviteId, sourceLeaseId, grantedAt },
+  };
+}
+
+function validAdmissionId(value: string | null): value is string {
+  return (
+    value !== null &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    value === value.trim()
+  );
+}
+
+function sameBetaAdmission(
+  left: BetaAdmissionEpoch | null,
+  right: BetaAdmissionEpoch | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.sourceInviteId === right.sourceInviteId &&
+    left.sourceLeaseId === right.sourceLeaseId &&
+    left.grantedAt === right.grantedAt
+  );
+}
+
+function betaAdmissionFromAttachment(
+  attachment: SocketAttachment,
+): BetaAdmissionEpoch | null {
+  return admissionFromValues(
+    attachment.betaSourceInviteId,
+    attachment.betaSourceLeaseId,
+    attachment.betaAdmissionGrantedAt,
+  );
+}
+
+function admissionFromDatabaseRow(row: {
+  beta_source_invite_id: string | null;
+  beta_source_lease_id: string | null;
+  beta_granted_at: number | null;
+}): BetaAdmissionEpoch | null {
+  return admissionFromValues(
+    row.beta_source_invite_id,
+    row.beta_source_lease_id,
+    row.beta_granted_at,
+  );
+}
+
+function admissionFromValues(
+  sourceInviteId: string | null,
+  sourceLeaseId: string | null,
+  grantedAt: number | null,
+): BetaAdmissionEpoch | null {
+  return validAdmissionId(sourceInviteId) &&
+    validAdmissionId(sourceLeaseId) &&
+    typeof grantedAt === "number" &&
+    Number.isSafeInteger(grantedAt) &&
+    grantedAt >= 0
+    ? { sourceInviteId, sourceLeaseId, grantedAt }
+    : null;
 }
 
 function workshopHostFailureRecoveryIsDue(

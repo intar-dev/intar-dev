@@ -15,6 +15,7 @@ import {
   workshopRegistryTokens,
 } from "@/db/schema";
 import { deleteAgentHostPreservingHistory } from "@/lib/agent-host-deletion";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 
 describe("host history database invariant", () => {
@@ -301,15 +302,20 @@ async function seedBuilderHistory(
       role: "builder",
       scenarioEnabled: false,
     }),
-    db.insert(workshopRegistryTokens).values({
-      id: "registry-token-builder-history",
-      organizationId: "org-builder-history",
-      name: "History token",
-      tokenPrefix: "history",
-      tokenHash: "history-hash",
-      createdBy: "user-builder-history",
-    }),
   ]);
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId: "user-builder-history",
+    now: now.getTime(),
+  });
+  await db.insert(workshopRegistryTokens).values({
+    id: "registry-token-builder-history",
+    organizationId: "org-builder-history",
+    name: "History token",
+    tokenPrefix: "history",
+    tokenHash: "history-hash",
+    createdBy: "user-builder-history",
+  });
   await db.insert(workshopPublications).values({
     id: "publication-history",
     organizationId: "org-builder-history",

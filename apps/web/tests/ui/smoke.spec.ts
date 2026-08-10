@@ -45,16 +45,56 @@ test("public workshop entry keeps sign in focused and sponsors prominent", async
   expect(namespaceBox!.height).toBeGreaterThanOrEqual(40);
 });
 
-test("transactional access request submits deterministically", async ({
+test("beta invite fragment is scrubbed before the claim is inspected", async ({
   page,
   ui,
 }) => {
-  await ui.open({ ...routeCase("request-access"), theme: "light" });
-  await page.getByLabel("GitHub username").fill("newoperator");
-  await page.getByRole("button", { name: "Request access" }).click();
+  await ui.open({ ...routeCase("join-beta"), theme: "light" });
+
+  expect(new URL(page.url()).hash).toBe("");
   await expect(
-    page.getByRole("heading", { name: /Request received/i }),
+    page.getByRole("heading", { name: "Claim your beta invite" }),
   ).toBeVisible();
+  await expect(page.getByRole("status")).toContainText(
+    /This code is valid/i,
+  );
+  await expect(
+    page.getByRole("button", { name: "Continue with GitHub" }),
+  ).toBeVisible();
+  expect(ui.server.requests).toContain("POST /api/access-invites/exchange");
+  expect(ui.server.requests).toContain("GET /api/access-invites/current");
+  expect(ui.server.requests.join("\n")).not.toContain("intar_beta_");
+});
+
+test("admin sees a newly created beta link only once", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "light" });
+  await page.getByRole("button", { name: "Create invite" }).click();
+
+  const createDialog = page.getByRole("dialog", {
+    name: "Create beta invite",
+  });
+  await createDialog.getByLabel(/Label/).fill("September workshop cohort");
+  await createDialog
+    .getByRole("button", { name: "Create single-use link" })
+    .click();
+
+  const oneTimeDialog = page.getByRole("dialog", {
+    name: "Copy this link now",
+  });
+  const linkInput = oneTimeDialog.getByLabel("Beta invite link");
+  await expect(linkInput).toHaveValue(/\/join#invite=intar_beta_[A-Za-z0-9_-]+$/);
+  const rawLink = await linkInput.inputValue();
+  await oneTimeDialog
+    .getByRole("button", { name: "Close and forget link" })
+    .click();
+
+  await expect(oneTimeDialog).toBeHidden();
+  expect(
+    await page.locator("input").evaluateAll((inputs) =>
+      inputs.some((input) => (input as HTMLInputElement).value === rawLink),
+    ),
+  ).toBe(false);
+  expect(ui.server.requests).toContain("POST /api/admin/access-invites");
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {
@@ -433,7 +473,9 @@ test("admin operations expose URL-backed people views", async ({
   await ui.open({ ...routeCase("admin-people"), theme: "dark" });
   await page.getByRole("tab", { name: "Users" }).click();
   await expect(page).toHaveURL(/tab=users/);
-  await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Users", exact: true }),
+  ).toBeVisible();
 });
 
 test("authoring editor validates with the browser WASM shell", async ({

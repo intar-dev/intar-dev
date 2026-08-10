@@ -28,7 +28,8 @@
     "astro": "astro",
     "db:migrate:local": "wrangler d1 migrations apply DB --local --config wrangler.local.jsonc --persist-to .wrangler/local-ui-state",
     "db:migrate:production": "wrangler d1 migrations apply DB --remote --config wrangler.jsonc",
-    "db:schema:check": "tsc --noEmit -p tsconfig.provider-runtime-schema.json && vitest run src/lib/workshops/runtime-provider.test.ts && vitest run --config vitest.workers.config.ts src/db/schema.workers.test.ts"
+    "db:schema:check": "tsc --noEmit -p tsconfig.provider-runtime-schema.json && vitest run src/lib/workshops/runtime-provider.test.ts && vitest run --config vitest.workers.config.ts src/db/schema.workers.test.ts",
+    "beta:cutover": "bun scripts/beta-access-cutover.ts"
   },
   "dependencies": {
     "@intar/provider-contracts": "workspace:*",
@@ -36,6 +37,7 @@
     "@astrojs/cloudflare": "^14.1.2",
     "@astrojs/react": "^6.0.1",
     "@base-ui/react": "^1.6.0",
+    "@better-auth/core": "1.7.0-beta.10",
     "@better-auth/oauth-provider": "1.7.0-beta.10",
     "@better-auth/sso": "1.7.0-beta.10",
     "@codemirror/commands": "^6.10.4",

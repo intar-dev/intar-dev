@@ -27,6 +27,7 @@ import {
   type WorkshopManifestV2,
 } from "@/db/schema";
 import { AppError } from "@/lib/app-error";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { listWorkshopArtifactsForOwner } from "@/lib/workshops/artifacts";
 import {
   RUN_PHASE_ORDER,
@@ -257,6 +258,7 @@ async function seedScenarioRuntime(): Promise<string> {
   const db = drizzle(env.DB);
   const now = Date.now();
   await db.insert(user).values(userRow("scenario-owner"));
+  await grantActiveBetaAccess("scenario-owner");
   await db.insert(agentHosts).values(hostRow("scenario-host", null));
   const initial = buildInitialRunState({
     vms: [
@@ -569,6 +571,14 @@ async function issueAgentToken(hostId: string): Promise<string> {
   );
   const body = (await response.json()) as { accessToken: string };
   return body.accessToken;
+}
+
+async function grantActiveBetaAccess(userId: string): Promise<void> {
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubUsername: userId,
+  });
 }
 
 function artifactDescriptor(kind: string, filename: string, sizeBytes = 0) {

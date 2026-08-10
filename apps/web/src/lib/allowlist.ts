@@ -1,23 +1,95 @@
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { accessAllowlist } from "@/db/schema";
-import { toAllowlistKey } from "@/lib/github-username";
+import { accessAllowlist, account } from "@/db/schema";
 
-// The sign-up allowlist lives in D1 so approval and revocation are strongly
-// consistent with sessions and OAuth grants. Worker-only — pure username
-// helpers live in lib/github-username.ts so the client bundle can use them.
+// Beta access is intentionally keyed only by the immutable Better Auth user
+// id. GitHub usernames and organization memberships are snapshots/tenant data,
+// never authorization inputs.
 
 export { isValidGithubUsername, toAllowlistKey } from "@/lib/github-username";
 
-export async function isAllowlisted(username?: string | null): Promise<boolean> {
-  const key = toAllowlistKey(username);
-  if (!key) return false;
+export type BetaAccessState = "active" | "blocked";
 
-  const rows = await drizzle(env.DB)
-    .select({ githubUsername: accessAllowlist.githubUsername })
+export interface BetaAdmissionEpoch {
+  sourceInviteId: string;
+  sourceLeaseId: string;
+  grantedAt: number;
+}
+
+export interface BetaAccessSnapshot extends BetaAdmissionEpoch {
+  userId: string;
+  state: BetaAccessState;
+  githubAccountId: string;
+  githubUsername: string;
+  revocationId: string | null;
+}
+
+export async function getBetaAccess(
+  userId?: string | null,
+  d1: D1Database = env.DB,
+): Promise<BetaAccessSnapshot | null> {
+  if (!userId) return null;
+
+  const rows = await drizzle(d1)
+    .select({
+      userId: accessAllowlist.userId,
+      state: accessAllowlist.state,
+      githubAccountId: accessAllowlist.githubAccountId,
+      githubUsername: accessAllowlist.githubUsername,
+      sourceInviteId: accessAllowlist.sourceInviteId,
+      sourceLeaseId: accessAllowlist.sourceLeaseId,
+      grantedAt: accessAllowlist.grantedAt,
+      revocationId: accessAllowlist.revocationId,
+    })
     .from(accessAllowlist)
-    .where(eq(accessAllowlist.githubUsername, key))
+    .where(eq(accessAllowlist.userId, userId))
     .limit(1);
+
+  return rows[0] ?? null;
+}
+
+export async function getBetaAccessState(
+  userId?: string | null,
+  d1: D1Database = env.DB,
+): Promise<BetaAccessState | null> {
+  return (await getBetaAccess(userId, d1))?.state ?? null;
+}
+
+export async function isActiveBetaUser(
+  userId?: string | null,
+  d1: D1Database = env.DB,
+): Promise<boolean> {
+  return (await getBetaAccessState(userId, d1)) === "active";
+}
+
+export async function hasLinkedProviderAccount(
+  userId: string,
+  providerId: string,
+  d1: D1Database = env.DB,
+): Promise<boolean> {
+  if (!userId || !providerId) return false;
+
+  const rows = await drizzle(d1)
+    .select({ id: account.id })
+    .from(account)
+    .where(and(eq(account.userId, userId), eq(account.providerId, providerId)))
+    .limit(1);
+
+  return rows.length === 1;
+}
+
+export async function hasLinkedNonGithubAccount(
+  userId: string,
+  d1: D1Database = env.DB,
+): Promise<boolean> {
+  if (!userId) return false;
+
+  const rows = await drizzle(d1)
+    .select({ id: account.id })
+    .from(account)
+    .where(and(eq(account.userId, userId), ne(account.providerId, "github")))
+    .limit(1);
+
   return rows.length === 1;
 }

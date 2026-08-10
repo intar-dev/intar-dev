@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { workshopRegistryTokens } from "@/db/schema";
-import { appError } from "@/lib/app-error";
+import { appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
 
@@ -53,16 +53,32 @@ export async function createWorkshopRegistryToken(params: {
   const tokenHash = await hashWorkshopRegistryToken(token);
   const id = createAppId();
   const tokenPrefix = token.slice(0, TOKEN_PREFIX.length + 10);
-  await drizzle(env.DB).insert(workshopRegistryTokens).values({
-    id,
-    organizationId: params.organizationId,
-    name,
-    tokenPrefix,
-    tokenHash,
-    createdBy: params.actorUserId,
-    expiresAt,
-    createdAt: now,
-  });
+  try {
+    await drizzle(env.DB).insert(workshopRegistryTokens).values({
+      id,
+      organizationId: params.organizationId,
+      name,
+      tokenPrefix,
+      tokenHash,
+      createdBy: params.actorUserId,
+      expiresAt,
+      createdAt: now,
+    });
+  } catch (error) {
+    if (
+      errorChainMatches(
+        error,
+        /workshop registry token creator must have active beta access/i,
+      )
+    ) {
+      throw appError(
+        403,
+        "beta_access_revoked",
+        "active beta access is required to create a registry token",
+      );
+    }
+    throw error;
+  }
   return {
     id,
     name,

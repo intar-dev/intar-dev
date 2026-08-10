@@ -14,7 +14,8 @@ export default defineConfig({
           AGENT_JWT_ISSUER: "intar-agent-bridge",
           AGENT_JWT_SECRET: "test-agent-jwt-secret-0123456789abcdef",
           BETTER_AUTH_APP_NAME: "intar.dev",
-          BETTER_AUTH_SECRET: "test-better-auth-secret",
+          BETTER_AUTH_SECRET:
+            "test-better-auth-secret-that-is-at-least-32-bytes",
           BETTER_AUTH_URL: "http://localhost",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",

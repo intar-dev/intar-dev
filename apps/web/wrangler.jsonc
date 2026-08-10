@@ -5,11 +5,17 @@
   "name": "intar-dev",
   "main": "src/worker.ts",
   "secrets": {
-    "required": ["STARGATE_EGRESS_IPV4_CIDRS"],
+    "required": [
+      "BETA_MAINTENANCE_BYPASS_SECRET",
+      "STARGATE_EGRESS_IPV4_CIDRS",
+    ],
   },
   "vars": {
     "BETTER_AUTH_APP_NAME": "intar.dev",
     "BETTER_AUTH_URL": "https://intar.dev",
+    // The first deployment of this pure replacement must stay fenced until
+    // beta tables are reset, a bootstrap admin redeems, and smoke tests pass.
+    "BETA_ACCESS_MAINTENANCE": "on",
     "AGENT_JWT_ISSUER": "intar-agent-bridge",
     "AGENT_JWT_AUDIENCE": "agent-connect",
     "STARGATE_ROUTE_TTL_SECONDS": "14400",
@@ -89,7 +95,7 @@
   ],
   "ratelimits": [
     {
-      "name": "ACCESS_REQUEST_RATE_LIMITER",
+      "name": "ACCESS_INVITE_RATE_LIMITER",
       "namespace_id": "88427091",
       "simple": {
         "limit": 20,

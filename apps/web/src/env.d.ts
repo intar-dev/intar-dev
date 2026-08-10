@@ -16,6 +16,7 @@ declare global {
     interface Env {
       AGENT_JWT_SECRET: string;
       BETTER_AUTH_SECRET: string;
+      BETA_MAINTENANCE_BYPASS_SECRET: string;
       GITHUB_CLIENT_ID: string;
       GITHUB_CLIENT_SECRET: string;
       STARGATE_ADMIN_BASE_URL?: string;

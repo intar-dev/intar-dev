@@ -10,6 +10,11 @@ import {
   user,
   workshopRegistryTokens,
 } from "@/db/schema";
+import { revokeBetaUser } from "@/lib/access-invites";
+import {
+  FIXTURE_BETA_ADMIN_ID,
+  grantFixtureBetaAccess,
+} from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   createWorkshopRegistryToken,
@@ -84,6 +89,27 @@ describe("workshop registry token administration", () => {
         revokedAt: NOW + 5_000,
       }),
     ]);
+  });
+
+  it("does not create a registry token after the owner loses beta access", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    await revokeBetaUser({
+      d1: env.DB,
+      userId: "owner-a",
+      actorUserId: FIXTURE_BETA_ADMIN_ID,
+      reason: "registry_access_revoked",
+      now: NOW,
+    });
+
+    await expect(
+      createWorkshopRegistryToken({
+        organizationId: "org-a",
+        actorUserId: "owner-a",
+        name: "Must not exist",
+      }),
+    ).rejects.toMatchObject({ status: 403, code: "beta_access_revoked" });
+    const rows = await drizzle(env.DB).select().from(workshopRegistryTokens);
+    expect(rows).toEqual([]);
   });
 
   it("denies token creation, listing, and revocation to admins, members, and nonmembers", async () => {
@@ -440,4 +466,16 @@ async function seedOrganizations(): Promise<void> {
       createdAt: now,
     },
   ]);
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId: "owner-a",
+    githubUsername: "owner-a",
+    now: NOW - 10_000,
+  });
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId: "owner-b",
+    githubUsername: "owner-b",
+    now: NOW - 5_000,
+  });
 }

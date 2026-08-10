@@ -438,10 +438,19 @@ function currentWorkshopMembershipExists(input: {
       and ${member.workshopAccessRevokingAt} is null
       and exists (
         select 1
+        from access_allowlist actor_beta_access
+        where actor_beta_access.user_id = ${input.actorUserId}
+          and actor_beta_access.state = 'active'
+      )
+      and exists (
+        select 1
         from workshop_workspaces authorization_workspace
         join member workspace_member
           on workspace_member.organization_id = ${workshopSessions.organizationId}
          and workspace_member.user_id = authorization_workspace.user_id
+        join access_allowlist workspace_beta_access
+          on workspace_beta_access.user_id = authorization_workspace.user_id
+         and workspace_beta_access.state = 'active'
         where authorization_workspace.id = ${input.workspaceId}
           and workspace_member.workshop_access_revoking_at is null
       )

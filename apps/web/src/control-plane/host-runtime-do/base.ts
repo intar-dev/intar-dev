@@ -27,6 +27,10 @@ export const WORKSHOP_RECOVERY_RETRY_MS = 10_000;
 export interface SocketAttachment {
   hostId: string;
   sessionId: string | null;
+  /** Exact beta grant carried by a personal-host JWT; null for org hosts. */
+  betaSourceInviteId: string | null;
+  betaSourceLeaseId: string | null;
+  betaAdmissionGrantedAt: number | null;
   connectedAt: number;
   helloReceived: boolean;
   bridgeProtocol: "v6" | null;
@@ -510,6 +514,24 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
         sessionId:
           typeof parsed.sessionId === "string" && parsed.sessionId
             ? parsed.sessionId
+            : null,
+        betaSourceInviteId:
+          typeof parsed.betaSourceInviteId === "string" &&
+          parsed.betaSourceInviteId.length > 0 &&
+          parsed.betaSourceInviteId.length <= 256
+            ? parsed.betaSourceInviteId
+            : null,
+        betaSourceLeaseId:
+          typeof parsed.betaSourceLeaseId === "string" &&
+          parsed.betaSourceLeaseId.length > 0 &&
+          parsed.betaSourceLeaseId.length <= 256
+            ? parsed.betaSourceLeaseId
+            : null,
+        betaAdmissionGrantedAt:
+          typeof parsed.betaAdmissionGrantedAt === "number" &&
+          Number.isSafeInteger(parsed.betaAdmissionGrantedAt) &&
+          parsed.betaAdmissionGrantedAt >= 0
+            ? parsed.betaAdmissionGrantedAt
             : null,
         connectedAt:
           typeof parsed.connectedAt === "number" &&

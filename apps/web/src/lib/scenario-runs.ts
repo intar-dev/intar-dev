@@ -27,4 +27,7 @@ export {
   createScenarioSshSessionForUser,
   listHostRunsForUser,
 } from "./scenario-runs/lifecycle";
-export { revokeScenarioNativeProfileRoutesForUser } from "./scenario-runs/start";
+export {
+  revokeScenarioNativeProfileRoutesForUser,
+  revokeScenarioRoutesForUser,
+} from "./scenario-runs/start";

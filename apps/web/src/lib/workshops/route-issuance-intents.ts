@@ -43,6 +43,12 @@ export async function reserveWorkshopApplicationRouteIssuanceIntent(input: {
      JOIN member workspace_member
        ON workspace_member.organization_id = session.organization_id
       AND workspace_member.user_id = workspace.user_id
+     JOIN access_allowlist actor_beta_access
+       ON actor_beta_access.user_id = organization_member.user_id
+      AND actor_beta_access.state = 'active'
+     JOIN access_allowlist workspace_beta_access
+       ON workspace_beta_access.user_id = workspace_member.user_id
+      AND workspace_beta_access.state = 'active'
      WHERE session.id = ?
        AND session.organization_id = ?
        AND session.state IN ('lobby', 'live')
@@ -90,6 +96,12 @@ export async function reserveWorkshopApplicationRouteIssuanceIntent(input: {
      JOIN member workspace_member
        ON workspace_member.organization_id = session.organization_id
       AND workspace_member.user_id = workspace.user_id
+     JOIN access_allowlist actor_beta_access
+       ON actor_beta_access.user_id = organization_member.user_id
+      AND actor_beta_access.state = 'active'
+     JOIN access_allowlist workspace_beta_access
+       ON workspace_beta_access.user_id = workspace_member.user_id
+      AND workspace_beta_access.state = 'active'
      WHERE session.id = ?
        AND session.organization_id = ?
        AND session.state IN ('lobby', 'live')
@@ -142,6 +154,12 @@ export async function beginWorkshopRouteIssuanceIntent(input: {
      JOIN member workspace_member
        ON workspace_member.organization_id = session.organization_id
       AND workspace_member.user_id = workspace.user_id
+     JOIN access_allowlist actor_beta_access
+       ON actor_beta_access.user_id = organization_member.user_id
+      AND actor_beta_access.state = 'active'
+     JOIN access_allowlist workspace_beta_access
+       ON workspace_beta_access.user_id = workspace_member.user_id
+      AND workspace_beta_access.state = 'active'
      WHERE session.id = ?
        AND session.organization_id = ?
        AND session.state IN ('lobby', 'live')

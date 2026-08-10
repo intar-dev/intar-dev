@@ -5,11 +5,13 @@ export function AuthShell({
   eyebrow,
   title,
   description,
+  standalone = false,
   children,
 }: {
   eyebrow: string;
   title: string;
   description: string;
+  standalone?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -23,7 +25,7 @@ export function AuthShell({
         aria-hidden="true"
       />
       <div className="relative mx-auto w-full max-w-5xl">
-        <BrandMark className="mb-4 sm:mb-6" />
+        <BrandMark className="mb-4 sm:mb-6" native={standalone} />
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_28rem] lg:items-center lg:gap-12">
           <section className="order-1 rounded-xl border bg-card p-4 shadow-sm sm:p-8 lg:order-2">
             <header className="space-y-2">

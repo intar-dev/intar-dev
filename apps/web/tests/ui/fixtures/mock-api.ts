@@ -265,6 +265,59 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { success: true });
         return;
       }
+      if (pathname === "/api/access-invites/current" && method === "GET") {
+        const session = sessionFor(server.state.sessionRole);
+        await json(
+          route,
+          session
+            ? {
+                state: "active",
+                user: {
+                  id: session.user.id,
+                  githubUsername: session.user.username,
+                },
+              }
+            : server.state.betaClaim,
+        );
+        return;
+      }
+      if (pathname === "/api/access-invites/exchange" && method === "POST") {
+        await requestBody(route);
+        await json(route, server.state.betaClaim);
+        return;
+      }
+      if (pathname === "/api/access-invites/start" && method === "POST") {
+        const body = await requestBody(route);
+        const redirectKind = body.mode === "sso-recovery" ? "sso" : "github";
+        const leaseExpiresAt = FIXED_NOW + 10 * 60_000;
+        server.state.betaClaim = {
+          state: "leased",
+          leaseExpiresAt,
+          ownsLease: true,
+        };
+        await json(route, {
+          redirectUrl:
+            redirectKind === "sso"
+              ? "https://id.platform.example/authorize"
+              : "/join?oauth=github",
+          redirectKind,
+          leaseExpiresAt,
+        });
+        return;
+      }
+      if (pathname === "/api/access-invites/confirm" && method === "POST") {
+        server.state.betaClaim = {
+          state: "active",
+          user: { id: "user-learner", githubUsername: "minalearns" },
+        };
+        await json(route, server.state.betaClaim);
+        return;
+      }
+      if (pathname === "/api/access-invites/cancel" && method === "POST") {
+        server.state.betaClaim = { state: "invalid" };
+        await json(route, { canceled: true });
+        return;
+      }
       if (
         pathname === "/api/auth/organization/set-active" &&
         method === "POST"
@@ -325,11 +378,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
 
       if (server.state.variant === "error" && method === "GET") {
         await json(route, { error: "Deterministic fixture failure" }, 503);
-        return;
-      }
-
-      if (pathname === "/api/access-requests" && method === "POST") {
-        await json(route, { accepted: true }, 202);
         return;
       }
 
@@ -1082,28 +1130,142 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
 
-      if (pathname === "/api/admin/access-requests" && method === "GET") {
-        await json(route, { requests: server.state.accessRequests });
+      if (pathname === "/api/admin/access-invites" && method === "GET") {
+        await json(route, {
+          invites: server.state.accessInvites,
+          betaUsers: server.state.betaUsers,
+        });
         return;
       }
-      if (
-        /^\/api\/admin\/access-requests\/[^/]+\/decision$/.test(pathname) &&
-        method === "POST"
-      ) {
+      if (pathname === "/api/admin/access-invites" && method === "POST") {
         const body = await requestBody(route);
-        const requestId = segment(
-          pathname,
-          /^\/api\/admin\/access-requests\/([^/]+)\/decision$/,
+        const invite = {
+          id: `invite-created-${server.state.accessInvites.length + 1}`,
+          codePrefix: "intar_beta_CCCCCCCC",
+          kind: "standard",
+          state: "pending",
+          label: typeof body.label === "string" ? body.label : null,
+          createdBy: "user-admin",
+          createdAt: FIXED_NOW,
+          expiresAt: FIXED_NOW + 48 * 60 * 60_000,
+          leaseExpiresAt: null,
+          redeemerUserId: null,
+          redeemerGithubAccountId: null,
+          redeemerGithubUsername: null,
+          redeemedAt: null,
+          revokedBy: null,
+          revocationReason: null,
+          revokedAt: null,
+          replacesInviteId: null,
+          replacedByInviteId: null,
+          version: 1,
+          updatedAt: FIXED_NOW,
+        };
+        server.state.accessInvites.unshift(invite);
+        await json(
+          route,
+          {
+            invite,
+            inviteUrl: `http://127.0.0.1:4330/join#invite=intar_beta_${"C".repeat(43)}`,
+          },
+          201,
         );
-        const accessRequest = server.state.accessRequests.find(
-          (entry) => entry.id === requestId,
+        return;
+      }
+      const replacedInviteId = segment(
+        pathname,
+        /^\/api\/admin\/access-invites\/([^/]+)\/replace$/,
+      );
+      if (replacedInviteId && method === "POST") {
+        const replaced = server.state.accessInvites.find(
+          (entry) => entry.id === replacedInviteId,
         );
-        if (accessRequest && typeof body.decision === "string") {
-          accessRequest.status = body.decision;
-          accessRequest.decidedAt = FIXED_NOW;
-          accessRequest.decidedBy = "user-admin";
+        if (replaced) {
+          replaced.state = "revoked";
+          replaced.revocationReason = "replaced";
+          replaced.revokedAt = FIXED_NOW;
+          replaced.updatedAt = FIXED_NOW;
+          replaced.version = Number(replaced.version ?? 0) + 1;
         }
-        await json(route, { request: accessRequest ?? null });
+        const invite = {
+          ...(replaced ?? {}),
+          id: `${replacedInviteId}-replacement`,
+          codePrefix: "intar_beta_DDDDDDDD",
+          state: "pending",
+          createdAt: FIXED_NOW,
+          expiresAt: FIXED_NOW + 48 * 60 * 60_000,
+          revokedBy: null,
+          revocationReason: null,
+          revokedAt: null,
+          replacesInviteId: replacedInviteId,
+          replacedByInviteId: null,
+          version: 1,
+          updatedAt: FIXED_NOW,
+        };
+        server.state.accessInvites.unshift(invite);
+        await json(route, {
+          invite,
+          inviteUrl: `http://127.0.0.1:4330/join#invite=intar_beta_${"D".repeat(43)}`,
+        });
+        return;
+      }
+      const revokedInviteId = segment(
+        pathname,
+        /^\/api\/admin\/access-invites\/([^/]+)\/revoke$/,
+      );
+      if (revokedInviteId && method === "POST") {
+        const body = await requestBody(route);
+        const invite = server.state.accessInvites.find(
+          (entry) => entry.id === revokedInviteId,
+        );
+        if (invite) {
+          invite.state = "revoked";
+          invite.revocationReason = body.reason;
+          invite.revokedBy = "user-admin";
+          invite.revokedAt = FIXED_NOW;
+          invite.updatedAt = FIXED_NOW;
+          invite.version = Number(invite.version ?? 0) + 1;
+        }
+        await json(route, { invite: invite ?? null });
+        return;
+      }
+      const revokedBetaUserId = segment(
+        pathname,
+        /^\/api\/admin\/beta-users\/([^/]+)\/revoke$/,
+      );
+      if (revokedBetaUserId && method === "POST") {
+        const body = await requestBody(route);
+        const betaUser = server.state.betaUsers.find(
+          (entry) => entry.userId === revokedBetaUserId,
+        );
+        if (betaUser) {
+          betaUser.state = "blocked";
+          betaUser.revocationId = `revocation-${revokedBetaUserId}`;
+          betaUser.revocationReason = body.reason;
+          betaUser.revokedBy = "user-admin";
+          betaUser.revokedAt = FIXED_NOW;
+          betaUser.revocationCleanupCompletedAt = FIXED_NOW;
+        }
+        await json(route, {
+          userId: revokedBetaUserId,
+          state: "blocked",
+          revocationId: betaUser?.revocationId ?? null,
+          cleanupCompleted: true,
+        });
+        return;
+      }
+      const reinvitedBetaUserId = segment(
+        pathname,
+        /^\/api\/admin\/beta-users\/([^/]+)\/allow-reinvite$/,
+      );
+      if (reinvitedBetaUserId && method === "POST") {
+        server.state.betaUsers = server.state.betaUsers.filter(
+          (entry) => entry.userId !== reinvitedBetaUserId,
+        );
+        await json(route, {
+          userId: reinvitedBetaUserId,
+          state: "reinvite_allowed",
+        });
         return;
       }
       if (pathname === "/api/admin/organizations" && method === "GET") {

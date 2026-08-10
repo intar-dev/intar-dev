@@ -18,6 +18,9 @@ describe("production D1 schema", () => {
       expect.arrayContaining([
         "user",
         "organization",
+        "access_invite_codes",
+        "access_allowlist",
+        "access_events",
         "scenario_course_catalogs",
         "scenario_runs",
         "workshop_templates",
@@ -46,6 +49,7 @@ describe("production D1 schema", () => {
     expect(names).not.toEqual(
       expect.arrayContaining([
         "clean_d1_commissioning",
+        "access_requests",
         "hetzner_allocations",
         "organization_provider_connections",
         "runtime_provider_checkpoint_artifacts",
@@ -74,6 +78,49 @@ describe("production D1 schema", () => {
       "PRAGMA foreign_key_check",
     ).all();
     expect(foreignKeyViolations.results).toEqual([]);
+  });
+
+  it("installs the beta claim, append-only audit, and last-admin guards", async () => {
+    const triggers = await env.DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'trigger' AND name IN (
+         'access_allowlist_claim_invite',
+         'access_allowlist_revoker_guard',
+         'access_invite_codes_issuer_guard',
+         'access_invite_codes_revoker_guard',
+         'access_events_append_only_update',
+         'access_events_append_only_delete',
+         'access_allowlist_last_admin_guard',
+         'access_user_last_beta_admin_update_guard',
+         'access_user_last_beta_admin_delete_guard',
+         'workshop_registry_tokens_creator_beta_guard'
+       ) ORDER BY name`,
+    ).all<{ name: string }>();
+    expect(triggers.results.map(({ name }) => name)).toEqual([
+      "access_allowlist_claim_invite",
+      "access_allowlist_last_admin_guard",
+      "access_allowlist_revoker_guard",
+      "access_events_append_only_delete",
+      "access_events_append_only_update",
+      "access_invite_codes_issuer_guard",
+      "access_invite_codes_revoker_guard",
+      "access_user_last_beta_admin_delete_guard",
+      "access_user_last_beta_admin_update_guard",
+      "workshop_registry_tokens_creator_beta_guard",
+    ]);
+
+    const accountIndexes = await env.DB.prepare(
+      `SELECT name, "unique" AS is_unique
+       FROM pragma_index_list('account')
+       WHERE name IN (
+         'account_provider_account_uidx',
+         'account_user_github_uidx'
+       ) ORDER BY name`,
+    ).all<{ name: string; is_unique: number }>();
+    expect(accountIndexes.results).toEqual([
+      { name: "account_provider_account_uidx", is_unique: 1 },
+      { name: "account_user_github_uidx", is_unique: 1 },
+    ]);
   });
 
   it("requires immutable allocation price attribution in the clean schema", async () => {

@@ -56,10 +56,16 @@ export {
 } from "./schema/oauth";
 export {
   accessAllowlist,
-  accessRequests,
+  accessEvents,
+  accessInviteCodes,
   jwks,
   scenarioAssignments,
   scenarioSources,
+} from "./schema/application";
+export type {
+  AccessEventType,
+  AccessInviteKind,
+  AccessInviteState,
 } from "./schema/application";
 export {
   workshopAssistGrants,

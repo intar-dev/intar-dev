@@ -107,6 +107,7 @@ import {
   RUNTIME_PENDING_RESOURCE_RESERVATION_TTL_MS,
 } from "@/lib/runtime-capacity";
 import { recordRuntimeVmActualState } from "@/lib/runtime-vm-state";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   checkInToWorkshop,
@@ -1874,6 +1875,7 @@ async function seedIdentityAndRunner() {
       updatedAt: now,
     }),
   ]);
+  await grantFixtureBetaAccess({ d1: env.DB, userId: "owner", now });
 }
 
 async function seedRunner(hostId: string) {

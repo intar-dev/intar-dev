@@ -8,9 +8,14 @@ import { handleWorkspaceAgentControlPlaneRequest } from "@/control-plane/workspa
 import { openDueWorkshopLobbies } from "@/lib/workshops/auto-lobby";
 import { sweepWorkshopProviderRuntimes } from "@/lib/workshops/provider-runtime";
 import { recoverWorkshopRuntimesFromFailedProvider } from "@/lib/workshops/runtime-orchestrator";
+import { handleMaintenanceMode } from "@/maintenance";
+import { hardenJoinResponse } from "@/lib/join-security";
 
 export default {
   async fetch(request, env, ctx) {
+    const maintenanceResponse = await handleMaintenanceMode(request, env);
+    if (maintenanceResponse) return maintenanceResponse;
+
     const url = new URL(request.url);
 
     if (
@@ -53,9 +58,25 @@ export default {
       }
     }
 
-    return handle(request, env, ctx);
+    const response = await handle(request, env, ctx);
+    return url.pathname === "/join"
+      ? hardenJoinResponse(response, {
+          localDevelopment:
+            new URL(env.BETTER_AUTH_URL).hostname === "localhost",
+        })
+      : response;
   },
-  async scheduled(controller) {
+  async scheduled(controller, env) {
+    // The pure beta replacement must be database-independent while its D1
+    // schema and credential rows are reset. Cron work is part of the same
+    // maintenance fence as HTTP traffic; otherwise a minute tick can issue or
+    // mutate runtimes in the middle of the cutover.
+    if (env.BETA_ACCESS_MAINTENANCE === "on") {
+      console.info(
+        JSON.stringify({ event: "scheduled_maintenance_fenced" }),
+      );
+      return;
+    }
     const [lobbies, providerRuntimes] = await Promise.all([
       openDueWorkshopLobbies({ now: controller.scheduledTime }),
       sweepWorkshopProviderRuntimes({ now: controller.scheduledTime }),

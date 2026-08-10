@@ -286,6 +286,9 @@ bun "${repository_root}/tools/deploy/worker-version.ts" \
 jq -e '
   ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
+  )] | length) == 1 and
+  ([.resources.bindings[] | select(
+    .type == "secret_text" and .name == "BETA_MAINTENANCE_BYPASS_SECRET"
   )] | length) == 1
 ' "${uploaded_version}" >/dev/null
 jq -s -e '

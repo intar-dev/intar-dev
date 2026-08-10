@@ -53,6 +53,7 @@ import {
   type WorkshopManifestV2,
 } from "@/db/schema";
 import type { VmActualStateV2 } from "@/generated/bridge";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
 import { POST as createTemplateApi } from "@/pages/api/organizations/[orgId]/workshops/templates/index";
 import { POST as createRevisionApi } from "@/pages/api/organizations/[orgId]/workshops/templates/[templateId]/revisions/index";
@@ -3148,16 +3149,17 @@ async function openLobby(sessionId: string) {
 async function seedIdentityGraph() {
   const db = drizzle(env.DB);
   const now = new Date();
+  const userIds = [
+    "owner-a",
+    "learner-a",
+    "helper-a",
+    "late-a",
+    "owner-b",
+  ];
   await db.batch([
     db
       .insert(user)
-      .values([
-        userRow("owner-a"),
-        userRow("learner-a"),
-        userRow("helper-a"),
-        userRow("late-a"),
-        userRow("owner-b"),
-      ]),
+      .values(userIds.map((userId) => userRow(userId))),
     db.insert(organization).values([
       { id: "org-a", name: "Organization A", slug: "org-a", createdAt: now },
       { id: "org-b", name: "Organization B", slug: "org-b", createdAt: now },
@@ -3172,6 +3174,21 @@ async function seedIdentityGraph() {
         membership("membership-owner-b", "org-b", "owner-b", "owner", now),
       ]),
   ]);
+  for (const userId of userIds) {
+    await grantActiveBetaAccess(userId, now.getTime());
+  }
+}
+
+async function grantActiveBetaAccess(
+  userId: string,
+  now: number,
+): Promise<void> {
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubUsername: userId,
+    now,
+  });
 }
 
 function userRow(id: string): typeof user.$inferInsert {

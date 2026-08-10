@@ -41,6 +41,22 @@ interface WorkshopDomainExecutionRow {
   generation: number;
 }
 
+interface BetaWorkshopWorkspaceCapabilityRow {
+  id: string;
+  terminal_route_usernames_json: string | string[];
+  application_route_ids_json: string | string[];
+}
+
+interface BetaWorkshopGrantCapabilityRow {
+  id: string;
+  workspace_id: string;
+  terminal_route_usernames_json: string | string[];
+}
+
+interface BetaWorkshopIntentCapabilityRow extends WorkshopRouteIssuanceIntentRow {
+  workspace_id: string;
+}
+
 /**
  * Revokes externally usable live-workshop capabilities before organization
  * membership is removed. Callers must delete the membership only after this
@@ -336,6 +352,190 @@ export async function revokeLiveWorkshopAccessForOrganizationMember(input: {
       "a workshop route is still being issued; retry membership removal",
     );
   }
+}
+
+/**
+ * Removes capabilities personally usable by a beta user without deleting the
+ * organization membership or tearing down shared runners. Route issuance is
+ * separately fenced by active beta access, so cancelling pending intents here
+ * also closes the create-vs-revoke race.
+ */
+export async function revokeLiveWorkshopCapabilitiesForBetaUser(input: {
+  userId: string;
+  actorUserId: string;
+  now?: number;
+}): Promise<void> {
+  const now = input.now ?? Date.now();
+  const [workspaceResult, grantResult, intentResult] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, terminal_route_usernames_json, application_route_ids_json
+       FROM workshop_workspaces
+       WHERE user_id = ?`,
+    )
+      .bind(input.userId)
+      .all<BetaWorkshopWorkspaceCapabilityRow>(),
+    env.DB.prepare(
+      `SELECT id, workspace_id, terminal_route_usernames_json
+       FROM workshop_assist_grants
+       WHERE learner_user_id = ? OR helper_user_id = ?`,
+    )
+      .bind(input.userId, input.userId)
+      .all<BetaWorkshopGrantCapabilityRow>(),
+    env.DB.prepare(
+      `SELECT intent.id, intent.workspace_id, intent.kind, intent.route_key,
+              intent.alternate_route_key, intent.state,
+              intent.capability_expires_at, intent.created_at
+       FROM workshop_route_issuance_intents intent
+       JOIN workshop_workspaces workspace ON workspace.id = intent.workspace_id
+       WHERE intent.actor_user_id = ? OR workspace.user_id = ?`,
+    )
+      .bind(input.userId, input.userId)
+      .all<BetaWorkshopIntentCapabilityRow>(),
+  ]);
+
+  const workspaces = workspaceResult.results;
+  const grants = grantResult.results;
+  const intents = intentResult.results;
+  const pendingIntentIds = intents.flatMap((intent) =>
+    intent.state === "pending" ? [intent.id] : [],
+  );
+  if (pendingIntentIds.length) {
+    await env.DB.prepare(
+      `UPDATE workshop_route_issuance_intents
+       SET state = 'cancelled', updated_at = ?
+       WHERE id IN (${pendingIntentIds.map(() => "?").join(", ")})
+         AND state = 'pending'`,
+    )
+      .bind(now, ...pendingIntentIds)
+      .run();
+    for (const intent of intents) {
+      if (intent.state === "pending") intent.state = "cancelled";
+    }
+  }
+
+  const ownedWorkspaceIds = new Set(workspaces.map((row) => row.id));
+  const terminalRoutes = new Set<string>();
+  const applicationRoutes = new Set<string>();
+  const terminalRoutesByWorkspace = new Map<string, Set<string>>();
+  const applicationRoutesByWorkspace = new Map<string, Set<string>>();
+  const addWorkspaceRoute = (
+    target: Map<string, Set<string>>,
+    workspaceId: string,
+    route: string,
+  ) => {
+    const routes = target.get(workspaceId) ?? new Set<string>();
+    routes.add(route);
+    target.set(workspaceId, routes);
+  };
+
+  for (const workspace of workspaces) {
+    for (const route of jsonStrings(workspace.terminal_route_usernames_json)) {
+      terminalRoutes.add(route);
+    }
+    for (const route of jsonStrings(workspace.application_route_ids_json)) {
+      applicationRoutes.add(route);
+    }
+  }
+  for (const grant of grants) {
+    for (const route of jsonStrings(grant.terminal_route_usernames_json)) {
+      terminalRoutes.add(route);
+      addWorkspaceRoute(terminalRoutesByWorkspace, grant.workspace_id, route);
+    }
+  }
+  for (const intent of intents) {
+    for (const route of [intent.route_key, intent.alternate_route_key]) {
+      if (!route?.trim()) continue;
+      if (intent.kind === "terminal") {
+        terminalRoutes.add(route);
+        addWorkspaceRoute(terminalRoutesByWorkspace, intent.workspace_id, route);
+      } else {
+        applicationRoutes.add(route);
+        addWorkspaceRoute(applicationRoutesByWorkspace, intent.workspace_id, route);
+      }
+    }
+  }
+
+  await Promise.all([
+    ...[...terminalRoutes].map((route) => deleteStargateRoute(route)),
+    ...[...applicationRoutes].map((route) =>
+      deleteStargateWorkspaceAppRoute(route),
+    ),
+  ]);
+
+  const statements: D1PreparedStatement[] = [];
+  if (intents.length) {
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM workshop_route_issuance_intents
+         WHERE id IN (${intents.map(() => "?").join(", ")})`,
+      ).bind(...intents.map((intent) => intent.id)),
+    );
+  }
+  if (workspaces.length) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE workshop_workspaces
+         SET terminal_route_usernames_json = '[]',
+             application_route_ids_json = '[]', updated_at = ?
+         WHERE id IN (${workspaces.map(() => "?").join(", ")})`,
+      ).bind(now, ...workspaces.map((workspace) => workspace.id)),
+    );
+  }
+  if (grants.length) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE workshop_assist_grants
+         SET revoked_at = coalesce(revoked_at, ?),
+             revoked_by = coalesce(revoked_by, ?),
+             terminal_route_usernames_json = '[]', updated_at = ?
+         WHERE id IN (${grants.map(() => "?").join(", ")})`,
+      ).bind(now, input.actorUserId, now, ...grants.map((grant) => grant.id)),
+    );
+  }
+  for (const [workspaceId, routes] of terminalRoutesByWorkspace) {
+    if (ownedWorkspaceIds.has(workspaceId) || routes.size === 0) continue;
+    statements.push(
+      env.DB.prepare(
+        `UPDATE workshop_workspaces
+         SET terminal_route_usernames_json = coalesce(
+               (SELECT json_group_array(value)
+                FROM json_each(terminal_route_usernames_json)
+                WHERE value NOT IN (SELECT value FROM json_each(?))),
+               '[]'
+             ), updated_at = ?
+         WHERE id = ?`,
+      ).bind(JSON.stringify([...routes]), now, workspaceId),
+    );
+  }
+  for (const [workspaceId, routes] of applicationRoutesByWorkspace) {
+    if (ownedWorkspaceIds.has(workspaceId) || routes.size === 0) continue;
+    statements.push(
+      env.DB.prepare(
+        `UPDATE workshop_workspaces
+         SET application_route_ids_json = coalesce(
+               (SELECT json_group_array(value)
+                FROM json_each(application_route_ids_json)
+                WHERE value NOT IN (SELECT value FROM json_each(?))),
+               '[]'
+             ), updated_at = ?
+         WHERE id = ?`,
+      ).bind(JSON.stringify([...routes]), now, workspaceId),
+    );
+  }
+  statements.push(
+    env.DB.prepare(
+      `UPDATE workshop_help_requests
+       SET status = 'cancelled', active_key = NULL,
+           cancelled_at = coalesce(cancelled_at, ?), updated_at = ?
+       WHERE requester_user_id = ? AND status IN ('open', 'claimed')`,
+    ).bind(now, now, input.userId),
+    env.DB.prepare(
+      `UPDATE workshop_help_requests
+       SET status = 'open', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+       WHERE claimed_by = ? AND requester_user_id <> ? AND status = 'claimed'`,
+    ).bind(now, input.userId, input.userId),
+  );
+  await env.DB.batch(statements);
 }
 
 function jsonStrings(value: string | string[] | null): string[] {

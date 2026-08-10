@@ -12,6 +12,7 @@ import {
   scenarioRuns,
   user,
 } from "@/db/schema";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import {
   RUN_PHASE_ORDER,
   buildInitialRunState,
@@ -88,6 +89,7 @@ async function seedRun(runPhase: RunPhase, vmPhase: VmPhase): Promise<string> {
     name: "Agent Owner",
     email: "agent-owner@example.com",
   });
+  await grantActiveBetaAccess("user-1");
   await db.insert(agentHosts).values({
     id: "host-1",
     userId: "user-1",
@@ -161,6 +163,14 @@ async function seedRun(runPhase: RunPhase, vmPhase: VmPhase): Promise<string> {
   );
   const body = (await response.json()) as { accessToken: string };
   return body.accessToken;
+}
+
+async function grantActiveBetaAccess(userId: string): Promise<void> {
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubUsername: userId,
+  });
 }
 
 function artifactDescriptor() {

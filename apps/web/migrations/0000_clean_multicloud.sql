@@ -6,22 +6,117 @@
 -- allocation tables.
 PRAGMA foreign_keys = ON;
 --> statement-breakpoint
-CREATE TABLE `access_allowlist` (
-	`github_username` text PRIMARY KEY NOT NULL,
-	`approved_by` text,
-	`approved_at` integer NOT NULL,
-	FOREIGN KEY (`approved_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE set null
+CREATE TABLE `access_invite_codes` (
+	`id` text PRIMARY KEY NOT NULL,
+	`code_hash` text NOT NULL,
+	`code_prefix` text NOT NULL,
+	`kind` text NOT NULL,
+	`state` text DEFAULT 'pending' NOT NULL,
+	`label` text,
+	`created_by` text,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	`expires_at` integer NOT NULL,
+	`lease_id` text,
+	`leased_at` integer,
+	`lease_expires_at` integer,
+	`redeemer_user_id` text,
+	`redeemer_github_account_id` text,
+	`redeemer_github_username` text,
+	`redeemed_at` integer,
+	`revoked_by` text,
+	`revocation_reason` text,
+	`revoked_at` integer,
+	`replaces_invite_id` text,
+	`replaces_invite_version` integer,
+	`replaced_by_invite_id` text,
+	`version` integer DEFAULT 1 NOT NULL,
+	`updated_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
+	CONSTRAINT `access_invite_codes_hash_valid` CHECK (length(`code_hash`) = 64 AND `code_hash` NOT GLOB '*[^0-9a-f]*'),
+	CONSTRAINT `access_invite_codes_kind_valid` CHECK (`kind` IN ('standard', 'bootstrap_admin')),
+	CONSTRAINT `access_invite_codes_creator_valid` CHECK ((`kind` = 'standard' AND `created_by` IS NOT NULL) OR (`kind` = 'bootstrap_admin' AND `created_by` IS NULL)),
+	CONSTRAINT `access_invite_codes_expiry_valid` CHECK (`expires_at` = `created_at` + 172800000),
+	CONSTRAINT `access_invite_codes_version_valid` CHECK (`version` > 0),
+	CONSTRAINT `access_invite_codes_replacement_valid` CHECK ((`replaces_invite_id` IS NULL AND `replaces_invite_version` IS NULL) OR (`replaces_invite_id` IS NOT NULL AND `replaces_invite_version` > 0)),
+	CONSTRAINT `access_invite_codes_state_valid` CHECK (
+		(`state` = 'pending'
+			AND `lease_id` IS NULL AND `leased_at` IS NULL AND `lease_expires_at` IS NULL
+			AND `redeemer_user_id` IS NULL AND `redeemer_github_account_id` IS NULL
+			AND `redeemer_github_username` IS NULL AND `redeemed_at` IS NULL
+			AND `revoked_by` IS NULL AND `revocation_reason` IS NULL AND `revoked_at` IS NULL
+			AND `replaced_by_invite_id` IS NULL)
+		OR (`state` = 'leased'
+			AND `lease_id` IS NOT NULL AND `leased_at` IS NOT NULL
+			AND `lease_expires_at` = `leased_at` + 600000
+			AND `redeemer_user_id` IS NULL AND `redeemer_github_account_id` IS NULL
+			AND `redeemer_github_username` IS NULL AND `redeemed_at` IS NULL
+			AND `revoked_by` IS NULL AND `revocation_reason` IS NULL AND `revoked_at` IS NULL
+			AND `replaced_by_invite_id` IS NULL)
+		OR (`state` = 'redeemed'
+			AND `lease_id` IS NOT NULL AND `leased_at` IS NOT NULL
+			AND `lease_expires_at` = `leased_at` + 600000
+			AND `redeemer_user_id` IS NOT NULL AND `redeemer_github_account_id` IS NOT NULL
+			AND `redeemer_github_username` IS NOT NULL AND `redeemed_at` IS NOT NULL
+			AND `revoked_by` IS NULL AND `revocation_reason` IS NULL AND `revoked_at` IS NULL
+			AND `replaced_by_invite_id` IS NULL)
+		OR (`state` = 'revoked'
+			AND `lease_id` IS NULL AND `leased_at` IS NULL AND `lease_expires_at` IS NULL
+			AND `redeemer_user_id` IS NULL AND `redeemer_github_account_id` IS NULL
+			AND `redeemer_github_username` IS NULL AND `redeemed_at` IS NULL
+			AND `revoked_by` IS NOT NULL AND `revocation_reason` IS NOT NULL AND `revoked_at` IS NOT NULL)
+	)
 );
 --> statement-breakpoint
-CREATE TABLE `access_requests` (
-	`id` text PRIMARY KEY NOT NULL,
+CREATE TABLE `access_allowlist` (
+	`user_id` text PRIMARY KEY NOT NULL,
+	`state` text DEFAULT 'active' NOT NULL,
+	`github_account_id` text NOT NULL,
 	`github_username` text NOT NULL,
-	`note` text,
-	`status` text DEFAULT 'pending' NOT NULL,
-	`decided_by` text,
-	`decided_at` integer,
-	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL,
-	FOREIGN KEY (`decided_by`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE set null
+	`source_invite_id` text NOT NULL,
+	`source_lease_id` text NOT NULL,
+	`granted_by` text,
+	`grant_reason` text NOT NULL,
+	`granted_at` integer NOT NULL,
+	`revocation_id` text,
+	`revoked_by` text,
+	`revocation_reason` text,
+	`revoked_at` integer,
+	`revocation_cleanup_attempt_id` text,
+	`revocation_cleanup_started_at` integer,
+	`revocation_cleanup_completed_at` integer,
+	FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`source_invite_id`) REFERENCES `access_invite_codes`(`id`) ON UPDATE no action ON DELETE restrict,
+	CONSTRAINT `access_allowlist_state_valid` CHECK (
+		(`state` = 'active' AND `revocation_id` IS NULL AND `revoked_by` IS NULL
+			AND `revocation_reason` IS NULL AND `revoked_at` IS NULL
+			AND `revocation_cleanup_attempt_id` IS NULL
+			AND `revocation_cleanup_started_at` IS NULL
+			AND `revocation_cleanup_completed_at` IS NULL)
+		OR (`state` = 'blocked' AND `revocation_id` IS NOT NULL AND `revoked_by` IS NOT NULL
+			AND `revocation_reason` IS NOT NULL AND `revoked_at` IS NOT NULL
+			AND (
+				(`revocation_cleanup_attempt_id` IS NULL
+					AND `revocation_cleanup_started_at` IS NULL
+					AND `revocation_cleanup_completed_at` IS NULL)
+				OR (`revocation_cleanup_attempt_id` IS NOT NULL
+					AND `revocation_cleanup_started_at` IS NOT NULL
+					AND (`revocation_cleanup_completed_at` IS NULL
+						OR `revocation_cleanup_completed_at` >= `revocation_cleanup_started_at`))
+			)
+		)
+	)
+);
+--> statement-breakpoint
+CREATE TABLE `access_events` (
+	`id` text PRIMARY KEY NOT NULL,
+	`event_type` text NOT NULL,
+	`invite_id` text,
+	`subject_user_id` text,
+	`github_account_id` text,
+	`actor_user_id` text,
+	`revocation_id` text,
+	`cleanup_attempt_id` text,
+	`reason` text,
+	`created_at` integer DEFAULT (cast(unixepoch('subsecond') * 1000 as integer)) NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE `account` (
@@ -1056,13 +1151,35 @@ CREATE TABLE `workshop_route_issuance_intents` (
 	CONSTRAINT `workshop_route_issuance_intents_expiry_valid` CHECK (`capability_expires_at` >= `created_at`)
 );
 --> statement-breakpoint
-CREATE INDEX `access_allowlist_approved_by_idx` ON `access_allowlist` (`approved_by`);
+CREATE UNIQUE INDEX `access_invite_codes_hash_uidx` ON `access_invite_codes` (`code_hash`);
 --> statement-breakpoint
-CREATE UNIQUE INDEX `access_requests_username_uidx` ON `access_requests` (`github_username`);
+CREATE INDEX `access_invite_codes_state_expiry_idx` ON `access_invite_codes` (`state`,`expires_at`);
 --> statement-breakpoint
-CREATE INDEX `access_requests_status_idx` ON `access_requests` (`status`,`created_at`);
+CREATE INDEX `access_invite_codes_creator_idx` ON `access_invite_codes` (`created_by`,`created_at`);
+--> statement-breakpoint
+CREATE INDEX `access_invite_codes_lease_idx` ON `access_invite_codes` (`state`,`lease_expires_at`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `access_allowlist_github_account_uidx` ON `access_allowlist` (`github_account_id`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `access_allowlist_source_invite_uidx` ON `access_allowlist` (`source_invite_id`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `access_allowlist_revocation_uidx` ON `access_allowlist` (`revocation_id`);
+--> statement-breakpoint
+CREATE INDEX `access_allowlist_state_idx` ON `access_allowlist` (`state`,`granted_at`);
+--> statement-breakpoint
+CREATE INDEX `access_allowlist_granted_by_idx` ON `access_allowlist` (`granted_by`);
+--> statement-breakpoint
+CREATE INDEX `access_events_invite_idx` ON `access_events` (`invite_id`,`created_at`);
+--> statement-breakpoint
+CREATE INDEX `access_events_subject_idx` ON `access_events` (`subject_user_id`,`created_at`);
+--> statement-breakpoint
+CREATE INDEX `access_events_created_idx` ON `access_events` (`created_at`);
 --> statement-breakpoint
 CREATE INDEX `account_userId_idx` ON `account` (`user_id`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `account_provider_account_uidx` ON `account` (`provider_id`,`account_id`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `account_user_github_uidx` ON `account` (`user_id`) WHERE `provider_id` = 'github';
 --> statement-breakpoint
 CREATE INDEX `agent_hosts_user_idx` ON `agent_hosts` (`user_id`);
 --> statement-breakpoint
@@ -1354,6 +1471,563 @@ CREATE UNIQUE INDEX `workshop_publications_org_hash_active_uidx`
 ON `workshop_publications` (`organization_id`, `content_hash`)
 WHERE `status` <> 'failed';
 --> statement-breakpoint
+CREATE TRIGGER `access_events_insert_guard`
+BEFORE INSERT ON `access_events`
+WHEN NEW.`event_type` NOT IN (
+	'invite.created',
+	'invite.leased',
+	'invite.lease_released',
+	'invite.redeemed',
+	'invite.revoked',
+	'invite.replaced',
+	'invite.exchange_failed',
+	'invite.lease_failed',
+	'invite.claim_failed',
+	'access.granted',
+	'access.blocked',
+	'access.revocation_cleanup_failed',
+	'access.revocation_cleanup_stalled',
+	'access.revocation_cleanup_completed',
+	'access.reinvite_allowed'
+)
+	OR (NEW.`event_type` IN (
+		'access.revocation_cleanup_failed',
+		'access.revocation_cleanup_stalled',
+		'access.revocation_cleanup_completed'
+	) AND NEW.`cleanup_attempt_id` IS NULL)
+	OR (NEW.`event_type` NOT IN (
+		'access.revocation_cleanup_failed',
+		'access.revocation_cleanup_stalled',
+		'access.revocation_cleanup_completed'
+	) AND NEW.`cleanup_attempt_id` IS NOT NULL)
+	OR (NEW.`reason` IS NOT NULL AND (
+		length(NEW.`reason`) > 120
+		OR NEW.`reason` GLOB '*[^-a-z0-9._:]*'
+	))
+BEGIN
+	SELECT RAISE(ABORT, 'invalid access audit event');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_events_append_only_update`
+BEFORE UPDATE ON `access_events`
+BEGIN
+	SELECT RAISE(ABORT, 'access events are append-only');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_events_append_only_delete`
+BEFORE DELETE ON `access_events`
+BEGIN
+	SELECT RAISE(ABORT, 'access events are append-only');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_issuer_guard`
+BEFORE INSERT ON `access_invite_codes`
+WHEN NEW.`kind` = 'standard'
+BEGIN
+	SELECT CASE
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM `access_allowlist` AS access
+			JOIN `user` AS identity ON identity.`id` = access.`user_id`
+			WHERE access.`user_id` = NEW.`created_by`
+				AND access.`state` = 'active'
+				AND coalesce(identity.`banned`, 0) = 0
+				AND instr(
+					',' || replace(lower(coalesce(identity.`role`, '')), ' ', '') || ',',
+					',admin,'
+				) > 0
+		)
+		THEN RAISE(ABORT, 'access invite issuer must be an active unbanned administrator')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_replacement_insert`
+BEFORE INSERT ON `access_invite_codes`
+WHEN NEW.`replaces_invite_id` IS NOT NULL
+BEGIN
+	SELECT CASE
+		WHEN NEW.`kind` <> 'standard' OR NEW.`created_by` IS NULL
+		THEN RAISE(ABORT, 'only an administrator can replace a standard invite')
+	END;
+
+	UPDATE `access_invite_codes`
+	SET `state` = 'revoked',
+		`lease_id` = NULL,
+		`leased_at` = NULL,
+		`lease_expires_at` = NULL,
+		`revoked_by` = NEW.`created_by`,
+		`revocation_reason` = 'replaced',
+		`revoked_at` = NEW.`created_at`,
+		`replaced_by_invite_id` = NEW.`id`,
+		`version` = `version` + 1,
+		`updated_at` = NEW.`created_at`
+	WHERE `id` = NEW.`replaces_invite_id`
+		AND `kind` = 'standard'
+		AND `state` IN ('pending', 'leased')
+		AND `version` = NEW.`replaces_invite_version`;
+
+	SELECT CASE
+		WHEN changes() <> 1
+		THEN RAISE(ABORT, 'invite replacement lost its version race')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_revoker_guard`
+BEFORE UPDATE OF `state` ON `access_invite_codes`
+WHEN OLD.`state` IN ('pending', 'leased')
+	AND NEW.`state` = 'revoked'
+BEGIN
+	SELECT CASE
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM `access_allowlist` AS access
+			JOIN `user` AS identity ON identity.`id` = access.`user_id`
+			WHERE access.`user_id` = NEW.`revoked_by`
+				AND access.`state` = 'active'
+				AND coalesce(identity.`banned`, 0) = 0
+				AND instr(
+					',' || replace(lower(coalesce(identity.`role`, '')), ' ', '') || ',',
+					',admin,'
+				) > 0
+		)
+		THEN RAISE(ABORT, 'access invite revoker must be an active unbanned administrator')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_transition_guard`
+BEFORE UPDATE ON `access_invite_codes`
+WHEN NEW.`id` IS NOT OLD.`id`
+	OR NEW.`code_hash` IS NOT OLD.`code_hash`
+	OR NEW.`code_prefix` IS NOT OLD.`code_prefix`
+	OR NEW.`kind` IS NOT OLD.`kind`
+	OR NEW.`label` IS NOT OLD.`label`
+	OR NEW.`created_by` IS NOT OLD.`created_by`
+	OR NEW.`created_at` IS NOT OLD.`created_at`
+	OR NEW.`expires_at` IS NOT OLD.`expires_at`
+	OR NEW.`replaces_invite_id` IS NOT OLD.`replaces_invite_id`
+	OR NEW.`replaces_invite_version` IS NOT OLD.`replaces_invite_version`
+	OR NEW.`version` <> OLD.`version` + 1
+	OR NEW.`updated_at` < OLD.`updated_at`
+	OR NOT (
+		(OLD.`state` = 'pending' AND NEW.`state` IN ('leased', 'revoked'))
+		OR (OLD.`state` = 'leased' AND NEW.`state` IN ('pending', 'redeemed', 'revoked'))
+		OR (OLD.`state` = 'leased' AND NEW.`state` = 'leased'
+			AND OLD.`lease_expires_at` <= NEW.`leased_at`
+			AND OLD.`lease_id` <> NEW.`lease_id`)
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'invalid access invite transition');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_delete_guard`
+BEFORE DELETE ON `access_invite_codes`
+BEGIN
+	SELECT RAISE(ABORT, 'access invites must be retained in the audit timeline');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_created_event`
+AFTER INSERT ON `access_invite_codes`
+BEGIN
+	INSERT INTO `access_events` (
+		`id`, `event_type`, `invite_id`, `actor_user_id`, `reason`, `created_at`
+	) VALUES (
+		lower(hex(randomblob(16))), 'invite.created', NEW.`id`, NEW.`created_by`,
+		NEW.`kind`, NEW.`created_at`
+	);
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_invite_codes_transition_event`
+AFTER UPDATE OF `state` ON `access_invite_codes`
+BEGIN
+	INSERT INTO `access_events` (
+		`id`, `event_type`, `invite_id`, `subject_user_id`,
+		`github_account_id`, `actor_user_id`, `reason`, `created_at`
+	) VALUES (
+		lower(hex(randomblob(16))),
+		CASE
+			WHEN NEW.`state` = 'leased' THEN 'invite.leased'
+			WHEN NEW.`state` = 'pending' THEN 'invite.lease_released'
+			WHEN NEW.`state` = 'redeemed' THEN 'invite.redeemed'
+			WHEN NEW.`state` = 'revoked' AND NEW.`replaced_by_invite_id` IS NOT NULL
+				THEN 'invite.replaced'
+			ELSE 'invite.revoked'
+		END,
+		NEW.`id`,
+		NEW.`redeemer_user_id`,
+		NEW.`redeemer_github_account_id`,
+		CASE
+			WHEN NEW.`state` = 'redeemed' THEN NEW.`redeemer_user_id`
+			WHEN NEW.`state` = 'revoked' THEN NEW.`revoked_by`
+			ELSE NULL
+		END,
+		CASE
+			WHEN NEW.`state` = 'revoked' THEN NEW.`revocation_reason`
+			ELSE NULL
+		END,
+		NEW.`updated_at`
+	);
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_claim_invite`
+BEFORE INSERT ON `access_allowlist`
+BEGIN
+	SELECT CASE
+		WHEN NEW.`state` <> 'active'
+		THEN RAISE(ABORT, 'beta access can only be inserted as active')
+	END;
+
+	SELECT CASE
+		WHEN NOT EXISTS (
+			SELECT 1 FROM `account`
+			WHERE `provider_id` = 'github'
+				AND `account_id` = NEW.`github_account_id`
+				AND `user_id` = NEW.`user_id`
+		)
+		THEN RAISE(ABORT, 'GitHub account does not belong to the Better Auth user')
+	END;
+
+	SELECT CASE
+		WHEN EXISTS (
+			SELECT 1
+			FROM `access_events` AS reinvite
+			JOIN `access_invite_codes` AS candidate
+				ON candidate.`id` = NEW.`source_invite_id`
+			WHERE reinvite.`event_type` = 'access.reinvite_allowed'
+				AND reinvite.`subject_user_id` = NEW.`user_id`
+				AND reinvite.`created_at` >= candidate.`created_at`
+		)
+		THEN RAISE(ABORT, 'fresh beta invite required after block clear')
+	END;
+
+	UPDATE `access_invite_codes`
+	SET `state` = 'redeemed',
+		`redeemer_user_id` = NEW.`user_id`,
+		`redeemer_github_account_id` = NEW.`github_account_id`,
+		`redeemer_github_username` = NEW.`github_username`,
+		`redeemed_at` = NEW.`granted_at`,
+		`version` = `version` + 1,
+		`updated_at` = NEW.`granted_at`
+	WHERE `id` = NEW.`source_invite_id`
+		AND `state` = 'leased'
+		AND `lease_id` = NEW.`source_lease_id`
+		AND `leased_at` <= NEW.`granted_at`
+		AND `lease_expires_at` > NEW.`granted_at`
+		AND `created_by` IS NEW.`granted_by`
+		AND `kind` = NEW.`grant_reason`
+		AND (
+			`kind` <> 'bootstrap_admin'
+			OR EXISTS (
+				SELECT 1 FROM `user`
+				WHERE `id` = NEW.`user_id`
+					AND instr(
+						',' || replace(lower(coalesce(`role`, '')), ' ', '') || ',',
+						',admin,'
+					) > 0
+			)
+		);
+
+	SELECT CASE
+		WHEN changes() <> 1
+		THEN RAISE(ABORT, 'invite lease is invalid, expired, or already claimed')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_identity_immutable`
+BEFORE UPDATE ON `access_allowlist`
+WHEN NEW.`user_id` IS NOT OLD.`user_id`
+	OR NEW.`github_account_id` IS NOT OLD.`github_account_id`
+	OR NEW.`github_username` IS NOT OLD.`github_username`
+	OR NEW.`source_invite_id` IS NOT OLD.`source_invite_id`
+	OR NEW.`source_lease_id` IS NOT OLD.`source_lease_id`
+	OR NEW.`granted_by` IS NOT OLD.`granted_by`
+	OR NEW.`grant_reason` IS NOT OLD.`grant_reason`
+	OR NEW.`granted_at` IS NOT OLD.`granted_at`
+	OR NOT (
+		(OLD.`state` = 'active'
+			AND NEW.`state` = 'blocked'
+			AND NEW.`revocation_cleanup_attempt_id` IS NULL
+			AND NEW.`revocation_cleanup_started_at` IS NULL
+			AND NEW.`revocation_cleanup_completed_at` IS NULL)
+		OR (OLD.`state` = 'blocked'
+			AND NEW.`state` = 'blocked'
+			AND NEW.`revocation_id` IS OLD.`revocation_id`
+			AND NEW.`revoked_by` IS OLD.`revoked_by`
+			AND NEW.`revocation_reason` IS OLD.`revocation_reason`
+			AND NEW.`revoked_at` IS OLD.`revoked_at`
+			AND OLD.`revocation_cleanup_attempt_id` IS NULL
+			AND OLD.`revocation_cleanup_started_at` IS NULL
+			AND OLD.`revocation_cleanup_completed_at` IS NULL
+			AND NEW.`revocation_cleanup_attempt_id` IS NOT NULL
+			AND NEW.`revocation_cleanup_started_at` IS NOT NULL
+			AND NEW.`revocation_cleanup_completed_at` IS NULL)
+		OR (OLD.`state` = 'blocked'
+			AND NEW.`state` = 'blocked'
+			AND NEW.`revocation_id` IS OLD.`revocation_id`
+			AND NEW.`revoked_by` IS OLD.`revoked_by`
+			AND NEW.`revocation_reason` IS OLD.`revocation_reason`
+			AND NEW.`revoked_at` IS OLD.`revoked_at`
+			AND OLD.`revocation_cleanup_attempt_id` IS NOT NULL
+			AND OLD.`revocation_cleanup_started_at` IS NOT NULL
+			AND OLD.`revocation_cleanup_completed_at` IS NULL
+			AND NEW.`revocation_cleanup_attempt_id` IS NULL
+			AND NEW.`revocation_cleanup_started_at` IS NULL
+			AND NEW.`revocation_cleanup_completed_at` IS NULL)
+		OR (OLD.`state` = 'blocked'
+			AND NEW.`state` = 'blocked'
+			AND NEW.`revocation_id` IS OLD.`revocation_id`
+			AND NEW.`revoked_by` IS OLD.`revoked_by`
+			AND NEW.`revocation_reason` IS OLD.`revocation_reason`
+			AND NEW.`revoked_at` IS OLD.`revoked_at`
+			AND OLD.`revocation_cleanup_attempt_id` IS NOT NULL
+			AND NEW.`revocation_cleanup_attempt_id` IS OLD.`revocation_cleanup_attempt_id`
+			AND OLD.`revocation_cleanup_started_at` IS NOT NULL
+			AND NEW.`revocation_cleanup_started_at` IS OLD.`revocation_cleanup_started_at`
+			AND OLD.`revocation_cleanup_completed_at` IS NULL
+			AND NEW.`revocation_cleanup_completed_at` IS NOT NULL)
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'beta access identity is immutable');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_last_admin_guard`
+BEFORE UPDATE OF `state` ON `access_allowlist`
+WHEN OLD.`state` = 'active'
+	AND NEW.`state` = 'blocked'
+	AND EXISTS (
+		SELECT 1 FROM `user`
+		WHERE `id` = OLD.`user_id`
+			AND coalesce(`banned`, 0) = 0
+			AND instr(
+				',' || replace(lower(coalesce(`role`, '')), ' ', '') || ',',
+				',admin,'
+			) > 0
+	)
+	AND NOT EXISTS (
+		SELECT 1
+		FROM `access_allowlist` AS `other_access`
+		JOIN `user` AS `other_user` ON `other_user`.`id` = `other_access`.`user_id`
+		WHERE `other_access`.`state` = 'active'
+			AND `other_access`.`user_id` <> OLD.`user_id`
+			AND coalesce(`other_user`.`banned`, 0) = 0
+			AND instr(
+				',' || replace(lower(coalesce(`other_user`.`role`, '')), ' ', '') || ',',
+				',admin,'
+			) > 0
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'cannot revoke the last active beta administrator');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_revoker_guard`
+BEFORE UPDATE OF `state` ON `access_allowlist`
+WHEN OLD.`state` = 'active'
+	AND NEW.`state` = 'blocked'
+BEGIN
+	SELECT CASE
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM `access_allowlist` AS access
+			JOIN `user` AS identity ON identity.`id` = access.`user_id`
+			WHERE access.`user_id` = NEW.`revoked_by`
+				AND access.`state` = 'active'
+				AND coalesce(identity.`banned`, 0) = 0
+				AND instr(
+					',' || replace(lower(coalesce(identity.`role`, '')), ' ', '') || ',',
+					',admin,'
+				) > 0
+		)
+		THEN RAISE(ABORT, 'beta access revoker must be an active unbanned administrator')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_user_last_beta_admin_update_guard`
+BEFORE UPDATE OF `role`, `banned` ON `user`
+WHEN coalesce(OLD.`banned`, 0) = 0
+	AND instr(
+		',' || replace(lower(coalesce(OLD.`role`, '')), ' ', '') || ',',
+		',admin,'
+	) > 0
+	AND EXISTS (
+		SELECT 1 FROM `access_allowlist`
+		WHERE `user_id` = OLD.`id` AND `state` = 'active'
+	)
+	AND NOT (
+		coalesce(NEW.`banned`, 0) = 0
+		AND instr(
+			',' || replace(lower(coalesce(NEW.`role`, '')), ' ', '') || ',',
+			',admin,'
+		) > 0
+	)
+	AND NOT EXISTS (
+		SELECT 1
+		FROM `access_allowlist` AS `other_access`
+		JOIN `user` AS `other_user` ON `other_user`.`id` = `other_access`.`user_id`
+		WHERE `other_access`.`state` = 'active'
+			AND `other_access`.`user_id` <> OLD.`id`
+			AND coalesce(`other_user`.`banned`, 0) = 0
+			AND instr(
+				',' || replace(lower(coalesce(`other_user`.`role`, '')), ' ', '') || ',',
+				',admin,'
+			) > 0
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'cannot demote or ban the last active beta administrator');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_user_last_beta_admin_delete_guard`
+BEFORE DELETE ON `user`
+WHEN coalesce(OLD.`banned`, 0) = 0
+	AND instr(
+		',' || replace(lower(coalesce(OLD.`role`, '')), ' ', '') || ',',
+		',admin,'
+	) > 0
+	AND EXISTS (
+		SELECT 1 FROM `access_allowlist`
+		WHERE `user_id` = OLD.`id` AND `state` = 'active'
+	)
+	AND NOT EXISTS (
+		SELECT 1
+		FROM `access_allowlist` AS `other_access`
+		JOIN `user` AS `other_user` ON `other_user`.`id` = `other_access`.`user_id`
+		WHERE `other_access`.`state` = 'active'
+			AND `other_access`.`user_id` <> OLD.`id`
+			AND coalesce(`other_user`.`banned`, 0) = 0
+			AND instr(
+				',' || replace(lower(coalesce(`other_user`.`role`, '')), ' ', '') || ',',
+				',admin,'
+			) > 0
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'cannot delete the last active beta administrator');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_active_delete_guard`
+BEFORE DELETE ON `access_allowlist`
+WHEN OLD.`state` <> 'blocked'
+	OR OLD.`revocation_cleanup_completed_at` IS NULL
+	OR NOT EXISTS (
+		SELECT 1
+		FROM `access_events` AS clear_command
+		WHERE clear_command.`event_type` = 'access.reinvite_allowed'
+			AND clear_command.`subject_user_id` = OLD.`user_id`
+			AND clear_command.`revocation_id` = OLD.`revocation_id`
+			AND clear_command.`reason` = 'admin_cleared_block'
+	)
+BEGIN
+	SELECT RAISE(ABORT, 'beta access deletion requires an audited completed block clear');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_granted_event`
+AFTER INSERT ON `access_allowlist`
+BEGIN
+	INSERT INTO `access_events` (
+		`id`, `event_type`, `invite_id`, `subject_user_id`, `github_account_id`,
+		`actor_user_id`, `reason`, `created_at`
+	) VALUES (
+		lower(hex(randomblob(16))), 'access.granted', NEW.`source_invite_id`,
+		NEW.`user_id`, NEW.`github_account_id`, NEW.`granted_by`,
+		NEW.`grant_reason`, NEW.`granted_at`
+	);
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_blocked_event`
+AFTER UPDATE OF `state` ON `access_allowlist`
+WHEN NEW.`state` = 'blocked'
+BEGIN
+	INSERT INTO `access_events` (
+		`id`, `event_type`, `invite_id`, `subject_user_id`, `github_account_id`,
+		`actor_user_id`, `revocation_id`, `reason`, `created_at`
+	) VALUES (
+		lower(hex(randomblob(16))), 'access.blocked', NEW.`source_invite_id`,
+		NEW.`user_id`, NEW.`github_account_id`, NEW.`revoked_by`,
+		NEW.`revocation_id`, NEW.`revocation_reason`, NEW.`revoked_at`
+	);
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_allowlist_cleanup_completed_event`
+AFTER UPDATE OF `revocation_cleanup_completed_at` ON `access_allowlist`
+WHEN OLD.`revocation_cleanup_completed_at` IS NULL
+	AND NEW.`revocation_cleanup_completed_at` IS NOT NULL
+BEGIN
+	INSERT INTO `access_events` (
+		`id`, `event_type`, `invite_id`, `subject_user_id`, `github_account_id`,
+		`revocation_id`, `cleanup_attempt_id`, `reason`, `created_at`
+	) VALUES (
+		lower(hex(randomblob(16))), 'access.revocation_cleanup_completed',
+		NEW.`source_invite_id`, NEW.`user_id`, NEW.`github_account_id`,
+		NEW.`revocation_id`, NEW.`revocation_cleanup_attempt_id`, 'cleanup_completed',
+		NEW.`revocation_cleanup_completed_at`
+	);
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_events_cleanup_failure_command`
+BEFORE INSERT ON `access_events`
+WHEN NEW.`event_type` = 'access.revocation_cleanup_failed'
+BEGIN
+	SELECT CASE
+		WHEN NEW.`subject_user_id` IS NULL
+			OR NEW.`revocation_id` IS NULL
+			OR NEW.`cleanup_attempt_id` IS NULL
+			OR NEW.`reason` IS NULL
+		THEN RAISE(ABORT, 'invalid beta revocation cleanup failure event')
+	END;
+
+	UPDATE `access_allowlist`
+	SET `revocation_cleanup_attempt_id` = NULL,
+		`revocation_cleanup_started_at` = NULL
+	WHERE `user_id` = NEW.`subject_user_id`
+		AND `state` = 'blocked'
+		AND `revocation_id` = NEW.`revocation_id`
+		AND `revocation_cleanup_attempt_id` = NEW.`cleanup_attempt_id`
+		AND `revocation_cleanup_started_at` IS NOT NULL
+		AND `revocation_cleanup_completed_at` IS NULL;
+
+	SELECT CASE
+		WHEN changes() <> 1
+		THEN RAISE(ABORT, 'beta revocation cleanup attempt is stale')
+	END;
+END;
+--> statement-breakpoint
+CREATE TRIGGER `access_events_allow_reinvite_command`
+AFTER INSERT ON `access_events`
+WHEN NEW.`event_type` = 'access.reinvite_allowed'
+BEGIN
+	SELECT CASE
+		WHEN NEW.`subject_user_id` IS NULL
+			OR NEW.`actor_user_id` IS NULL
+			OR NEW.`revocation_id` IS NULL
+			OR NEW.`reason` <> 'admin_cleared_block'
+		THEN RAISE(ABORT, 'invalid beta block-clear event')
+	END;
+
+	SELECT CASE
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM `access_allowlist` AS access
+			JOIN `user` AS identity ON identity.`id` = access.`user_id`
+			WHERE access.`user_id` = NEW.`actor_user_id`
+				AND access.`state` = 'active'
+				AND coalesce(identity.`banned`, 0) = 0
+				AND instr(
+					',' || replace(lower(coalesce(identity.`role`, '')), ' ', '') || ',',
+					',admin,'
+				) > 0
+		)
+		THEN RAISE(ABORT, 'beta block-clear actor must be an active unbanned administrator')
+	END;
+
+	DELETE FROM `access_allowlist`
+	WHERE `user_id` = NEW.`subject_user_id`
+		AND `state` = 'blocked'
+		AND `revocation_id` = NEW.`revocation_id`
+		AND `revocation_cleanup_completed_at` IS NOT NULL;
+
+	SELECT CASE
+		WHEN changes() <> 1
+		THEN RAISE(ABORT, 'beta block is stale or already cleared')
+	END;
+END;
+--> statement-breakpoint
 CREATE TRIGGER `host_desired_running_vm_requires_active_run_insert`
 BEFORE INSERT ON `host_desired_state`
 WHEN EXISTS (
@@ -1428,6 +2102,18 @@ CREATE TRIGGER `workshop_template_revisions_immutable`
 BEFORE UPDATE ON `workshop_template_revisions`
 BEGIN
 	SELECT RAISE(ABORT, 'workshop template revisions are immutable');
+END;
+--> statement-breakpoint
+CREATE TRIGGER `workshop_registry_tokens_creator_beta_guard`
+BEFORE INSERT ON `workshop_registry_tokens`
+WHEN NOT EXISTS (
+	SELECT 1
+	FROM `access_allowlist` AS access
+	WHERE access.`user_id` = NEW.`created_by`
+		AND access.`state` = 'active'
+)
+BEGIN
+	SELECT RAISE(ABORT, 'workshop registry token creator must have active beta access');
 END;
 --> statement-breakpoint
 CREATE TRIGGER `workshop_sessions_revision_org_insert_guard`

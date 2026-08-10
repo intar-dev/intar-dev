@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
 import { AppError, appError, errorChainMatches } from "@/lib/app-error";
 import {
@@ -8,11 +8,12 @@ import {
 } from "@/control-plane/host-cpu-reservations";
 import {
   agentHosts,
+  accessAllowlist,
   hostActualState,
-  runtimeExecutions,
   scenarioRuns,
   scenarioRunSshKeys,
 } from "@/db/schema";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import {
   desiredVmFromRunVm,
   markDesiredVmAbsent,
@@ -62,7 +63,7 @@ import {
   isFreshHostHeartbeat,
   isScenarioLaunchHost,
 } from "@/lib/scenario-hosts";
-import { deleteStargateRoute } from "@/lib/stargate";
+import { deleteStargateRoute, stargateRouteTtlMs } from "@/lib/stargate";
 import {
   generateScenarioRunSshKeyDraft,
   prepareScenarioRunSshKeyRows,
@@ -92,6 +93,7 @@ export type ScenarioRouteType = "browser" | "native_profile_keys";
 export async function startScenarioRunInternal(params: {
   scenarioId: string;
   userId: string;
+  betaAdmission: BetaAdmissionEpoch;
   organizationId?: string | null;
   hostId?: string;
 }): Promise<{
@@ -109,6 +111,7 @@ export async function startScenarioRunInternal(params: {
   if (!scenario) {
     throw appError(404, "scenario_not_found", "scenario not found");
   }
+  await assertScenarioStartAdmission(params.userId, params.betaAdmission);
   if (active) {
     if (
       active.scenarioId === scenario.scenarioId &&
@@ -121,6 +124,7 @@ export async function startScenarioRunInternal(params: {
           "the active scenario run is assigned to a different host",
         );
       }
+      await assertScenarioStartAdmission(params.userId, params.betaAdmission);
       return {
         accepted: true,
         runId: active.runId,
@@ -229,7 +233,6 @@ export async function startScenarioRunInternal(params: {
         }) satisfies RunVmStateDocument,
     ),
   });
-  const db = drizzle(env.DB);
   const runtimeVms = runtimeVmSpecsFromScenarioState(provisionedState);
   const leaseDurationSeconds = Math.max(
     0,
@@ -243,6 +246,7 @@ export async function startScenarioRunInternal(params: {
   );
   let hostId: string | null = null;
   let runtimeCreated = false;
+  let runInserted = false;
   try {
     const allocated = await allocateScenarioRuntime({
       scenarioId: scenario.scenarioId,
@@ -270,45 +274,50 @@ export async function startScenarioRunInternal(params: {
     if (sshKeyRows.length === 0) {
       throw new Error("scenario run has no SSH key rows");
     }
-    await db.batch([
-      db.insert(scenarioRuns).values({
-        runId,
-        userId: params.userId,
-        organizationId,
-        runtimeExecutionId: runId,
-        hostId,
-        scenarioId: scenario.scenarioId,
-        scenarioName: scenario.scenarioId,
-        title: scenario.briefing.title,
-        tagline: scenario.briefing.tagline,
-        briefingMarkdown: scenario.briefing.briefingMarkdown,
-        objectivesJson: JSON.stringify(scenario.briefing.objectives),
-        difficulty: scenario.briefing.difficulty,
-        estimatedMinutes: scenario.briefing.estimatedMinutes,
-        tagsJson: scenario.content.tags,
-        hintsJson: scenario.content.hints,
-        solutionMarkdown: scenario.content.solutionMarkdown,
-        revealedHintsJson: [],
-        solutionRevealedAt: null,
-        solutionAssisted: false,
-        vmCount: provisionedState.vms.length,
-        state: provisionedState.phase,
-        stateRank: RUN_PHASE_ORDER[provisionedState.phase],
-        activeKey: activeKeyFor(params.userId),
-        stateJson: JSON.stringify(provisionedState),
-        deleteRequestedAt: null,
-        completedAt: null,
-        solvedAt: null,
-        failedAt: null,
-        hiddenAt: null,
-        createdAt,
-        updatedAt: createdAt,
-      }),
-      db.insert(scenarioRunSshKeys).values(sshKeyRows),
-    ]);
+    const runInsert = {
+      runId,
+      userId: params.userId,
+      organizationId,
+      runtimeExecutionId: runId,
+      hostId,
+      scenarioId: scenario.scenarioId,
+      scenarioName: scenario.scenarioId,
+      title: scenario.briefing.title,
+      tagline: scenario.briefing.tagline,
+      briefingMarkdown: scenario.briefing.briefingMarkdown,
+      objectivesJson: JSON.stringify(scenario.briefing.objectives),
+      difficulty: scenario.briefing.difficulty,
+      estimatedMinutes: scenario.briefing.estimatedMinutes,
+      tagsJson: scenario.content.tags,
+      hintsJson: scenario.content.hints,
+      solutionMarkdown: scenario.content.solutionMarkdown,
+      revealedHintsJson: [],
+      solutionRevealedAt: null,
+      solutionAssisted: false,
+      vmCount: provisionedState.vms.length,
+      state: provisionedState.phase,
+      stateRank: RUN_PHASE_ORDER[provisionedState.phase],
+      activeKey: activeKeyFor(params.userId),
+      stateJson: JSON.stringify(provisionedState),
+      deleteRequestedAt: null,
+      completedAt: null,
+      solvedAt: null,
+      failedAt: null,
+      hiddenAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    } satisfies typeof scenarioRuns.$inferInsert;
+    await insertScenarioRunForAdmission({
+      row: runInsert,
+      sshKeyRows,
+      betaAdmission: params.betaAdmission,
+    });
+    runInserted = true;
     await upsertRunVmsIntoDesiredState({
       hostId,
       runId,
+      userId: params.userId,
+      betaAdmission: params.betaAdmission,
       vms: provisionedState.vms,
       nowUnixMs: createdAt,
       sshAuthorizedKeysByVmId,
@@ -319,33 +328,56 @@ export async function startScenarioRunInternal(params: {
       state: "provisioning",
       observedAt: createdAt,
     });
-    await env.DB.prepare(
+    const committedReservation = await env.DB.prepare(
       `UPDATE host_resource_reservations
        SET state = 'committed', expires_at = NULL, updated_at = ?
-       WHERE execution_id = ? AND host_id = ? AND state = 'pending'`,
+       WHERE execution_id = ? AND host_id = ? AND state = 'pending'
+         AND EXISTS (
+           SELECT 1
+           FROM access_allowlist access
+           INNER JOIN scenario_runs run
+             ON run.user_id = access.user_id AND run.run_id = ?
+           WHERE access.user_id = ?
+             AND access.state = 'active'
+             AND access.source_invite_id = ?
+             AND access.source_lease_id = ?
+             AND access.granted_at = ?
+             AND run.state = 'provisioning'
+             AND run.delete_requested_at IS NULL
+         )`,
     )
-      .bind(createdAt, runId, hostId)
+      .bind(
+        createdAt,
+        runId,
+        hostId,
+        runId,
+        params.userId,
+        params.betaAdmission.sourceInviteId,
+        params.betaAdmission.sourceLeaseId,
+        params.betaAdmission.grantedAt,
+      )
       .run();
+    if (committedReservation.meta.changes !== 1) {
+      throw scenarioStartAdmissionChanged();
+    }
     await commitHostCpu({ hostId, runId });
+    // Keep this inside rollback coverage. The guarded run/desired-state writes
+    // close the two D1 orderings; this final check catches any later stale work.
+    await assertScenarioStartWriteFence({
+      userId: params.userId,
+      runId,
+      betaAdmission: params.betaAdmission,
+    });
   } catch (error) {
-    if (hostId) {
-      await Promise.allSettled([
-        markRunVmsAbsentInDesiredState({
-          hostId,
-          runId,
-          vms: provisionedState.vms,
-          nowUnixMs: Date.now(),
-          db,
-        }),
-      ]);
-    }
-    await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, runId));
-    if (runtimeCreated) {
-      await db.delete(runtimeExecutions).where(eq(runtimeExecutions.id, runId));
-    }
-    if (hostId) {
-      await Promise.allSettled([rollbackHostCpu({ hostId, runId })]);
-    }
+    await rollbackScenarioStartAfterFailure({
+      hostId,
+      runId,
+      userId: params.userId,
+      betaAdmission: params.betaAdmission,
+      vms: provisionedState.vms,
+      runInserted,
+      runtimeCreated,
+    });
     // Two concurrent starts race past the pre-check; the unique index on
     // active_key rejects the loser.
     if (isActiveKeyUniqueViolation(error)) {
@@ -364,6 +396,280 @@ export async function startScenarioRunInternal(params: {
     acceptedAt: createdAt,
     reused: false,
   };
+}
+
+/** @internal Exported for adversarial D1-boundary tests. */
+export async function insertScenarioRunForAdmission(input: {
+  row: typeof scenarioRuns.$inferInsert;
+  sshKeyRows: Array<typeof scenarioRunSshKeys.$inferInsert>;
+  betaAdmission: BetaAdmissionEpoch;
+}): Promise<void> {
+  const row = input.row;
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO scenario_runs (
+         run_id, user_id, organization_id, runtime_execution_id, host_id,
+         scenario_id, scenario_name, title, tagline, briefing_markdown,
+         objectives_json, difficulty, estimated_minutes, tags_json,
+         hints_json, solution_markdown, revealed_hints_json,
+         solution_revealed_at, solution_assisted, vm_count, state, state_rank,
+         active_key, state_json, delete_requested_at, solved_at, completed_at,
+         failed_at, hidden_at, created_at, updated_at
+       )
+       SELECT
+         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+         ?27, ?28, ?29, ?30, ?31
+       FROM access_allowlist access
+       WHERE access.user_id = ?2
+         AND access.state = 'active'
+         AND access.source_invite_id = ?32
+         AND access.source_lease_id = ?33
+         AND access.granted_at = ?34
+       RETURNING run_id`,
+    ).bind(
+      row.runId,
+      row.userId,
+      row.organizationId ?? null,
+      row.runtimeExecutionId ?? null,
+      row.hostId,
+      row.scenarioId,
+      row.scenarioName,
+      row.title,
+      row.tagline,
+      row.briefingMarkdown,
+      row.objectivesJson,
+      row.difficulty,
+      row.estimatedMinutes,
+      JSON.stringify(row.tagsJson),
+      JSON.stringify(row.hintsJson),
+      row.solutionMarkdown,
+      JSON.stringify(row.revealedHintsJson ?? []),
+      row.solutionRevealedAt ?? null,
+      row.solutionAssisted ? 1 : 0,
+      row.vmCount,
+      row.state,
+      row.stateRank,
+      row.activeKey ?? null,
+      row.stateJson,
+      row.deleteRequestedAt ?? null,
+      row.solvedAt ?? null,
+      row.completedAt ?? null,
+      row.failedAt ?? null,
+      row.hiddenAt ?? null,
+      row.createdAt,
+      row.updatedAt,
+      input.betaAdmission.sourceInviteId,
+      input.betaAdmission.sourceLeaseId,
+      input.betaAdmission.grantedAt,
+    ),
+    ...input.sshKeyRows.map((key) =>
+      env.DB.prepare(
+        `INSERT INTO scenario_run_ssh_keys (
+           id, run_id, vm_id, runtime_vm_name, public_key_openssh,
+           private_key_ciphertext_b64, private_key_iv_b64, created_at
+         )
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+         FROM scenario_runs run
+         INNER JOIN access_allowlist access ON access.user_id = run.user_id
+         WHERE run.run_id = ?2
+           AND run.run_id = ?9
+           AND run.user_id = ?10
+           AND access.state = 'active'
+           AND access.source_invite_id = ?11
+           AND access.source_lease_id = ?12
+           AND access.granted_at = ?13`,
+      ).bind(
+        key.id,
+        key.runId,
+        key.vmId,
+        key.runtimeVmName,
+        key.publicKeyOpenssh,
+        key.privateKeyCiphertextB64,
+        key.privateKeyIvB64,
+        key.createdAt,
+        row.runId,
+        row.userId,
+        input.betaAdmission.sourceInviteId,
+        input.betaAdmission.sourceLeaseId,
+        input.betaAdmission.grantedAt,
+      ),
+    ),
+  ];
+  const [inserted] = await env.DB.batch(statements);
+  if (
+    !inserted?.results.some(
+      (result) =>
+        typeof result === "object" &&
+        result !== null &&
+        "run_id" in result &&
+        result.run_id === row.runId,
+    )
+  ) {
+    throw scenarioStartAdmissionChanged();
+  }
+}
+
+/** @internal Exported for adversarial rollback tests. */
+export async function rollbackScenarioStartAfterFailure(
+  input: {
+    hostId: string | null;
+    runId: string;
+    userId: string;
+    betaAdmission: BetaAdmissionEpoch;
+    vms: RunVmStateDocument[];
+    runInserted: boolean;
+    runtimeCreated: boolean;
+  },
+  dependencies: {
+    markVmsAbsent?: typeof markRunVmsAbsentInDesiredState;
+    rollbackCpu?: typeof rollbackHostCpu;
+  } = {},
+): Promise<{ durableStatePreserved: boolean }> {
+  const markVmsAbsent =
+    dependencies.markVmsAbsent ?? markRunVmsAbsentInDesiredState;
+  const rollbackCpu = dependencies.rollbackCpu ?? rollbackHostCpu;
+
+  if (input.hostId && input.runInserted) {
+    try {
+      await markVmsAbsent({
+        hostId: input.hostId,
+        runId: input.runId,
+        vms: input.vms,
+        nowUnixMs: Date.now(),
+        db: drizzle(env.DB),
+      });
+    } catch (error) {
+      // The run and runtime are the durable recovery record for both the
+      // revocation worker and normal reconciliation. Deleting them while the
+      // host may still desire the VMs would turn a retryable cleanup into an
+      // untracked workload, especially on a shared organization runner.
+      console.warn(
+        JSON.stringify({
+          event: "scenario_start_rollback_preserved",
+          runId: input.runId,
+          hostId: input.hostId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return { durableStatePreserved: true };
+    }
+  }
+
+  let durableStatePreserved = false;
+  if (input.runInserted) {
+    const statements: D1PreparedStatement[] = [
+      env.DB
+        .prepare(
+          `DELETE FROM scenario_runs
+           WHERE run_id = ?1
+             AND user_id = ?2
+             AND EXISTS (
+               SELECT 1 FROM access_allowlist
+               WHERE user_id = ?2
+                 AND state = 'active'
+                 AND source_invite_id = ?3
+                 AND source_lease_id = ?4
+                 AND granted_at = ?5
+             )`,
+        )
+        .bind(
+          input.runId,
+          input.userId,
+          input.betaAdmission.sourceInviteId,
+          input.betaAdmission.sourceLeaseId,
+          input.betaAdmission.grantedAt,
+        ),
+    ];
+    if (input.runtimeCreated) {
+      statements.push(
+        env.DB
+          .prepare(
+            `DELETE FROM runtime_executions
+             WHERE id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM scenario_runs WHERE run_id = ?1
+               )`,
+          )
+          .bind(input.runId),
+      );
+    }
+    const [deletedRun] = await env.DB.batch(statements);
+    durableStatePreserved = deletedRun?.meta.changes !== 1;
+  } else if (input.runtimeCreated) {
+    await env.DB.prepare("DELETE FROM runtime_executions WHERE id = ?1")
+      .bind(input.runId)
+      .run();
+  }
+
+  if (input.hostId) {
+    await Promise.allSettled([
+      rollbackCpu({ hostId: input.hostId, runId: input.runId }),
+    ]);
+  }
+  return { durableStatePreserved };
+}
+
+async function assertScenarioStartAdmission(
+  userId: string,
+  admission: BetaAdmissionEpoch,
+): Promise<void> {
+  const current = await env.DB.prepare(
+    `SELECT 1
+     FROM access_allowlist
+     WHERE user_id = ?1
+       AND state = 'active'
+       AND source_invite_id = ?2
+       AND source_lease_id = ?3
+       AND granted_at = ?4
+     LIMIT 1`,
+  )
+    .bind(
+      userId,
+      admission.sourceInviteId,
+      admission.sourceLeaseId,
+      admission.grantedAt,
+    )
+    .first();
+  if (!current) throw scenarioStartAdmissionChanged();
+}
+
+async function assertScenarioStartWriteFence(input: {
+  userId: string;
+  runId: string;
+  betaAdmission: BetaAdmissionEpoch;
+}): Promise<void> {
+  const current = await env.DB.prepare(
+    `SELECT 1
+     FROM access_allowlist access
+     INNER JOIN scenario_runs run
+       ON run.user_id = access.user_id AND run.run_id = ?2
+     WHERE access.user_id = ?1
+       AND access.state = 'active'
+       AND access.source_invite_id = ?3
+       AND access.source_lease_id = ?4
+       AND access.granted_at = ?5
+       AND run.state = 'provisioning'
+       AND run.delete_requested_at IS NULL
+     LIMIT 1`,
+  )
+    .bind(
+      input.userId,
+      input.runId,
+      input.betaAdmission.sourceInviteId,
+      input.betaAdmission.sourceLeaseId,
+      input.betaAdmission.grantedAt,
+    )
+    .first();
+  if (!current) throw scenarioStartAdmissionChanged();
+}
+
+function scenarioStartAdmissionChanged() {
+  return appError(
+    403,
+    "beta_access_revoked",
+    "beta access changed while the scenario was starting",
+  );
 }
 
 async function allocateScenarioRuntime(input: {
@@ -696,6 +1002,8 @@ export function isActiveKeyUniqueViolation(error: unknown): boolean {
 export async function upsertRunVmsIntoDesiredState(input: {
   hostId: string;
   runId: string;
+  userId: string;
+  betaAdmission: BetaAdmissionEpoch;
   vms: RunVmStateDocument[];
   nowUnixMs: number;
   sshAuthorizedKeysByVmId: Map<string, string[]>;
@@ -729,6 +1037,29 @@ export async function upsertRunVmsIntoDesiredState(input: {
         });
         upsertDesiredVm(draft, desiredVm);
       }
+    },
+    undefined,
+    {
+      condition: sql`EXISTS (
+        SELECT 1
+        FROM ${accessAllowlist} access
+        INNER JOIN ${scenarioRuns} run
+          ON run.user_id = access.user_id
+         AND run.run_id = ${input.runId}
+        WHERE access.user_id = ${input.userId}
+          AND access.state = 'active'
+          AND access.source_invite_id = ${input.betaAdmission.sourceInviteId}
+          AND access.source_lease_id = ${input.betaAdmission.sourceLeaseId}
+          AND access.granted_at = ${input.betaAdmission.grantedAt}
+          AND run.state = 'provisioning'
+          AND run.delete_requested_at IS NULL
+      )`,
+      assertSatisfied: () =>
+        assertScenarioStartWriteFence({
+          userId: input.userId,
+          runId: input.runId,
+          betaAdmission: input.betaAdmission,
+        }),
     },
   );
 }
@@ -851,6 +1182,29 @@ export async function revokeScenarioRunRoutes(row: {
 export async function revokeScenarioNativeProfileRoutesForUser(
   userId: string,
 ): Promise<void> {
+  await revokeScenarioRouteTypesForUser(
+    userId,
+    ["native_profile_keys"],
+    "active-only",
+  );
+}
+
+export async function revokeScenarioRoutesForUser(
+  userId: string,
+  now = Date.now(),
+): Promise<void> {
+  await revokeScenarioRouteTypesForUser(
+    userId,
+    ["browser", "native_profile_keys"],
+    now - stargateRouteTtlMs(),
+  );
+}
+
+async function revokeScenarioRouteTypesForUser(
+  userId: string,
+  routeTypes: readonly ScenarioRouteType[],
+  scope: "active-only" | number,
+): Promise<void> {
   const db = drizzle(env.DB);
   const rows = await db
     .select({
@@ -859,26 +1213,37 @@ export async function revokeScenarioNativeProfileRoutesForUser(
     })
     .from(scenarioRuns)
     .where(
-      and(
-        eq(scenarioRuns.userId, userId),
-        isNull(scenarioRuns.hiddenAt),
-        isNull(scenarioRuns.completedAt),
-        isNull(scenarioRuns.failedAt),
-      ),
+      scope === "active-only"
+        ? and(
+            eq(scenarioRuns.userId, userId),
+            isNull(scenarioRuns.hiddenAt),
+            isNull(scenarioRuns.completedAt),
+            isNull(scenarioRuns.failedAt),
+          )
+        : and(
+            eq(scenarioRuns.userId, userId),
+            or(
+              and(
+                isNull(scenarioRuns.completedAt),
+                isNull(scenarioRuns.failedAt),
+              ),
+              gte(scenarioRuns.updatedAt, scope),
+              gte(scenarioRuns.completedAt, scope),
+              gte(scenarioRuns.failedAt, scope),
+              gte(scenarioRuns.hiddenAt, scope),
+            ),
+          ),
     );
 
   const routeUsernames = new Set<string>();
   for (const row of rows) {
     const state = parseRunState(row.stateJson);
     for (const vm of state.vms) {
-      routeUsernames.add(
-        buildRunVmRouteUsername(
-          row.runId,
-          state.vms,
-          vm.id,
-          "native_profile_keys",
-        ),
-      );
+      for (const routeType of routeTypes) {
+        routeUsernames.add(
+          buildRunVmRouteUsername(row.runId, state.vms, vm.id, routeType),
+        );
+      }
     }
   }
 

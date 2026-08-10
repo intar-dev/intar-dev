@@ -7,7 +7,7 @@ export type OrganizationDetailTab =
   | "runners"
   | "settings";
 
-export type AdminPeopleTab = "requests" | "users" | "organizations";
+export type AdminPeopleTab = "beta" | "users" | "organizations";
 
 export interface OrganizationDetailSearch {
   tab?: OrganizationDetailTab;
@@ -29,7 +29,7 @@ export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
 ];
 
 export const ADMIN_PEOPLE_TABS: readonly AdminPeopleTab[] = [
-  "requests",
+  "beta",
   "users",
   "organizations",
 ];
@@ -51,7 +51,7 @@ export function validateOrganizationDetailSearch(
 export function validateAdminPeopleSearch(
   search: Record<string, unknown>,
 ): AdminPeopleSearch {
-  return isAdminPeopleTab(search.tab) && search.tab !== "requests"
+  return isAdminPeopleTab(search.tab) && search.tab !== "beta"
     ? { tab: search.tab }
     : {};
 }

@@ -20,7 +20,10 @@ import {
   validateOrganizationDetailSearch,
   validateScenarioBriefingSearch,
 } from "./pages/tab-search";
-import { getClientSession } from "@/lib/auth-client";
+import {
+  getClientBetaAccessState,
+  getClientSession,
+} from "@/lib/auth-client";
 import { isAdminUser } from "@/lib/authz";
 
 const rootRoute = createRootRoute({
@@ -49,21 +52,6 @@ const indexRoute = createRoute({
   component: lazyRouteComponent(() => import("./pages/Landing"), "Landing"),
 });
 
-const requestAccessRoute = createRoute({
-  getParentRoute: () => marketingLayoutRoute,
-  path: "request-access",
-  head: () =>
-    routeHead(
-      "Request access",
-      "Request access to intar.dev hands-on infrastructure labs.",
-    ),
-  pendingComponent: FullPageRoutePending,
-  component: lazyRouteComponent(
-    () => import("./pages/RequestAccess"),
-    "RequestAccess",
-  ),
-});
-
 const oauthConsentRoute = createRoute({
   getParentRoute: () => marketingLayoutRoute,
   path: "oauth/consent",
@@ -85,7 +73,7 @@ const organizationSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Sign in through your organization identity provider.",
+      "Use an existing linked OIDC identity or connect it from an active GitHub beta session.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -99,7 +87,7 @@ const organizationDirectSignInRoute = createRoute({
   head: () =>
     routeHead(
       "Organization sign-in",
-      "Continue to your organization identity provider.",
+      "Use an existing linked OIDC identity or connect it from an active GitHub beta session.",
     ),
   component: lazyRouteComponent(
     () => import("./pages/OrganizationSignIn"),
@@ -359,7 +347,7 @@ const adminPeopleRoute = createRoute({
   head: () =>
     routeHead(
       "People and access",
-      "Review access requests, users, and platform organizations.",
+      "Manage beta invite codes, beta users, roles, and platform organizations.",
     ),
   beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(
@@ -386,7 +374,6 @@ const adminAuthoringRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   marketingLayoutRoute.addChildren([
     indexRoute,
-    requestAccessRoute,
     oauthConsentRoute,
     organizationSignInRoute,
     organizationDirectSignInRoute,
@@ -548,6 +535,12 @@ async function requireAdminRoute() {
 async function requireSignedInRoute() {
   const session = await getClientSession();
   if (!session?.user) {
+    throw redirect({ to: "/" });
+  }
+  if ((await getClientBetaAccessState()) !== "active") {
+    if (typeof window !== "undefined") {
+      window.location.replace("/join");
+    }
     throw redirect({ to: "/" });
   }
 }

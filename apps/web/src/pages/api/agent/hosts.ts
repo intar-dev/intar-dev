@@ -3,7 +3,6 @@ import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
-  agentBootstrapTokens,
   agentHosts,
   hostActualState,
   scenarioRuns,
@@ -21,6 +20,10 @@ import {
 import { createAppId, createShortAppId } from "@/lib/id";
 import { resolveRequestedHostRole } from "@/lib/scenario-hosts";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
+import {
+  insertPersonalHostForActiveBetaAdmission,
+  rotatePersonalBootstrapForActiveBetaAdmission,
+} from "@/lib/personal-agent-admission";
 
 const HOST_ID_REGEX = /^[A-Za-z0-9_-]+$/;
 
@@ -135,6 +138,7 @@ export const POST: APIRoute = async ({ request, url }) => {
           eq(agentHosts.userId, authz.context.userId),
           isNull(agentHosts.organizationId),
           eq(agentHosts.name, hostName),
+          eq(agentHosts.disabled, false),
         ),
       )
       .limit(1);
@@ -142,18 +146,20 @@ export const POST: APIRoute = async ({ request, url }) => {
     const hostId = existingByName[0]?.id ?? (await allocateHostId(hostName));
     const now = Date.now();
     if (!existingByName[0]) {
-      await db.insert(agentHosts).values({
-        id: hostId,
+      const inserted = await insertPersonalHostForActiveBetaAdmission(env.DB, {
+        hostId,
         userId: authz.context.userId,
-        organizationId: null,
         name: hostName,
         role: requestedRole,
-        scenarioEnabled: requestedRole === "agent",
-        disabled: false,
-        connected: false,
-        createdAt: now,
-        updatedAt: now,
+        betaAdmission: authz.context.betaAdmission,
+        now,
       });
+      if (!inserted) {
+        return jsonResponse(
+          { error: "beta access changed while creating the host" },
+          { status: 403 },
+        );
+      }
     }
 
     host = await loadHostForUser(hostId, authz.context.userId);
@@ -176,30 +182,29 @@ export const POST: APIRoute = async ({ request, url }) => {
   if (!host) {
     return jsonResponse({ error: "failed to create host" }, { status: 500 });
   }
+  if (host.disabled) {
+    return jsonResponse({ error: "host is disabled" }, { status: 403 });
+  }
 
   const token = createBootstrapToken();
   const tokenHash = await sha256Hex(token);
   const now = Date.now();
 
-  await db.batch([
-    db
-      .update(agentBootstrapTokens)
-      .set({ revokedAt: now })
-      .where(
-        and(
-          eq(agentBootstrapTokens.hostId, host.id),
-          isNull(agentBootstrapTokens.revokedAt),
-        ),
-      ),
-    db.insert(agentBootstrapTokens).values({
-      id: createAppId(),
-      hostId: host.id,
-      tokenHash,
-      expiresAt: null,
-      revokedAt: null,
-      createdAt: now,
-    }),
-  ]);
+  const tokenId = createAppId();
+  const issued = await rotatePersonalBootstrapForActiveBetaAdmission(env.DB, {
+    tokenId,
+    hostId: host.id,
+    userId: authz.context.userId,
+    tokenHash,
+    betaAdmission: authz.context.betaAdmission,
+    now,
+  });
+  if (!issued) {
+    return jsonResponse(
+      { error: "beta access changed while issuing the bootstrap token" },
+      { status: 403 },
+    );
+  }
 
   const bridgeConfigToml = buildBridgeConfigToml({
     baseUrl: url.origin || resolveRequestOrigin(request),

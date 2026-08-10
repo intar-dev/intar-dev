@@ -309,6 +309,12 @@ export async function issueWorkshopWorkspaceApplication(input: {
             and ${workshopSessions.organizationId} = ${access.organizationId}
             and ${workshopSessions.state} in ('lobby', 'live')
             and ${member.workshopAccessRevokingAt} is null
+            and exists (
+              select 1
+              from access_allowlist beta_access
+              where beta_access.user_id = ${input.actorUserId}
+                and beta_access.state = 'active'
+            )
         )`,
       ),
     )

@@ -12,6 +12,7 @@ import {
   vmScenarios,
   vmScenarioVms,
 } from "@/db/schema";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { resetD1Database } from "@/test/d1-migrations";
 import { handleAgentImageDownload } from "./agent";
 import { imageObjectKey, registryImageKey } from "./shared";
@@ -35,6 +36,7 @@ describe("organization image registry tenancy", () => {
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    await grantActiveBetaAccess("runner-owner");
     await db.insert(organization).values([
       {
         id: "org-a",
@@ -186,6 +188,14 @@ async function seedAgentAndBootstrap(input: {
   expect(response.status).toBe(200);
   const body = (await response.json()) as { accessToken: string };
   return body.accessToken;
+}
+
+async function grantActiveBetaAccess(userId: string): Promise<void> {
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubUsername: userId,
+  });
 }
 
 function download(token: string, scenario: SeededScenario): Promise<Response> {

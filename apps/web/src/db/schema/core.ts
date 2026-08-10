@@ -105,7 +105,18 @@ export const account = sqliteTable(
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
-  (table) => [index("account_userId_idx").on(table.userId)],
+  (table) => [
+    index("account_userId_idx").on(table.userId),
+    uniqueIndex("account_provider_account_uidx").on(
+      table.providerId,
+      table.accountId,
+    ),
+    // A Better Auth user can have at most one stable GitHub identity. Other
+    // providers are not capped per user by this beta-specific invariant.
+    uniqueIndex("account_user_github_uidx")
+      .on(table.userId)
+      .where(sql`${table.providerId} = 'github'`),
+  ],
 );
 
 export const verification = sqliteTable(

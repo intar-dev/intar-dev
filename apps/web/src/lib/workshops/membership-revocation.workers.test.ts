@@ -79,6 +79,10 @@ import {
   type WorkshopSessionState,
 } from "@/db/schema";
 import {
+  FIXTURE_BETA_ADMIN_ID,
+  grantFixtureBetaAccess,
+} from "@/test/beta-access-fixtures";
+import {
   leaveOrganization,
   removeOrganizationMember,
   transferOrganizationOwnership,
@@ -91,6 +95,7 @@ import {
 } from "@/lib/stargate";
 import { issueWorkshopWorkspaceApplication } from "./applications";
 import { claimWorkshopHelpRequest, revokeWorkshopAssist } from "./assistance";
+import { revokeLiveWorkshopCapabilitiesForBetaUser } from "./membership-revocation";
 import { getWorkshopSessionProjection } from "./projection";
 import {
   listWorkshopSessionsForUser,
@@ -228,6 +233,96 @@ describe("workshop access revocation during organization membership removal", ()
       },
     ]);
     await expectParticipantHistoryPreserved();
+  });
+
+  it("revokes live beta capabilities without removing membership or shared workshop state", async () => {
+    await seedLiveWorkshopFixture();
+    const now = 1_800_000_000_002;
+    await env.DB.prepare(
+      `UPDATE access_allowlist
+       SET state = 'blocked',
+           revocation_id = 'participant-capability-block',
+           revoked_by = ?2,
+           revocation_reason = 'test_block',
+           revoked_at = ?1
+       WHERE user_id = 'participant'`,
+    )
+      .bind(now, FIXTURE_BETA_ADMIN_ID)
+      .run();
+
+    await revokeLiveWorkshopCapabilitiesForBetaUser({
+      userId: "participant",
+      actorUserId: "owner",
+      now,
+    });
+
+    expect(accessMocks.deleteStargateRoute).toHaveBeenCalledWith(
+      PARTICIPANT_ROUTE,
+    );
+    expect(accessMocks.deleteStargateRoute).toHaveBeenCalledWith(ASSIST_ROUTE);
+    expect(accessMocks.deleteStargateWorkspaceAppRoute).toHaveBeenCalledWith(
+      APPLICATION_ROUTE,
+    );
+
+    const db = drizzle(env.DB);
+    const [memberships, workspaces, generations, executions, slots, grants] =
+      await Promise.all([
+        db
+          .select({
+            id: member.id,
+            workshopAccessRevokingAt: member.workshopAccessRevokingAt,
+          })
+          .from(member)
+          .where(eq(member.id, membershipId("participant"))),
+        db
+          .select({
+            state: workshopWorkspaces.state,
+            terminalRoutes: workshopWorkspaces.terminalRouteUsernamesJson,
+            applicationRoutes: workshopWorkspaces.applicationRouteIdsJson,
+          })
+          .from(workshopWorkspaces)
+          .where(eq(workshopWorkspaces.id, WORKSPACE_ID)),
+        db
+          .select({ state: workshopWorkspaceGenerations.state })
+          .from(workshopWorkspaceGenerations)
+          .where(eq(workshopWorkspaceGenerations.id, GENERATION_ID)),
+        db
+          .select({ state: runtimeExecutions.state })
+          .from(runtimeExecutions)
+          .where(eq(runtimeExecutions.id, EXECUTION_ID)),
+        db
+          .select({ executionId: activeRuntimeSlots.executionId })
+          .from(activeRuntimeSlots)
+          .where(eq(activeRuntimeSlots.userId, "participant")),
+        db
+          .select({
+            revokedAt: workshopAssistGrants.revokedAt,
+            revokedBy: workshopAssistGrants.revokedBy,
+            terminalRoutes: workshopAssistGrants.terminalRouteUsernamesJson,
+          })
+          .from(workshopAssistGrants)
+          .where(eq(workshopAssistGrants.id, "assist-grant")),
+      ]);
+
+    expect(memberships).toEqual([
+      {
+        id: membershipId("participant"),
+        workshopAccessRevokingAt: null,
+      },
+    ]);
+    expect(workspaces).toEqual([
+      { state: "ready", terminalRoutes: [], applicationRoutes: [] },
+    ]);
+    expect(generations).toEqual([{ state: "ready" }]);
+    expect(executions).toEqual([{ state: "ready" }]);
+    expect(slots).toEqual([{ executionId: EXECUTION_ID }]);
+    expect(grants).toEqual([
+      {
+        revokedAt: now,
+        revokedBy: "owner",
+        terminalRoutes: [],
+      },
+    ]);
   });
 
   it("revokes only the helper assist capability when the helper leaves", async () => {
@@ -580,6 +675,41 @@ describe("workshop access revocation during organization membership removal", ()
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it("rejects application route issuance after the beta actor is blocked", async () => {
+    await seedLiveWorkshopFixture();
+    await env.DB.prepare(
+      `UPDATE access_allowlist
+       SET state = 'blocked',
+           revocation_id = 'participant-block',
+           revoked_by = ?2,
+           revocation_reason = 'test_block',
+           revoked_at = ?1
+       WHERE user_id = 'participant'`,
+    )
+      .bind(1_800_000_000_002, FIXTURE_BETA_ADMIN_ID)
+      .run();
+
+    await expect(
+      issueWorkshopWorkspaceApplication({
+        sessionId: SESSION_ID,
+        workspaceId: WORKSPACE_ID,
+        applicationId: "gitea",
+        actorUserId: "participant",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "workshop_application_authorization_changed",
+    });
+    expect(accessMocks.issueStargateWorkspaceAppSession).not.toHaveBeenCalled();
+    await expect(
+      env.DB.prepare(
+        "SELECT id FROM workshop_route_issuance_intents WHERE workspace_id = ?",
+      )
+        .bind(WORKSPACE_ID)
+        .all(),
+    ).resolves.toMatchObject({ results: [] });
   });
 
   it("retries a Stargate create-only collision without deleting the existing route", async () => {
@@ -1232,6 +1362,9 @@ async function seedLiveWorkshopFixture(
       updatedAt: createdAt,
     })),
   );
+  for (const userId of ["owner", "participant", "helper", "facilitator"]) {
+    await grantActiveBetaAccess(userId, now);
+  }
   await db.insert(organization).values({
     id: ORGANIZATION_ID,
     name: "Workshop Organization",
@@ -1391,6 +1524,18 @@ async function seedLiveWorkshopFixture(
     type: "module.verified",
     payloadJson: { moduleId: "module-00" },
     createdAt: now,
+  });
+}
+
+async function grantActiveBetaAccess(
+  userId: string,
+  now: number,
+): Promise<void> {
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubUsername: userId,
+    now,
   });
 }
 

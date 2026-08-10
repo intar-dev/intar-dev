@@ -80,21 +80,104 @@ through the `Website production` workflow; do not deploy an ignored local
 artifact but does not repeat the pull request quality gates. Treat `main` as
 deploy-only: a direct website push bypasses those gates and deploys immediately.
 
+## Beta-access replacement cutover
+
+Beta access is a clean replacement, not a D1 migration. Do not merge or deploy
+this Worker through the normal migration-first production job while
+`BETA_ACCESS_MAINTENANCE` is off. There is no old-Worker rollback after the
+reset.
+
+1. Set a production-environment `BETA_MAINTENANCE_BYPASS_SECRET`; use at least
+   32 random bytes. The protected website deployment passes it to Wrangler's
+   secrets file without logging it.
+2. While the current Worker and old beta schema are still active, end every
+   active scenario run (including hidden runs and a user-owned run on an
+   organization runner), disconnect all personal agents, and close every issued
+   workshop terminal/application route. The replacement Worker cannot perform
+   this drain before the schema reset: its authorization queries intentionally
+   understand only the new allowlist shape.
+3. Deploy the Worker with `BETA_ACCESS_MAINTENANCE` set to `on`. Verify an
+   unauthenticated `/api/*` request returns HTTP 503 with
+   `{"code":"maintenance"}`. Keep maintenance enabled for at least one hour
+   before cutover. The replacement disables Better Auth's generic `/token`
+   endpoint, but wait at least 15 minutes for JWTs issued by the previous Worker
+   to expire. It also rejects OAuth resource/audience requests so every newly
+   issued OAuth access token is opaque and immediately revocable; wait the full
+   hour for any resource JWT minted by the previous Worker to reach its maximum
+   lifetime.
+4. In the browser used for the smoke test, establish the two-hour operator
+   bypass from the maintenance page's DevTools console. This keeps the secret
+   out of URLs and request logs:
+
+   ```js
+   await fetch("/api/maintenance/bypass", {
+     method: "POST",
+     headers: { "content-type": "application/json" },
+     body: JSON.stringify({ secret: prompt("Maintenance bypass secret") }),
+   });
+   ```
+
+   If a Stargate create or delete result from the pre-deploy drain was
+   ambiguous, wait out its four-hour maximum TTL before continuing. The cutover
+   command rejects live or recently terminal scenario routes and never disables
+   or deletes an organization-owned runner.
+5. Run the destructive command with a new, protected, absolute checkpoint path and the
+   known existing Better Auth administrator. It verifies maintenance and
+   provider-account uniqueness, exports D1, replaces only beta tables and
+   account indexes, removes sessions/OAuth grants/personal credentials, then
+   prints one bootstrap fragment link exactly once:
+
+   ```sh
+   bun run beta:cutover -- \
+     --remote \
+     --admin-user-id ADMIN_USER_ID \
+     --export /secure/checkpoints/intar-before-beta-cutover.sql \
+     --confirm-pure-replacement
+   ```
+
+6. Redeem the bootstrap link as that administrator. Create and claim a normal
+   invite, connect organization SSO, revoke the test user, and verify app,
+   OAuth, personal-agent bootstrap, and personal-route denial while an
+   organization runner remains healthy.
+7. Change `BETA_ACCESS_MAINTENANCE` to `off` and deploy the same forward-fixed
+   Worker only after the smoke checks pass. A failure stays in maintenance and
+   is fixed forward; the checkpoint is catastrophe recovery, not an
+   application rollback.
+
+Beta revocation cleanup uses a non-expiring D1 execution lock. Concurrent
+retries cannot run capability cleanup twice or delete routes created after a
+later admission. A timeout after dispatching an external route/runtime delete
+is recorded as `access.revocation_cleanup_stalled` and deliberately retains the
+lock because the remote operation may still finish. The same applies if a
+Worker is terminated mid-cleanup. Put the app in maintenance, prove that the
+recorded attempt and remote operations are no longer executing, and release it
+through an `access.revocation_cleanup_failed` audit insert carrying the exact
+user, revocation, and cleanup-attempt IDs with reason
+`operator_abandoned_cleanup`. The D1 trigger atomically records that failure and
+releases only that attempt; then retry the normal beta-user revoke endpoint.
+Never clear the lock with a direct allowlist update or while the original
+execution may still be live.
+
 ## Organizations
 
-Organizations are visible to every signed-in user, but organization creation is
+Organizations are visible to every active beta user, but organization creation is
 controlled by the generic Cloudflare Flagship binding named `FLAGS`. The
 `organization-creation` boolean flag defaults to `off`; targeting rules should
 serve `on` only when the `targetingKey` context field matches a selected Better
 Auth user ID. The toggle controls creation only—it is not an authentication or
 authorization boundary.
 
-An organization admin can configure one verified OIDC provider and email domain.
+An organization admin can configure one verified OIDC provider and domain.
 The callback URI shown in the organization settings must be registered at the
 identity provider. After the admin publishes the requested DNS TXT record,
-users can sign in at `/organization-sign-in` or at the organization-specific
-`/organizations/<slug>/sign-in` URL. Better Auth creates the Intar account and
-organization membership on the first successful sign-in.
+an active GitHub beta user connects that provider explicitly at
+`/organization-sign-in` or `/organizations/<slug>/sign-in`. Later sign-ins bind
+to the stable provider subject and dynamically require active beta access.
+Existing SSO-only identities recover by opening an invite, authenticating the
+already-linked OIDC subject, explicitly linking GitHub, and confirming the
+claim. The installed Better Auth SAML RelayState does not preserve protected
+server context, so invite recovery and new account linking fail closed for
+SAML; already-linked active SAML identities can still sign in normally.
 
 For Rawkode Academy, use issuer `https://id.rawkode.academy`. Discovery maps
 that issuer to `/auth/oauth2/authorize`, `/auth/oauth2/token`,

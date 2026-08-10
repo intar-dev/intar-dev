@@ -9,6 +9,11 @@ const agentBridgeMock = vi.hoisted(() => ({
 const scenarioRunsMock = vi.hoisted(() => ({
   startScenarioRunForUser: vi.fn(),
 }));
+const betaAdmission = {
+  sourceInviteId: "invite-1",
+  sourceLeaseId: "lease-1",
+  grantedAt: 1,
+};
 
 vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/scenario-runs", () => scenarioRunsMock);
@@ -24,6 +29,7 @@ describe("scenario start route", () => {
       context: {
         userId: "user-1",
         isAdmin: false,
+        betaAdmission,
       },
     });
     scenarioRunsMock.startScenarioRunForUser.mockResolvedValue({
@@ -50,13 +56,14 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
+      betaAdmission,
     });
   });
 
   it("forwards an explicit host only for an administrator", async () => {
     agentBridgeMock.requireUserContext.mockResolvedValue({
       ok: true,
-      context: { userId: "admin-1", isAdmin: true },
+      context: { userId: "admin-1", isAdmin: true, betaAdmission },
     });
 
     const response = await startRequest({ hostId: "agent-01" });
@@ -65,6 +72,7 @@ describe("scenario start route", () => {
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "admin-1",
+      betaAdmission,
       hostId: "agent-01",
     });
   });

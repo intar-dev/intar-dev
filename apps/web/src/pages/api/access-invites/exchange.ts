@@ -1,0 +1,37 @@
+import type { APIRoute } from "astro";
+import { env } from "cloudflare:workers";
+import { exchangeAccessInviteCode } from "@/lib/access-invites";
+import {
+  accessInviteError,
+  accessInviteJson,
+  readJsonObject,
+} from "@/lib/access-invite-http";
+import {
+  inviteAttemptSetCookie,
+  newInviteAttempt,
+} from "@/lib/invite-attempt";
+import {
+  rateLimitPublicAccessInvite,
+  requireSameOriginJsonMutation,
+} from "@/lib/request-security";
+
+export const prerender = false;
+
+export const POST: APIRoute = async ({ request }) => {
+  try {
+    requireSameOriginJsonMutation(request);
+    await rateLimitPublicAccessInvite({ request, action: "exchange" });
+    const body = await readJsonObject(request);
+    const code = typeof body.code === "string" ? body.code : "";
+    const invite = await exchangeAccessInviteCode({ d1: env.DB, code });
+    const attempt = newInviteAttempt(invite.inviteId);
+    const headers = new Headers();
+    headers.append("set-cookie", await inviteAttemptSetCookie(attempt));
+    return accessInviteJson(
+      { state: "ready", expiresAt: invite.expiresAt },
+      { status: 200, headers },
+    );
+  } catch (error) {
+    return accessInviteError(error, "the invite could not be exchanged");
+  }
+};

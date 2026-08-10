@@ -23,6 +23,7 @@ import {
   mutateStoredHostDesiredState,
   startScenarioRunForUser,
   resetHostRuntimeTestDatabase,
+  betaAdmissionForHostFixture,
 } from "./test-fixtures";
 import { destroyScenarioRunForUserWithDependencies } from "@/lib/scenario-runs/lifecycle";
 import { markRunVmsAbsentInDesiredState } from "@/lib/scenario-runs/start";
@@ -70,6 +71,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       startScenarioRunForUser({
         scenarioId: "broken-nginx",
         userId: "user-1",
+        betaAdmission: await betaAdmissionForHostFixture("user-1"),
       }),
     ).rejects.toMatchObject({ code: "scenario_host_unavailable" });
     ws.close();
@@ -119,6 +121,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       startScenarioRunForUser({
         scenarioId: "broken-nginx",
         userId: "user-1",
+        betaAdmission: await betaAdmissionForHostFixture("user-1"),
         hostId,
       }),
     ).rejects.toMatchObject({ code: "boot_capacity_pending" });
@@ -156,6 +159,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     const first = await startScenarioRunForUser({
       scenarioId: "broken-nginx",
       userId: "user-1",
+      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
     });
     const ending = await destroyScenarioRunForUserWithDependencies(
@@ -169,6 +173,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     const second = await startScenarioRunForUser({
       scenarioId: "broken-nginx",
       userId: "user-1",
+      betaAdmission: await betaAdmissionForHostFixture("user-1"),
       hostId,
     });
 
@@ -255,6 +260,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
     const started = await startScenarioRunForUser({
       scenarioId: "broken-nginx",
       userId: "user-1",
+      betaAdmission: await betaAdmissionForHostFixture("user-1"),
     });
     expect(started.run).toMatchObject({
       id: started.runId,
@@ -284,6 +290,7 @@ describe("HostRuntimeDO scheduling and capacity", () => {
       startScenarioRunForUser({
         scenarioId: "broken-nginx",
         userId: "user-1",
+        betaAdmission: await betaAdmissionForHostFixture("user-1"),
       }),
     ).rejects.toMatchObject({ code: "boot_capacity_pending" });
 

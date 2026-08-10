@@ -1,6 +1,10 @@
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { agentBootstrapTokens, agentHosts } from "@/db/schema";
+import {
+  accessAllowlist,
+  agentBootstrapTokens,
+  agentHosts,
+} from "@/db/schema";
 import { createAppId } from "@/lib/id";
 
 const JWT_TTL_SECONDS = 15 * 60;
@@ -21,6 +25,10 @@ interface JwtPayload {
   nbf: number;
   exp: number;
   jti: string;
+  /** Exact beta admission that minted a personal-host token; null for org hosts. */
+  beta_source_invite_id: string | null;
+  beta_source_lease_id: string | null;
+  beta_admission_granted_at: number | null;
 }
 
 export interface VerifiedAgentHost {
@@ -28,6 +36,9 @@ export interface VerifiedAgentHost {
   userId: string;
   organizationId: string | null;
   role: "agent" | "builder";
+  betaSourceInviteId: string | null;
+  betaSourceLeaseId: string | null;
+  betaAdmissionGrantedAt: number | null;
 }
 
 export async function handleAgentBootstrap(
@@ -67,9 +78,19 @@ export async function handleAgentBootstrap(
       expiresAt: agentBootstrapTokens.expiresAt,
       revokedAt: agentBootstrapTokens.revokedAt,
       hostDisabled: agentHosts.disabled,
+      hostUserId: agentHosts.userId,
+      hostOrganizationId: agentHosts.organizationId,
+      betaState: accessAllowlist.state,
+      betaSourceInviteId: accessAllowlist.sourceInviteId,
+      betaSourceLeaseId: accessAllowlist.sourceLeaseId,
+      betaGrantedAt: accessAllowlist.grantedAt,
     })
     .from(agentBootstrapTokens)
     .innerJoin(agentHosts, eq(agentHosts.id, agentBootstrapTokens.hostId))
+    .leftJoin(
+      accessAllowlist,
+      eq(accessAllowlist.userId, agentHosts.userId),
+    )
     .where(
       and(
         eq(agentBootstrapTokens.hostId, hostId),
@@ -85,6 +106,15 @@ export async function handleAgentBootstrap(
   }
   if (match.hostDisabled) {
     return jsonResponse({ error: "host is disabled" }, 403);
+  }
+  if (
+    match.hostOrganizationId === null &&
+    (match.betaState !== "active" ||
+      !match.betaSourceInviteId ||
+      !match.betaSourceLeaseId ||
+      match.betaGrantedAt === null)
+  ) {
+    return jsonResponse({ error: "beta access is revoked" }, 403);
   }
 
   const nowMs = Date.now();
@@ -110,6 +140,12 @@ export async function handleAgentBootstrap(
     nbf: nowSeconds,
     exp: nowSeconds + JWT_TTL_SECONDS,
     jti: createAppId(),
+    beta_source_invite_id:
+      match.hostOrganizationId === null ? match.betaSourceInviteId : null,
+    beta_source_lease_id:
+      match.hostOrganizationId === null ? match.betaSourceLeaseId : null,
+    beta_admission_granted_at:
+      match.hostOrganizationId === null ? match.betaGrantedAt : null,
   };
 
   const accessToken = await signJwt(payload, jwtSecret);
@@ -155,6 +191,24 @@ export async function handleAgentConnect(
 
   const headers = new Headers(request.headers);
   headers.set("x-agent-host-id", hostId);
+  if (verified.agent.betaAdmissionGrantedAt !== null) {
+    headers.set(
+      "x-agent-beta-source-invite-id",
+      verified.agent.betaSourceInviteId!,
+    );
+    headers.set(
+      "x-agent-beta-source-lease-id",
+      verified.agent.betaSourceLeaseId!,
+    );
+    headers.set(
+      "x-agent-beta-admission-granted-at",
+      String(verified.agent.betaAdmissionGrantedAt),
+    );
+  } else {
+    headers.delete("x-agent-beta-source-invite-id");
+    headers.delete("x-agent-beta-source-lease-id");
+    headers.delete("x-agent-beta-admission-granted-at");
+  }
 
   const proxiedRequest = new Request("https://host-runtime.internal/connect", {
     method: "GET",
@@ -219,8 +273,16 @@ export async function requireVerifiedAgentRequest(
       organizationId: agentHosts.organizationId,
       role: agentHosts.role,
       disabled: agentHosts.disabled,
+      betaState: accessAllowlist.state,
+      betaSourceInviteId: accessAllowlist.sourceInviteId,
+      betaSourceLeaseId: accessAllowlist.sourceLeaseId,
+      betaGrantedAt: accessAllowlist.grantedAt,
     })
     .from(agentHosts)
+    .leftJoin(
+      accessAllowlist,
+      eq(accessAllowlist.userId, agentHosts.userId),
+    )
     .where(eq(agentHosts.id, hostId))
     .limit(1);
 
@@ -237,6 +299,40 @@ export async function requireVerifiedAgentRequest(
       response: jsonResponse({ error: "host is disabled" }, 403),
     };
   }
+  if (
+    host.organizationId === null &&
+    (host.betaState !== "active" ||
+      !host.betaSourceInviteId ||
+      !host.betaSourceLeaseId ||
+      host.betaGrantedAt === null)
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "beta access is revoked" }, 403),
+    };
+  }
+  if (
+    host.organizationId === null &&
+    (payload.beta_source_invite_id !== host.betaSourceInviteId ||
+      payload.beta_source_lease_id !== host.betaSourceLeaseId ||
+      payload.beta_admission_granted_at !== host.betaGrantedAt)
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "stale beta admission" }, 401),
+    };
+  }
+  if (
+    host.organizationId !== null &&
+    (payload.beta_source_invite_id !== null ||
+      payload.beta_source_lease_id !== null ||
+      payload.beta_admission_granted_at !== null)
+  ) {
+    return {
+      ok: false,
+      response: jsonResponse({ error: "invalid token" }, 401),
+    };
+  }
 
   return {
     ok: true,
@@ -245,6 +341,12 @@ export async function requireVerifiedAgentRequest(
       userId: host.userId,
       organizationId: host.organizationId,
       role: host.role,
+      betaSourceInviteId:
+        host.organizationId === null ? host.betaSourceInviteId : null,
+      betaSourceLeaseId:
+        host.organizationId === null ? host.betaSourceLeaseId : null,
+      betaAdmissionGrantedAt:
+        host.organizationId === null ? host.betaGrantedAt : null,
     },
   };
 }
@@ -326,7 +428,8 @@ async function verifyJwt(
     typeof payload.iat !== "number" ||
     typeof payload.nbf !== "number" ||
     typeof payload.exp !== "number" ||
-    typeof payload.jti !== "string"
+    typeof payload.jti !== "string" ||
+    !isValidBetaAdmissionClaims(payload)
   ) {
     return null;
   }
@@ -341,6 +444,26 @@ async function verifyJwt(
   }
 
   return payload as JwtPayload;
+}
+
+function isValidBetaAdmissionClaims(payload: Partial<JwtPayload>): boolean {
+  const inviteId = payload.beta_source_invite_id;
+  const leaseId = payload.beta_source_lease_id;
+  const grantedAt = payload.beta_admission_granted_at;
+  if (inviteId === null && leaseId === null && grantedAt === null) {
+    return true;
+  }
+  return (
+    typeof inviteId === "string" &&
+    inviteId.length > 0 &&
+    inviteId.length <= 256 &&
+    typeof leaseId === "string" &&
+    leaseId.length > 0 &&
+    leaseId.length <= 256 &&
+    typeof grantedAt === "number" &&
+    Number.isSafeInteger(grantedAt) &&
+    grantedAt >= 0
+  );
 }
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {

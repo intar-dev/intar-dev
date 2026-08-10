@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { startOrganizationSignIn } from "@/lib/auth-client";
+import { normalizeRecoveryOrganizationSlug } from "./join-recovery";
 
 export function OrganizationSignIn() {
   const pathname = useRouterState({
@@ -36,13 +37,16 @@ export function OrganizationSignIn() {
           );
         })();
   const [slug, setSlug] = useState(directSlug);
+  const normalizedSlug = normalizeRecoveryOrganizationSlug(slug);
   const signIn = useMutation({
-    mutationFn: () =>
-      startOrganizationSignIn(slug, {
-        callbackURL: `${window.location.origin}/organizations/${encodeURIComponent(slug.trim())}`,
+    mutationFn: () => {
+      if (!normalizedSlug) throw new Error("Organization slug is invalid");
+      return startOrganizationSignIn(normalizedSlug, {
+        callbackURL: `${window.location.origin}/organizations/${encodeURIComponent(normalizedSlug)}`,
         errorCallbackURL:
           window.location.href.split("?")[0] ?? window.location.href,
-      }),
+      });
+    },
   });
 
   return (
@@ -62,12 +66,11 @@ export function OrganizationSignIn() {
                 Organization access
               </p>
               <h1 className="text-section-title">
-                Sign in with your organization
+                Continue with organization OIDC
               </h1>
               <p className="text-sm leading-6 text-muted-foreground">
-                Intar sends you to your organization&apos;s verified identity
-                provider. Your account and membership are created on the first
-                successful sign-in.
+                Use an existing linked OIDC identity, or explicitly connect
+                your organization provider from an active GitHub beta session.
               </p>
             </div>
           </CardHeader>
@@ -79,7 +82,7 @@ export function OrganizationSignIn() {
               className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (slug.trim() && !signIn.isPending) signIn.mutate();
+                if (normalizedSlug && !signIn.isPending) signIn.mutate();
               }}
             >
               <label
@@ -93,16 +96,21 @@ export function OrganizationSignIn() {
                 value={slug}
                 onChange={(event) => setSlug(event.target.value)}
                 placeholder="rawkode-academy-ab12cd"
+                maxLength={128}
+                pattern="[a-z0-9][a-z0-9-]{0,127}"
                 autoComplete="organization"
+                spellCheck={false}
                 autoFocus={!directSlug}
               />
               <Button
                 type="submit"
                 size="lg"
                 className="w-full"
-                disabled={!slug.trim() || signIn.isPending}
+                disabled={!normalizedSlug || signIn.isPending}
               >
-                {signIn.isPending ? "Opening identity provider…" : "Continue"}
+                {signIn.isPending
+                  ? "Opening identity provider…"
+                  : "Continue with organization OIDC"}
                 {!signIn.isPending ? <ArrowRight className="size-4" /> : null}
               </Button>
             </form>
@@ -115,10 +123,21 @@ export function OrganizationSignIn() {
             ) : null}
             <div className="flex gap-3 rounded-xl bg-muted/40 p-4 text-sm text-muted-foreground">
               <ShieldCheck className="mt-0.5 size-4 shrink-0 text-brand-text" />
-              <p>
-                Ask your organization admin for the exact sign-in link if you do
-                not know the slug.
-              </p>
+              <div className="space-y-2">
+                <p>
+                  New beta users must open an invite and redeem through GitHub
+                  first.
+                </p>
+                <p>
+                  Signed in with an active GitHub beta account? Continuing here
+                  explicitly connects OIDC to that account.
+                </p>
+                <p>
+                  Already linked? Continuing signs in with the stable OIDC
+                  subject. Ask your organization admin for the exact slug if
+                  needed.
+                </p>
+              </div>
             </div>
             <Button
               variant="link"

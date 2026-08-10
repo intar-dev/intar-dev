@@ -35,7 +35,10 @@ function runAmbiguousActivation(restoreFailures: number) {
   mkdirSync(runnerTemp, { recursive: true });
   writeFileSync(state, beforeVersionId);
   writeFileSync(restoreCount, "0");
-  writeFileSync(secrets, '{"STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n');
+  writeFileSync(
+    secrets,
+    '{"BETA_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
+  );
   writeFileSync(
     config,
     JSON.stringify({
@@ -78,7 +81,7 @@ if [ "$1 $2" = "deployments status" ]; then
 fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
-  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"}],script_runtime:{migration_tag:"v4"}}}'
+  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}],script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -212,6 +215,7 @@ describe("exact web-version activation", () => {
     expect(script).toContain("--experimental-provision=false");
     expect(script).toContain('--secrets-file "${secrets_file}"');
     expect(script).toContain('.name == "STARGATE_EGRESS_IPV4_CIDRS"');
+    expect(script).toContain('.name == "BETA_MAINTENANCE_BYPASS_SECRET"');
     expect(script).toContain("runtime_secret_binding_proven: true");
   });
 

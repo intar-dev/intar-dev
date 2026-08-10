@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { expect } from "vitest";
 import {
+  accessAllowlist,
   agentHosts,
   hostActualState,
   hostCpuReservations,
@@ -15,6 +16,8 @@ import {
   vmScenarioVms,
   vmScenarios,
 } from "@/db/schema";
+import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
+import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import type {
   BridgeMessageV6,
   DesiredVmV2,
@@ -117,6 +120,7 @@ export async function seedHost(hostId: string): Promise<void> {
       updatedAt: new Date(now),
     })
     .onConflictDoNothing();
+  await grantActiveBetaAccessForHostFixture("user-1", now);
   await db.insert(agentHosts).values({
     id: hostId,
     userId: "user-1",
@@ -139,11 +143,52 @@ export async function connectHost(
   ws: WebSocket;
 }> {
   const stub = env.HOST_RUNTIME.get(env.HOST_RUNTIME.idFromName(hostId));
+  const admission = await env.DB.prepare(
+    `SELECT host.organization_id,
+            access.source_invite_id,
+            access.source_lease_id,
+            access.granted_at
+     FROM agent_hosts host
+     LEFT JOIN access_allowlist access
+       ON access.user_id = host.user_id AND access.state = 'active'
+     WHERE host.id = ?1`,
+  )
+    .bind(hostId)
+    .first<{
+      organization_id: string | null;
+      source_invite_id: string | null;
+      source_lease_id: string | null;
+      granted_at: number | null;
+    }>();
+  if (!admission) throw new Error(`host fixture is missing: ${hostId}`);
+  if (
+    admission.organization_id === null &&
+    (!admission.source_invite_id ||
+      !admission.source_lease_id ||
+      admission.granted_at === null)
+  ) {
+    throw new Error(`personal host fixture lacks beta access: ${hostId}`);
+  }
+  const headers = new Headers({
+    upgrade: "websocket",
+    "x-agent-host-id": hostId,
+  });
+  if (admission.granted_at !== null) {
+    headers.set(
+      "x-agent-beta-source-invite-id",
+      admission.source_invite_id!,
+    );
+    headers.set(
+      "x-agent-beta-source-lease-id",
+      admission.source_lease_id!,
+    );
+    headers.set(
+      "x-agent-beta-admission-granted-at",
+      String(admission.granted_at),
+    );
+  }
   const response = await stub.fetch("http://host-runtime/connect", {
-    headers: {
-      upgrade: "websocket",
-      "x-agent-host-id": hostId,
-    },
+    headers,
   });
   expect(response.status).toBe(101);
   const ws = response.webSocket;
@@ -160,6 +205,41 @@ export async function connectHost(
   });
   ws.send(JSON.stringify(clientHello(hostId, options)));
   return { messages, stub, ws };
+}
+
+export async function grantActiveBetaAccessForHostFixture(
+  userId: string,
+  now: number,
+): Promise<void> {
+  const existing = await drizzle(env.DB)
+    .select({ userId: accessAllowlist.userId })
+    .from(accessAllowlist)
+    .where(eq(accessAllowlist.userId, userId))
+    .limit(1);
+  if (existing.length) return;
+  await grantFixtureBetaAccess({
+    d1: env.DB,
+    userId,
+    githubAccountId: `host-runtime-github-${userId}`,
+    githubUsername: userId,
+    now,
+  });
+}
+
+export async function betaAdmissionForHostFixture(
+  userId: string,
+): Promise<BetaAdmissionEpoch> {
+  const [access] = await drizzle(env.DB)
+    .select({
+      sourceInviteId: accessAllowlist.sourceInviteId,
+      sourceLeaseId: accessAllowlist.sourceLeaseId,
+      grantedAt: accessAllowlist.grantedAt,
+    })
+    .from(accessAllowlist)
+    .where(eq(accessAllowlist.userId, userId))
+    .limit(1);
+  if (!access) throw new Error(`beta access fixture is missing: ${userId}`);
+  return access;
 }
 
 export function clientHello(
