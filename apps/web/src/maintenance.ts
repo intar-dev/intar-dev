@@ -133,7 +133,7 @@ function maintenancePage(): Response {
   const headers = maintenanceHeaders("text/html; charset=utf-8");
   headers.set(
     "content-security-policy",
-    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   );
   headers.set("x-robots-tag", "noindex, nofollow");
   return new Response(

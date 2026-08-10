@@ -30,6 +30,9 @@ describe("beta cutover maintenance fence", () => {
 
     expect(page?.status).toBe(503);
     expect(page?.headers.get("cache-control")).toContain("no-store");
+    expect(page?.headers.get("content-security-policy")).toContain(
+      "connect-src 'self'",
+    );
     expect(api?.status).toBe(503);
     await expect(api?.json()).resolves.toMatchObject({ code: "maintenance" });
   });
