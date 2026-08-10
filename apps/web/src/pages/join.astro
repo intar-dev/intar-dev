@@ -1,25 +1,14 @@
 ---
 import "../styles/global.css";
 import { JoinBeta } from "../components/app/pages/JoinBeta";
-import {
-  JOIN_LOCAL_DEVELOPMENT_META_CONTENT_SECURITY_POLICY,
-  JOIN_META_CONTENT_SECURITY_POLICY,
-} from "../lib/join-security";
 
 const JOIN_THEME_BOOTSTRAP_SCRIPT = `(()=>{let t="system";try{const s=localStorage.getItem("intar-theme");if(s==="light"||s==="dark"||s==="system")t=s}catch{}const d=t==="dark"||(t==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=t;document.documentElement.classList.toggle("dark",d)})();`;
-const joinContentSecurityPolicy = import.meta.env.DEV
-	? JOIN_LOCAL_DEVELOPMENT_META_CONTENT_SECURITY_POLICY
-	: JOIN_META_CONTENT_SECURITY_POLICY;
 ---
 
 <!doctype html>
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta
-			http-equiv="Content-Security-Policy"
-			content={joinContentSecurityPolicy}
-		/>
 		<meta http-equiv="Cache-Control" content="no-store, max-age=0" />
 		<meta http-equiv="Pragma" content="no-cache" />
 		<meta http-equiv="Expires" content="0" />
