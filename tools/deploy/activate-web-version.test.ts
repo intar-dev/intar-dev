@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -22,7 +23,11 @@ const uploadedVersionId = "22222222-3333-4444-8555-666666666666";
 const databaseId = "33333333-4444-4555-8666-777777777777";
 const sessionNamespaceId = "87ad9df7e37e4ced900553aa1a7775a1";
 
-function runAmbiguousActivation(restoreFailures: number) {
+function runAmbiguousActivation(
+  restoreFailures: number,
+  beforeMaintenance = false,
+  targetMaintenance = false,
+) {
   const root = mkdtempSync(join(tmpdir(), "intar-web-activation-test-"));
   const bin = join(root, "bin");
   const runnerTemp = join(root, "runner");
@@ -45,6 +50,9 @@ function runAmbiguousActivation(restoreFailures: number) {
       name: "intar-dev",
       d1_databases: [{ binding: "DB", database_id: databaseId }],
       kv_namespaces: [{ binding: "SESSION", id: sessionNamespaceId }],
+      vars: {
+        BETA_ACCESS_MAINTENANCE: targetMaintenance ? "on" : "off",
+      },
       migrations: [
         { tag: "v1", new_sqlite_classes: ["AgentBridgeDO"] },
         {
@@ -81,7 +89,8 @@ if [ "$1 $2" = "deployments status" ]; then
 fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
-  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}],script_runtime:{migration_tag:"v4"}}}'
+  if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
+  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -135,16 +144,33 @@ esac
 set -u
 output=""
 headers=""
+url=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) output="$2"; shift 2 ;;
     --dump-header) headers="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 current="$(<"$MOCK_STATE")"
+if [ "$current" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
 if [ -n "$headers" ]; then : > "$headers"; fi
-if [ "$current" = "$BEFORE_VERSION_ID" ]; then printf '200'; else printf '503'; fi
+if [ "$url" = "https://intar.dev/api/cutover-maintenance-probe" ]; then
+  if [ "$maintenance" = true ]; then
+    if [ -n "$output" ]; then printf '%s' '{"code":"maintenance"}' > "$output"; fi
+    printf '503'
+  else
+    if [ -n "$output" ]; then printf '%s' '{"code":"not-found"}' > "$output"; fi
+    printf '404'
+  fi
+elif [ "$maintenance" = true ]; then
+  if [ -n "$output" ]; then printf '%s' '<h1>Beta access is under maintenance</h1>' > "$output"; fi
+  printf '503'
+else
+  if [ -n "$output" ]; then printf '%s' '<h1>intar.dev</h1>' > "$output"; fi
+  printf '200'
+fi
 `,
   );
   writeFileSync(join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
@@ -185,15 +211,23 @@ if [ "$current" = "$BEFORE_VERSION_ID" ]; then printf '200'; else printf '503'; 
         BEFORE_DEPLOYMENT_ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         UPLOADED_DEPLOYMENT_ID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
         RESTORE_DEPLOYMENT_ID: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa",
+        BEFORE_MAINTENANCE: String(beforeMaintenance),
+        TARGET_MAINTENANCE: String(targetMaintenance),
       },
     },
   );
   const runtime = join(runnerTemp, "intar-web-deploy-12345");
+  const rollbackPath = join(runtime, "rollback-evidence.json");
+  if (!existsSync(rollbackPath)) {
+    throw new Error(
+      `activation script did not reach rollback evidence (status ${String(result.status)}):\n${result.stdout}\n${result.stderr}`,
+    );
+  }
   return {
     result,
     state: readFileSync(state, "utf8"),
     rollback: JSON.parse(
-      readFileSync(join(runtime, "rollback-evidence.json"), "utf8"),
+      readFileSync(rollbackPath, "utf8"),
     ) as Record<string, unknown>,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
@@ -259,12 +293,36 @@ describe("exact web-version activation", () => {
     expect(script).toContain("current_active_version_used_as_reference: true");
   });
 
-  it("requires the production root to be healthy before and after activation", () => {
-    expect(script).toContain('probe_root_health "before" "${before_health}"');
-    expect(script).toContain('probe_root_health "after-${attempt}" "${health_state}"');
+  it("requires the expected open or exact maintenance state before and after activation", () => {
+    expect(script).toContain("before_health_mode");
+    expect(script).toContain("target_health_mode");
+    expect(script).toContain("https://intar.dev/api/cutover-maintenance-probe");
+    expect(script).toContain('"${maintenance_code}" = maintenance');
     expect(script).toContain('https://intar.dev/');
     expect(script).toContain("before_health_proven: true");
     expect(script).toContain("after_health_proven: true");
+  });
+
+  it("accepts the exact maintenance fence as the active rollback health state", () => {
+    const run = runAmbiguousActivation(0, true, true);
+    try {
+      expect(run.result.status).toBe(42);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.rollback).toMatchObject({
+        rollback_control_plane_proven: true,
+        rollback_health_proven: true,
+        rollback_proven: true,
+        before_health: {
+          expected_mode: "maintenance",
+          root_status: "503",
+          maintenance_status: "503",
+          maintenance_code: "maintenance",
+          healthy: true,
+        },
+      });
+    } finally {
+      run.cleanup();
+    }
   });
 
   it("reconciles an ambiguous activation and retries exact restore through public propagation", () => {

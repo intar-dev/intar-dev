@@ -46,17 +46,42 @@ test -n "${GITHUB_RUN_ATTEMPT:-}"
 probe_root_health() {
   local label="$1"
   local output="$2"
+  local expected_mode="$3"
   local root_headers="${runtime_root}/${label}-root-headers.txt"
+  local root_body="${runtime_root}/${label}-root-body.txt"
+  local maintenance_headers="${runtime_root}/${label}-maintenance-headers.txt"
+  local maintenance_body="${runtime_root}/${label}-maintenance-body.json"
   local root_status
+  local maintenance_status=""
+  local maintenance_code=""
+  local healthy=false
 
   root_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-    --header 'Cache-Control: no-cache' --output /dev/null \
+    --header 'Cache-Control: no-cache' --output "${root_body}" \
     --dump-header "${root_headers}" --write-out '%{http_code}' \
     https://intar.dev/; } || true)"
+  if [ "${expected_mode}" = maintenance ]; then
+    maintenance_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
+      --header 'Accept: application/json' --header 'Cache-Control: no-cache' \
+      --output "${maintenance_body}" --dump-header "${maintenance_headers}" \
+      --write-out '%{http_code}' \
+      https://intar.dev/api/cutover-maintenance-probe; } || true)"
+    maintenance_code="$(jq -r '.code // empty' "${maintenance_body}" 2>/dev/null || true)"
+    if [ "${root_status}" = 503 ] && [ "${maintenance_status}" = 503 ] && \
+      [ "${maintenance_code}" = maintenance ]; then
+      healthy=true
+    fi
+  elif [ "${expected_mode}" = open ] && [ "${root_status}" = 200 ]; then
+    healthy=true
+  fi
   jq -n \
     --arg root_status "${root_status}" \
+    --arg expected_mode "${expected_mode}" \
+    --arg maintenance_status "${maintenance_status}" \
+    --arg maintenance_code "${maintenance_code}" \
+    --argjson healthy "${healthy}" \
     --arg url "https://intar.dev/" \
-    '{url: $url, root_status: $root_status, healthy: ($root_status == "200")}' \
+    '{url: $url, expected_mode: $expected_mode, root_status: $root_status, maintenance_status: (if $maintenance_status == "" then null else $maintenance_status end), maintenance_code: (if $maintenance_code == "" then null else $maintenance_code end), healthy: $healthy}' \
     > "${output}"
   jq -e '.healthy == true' "${output}" >/dev/null
 }
@@ -84,6 +109,12 @@ jq -e \
     (.migrations | length) >= 1 and
     (.migrations[-1].tag | type) == "string"
   ' "${config}" >/dev/null
+target_maintenance_value="$(jq -er '.vars.BETA_ACCESS_MAINTENANCE // "off"' "${config}")"
+case "${target_maintenance_value}" in
+  on) target_health_mode=maintenance ;;
+  off) target_health_mode=open ;;
+  *) echo "invalid target BETA_ACCESS_MAINTENANCE value" >&2; exit 1 ;;
+esac
 
 bunx wrangler deployments status --name "${worker_name}" --json \
   > "${before_deployment}"
@@ -115,7 +146,21 @@ jq -e --arg version_id "${before_version_id}" '
 jq -e --arg migration_tag "$(jq -er '.resources.script_runtime.migration_tag' "${before_version}")" '
   .migrations[-1].tag == $migration_tag
 ' "${config}" >/dev/null
-probe_root_health "before" "${before_health}"
+before_maintenance_value="$(jq -r '
+  [.resources.bindings[] | select(
+    .type == "plain_text" and .name == "BETA_ACCESS_MAINTENANCE"
+  )] |
+  if length == 0 then "off"
+  elif length == 1 then .[0].text
+  else "invalid"
+  end
+' "${before_version}")"
+case "${before_maintenance_value}" in
+  on) before_health_mode=maintenance ;;
+  off) before_health_mode=open ;;
+  *) echo "invalid active BETA_ACCESS_MAINTENANCE binding" >&2; exit 1 ;;
+esac
+probe_root_health "before" "${before_health}" "${before_health_mode}"
 
 restore_required=false
 uploaded_version_id=""
@@ -212,7 +257,8 @@ restore_previous_on_exit() {
   if [ "${rollback_control_plane_proven}" = true ]; then
     for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
       rollback_state="${runtime_root}/rollback-health-${attempt}.json"
-      probe_root_health "rollback-${attempt}" "${rollback_state}"
+      probe_root_health "rollback-${attempt}" "${rollback_state}" \
+        "${before_health_mode}"
       probe_status="$?"
       root_healthy=false
       if [ "${probe_status}" -eq 0 ]; then
@@ -348,7 +394,8 @@ propagation_observed_attempt=0
 for attempt in $(seq 1 12); do
   health_state="${runtime_root}/after-health-${attempt}.json"
   root_healthy=false
-  if probe_root_health "after-${attempt}" "${health_state}"; then
+  if probe_root_health "after-${attempt}" "${health_state}" \
+    "${target_health_mode}"; then
     root_healthy=true
   fi
   jq -cn \
