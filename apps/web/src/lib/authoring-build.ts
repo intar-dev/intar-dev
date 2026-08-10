@@ -3,11 +3,13 @@ import { drizzle } from "drizzle-orm/d1";
 import type { ImageBuildBundleMeta } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
   assignQueuedImageBuilds,
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { createAppId } from "@/lib/id";
+import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import { getScenarioSource } from "@/lib/scenario-sources";
 import { buildTar, gzipBytes } from "@/lib/tar";
 import {
@@ -129,6 +131,15 @@ export async function queueDraftBuild(params: {
     nowUnixMs: now,
   });
   const assigned = await assignQueuedImageBuilds(db, now);
+  if (queued.queued < meta.scenarios.length) {
+    await tryReconcileScenarioImagesForPublicationScope(db, {
+      publicationOrganizationId: organizationId,
+      nowUnixMs: now,
+      reason: "authoring_bundle_accepted_without_full_rebuild",
+      wakeHostRuntime: (hostId) =>
+        tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+    });
+  }
 
   return {
     rev,

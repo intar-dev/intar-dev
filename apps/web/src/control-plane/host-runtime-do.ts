@@ -5,7 +5,7 @@ import {
   type SocketAttachment,
 } from "./host-runtime-do/base";
 import { and, eq, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
+import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
   parseBridgeMessageV6,
   serializeBridgeMessageV6,
@@ -47,6 +47,7 @@ import {
 } from "@/lib/scenario-hosts";
 import type {
   BridgeMessageV6,
+  HostCapabilitiesV2,
   HostDesiredStateV2,
   HostStateReportV2,
   VmActualStateV2,
@@ -56,9 +57,13 @@ import type {
 import { recordWorkshopProbeReport } from "@/lib/workshops/progress";
 import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
 import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
+import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
 
 export const WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS = 90_000;
 export const WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE = 8;
+export const SCENARIO_IMAGE_CACHE_RECONCILIATION_INTERVAL_MS = 5 * 60_000;
+const SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY =
+  "scenario-image-cache-next-reconciliation-at-ms";
 
 type RuntimeVmReportContext = {
   executionId: string;
@@ -95,6 +100,8 @@ type RuntimeVmAggregateRow = {
 export class HostRuntimeDO extends HostRuntimeBase {
   private cpuReservationQueue: Promise<void> = Promise.resolve();
   private desiredDispatchQueue: Promise<void> = Promise.resolve();
+  private clientHelloQueue: Promise<void> = Promise.resolve();
+  private nextScenarioImageCacheReconciliationAtMs: number | null = null;
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -400,7 +407,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
     message: BridgeMessageV6,
   ): Promise<void> {
     if (message.type === "client_hello") {
-      await this.handleBridgeClientHello(ws, attachment, message);
+      await this.withClientHelloLock(() =>
+        this.handleBridgeClientHello(ws, attachment, message),
+      );
       return;
     }
 
@@ -500,52 +509,129 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return;
     }
 
-    const db = drizzle(this.env.DB);
-    const desiredState = await loadOrCreateHostDesiredState(
-      db,
-      message.host_id,
-      now,
-    );
     const sessionId = `v6:${createAppId()}`;
-    const nextAttachment: SocketAttachment = {
+    const pendingAttachment: SocketAttachment = {
       ...attachment,
       sessionId,
+      // Keep the socket in handshake state until server_hello is ready. A
+      // concurrent wake must not send desired_state first; the agent rejects
+      // any first server frame other than server_hello.
+      helloReceived: false,
+      bridgeProtocol: null,
+      lastDesiredVersionSent: null,
+      lastDesiredDispatchAtMs: null,
+    };
+    ws.serializeAttachment(pendingAttachment);
+
+    await this.persistKnownHostId(message.host_id);
+    const db = drizzle(this.env.DB);
+    await db.batch([
+      db
+        .update(agentHosts)
+        .set({
+          activeSessionId: sessionId,
+          scenarioEnabled: resolveScenarioEnabledForHostRole(
+            host.role,
+            host.scenarioEnabled,
+          ),
+          connected: true,
+          connectedAt: host.connectedAt ?? now,
+          disconnectedAt: null,
+          lastClientHelloAt: now,
+          lastServerHelloAt: now,
+          agentVersion: message.agent_version,
+          updatedAt: now,
+        })
+        .where(eq(agentHosts.id, message.host_id)),
+      // host_actual_state has no session column. Clearing it in the same
+      // transaction as the session swap makes any subsequently accepted row
+      // current-session evidence, without relying on millisecond timestamps.
+      db
+        .delete(hostActualState)
+        .where(eq(hostActualState.hostId, message.host_id)),
+    ]);
+
+    // Persist the session fence before trusting the hello architecture. Bulk
+    // catalog reconciliation cannot see actual-state reports from before this
+    // hello, and the desired-state CAS below is tied to this exact session.
+    let reconciliation: Awaited<ReturnType<typeof reconcileHostScenarioImages>>;
+    try {
+      reconciliation = await reconcileHostScenarioImages(db, {
+        hostId: message.host_id,
+        architecture: message.capabilities.arch,
+        nowUnixMs: now,
+        expectedActiveSessionId: sessionId,
+      });
+    } catch (error) {
+      await this.rollbackPendingClientHello(db, host, sessionId);
+      try {
+        ws.close(1011, "host image reconciliation failed");
+      } catch {
+        // ignore
+      }
+      throw error;
+    }
+    const desiredState = reconciliation.desiredState;
+    if (
+      !desiredState ||
+      reconciliation.outcome === "stale_host_snapshot" ||
+      ws.readyState !== WebSocket.OPEN
+    ) {
+      await this.rollbackPendingClientHello(db, host, sessionId);
+      try {
+        ws.close(1012, "host session changed during hello");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const nextAttachment: SocketAttachment = {
+      ...pendingAttachment,
       helloReceived: true,
       bridgeProtocol: "v6",
       lastDesiredVersionSent:
         message.last_applied_desired_version === desiredState.version
           ? desiredState.version
           : null,
-      lastDesiredDispatchAtMs: null,
     };
-    ws.serializeAttachment(nextAttachment);
+    try {
+      // No await is allowed between promoting the attachment and this frame:
+      // server_hello must be the first server message on a v6 connection.
+      ws.serializeAttachment(nextAttachment);
+      ws.send(
+        serializeBridgeMessageV6({
+          type: "server_hello",
+          protocol_version: message.protocol_version,
+          host_id: message.host_id,
+          desired_version: desiredState.version,
+        }),
+      );
+    } catch (error) {
+      await this.rollbackPendingClientHello(db, host, sessionId);
+      try {
+        ws.close(1011, "server hello failed");
+      } catch {
+        // ignore
+      }
+      throw error;
+    }
 
-    await this.persistKnownHostId(message.host_id);
-    await this.updateHostRow(message.host_id, {
-      activeSessionId: sessionId,
-      scenarioEnabled: resolveScenarioEnabledForHostRole(
-        host.role,
-        host.scenarioEnabled,
-      ),
-      connected: true,
-      connectedAt: host.connectedAt ?? now,
-      disconnectedAt: null,
-      lastClientHelloAt: now,
-      lastServerHelloAt: now,
-      agentVersion: message.agent_version,
-      updatedAt: now,
-    });
+    this.nextScenarioImageCacheReconciliationAtMs = 0;
+    try {
+      await this.ctx.storage.delete(
+        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          message: "failed to reset scenario image reconciliation schedule",
+          hostId: message.host_id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
 
     await this.closeOlderSockets(message.host_id, ws, sessionId);
-
-    ws.send(
-      serializeBridgeMessageV6({
-        type: "server_hello",
-        protocol_version: message.protocol_version,
-        host_id: message.host_id,
-        desired_version: desiredState.version,
-      }),
-    );
 
     // Deliver the current version through the same serialized path used by
     // wake/alarm/report events. Maintenance remains durable but no longer sits
@@ -691,6 +777,27 @@ export class HostRuntimeDO extends HostRuntimeBase {
     await this.withCpuReservationLock(async () => {
       await reconcileHostCpuReservations(db, hostId, now);
     });
+
+    try {
+      await this.reconcileScenarioImageCacheIfDue({
+        db,
+        hostId,
+        architecture: report.capabilities.arch,
+        expectedSessionId,
+        nowUnixMs: now,
+      });
+    } catch (error) {
+      // Cache repair is durable, best-effort maintenance. Never discard an
+      // authoritative inventory report because catalog reconciliation failed;
+      // leave the due marker unchanged so the next report retries.
+      console.error(
+        JSON.stringify({
+          message: "periodic scenario image cache reconciliation failed",
+          hostId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
   }
 
   private async applyBridgeVmReport(
@@ -1279,6 +1386,102 @@ export class HostRuntimeDO extends HostRuntimeBase {
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  private async withClientHelloLock<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.clientHelloQueue;
+    let release!: () => void;
+    this.clientHelloQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async rollbackPendingClientHello(
+    db: DrizzleD1Database,
+    previousHost: typeof agentHosts.$inferSelect,
+    pendingSessionId: string,
+  ): Promise<void> {
+    const now = Date.now();
+    const disconnectedHost = await db
+      .update(agentHosts)
+      .set({
+        // Fail closed instead of reviving the previous session: that socket
+        // may have closed while the replacement handshake was awaiting D1.
+        // Closing it below forces the agent through a fresh hello/report and
+        // prevents ghost readiness based on unowned actual-state evidence.
+        activeSessionId: null,
+        scenarioEnabled: previousHost.scenarioEnabled,
+        connected: false,
+        connectedAt: previousHost.connectedAt,
+        disconnectedAt: now,
+        lastClientHelloAt: previousHost.lastClientHelloAt,
+        lastServerHelloAt: previousHost.lastServerHelloAt,
+        agentVersion: previousHost.agentVersion,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(agentHosts.id, previousHost.id),
+          eq(agentHosts.activeSessionId, pendingSessionId),
+        ),
+      )
+      .returning({ id: agentHosts.id });
+    if (!disconnectedHost.length || !previousHost.activeSessionId) return;
+
+    for (const socket of this.ctx.getWebSockets(`host:${previousHost.id}`)) {
+      const socketAttachment = this.readSocketAttachment(socket);
+      if (socketAttachment?.sessionId !== previousHost.activeSessionId) {
+        continue;
+      }
+      try {
+        socket.close(1012, "replacement handshake failed");
+      } catch {
+        // The previous socket may already be closing.
+      }
+    }
+  }
+
+  private async reconcileScenarioImageCacheIfDue(input: {
+    db: DrizzleD1Database;
+    hostId: string;
+    architecture: HostCapabilitiesV2["arch"];
+    expectedSessionId: string;
+    nowUnixMs: number;
+  }): Promise<void> {
+    const nextReconciliationAt =
+      this.nextScenarioImageCacheReconciliationAtMs ??
+      (await this.ctx.storage.get<number>(
+        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
+      )) ??
+      0;
+    this.nextScenarioImageCacheReconciliationAtMs = nextReconciliationAt;
+    if (input.nowUnixMs < nextReconciliationAt) {
+      return;
+    }
+
+    const result = await reconcileHostScenarioImages(input.db, {
+      hostId: input.hostId,
+      architecture: input.architecture,
+      nowUnixMs: input.nowUnixMs,
+      expectedActiveSessionId: input.expectedSessionId,
+    });
+    if (result.outcome !== "stale_host_snapshot") {
+      const nextAt =
+        input.nowUnixMs + SCENARIO_IMAGE_CACHE_RECONCILIATION_INTERVAL_MS;
+      await this.ctx.storage.put(
+        SCENARIO_IMAGE_CACHE_NEXT_RECONCILIATION_STORAGE_KEY,
+        nextAt,
+      );
+      this.nextScenarioImageCacheReconciliationAtMs = nextAt;
     }
   }
 }

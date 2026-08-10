@@ -410,7 +410,7 @@ describe("HostRuntimeDO generic runtime projection", () => {
       executionId: "workshop-execution-missing",
       now,
     });
-    const desired = await mutateStoredHostDesiredState(
+    await mutateStoredHostDesiredState(
       drizzleD1(env.DB),
       fixture.hostId,
       now,
@@ -437,15 +437,18 @@ describe("HostRuntimeDO generic runtime projection", () => {
       },
     );
     const { messages, ws } = await connectHost(fixture.hostId);
-    await waitForBridgeMessage(
+    const hello = await waitForBridgeMessage(
       messages,
       (message) => message.type === "server_hello",
     );
+    if (hello.type !== "server_hello") {
+      throw new Error("expected server hello");
+    }
     sendBridge(
       ws,
       stateReport(fixture.hostId, {
         observedAt: now + 100,
-        appliedDesiredVersion: desired.version,
+        appliedDesiredVersion: hello.desired_version,
         vms: [],
       }),
     );

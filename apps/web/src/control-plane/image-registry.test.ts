@@ -11,8 +11,13 @@ import { beforeEach, describe, it, expect, vi } from "vitest";
 import { handleImageRegistryRequest } from "@/control-plane/image-registry";
 import { readBundleMeta } from "@/control-plane/image-registry/bundle";
 
-const { authMock, dbMock, schedulerMock, scenarioCourseCatalogMock } =
-  imageRegistryMocks();
+const {
+  authMock,
+  dbMock,
+  schedulerMock,
+  scenarioCourseCatalogMock,
+  scenarioImageCacheMock,
+} = imageRegistryMocks();
 
 describe("image registry source bundles", () => {
   beforeEach(resetImageRegistryMocks);
@@ -159,6 +164,9 @@ describe("image registry source bundles", () => {
         dbMock.db,
         now,
       );
+      expect(
+        scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope,
+      ).not.toHaveBeenCalled();
     } finally {
       dateSpy.mockRestore();
     }
@@ -847,10 +855,7 @@ describe("course catalog bundle metadata", () => {
       {
         version: 1,
         mode: "replace",
-        courses: [
-          courseMeta(),
-          courseMeta({ course_id: "second-course" }),
-        ],
+        courses: [courseMeta(), courseMeta({ course_id: "second-course" })],
       },
       {
         version: 1,
@@ -940,6 +945,14 @@ describe("course catalog bundle metadata", () => {
         nowUnixMs: now,
       });
       expect(bucketPut).toHaveBeenCalledOnce();
+      expect(
+        scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope,
+      ).toHaveBeenCalledWith(dbMock.db, {
+        publicationOrganizationId: null,
+        nowUnixMs: now,
+        reason: "public_bundle_accepted_without_full_rebuild",
+        wakeHostRuntime: expect.any(Function),
+      });
     } finally {
       dateSpy.mockRestore();
     }
@@ -974,7 +987,9 @@ describe("course catalog bundle metadata", () => {
       scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot,
     ).toHaveBeenCalledWith(
       dbMock.db,
-      expect.objectContaining({ snapshot: { version: 1, mode: "replace", courses: [] } }),
+      expect.objectContaining({
+        snapshot: { version: 1, mode: "replace", courses: [] },
+      }),
     );
 
     scenarioCourseCatalogMock.syncScenarioCourseCatalogSnapshot.mockClear();
@@ -982,7 +997,10 @@ describe("course catalog bundle metadata", () => {
       new Request("https://intar.test/registry/v1/bundles", {
         method: "POST",
         headers: { authorization: "Bearer publish-secret" },
-        body: sourceBundleForm(undefined, sourceBundleFixture(["broken-nginx"])),
+        body: sourceBundleForm(
+          undefined,
+          sourceBundleFixture(["broken-nginx"]),
+        ),
       }),
       env,
     );

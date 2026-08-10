@@ -13,11 +13,13 @@ import {
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { createAppId } from "@/lib/id";
+import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { getOrganizationDetail } from "@/lib/organizations";
 import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
+import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 
 export const prerender = false;
 
@@ -80,14 +82,16 @@ export const POST: APIRoute = async ({ request, params }) => {
     const db = drizzle(env.DB);
     const courseCatalog = parsed.value.bundleMeta.courseCatalog;
     if (courseCatalog) {
-      const referenceValidation =
-        await validateScenarioCourseCatalogReferences(db, {
+      const referenceValidation = await validateScenarioCourseCatalogReferences(
+        db,
+        {
           snapshot: courseCatalog,
           bundleScenarioIds: parsed.value.bundleMeta.scenarios.map(
             (scenario) => scenario.scenarioId,
           ),
           organizationId: organization.id,
-        });
+        },
+      );
       if (!referenceValidation.ok) {
         return jsonResponse(
           {
@@ -126,6 +130,15 @@ export const POST: APIRoute = async ({ request, params }) => {
       });
     }
     const assigned = await assignQueuedImageBuilds(db, now);
+    if (queued.queued < meta.scenarios.length) {
+      await tryReconcileScenarioImagesForPublicationScope(db, {
+        publicationOrganizationId: organization.id,
+        nowUnixMs: now,
+        reason: "organization_bundle_accepted_without_full_rebuild",
+        wakeHostRuntime: (hostId) =>
+          tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+      });
+    }
     return jsonResponse(
       {
         ok: true,
