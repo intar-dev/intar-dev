@@ -130,16 +130,115 @@ function maintenanceJson(
 }
 
 function maintenancePage(): Response {
+  const nonce = maintenanceNonce();
   const headers = maintenanceHeaders("text/html; charset=utf-8");
   headers.set(
     "content-security-policy",
-    "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    `default-src 'none'; connect-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
   );
   headers.set("x-robots-tag", "noindex, nofollow");
   return new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Maintenance · intar.dev</title><style>html{color-scheme:light dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#171613;color:#f3efe4}body{min-height:100vh;margin:0;display:grid;place-items:center}main{width:min(38rem,calc(100% - 3rem));border-top:3px solid #d65f2f;padding-top:2rem}p{max-width:60ch;color:#c9c1b2;line-height:1.6}small{font-family:ui-monospace,monospace;color:#938b7d}</style></head><body><main><small>PLANNED CUTOVER</small><h1>Beta access is under maintenance</h1><p>We are replacing the access boundary and validating the new invite flow. Existing sessions are intentionally unavailable until the checks finish.</p><p>Try again shortly.</p></main></body></html>`,
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>Maintenance · intar.dev</title>
+    <style nonce="${nonce}">
+      html{color-scheme:light dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#171613;color:#f3efe4}
+      body{min-height:100vh;margin:0;display:grid;place-items:center}
+      main{width:min(38rem,calc(100% - 3rem));border-top:3px solid #d65f2f;padding-top:2rem}
+      p{max-width:60ch;color:#c9c1b2;line-height:1.6}
+      small{font-family:ui-monospace,monospace;color:#938b7d}
+      form{margin-top:2rem;padding-top:1.5rem;border-top:1px solid #4b463d}
+      label{display:block;margin-bottom:.5rem;font-weight:650}
+      input,button{box-sizing:border-box;font:inherit;border-radius:.35rem}
+      input{width:100%;padding:.75rem;border:1px solid #736a5d;background:#211f1b;color:#f3efe4}
+      input:focus-visible,button:focus-visible{outline:3px solid #ef8a5f;outline-offset:3px}
+      button{margin-top:1rem;padding:.7rem 1rem;border:0;background:#b84a20;color:#fff;cursor:pointer;font-weight:700}
+      button:disabled{cursor:wait;opacity:.65}
+      #operator-status{min-height:1.6em;margin-bottom:0}
+      #operator-status[data-error="true"]{color:#ffb49a}
+    </style>
+  </head>
+  <body>
+    <main>
+      <small>PLANNED CUTOVER</small>
+      <h1>Beta access is under maintenance</h1>
+      <p>We are replacing the access boundary and validating the new invite flow. Existing sessions are intentionally unavailable until the checks finish.</p>
+      <p>Try again shortly.</p>
+      <form id="operator-login" action="/api/maintenance/bypass" method="post">
+        <label for="operator-secret">Operator maintenance secret</label>
+        <input id="operator-secret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+        <button id="operator-submit" type="submit">Enter maintenance mode</button>
+        <p id="operator-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      </form>
+    </main>
+    <script nonce="${nonce}">
+      (() => {
+        "use strict";
+        const form = document.getElementById("operator-login");
+        const secretInput = document.getElementById("operator-secret");
+        const submitButton = document.getElementById("operator-submit");
+        const status = document.getElementById("operator-status");
+        if (!(form instanceof HTMLFormElement) ||
+            !(secretInput instanceof HTMLInputElement) ||
+            !(submitButton instanceof HTMLButtonElement) ||
+            !(status instanceof HTMLParagraphElement)) return;
+
+        window.addEventListener("pagehide", () => {
+          secretInput.value = "";
+        });
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          form.setAttribute("aria-busy", "true");
+          submitButton.disabled = true;
+          status.removeAttribute("data-error");
+          status.textContent = "Checking operator access…";
+          let requestBody = "";
+          try {
+            requestBody = JSON.stringify({ secret: secretInput.value });
+            secretInput.value = "";
+            const response = await fetch("/api/maintenance/bypass", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              credentials: "same-origin",
+              cache: "no-store",
+              redirect: "error",
+              body: requestBody,
+            });
+            requestBody = "";
+            if (!response.ok) {
+              status.setAttribute("data-error", "true");
+              status.textContent = "Operator access was denied. Check the secret and try again.";
+              secretInput.focus();
+              return;
+            }
+            status.textContent = "Access granted. Reloading…";
+            window.location.reload();
+          } catch {
+            status.setAttribute("data-error", "true");
+            status.textContent = "Operator access could not be checked. Try again.";
+            secretInput.focus();
+          } finally {
+            requestBody = "";
+            secretInput.value = "";
+            form.removeAttribute("aria-busy");
+            submitButton.disabled = false;
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>`,
     { status: 503, headers },
   );
+}
+
+function maintenanceNonce(): string {
+  return base64Url(crypto.getRandomValues(new Uint8Array(18)));
 }
 
 function maintenanceHeaders(contentType: string): Headers {

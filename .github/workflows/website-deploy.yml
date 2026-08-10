@@ -702,6 +702,22 @@ jobs:
           INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
         run: |
           set -euo pipefail
+          beta_maintenance="$(
+            jq -er '.vars.BETA_ACCESS_MAINTENANCE // "off"' \
+              apps/web/dist/server/wrangler.json
+          )"
+          case "${beta_maintenance}" in
+            on)
+              printf 'Skipping scenario source bundle while beta access maintenance is on.\n'
+              exit 0
+              ;;
+            off) ;;
+            *)
+              printf 'Invalid BETA_ACCESS_MAINTENANCE value: %s\n' \
+                "${beta_maintenance}" >&2
+              exit 1
+              ;;
+          esac
           test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
           revision="${GITHUB_SHA:0:12}"
           just bundle-images \
