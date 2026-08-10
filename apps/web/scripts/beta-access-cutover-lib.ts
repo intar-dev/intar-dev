@@ -37,6 +37,12 @@ export const BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL = `
   FROM workshop_route_issuance_intents
 `;
 
+export function betaCutoverOperationalPreflightQueries(): string[] {
+  return BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL.split(/\s+UNION ALL\s+/u)
+    .map((query) => query.trim())
+    .filter(Boolean);
+}
+
 export function betaSchemaStatements(cleanBaseline: string): string[] {
   const statements = cleanBaseline
     .split(STATEMENT_BREAKPOINT)

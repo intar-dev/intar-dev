@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL,
+  betaCutoverOperationalPreflightQueries,
   betaSchemaStatements,
   buildBetaResetSql,
 } from "../../scripts/beta-access-cutover-lib";
@@ -37,6 +38,14 @@ describe("pure beta replacement SQL", () => {
     expect(BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL).toContain(
       "'connected_personal_agent'",
     );
+  });
+
+  it("runs operational preflights as independent D1 queries", () => {
+    const queries = betaCutoverOperationalPreflightQueries();
+
+    expect(queries).toHaveLength(6);
+    expect(queries.every((query) => !query.includes("UNION ALL"))).toBe(true);
+    expect(queries.join("\n")).toContain("workshop_route_issuance_intents");
   });
 
   it("selects only beta schema and required account indexes", () => {

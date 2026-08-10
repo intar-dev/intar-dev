@@ -4,7 +4,7 @@ import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL,
+  betaCutoverOperationalPreflightQueries,
   buildBetaResetSql,
 } from "./beta-access-cutover-lib";
 
@@ -59,9 +59,10 @@ if (preflight.length > 0) {
   fail(`Account uniqueness preflight failed: ${JSON.stringify(preflight)}`);
 }
 
-const operationalState = await d1Query(
-  BETA_CUTOVER_OPERATIONAL_PREFLIGHT_SQL,
-);
+const operationalState: Record<string, unknown>[] = [];
+for (const query of betaCutoverOperationalPreflightQueries()) {
+  operationalState.push(...(await d1Query(query)));
+}
 if (operationalState.length > 0) {
   fail(
     `Drain scenario runs, personal agents, and workshop routes before cutover: ${JSON.stringify(operationalState)}`,
