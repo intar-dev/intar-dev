@@ -41,6 +41,12 @@ const hostRuntimeWakeMock = vi.hoisted(() => ({
   tryWakeHostRuntime: vi.fn(),
 }));
 
+const scenarioImageCacheMock = vi.hoisted(() => ({
+  isRuntimeImageCacheHost: vi.fn(),
+  reconcileScenarioImagesForPublicationScope: vi.fn(),
+  tryReconcileScenarioImagesForPublicationScope: vi.fn(),
+}));
+
 export function imageRegistryMocks() {
   return {
     authMock,
@@ -51,6 +57,7 @@ export function imageRegistryMocks() {
     catalogManifestMock,
     desiredStateStoreMock,
     hostRuntimeWakeMock,
+    scenarioImageCacheMock,
   };
 }
 
@@ -69,6 +76,8 @@ vi.mock("@/lib/catalog-manifest", () => catalogManifestMock);
 vi.mock("@/lib/desired-state-store", () => desiredStateStoreMock);
 
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeWakeMock);
+
+vi.mock("@/lib/scenario-image-cache", () => scenarioImageCacheMock);
 
 vi.mock("cloudflare:workers", () => ({ env: {} }));
 
@@ -98,6 +107,27 @@ export function resetImageRegistryMocks(): void {
   catalogManifestMock.seedScenarioManifest.mockReset();
   desiredStateStoreMock.mutateStoredHostDesiredState.mockReset();
   hostRuntimeWakeMock.tryWakeHostRuntime.mockReset();
+  scenarioImageCacheMock.isRuntimeImageCacheHost.mockReset();
+  scenarioImageCacheMock.isRuntimeImageCacheHost.mockImplementation(
+    (host: { role: string; disabled: boolean }) =>
+      host.role === "agent" && !host.disabled,
+  );
+  scenarioImageCacheMock.reconcileScenarioImagesForPublicationScope.mockReset();
+  scenarioImageCacheMock.reconcileScenarioImagesForPublicationScope.mockResolvedValue(
+    {
+      changedHostIds: [],
+      skippedUnknownArchitectureHostIds: [],
+      failedHostIds: [],
+    },
+  );
+  scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope.mockReset();
+  scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope.mockResolvedValue(
+    {
+      changedHostIds: [],
+      skippedUnknownArchitectureHostIds: [],
+      failedHostIds: [],
+    },
+  );
 }
 
 export function buildLogDb(input: {
@@ -208,16 +238,15 @@ export interface HostSelectRow {
   scenarioEnabled: boolean;
 }
 
-// Publish runs three select queries in order: the cached-image host bump, the
-// scenario catalog-reference guard, and the published-workshop checkpoint
-// guard. The last query includes an inner join, so the fixture exposes both
-// Drizzle chain shapes.
+// Pruning queries the scenario catalog-reference guard and then the published
+// workshop checkpoint guard. The last query includes an inner join, so the
+// fixture exposes both Drizzle chain shapes.
 export function publishPruneDb(
-  hostRows: HostSelectRow[],
+  _hostRows: HostSelectRow[],
   imageRefRows: Array<{ imageKey: unknown; imageSha256: string | null }>,
   workshopRows: Array<{ images: unknown[] | null }> = [],
 ) {
-  const rowSets = [hostRows, imageRefRows, workshopRows];
+  const rowSets = [imageRefRows, workshopRows];
   let queryIndex = 0;
   const select = vi.fn(() => {
     const rows = rowSets[queryIndex++] ?? [];

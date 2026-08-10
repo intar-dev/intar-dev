@@ -35,6 +35,8 @@ import {
   drizzle,
   hostDesiredState,
   scenarioRuns,
+  vmScenarios,
+  vmScenarioVms,
   upsertDesiredCachedImage,
   upsertDesiredVm,
   mutateStoredHostDesiredState,
@@ -413,6 +415,7 @@ describe("HostRuntimeDO run lifecycle projection", () => {
   it("re-pushes desired state after reconnect sync and persists applied version catch-up", async () => {
     const hostId = "host-reconnect-sync";
     await seedHost(hostId);
+    await seedCatalogImage("3".repeat(64));
     const first = await connectHost(hostId);
     await waitForBridgeMessage(
       first.messages,
@@ -479,4 +482,127 @@ describe("HostRuntimeDO run lifecycle projection", () => {
     );
     ws.close();
   });
+
+  it("seeds a host registered after publication before its first desired-state dispatch", async () => {
+    const hostId = "host-created-after-publication";
+    const sha256 = "4".repeat(64);
+    await seedHost(hostId);
+    await seedCatalogImage(sha256);
+
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) => message.type === "server_hello",
+    );
+    const desired = await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" &&
+        message.desired_state.cached_images.some(
+          (entry) => entry.image_sha256 === sha256,
+        ),
+    );
+
+    expect(desired).toMatchObject({
+      type: "desired_state",
+      desired_state: {
+        version: 1,
+        cached_images: [
+          {
+            image_key: testImageKey,
+            image_sha256: sha256,
+          },
+        ],
+      },
+    });
+    expect(messages.slice(0, 2).map((message) => message.type)).toEqual([
+      "server_hello",
+      "desired_state",
+    ]);
+    ws.close();
+  });
+
+  it("periodically repairs catalog cache drift on an already connected host", async () => {
+    const hostId = "host-periodic-image-repair";
+    const sha256 = "5".repeat(64);
+    await seedHost(hostId);
+    await seedCatalogImage(sha256);
+    const { messages, ws } = await connectHost(hostId);
+    await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" &&
+        message.desired_state.cached_images[0]?.image_sha256 === sha256,
+    );
+
+    const db = drizzle(env.DB);
+    const cleared = await mutateStoredHostDesiredState(
+      db,
+      hostId,
+      Date.now(),
+      (draft) => {
+        draft.cached_images = [];
+      },
+    );
+    sendBridge(
+      ws,
+      stateReport(hostId, {
+        observedAt: Date.now(),
+        appliedDesiredVersion: cleared.version,
+        cachedImages: [],
+      }),
+    );
+
+    const repaired = await waitForBridgeMessage(
+      messages,
+      (message) =>
+        message.type === "desired_state" &&
+        message.desired_state.version > cleared.version &&
+        message.desired_state.cached_images[0]?.image_sha256 === sha256,
+    );
+    expect(repaired).toMatchObject({ type: "desired_state" });
+    ws.close();
+  });
 });
+
+async function seedCatalogImage(sha256: string): Promise<void> {
+  const db = drizzle(env.DB);
+  const now = Date.now();
+  await db.batch([
+    db.insert(vmScenarios).values({
+      scenarioId: testImageKey.scenario,
+      organizationId: null,
+      title: "Broken nginx",
+      category: "test",
+      description: "host image reconciliation test",
+      difficulty: "easy",
+      estimatedMinutes: 10,
+      tagsJson: [],
+      briefingMarkdown: "briefing",
+      solutionMarkdown: "solution",
+      hintsJson: [],
+      enabled: true,
+      enabledAt: now,
+      createdAt: now,
+      updatedAt: now,
+    }),
+    db.insert(vmScenarioVms).values({
+      id: `${testImageKey.scenario}:${testImageKey.vm}`,
+      scenarioId: testImageKey.scenario,
+      ordinal: 0,
+      vmName: testImageKey.vm,
+      image: "broken-nginx-webserver-x86_64.raw.zst",
+      imageKeyJson: testImageKey,
+      imageSha256: sha256,
+      imageFormat: "raw_zstd",
+      imageVirtualSizeBytes: 1_024,
+      kernelSha256: "a".repeat(64),
+      initrdSha256: "b".repeat(64),
+      bootCmdline: "console=ttyS0 root=/dev/vda rw",
+      cpuMillis: 1_000,
+      vcpuCount: 1,
+      memoryMib: 512,
+      diskMib: 1_024,
+    }),
+  ]);
+}

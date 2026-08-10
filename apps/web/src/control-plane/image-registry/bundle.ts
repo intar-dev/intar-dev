@@ -8,10 +8,12 @@ import {
   queueImageBuildsFromBundle,
 } from "@/lib/build-scheduler";
 import { IMAGE_BUILD_FORMAT_VERSION } from "@/lib/image-build-format";
+import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
 } from "@/lib/scenario-course-catalogs";
+import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
   jsonResponse,
   bundleObjectKey,
@@ -116,6 +118,19 @@ export async function handleBundleUpload(
     });
   }
   const assigned = await assignQueuedImageBuilds(db, now);
+  // Run this after the bundle/course/build pipeline has committed whenever at
+  // least one accepted image has no new publication event ahead of it. This is
+  // the key path for unchanged bundles (queued=0) and hosts added since the
+  // original publication, without duplicating fan-out for all-new builds.
+  if (queued.queued < meta.value.bundleMeta.scenarios.length) {
+    await tryReconcileScenarioImagesForPublicationScope(db, {
+      publicationOrganizationId: null,
+      nowUnixMs: now,
+      reason: "public_bundle_accepted_without_full_rebuild",
+      wakeHostRuntime: (hostId) =>
+        tryWakeHostRuntimeViaNamespace(env.HOST_RUNTIME, hostId),
+    });
+  }
 
   return jsonResponse(
     {
@@ -282,7 +297,10 @@ export async function readBundleMeta(value: FormDataEntryValue | null): Promise<
 export function normalizeCourseCatalogSnapshot(
   value: unknown,
 ): ScenarioCourseCatalogSnapshotV1 | null {
-  if (!isRecord(value) || !hasExactKeys(value, ["version", "mode", "courses"])) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["version", "mode", "courses"])
+  ) {
     return null;
   }
   if (value.version !== 1 || value.mode !== "replace") {
@@ -489,8 +507,7 @@ export function concatUint8Arrays(
 }
 
 export type TarInspectionResult =
-  | { ok: true; files: Set<string> }
-  | { ok: false; error: string };
+  { ok: true; files: Set<string> } | { ok: false; error: string };
 
 export function inspectTarArchive(bytes: Uint8Array): TarInspectionResult {
   if (bytes.length === 0) {

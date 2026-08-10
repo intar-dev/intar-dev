@@ -11,12 +11,8 @@ import {
   isRuntimeImageCacheHost,
 } from "@/control-plane/image-registry";
 
-const {
-  dbMock,
-  catalogManifestMock,
-  desiredStateStoreMock,
-  hostRuntimeWakeMock,
-} = imageRegistryMocks();
+const { dbMock, catalogManifestMock, scenarioImageCacheMock } =
+  imageRegistryMocks();
 
 describe("image registry publish storage", () => {
   beforeEach(resetImageRegistryMocks);
@@ -269,7 +265,7 @@ describe("image registry publish storage", () => {
     ).toBe(false);
   });
 
-  it("prewarms maintenance-paused agents without waking builder hosts", async () => {
+  it("reconciles all eligible hosts after publication", async () => {
     const now = 1_762_041_660_000;
     const dateSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     const imagePayload = new Uint8Array([1, 2, 3]);
@@ -292,26 +288,7 @@ describe("image registry publish storage", () => {
     );
     const bucketHead = vi.fn().mockResolvedValue(null);
     const bucketPut = vi.fn().mockResolvedValue(undefined);
-    const db = hostSelectDb([
-      {
-        id: "agent-1",
-        role: "agent",
-        disabled: false,
-        scenarioEnabled: true,
-      },
-      {
-        id: "builder-1",
-        role: "builder",
-        disabled: false,
-        scenarioEnabled: false,
-      },
-      {
-        id: "agent-paused",
-        role: "agent",
-        disabled: false,
-        scenarioEnabled: false,
-      },
-    ]);
+    const db = hostSelectDb([]);
     dbMock.drizzle.mockReturnValueOnce(db);
 
     try {
@@ -341,21 +318,13 @@ describe("image registry publish storage", () => {
         },
       );
       expect(
-        desiredStateStoreMock.mutateStoredHostDesiredState,
-      ).toHaveBeenCalledTimes(2);
-      expect(
-        desiredStateStoreMock.mutateStoredHostDesiredState,
-      ).toHaveBeenCalledWith(db, "agent-1", now, expect.any(Function));
-      expect(
-        desiredStateStoreMock.mutateStoredHostDesiredState,
-      ).toHaveBeenCalledWith(db, "agent-paused", now, expect.any(Function));
-      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledTimes(2);
-      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
-        "agent-1",
-      );
-      expect(hostRuntimeWakeMock.tryWakeHostRuntime).toHaveBeenCalledWith(
-        "agent-paused",
-      );
+        scenarioImageCacheMock.tryReconcileScenarioImagesForPublicationScope,
+      ).toHaveBeenCalledWith(db, {
+        publicationOrganizationId: null,
+        nowUnixMs: now,
+        reason: "image_published",
+        wakeHostRuntime: expect.any(Function),
+      });
     } finally {
       dateSpy.mockRestore();
     }

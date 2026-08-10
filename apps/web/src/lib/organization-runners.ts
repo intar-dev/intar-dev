@@ -5,9 +5,10 @@ import { sha256Hex } from "@/control-plane/auth";
 import { agentBootstrapTokens, agentHosts, scenarioRuns } from "@/db/schema";
 import { buildStoredBridgeStatus, type AgentHostRow } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
-import { retireHostRuntime } from "@/lib/host-runtime-wake";
+import { retireHostRuntime, tryWakeHostRuntime } from "@/lib/host-runtime-wake";
 import { createAppId, createShortAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
+import { tryReconcileHostScenarioImagesFromActualState } from "@/lib/scenario-image-cache";
 
 const HOST_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -155,9 +156,10 @@ export async function setOrganizationRunnerDisabled(params: {
     admin: true,
   });
   const db = drizzle(env.DB);
+  const now = Date.now();
   const updated = await db
     .update(agentHosts)
-    .set({ disabled: params.disabled, updatedAt: Date.now() })
+    .set({ disabled: params.disabled, updatedAt: now })
     .where(
       and(
         eq(agentHosts.id, params.runnerId),
@@ -167,6 +169,17 @@ export async function setOrganizationRunnerDisabled(params: {
     .returning(hostSelection());
   if (!updated[0]) {
     throw appError(404, "runner_not_found", "runner not found");
+  }
+  if (!params.disabled) {
+    await tryReconcileHostScenarioImagesFromActualState(db, {
+      hostId: updated[0].id,
+      nowUnixMs: now,
+      reason: "organization_runner_enabled",
+    });
+    // Re-enabling is an operator request to resume this host. Wake even when
+    // desired state was already current so a connected runtime promptly
+    // re-evaluates placement and delivery state.
+    await tryWakeHostRuntime(updated[0].id);
   }
   return serializeRunner(updated[0]);
 }

@@ -1,28 +1,21 @@
 import { and, eq, isNotNull } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import {
-  agentHosts,
   imageBuilds,
   scenarioSources,
   vmScenarioVms,
   workshopPublicationCheckpoints,
   workshopPublications,
-  type AgentHostRole,
   type ImageBuildStatus,
 } from "@/db/schema";
-import {
-  type ImageArchitecture,
-  type ImageKey,
-  type ScenarioManifestV3,
-} from "@/generated/catalog";
+import type { ImageArchitecture } from "@/generated/catalog";
 import { seedScenarioManifest } from "@/lib/catalog-manifest";
-import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
-import { upsertDesiredCachedImage } from "@/lib/desired-state";
 import {
   withImageBuildCoordinationLock,
   type ImageBuildCoordinationLease,
 } from "@/lib/image-build-lock";
 import { tryWakeHostRuntime } from "@/lib/host-runtime-wake";
+import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-image-cache";
 import {
   readManifest,
   validateManifest,
@@ -82,8 +75,8 @@ export async function handlePublish(
   const normalizedManifest = normalizePublishManifest(manifest.value);
 
   let buildFence:
-    | (PublishBuildIdentity & { hostId: string; scenarioId: string })
-    | null = null;
+    (PublishBuildIdentity & { hostId: string; scenarioId: string }) | null =
+    null;
   if (authorization.kind === "builder") {
     const identity = readPublishBuildIdentity(form);
     if (!identity.ok) return identity.response;
@@ -214,7 +207,12 @@ export async function handlePublish(
   }
   if (!published.ok) return published.response;
 
-  await bumpHostCachedImages(db, normalizedManifest, published.organizationId);
+  await tryReconcileScenarioImagesForPublicationScope(db, {
+    publicationOrganizationId: published.organizationId,
+    nowUnixMs: Date.now(),
+    reason: "image_published",
+    wakeHostRuntime: tryWakeHostRuntime,
+  });
 
   let pruned: PrunedImages[] = [];
   try {
@@ -399,65 +397,7 @@ export async function pruneStaleVmImages(
   return pruned;
 }
 
-export async function bumpHostCachedImages(
-  db: DrizzleD1Database,
-  manifest: ScenarioManifestV3,
-  organizationId: string | null = null,
-): Promise<void> {
-  const images = manifest.vms.map((vm) => ({
-    image_key: vm.image_key,
-    image_sha256: vm.image_sha256,
-  }));
-  await bumpCachedImages(db, images, organizationId);
-}
-
-export async function bumpCachedImages(
-  db: DrizzleD1Database,
-  images: Array<{ image_key: ImageKey; image_sha256: string }>,
-  organizationId: string | null = null,
-): Promise<void> {
-  if (images.length === 0) return;
-  const nowUnixMs = Date.now();
-  const hosts = await db
-    .select({
-      id: agentHosts.id,
-      role: agentHosts.role,
-      disabled: agentHosts.disabled,
-      scenarioEnabled: agentHosts.scenarioEnabled,
-    })
-    .from(agentHosts)
-    .where(
-      organizationId
-        ? and(
-            eq(agentHosts.disabled, false),
-            eq(agentHosts.organizationId, organizationId),
-          )
-        : eq(agentHosts.disabled, false),
-    );
-
-  for (const host of hosts) {
-    if (!isRuntimeImageCacheHost(host)) {
-      continue;
-    }
-    await mutateStoredHostDesiredState(db, host.id, nowUnixMs, (draft) => {
-      for (const image of images) {
-        upsertDesiredCachedImage(draft, image);
-      }
-    });
-    await tryWakeHostRuntime(host.id);
-  }
-}
-
-export function isRuntimeImageCacheHost(host: {
-  role: AgentHostRole;
-  disabled: boolean;
-  scenarioEnabled: boolean;
-}): boolean {
-  // Maintenance disables placement, not cache convergence. Keeping this
-  // independent from scenarioEnabled lets a drained host prewarm the newly
-  // published generation before starts are re-enabled.
-  return host.role === "agent" && !host.disabled;
-}
+export { isRuntimeImageCacheHost } from "@/lib/scenario-image-cache";
 
 export type ManifestPublishAuthorization =
   | { ok: true; kind: "trusted-token" }
