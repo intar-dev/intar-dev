@@ -735,6 +735,78 @@ describe("auth policy", () => {
     ).resolves.toBeNull();
   });
 
+  it("carries the session admission fence on the Better Auth hook context", async () => {
+    const now = Date.now();
+    const userId = "context-fenced-session-user";
+    await seedActiveBetaUser({
+      id: userId,
+      accountId: "context-fenced-session-github",
+      username: "context-fenced-session-user",
+      now,
+    });
+    const createdSession: Session = {
+      id: "context-fenced-session-row",
+      token: "context-fenced-session-token",
+      userId,
+      expiresAt: new Date(now + 3_600_000),
+      createdAt: new Date(now + 10_000),
+      updatedAt: new Date(now + 10_000),
+      ipAddress: null,
+      userAgent: null,
+    };
+    const hooks = auth.options.databaseHooks?.session?.create;
+    const before = hooks?.before;
+    const after = hooks?.after;
+    if (!before || !after) throw new Error("session create hooks are required");
+    const hookContext = {} as Parameters<typeof before>[1];
+
+    // Database after hooks can be queued beyond Better Auth's request-state
+    // ALS scope. The exact endpoint-context object remains stable across both
+    // callbacks and is the fence carrier.
+    await expect(before(createdSession, hookContext)).resolves.toBeUndefined();
+    await drizzle(env.DB).insert(session).values(createdSession);
+    await expect(after(createdSession, hookContext)).resolves.toBeUndefined();
+    await expect(
+      env.DB.prepare("SELECT id FROM session WHERE id = ?")
+        .bind(createdSession.id)
+        .first<{ id: string }>(),
+    ).resolves.toEqual({ id: createdSession.id });
+  });
+
+  it("removes a linked account when its hook-context fence is missing", async () => {
+    const now = Date.now();
+    const userId = "missing-account-fence-user";
+    await drizzle(env.DB).insert(user).values({
+      id: userId,
+      name: "Missing Account Fence",
+      email: "missing-account-fence@example.test",
+      emailVerified: true,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const linkedAccount = {
+      id: "missing-account-fence-row",
+      providerId: "github",
+      accountId: "missing-account-fence-github",
+      userId,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    };
+    await drizzle(env.DB).insert(account).values(linkedAccount);
+    const after = auth.options.databaseHooks?.account?.create?.after;
+    if (!after) throw new Error("account create after hook is required");
+    const hookContext = {} as Parameters<typeof after>[1];
+
+    await expect(after(linkedAccount, hookContext)).rejects.toMatchObject({
+      body: { code: "valid_beta_invite_required" },
+    });
+    await expect(
+      env.DB.prepare("SELECT id FROM account WHERE id = ?")
+        .bind(linkedAccount.id)
+        .first(),
+    ).resolves.toBeNull();
+  });
+
   it("deletes a GitHub link inserted after its exact invite lease is revoked", async () => {
     const now = Date.now();
     const userId = "github-link-race-user";

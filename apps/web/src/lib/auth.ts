@@ -1,8 +1,5 @@
 import { env } from "cloudflare:workers";
-import {
-  defineRequestState,
-  hasRequestState,
-} from "@better-auth/core/context";
+import { defineRequestState } from "@better-auth/core/context";
 import { oauthProvider } from "@better-auth/oauth-provider";
 import { sso } from "@better-auth/sso";
 import { betterAuth } from "better-auth";
@@ -111,15 +108,57 @@ const oauthIssuanceAdmissionState =
   defineRequestState<BetaAdmissionEpoch | null>(() => null);
 const presentedRefreshAdmissionState =
   defineRequestState<BetaAdmissionEpoch | null>(() => null);
-const sessionIssuanceFenceState = defineRequestState<
-  Map<string, SessionIssuanceFence>
->(() => new Map());
-const ssoAccountIssuanceFenceState = defineRequestState<
-  Map<string, BetaAdmissionEpoch>
->(() => new Map());
-const githubAccountIssuanceFenceState = defineRequestState<
-  Map<string, GithubAccountIssuanceFence>
->(() => new Map());
+
+type DatabaseHookIssuanceFences = {
+  sessions: Map<string, SessionIssuanceFence>;
+  ssoAccounts: Map<string, BetaAdmissionEpoch>;
+  githubAccounts: Map<string, GithubAccountIssuanceFence>;
+};
+
+// Better Auth captures one endpoint-context object for a database create and
+// passes that same object to its before hook and queued after hook. Bind the
+// issuance fence to that unforgeable object rather than request-state ALS:
+// queued after hooks may run after the request-state scope has unwound.
+const databaseHookIssuanceFences = new WeakMap<
+  object,
+  DatabaseHookIssuanceFences
+>();
+
+function getDatabaseHookIssuanceFences(
+  context: object,
+): DatabaseHookIssuanceFences {
+  let fences = databaseHookIssuanceFences.get(context);
+  if (!fences) {
+    fences = {
+      sessions: new Map(),
+      ssoAccounts: new Map(),
+      githubAccounts: new Map(),
+    };
+    databaseHookIssuanceFences.set(context, fences);
+  }
+  return fences;
+}
+
+function readDatabaseHookIssuanceFences(
+  context: object | null,
+): DatabaseHookIssuanceFences | null {
+  return context ? (databaseHookIssuanceFences.get(context) ?? null) : null;
+}
+
+function releaseDatabaseHookIssuanceFences(
+  context: object | null,
+  fences: DatabaseHookIssuanceFences | null,
+): void {
+  if (
+    context &&
+    fences &&
+    fences.sessions.size === 0 &&
+    fences.ssoAccounts.size === 0 &&
+    fences.githubAccounts.size === 0
+  ) {
+    databaseHookIssuanceFences.delete(context);
+  }
+}
 
 type BetaAuthFlow =
   | {
@@ -1513,8 +1552,8 @@ function buildAuthInstance() {
       },
       account: {
         create: {
-          before: async (account) => {
-            if (!(await hasRequestState())) return false;
+          before: async (account, context) => {
+            if (!context) return false;
             const flow = getTrustedBetaFlowFromState(await readOAuthState());
             if (account.providerId === "github") {
               const accessState = await getBetaAccessState(account.userId);
@@ -1542,8 +1581,10 @@ function buildAuthInstance() {
                       }
                     : null;
               if (!expected) return false;
-              const fences = await githubAccountIssuanceFenceState.get();
-              fences.set(account.id, expected);
+              getDatabaseHookIssuanceFences(context).githubAccounts.set(
+                account.id,
+                expected,
+              );
               return;
             }
             if (
@@ -1554,15 +1595,18 @@ function buildAuthInstance() {
             ) {
               return false;
             }
-            const fences = await ssoAccountIssuanceFenceState.get();
-            fences.set(account.id, flow);
+            getDatabaseHookIssuanceFences(context).ssoAccounts.set(
+              account.id,
+              flow,
+            );
             return;
           },
-          after: async (account) => {
+          after: async (account, context) => {
+            const fences = readDatabaseHookIssuanceFences(context);
             if (account.providerId === "github") {
-              const fences = await githubAccountIssuanceFenceState.get();
-              const expected = fences.get(account.id);
-              fences.delete(account.id);
+              const expected = fences?.githubAccounts.get(account.id);
+              fences?.githubAccounts.delete(account.id);
+              releaseDatabaseHookIssuanceFences(context, fences);
               if (!expected) {
                 await deleteExactLinkedAccount(account);
                 return throwBetaAuthError("valid_beta_invite_required");
@@ -1570,9 +1614,9 @@ function buildAuthInstance() {
               await enforceCreatedGithubAccountAdmission({ account, expected });
               return;
             }
-            const fences = await ssoAccountIssuanceFenceState.get();
-            const expected = fences.get(account.id);
-            fences.delete(account.id);
+            const expected = fences?.ssoAccounts.get(account.id);
+            fences?.ssoAccounts.delete(account.id);
+            releaseDatabaseHookIssuanceFences(context, fences);
             if (!expected) {
               await deleteExactLinkedAccount(account);
               return throwBetaAuthError("explicit_sso_link_required");
@@ -1584,8 +1628,8 @@ function buildAuthInstance() {
       session: {
         create: {
           before: async (session: Session, context) => {
-            if (!context || !(await hasRequestState())) return false;
-            const fences = await sessionIssuanceFenceState.get();
+            if (!context) return false;
+            const fences = getDatabaseHookIssuanceFences(context).sessions;
             const access = await getBetaAccess(session.userId);
             if (isActiveAdmission(access)) {
               fences.set(session.token, {
@@ -1602,12 +1646,10 @@ function buildAuthInstance() {
             return;
           },
           after: async (session: Session, context) => {
-            const fences =
-              context && (await hasRequestState())
-                ? await sessionIssuanceFenceState.get()
-                : null;
-            const fence = fences?.get(session.token);
-            fences?.delete(session.token);
+            const issuanceFences = readDatabaseHookIssuanceFences(context);
+            const fence = issuanceFences?.sessions.get(session.token);
+            issuanceFences?.sessions.delete(session.token);
+            releaseDatabaseHookIssuanceFences(context, issuanceFences);
             if (fence?.kind === "active") {
               await enforceCreatedSessionAdmission({
                 session,
