@@ -235,7 +235,7 @@ BEGIN
 			WHEN NEW.`state` = 'revoked' AND NEW.`replaced_by_invite_id` IS NOT NULL
 				THEN 'invite.replaced'
 			ELSE 'invite.revoked'
-		END,
+		END ,
 		NEW.`id`,
 		NEW.`redeemer_user_id`,
 		NEW.`redeemer_github_account_id`,
@@ -243,11 +243,11 @@ BEGIN
 			WHEN NEW.`state` = 'redeemed' THEN NEW.`redeemer_user_id`
 			WHEN NEW.`state` = 'revoked' THEN NEW.`revoked_by`
 			ELSE NULL
-		END,
+		END ,
 		CASE
 			WHEN NEW.`state` = 'revoked' THEN NEW.`revocation_reason`
 			ELSE NULL
-		END,
+		END ,
 		NEW.`updated_at`
 	);
 END;

@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
+import { unstable_splitSqlQuery } from "wrangler";
 
 const migrationSql = readFileSync(
   new URL(
@@ -29,7 +30,14 @@ const inviteLifecycleMigrationSql = readFileSync(
     import.meta.url,
   ),
   "utf8",
-).replaceAll("--> statement-breakpoint", "");
+);
+const inviteLifecycleMigrationStatements = unstable_splitSqlQuery(
+  inviteLifecycleMigrationSql,
+);
+const declaredInviteLifecycleMigrationStatements = inviteLifecycleMigrationSql
+  .split("--> statement-breakpoint")
+  .map((statement) => statement.trim())
+  .filter(Boolean);
 const legacyInviteBaselineSql = cleanBaselineSql.replace(
   "CHECK (`expires_at` IN (`created_at` + 172800000, `created_at` + 1209600000))",
   "CHECK (`expires_at` = `created_at` + 172800000)",
@@ -218,7 +226,14 @@ describe("invite lifecycle migration", () => {
         .query("SELECT * FROM access_events ORDER BY id")
         .all();
 
-      database.exec(inviteLifecycleMigrationSql);
+      expect(inviteLifecycleMigrationStatements).toHaveLength(
+        declaredInviteLifecycleMigrationStatements.length,
+      );
+      database.transaction(() => {
+        for (const statement of inviteLifecycleMigrationStatements) {
+          database.exec(statement);
+        }
+      })();
 
       expect(
         database.query("SELECT * FROM access_invite_codes ORDER BY id").all(),
