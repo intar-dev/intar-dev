@@ -78,6 +78,13 @@ describe("production D1 schema", () => {
       "PRAGMA foreign_key_check",
     ).all();
     expect(foreignKeyViolations.results).toEqual([]);
+
+    const inviteSchema = await env.DB.prepare(
+      `SELECT sql FROM sqlite_schema
+       WHERE type = 'table' AND name = 'access_invite_codes'`,
+    ).first<{ sql: string }>();
+    expect(inviteSchema?.sql).toContain("172800000");
+    expect(inviteSchema?.sql).toContain("1209600000");
   });
 
   it("installs the beta claim, append-only audit, and last-admin guards", async () => {
@@ -88,6 +95,10 @@ describe("production D1 schema", () => {
          'access_allowlist_revoker_guard',
          'access_invite_codes_issuer_guard',
          'access_invite_codes_revoker_guard',
+         'access_invite_removals_insert_command',
+         'access_invite_removals_append_only_update',
+         'access_invite_removals_append_only_delete',
+         'access_invite_removals_event',
          'access_events_append_only_update',
          'access_events_append_only_delete',
          'access_allowlist_last_admin_guard',
@@ -104,6 +115,10 @@ describe("production D1 schema", () => {
       "access_events_append_only_update",
       "access_invite_codes_issuer_guard",
       "access_invite_codes_revoker_guard",
+      "access_invite_removals_append_only_delete",
+      "access_invite_removals_append_only_update",
+      "access_invite_removals_event",
+      "access_invite_removals_insert_command",
       "access_user_last_beta_admin_delete_guard",
       "access_user_last_beta_admin_update_guard",
       "workshop_registry_tokens_creator_beta_guard",

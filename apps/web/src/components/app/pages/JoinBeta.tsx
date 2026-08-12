@@ -471,7 +471,7 @@ function TerminalInviteState({ state }: { state: ClaimState }) {
   const content = {
     expired: [
       "Invite expired",
-      "This code passed its 48-hour expiry and cannot be leased or claimed. Ask an administrator for a new link.",
+      "This code passed its expiry and cannot be leased or claimed. Ask an administrator for a new link.",
     ],
     revoked: [
       "Invite revoked",

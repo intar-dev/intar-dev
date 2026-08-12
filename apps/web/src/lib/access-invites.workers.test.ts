@@ -15,6 +15,7 @@ import {
   listAccessInvites,
   recordBetaRevocationCleanupFailure,
   recordBetaRevocationCleanupStall,
+  removeAccessInvite,
   replaceAccessInvite,
   revokeAccessInvite,
   revokeBetaUser,
@@ -42,6 +43,7 @@ describe("beta invitation storage invariants", () => {
       "access_allowlist",
       "access_events",
       "access_invite_codes",
+      "access_invite_removals",
     ]);
 
     await seedUserOnly({ id: "index-user", username: "index-user" });
@@ -61,8 +63,315 @@ describe("beta invitation storage invariants", () => {
     ).rejects.toThrow();
   });
 
+  it("atomically revokes, archives, and audits a pending invite", async () => {
+    const invite = await standardInvite(3_000, "remove-pending");
+
+    await removeAccessInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      expectedVersion: invite.version,
+      actorUserId: "admin-a",
+      now: 4_000,
+    });
+
+    const stored = await env.DB.prepare(
+      `SELECT state, lease_id, revoked_by, revocation_reason, revoked_at, version
+       FROM access_invite_codes WHERE id = ?`,
+    )
+      .bind(invite.id)
+      .first();
+    expect(stored).toEqual({
+      state: "revoked",
+      lease_id: null,
+      revoked_by: "admin-a",
+      revocation_reason: "admin_removed",
+      revoked_at: 4_000,
+      version: 2,
+    });
+    expect(
+      (await listAccessInvites({ d1: env.DB })).some(
+        (candidate) => candidate.id === invite.id,
+      ),
+    ).toBe(false);
+    await expect(
+      exchangeAccessInviteCode({ d1: env.DB, code: invite.code, now: 4_100 }),
+    ).rejects.toMatchObject({ code: "access_invite_unavailable" });
+
+    const events = await env.DB.prepare(
+      `SELECT event_type, actor_user_id, reason
+       FROM access_events WHERE invite_id = ? ORDER BY event_type`,
+    )
+      .bind(invite.id)
+      .all<{
+        event_type: string;
+        actor_user_id: string | null;
+        reason: string | null;
+      }>();
+    expect(events.results).toEqual(
+      expect.arrayContaining([
+        {
+          event_type: "invite.removed",
+          actor_user_id: "admin-a",
+          reason: "admin_removed",
+        },
+        {
+          event_type: "invite.revoked",
+          actor_user_id: "admin-a",
+          reason: "admin_removed",
+        },
+      ]),
+    );
+
+    const countsBeforeRetry = await inviteAndEventCounts();
+    await expect(
+      removeAccessInvite({
+        d1: env.DB,
+        inviteId: invite.id,
+        expectedVersion: invite.version,
+        actorUserId: "admin-a",
+        now: 5_000,
+      }),
+    ).resolves.toBeUndefined();
+    expect(await inviteAndEventCounts()).toEqual(countsBeforeRetry);
+    await expect(
+      env.DB.prepare(
+        "DELETE FROM access_invite_removals WHERE invite_id = ?",
+      )
+        .bind(invite.id)
+        .run(),
+    ).rejects.toThrow("access invite removals are append-only");
+  });
+
+  it("removes a leased invite and invalidates the exact sign-in lease", async () => {
+    const invite = await standardInvite(6_000, "remove-leased");
+    const lease = await leaseAccessInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      now: 6_100,
+    });
+
+    await removeAccessInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      expectedVersion: lease.version,
+      actorUserId: "admin-a",
+      now: 6_200,
+    });
+
+    await expect(
+      validateGithubInviteLease({
+        d1: env.DB,
+        inviteId: invite.id,
+        leaseId: lease.leaseId,
+        providerId: "github",
+        now: 6_300,
+      }),
+    ).rejects.toMatchObject({ code: "access_invite_lease_invalid" });
+    await expect(
+      env.DB.prepare(
+        `SELECT state, lease_id, leased_at, lease_expires_at, version
+         FROM access_invite_codes WHERE id = ?`,
+      )
+        .bind(invite.id)
+        .first(),
+    ).resolves.toEqual({
+      state: "revoked",
+      lease_id: null,
+      leased_at: null,
+      lease_expires_at: null,
+      version: 3,
+    });
+  });
+
+  it("archives terminal invites without changing redeemed access", async () => {
+    await seedGithubUser({
+      id: "redeemed-user",
+      accountId: "3900",
+      username: "redeemed-user",
+    });
+    const redeemedInvite = await standardInvite(7_000, "remove-redeemed");
+    const lease = await leaseAccessInvite({
+      d1: env.DB,
+      inviteId: redeemedInvite.id,
+      now: 7_100,
+    });
+    await confirmAccessInvite({
+      d1: env.DB,
+      inviteId: redeemedInvite.id,
+      leaseId: lease.leaseId,
+      userId: "redeemed-user",
+      githubAccountId: "3900",
+      githubUsername: "redeemed-user",
+      now: 7_200,
+    });
+    const redeemedVersion = await inviteVersion(redeemedInvite.id);
+
+    await removeAccessInvite({
+      d1: env.DB,
+      inviteId: redeemedInvite.id,
+      expectedVersion: redeemedVersion,
+      actorUserId: "admin-a",
+      now: 7_300,
+    });
+
+    await expect(
+      env.DB.prepare(
+        "SELECT state, version FROM access_invite_codes WHERE id = ?",
+      )
+        .bind(redeemedInvite.id)
+        .first(),
+    ).resolves.toEqual({ state: "redeemed", version: redeemedVersion });
+    await expect(
+      env.DB.prepare(
+        "SELECT state, source_invite_id FROM access_allowlist WHERE user_id = ?",
+      )
+        .bind("redeemed-user")
+        .first(),
+    ).resolves.toEqual({
+      state: "active",
+      source_invite_id: redeemedInvite.id,
+    });
+
+    const revokedInvite = await standardInvite(8_000, "remove-revoked");
+    const revoked = await revokeAccessInvite({
+      d1: env.DB,
+      inviteId: revokedInvite.id,
+      expectedVersion: revokedInvite.version,
+      actorUserId: "admin-a",
+      reason: "superseded",
+      now: 8_100,
+    });
+    await removeAccessInvite({
+      d1: env.DB,
+      inviteId: revoked.id,
+      expectedVersion: revoked.version,
+      actorUserId: "admin-a",
+      now: 8_200,
+    });
+    await expect(
+      env.DB.prepare(
+        "SELECT state, version, revocation_reason FROM access_invite_codes WHERE id = ?",
+      )
+        .bind(revoked.id)
+        .first(),
+    ).resolves.toEqual({
+      state: "revoked",
+      version: revoked.version,
+      revocation_reason: "superseded",
+    });
+  });
+
+  it("rejects stale or unauthorized removal without hiding an invite", async () => {
+    const invite = await standardInvite(9_000, "guarded-removal");
+    await expect(
+      removeAccessInvite({
+        d1: env.DB,
+        inviteId: invite.id,
+        expectedVersion: invite.version + 1,
+        actorUserId: "admin-a",
+        now: 9_100,
+      }),
+    ).rejects.toMatchObject({ code: "access_invite_stale_version" });
+
+    await seedGithubUser({
+      id: "admin-b",
+      accountId: "3950",
+      username: "platform-admin-b",
+      role: "admin",
+    });
+    await bootstrapAdmin("admin-b", 9_200);
+    await env.DB.prepare(
+      "UPDATE user SET role = 'user' WHERE id = 'admin-a'",
+    ).run();
+    const before = await inviteAndEventCounts();
+    await expect(
+      removeAccessInvite({
+        d1: env.DB,
+        inviteId: invite.id,
+        expectedVersion: invite.version,
+        actorUserId: "admin-a",
+        now: 9_300,
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "access_invite_remover_forbidden",
+    });
+    expect(await inviteAndEventCounts()).toEqual(before);
+    await expect(
+      env.DB.prepare(
+        "SELECT count(*) AS count FROM access_invite_removals WHERE invite_id = ?",
+      )
+        .bind(invite.id)
+        .first(),
+    ).resolves.toEqual({ count: 0 });
+  });
+
+  it("linearizes removal against a concurrent claim", async () => {
+    await seedGithubUser({
+      id: "race-user",
+      accountId: "3990",
+      username: "race-user",
+    });
+    const invite = await standardInvite(9_500, "remove-claim-race");
+    const lease = await leaseAccessInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      now: 9_600,
+    });
+
+    const outcomes = await Promise.allSettled([
+      confirmAccessInvite({
+        d1: env.DB,
+        inviteId: invite.id,
+        leaseId: lease.leaseId,
+        userId: "race-user",
+        githubAccountId: "3990",
+        githubUsername: "race-user",
+        now: 9_700,
+      }),
+      removeAccessInvite({
+        d1: env.DB,
+        inviteId: invite.id,
+        expectedVersion: lease.version,
+        actorUserId: "admin-a",
+        now: 9_700,
+      }),
+    ]);
+    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(
+      1,
+    );
+
+    const [stored, access, removal] = await Promise.all([
+      env.DB.prepare(
+        "SELECT state FROM access_invite_codes WHERE id = ?",
+      )
+        .bind(invite.id)
+        .first<{ state: string }>(),
+      env.DB.prepare(
+        "SELECT state FROM access_allowlist WHERE user_id = 'race-user'",
+      ).first<{ state: string }>(),
+      env.DB.prepare(
+        "SELECT invite_id FROM access_invite_removals WHERE invite_id = ?",
+      )
+        .bind(invite.id)
+        .first<{ invite_id: string }>(),
+    ]);
+    if (stored?.state === "revoked") {
+      expect(access).toBeNull();
+      expect(removal).toEqual({ invite_id: invite.id });
+    } else {
+      expect(stored?.state).toBe("redeemed");
+      expect(access).toEqual({ state: "active" });
+      expect(removal).toBeNull();
+    }
+  });
+
   it("stores only a hash, returns the raw code once, and does not mutate on exchange", async () => {
     const created = await standardInvite(1_000, "summer-beta");
+
+    expect(created.expiresAt - created.createdAt).toBe(
+      14 * 24 * 60 * 60 * 1_000,
+    );
 
     const stored = await env.DB.prepare(
       `SELECT code_hash, code_prefix, state, version
@@ -352,6 +661,9 @@ describe("beta invitation storage invariants", () => {
       version: 3,
     });
     expect(replacement.version).toBe(1);
+    expect(replacement.expiresAt - replacement.createdAt).toBe(
+      14 * 24 * 60 * 60 * 1_000,
+    );
 
     await expect(
       replaceAccessInvite({
@@ -1050,6 +1362,15 @@ async function inviteAndEventCounts(): Promise<{
     }>(),
   ]);
   return { invites: invites?.count ?? -1, events: events?.count ?? -1 };
+}
+
+async function inviteVersion(inviteId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    "SELECT version FROM access_invite_codes WHERE id = ?",
+  )
+    .bind(inviteId)
+    .first<{ version: number }>();
+  return row!.version;
 }
 
 async function seedGithubUser(params: {

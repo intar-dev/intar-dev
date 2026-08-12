@@ -71,7 +71,7 @@ export default {
     // schema and credential rows are reset. Cron work is part of the same
     // maintenance fence as HTTP traffic; otherwise a minute tick can issue or
     // mutate runtimes in the middle of the cutover.
-    if (env.BETA_ACCESS_MAINTENANCE === "on") {
+    if (String(env.BETA_ACCESS_MAINTENANCE) === "on") {
       console.info(
         JSON.stringify({ event: "scheduled_maintenance_fenced" }),
       );

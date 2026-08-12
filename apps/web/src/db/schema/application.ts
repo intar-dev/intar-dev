@@ -96,7 +96,9 @@ export const accessInviteCodes = sqliteTable(
     ),
     check(
       "access_invite_codes_expiry_valid",
-      sql`${table.expiresAt} = ${table.createdAt} + 172800000`,
+      // Existing audit rows retain the original 48-hour expiry. New invites
+      // use the 14-day default.
+      sql`${table.expiresAt} in (${table.createdAt} + 172800000, ${table.createdAt} + 1209600000)`,
     ),
     check("access_invite_codes_version_valid", sql`${table.version} > 0`),
     check(
@@ -156,6 +158,35 @@ export const accessInviteCodes = sqliteTable(
           AND ${table.revokedBy} is not null
           AND ${table.revocationReason} is not null
           AND ${table.revokedAt} is not null)`,
+    ),
+  ],
+);
+
+// Removing an invite is a presentation-level archive, not a destructive
+// delete. The invite row remains the immutable authorization and audit source.
+export const accessInviteRemovals = sqliteTable(
+  "access_invite_removals",
+  {
+    inviteId: text("invite_id")
+      .primaryKey()
+      .references(() => accessInviteCodes.id, { onDelete: "restrict" }),
+    inviteVersion: integer("invite_version").notNull(),
+    removedBy: text("removed_by").notNull(),
+    removedAt: integer("removed_at").notNull(),
+  },
+  (table) => [
+    index("access_invite_removals_removed_idx").on(table.removedAt),
+    check(
+      "access_invite_removals_version_valid",
+      sql`${table.inviteVersion} > 0`,
+    ),
+    check(
+      "access_invite_removals_actor_valid",
+      sql`length(${table.removedBy}) BETWEEN 1 AND 255`,
+    ),
+    check(
+      "access_invite_removals_timestamp_valid",
+      sql`${table.removedAt} >= 0`,
     ),
   ],
 );
@@ -235,6 +266,7 @@ export type AccessEventType =
   | "invite.redeemed"
   | "invite.revoked"
   | "invite.replaced"
+  | "invite.removed"
   | "invite.exchange_failed"
   | "invite.lease_failed"
   | "invite.claim_failed"

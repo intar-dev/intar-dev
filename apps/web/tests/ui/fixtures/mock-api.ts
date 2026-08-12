@@ -1147,7 +1147,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           label: typeof body.label === "string" ? body.label : null,
           createdBy: "user-admin",
           createdAt: FIXED_NOW,
-          expiresAt: FIXED_NOW + 48 * 60 * 60_000,
+          expiresAt: FIXED_NOW + 14 * 24 * 60 * 60_000,
           leaseExpiresAt: null,
           redeemerUserId: null,
           redeemerGithubAccountId: null,
@@ -1193,7 +1193,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           codePrefix: "intar_beta_DDDDDDDD",
           state: "pending",
           createdAt: FIXED_NOW,
-          expiresAt: FIXED_NOW + 48 * 60 * 60_000,
+          expiresAt: FIXED_NOW + 14 * 24 * 60 * 60_000,
           revokedBy: null,
           revocationReason: null,
           revokedAt: null,
@@ -1227,6 +1227,29 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           invite.version = Number(invite.version ?? 0) + 1;
         }
         await json(route, { invite: invite ?? null });
+        return;
+      }
+      const removedInviteId = segment(
+        pathname,
+        /^\/api\/admin\/access-invites\/([^/]+)\/remove$/,
+      );
+      if (removedInviteId && method === "POST") {
+        const body = await requestBody(route);
+        const invite = server.state.accessInvites.find(
+          (entry) => entry.id === removedInviteId,
+        );
+        if (!invite || body.expectedVersion !== invite.version) {
+          await json(
+            route,
+            { code: "access_invite_stale_version", message: "stale invite" },
+            409,
+          );
+          return;
+        }
+        server.state.accessInvites = server.state.accessInvites.filter(
+          (entry) => entry.id !== removedInviteId,
+        );
+        await json(route, { removed: true });
         return;
       }
       const revokedBetaUserId = segment(

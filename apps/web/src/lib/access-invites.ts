@@ -1,9 +1,10 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, notExists } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   accessAllowlist,
   accessEvents,
   accessInviteCodes,
+  accessInviteRemovals,
   type AccessInviteKind,
 } from "@/db/schema/application";
 import { user } from "@/db/schema/core";
@@ -11,7 +12,7 @@ import { appError, errorChainMatches } from "@/lib/app-error";
 import { isValidGithubUsername } from "@/lib/github-username";
 import { createAppId } from "@/lib/id";
 
-export const ACCESS_INVITE_LIFETIME_MS = 48 * 60 * 60 * 1_000;
+export const ACCESS_INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1_000;
 export const ACCESS_INVITE_LEASE_MS = 10 * 60 * 1_000;
 
 const INVITE_TOKEN_PREFIX = "intar_beta_";
@@ -157,9 +158,18 @@ export async function listAccessInvites(params: {
   limit?: number;
 }): Promise<AccessInviteSummary[]> {
   const limit = boundedLimit(params.limit);
-  const rows = await drizzle(params.d1)
+  const db = drizzle(params.d1);
+  const rows = await db
     .select()
     .from(accessInviteCodes)
+    .where(
+      notExists(
+        db
+          .select({ inviteId: accessInviteRemovals.inviteId })
+          .from(accessInviteRemovals)
+          .where(eq(accessInviteRemovals.inviteId, accessInviteCodes.id)),
+      ),
+    )
     .orderBy(desc(accessInviteCodes.createdAt))
     .limit(limit);
   return rows.map(toInviteSummary);
@@ -464,6 +474,53 @@ export async function revokeAccessInvite(params: {
   } catch (error) {
     if (isInviteRevokerGuardError(error)) throw inviteRevokerForbidden();
     throw error;
+  }
+
+  throw staleInvite();
+}
+
+export async function removeAccessInvite(params: {
+  d1: D1Database;
+  inviteId: string;
+  expectedVersion: number;
+  actorUserId: string;
+  now?: number;
+}): Promise<void> {
+  const db = drizzle(params.d1);
+  const inviteId = validId(params.inviteId, "invite");
+  const actorUserId = validId(params.actorUserId, "actor");
+  const expectedVersion = validVersion(params.expectedVersion);
+  const now = validTimestamp(params.now ?? Date.now());
+
+  try {
+    const inserted = await db
+      .insert(accessInviteRemovals)
+      .values({
+        inviteId,
+        inviteVersion: expectedVersion,
+        removedBy: actorUserId,
+        removedAt: now,
+      })
+      .returning({ inviteId: accessInviteRemovals.inviteId });
+    if (inserted[0]?.inviteId === inviteId) return;
+
+    // The database command is idempotent and ignores a repeated insert after
+    // re-checking administrator authority.
+    if (await hasInviteRemoval(params.d1, inviteId)) return;
+  } catch (error) {
+    if (isInviteRemoverGuardError(error)) throw inviteRemoverForbidden();
+    if (!errorChainMatches(error, /invite removal lost its version race/i)) {
+      throw error;
+    }
+
+    if (await hasInviteRemoval(params.d1, inviteId)) return;
+    const invite = await db
+      .select({ id: accessInviteCodes.id })
+      .from(accessInviteCodes)
+      .where(eq(accessInviteCodes.id, inviteId))
+      .limit(1);
+    if (!invite[0]) throw unavailableInvite();
+    throw staleInvite();
   }
 
   throw staleInvite();
@@ -1138,6 +1195,13 @@ function isInviteRevokerGuardError(error: unknown): boolean {
   );
 }
 
+function isInviteRemoverGuardError(error: unknown): boolean {
+  return errorChainMatches(
+    error,
+    /access invite remover must be an active unbanned administrator/i,
+  );
+}
+
 function isBetaAdministratorGuardError(error: unknown): boolean {
   return errorChainMatches(
     error,
@@ -1159,6 +1223,26 @@ function inviteRevokerForbidden() {
     "access_invite_revoker_forbidden",
     "active beta administrator access is required to revoke an invite",
   );
+}
+
+function inviteRemoverForbidden() {
+  return appError(
+    403,
+    "access_invite_remover_forbidden",
+    "active beta administrator access is required to remove an invite",
+  );
+}
+
+async function hasInviteRemoval(
+  d1: D1Database,
+  inviteId: string,
+): Promise<boolean> {
+  const row = await drizzle(d1)
+    .select({ inviteId: accessInviteRemovals.inviteId })
+    .from(accessInviteRemovals)
+    .where(eq(accessInviteRemovals.inviteId, inviteId))
+    .limit(1);
+  return row[0]?.inviteId === inviteId;
 }
 
 function betaAdministratorForbidden() {

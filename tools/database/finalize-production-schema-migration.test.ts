@@ -16,6 +16,30 @@ const retiredBuilderHistoryMigrationSql = readFileSync(
   ),
   "utf8",
 ).replaceAll("--> statement-breakpoint", "");
+const cleanBaselineSql = readFileSync(
+  new URL(
+    "../../apps/web/migrations/0000_clean_multicloud.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
+const inviteLifecycleMigrationSql = readFileSync(
+  new URL(
+    "../../apps/web/migrations/0003_archive_access_invites.sql",
+    import.meta.url,
+  ),
+  "utf8",
+).replaceAll("--> statement-breakpoint", "");
+const legacyInviteBaselineSql = cleanBaselineSql.replace(
+  "CHECK (`expires_at` IN (`created_at` + 172800000, `created_at` + 1209600000))",
+  "CHECK (`expires_at` = `created_at` + 172800000)",
+);
+
+if (legacyInviteBaselineSql === cleanBaselineSql) {
+  throw new Error(
+    "clean baseline no longer contains the dual invite lifetime check",
+  );
+}
 
 describe("production schema finalization migration", () => {
   for (const [name, indexSql] of [
@@ -177,6 +201,107 @@ describe("retired builder history migration", () => {
   });
 });
 
+describe("invite lifecycle migration", () => {
+  test("preserves legacy grants while accepting 48-hour and 14-day invites", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec(legacyInviteBaselineSql);
+      seedLegacyInviteGrant(database);
+
+      const invitesBefore = database
+        .query("SELECT * FROM access_invite_codes ORDER BY id")
+        .all();
+      const accessBefore = database
+        .query("SELECT * FROM access_allowlist ORDER BY user_id")
+        .all();
+      const eventsBefore = database
+        .query("SELECT * FROM access_events ORDER BY id")
+        .all();
+
+      database.exec(inviteLifecycleMigrationSql);
+
+      expect(
+        database.query("SELECT * FROM access_invite_codes ORDER BY id").all(),
+      ).toEqual(invitesBefore);
+      expect(
+        database.query("SELECT * FROM access_allowlist ORDER BY user_id").all(),
+      ).toEqual(accessBefore);
+      expect(
+        database.query("SELECT * FROM access_events ORDER BY id").all(),
+      ).toEqual(eventsBefore);
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
+
+      const inviteTable = database
+        .query(
+          `SELECT sql FROM sqlite_schema
+           WHERE type = 'table' AND name = 'access_invite_codes'`,
+        )
+        .get() as { sql: string };
+      expect(inviteTable.sql).toContain("172800000");
+      expect(inviteTable.sql).toContain("1209600000");
+
+      expect(
+        schemaObjectNames(database, "index", "access_invite_codes"),
+      ).toEqual([
+        "access_invite_codes_creator_idx",
+        "access_invite_codes_hash_uidx",
+        "access_invite_codes_lease_idx",
+        "access_invite_codes_state_expiry_idx",
+      ]);
+      expect(
+        schemaObjectNames(database, "trigger", "access_invite_codes"),
+      ).toEqual([
+        "access_invite_codes_created_event",
+        "access_invite_codes_delete_guard",
+        "access_invite_codes_issuer_guard",
+        "access_invite_codes_replacement_insert",
+        "access_invite_codes_revoker_guard",
+        "access_invite_codes_transition_event",
+        "access_invite_codes_transition_guard",
+      ]);
+      expect(
+        schemaObjectNames(database, "trigger", "access_allowlist"),
+      ).toEqual([
+        "access_allowlist_active_delete_guard",
+        "access_allowlist_blocked_event",
+        "access_allowlist_claim_invite",
+        "access_allowlist_cleanup_completed_event",
+        "access_allowlist_granted_event",
+        "access_allowlist_identity_immutable",
+        "access_allowlist_last_admin_guard",
+        "access_allowlist_revoker_guard",
+      ]);
+
+      expect(() =>
+        insertBootstrapInvite(database, "legacy-new", 10_000, 172_800_000),
+      ).not.toThrow();
+      expect(() =>
+        insertBootstrapInvite(
+          database,
+          "fourteen-day",
+          20_000,
+          1_209_600_000,
+        ),
+      ).not.toThrow();
+      expect(() =>
+        insertBootstrapInvite(database, "wrong-lifetime", 30_000, 86_400_000),
+      ).toThrow(/access_invite_codes_expiry_valid/u);
+      expect(() =>
+        database
+          .query(
+            `INSERT INTO access_events
+               (id, event_type, invite_id, actor_user_id, created_at)
+             VALUES ('invalid-remove', 'invite.removed', 'legacy-pending',
+                     'admin-a', 40000)`,
+          )
+          .run(),
+      ).toThrow(/invalid access audit event/u);
+    } finally {
+      database.close(false);
+    }
+  });
+});
+
 function fixture(indexSql: string): Database {
   const database = new Database(":memory:", { strict: true });
   database.exec(`
@@ -271,4 +396,85 @@ function retiredBuilderHistoryFixture(): Database {
     );
   `);
   return database;
+}
+
+function seedLegacyInviteGrant(database: Database): void {
+  database.exec(`
+    INSERT INTO user (
+      id, name, email, email_verified, created_at, updated_at, username,
+      display_username, role, banned
+    ) VALUES (
+      'admin-a', 'Admin A', 'admin-a@example.test', 1, 100, 100,
+      'admin-a', 'admin-a', 'admin', 0
+    );
+    INSERT INTO account (
+      id, account_id, provider_id, user_id, created_at, updated_at
+    ) VALUES ('account-admin-a', 'github-admin-a', 'github', 'admin-a', 100, 100);
+    INSERT INTO access_invite_codes (
+      id, code_hash, code_prefix, kind, state, label, created_by,
+      created_at, expires_at, lease_id, leased_at, lease_expires_at,
+      version, updated_at
+    ) VALUES (
+      'legacy-redeemed', '${"a".repeat(64)}', 'intar_beta_AAAAAAAA',
+      'bootstrap_admin', 'leased', 'legacy bootstrap', NULL,
+      1000, 172801000, 'legacy-lease', 2000, 602000, 1, 2000
+    );
+    INSERT INTO access_allowlist (
+      user_id, state, github_account_id, github_username, source_invite_id,
+      source_lease_id, granted_by, grant_reason, granted_at
+    ) VALUES (
+      'admin-a', 'active', 'github-admin-a', 'admin-a', 'legacy-redeemed',
+      'legacy-lease', NULL, 'bootstrap_admin', 3000
+    );
+    INSERT INTO access_invite_codes (
+      id, code_hash, code_prefix, kind, state, label, created_by,
+      created_at, expires_at, version, updated_at
+    ) VALUES (
+      'legacy-pending', '${"b".repeat(64)}', 'intar_beta_BBBBBBBB',
+      'standard', 'pending', 'legacy pending', 'admin-a',
+      4000, 172804000, 1, 4000
+    );
+  `);
+}
+
+function insertBootstrapInvite(
+  database: Database,
+  id: string,
+  createdAt: number,
+  lifetime: number,
+): void {
+  database
+    .query(
+      `INSERT INTO access_invite_codes (
+         id, code_hash, code_prefix, kind, state, created_by,
+         created_at, expires_at, version, updated_at
+       ) VALUES (?, ?, ?, 'bootstrap_admin', 'pending', NULL, ?, ?, 1, ?)`,
+    )
+    .run(
+      id,
+      id === "legacy-new"
+        ? "c".repeat(64)
+        : id === "fourteen-day"
+          ? "d".repeat(64)
+          : "e".repeat(64),
+      `intar_beta_${id.slice(0, 8).padEnd(8, "X")}`,
+      createdAt,
+      createdAt + lifetime,
+      createdAt,
+    );
+}
+
+function schemaObjectNames(
+  database: Database,
+  type: "index" | "trigger",
+  tableName: string,
+): string[] {
+  return database
+    .query(
+      `SELECT name FROM sqlite_schema
+       WHERE type = ? AND tbl_name = ? AND name NOT LIKE 'sqlite_autoindex_%'
+       ORDER BY name`,
+    )
+    .all(type, tableName)
+    .map((row) => (row as { name: string }).name);
 }

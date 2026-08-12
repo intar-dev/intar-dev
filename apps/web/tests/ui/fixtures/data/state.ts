@@ -1134,7 +1134,7 @@ export function createMockApiState(input?: {
             label: "August workshop cohort",
             createdBy: "user-admin",
             createdAt: FIXED_NOW - 2 * hour,
-            expiresAt: FIXED_NOW + 46 * hour,
+            expiresAt: FIXED_NOW + 14 * day - 2 * hour,
             leaseExpiresAt: null,
             redeemerUserId: null,
             redeemerGithubAccountId: null,
@@ -1156,7 +1156,7 @@ export function createMockApiState(input?: {
             label: "Facilitator preview",
             createdBy: "user-admin",
             createdAt: FIXED_NOW - 2 * day,
-            expiresAt: FIXED_NOW - hour,
+            expiresAt: FIXED_NOW + 12 * day,
             leaseExpiresAt: null,
             redeemerUserId: "user-learner",
             redeemerGithubAccountId: "github-account-learner",
@@ -1211,7 +1211,7 @@ export function createMockApiState(input?: {
         ],
     betaClaim: {
       state: "ready",
-      expiresAt: FIXED_NOW + 46 * hour,
+      expiresAt: FIXED_NOW + 14 * day - 2 * hour,
     },
     users: empty
       ? []

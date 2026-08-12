@@ -58,6 +58,7 @@ export {
   accessAllowlist,
   accessEvents,
   accessInviteCodes,
+  accessInviteRemovals,
   jwks,
   scenarioAssignments,
   scenarioSources,

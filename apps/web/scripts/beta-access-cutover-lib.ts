@@ -43,31 +43,55 @@ export function betaCutoverOperationalPreflightQueries(): string[] {
     .filter(Boolean);
 }
 
-export function betaSchemaStatements(cleanBaseline: string): string[] {
-  const statements = cleanBaseline
+export function betaSchemaStatements(schemaSources: string): string[] {
+  const statements = schemaSources
     .split(STATEMENT_BREAKPOINT)
     .map((statement) => statement.trim())
     .filter(Boolean);
+  const tables = new Map<string, string>();
+  const indexes = new Map<string, string>();
+  const triggers = new Map<string, string>();
+  const betaTables = [
+    "access_invite_codes",
+    "access_allowlist",
+    "access_events",
+    "access_invite_removals",
+  ];
 
-  return statements.filter((statement) => {
-    return (
-      /CREATE TABLE `access_(?:invite_codes|allowlist|events)`/u.test(
-        statement,
-      ) ||
-      /CREATE (?:UNIQUE )?INDEX `access_/u.test(statement) ||
-      /CREATE UNIQUE INDEX `account_(?:provider_account|user_github)_uidx`/u.test(
-        statement,
-      ) ||
-      /CREATE TRIGGER `access_/u.test(statement)
-    );
-  });
+  for (const statement of statements) {
+    const table = statement.match(/CREATE TABLE `([^`]+)`\s*\(/u)?.[1];
+    if (table && betaTables.includes(table)) tables.set(table, statement);
+
+    const index = statement.match(
+      /CREATE (?:UNIQUE )?INDEX `([^`]+)`/u,
+    )?.[1];
+    if (
+      index?.startsWith("access_") ||
+      index === "account_provider_account_uidx" ||
+      index === "account_user_github_uidx"
+    ) {
+      indexes.set(index, statement);
+    }
+
+    const trigger = statement.match(/CREATE TRIGGER `([^`]+)`/u)?.[1];
+    if (trigger?.startsWith("access_")) triggers.set(trigger, statement);
+  }
+
+  return [
+    ...betaTables.map((name) => tables.get(name)).filter(isPresent),
+    ...indexes.values(),
+    ...triggers.values(),
+  ];
 }
 
-export function buildBetaResetSql(cleanBaseline: string, now: number): string {
-  const selected = betaSchemaStatements(cleanBaseline);
+export function buildBetaResetSql(schemaSources: string, now: number): string {
+  const selected = betaSchemaStatements(schemaSources);
   if (
     !selected.some((statement) =>
       statement.includes("CREATE TABLE `access_invite_codes`"),
+    ) ||
+    !selected.some((statement) =>
+      statement.includes("CREATE TABLE `access_invite_removals`"),
     ) ||
     !selected.some((statement) =>
       statement.includes("CREATE TRIGGER `access_allowlist_claim_invite`"),
@@ -122,6 +146,7 @@ export function buildBetaResetSql(cleanBaseline: string, now: number): string {
     "DELETE FROM session;",
     "DROP TABLE IF EXISTS `access_events`;",
     "DROP TABLE IF EXISTS `access_allowlist`;",
+    "DROP TABLE IF EXISTS `access_invite_removals`;",
     "DROP TABLE IF EXISTS `access_invite_codes`;",
     "DROP TABLE IF EXISTS `access_requests`;",
     ...selected.map((statement) => `${statement.replace(/;\s*$/u, "")};`),
@@ -129,4 +154,8 @@ export function buildBetaResetSql(cleanBaseline: string, now: number): string {
   ];
 
   return `${reset.join(`\n${STATEMENT_BREAKPOINT}\n`)}\n`;
+}
+
+function isPresent<T>(value: T | undefined): value is T {
+  return value !== undefined;
 }

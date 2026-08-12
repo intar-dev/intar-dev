@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
@@ -8,6 +8,7 @@ import {
   RefreshCw,
   ShieldCheck,
   TicketPlus,
+  Trash2,
   Undo2,
 } from "lucide-react";
 import { formatRelativeTime } from "../../lib/format";
@@ -78,7 +79,8 @@ interface OneTimeInvite {
 
 type InviteAction =
   | { kind: "replace"; invite: AdminInvite }
-  | { kind: "revoke"; invite: AdminInvite };
+  | { kind: "revoke"; invite: AdminInvite }
+  | { kind: "remove"; invite: AdminInvite };
 
 type BetaUserAction =
   | { kind: "revoke"; user: BetaUser }
@@ -86,6 +88,7 @@ type BetaUserAction =
 
 export function BetaAccessPanel() {
   const queryClient = useQueryClient();
+  const createInviteButton = useRef<HTMLButtonElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [label, setLabel] = useState("");
   const [oneTimeInvite, setOneTimeInvite] =
@@ -94,6 +97,7 @@ export function BetaAccessPanel() {
   const [betaUserAction, setBetaUserAction] =
     useState<BetaUserAction | null>(null);
   const [reason, setReason] = useState("");
+  const [removalNotice, setRemovalNotice] = useState<string | null>(null);
 
   const access = useQuery({
     queryKey: ["admin", "beta-access"],
@@ -160,6 +164,27 @@ export function BetaAccessPanel() {
     },
   });
 
+  const removeInvite = useMutation({
+    mutationFn: (invite: AdminInvite) =>
+      apiJson<void>(
+        `/api/admin/access-invites/${encodeURIComponent(invite.id)}/remove`,
+        {
+          method: "POST",
+          body: JSON.stringify({ expectedVersion: invite.version }),
+        },
+      ),
+    onMutate: () => setRemovalNotice(null),
+    onSuccess: async (_result, invite) => {
+      setInviteAction(null);
+      setReason("");
+      setRemovalNotice(
+        `${invite.codePrefix}… was removed from this list. Its audit history was retained.`,
+      );
+      await refreshAccess();
+      requestAnimationFrame(() => createInviteButton.current?.focus());
+    },
+  });
+
   const updateBetaUser = useMutation({
     mutationFn: ({ action, reason }: { action: BetaUserAction; reason: string }) =>
       apiJson<void>(
@@ -202,10 +227,12 @@ export function BetaAccessPanel() {
     createInvite.error ??
     replaceInvite.error ??
     revokeInvite.error ??
+    removeInvite.error ??
     updateBetaUser.error;
   const actionPending =
     replaceInvite.isPending ||
     revokeInvite.isPending ||
+    removeInvite.isPending ||
     updateBetaUser.isPending;
 
   return (
@@ -213,12 +240,14 @@ export function BetaAccessPanel() {
       <Section
         density="compact"
         title="Beta invite codes"
-        description="Single-use bearer links expire after 48 hours. Only the safe code prefix remains visible after creation."
+        description="New single-use bearer links expire after 14 days. Only the safe code prefix remains visible after creation."
         actions={
           <Button
+            ref={createInviteButton}
             size="sm"
             onClick={() => {
               createInvite.reset();
+              setRemovalNotice(null);
               setCreateOpen(true);
             }}
           >
@@ -283,35 +312,52 @@ export function BetaAccessPanel() {
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    {invite.state === "pending" || invite.state === "leased" ? (
-                      <div className="flex justify-end gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={actionPending}
-                          onClick={() => {
-                            setReason("");
-                            setInviteAction({ kind: "replace", invite });
-                          }}
-                        >
-                          <RefreshCw />
-                          Replace
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-muted-foreground hover:text-destructive"
-                          disabled={actionPending}
-                          onClick={() => {
-                            setReason("");
-                            setInviteAction({ kind: "revoke", invite });
-                          }}
-                        >
-                          <Ban />
-                          Revoke
-                        </Button>
-                      </div>
-                    ) : null}
+                    <div className="flex justify-end gap-1.5">
+                      {invite.state === "pending" ||
+                      invite.state === "leased" ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={actionPending}
+                            onClick={() => {
+                              setReason("");
+                              setInviteAction({ kind: "replace", invite });
+                            }}
+                          >
+                            <RefreshCw />
+                            Replace
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground hover:text-destructive"
+                            disabled={actionPending}
+                            onClick={() => {
+                              setReason("");
+                              setInviteAction({ kind: "revoke", invite });
+                            }}
+                          >
+                            <Ban />
+                            Revoke
+                          </Button>
+                        </>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-muted-foreground hover:text-destructive"
+                        disabled={actionPending}
+                        onClick={() => {
+                          setReason("");
+                          setRemovalNotice(null);
+                          setInviteAction({ kind: "remove", invite });
+                        }}
+                      >
+                        <Trash2 />
+                        Remove
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -396,6 +442,10 @@ export function BetaAccessPanel() {
         </InlineFeedback>
       ) : null}
 
+      {removalNotice ? (
+        <InlineFeedback tone="success">{removalNotice}</InlineFeedback>
+      ) : null}
+
       <CreateInviteDialog
         open={createOpen}
         label={label}
@@ -420,11 +470,21 @@ export function BetaAccessPanel() {
       <InviteActionDialog
         action={inviteAction}
         reason={reason}
-        pending={replaceInvite.isPending || revokeInvite.isPending}
-        error={replaceInvite.error ?? revokeInvite.error}
+        pending={
+          replaceInvite.isPending ||
+          revokeInvite.isPending ||
+          removeInvite.isPending
+        }
+        error={
+          replaceInvite.error ?? revokeInvite.error ?? removeInvite.error
+        }
         onReasonChange={setReason}
         onClose={() => {
-          if (!replaceInvite.isPending && !revokeInvite.isPending) {
+          if (
+            !replaceInvite.isPending &&
+            !revokeInvite.isPending &&
+            !removeInvite.isPending
+          ) {
             setInviteAction(null);
             setReason("");
           }
@@ -433,6 +493,8 @@ export function BetaAccessPanel() {
           if (!inviteAction) return;
           if (inviteAction.kind === "replace") {
             replaceInvite.mutate(inviteAction.invite);
+          } else if (inviteAction.kind === "remove") {
+            removeInvite.mutate(inviteAction.invite);
           } else if (isValidReasonCode(reason)) {
             revokeInvite.mutate({
               invite: inviteAction.invite,
@@ -495,8 +557,8 @@ function CreateInviteDialog({
         <DialogHeader>
           <DialogTitle>Create beta invite</DialogTitle>
           <DialogDescription>
-            This creates one unbound, single-use link that expires after 48
-            hours. Anyone holding it can begin the claim.
+            This creates one unbound, single-use link that expires after 14
+            days. Anyone holding it can begin the claim.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -650,17 +712,30 @@ function InviteActionDialog({
   onConfirm: () => void;
 }) {
   const replacing = action?.kind === "replace";
+  const removing = action?.kind === "remove";
+  const active =
+    action?.invite.state === "pending" || action?.invite.state === "leased";
   return (
     <Dialog open={action !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {replacing ? "Replace this invite?" : "Revoke this invite?"}
+            {replacing
+              ? "Replace this invite?"
+              : removing
+                ? "Remove this invite code?"
+                : "Revoke this invite?"}
           </DialogTitle>
           <DialogDescription>
             {replacing
               ? "The current link and any active OAuth lease stop working immediately. A new raw link will be shown once."
-              : "The link and any active OAuth lease stop working immediately. This cannot be undone."}
+              : removing
+                ? active
+                  ? "The link and any active sign-in attempt stop working immediately, then the code disappears from this list. Its audit history remains."
+                  : action?.invite.state === "redeemed"
+                    ? "The code disappears from this list, but its audit history remains and the redeemed user keeps beta access."
+                    : "The code disappears from this list, but its audit history remains."
+                : "The link and any active OAuth lease stop working immediately. This cannot be undone."}
           </DialogDescription>
         </DialogHeader>
         <div className="rounded-lg border bg-muted/40 p-3">
@@ -669,7 +744,7 @@ function InviteActionDialog({
             {action?.invite.label ?? "Unlabelled invite"}
           </p>
         </div>
-        {!replacing ? (
+        {!replacing && !removing ? (
           <div className="space-y-2">
             <label htmlFor="invite-reason" className="text-sm font-semibold">
               Revocation reason code
@@ -699,14 +774,19 @@ function InviteActionDialog({
           </Button>
           <Button
             variant={replacing ? "default" : "destructive"}
-            disabled={pending || (!replacing && !isValidReasonCode(reason))}
+            disabled={
+              pending ||
+              (!replacing && !removing && !isValidReasonCode(reason))
+            }
             onClick={onConfirm}
           >
             {pending
               ? "Updating…"
               : replacing
                 ? "Replace and show new link"
-                : "Revoke invite"}
+                : removing
+                  ? "Remove from list"
+                  : "Revoke invite"}
           </Button>
         </DialogFooter>
       </DialogContent>

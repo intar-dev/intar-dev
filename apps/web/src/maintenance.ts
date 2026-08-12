@@ -6,7 +6,7 @@ export async function handleMaintenanceMode(
   request: Request,
   workerEnv: Cloudflare.Env,
 ): Promise<Response | null> {
-  if (workerEnv.BETA_ACCESS_MAINTENANCE !== "on") return null;
+  if (String(workerEnv.BETA_ACCESS_MAINTENANCE) !== "on") return null;
 
   const pathname = new URL(request.url).pathname;
   if (pathname === "/api/maintenance/bypass" && request.method === "POST") {

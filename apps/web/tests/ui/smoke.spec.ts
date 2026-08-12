@@ -97,6 +97,43 @@ test("admin sees a newly created beta link only once", async ({ page, ui }) => {
   expect(ui.server.requests).toContain("POST /api/admin/access-invites");
 });
 
+test("admin can remove a redeemed invite without revoking its user", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "light" });
+  const inviteRow = page
+    .getByRole("row")
+    .filter({ hasText: "Facilitator preview" });
+
+  await inviteRow.getByRole("button", { name: "Remove" }).click();
+  const dialog = page.getByRole("dialog", {
+    name: "Remove this invite code?",
+  });
+  await expect(dialog).toContainText("redeemed user keeps beta access");
+  const removalRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith(
+        "/api/admin/access-invites/invite-redeemed/remove",
+      ),
+  );
+  await dialog.getByRole("button", { name: "Remove from list" }).click();
+  expect((await removalRequest).postDataJSON()).toEqual({ expectedVersion: 3 });
+
+  await expect(inviteRow).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText(
+    "was removed from this list",
+  );
+  await expect(page.getByRole("button", { name: "Create invite" })).toBeFocused();
+  expect(ui.server.requests).toContain(
+    "POST /api/admin/access-invites/invite-redeemed/remove",
+  );
+  await expect(
+    page.getByText("@minalearns", { exact: true }),
+  ).toBeVisible();
+});
+
 test("learner discovery filters the catalog", async ({ page, ui }) => {
   await ui.open({ ...routeCase("scenario-catalog"), theme: "light" });
   const search = page.getByLabel(/Search courses and scenarios/i);

@@ -100,8 +100,15 @@ const baseline = await readFile(
   resolve(cwd, "migrations/0000_clean_multicloud.sql"),
   "utf8",
 );
+const inviteLifecycleMigration = await readFile(
+  resolve(cwd, "migrations/0003_archive_access_invites.sql"),
+  "utf8",
+);
 const now = Date.now();
-const resetSql = buildBetaResetSql(baseline, now);
+const resetSql = buildBetaResetSql(
+  `${baseline}\n--> statement-breakpoint\n${inviteLifecycleMigration}`,
+  now,
+);
 const temporarySql = resolve(
   "/tmp",
   `intar-beta-access-cutover-${randomUUID()}.sql`,
@@ -143,7 +150,7 @@ await runWrangler([
    ) VALUES (
      ${sqlString(inviteId)}, ${sqlString(codeHash)}, ${sqlString(codePrefix)},
      'bootstrap_admin', 'pending', 'cutover bootstrap', NULL,
-     ${now}, ${now + 48 * 60 * 60 * 1000}, 1, ${now}
+     ${now}, ${now + 14 * 24 * 60 * 60 * 1000}, 1, ${now}
    )`,
   "--yes",
 ]);

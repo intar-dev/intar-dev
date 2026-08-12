@@ -34,7 +34,7 @@ CREATE TABLE `access_invite_codes` (
 	CONSTRAINT `access_invite_codes_hash_valid` CHECK (length(`code_hash`) = 64 AND `code_hash` NOT GLOB '*[^0-9a-f]*'),
 	CONSTRAINT `access_invite_codes_kind_valid` CHECK (`kind` IN ('standard', 'bootstrap_admin')),
 	CONSTRAINT `access_invite_codes_creator_valid` CHECK ((`kind` = 'standard' AND `created_by` IS NOT NULL) OR (`kind` = 'bootstrap_admin' AND `created_by` IS NULL)),
-	CONSTRAINT `access_invite_codes_expiry_valid` CHECK (`expires_at` = `created_at` + 172800000),
+	CONSTRAINT `access_invite_codes_expiry_valid` CHECK (`expires_at` IN (`created_at` + 172800000, `created_at` + 1209600000)),
 	CONSTRAINT `access_invite_codes_version_valid` CHECK (`version` > 0),
 	CONSTRAINT `access_invite_codes_replacement_valid` CHECK ((`replaces_invite_id` IS NULL AND `replaces_invite_version` IS NULL) OR (`replaces_invite_id` IS NOT NULL AND `replaces_invite_version` > 0)),
 	CONSTRAINT `access_invite_codes_state_valid` CHECK (
