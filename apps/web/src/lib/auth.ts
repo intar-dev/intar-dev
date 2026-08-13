@@ -107,10 +107,26 @@ type DatabaseHookIssuanceFences = {
   githubAccounts: Map<string, GithubAccountIssuanceFence>;
 };
 
+type AccountIssuanceIdentity = {
+  providerId: string;
+  accountId: string;
+  userId: string;
+};
+
+function accountIssuanceFenceKey(account: AccountIssuanceIdentity): string {
+  return JSON.stringify([
+    account.providerId,
+    account.accountId,
+    account.userId,
+  ]);
+}
+
 // Better Auth captures one endpoint-context object for a database create and
 // passes that same object to its before hook and queued after hook. Bind the
 // issuance fence to that unforgeable object rather than request-state ALS:
-// queued after hooks may run after the request-state scope has unwound.
+// queued after hooks may run after the request-state scope has unwound. Account
+// row ids are generated between the before and after hooks, so account fences
+// use the stable provider-account-user tuple rather than the provisional id.
 const databaseHookIssuanceFences = new WeakMap<
   object,
   DatabaseHookIssuanceFences
@@ -1136,6 +1152,26 @@ async function validateProviderIdentity(
       return;
     }
 
+    // Better Auth classifies a GitHub callback as `link-account` when its
+    // verified email matches an existing user that does not yet have this
+    // GitHub identity. That is still a GitHub-authenticated invite claim, not
+    // an OIDC claim: the trusted server-side OAuth state and live lease remain
+    // the authority. Permit only an unadmitted target with no GitHub account;
+    // the account/session database hooks re-check the same lease before either
+    // linked identity or restricted session can survive.
+    if (
+      data.source.action === "link-account" &&
+      flow?.kind === "github-invite" &&
+      stateTargetUserId === null &&
+      incomingUserId !== null &&
+      targetUserId === incomingUserId &&
+      accessState === null &&
+      !(await hasLinkedProviderAccount(targetUserId, "github")) &&
+      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
+    ) {
+      return;
+    }
+
     return rejectBetaAuth(
       data.source.action === "link-account"
         ? "explicit_github_link_required"
@@ -1382,11 +1418,13 @@ function buildAuthInstance() {
           before: async (account, context) => {
             if (!context) return false;
             const flow = getTrustedBetaFlowFromState(await readOAuthState());
+            const fenceKey = accountIssuanceFenceKey(account);
             if (account.providerId === "github") {
               const accessState = await getBetaAccessState(account.userId);
               const expected: GithubAccountIssuanceFence | null =
                 flow?.kind === "github-invite" &&
                 accessState === null &&
+                !(await hasLinkedProviderAccount(account.userId, "github")) &&
                 (await hasValidInviteLease(flow.inviteId, flow.leaseId))
                   ? {
                       kind: flow.kind,
@@ -1397,7 +1435,7 @@ function buildAuthInstance() {
                   : null;
               if (!expected) return false;
               getDatabaseHookIssuanceFences(context).githubAccounts.set(
-                account.id,
+                fenceKey,
                 expected,
               );
               return;
@@ -1411,16 +1449,17 @@ function buildAuthInstance() {
               return false;
             }
             getDatabaseHookIssuanceFences(context).ssoAccounts.set(
-              account.id,
+              fenceKey,
               flow,
             );
             return;
           },
           after: async (account, context) => {
             const fences = readDatabaseHookIssuanceFences(context);
+            const fenceKey = accountIssuanceFenceKey(account);
             if (account.providerId === "github") {
-              const expected = fences?.githubAccounts.get(account.id);
-              fences?.githubAccounts.delete(account.id);
+              const expected = fences?.githubAccounts.get(fenceKey);
+              fences?.githubAccounts.delete(fenceKey);
               releaseDatabaseHookIssuanceFences(context, fences);
               if (!expected) {
                 await deleteExactLinkedAccount(account);
@@ -1429,8 +1468,8 @@ function buildAuthInstance() {
               await enforceCreatedGithubAccountAdmission({ account, expected });
               return;
             }
-            const expected = fences?.ssoAccounts.get(account.id);
-            fences?.ssoAccounts.delete(account.id);
+            const expected = fences?.ssoAccounts.get(fenceKey);
+            fences?.ssoAccounts.delete(fenceKey);
             releaseDatabaseHookIssuanceFences(context, fences);
             if (!expected) {
               await deleteExactLinkedAccount(account);

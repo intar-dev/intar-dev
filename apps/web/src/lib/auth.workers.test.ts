@@ -2,8 +2,9 @@
 
 import { env } from "cloudflare:workers";
 import type { Session, User } from "better-auth";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { accessInviteCodes } from "@/db/schema/application";
 import { account, session, ssoProvider, user } from "@/db/schema/core";
 import {
@@ -297,6 +298,221 @@ describe("auth policy", () => {
     await expect(validResponse.json()).resolves.toMatchObject({
       redirect: true,
       url: expect.stringContaining("github.com/login/oauth/authorize"),
+    });
+  });
+
+  it("links a same-email OIDC user only through a live GitHub invite callback", async () => {
+    const now = Date.now();
+    const target = await seedOidcOnlyUser({
+      id: "same-email-invite-target",
+      email: "same-email-invite@example.test",
+      now,
+    });
+    const flow = await beginGithubInviteFlow("same-email-live-lease", now);
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: target.email,
+      githubAccountId: "4242001",
+      githubLogin: "same-email-github",
+    });
+
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe("http://localhost/join");
+    await expect(
+      env.DB.prepare(
+        `SELECT account_id AS accountId, user_id AS userId
+         FROM account
+         WHERE provider_id = 'github' AND account_id = ?`,
+      )
+        .bind("4242001")
+        .first(),
+    ).resolves.toEqual({
+      accountId: "4242001",
+      userId: target.id,
+    });
+    await expect(
+      env.DB.prepare(
+        "SELECT user_id AS userId FROM session WHERE user_id = ? LIMIT 1",
+      )
+        .bind(target.id)
+        .first(),
+    ).resolves.toEqual({ userId: target.id });
+    await expect(
+      env.DB.prepare(
+        "SELECT user_id FROM access_allowlist WHERE user_id = ? LIMIT 1",
+      )
+        .bind(target.id)
+        .first(),
+    ).resolves.toBeNull();
+    await expect(
+      env.DB.prepare(
+        `SELECT state, redeemer_user_id AS redeemerUserId
+         FROM access_invite_codes WHERE id = ?`,
+      )
+        .bind(flow.inviteId)
+        .first(),
+    ).resolves.toEqual({ state: "leased", redeemerUserId: null });
+  });
+
+  it("rejects a same-email implicit GitHub link without an invite flow", async () => {
+    const target = await seedOidcOnlyUser({
+      id: "same-email-no-flow-target",
+      email: "same-email-no-flow@example.test",
+      now: Date.now(),
+    });
+    const flow = await beginGithubFlowWithoutInvite();
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: target.email,
+      githubAccountId: "4242002",
+      githubLogin: "same-email-no-flow",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242002");
+  });
+
+  it("rejects a same-email implicit GitHub link after its exact lease expires", async () => {
+    const now = Date.now();
+    const target = await seedOidcOnlyUser({
+      id: "same-email-expired-target",
+      email: "same-email-expired@example.test",
+      now,
+    });
+    const flow = await beginGithubInviteFlow("same-email-expired-lease", now);
+    const expiredAt = Date.now() - 1;
+    await drizzle(env.DB)
+      .update(accessInviteCodes)
+      .set({
+        leasedAt: expiredAt - 600_000,
+        leaseExpiresAt: expiredAt,
+      })
+      .where(eq(accessInviteCodes.id, flow.inviteId));
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: target.email,
+      githubAccountId: "4242003",
+      githubLogin: "same-email-expired",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242003");
+  });
+
+  it("rejects a same-email implicit GitHub link after its exact lease is revoked", async () => {
+    const now = Date.now();
+    const target = await seedOidcOnlyUser({
+      id: "same-email-revoked-target",
+      email: "same-email-revoked@example.test",
+      now,
+    });
+    const flow = await beginGithubInviteFlow("same-email-revoked-lease", now);
+    await revokeAccessInvite({
+      d1: env.DB,
+      inviteId: flow.inviteId,
+      expectedVersion: flow.inviteVersion,
+      actorUserId: FIXTURE_BETA_ADMIN_ID,
+      reason: "same_email_callback_race",
+      now: now + 1,
+    });
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: target.email,
+      githubAccountId: "4242004",
+      githubLogin: "same-email-revoked",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242004");
+  });
+
+  it.each(["active", "blocked"] as const)(
+    "rejects a same-email implicit GitHub link for a %s beta target",
+    async (accessState) => {
+      const now = Date.now();
+      const target = await seedOidcOnlyUser({
+        id: `same-email-${accessState}-target`,
+        email: `same-email-${accessState}@example.test`,
+        now,
+      });
+      await grantBetaAccessWithoutLinkedGithub({
+        userId: target.id,
+        githubAccountId: `historical-${accessState}-github`,
+        githubUsername: `historical-${accessState}`,
+        now,
+      });
+      if (accessState === "blocked") {
+        await revokeBetaUser({
+          d1: env.DB,
+          userId: target.id,
+          actorUserId: FIXTURE_BETA_ADMIN_ID,
+          reason: "same_email_policy_test",
+          now: now + 4,
+        });
+      }
+      const flow = await beginGithubInviteFlow(
+        `same-email-${accessState}-access`,
+        now + 5,
+      );
+
+      const callback = await completeGithubCallback({
+        ...flow,
+        email: target.email,
+        githubAccountId: accessState === "active" ? "4242005" : "4242006",
+        githubLogin: `same-email-${accessState}`,
+      });
+
+      expectOauthCallbackError(callback, "explicit_github_link_required");
+      await expectGithubLinkAndSessionAbsent(
+        target.id,
+        accessState === "active" ? "4242005" : "4242006",
+      );
+    },
+  );
+
+  it("rejects a same-email target that already has another GitHub account", async () => {
+    const now = Date.now();
+    const target = await seedOidcOnlyUser({
+      id: "same-email-existing-github-target",
+      email: "same-email-existing-github@example.test",
+      now,
+    });
+    await drizzle(env.DB).insert(account).values({
+      id: "same-email-existing-github-row",
+      providerId: "github",
+      accountId: "already-linked-github",
+      userId: target.id,
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const flow = await beginGithubInviteFlow(
+      "same-email-existing-github",
+      now,
+    );
+
+    const callback = await completeGithubCallback({
+      ...flow,
+      email: target.email,
+      githubAccountId: "4242007",
+      githubLogin: "same-email-second-github",
+    });
+
+    expectOauthCallbackError(callback, "explicit_github_link_required");
+    await expectGithubLinkAndSessionAbsent(target.id, "4242007");
+    await expect(
+      env.DB.prepare(
+        `SELECT account_id AS accountId
+         FROM account
+         WHERE user_id = ? AND provider_id = 'github'`,
+      )
+        .bind(target.id)
+        .all(),
+    ).resolves.toMatchObject({
+      results: [{ accountId: "already-linked-github" }],
     });
   });
 
@@ -1062,6 +1278,215 @@ describe("auth policy", () => {
     ).rejects.toThrow("handoff expiry is outside the allowed window");
   });
 });
+
+type StartedGithubFlow = {
+  cookie: string;
+  inviteId?: string;
+  inviteVersion?: number;
+  state: string;
+};
+
+async function seedOidcOnlyUser(input: {
+  id: string;
+  email: string;
+  now: number;
+}): Promise<{ id: string; email: string }> {
+  await drizzle(env.DB).insert(user).values({
+    id: input.id,
+    name: input.id,
+    email: input.email,
+    emailVerified: true,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  await drizzle(env.DB).insert(account).values({
+    id: `${input.id}-oidc-row`,
+    providerId: "har-oidc",
+    accountId: `${input.id}-oidc-subject`,
+    userId: input.id,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  return { id: input.id, email: input.email };
+}
+
+async function beginGithubInviteFlow(
+  label: string,
+  now: number,
+): Promise<StartedGithubFlow & { inviteId: string; inviteVersion: number }> {
+  const invite = await createAccessInvite({
+    d1: env.DB,
+    kind: "standard",
+    actorUserId: FIXTURE_BETA_ADMIN_ID,
+    label,
+    now: now - 2_000,
+  });
+  const lease = await leaseAccessInvite({
+    d1: env.DB,
+    inviteId: invite.id,
+    now: now - 1_000,
+  });
+  const handoff = await createInviteOAuthHandoff({
+    inviteId: invite.id,
+    leaseId: lease.leaseId,
+    leaseExpiresAt: lease.leaseExpiresAt,
+  });
+  const started = await beginGithubFlow(handoff);
+  return {
+    ...started,
+    inviteId: invite.id,
+    inviteVersion: lease.version,
+  };
+}
+
+async function beginGithubFlowWithoutInvite(): Promise<StartedGithubFlow> {
+  return beginGithubFlow();
+}
+
+async function beginGithubFlow(handoff?: string): Promise<StartedGithubFlow> {
+  const response = await auth.handler(
+    authRequest(
+      "/api/auth/sign-in/social",
+      {
+        provider: "github",
+        callbackURL: "http://localhost/join",
+        errorCallbackURL: "http://localhost/join",
+      },
+      handoff ? { [INVITE_OAUTH_HANDOFF_HEADER]: handoff } : undefined,
+    ),
+  );
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { url?: string };
+  if (!body.url) throw new Error("GitHub authorization URL is required");
+  const state = new URL(body.url).searchParams.get("state");
+  if (!state) throw new Error("GitHub OAuth state is required");
+  const setCookie = response.headers.get("set-cookie");
+  if (!setCookie) throw new Error("GitHub OAuth state cookie is required");
+  const cookie = setCookie.split(";", 1)[0];
+  if (!cookie) throw new Error("GitHub OAuth state cookie is invalid");
+  return { cookie, state };
+}
+
+async function completeGithubCallback(
+  input: StartedGithubFlow & {
+    email: string;
+    githubAccountId: string;
+    githubLogin: string;
+  },
+): Promise<Response> {
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (request): Promise<Response> => {
+      const url =
+        typeof request === "string"
+          ? request
+          : request instanceof URL
+            ? request.href
+            : request.url;
+      if (url === "https://github.com/login/oauth/access_token") {
+        return Response.json({
+          access_token: `token-${input.githubAccountId}`,
+          scope: "read:user,user:email",
+          token_type: "bearer",
+        });
+      }
+      if (url === "https://api.github.com/user") {
+        return Response.json({
+          id: Number(input.githubAccountId),
+          login: input.githubLogin,
+          name: input.githubLogin,
+          email: input.email,
+          avatar_url: null,
+        });
+      }
+      if (url === "https://api.github.com/user/emails") {
+        return Response.json([
+          {
+            email: input.email,
+            primary: true,
+            verified: true,
+            visibility: null,
+          },
+        ]);
+      }
+      throw new Error(`unexpected fetch in GitHub callback test: ${url}`);
+    },
+  );
+  try {
+    return await auth.handler(
+      new Request(
+        `http://localhost/api/auth/callback/github?code=test-code&state=${encodeURIComponent(input.state)}`,
+        { headers: { cookie: input.cookie } },
+      ),
+    );
+  } finally {
+    fetchSpy.mockRestore();
+  }
+}
+
+function expectOauthCallbackError(response: Response, code: string): void {
+  expect(response.status).toBe(302);
+  const location = response.headers.get("location");
+  expect(location).not.toBeNull();
+  expect(new URL(location!).searchParams.get("error")).toBe(code);
+}
+
+async function expectGithubLinkAndSessionAbsent(
+  userId: string,
+  githubAccountId: string,
+): Promise<void> {
+  await expect(
+    env.DB.prepare(
+      `SELECT id FROM account
+       WHERE provider_id = 'github' AND account_id = ? LIMIT 1`,
+    )
+      .bind(githubAccountId)
+      .first(),
+  ).resolves.toBeNull();
+  await expect(
+    env.DB.prepare("SELECT id FROM session WHERE user_id = ? LIMIT 1")
+      .bind(userId)
+      .first(),
+  ).resolves.toBeNull();
+}
+
+async function grantBetaAccessWithoutLinkedGithub(input: {
+  userId: string;
+  githubAccountId: string;
+  githubUsername: string;
+  now: number;
+}): Promise<void> {
+  const githubRowId = `${input.userId}-temporary-github-row`;
+  await drizzle(env.DB).insert(account).values({
+    id: githubRowId,
+    providerId: "github",
+    accountId: input.githubAccountId,
+    userId: input.userId,
+    createdAt: new Date(input.now),
+    updatedAt: new Date(input.now),
+  });
+  const invite = await createAccessInvite({
+    d1: env.DB,
+    kind: "standard",
+    actorUserId: FIXTURE_BETA_ADMIN_ID,
+    label: `access-${input.userId}`,
+    now: input.now,
+  });
+  const lease = await leaseAccessInvite({
+    d1: env.DB,
+    inviteId: invite.id,
+    now: input.now + 1,
+  });
+  await confirmAccessInvite({
+    d1: env.DB,
+    inviteId: invite.id,
+    leaseId: lease.leaseId,
+    userId: input.userId,
+    githubAccountId: input.githubAccountId,
+    githubUsername: input.githubUsername,
+    now: input.now + 2,
+  });
+  await drizzle(env.DB).delete(account).where(eq(account.id, githubRowId));
+}
 
 function authRequest(
   path: string,
