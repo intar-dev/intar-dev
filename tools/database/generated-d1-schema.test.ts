@@ -1,5 +1,8 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { drizzle } from "../../apps/web/node_modules/drizzle-orm/sqlite-proxy/index.js";
+import { migrate } from "../../apps/web/node_modules/drizzle-orm/sqlite-proxy/migrator.js";
 import {
   BunSqliteD1ReadClient,
   expectedGeneratedD1Schema,
@@ -7,12 +10,28 @@ import {
 } from "./generated-d1-schema";
 
 describe("exact generated D1 schema verifier", () => {
-  test("models the Drizzle-created ledger with SQLite dialect quoting", () => {
-    const ledger = expectedGeneratedD1Schema().objects.find(
-      ({ name }) => name === "__drizzle_migrations",
-    );
-    expect(ledger?.sql).toStartWith('CREATE TABLE "__drizzle_migrations"');
-    expect(ledger?.sql).not.toContain("`__drizzle_migrations`");
+  test("accepts the ledger DDL emitted by the pinned Drizzle migrator", async () => {
+    const emitted: string[] = [];
+    const drizzleDatabase = drizzle(async (sql) => {
+      emitted.push(sql);
+      return { rows: [] };
+    });
+    await migrate(drizzleDatabase, async () => {}, {
+      migrationsFolder: fileURLToPath(
+        new URL("../../apps/web/migrations", import.meta.url),
+      ),
+    });
+    const ledgerSql = emitted[0];
+    expect(ledgerSql).toContain('CREATE TABLE IF NOT EXISTS "__drizzle_migrations"');
+
+    const fixture = generatedDatabase({ ledgerSql });
+    try {
+      await expect(verifyGeneratedD1Schema(fixture.client)).resolves.toMatchObject({
+        status: "exact_generated_schema_verified",
+      });
+    } finally {
+      fixture.database.close(false);
+    }
   });
 
   test("accepts the full generated schema and ledger", async () => {
@@ -147,16 +166,21 @@ describe("exact generated D1 schema verifier", () => {
   });
 });
 
-function generatedDatabase(): {
+function generatedDatabase(options: { ledgerSql?: string } = {}): {
   database: Database;
   client: BunSqliteD1ReadClient;
 } {
   const proof = expectedGeneratedD1Schema();
   const database = new Database(":memory:", { strict: true });
   database.exec("PRAGMA foreign_keys = ON");
-  for (const object of proof.objects.filter(({ type }) => type === "table")) {
+  for (const object of proof.objects.filter(
+    ({ type, name }) =>
+      type === "table" &&
+      (options.ledgerSql === undefined || name !== "__drizzle_migrations"),
+  )) {
     database.exec(object.sql);
   }
+  if (options.ledgerSql !== undefined) database.exec(options.ledgerSql);
   for (const object of proof.objects.filter(({ type }) => type === "index")) {
     database.exec(object.sql);
   }

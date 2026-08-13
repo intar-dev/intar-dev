@@ -227,6 +227,7 @@ function canonicalObjects(rows: readonly D1Row[]): CanonicalSchemaObject[] {
       ),
       sql: canonicalSql(
         stringValue(row.sql, `schema object ${index} SQL`),
+        stringValue(row.name, `schema object ${index} name`),
       ),
     };
   });
@@ -248,8 +249,16 @@ function assertCanonicalObjectsEqual(
   throw new Error("D1 schema differs from generated Drizzle SQL");
 }
 
-function canonicalSql(sql: string): string {
-  return sql.replaceAll("\r\n", "\n").trim();
+function canonicalSql(sql: string, objectName: string): string {
+  const normalized = sql.replaceAll("\r\n", "\n").trim();
+  if (objectName !== "__drizzle_migrations") return normalized;
+
+  // The ledger belongs to the pinned Drizzle migrator, not the generated
+  // application stream. SQLite preserves renderer-only quote and indentation
+  // choices in sqlite_schema, so normalize those while retaining its exact DDL.
+  return normalized
+    .replace(/[`"]__drizzle_migrations[`"]?/gu, "__drizzle_migrations")
+    .replace(/\s+/gu, " ");
 }
 
 function schemaHash(objects: readonly CanonicalSchemaObject[]): string {
