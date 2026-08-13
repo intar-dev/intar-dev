@@ -5,12 +5,12 @@ import { handleMaintenanceMode } from "./maintenance";
 
 const maintenanceEnv = {
   BETTER_AUTH_URL: "https://intar.dev",
-  BETA_ACCESS_MAINTENANCE: "on",
-  BETA_MAINTENANCE_BYPASS_SECRET:
+  CONTROL_PLANE_MAINTENANCE: "on",
+  CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:
     "maintenance-test-secret-that-is-long-enough",
 } as unknown as Cloudflare.Env;
 
-describe("beta cutover maintenance fence", () => {
+describe("control-plane maintenance fence", () => {
   it("fences every durable-object ingress without touching D1", async () => {
     const databaseAccess = vi.fn(() => {
       throw new Error("maintenance fence touched D1");
@@ -23,7 +23,7 @@ describe("beta cutover maintenance fence", () => {
     ) as D1Database;
     const maintenanceDoEnv = new Proxy(env, {
       get(target, property, receiver) {
-        if (property === "BETA_ACCESS_MAINTENANCE") return "on";
+        if (property === "CONTROL_PLANE_MAINTENANCE") return "on";
         if (property === "DB") return db;
         return Reflect.get(target, property, receiver);
       },
@@ -64,7 +64,7 @@ describe("beta cutover maintenance fence", () => {
     await expect(
       handleMaintenanceMode(
         new Request("https://intar.dev/courses"),
-        { ...maintenanceEnv, BETA_ACCESS_MAINTENANCE: "off" } as unknown as Cloudflare.Env,
+        { ...maintenanceEnv, CONTROL_PLANE_MAINTENANCE: "off" } as unknown as Cloudflare.Env,
       ),
     ).resolves.toBeNull();
   });
@@ -111,6 +111,9 @@ describe("beta cutover maintenance fence", () => {
     expect(firstCsp).not.toContain("'unsafe-inline'");
     expect(html).toContain(`<style nonce="${firstNonce}">`);
     expect(html).toContain(`<script nonce="${firstNonce}">`);
+    expect(html).toContain("PLANNED MAINTENANCE");
+    expect(html).toContain("The control plane is under maintenance");
+    expect(html).not.toMatch(/beta access|cutover|invite flow/iu);
     expect(html).toContain(
       '<form id="operator-login" action="/api/maintenance/bypass" method="post">',
     );
@@ -136,7 +139,7 @@ describe("beta cutover maintenance fence", () => {
           "sec-fetch-site": "same-origin",
         },
         body: JSON.stringify({
-          secret: maintenanceEnv.BETA_MAINTENANCE_BYPASS_SECRET,
+          secret: maintenanceEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
         }),
       }),
       maintenanceEnv,
@@ -189,7 +192,7 @@ describe("beta cutover maintenance fence", () => {
     expect(mutation?.status).toBe(503);
     await expect(mutation?.json()).resolves.toMatchObject({
       code: "maintenance",
-      error: "beta access maintenance is in progress",
+      error: "control-plane maintenance is in progress",
     });
   });
 

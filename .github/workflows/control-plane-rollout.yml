@@ -27,41 +27,6 @@ on:
         required: false
         default: ""
         type: string
-      fresh_d1_cutover:
-        description: Perform the protected old-D1 to fresh Drizzle D1 cutover
-        required: true
-        default: false
-        type: boolean
-      fresh_d1_cutover_confirmation:
-        description: Type CUT OVER FRESH DRIZZLE D1 when fresh_d1_cutover is true
-        required: false
-        default: ""
-        type: string
-      source_snapshot_reset_confirmation:
-        description: Type ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE when fresh_d1_cutover is true
-        required: false
-        default: ""
-        type: string
-      source_database_id:
-        description: UUID currently bound to the active production Worker
-        required: false
-        default: ""
-        type: string
-      source_database_name:
-        description: Name currently paired with source_database_id
-        required: false
-        default: ""
-        type: string
-      target_database_id:
-        description: Fresh D1 UUID committed in apps/web/wrangler.jsonc
-        required: false
-        default: ""
-        type: string
-      target_database_name:
-        description: Name paired with target_database_id in apps/web/wrangler.jsonc
-        required: false
-        default: ""
-        type: string
 
 permissions:
   actions: read
@@ -102,17 +67,9 @@ jobs:
       single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
       provenance_workflow_path: .github/workflows/control-plane-rollout.yml
       parent_holds_control_plane_lock: true
-      fresh_d1_cutover: ${{ inputs.fresh_d1_cutover }}
-      fresh_d1_cutover_confirmation: ${{ inputs.fresh_d1_cutover_confirmation }}
-      source_snapshot_reset_confirmation: ${{ inputs.source_snapshot_reset_confirmation }}
-      source_database_id: ${{ inputs.source_database_id }}
-      source_database_name: ${{ inputs.source_database_name }}
-      target_database_id: ${{ inputs.target_database_id }}
-      target_database_name: ${{ inputs.target_database_name }}
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_PROVIDER_PROBE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
       STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
       INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-      BETA_MAINTENANCE_BYPASS_SECRET: ${{ secrets.BETA_MAINTENANCE_BYPASS_SECRET }}

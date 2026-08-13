@@ -67,11 +67,10 @@ export default {
       : response;
   },
   async scheduled(controller, env) {
-    // The pure beta replacement must be database-independent while its D1
-    // schema and credential rows are reset. Cron work is part of the same
-    // maintenance fence as HTTP traffic; otherwise a minute tick can issue or
-    // mutate runtimes in the middle of the cutover.
-    if (String(env.BETA_ACCESS_MAINTENANCE) === "on") {
+    // Planned control-plane maintenance must be database-independent. Cron work
+    // is part of the same maintenance fence as HTTP traffic; otherwise a minute
+    // tick can issue or mutate runtimes while the control plane is fenced.
+    if (String(env.CONTROL_PLANE_MAINTENANCE) === "on") {
       console.info(
         JSON.stringify({ event: "scheduled_maintenance_fenced" }),
       );

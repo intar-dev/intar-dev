@@ -74,7 +74,7 @@ probe_root_health() {
       --header 'Accept: application/json' --header 'Cache-Control: no-cache' \
       --output "${maintenance_body}" --dump-header "${maintenance_headers}" \
       --write-out '%{http_code}' \
-      https://intar.dev/api/cutover-maintenance-probe; } || true)"
+      https://intar.dev/api/control-plane-maintenance-probe; } || true)"
     maintenance_code="$(jq -r '.code // empty' "${maintenance_body}" 2>/dev/null || true)"
     if [ "${root_status}" = 503 ] && [ "${maintenance_status}" = 503 ] && \
       [ "${maintenance_code}" = maintenance ]; then
@@ -119,11 +119,11 @@ jq -e \
     (.migrations | length) >= 1 and
     (.migrations[-1].tag | type) == "string"
   ' "${config}" >/dev/null
-target_maintenance_value="$(jq -er '.vars.BETA_ACCESS_MAINTENANCE // "off"' "${config}")"
+target_maintenance_value="$(jq -er '.vars.CONTROL_PLANE_MAINTENANCE // "off"' "${config}")"
 case "${target_maintenance_value}" in
   on) target_health_mode=maintenance ;;
   off) target_health_mode=open ;;
-  *) echo "invalid target BETA_ACCESS_MAINTENANCE value" >&2; exit 1 ;;
+  *) echo "invalid target CONTROL_PLANE_MAINTENANCE value" >&2; exit 1 ;;
 esac
 
 bunx wrangler deployments status --name "${worker_name}" --json \
@@ -158,7 +158,7 @@ jq -e --arg migration_tag "$(jq -er '.resources.script_runtime.migration_tag' "$
 ' "${config}" >/dev/null
 before_maintenance_value="$(jq -r '
   [.resources.bindings[] | select(
-    .type == "plain_text" and .name == "BETA_ACCESS_MAINTENANCE"
+    .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
   )] |
   if length == 0 then "off"
   elif length == 1 then .[0].text
@@ -168,7 +168,7 @@ before_maintenance_value="$(jq -r '
 case "${before_maintenance_value}" in
   on) before_health_mode=maintenance ;;
   off) before_health_mode=open ;;
-  *) echo "invalid active BETA_ACCESS_MAINTENANCE binding" >&2; exit 1 ;;
+  *) echo "invalid active CONTROL_PLANE_MAINTENANCE binding" >&2; exit 1 ;;
 esac
 test "${before_health_mode}" = "${expected_current_mode}"
 probe_root_health "before" "${before_health}" "${before_health_mode}"
@@ -347,7 +347,7 @@ jq -e '
     .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
   )] | length) == 1 and
   ([.resources.bindings[] | select(
-    .type == "secret_text" and .name == "BETA_MAINTENANCE_BYPASS_SECRET"
+    .type == "secret_text" and .name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"
   )] | length) == 1
 ' "${uploaded_version}" >/dev/null
 jq -s -e '

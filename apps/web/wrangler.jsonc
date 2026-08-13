@@ -6,16 +6,16 @@
   "main": "src/worker.ts",
   "secrets": {
     "required": [
-      "BETA_MAINTENANCE_BYPASS_SECRET",
+      "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
       "STARGATE_EGRESS_IPV4_CIDRS",
     ],
   },
   "vars": {
     "BETTER_AUTH_APP_NAME": "intar.dev",
     "BETTER_AUTH_URL": "https://intar.dev",
-    // Exceptional database rebaselines generate a temporary maintenance-on
-    // version in the protected cutover workflow; committed steady state is open.
-    "BETA_ACCESS_MAINTENANCE": "off",
+    // Planned control-plane maintenance generates a temporary maintenance-on
+    // version; committed steady state is open.
+    "CONTROL_PLANE_MAINTENANCE": "off",
     "AGENT_JWT_ISSUER": "intar-agent-bridge",
     "AGENT_JWT_AUDIENCE": "agent-connect",
     "STARGATE_ROUTE_TTL_SECONDS": "14400",

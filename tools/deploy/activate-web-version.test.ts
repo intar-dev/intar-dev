@@ -48,7 +48,7 @@ function runAmbiguousActivation(
   writeFileSync(restoreCount, "0");
   writeFileSync(
     secrets,
-    '{"BETA_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
+    '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
   );
   writeFileSync(
     config,
@@ -62,7 +62,7 @@ function runAmbiguousActivation(
       ],
       kv_namespaces: [{ binding: "SESSION", id: sessionNamespaceId }],
       vars: {
-        BETA_ACCESS_MAINTENANCE: targetMaintenance ? "on" : "off",
+        CONTROL_PLANE_MAINTENANCE: targetMaintenance ? "on" : "off",
       },
       migrations: [
         { tag: "v1", new_sqlite_classes: ["AgentBridgeDO"] },
@@ -101,7 +101,7 @@ fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
   if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; db="$CURRENT_DATABASE_ID"; else maintenance="$TARGET_MAINTENANCE"; db="$TARGET_DATABASE_ID"; fi
-  jq -cn --arg id "$version" --arg db "$db" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
+  jq -cn --arg id "$version" --arg db "$db" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -167,7 +167,7 @@ done
 current="$(<"$MOCK_STATE")"
 if [ "$current" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
 if [ -n "$headers" ]; then : > "$headers"; fi
-if [ "$url" = "https://intar.dev/api/cutover-maintenance-probe" ]; then
+if [ "$url" = "https://intar.dev/api/control-plane-maintenance-probe" ]; then
   if [ "$maintenance" = true ]; then
     if [ -n "$output" ]; then printf '%s' '{"code":"maintenance"}' > "$output"; fi
     printf '503'
@@ -176,7 +176,7 @@ if [ "$url" = "https://intar.dev/api/cutover-maintenance-probe" ]; then
     printf '404'
   fi
 elif [ "$maintenance" = true ]; then
-  if [ -n "$output" ]; then printf '%s' '<h1>Beta access is under maintenance</h1>' > "$output"; fi
+  if [ -n "$output" ]; then printf '%s' '<h1>The control plane is under maintenance</h1>' > "$output"; fi
   printf '503'
 else
   if [ -n "$output" ]; then printf '%s' '<h1>intar.dev</h1>' > "$output"; fi
@@ -263,7 +263,7 @@ describe("exact web-version activation", () => {
     expect(script).toContain("--experimental-provision=false");
     expect(script).toContain('--secrets-file "${secrets_file}"');
     expect(script).toContain('.name == "STARGATE_EGRESS_IPV4_CIDRS"');
-    expect(script).toContain('.name == "BETA_MAINTENANCE_BYPASS_SECRET"');
+    expect(script).toContain('.name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"');
     expect(script).toContain("runtime_secret_binding_proven: true");
   });
 
@@ -307,7 +307,7 @@ describe("exact web-version activation", () => {
     expect(script).toContain("current_active_version_used_as_reference: true");
   });
 
-  it("validates the active and target D1 bindings independently during cutover", () => {
+  it("validates active and target D1 bindings independently during maintenance transitions", () => {
     expect(script).toContain('"${current_database_id}" "${session_namespace_id}"');
     expect(script).toContain(
       'version-runtime-bindings "${uploaded_version}" "${target_database_id}"',
@@ -330,7 +330,7 @@ describe("exact web-version activation", () => {
     }
   });
 
-  it("restores source/open when phase A activation fails", () => {
+  it("restores the open version when activation from open fails", () => {
     const run = runAmbiguousActivation(0, false, true);
     try {
       expect(run.result.status).toBe(42);
@@ -346,7 +346,7 @@ describe("exact web-version activation", () => {
     }
   });
 
-  it("restores source/maintenance when phase B activation fails", () => {
+  it("restores the maintenance version when a binding change fails", () => {
     const run = runAmbiguousActivation(0, true, true, true);
     try {
       expect(run.result.status).toBe(42);
@@ -362,7 +362,7 @@ describe("exact web-version activation", () => {
     }
   });
 
-  it("restores target/maintenance when phase C activation fails", () => {
+  it("restores the maintenance version when opening fails", () => {
     const run = runAmbiguousActivation(
       0,
       true,
@@ -387,7 +387,9 @@ describe("exact web-version activation", () => {
   it("requires the expected open or exact maintenance state before and after activation", () => {
     expect(script).toContain("before_health_mode");
     expect(script).toContain("target_health_mode");
-    expect(script).toContain("https://intar.dev/api/cutover-maintenance-probe");
+    expect(script).toContain(
+      "https://intar.dev/api/control-plane-maintenance-probe",
+    );
     expect(script).toContain('"${maintenance_code}" = maintenance');
     expect(script).toContain('https://intar.dev/');
     expect(script).toContain("before_health_proven: true");

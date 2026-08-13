@@ -78,43 +78,6 @@ The production workflow builds the exact commit, applies pending Drizzle
 migrations, and then deploys the new Worker. A forward migration must leave the
 currently deployed Worker functional for the short interval before replacement.
 
-A deliberate database rebaseline uses two reviewed exact-`main` commits. From
-the first, dispatch `Prepare fresh production D1` with the exact confirmation
-and a new unique production name. That workflow creates one EU-jurisdiction D1,
-applies only the generated Drizzle stream, verifies the exact Drizzle ledger and
-canonical generated DDL (including table definitions, indexes, constraints, and
-the ledger table itself), proves that views, triggers, and foreign-key
-violations are absent, empirically proves REST batch rollback, and retains its
-UUID without changing the Worker. Put that evidence-backed name and UUID into
-`wrangler.jsonc` in the second commit.
-
-Deploy the second commit with `fresh_d1_cutover=true`, the exact cutover
-confirmation, the separate `ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE`
-acknowledgement, and both source and target name/UUID pairs. This is an
-explicit snapshot reset, not a lossless in-place database migration. The
-protected run
-fences the source Worker, performs the allowlisted durable-data copy, switches
-to the target while still fenced, re-verifies schema and data-copy evidence,
-then re-fingerprints every source application table and requires the source Time
-Travel bookmark to remain unchanged before it opens the target. While this
-fence is active, the maintenance bypass permits only GET/HEAD requests to the
-DB-independent `/api/maintenance/status` endpoint; application and OAuth routes
-cannot bypass maintenance, and no application mutation is permitted. The
-workflow retains the source bookmark captured immediately before fencing, but
-never restores it automatically. Any Phase A activation failure restores
-source/open; a copy or Phase B activation failure leaves source/maintenance;
-and copied-target/source-stability verification or Phase C activation failure
-leaves target/maintenance. The workflow never deletes the source D1; keep it as
-immutable rollback evidence, and do not switch back after the target has
-accepted writes.
-
-Maintenance prevents new application mutations but cannot cancel a Worker
-invocation that started on the previous version. The final source fingerprint
-and bookmark catch writes completed before that check. A later write remains
-recoverable in the retained source archive but is deliberately outside the new
-control-plane snapshot. Drain externally active work first and treat provider,
-R2, route, and agent inventories as separate cleanup surfaces.
-
 Pull requests run the test/build and UI quality gates. Production is not
 automatic on merge: first dispatch `Website` against the exact `main` commit,
 then dispatch the protected `Website production` workflow only after that

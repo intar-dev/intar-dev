@@ -61,7 +61,7 @@ import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-o
 import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import {
-  betaAccessMaintenanceEnabled,
+  controlPlaneMaintenanceEnabled,
   maintenanceJsonResponse,
 } from "@/maintenance";
 
@@ -110,7 +110,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private nextScenarioImageCacheReconciliationAtMs: number | null = null;
 
   override async fetch(request: Request): Promise<Response> {
-    if (betaAccessMaintenanceEnabled(this.env)) {
+    if (controlPlaneMaintenanceEnabled(this.env)) {
       return maintenanceJsonResponse();
     }
     const url = new URL(request.url);
@@ -135,7 +135,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   override async alarm(): Promise<void> {
-    if (betaAccessMaintenanceEnabled(this.env)) {
+    if (controlPlaneMaintenanceEnabled(this.env)) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
@@ -154,7 +154,7 @@ export class HostRuntimeDO extends HostRuntimeBase {
     ws: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
-    if (betaAccessMaintenanceEnabled(this.env)) {
+    if (controlPlaneMaintenanceEnabled(this.env)) {
       try {
         ws.close(1012, "maintenance");
       } catch {
@@ -191,12 +191,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     _reason: string,
     _wasClean: boolean,
   ): Promise<void> {
-    if (betaAccessMaintenanceEnabled(this.env)) return;
+    if (controlPlaneMaintenanceEnabled(this.env)) return;
     await this.handleSocketClosed(ws);
   }
 
   override async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
-    if (betaAccessMaintenanceEnabled(this.env)) return;
+    if (controlPlaneMaintenanceEnabled(this.env)) return;
     await this.handleSocketClosed(ws);
   }
 

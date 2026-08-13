@@ -6,7 +6,7 @@ export async function handleMaintenanceMode(
   request: Request,
   workerEnv: Cloudflare.Env,
 ): Promise<Response | null> {
-  if (!betaAccessMaintenanceEnabled(workerEnv)) return null;
+  if (!controlPlaneMaintenanceEnabled(workerEnv)) return null;
 
   const pathname = new URL(request.url).pathname;
   if (pathname === "/api/maintenance/bypass" && request.method === "POST") {
@@ -52,7 +52,7 @@ async function establishMaintenanceBypass(
   } | null;
   const suppliedSecret =
     typeof body?.secret === "string" ? body.secret : "";
-  const configuredSecret = workerEnv.BETA_MAINTENANCE_BYPASS_SECRET;
+  const configuredSecret = workerEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET;
   if (
     typeof configuredSecret !== "string" ||
     encoder.encode(configuredSecret).byteLength < 32 ||
@@ -80,7 +80,7 @@ async function hasMaintenanceBypass(
   request: Request,
   workerEnv: Cloudflare.Env,
 ): Promise<boolean> {
-  const configuredSecret = workerEnv.BETA_MAINTENANCE_BYPASS_SECRET;
+  const configuredSecret = workerEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET;
   if (
     typeof configuredSecret !== "string" ||
     encoder.encode(configuredSecret).byteLength < 32
@@ -125,15 +125,15 @@ async function equalSecrets(left: string, right: string): Promise<boolean> {
   return mismatch === 0;
 }
 
-export function betaAccessMaintenanceEnabled(
-  workerEnv: Pick<Cloudflare.Env, "BETA_ACCESS_MAINTENANCE">,
+export function controlPlaneMaintenanceEnabled(
+  workerEnv: Pick<Cloudflare.Env, "CONTROL_PLANE_MAINTENANCE">,
 ): boolean {
-  return String(workerEnv.BETA_ACCESS_MAINTENANCE) === "on";
+  return String(workerEnv.CONTROL_PLANE_MAINTENANCE) === "on";
 }
 
 export function maintenanceJsonResponse(
   status = 503,
-  error = "beta access maintenance is in progress",
+  error = "control-plane maintenance is in progress",
 ): Response {
   const headers = maintenanceHeaders("application/json; charset=utf-8");
   headers.set("retry-after", "60");
@@ -186,9 +186,9 @@ function maintenancePage(): Response {
   </head>
   <body>
     <main>
-      <small>PLANNED CUTOVER</small>
-      <h1>Beta access is under maintenance</h1>
-      <p>We are replacing the access boundary and validating the new invite flow. Existing sessions are intentionally unavailable until the checks finish.</p>
+      <small>PLANNED MAINTENANCE</small>
+      <h1>The control plane is under maintenance</h1>
+      <p>We are completing planned maintenance. Existing sessions are temporarily unavailable until the checks finish.</p>
       <p>Try again shortly.</p>
       <form id="operator-login" action="/api/maintenance/bypass" method="post">
         <label for="operator-secret">Operator maintenance secret</label>
