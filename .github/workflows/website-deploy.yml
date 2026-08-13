@@ -603,9 +603,9 @@ jobs:
           [[ "${target_database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
           test "$(jq -er '.vars.BETA_ACCESS_MAINTENANCE // "off"' "${config}")" = off
 
-          source_maintenance_config="dist/server/wrangler-source-maintenance.json"
-          target_maintenance_config="dist/server/wrangler-target-maintenance.json"
-          target_open_config="dist/server/wrangler-target-open.json"
+          source_maintenance_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-source-maintenance.json"
+          target_maintenance_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-target-maintenance.json"
+          target_open_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-target-open.json"
           jq \
             --arg database_id "${source_database_id}" \
             --arg database_name "${source_database_name}" '

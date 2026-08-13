@@ -65,6 +65,21 @@ describe("fresh production D1 workflows", () => {
     expect(prepareWorkflow).toContain("retention-days: 90");
   });
 
+  it("exports generated Worker configs as absolute workspace paths", () => {
+    expect(deployWorkflow).toContain(
+      'source_maintenance_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-source-maintenance.json"',
+    );
+    expect(deployWorkflow).toContain(
+      'target_maintenance_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-target-maintenance.json"',
+    );
+    expect(deployWorkflow).toContain(
+      'target_open_config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler-target-open.json"',
+    );
+    expect(deployWorkflow).not.toMatch(
+      /(?:source_maintenance|target_maintenance|target_open)_config="dist\/server\//u,
+    );
+  });
+
   it("orders one protected cutover source fence, copy, target fence, then open", () => {
     const sourceFence = deployWorkflow.indexOf(
       "Phase A - fence the source D1 behind maintenance",
