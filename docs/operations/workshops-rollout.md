@@ -203,16 +203,22 @@ not a claim that the legacy database can be migrated in place without a write
 barrier.
 The single serialized run performs these fail-closed phases:
 
-1. capture and retain the source D1 Time Travel bookmark without restoring it;
-2. activate the source binding with maintenance on and prove the public 503
+1. prove every source activity gate is already zero except the explicitly
+   quiesceable host-observation and bootstrap/publisher capabilities;
+2. capture and retain the source D1 Time Travel bookmark without restoring it;
+3. activate the source binding with maintenance on and prove the public 503
    maintenance response;
-3. copy only the explicitly allowlisted durable rows into the prepared target;
-4. activate the target binding with maintenance still on, then re-prove its
+4. use the typed Drizzle data command to revoke those source capabilities and
+   remove ephemeral host observations in one D1 batch, while retaining host
+   registrations and history; capture a second bookmark as the stability
+   baseline, then require the complete copy preflight to pass;
+5. copy only the explicitly allowlisted durable rows into the prepared target;
+6. activate the target binding with maintenance still on, then re-prove its
    Drizzle ledger, canonical generated DDL, foreign keys, and copy evidence;
-5. re-fingerprint every source application table after Phase B, repeat the
+7. re-fingerprint every source application table after Phase B, repeat the
    quiescence gates, and require its current Time Travel bookmark to equal the
-   pre-fence bookmark;
-6. activate the same target binding with maintenance off and prove public
+   post-quiescence stability bookmark;
+8. activate the same target binding with maintenance off and prove public
    health.
 
 Under the source fence, the maintenance bypass is read-only in operational
@@ -221,8 +227,10 @@ effect: only GET/HEAD requests to the DB-independent
 administration, and OAuth routes remain fenced, and no application mutation is
 permitted.
 
-A bookmark-capture failure changes no Worker version. A Phase A activation
-failure restores source/open; a copy failure leaves source/maintenance; a
+A bookmark-capture failure changes no Worker version. The capability preflight
+is read-only and refuses to begin while any non-quiesceable work remains. A
+Phase A activation failure restores source/open; a capability-retirement or
+copy failure leaves source/maintenance; a
 Phase B activation failure restores source/maintenance; and a copied-target
 verification, source-stability verification, or Phase C activation failure
 leaves target/maintenance. Never delete the source D1 in the cutover workflow.

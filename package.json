@@ -24,7 +24,7 @@
     "check:flagship": "bun test tools/flagship/workshop-multicloud-targeting.test.ts",
     "check:imports": "bun tools/check-import-boundaries.ts",
     "check:deploy": "vitest run tools/deploy",
-    "check:database-migrations": "bun run --cwd apps/web db:check && bun test tools/database/drizzle-generated-migrations.test.ts",
+    "check:database-migrations": "bun run --cwd apps/web db:check && bun test tools/database",
     "clean:generated": "bun tools/cleanup-generated.ts",
     "hydrate": "bun tools/workshops/platform-engineering/hydrate.ts",
     "generate:scenario-authoring": "bun tools/generate-scenario-authoring-config.ts",

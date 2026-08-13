@@ -1170,7 +1170,7 @@ jobs:
             .[0].results == []
           ' "${foreign_keys}" >/dev/null
 
-      - name: Dry-run the allowlisted production D1 copy
+      - name: Preflight source capability quiescence
         if: ${{ inputs.fresh_d1_cutover }}
         working-directory: ${{ github.workspace }}
         env:
@@ -1178,33 +1178,31 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          bun tools/database/copy-production-d1.ts \
+          evidence="${RUNNER_TEMP}/production-d1-source-quiescence-dry-run.json"
+          bun tools/database/quiesce-production-d1-source.ts \
             --source-database-id "${SOURCE_DATABASE_ID}" \
-            --target-database-id "${TARGET_DATABASE_ID}" \
+            --confirm-source-database-id "${SOURCE_DATABASE_ID}" \
+            --confirmation 'QUIESCE SOURCE CAPABILITIES' \
             --dry-run \
-            --evidence "${RUNNER_TEMP}/production-d1-copy-dry-run.json"
+            --evidence "${evidence}"
           jq -e \
             --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
-            --arg source_database_id "${SOURCE_DATABASE_ID}" \
-            --arg target_database_id "${TARGET_DATABASE_ID}" '
+            --arg source_database_id "${SOURCE_DATABASE_ID}" '
               .version == 1 and
               .mode == "dry-run" and
-              .status == "preflight_passed" and
+              .status == "quiescence_preflight_passed" and
               .accountId == $account_id and
               .sourceDatabaseId == $source_database_id and
-              .targetDatabaseId == $target_database_id and
-              .sourceDatabaseId != .targetDatabaseId and
-              .schema.foreignKeyViolations == 0 and
-              .schema.triggers == 0 and
-              .schema.views == 0 and
-              all(.sourceGates[]; .count == 0) and
-              (.sourceBefore | type) == "object" and
-              (.sourceAllBefore | type) == "object" and
-              .sourceAllAfter == null and
-              .sourceAfter == null and
-              .targetAfter == null
+              (.before | type) == "array" and
+              all(.before[]; .quiesceable == true or .count == 0) and
+              .after == null and
+              .changes == {
+                agentBootstrapTokensRevoked: 0,
+                workshopRegistryTokensRevoked: 0,
+                hostActualStateDeleted: 0
+              }
             ' \
-            "${RUNNER_TEMP}/production-d1-copy-dry-run.json" >/dev/null
+            "${evidence}" >/dev/null
 
       - name: Retain production D1 migration evidence
         if: ${{ always() }}
@@ -1222,6 +1220,7 @@ jobs:
             ${{ runner.temp }}/production-d1-manifest.json
             ${{ runner.temp }}/production-d1-foreign-keys.json
             ${{ runner.temp }}/production-d1-generated-schema.json
+            ${{ runner.temp }}/production-d1-source-quiescence*.json
             ${{ runner.temp }}/production-d1-copy-dry-run.json
           if-no-files-found: error
           retention-days: 90
@@ -1332,6 +1331,121 @@ jobs:
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/exact-web-version-activation-source-maintenance.json" \
             open
+
+      - name: Retire source capabilities under maintenance
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/production-d1-source-quiescence.json"
+          bun tools/database/quiesce-production-d1-source.ts \
+            --source-database-id "${SOURCE_DATABASE_ID}" \
+            --confirm-source-database-id "${SOURCE_DATABASE_ID}" \
+            --confirmation 'QUIESCE SOURCE CAPABILITIES' \
+            --apply \
+            --evidence "${evidence}"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" '
+              .version == 1 and
+              .mode == "apply" and
+              .status == "source_quiesced" and
+              .accountId == $account_id and
+              .sourceDatabaseId == $source_database_id and
+              (.before | type) == "array" and
+              all(.before[]; .quiesceable == true or .count == 0) and
+              (.after | type) == "array" and
+              all(.after[]; .count == 0) and
+              .changes.agentBootstrapTokensRevoked >= 0 and
+              .changes.workshopRegistryTokensRevoked >= 0 and
+              .changes.hostActualStateDeleted >= 0
+            ' "${evidence}" >/dev/null
+
+      - name: Capture the post-quiescence source bookmark
+        if: ${{ inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          raw="${RUNNER_TEMP}/source-d1-time-travel-post-quiescence-raw.json"
+          evidence="${RUNNER_TEMP}/source-d1-time-travel-post-quiescence.json"
+          bunx wrangler d1 time-travel info DB \
+            --config "${SOURCE_MAINTENANCE_CONFIG}" \
+            --json > "${raw}"
+          jq -e '
+            type == "object" and
+            (.bookmark | type) == "string" and
+            (.bookmark | length) > 0
+          ' "${raw}" >/dev/null
+          jq -n \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg source_database_name "${SOURCE_DATABASE_NAME}" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile observed "${raw}" '
+              {
+                schema_version: 1,
+                operation: "capture-post-quiescence-source-bookmark",
+                source_database_id: $source_database_id,
+                source_database_name: $source_database_name,
+                captured_at: $captured_at,
+                bookmark: $observed[0].bookmark,
+                source_capabilities_quiesced: true,
+                read_only: true,
+                restore_attempted: false,
+                source_database_deleted: false
+              }
+            ' > "${evidence}"
+          jq -e \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" '
+              .operation == "capture-post-quiescence-source-bookmark" and
+              .source_database_id == $source_database_id and
+              (.bookmark | type) == "string" and
+              (.bookmark | length) > 0 and
+              .source_capabilities_quiesced == true and
+              .read_only == true and
+              .restore_attempted == false and
+              .source_database_deleted == false
+            ' "${evidence}" >/dev/null
+
+      - name: Dry-run the allowlisted production D1 copy
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          bun tools/database/copy-production-d1.ts \
+            --source-database-id "${SOURCE_DATABASE_ID}" \
+            --target-database-id "${TARGET_DATABASE_ID}" \
+            --dry-run \
+            --evidence "${RUNNER_TEMP}/production-d1-copy-dry-run.json"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .mode == "dry-run" and
+              .status == "preflight_passed" and
+              .accountId == $account_id and
+              .sourceDatabaseId == $source_database_id and
+              .targetDatabaseId == $target_database_id and
+              .sourceDatabaseId != .targetDatabaseId and
+              .schema.foreignKeyViolations == 0 and
+              .schema.triggers == 0 and
+              .schema.views == 0 and
+              all(.sourceGates[]; .count == 0) and
+              (.sourceBefore | type) == "object" and
+              (.sourceAllBefore | type) == "object" and
+              .sourceAllAfter == null and
+              .sourceAfter == null and
+              .targetAfter == null
+            ' \
+            "${RUNNER_TEMP}/production-d1-copy-dry-run.json" >/dev/null
 
       - name: Copy the allowlisted durable production data
         if: ${{ inputs.fresh_d1_cutover }}
@@ -1493,7 +1607,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          before="${RUNNER_TEMP}/source-d1-time-travel-raw.json"
+          before="${RUNNER_TEMP}/source-d1-time-travel-post-quiescence-raw.json"
           after="${RUNNER_TEMP}/source-d1-time-travel-after-phase-b-raw.json"
           evidence="${RUNNER_TEMP}/source-d1-time-travel-after-phase-b.json"
           bunx wrangler d1 time-travel info DB \
@@ -1569,6 +1683,10 @@ jobs:
               "${RUNNER_TEMP}/exact-web-version-activation-target-open.json" \
             --slurpfile source_time_travel \
               "${RUNNER_TEMP}/source-d1-time-travel.json" \
+            --slurpfile source_quiescence \
+              "${RUNNER_TEMP}/production-d1-source-quiescence.json" \
+            --slurpfile source_stability_baseline \
+              "${RUNNER_TEMP}/source-d1-time-travel-post-quiescence.json" \
             --slurpfile source_after_phase_b \
               "${RUNNER_TEMP}/production-d1-source-after-phase-b.json" \
             --slurpfile source_time_travel_after_phase_b \
@@ -1585,6 +1703,8 @@ jobs:
                 source_database_retained: true,
                 source_database_deleted: false,
                 source_time_travel: $source_time_travel[0],
+                source_quiescence: $source_quiescence[0],
+                source_stability_baseline: $source_stability_baseline[0],
                 source_after_phase_b: $source_after_phase_b[0],
                 source_time_travel_after_phase_b: $source_time_travel_after_phase_b[0],
                 phase_a_source_maintenance: $source_maintenance[0],
@@ -1607,11 +1727,18 @@ jobs:
               .source_time_travel.source_database_id == $source_database_id and
               .source_time_travel.read_only == true and
               .source_time_travel.restore_attempted == false and
+              .source_quiescence.status == "source_quiesced" and
+              .source_quiescence.sourceDatabaseId == $source_database_id and
+              all(.source_quiescence.after[]; .count == 0) and
+              .source_stability_baseline.operation == "capture-post-quiescence-source-bookmark" and
+              .source_stability_baseline.source_database_id == $source_database_id and
+              .source_stability_baseline.source_capabilities_quiesced == true and
               .source_after_phase_b.status == "source_unchanged_after_target_activation" and
               .source_after_phase_b.sourceDatabaseId == $source_database_id and
               .source_after_phase_b.targetDatabaseId == $target_database_id and
               .source_after_phase_b.sourceAllObserved == .source_after_phase_b.sourceAllExpected and
               .source_time_travel_after_phase_b.unchanged == true and
+              .source_time_travel_after_phase_b.before_bookmark == .source_stability_baseline.bookmark and
               .source_time_travel_after_phase_b.before_bookmark == .source_time_travel_after_phase_b.after_bookmark and
               .phase_a_source_maintenance.after_health_proven == true and
               .durable_data_copy.version == 1 and
@@ -1640,6 +1767,7 @@ jobs:
             ${{ runner.temp }}/fresh-d1-cutover-attempt.json
             ${{ runner.temp }}/fresh-d1-cutover.json
             ${{ runner.temp }}/production-d1-copy*.json
+            ${{ runner.temp }}/production-d1-source-quiescence*.json
             ${{ runner.temp }}/production-d1-copied-*.json
             ${{ runner.temp }}/production-d1-source-after-phase-b.json
             ${{ runner.temp }}/source-d1-time-travel*.json

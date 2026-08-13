@@ -69,6 +69,18 @@ describe("fresh production D1 workflows", () => {
     const sourceFence = deployWorkflow.indexOf(
       "Phase A - fence the source D1 behind maintenance",
     );
+    const capabilityPreflight = deployWorkflow.indexOf(
+      "Preflight source capability quiescence",
+    );
+    const capabilityRetirement = deployWorkflow.indexOf(
+      "Retire source capabilities under maintenance",
+    );
+    const postQuiescenceBookmark = deployWorkflow.indexOf(
+      "Capture the post-quiescence source bookmark",
+    );
+    const copyDryRun = deployWorkflow.indexOf(
+      "Dry-run the allowlisted production D1 copy",
+    );
     const copy = deployWorkflow.indexOf(
       "Copy the allowlisted durable production data",
     );
@@ -87,7 +99,13 @@ describe("fresh production D1 workflows", () => {
     const stableBookmark = deployWorkflow.indexOf(
       "Reconfirm the source Time Travel bookmark before Phase C",
     );
+    expect(capabilityPreflight).toBeGreaterThan(-1);
+    expect(capabilityPreflight).toBeLessThan(sourceFence);
     expect(sourceFence).toBeGreaterThan(-1);
+    expect(capabilityRetirement).toBeGreaterThan(sourceFence);
+    expect(postQuiescenceBookmark).toBeGreaterThan(capabilityRetirement);
+    expect(copyDryRun).toBeGreaterThan(postQuiescenceBookmark);
+    expect(copy).toBeGreaterThan(copyDryRun);
     expect(copy).toBeGreaterThan(sourceFence);
     expect(targetFence).toBeGreaterThan(copy);
     expect(verify).toBeGreaterThan(targetFence);
@@ -104,6 +122,13 @@ describe("fresh production D1 workflows", () => {
     );
     expect(deployWorkflow).toContain("--dry-run");
     expect(deployWorkflow).toContain("--apply");
+    expect(deployWorkflow).toContain(
+      "bun tools/database/quiesce-production-d1-source.ts",
+    );
+    expect(deployWorkflow).toContain("QUIESCE SOURCE CAPABILITIES");
+    expect(deployWorkflow).toContain(
+      "production-d1-source-quiescence.json",
+    );
     expect(deployWorkflow).toContain("source_database_retained: true");
     expect(deployWorkflow).toContain("source_database_deleted: false");
     expect(deployWorkflow).not.toMatch(/wrangler d1 delete|wrangler delete/);
@@ -137,18 +162,33 @@ describe("fresh production D1 workflows", () => {
     const stableBookmarkStep = deployWorkflow.slice(stableBookmark, open);
     expect(stableBookmarkStep).toContain("wrangler d1 time-travel info");
     expect(stableBookmarkStep).toContain(
+      "source-d1-time-travel-post-quiescence-raw.json",
+    );
+    expect(stableBookmarkStep).toContain(
       ".before_bookmark == .after_bookmark",
     );
     expect(deployWorkflow).toContain(
       "${{ runner.temp }}/production-d1-source-after-phase-b.json",
     );
 
-    const phaseA = deployWorkflow.slice(sourceFence, copy);
+    const phaseA = deployWorkflow.slice(sourceFence, capabilityRetirement);
     expect(phaseA.match(/"\$\{SOURCE_DATABASE_ID\}"/g)).toHaveLength(2);
     expect(phaseA).not.toContain('"${TARGET_DATABASE_ID}"');
     expect(phaseA).toMatch(
       /exact-web-version-activation-source-maintenance\.json" \\\n+\s+open/u,
     );
+
+    const sourceQuiescence = deployWorkflow.slice(
+      capabilityRetirement,
+      postQuiescenceBookmark,
+    );
+    expect(sourceQuiescence).toContain(
+      '--source-database-id "${SOURCE_DATABASE_ID}"',
+    );
+    expect(sourceQuiescence).toContain(
+      '--confirm-source-database-id "${SOURCE_DATABASE_ID}"',
+    );
+    expect(sourceQuiescence).not.toContain('"${TARGET_DATABASE_ID}"');
 
     const phaseB = deployWorkflow.slice(targetFence, verify);
     expect(phaseB).toContain('"${SOURCE_DATABASE_ID}"');
