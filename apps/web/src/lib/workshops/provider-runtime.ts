@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { CanonicalProviderWrite } from "@intar/provider-contracts";
 import type { RuntimeProviderKind } from "@intar/workshop-contracts";
@@ -3269,19 +3269,90 @@ async function confirmProviderDeletion(context: ExecutionAllocationContext, now:
     return false;
   }
   const db = drizzle(env.DB);
-  const deleted = await db
-    .update(runtimeProviderAllocations)
-    .set({ state: "deleted", deletionConfirmedAt: now, updatedAt: now })
-    .where(
-      and(
-        eq(runtimeProviderAllocations.id, context.allocation.id),
-        eq(
-          runtimeProviderAllocations.locationAttempt,
-          context.allocation.locationAttempt,
+  const deleted = await db.batch([
+    db
+      .update(runtimeProviderAllocations)
+      .set({ state: "deleted", deletionConfirmedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(runtimeProviderAllocations.id, context.allocation.id),
+          eq(
+            runtimeProviderAllocations.locationAttempt,
+            context.allocation.locationAttempt,
+          ),
+          inArray(runtimeProviderAllocations.state, [
+            "deleting",
+            "cleanup_pending",
+          ]),
+          exists(
+            db
+              .select({
+                allocationId: runtimeProviderReconciliation.allocationId,
+              })
+              .from(runtimeProviderReconciliation)
+              .where(
+                and(
+                  eq(
+                    runtimeProviderReconciliation.allocationId,
+                    context.allocation.id,
+                  ),
+                  eq(runtimeProviderReconciliation.desiredState, "deleted"),
+                  ne(runtimeProviderReconciliation.observedState, "deleted"),
+                ),
+              ),
+          ),
         ),
       ),
+    db
+      .update(runtimeProviderReconciliation)
+      .set({
+        desiredState: "deleted",
+        observedState: "deleted",
+        sweepAfter: now,
+        claimId: null,
+        claimExpiresAt: null,
+        consecutiveFailures: 0,
+        lastReconciledAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(
+            runtimeProviderReconciliation.allocationId,
+            context.allocation.id,
+          ),
+          eq(runtimeProviderReconciliation.desiredState, "deleted"),
+          ne(runtimeProviderReconciliation.observedState, "deleted"),
+          exists(
+            db
+              .select({ id: runtimeProviderAllocations.id })
+              .from(runtimeProviderAllocations)
+              .where(
+                and(
+                  eq(runtimeProviderAllocations.id, context.allocation.id),
+                  eq(
+                    runtimeProviderAllocations.locationAttempt,
+                    context.allocation.locationAttempt,
+                  ),
+                  eq(runtimeProviderAllocations.state, "deleted"),
+                  eq(runtimeProviderAllocations.deletionConfirmedAt, now),
+                  eq(runtimeProviderAllocations.updatedAt, now),
+                ),
+              ),
+          ),
+        ),
+      ),
+  ]);
+  if (
+    deleted[0]?.meta.changes !== 1 ||
+    deleted[1]?.meta.changes !== 1
+  ) {
+    throw appError(
+      409,
+      "runtime_provider_deletion_fence_lost",
+      "provider deletion changed before terminal reconciliation was persisted",
     );
-  if (deleted.meta.changes !== 1) return false;
+  }
   await archiveRuntimeExecution({
     executionId: context.executionId,
     expectedGeneration: context.generation,

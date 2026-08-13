@@ -47,6 +47,13 @@ The caller must put the old Worker into maintenance and drain it before running
 the tool; the tool cannot itself stop an already-open Worker, Durable Object,
 or agent socket.
 
+The protected cutover first runs `quiesce-production-d1-source.ts`. Its typed
+Drizzle batch may revoke bootstrap/publisher capabilities, remove ephemeral host
+observations, and repair a provider-reconciliation row only when the allocation
+is already confirmed deleted, its execution is archived, every resource is
+confirmed absent, every operation is terminal, and no live reconciliation claim
+remains. Any provider row lacking that complete proof still blocks the cutover.
+
 The manifest is exhaustive: every generated application table is explicitly
 copied or excluded. A new table makes the tests and runtime preflight fail
 until a policy is added. Copied rows use bounded keyset pagination and

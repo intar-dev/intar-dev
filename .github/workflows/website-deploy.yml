@@ -1188,7 +1188,7 @@ jobs:
           jq -e \
             --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
             --arg source_database_id "${SOURCE_DATABASE_ID}" '
-              .version == 1 and
+              .version == 2 and
               .mode == "dry-run" and
               .status == "quiescence_preflight_passed" and
               .accountId == $account_id and
@@ -1199,7 +1199,8 @@ jobs:
               .changes == {
                 agentBootstrapTokensRevoked: 0,
                 workshopRegistryTokensRevoked: 0,
-                hostActualStateDeleted: 0
+                hostActualStateDeleted: 0,
+                providerReconciliationsTerminalized: 0
               }
             ' \
             "${evidence}" >/dev/null
@@ -1350,7 +1351,7 @@ jobs:
           jq -e \
             --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
             --arg source_database_id "${SOURCE_DATABASE_ID}" '
-              .version == 1 and
+              .version == 2 and
               .mode == "apply" and
               .status == "source_quiesced" and
               .accountId == $account_id and
@@ -1361,7 +1362,8 @@ jobs:
               all(.after[]; .count == 0) and
               .changes.agentBootstrapTokensRevoked >= 0 and
               .changes.workshopRegistryTokensRevoked >= 0 and
-              .changes.hostActualStateDeleted >= 0
+              .changes.hostActualStateDeleted >= 0 and
+              .changes.providerReconciliationsTerminalized >= 0
             ' "${evidence}" >/dev/null
 
       - name: Capture the post-quiescence source bookmark
@@ -1727,6 +1729,8 @@ jobs:
               .source_time_travel.source_database_id == $source_database_id and
               .source_time_travel.read_only == true and
               .source_time_travel.restore_attempted == false and
+              .source_quiescence.version == 2 and
+              .source_quiescence.mode == "apply" and
               .source_quiescence.status == "source_quiesced" and
               .source_quiescence.sourceDatabaseId == $source_database_id and
               all(.source_quiescence.after[]; .count == 0) and

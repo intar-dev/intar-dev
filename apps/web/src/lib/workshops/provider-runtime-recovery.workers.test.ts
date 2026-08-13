@@ -223,6 +223,88 @@ describe("provider runtime recovery", () => {
     });
   });
 
+  it("terminalizes reconciliation with confirmed provider deletion", async () => {
+    await seedFalseDisappearedHetznerCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE workshop_runtime_profile_certifications
+         SET state = 'cleanup_pending', error_code = 'test_cleanup', updated_at = 200
+         WHERE id = 'certification'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'cleanup_pending', last_error_code = 'test_cleanup',
+             deletion_requested_at = 200, updated_at = 200
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET desired_state = 'deleted', observed_state = 'cleanup_pending',
+             sweep_after = 0, consecutive_failures = 4, updated_at = 200
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+    ]);
+    const runOperation = vi.fn(async (request: TestHetznerRequest) => {
+      expect(request.operation.kind).toBe("reconcile");
+      const resources = request.operation.resources ?? [];
+      return {
+        canonicalWrites: resources.map((resource) => ({
+          requestId: request.requestId,
+          connectionId: request.connectionId,
+          observedAt: new Date(300).toISOString(),
+          operation: "resource_deleted",
+          resourceKind: resource.resourceKind,
+          externalId: resource.externalId,
+          name: resource.deterministicName,
+          state: "deleted",
+        })),
+        data: { resources: resources.map(() => ({ status: "missing" })) },
+      };
+    });
+    mocks.invokeProviderOperation.mockImplementation(
+      async (
+        providerKind: string,
+        invoke: (binding: {
+          runOperation: typeof runOperation;
+        }) => Promise<unknown>,
+      ) => {
+        expect(providerKind).toBe("hetzner_cloud");
+        return invoke({ runOperation });
+      },
+    );
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 300, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 0, deleted: 1 });
+
+    const terminal = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.deletion_confirmed_at,
+              reconciliation.desired_state,
+              reconciliation.observed_state,
+              reconciliation.claim_id,
+              reconciliation.claim_expires_at,
+              reconciliation.consecutive_failures,
+              reconciliation.last_reconciled_at,
+              reconciliation.updated_at
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<Record<string, string | number | null>>();
+    expect(terminal).toEqual({
+      allocation_state: "deleted",
+      deletion_confirmed_at: 300,
+      desired_state: "deleted",
+      observed_state: "deleted",
+      claim_id: null,
+      claim_expires_at: null,
+      consecutive_failures: 0,
+      last_reconciled_at: 300,
+      updated_at: 300,
+    });
+  });
+
   it("does not let an expired delete action block resources already proven absent", async () => {
     await seedFalseDisappearedHetznerCertification();
     await env.DB.batch([

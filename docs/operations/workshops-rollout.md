@@ -204,13 +204,16 @@ barrier.
 The single serialized run performs these fail-closed phases:
 
 1. prove every source activity gate is already zero except the explicitly
-   quiesceable host-observation and bootstrap/publisher capabilities;
+   quiesceable host-observation and bootstrap/publisher capabilities and
+   provider-reconciliation rows whose allocation is already confirmed deleted,
+   execution archived, resources absent, operations terminal, and no claim held;
 2. capture and retain the source D1 Time Travel bookmark without restoring it;
 3. activate the source binding with maintenance on and prove the public 503
    maintenance response;
-4. use the typed Drizzle data command to revoke those source capabilities and
-   remove ephemeral host observations in one D1 batch, while retaining host
-   registrations and history; capture a second bookmark as the stability
+4. use the typed Drizzle data command to revoke those source capabilities,
+   remove ephemeral host observations, and terminalize only those
+   deletion-proven reconciliation rows in one D1 batch, while retaining host,
+   provider, and audit history; capture a second bookmark as the stability
    baseline, then require the complete copy preflight to pass;
 5. copy only the explicitly allowlisted durable rows into the prepared target;
 6. activate the target binding with maintenance still on, then re-prove its

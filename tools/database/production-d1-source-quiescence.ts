@@ -1,8 +1,22 @@
-import { isNull } from "../../apps/web/node_modules/drizzle-orm/index.js";
+import {
+  and,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  notExists,
+} from "../../apps/web/node_modules/drizzle-orm/index.js";
 import { drizzle } from "../../apps/web/node_modules/drizzle-orm/sqlite-proxy/index.js";
 import {
   agentBootstrapTokens,
   hostActualState,
+  runtimeExecutions,
+  runtimeProviderAllocations,
+  runtimeProviderOperations,
+  runtimeProviderReconciliation,
+  runtimeProviderResources,
   workshopRegistryTokens,
 } from "../../apps/web/src/db/schema.ts";
 import type {
@@ -18,9 +32,10 @@ const QUIESCEABLE_GATE_IDS = new Set([
   "registry_tokens",
   "host_actual_state",
 ]);
+const PROVIDER_RECONCILIATION_GATE_ID = "provider_reconciliation";
 
 export interface ProductionD1SourceQuiescenceEvidence {
-  readonly version: 1;
+  readonly version: 2;
   readonly mode: "dry-run" | "apply";
   readonly status: "quiescence_preflight_passed" | "source_quiesced";
   readonly accountId: string;
@@ -34,6 +49,7 @@ export interface ProductionD1SourceQuiescenceEvidence {
     readonly agentBootstrapTokensRevoked: number;
     readonly workshopRegistryTokensRevoked: number;
     readonly hostActualStateDeleted: number;
+    readonly providerReconciliationsTerminalized: number;
   };
 }
 
@@ -58,7 +74,7 @@ export async function runProductionD1SourceQuiescence(input: {
 
   if (input.mode === "dry-run") {
     return {
-      version: 1,
+      version: 2,
       mode: "dry-run",
       status: "quiescence_preflight_passed",
       accountId: input.accountId,
@@ -86,6 +102,10 @@ export async function runProductionD1SourceQuiescence(input: {
       "workshop registry token revocation",
     ),
     hostActualStateDeleted: requiredChanges(results[2], "host actual-state deletion"),
+    providerReconciliationsTerminalized: requiredChanges(
+      results[3],
+      "terminal provider reconciliation repair",
+    ),
   };
 
   const after = await readSourceGates(input.source, now);
@@ -97,7 +117,7 @@ export async function runProductionD1SourceQuiescence(input: {
   }
 
   return {
-    version: 1,
+    version: 2,
     mode: "apply",
     status: "source_quiesced",
     accountId: input.accountId,
@@ -113,6 +133,52 @@ export async function runProductionD1SourceQuiescence(input: {
 
 function quiescenceStatements(now: number): readonly D1Statement[] {
   const db = drizzle(async () => ({ rows: [] }));
+  const terminalAllocation = db
+    .select({ id: runtimeProviderAllocations.id })
+    .from(runtimeProviderAllocations)
+    .innerJoin(
+      runtimeExecutions,
+      eq(runtimeExecutions.id, runtimeProviderAllocations.executionId),
+    )
+    .where(
+      and(
+        eq(
+          runtimeProviderAllocations.id,
+          runtimeProviderReconciliation.allocationId,
+        ),
+        eq(runtimeProviderAllocations.state, "deleted"),
+        isNotNull(runtimeProviderAllocations.deletionConfirmedAt),
+        eq(runtimeExecutions.state, "archived"),
+      ),
+    );
+  const activeResources = db
+    .select({ id: runtimeProviderResources.id })
+    .from(runtimeProviderResources)
+    .where(
+      and(
+        eq(
+          runtimeProviderResources.allocationId,
+          runtimeProviderReconciliation.allocationId,
+        ),
+        isNull(runtimeProviderResources.disappearanceConfirmedAt),
+      ),
+    );
+  const activeOperations = db
+    .select({ id: runtimeProviderOperations.id })
+    .from(runtimeProviderOperations)
+    .where(
+      and(
+        eq(
+          runtimeProviderOperations.allocationId,
+          runtimeProviderReconciliation.allocationId,
+        ),
+        inArray(runtimeProviderOperations.state, [
+          "pending",
+          "running",
+          "retryable",
+        ]),
+      ),
+    );
   return [
     compiledStatement(
       db
@@ -127,6 +193,30 @@ function quiescenceStatements(now: number): readonly D1Statement[] {
         .where(isNull(workshopRegistryTokens.revokedAt)),
     ),
     compiledStatement(db.delete(hostActualState)),
+    compiledStatement(
+      db
+        .update(runtimeProviderReconciliation)
+        .set({
+          desiredState: "deleted",
+          observedState: "deleted",
+          sweepAfter: now,
+          claimId: null,
+          claimExpiresAt: null,
+          consecutiveFailures: 0,
+          lastReconciledAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(runtimeProviderReconciliation.desiredState, "deleted"),
+            ne(runtimeProviderReconciliation.observedState, "deleted"),
+            isNull(runtimeProviderReconciliation.claimId),
+            exists(terminalAllocation),
+            notExists(activeResources),
+            notExists(activeOperations),
+          ),
+        ),
+    ),
   ];
 }
 
@@ -156,10 +246,72 @@ async function readSourceGates(
   source: D1WriteClient,
   now: number,
 ): Promise<readonly SourceGateCount[]> {
-  const statements = SOURCE_GATES.map((gate) => ({
+  const db = drizzle(async () => ({ rows: [] }));
+  const statements: D1Statement[] = SOURCE_GATES.map((gate) => ({
     sql: gate.sql,
     params: gate.usesCutoverTime ? [now] : [],
   }));
+  statements.push(
+    compiledStatement(
+      db
+        .select({ allocationId: runtimeProviderReconciliation.allocationId })
+        .from(runtimeProviderReconciliation)
+        .innerJoin(
+          runtimeProviderAllocations,
+          eq(
+            runtimeProviderAllocations.id,
+            runtimeProviderReconciliation.allocationId,
+          ),
+        )
+        .innerJoin(
+          runtimeExecutions,
+          eq(runtimeExecutions.id, runtimeProviderAllocations.executionId),
+        )
+        .where(
+          and(
+            eq(runtimeProviderReconciliation.desiredState, "deleted"),
+            ne(runtimeProviderReconciliation.observedState, "deleted"),
+            isNull(runtimeProviderReconciliation.claimId),
+            eq(runtimeProviderAllocations.state, "deleted"),
+            isNotNull(runtimeProviderAllocations.deletionConfirmedAt),
+            eq(runtimeExecutions.state, "archived"),
+            notExists(
+              db
+                .select({ id: runtimeProviderResources.id })
+                .from(runtimeProviderResources)
+                .where(
+                  and(
+                    eq(
+                      runtimeProviderResources.allocationId,
+                      runtimeProviderReconciliation.allocationId,
+                    ),
+                    isNull(runtimeProviderResources.disappearanceConfirmedAt),
+                  ),
+                ),
+            ),
+            notExists(
+              db
+                .select({ id: runtimeProviderOperations.id })
+                .from(runtimeProviderOperations)
+                .where(
+                  and(
+                    eq(
+                      runtimeProviderOperations.allocationId,
+                      runtimeProviderReconciliation.allocationId,
+                    ),
+                    inArray(runtimeProviderOperations.state, [
+                      "pending",
+                      "running",
+                      "retryable",
+                    ]),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .groupBy(runtimeProviderReconciliation.allocationId),
+    ),
+  );
   const results = source.batchRead
     ? await source.batchRead(statements)
     : await Promise.all(
@@ -167,16 +319,22 @@ async function readSourceGates(
           source.query(statement.sql, statement.params),
         ),
       );
-  if (results.length !== SOURCE_GATES.length) {
+  if (results.length !== statements.length) {
     throw new Error(
-      `source gate read returned ${results.length} results for ${SOURCE_GATES.length} gates`,
+      `source gate read returned ${results.length} results for ${statements.length} statements`,
     );
   }
+  const terminalizableProviderReconciliations =
+    results[SOURCE_GATES.length]?.rows.length ?? 0;
   return SOURCE_GATES.map((gate, index) => ({
     id: gate.id,
     description: gate.description,
     count: countResult(results[index], gate.id),
-    quiesceable: QUIESCEABLE_GATE_IDS.has(gate.id),
+    quiesceable:
+      QUIESCEABLE_GATE_IDS.has(gate.id) ||
+      (gate.id === PROVIDER_RECONCILIATION_GATE_ID &&
+        countResult(results[index], gate.id) ===
+          terminalizableProviderReconciliations),
   }));
 }
 
@@ -220,5 +378,6 @@ function emptyChanges(): ProductionD1SourceQuiescenceEvidence["changes"] {
     agentBootstrapTokensRevoked: 0,
     workshopRegistryTokensRevoked: 0,
     hostActualStateDeleted: 0,
+    providerReconciliationsTerminalized: 0,
   };
 }
