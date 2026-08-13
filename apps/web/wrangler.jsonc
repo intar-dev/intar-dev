@@ -69,8 +69,8 @@
       "binding": "DB",
       // D1 has no supported database-name mutation; the UUID is the stable
       // production identity and must remain paired with its actual name.
-      "database_id": "1aade7e2-85e6-4304-9851-2bc71e082476",
-      "database_name": "intar-dev-control-plane-v2-20260803-r3",
+      "database_id": "c53ff120-c555-4702-b3a1-eaab44fd76f6",
+      "database_name": "intar-dev-control-plane-v3-20260813-r2",
       "migrations_dir": "migrations",
     },
   ],
