@@ -287,8 +287,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (pathname === "/api/access-invites/start" && method === "POST") {
-        const body = await requestBody(route);
-        const redirectKind = body.mode === "sso-recovery" ? "sso" : "github";
+        await requestBody(route);
         const leaseExpiresAt = FIXED_NOW + 10 * 60_000;
         server.state.betaClaim = {
           state: "leased",
@@ -296,11 +295,8 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           ownsLease: true,
         };
         await json(route, {
-          redirectUrl:
-            redirectKind === "sso"
-              ? "https://id.platform.example/authorize"
-              : "/join?oauth=github",
-          redirectKind,
+          redirectUrl: "/join?oauth=github",
+          redirectKind: "github",
           leaseExpiresAt,
         });
         return;

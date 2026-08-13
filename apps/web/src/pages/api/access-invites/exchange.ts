@@ -9,6 +9,7 @@ import {
 import {
   inviteAttemptSetCookie,
   newInviteAttempt,
+  readInviteAttempt,
 } from "@/lib/invite-attempt";
 import {
   rateLimitPublicAccessInvite,
@@ -24,7 +25,11 @@ export const POST: APIRoute = async ({ request }) => {
     const body = await readJsonObject(request);
     const code = typeof body.code === "string" ? body.code : "";
     const invite = await exchangeAccessInviteCode({ d1: env.DB, code });
-    const attempt = newInviteAttempt(invite.inviteId);
+    const existingAttempt = await readInviteAttempt(request).catch(() => null);
+    const attempt =
+      existingAttempt?.inviteId === invite.inviteId
+        ? existingAttempt
+        : newInviteAttempt(invite.inviteId);
     const headers = new Headers();
     headers.append("set-cookie", await inviteAttemptSetCookie(attempt));
     return accessInviteJson(

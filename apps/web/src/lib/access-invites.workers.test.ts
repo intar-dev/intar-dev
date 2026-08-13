@@ -455,6 +455,37 @@ describe("beta invitation storage invariants", () => {
     expect(stored).toEqual({ state: "leased", version: 2 });
   });
 
+  it("lists an expired lease as ready without rewriting audit state", async () => {
+    const invite = await standardInvite(12_000, "expired-lease-display");
+    const lease = await leaseAccessInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      now: 13_000,
+    });
+
+    await expect(
+      listAccessInvites({
+        d1: env.DB,
+        now: lease.leaseExpiresAt + 1,
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: invite.id,
+          state: "pending",
+          leaseExpiresAt: null,
+        }),
+      ]),
+    );
+    await expect(
+      env.DB.prepare(
+        "SELECT state, lease_id FROM access_invite_codes WHERE id = ?",
+      )
+        .bind(invite.id)
+        .first(),
+    ).resolves.toEqual({ state: "leased", lease_id: lease.leaseId });
+  });
+
   it("atomically admits exactly one of 50 concurrent claimers", async () => {
     const invite = await standardInvite(20_000);
     const lease = await leaseAccessInvite({

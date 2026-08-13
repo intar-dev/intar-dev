@@ -16,7 +16,7 @@ export const POST: APIRoute = async ({ request }) => {
   try {
     requireSameOriginJsonMutation(request);
     // Cancellation must remain available even after an attempt cookie expires
-    // or is corrupted so a restricted recovery session can always sign out.
+    // or is corrupted so a restricted invite session can always sign out.
     const attempt = await readInviteAttempt(request).catch(() => null);
     if (attempt?.leaseId) {
       await releaseAccessInviteLease({

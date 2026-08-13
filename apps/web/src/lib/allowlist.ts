@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { accessAllowlist, account } from "@/db/schema";
 
@@ -74,21 +74,6 @@ export async function hasLinkedProviderAccount(
     .select({ id: account.id })
     .from(account)
     .where(and(eq(account.userId, userId), eq(account.providerId, providerId)))
-    .limit(1);
-
-  return rows.length === 1;
-}
-
-export async function hasLinkedNonGithubAccount(
-  userId: string,
-  d1: D1Database = env.DB,
-): Promise<boolean> {
-  if (!userId) return false;
-
-  const rows = await drizzle(d1)
-    .select({ id: account.id })
-    .from(account)
-    .where(and(eq(account.userId, userId), ne(account.providerId, "github")))
     .limit(1);
 
   return rows.length === 1;

@@ -300,7 +300,58 @@ describe("auth policy", () => {
     });
   });
 
-  it("confines a pre-access session to inspection, sign-out, and the join recovery seam", async () => {
+  it("rejects previously issued invite-recovery handoff kinds", async () => {
+    const expiresAt = Date.now() + 300_000;
+    const legacyHandoffs = [
+      {
+        kind: "github-recovery-link",
+        inviteId: "legacy-recovery-invite",
+        leaseId: "legacy-recovery-lease",
+        userId: "legacy-recovery-user",
+        aud: "intar.beta-auth-handoff.v1",
+        expiresAt,
+        version: 1,
+      },
+      {
+        kind: "sso-recovery",
+        inviteId: "legacy-recovery-invite",
+        leaseId: "legacy-recovery-lease",
+        providerId: "legacy-recovery-provider",
+        aud: "intar.beta-auth-handoff.v1",
+        expiresAt,
+        version: 1,
+      },
+    ];
+
+    for (const payload of legacyHandoffs) {
+      const response = await auth.handler(
+        authRequest(
+          payload.kind === "sso-recovery"
+            ? "/api/auth/sign-in/sso"
+            : "/api/auth/link-social",
+          payload.kind === "sso-recovery"
+            ? {
+                providerId: payload.providerId,
+                providerType: "oidc",
+                callbackURL: "http://localhost/join",
+              }
+            : {
+                provider: "github",
+                callbackURL: "http://localhost/join",
+              },
+          {
+            [INVITE_OAUTH_HANDOFF_HEADER]: await signLegacyHandoff(payload),
+          },
+        ),
+      );
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        code: "invalid_beta_oauth_handoff",
+      });
+    }
+  });
+
+  it("confines a pre-access session to inspection, sign-out, and invite callbacks", async () => {
     const now = Date.now();
     const userId = "restricted-session-user";
     const token = "restricted-session-token";
@@ -1053,6 +1104,33 @@ async function signedSessionCookie(token: string): Promise<string> {
   return `${context.authCookies.sessionToken.name}=${encodeURIComponent(
     `${token}.${encodedSignature}`,
   )}`;
+}
+
+async function signLegacyHandoff(payload: object): Promise<string> {
+  const context = await auth.$context;
+  const encoded = bytesToBase64Url(
+    new TextEncoder().encode(JSON.stringify(payload)),
+  );
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(context.secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`intar.beta-auth-handoff.v1.${encoded}`),
+  );
+  return `${encoded}.${bytesToBase64Url(new Uint8Array(signature))}`;
+}
+
+function bytesToBase64Url(value: Uint8Array): string {
+  return btoa(String.fromCharCode(...value))
+    .replace(/\+/gu, "-")
+    .replace(/\//gu, "_")
+    .replace(/=+$/gu, "");
 }
 
 function formRequest(

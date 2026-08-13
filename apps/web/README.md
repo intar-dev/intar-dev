@@ -100,11 +100,10 @@ identity provider. After the admin publishes the requested DNS TXT record,
 an active GitHub beta user connects that provider explicitly at
 `/organization-sign-in` or `/organizations/<slug>/sign-in`. Later sign-ins bind
 to the stable provider subject and dynamically require active beta access.
-Existing SSO-only identities recover by opening an invite, authenticating the
-already-linked OIDC subject, explicitly linking GitHub, and confirming the
-claim. The installed Better Auth SAML RelayState does not preserve protected
-server context, so invite recovery and new account linking fail closed for
-SAML; already-linked active SAML identities can still sign in normally.
+Beta invitations can only be claimed with GitHub; an existing SSO-only identity
+cannot use an invite to recover or link a GitHub identity. Already-active users
+can still explicitly connect OIDC, and already-linked active OIDC or SAML
+identities can sign in normally.
 
 For Rawkode Academy, use issuer `https://id.rawkode.academy`. Discovery maps
 that issuer to `/auth/oauth2/authorize`, `/auth/oauth2/token`,

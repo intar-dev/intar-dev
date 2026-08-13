@@ -22,7 +22,6 @@ import { validateGithubInviteLease } from "./access-invites";
 import {
   getBetaAccess,
   getBetaAccessState,
-  hasLinkedNonGithubAccount,
   hasLinkedProviderAccount,
   isActiveBetaUser,
   isValidGithubUsername,
@@ -90,19 +89,12 @@ type SessionIssuanceFence =
   | { kind: "active"; admission: BetaAdmissionEpoch }
   | { kind: "restricted"; flow: BetaAuthFlow };
 
-export type GithubAccountIssuanceFence =
-  | {
-      kind: "github-invite";
-      inviteId: string;
-      leaseId: string;
-      userId: string;
-    }
-  | {
-      kind: "github-recovery-link";
-      inviteId: string;
-      leaseId: string;
-      userId: string;
-    };
+export type GithubAccountIssuanceFence = {
+  kind: "github-invite";
+  inviteId: string;
+  leaseId: string;
+  userId: string;
+};
 
 const oauthIssuanceAdmissionState =
   defineRequestState<BetaAdmissionEpoch | null>(() => null);
@@ -167,18 +159,6 @@ type BetaAuthFlow =
       leaseId: string;
     }
   | {
-      kind: "github-recovery-link";
-      inviteId: string;
-      leaseId: string;
-      userId: string;
-    }
-  | {
-      kind: "sso-recovery";
-      inviteId: string;
-      leaseId: string;
-      providerId: string;
-    }
-  | {
       kind: "sso-link";
       userId: string;
       providerId: string;
@@ -204,9 +184,6 @@ type AdmissionBoundRefreshToken = {
 
 type HandoffPayload =
   | (Extract<BetaAuthFlow, { kind: "github-invite" }> & HandoffEnvelope)
-  | (Extract<BetaAuthFlow, { kind: "github-recovery-link" }> &
-      HandoffEnvelope)
-  | (Extract<BetaAuthFlow, { kind: "sso-recovery" }> & HandoffEnvelope)
   | (Extract<BetaAuthFlow, { kind: "sso-link" }> & HandoffEnvelope);
 
 const rejectBetaAuth = (
@@ -268,36 +245,6 @@ export async function createInviteOAuthHandoff(input: {
     kind: "github-invite",
     inviteId: requireSafeIdentifier(input.inviteId, "inviteId"),
     leaseId: requireSafeIdentifier(input.leaseId, "leaseId"),
-    expiresAt: requireHandoffExpiry(input.leaseExpiresAt),
-  });
-}
-
-export async function createGithubRecoveryOAuthHandoff(input: {
-  inviteId: string;
-  leaseId: string;
-  leaseExpiresAt: number;
-  userId: string;
-}): Promise<string> {
-  return signHandoff({
-    kind: "github-recovery-link",
-    inviteId: requireSafeIdentifier(input.inviteId, "inviteId"),
-    leaseId: requireSafeIdentifier(input.leaseId, "leaseId"),
-    userId: requireSafeIdentifier(input.userId, "userId"),
-    expiresAt: requireHandoffExpiry(input.leaseExpiresAt),
-  });
-}
-
-export async function createSsoRecoveryOAuthHandoff(input: {
-  inviteId: string;
-  leaseId: string;
-  leaseExpiresAt: number;
-  providerId: string;
-}): Promise<string> {
-  return signHandoff({
-    kind: "sso-recovery",
-    inviteId: requireSafeIdentifier(input.inviteId, "inviteId"),
-    leaseId: requireSafeIdentifier(input.leaseId, "leaseId"),
-    providerId: requireSafeIdentifier(input.providerId, "providerId"),
     expiresAt: requireHandoffExpiry(input.leaseExpiresAt),
   });
 }
@@ -480,18 +427,6 @@ function isHandoffPayload(value: unknown): value is HandoffPayload {
     case "github-invite":
       return (
         isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.leaseId)
-      );
-    case "github-recovery-link":
-      return (
-        isSafeIdentifier(value.inviteId) &&
-        isSafeIdentifier(value.leaseId) &&
-        isSafeIdentifier(value.userId)
-      );
-    case "sso-recovery":
-      return (
-        isSafeIdentifier(value.inviteId) &&
-        isSafeIdentifier(value.leaseId) &&
-        isSafeIdentifier(value.providerId)
       );
     case "sso-link":
       return (
@@ -856,12 +791,8 @@ export async function enforceCreatedGithubAccountAdmission(input: {
     input.account.providerId === "github" &&
     input.account.userId === input.expected.userId &&
     (await getBetaAccessState(input.account.userId)) === null;
-  const validRecoveryTarget =
-    input.expected.kind !== "github-recovery-link" ||
-    (await hasLinkedNonGithubAccount(input.expected.userId));
   if (
     validTarget &&
-    validRecoveryTarget &&
     (await hasValidInviteLease(
       input.expected.inviteId,
       input.expected.leaseId,
@@ -922,7 +853,7 @@ async function hasValidInviteLease(
 
 async function isOidcSsoProvider(providerId: string): Promise<boolean> {
   // Better Auth SSO 1.7.0-beta.10 preserves OAuth serverContext in OIDC
-  // state, but its separate SAML RelayState omits it. Explicit recovery/link
+  // state, but its separate SAML RelayState omits it. Explicit account linking
   // therefore fails closed for SAML until that server-context seam exists.
   const providers = await drizzle(env.DB)
     .select({ oidcConfig: schema.ssoProvider.oidcConfig })
@@ -944,28 +875,6 @@ function getTrustedBetaFlowFromState(
     case "github-invite":
       return isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.leaseId)
         ? { kind: value.kind, inviteId: value.inviteId, leaseId: value.leaseId }
-        : null;
-    case "github-recovery-link":
-      return isSafeIdentifier(value.inviteId) &&
-        isSafeIdentifier(value.leaseId) &&
-        isSafeIdentifier(value.userId)
-        ? {
-            kind: value.kind,
-            inviteId: value.inviteId,
-            leaseId: value.leaseId,
-            userId: value.userId,
-          }
-        : null;
-    case "sso-recovery":
-      return isSafeIdentifier(value.inviteId) &&
-        isSafeIdentifier(value.leaseId) &&
-        isSafeIdentifier(value.providerId)
-        ? {
-            kind: value.kind,
-            inviteId: value.inviteId,
-            leaseId: value.leaseId,
-            providerId: value.providerId,
-          }
         : null;
     case "sso-link":
       return isSafeIdentifier(value.userId) &&
@@ -1013,17 +922,6 @@ async function isValidRestrictedSessionFlow(
         (await hasValidInviteLease(flow.inviteId, flow.leaseId)) &&
         (await hasLinkedProviderAccount(userId, "github"))
       );
-    case "github-recovery-link":
-      return (
-        flow.userId === userId &&
-        (await hasValidInviteLease(flow.inviteId, flow.leaseId)) &&
-        (await hasLinkedProviderAccount(userId, "github"))
-      );
-    case "sso-recovery":
-      return (
-        (await hasValidInviteLease(flow.inviteId, flow.leaseId)) &&
-        (await hasLinkedProviderAccount(userId, flow.providerId))
-      );
     case "sso-link":
       return false;
   }
@@ -1062,59 +960,6 @@ const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
         }
         await addOAuthServerContext({
           intarBetaAuth: { kind: handoff.kind, inviteId, leaseId },
-        });
-        acceptedHandoff = true;
-        break;
-      }
-      case "github-recovery-link": {
-        const { inviteId, leaseId, userId } = handoff;
-        if (
-          context.path !== "/link-social" ||
-          context.body?.provider !== "github" ||
-          context.body?.idToken !== undefined ||
-          session?.user.id !== userId ||
-          (await getBetaAccessState(userId)) !== null ||
-          !(await hasLinkedNonGithubAccount(userId)) ||
-          (await hasLinkedProviderAccount(userId, "github")) ||
-          !(await hasValidInviteLease(inviteId, leaseId))
-        ) {
-          throwBetaAuthError(
-            "invalid_beta_oauth_handoff",
-            "OAuth handoff does not match this flow",
-          );
-        }
-        await addOAuthServerContext({
-          intarBetaAuth: {
-            kind: handoff.kind,
-            inviteId,
-            leaseId,
-            userId,
-          },
-        });
-        acceptedHandoff = true;
-        break;
-      }
-      case "sso-recovery": {
-        const { inviteId, leaseId, providerId } = handoff;
-        if (
-          context.path !== "/sign-in/sso" ||
-          context.body?.providerId !== providerId ||
-          context.body?.providerType === "saml" ||
-          !(await isOidcSsoProvider(providerId)) ||
-          !(await hasValidInviteLease(inviteId, leaseId))
-        ) {
-          throwBetaAuthError(
-            "invalid_beta_oauth_handoff",
-            "OAuth handoff does not match this flow",
-          );
-        }
-        await addOAuthServerContext({
-          intarBetaAuth: {
-            kind: handoff.kind,
-            inviteId,
-            leaseId,
-            providerId,
-          },
         });
         acceptedHandoff = true;
         break;
@@ -1169,8 +1014,8 @@ const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
   }
 
   // Better Auth's id-token link shortcut does not invoke validateUserInfo in
-  // 1.7.0-beta.10. Require the signed recovery handoff and redirect callback
-  // seam for every link so identity checks always run before account writes.
+  // 1.7.0-beta.10. Reject direct social links so every supported account link
+  // continues through the explicit SSO-link flow and its admission fence.
   if (context.path === "/link-social" && !acceptedHandoff) {
     throwBetaAuthError("explicit_github_link_required");
   }
@@ -1291,18 +1136,6 @@ async function validateProviderIdentity(
       return;
     }
 
-    if (
-      data.source.action === "link-account" &&
-      flow?.kind === "github-recovery-link" &&
-      targetUserId === flow.userId &&
-      accessState === null &&
-      (await hasLinkedNonGithubAccount(flow.userId)) &&
-      !(await hasLinkedProviderAccount(flow.userId, "github")) &&
-      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
-    ) {
-      return;
-    }
-
     return rejectBetaAuth(
       data.source.action === "link-account"
         ? "explicit_github_link_required"
@@ -1316,15 +1149,6 @@ async function validateProviderIdentity(
   ) {
     const providerId = data.source.sso?.providerId;
     if (!providerId) return rejectBetaAuth("sso_provider_missing");
-
-    if (
-      data.source.action === "sign-in" &&
-      flow?.kind === "sso-recovery" &&
-      flow.providerId === providerId &&
-      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
-    ) {
-      return;
-    }
 
     if (
       data.source.action === "sign-in" &&
@@ -1512,12 +1336,11 @@ function buildAuthInstance() {
       accountLinking: {
         enabled: true,
         disableImplicitLinking: false,
-        // Provider identifiers and the signed step-up intent bind recovery;
-        // an address match is deliberately not an authorization boundary.
+        // Provider identifiers and the signed step-up intent bind explicit
+        // account links; an address match is not an authorization boundary.
         allowDifferentEmails: true,
-        // The explicit SSO-recovery link must copy GitHub's mapped username
-        // snapshot onto the existing Better Auth user. Better Auth preserves
-        // the existing email while applying mapProfileToUser fields here.
+        // Explicit account linking may refresh mapped profile fields while
+        // Better Auth preserves the existing primary email.
         updateUserInfoOnLink: true,
       },
     },
@@ -1571,19 +1394,7 @@ function buildAuthInstance() {
                       leaseId: flow.leaseId,
                       userId: account.userId,
                     }
-                  : flow?.kind === "github-recovery-link" &&
-                      flow.userId === account.userId &&
-                      accessState === null &&
-                      (await hasLinkedNonGithubAccount(flow.userId)) &&
-                      !(await hasLinkedProviderAccount(flow.userId, "github")) &&
-                      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
-                    ? {
-                        kind: flow.kind,
-                        inviteId: flow.inviteId,
-                        leaseId: flow.leaseId,
-                        userId: flow.userId,
-                      }
-                    : null;
+                  : null;
               if (!expected) return false;
               getDatabaseHookIssuanceFences(context).githubAccounts.set(
                 account.id,
@@ -1705,9 +1516,9 @@ function buildAuthInstance() {
         organizationProvisioning: { disabled: true },
         provisionUserOnEveryLogin: true,
         provisionUser: async ({ user, provider }) => {
-          // Invite recovery may create a deliberately restricted session.
-          // Do not let that pre-access callback mutate organization tenancy;
-          // the next normal sign-in after confirmation provisions membership.
+          // Invite sign-in may create a deliberately restricted session. Do
+          // not let that pre-access callback mutate organization tenancy; the
+          // next normal sign-in after confirmation provisions membership.
           if (!(await isActiveBetaUser(user.id))) return;
           if (!provider.organizationId) return;
           await db

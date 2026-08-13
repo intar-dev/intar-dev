@@ -13,12 +13,9 @@ import {
 } from "@/lib/access-invite-http";
 import { getAccessClaimIdentity } from "@/lib/access-claim";
 import { appError } from "@/lib/app-error";
-import { resolveBetaOidcProvider } from "@/lib/access-sso";
 import {
   auth,
-  createGithubRecoveryOAuthHandoff,
   createInviteOAuthHandoff,
-  createSsoRecoveryOAuthHandoff,
   INVITE_OAUTH_HANDOFF_HEADER,
 } from "@/lib/auth";
 import {
@@ -42,87 +39,43 @@ export const POST: APIRoute = async ({ request }) => {
     requireSameOriginJsonMutation(request);
     await rateLimitPublicAccessInvite({ request, action: "start" });
     const body = await readJsonObject(request);
-    const mode = body.mode === "sso-recovery" ? body.mode : "github";
+    if (body.mode !== undefined && body.mode !== "github") {
+      throw appError(
+        400,
+        "github_invite_claim_required",
+        "beta invitations can only be claimed with GitHub",
+      );
+    }
     const attempt = await readInviteAttempt(request);
+    const identity = await getAccessClaimIdentity(request);
+    if (identity && !identity.githubAccountId) {
+      throw appError(
+        409,
+        "github_session_required",
+        "cancel and sign out before claiming this invite with GitHub",
+      );
+    }
     const lease = await leaseForAttempt(attempt);
     leased = lease;
 
     const authHeaders = new Headers(request.headers);
     const origin = canonicalApplicationOrigin();
-    let authResponse: Response;
-    let redirectKind: "github" | "sso";
-
-    if (mode === "sso-recovery") {
-      if (typeof body.organizationSlug !== "string") {
-        throw appError(
-          400,
-          "organization_slug_required",
-          "organization slug is required",
-        );
-      }
-      const provider = await resolveBetaOidcProvider(body.organizationSlug);
-      const handoff = await createSsoRecoveryOAuthHandoff({
-        inviteId: lease.inviteId,
-        leaseId: lease.leaseId,
-        leaseExpiresAt: lease.leaseExpiresAt,
-        providerId: provider.providerId,
-      });
-      authHeaders.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
-      authResponse = await auth.api.signInSSO({
-        body: {
-          providerId: provider.providerId,
-          providerType: "oidc",
-          callbackURL: `${origin}/join`,
-          errorCallbackURL: `${origin}/join`,
-          newUserCallbackURL: `${origin}/join`,
-          requestSignUp: false,
-          scopes: ["openid", "email", "profile", "offline_access"],
-        },
-        headers: authHeaders,
-        asResponse: true,
-      });
-      redirectKind = "sso";
-    } else {
-      const identity = await getAccessClaimIdentity(request);
-      if (identity && !identity.githubAccountId) {
-        const handoff = await createGithubRecoveryOAuthHandoff({
-          inviteId: lease.inviteId,
-          leaseId: lease.leaseId,
-          leaseExpiresAt: lease.leaseExpiresAt,
-          userId: identity.userId,
-        });
-        authHeaders.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
-        authResponse = await auth.api.linkSocialAccount({
-          body: {
-            provider: "github",
-            callbackURL: `${origin}/join`,
-            errorCallbackURL: `${origin}/join`,
-            disableRedirect: true,
-            requestSignUp: false,
-          },
-          headers: authHeaders,
-          asResponse: true,
-        });
-      } else {
-        const handoff = await createInviteOAuthHandoff({
-          inviteId: lease.inviteId,
-          leaseId: lease.leaseId,
-          leaseExpiresAt: lease.leaseExpiresAt,
-        });
-        authHeaders.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
-        authResponse = await auth.api.signInSocial({
-          body: {
-            provider: "github",
-            callbackURL: `${origin}/join`,
-            errorCallbackURL: `${origin}/join`,
-            disableRedirect: true,
-          },
-          headers: authHeaders,
-          asResponse: true,
-        });
-      }
-      redirectKind = "github";
-    }
+    const handoff = await createInviteOAuthHandoff({
+      inviteId: lease.inviteId,
+      leaseId: lease.leaseId,
+      leaseExpiresAt: lease.leaseExpiresAt,
+    });
+    authHeaders.set(INVITE_OAUTH_HANDOFF_HEADER, handoff);
+    const authResponse = await auth.api.signInSocial({
+      body: {
+        provider: "github",
+        callbackURL: `${origin}/join`,
+        errorCallbackURL: `${origin}/join`,
+        disableRedirect: true,
+      },
+      headers: authHeaders,
+      asResponse: true,
+    });
     if (!authResponse.ok) {
       throw new Error(`Better Auth returned ${authResponse.status}`);
     }
@@ -143,7 +96,7 @@ export const POST: APIRoute = async ({ request }) => {
     return accessInviteJson(
       {
         redirectUrl: authBody.url,
-        redirectKind,
+        redirectKind: "github",
         leaseExpiresAt: lease.leaseExpiresAt,
       },
       { headers },

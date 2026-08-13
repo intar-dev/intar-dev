@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Ban,
-  Building2,
   CheckCircle2,
   CircleAlert,
   CircleUserRound,
@@ -14,12 +13,7 @@ import {
 import { AuthShell } from "../patterns/AuthShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  normalizeRecoveryOrganizationSlug,
-  resolveClaimRedirect,
-  type ClaimRedirectKind,
-} from "./join-recovery";
+import { resolveGithubClaimRedirect } from "./sign-in-helpers";
 
 type ClaimState =
   | "ready"
@@ -45,7 +39,7 @@ interface CurrentClaim {
 
 interface StartClaimResponse {
   redirectUrl: string;
-  redirectKind: ClaimRedirectKind;
+  redirectKind: "github";
   leaseExpiresAt: number;
 }
 
@@ -58,12 +52,10 @@ declare global {
 export function JoinBeta() {
   const inviteCodeRef = useRef<string | null>(takeScrubbedInviteCode());
   const [claim, setClaim] = useState<CurrentClaim | null>(null);
-  const [organizationSlug, setOrganizationSlug] = useState("");
   const [status, setStatus] = useState<
     | "loading"
     | "idle"
     | "starting-github"
-    | "starting-sso"
     | "confirming"
     | "canceling"
     | "canceled"
@@ -106,40 +98,25 @@ export function JoinBeta() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startClaim = async (kind: ClaimRedirectKind) => {
-    const recoverySlug = normalizeRecoveryOrganizationSlug(organizationSlug);
-    if (kind === "sso" && !recoverySlug) {
-      setProblem({
-        title: "Check the organization slug",
-        description:
-          "Use the exact lowercase slug from the organization sign-in link.",
-      });
-      return;
-    }
-
-    setStatus(kind === "sso" ? "starting-sso" : "starting-github");
+  const startClaim = async () => {
+    setStatus("starting-github");
     setProblem(null);
     try {
       const started = await apiJson<StartClaimResponse>(
         "/api/access-invites/start",
         {
           method: "POST",
-          body: JSON.stringify(
-            kind === "sso"
-              ? { mode: "sso-recovery", organizationSlug: recoverySlug }
-              : {},
-          ),
+          body: "{}",
         },
       );
-      const redirect = resolveClaimRedirect({
+      const redirect = resolveGithubClaimRedirect({
         redirectUrl: started.redirectUrl,
         redirectKind: started.redirectKind,
-        expectedKind: kind,
         applicationOrigin: window.location.origin,
       });
       if (!redirect) {
         throw new JoinApiError(
-          kind === "sso" ? "invalid_sso_redirect" : "invalid_oauth_redirect",
+          "invalid_oauth_redirect",
           "The sign-in destination was rejected.",
           500,
         );
@@ -192,9 +169,7 @@ export function JoinBeta() {
     (claim?.state === "authenticated" || claim?.state === "leased") &&
     Boolean(claim.user?.githubUsername);
   const startingGithub = status === "starting-github";
-  const startingSso = status === "starting-sso";
-  const startPending = startingGithub || startingSso;
-  const recoverySlug = normalizeRecoveryOrganizationSlug(organizationSlug);
+  const startPending = startingGithub;
 
   return (
     <AuthShell
@@ -224,19 +199,11 @@ export function JoinBeta() {
             <Button
               className="w-full"
               disabled={startPending}
-              onClick={() => void startClaim("github")}
+              onClick={() => void startClaim()}
             >
               <CircleUserRound />
               {startingGithub ? "Opening GitHub…" : "Continue with GitHub"}
             </Button>
-            <OidcRecovery
-              organizationSlug={organizationSlug}
-              validSlug={Boolean(recoverySlug)}
-              pending={startingSso}
-              disabled={startPending}
-              onOrganizationSlugChange={setOrganizationSlug}
-              onStart={() => void startClaim("sso")}
-            />
           </>
         ) : identityReady ? (
           <>
@@ -270,7 +237,7 @@ export function JoinBeta() {
             <JoinStatus icon={<Clock3 />}>
               {claim.ownsLease === false
                 ? "Another attempt holds this invite's active sign-in lease. Finish that flow or wait for the lease to expire."
-                : "This browser holds the active sign-in lease. If you just returned from organization OIDC, Continue with GitHub explicitly links GitHub to that same account."}
+                : "This browser holds the active sign-in lease. Continue with GitHub to resume the claim."}
               {claim.leaseExpiresAt
                 ? ` The lease ends ${formatDateTime(claim.leaseExpiresAt)}.`
                 : ""}
@@ -279,7 +246,7 @@ export function JoinBeta() {
               <Button
                 className="w-full"
                 disabled={startPending}
-                onClick={() => void startClaim("github")}
+                onClick={() => void startClaim()}
               >
                 <CircleUserRound />
                 {startingGithub ? "Opening GitHub…" : "Continue with GitHub"}
@@ -349,84 +316,6 @@ export function JoinBeta() {
         ) : null}
       </div>
     </AuthShell>
-  );
-}
-
-function OidcRecovery({
-  organizationSlug,
-  validSlug,
-  pending,
-  disabled,
-  onOrganizationSlugChange,
-  onStart,
-}: {
-  organizationSlug: string;
-  validSlug: boolean;
-  pending: boolean;
-  disabled: boolean;
-  onOrganizationSlugChange: (value: string) => void;
-  onStart: () => void;
-}) {
-  return (
-    <details className="group rounded-xl border bg-muted/20">
-      <summary className="min-h-11 cursor-pointer px-4 py-3 text-sm font-semibold marker:text-muted-foreground">
-        <span className="ml-1 inline-flex items-center gap-2">
-          <Building2 className="size-4 text-brand-text" aria-hidden="true" />
-          Recover an existing OIDC account
-        </span>
-      </summary>
-      <div className="space-y-4 border-t px-4 py-4">
-        <p className="text-sm leading-6 text-muted-foreground">
-          This is only for an existing Intar account already linked to your
-          organization&apos;s verified OIDC provider. It cannot create a new SSO
-          identity or grant beta access. After returning, you must explicitly
-          link GitHub and confirm the claim.
-        </p>
-        <form
-          className="space-y-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (validSlug && !disabled) onStart();
-          }}
-        >
-          <div className="space-y-2">
-            <label
-              htmlFor="recovery-organization-slug"
-              className="text-sm font-semibold"
-            >
-              Organization slug
-            </label>
-            <Input
-              id="recovery-organization-slug"
-              value={organizationSlug}
-              maxLength={128}
-              pattern="[a-z0-9][a-z0-9-]{0,127}"
-              placeholder="rawkode-academy-ab12cd"
-              autoComplete="organization"
-              spellCheck={false}
-              aria-describedby="recovery-organization-help"
-              onChange={(event) =>
-                onOrganizationSlugChange(event.target.value)
-              }
-            />
-            <p id="recovery-organization-help" className="text-caption">
-              Use the exact lowercase slug from your organization sign-in link.
-            </p>
-          </div>
-          <Button
-            type="submit"
-            variant="outline"
-            className="w-full whitespace-normal"
-            disabled={!validSlug || disabled}
-          >
-            <Building2 />
-            {pending
-              ? "Opening organization provider…"
-              : "Continue existing OIDC recovery"}
-          </Button>
-        </form>
-      </div>
-    </details>
   );
 }
 
@@ -622,8 +511,18 @@ function problemFor(error: unknown): JoinProblem {
     case "invite_lease_required":
       return {
         title: "GitHub step required",
+        description: "Continue with GitHub before confirming this invite.",
+      };
+    case "github_invite_claim_required":
+      return {
+        title: "GitHub is required",
+        description: "Beta invitations can only be claimed with GitHub.",
+      };
+    case "github_session_required":
+      return {
+        title: "Sign out before continuing",
         description:
-          "Continue with GitHub before confirming this invite. OIDC recovery alone cannot complete the claim.",
+          "This browser is signed in with a non-GitHub account. Cancel and sign out, then reopen the invite and continue with GitHub.",
       };
     case "github_identity_required":
       return {
@@ -650,25 +549,6 @@ function problemFor(error: unknown): JoinProblem {
       return {
         title: "Too many attempts",
         description: "Wait before checking or starting this invite again.",
-      };
-    case "organization_slug_required":
-    case "invalid_organization_slug":
-      return {
-        title: "Check the organization slug",
-        description:
-          "Use the exact lowercase slug from the organization sign-in link.",
-      };
-    case "organization_sso_unavailable":
-      return {
-        title: "OIDC recovery unavailable",
-        description:
-          "This organization has no verified OIDC provider available for account recovery. Continue with GitHub or contact the organization administrator.",
-      };
-    case "invalid_sso_redirect":
-      return {
-        title: "OIDC destination rejected",
-        description:
-          "The server returned a non-HTTPS or mismatched recovery destination. The invite was not consumed.",
       };
     case "invalid_oauth_redirect":
       return {

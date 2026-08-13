@@ -176,8 +176,10 @@ export async function createAccessInvite(
 export async function listAccessInvites(params: {
   d1: D1Database;
   limit?: number;
+  now?: number;
 }): Promise<AccessInviteSummary[]> {
   const limit = boundedLimit(params.limit);
+  const now = validTimestamp(params.now ?? Date.now());
   const db = drizzle(params.d1);
   const rows = await db
     .select()
@@ -192,7 +194,16 @@ export async function listAccessInvites(params: {
     )
     .orderBy(desc(accessInviteCodes.createdAt))
     .limit(limit);
-  return rows.map(toInviteSummary);
+  return rows.map((row) => {
+    const summary = toInviteSummary(row);
+    if (
+      summary.state === "leased" &&
+      (summary.leaseExpiresAt ?? 0) <= now
+    ) {
+      return { ...summary, state: "pending", leaseExpiresAt: null };
+    }
+    return summary;
+  });
 }
 
 // Lookup is intentionally read-only: exchanging a fragment never leases or

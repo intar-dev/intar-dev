@@ -53,6 +53,9 @@ test.describe("focused state accessibility", () => {
     await expect(
       page.getByRole("button", { name: "Continue with GitHub" }),
     ).toBeVisible();
+    await expect(
+      page.getByText("Recover an existing OIDC account"),
+    ).toHaveCount(0);
     await expectNoAxeViolations(page, testInfo);
   });
 

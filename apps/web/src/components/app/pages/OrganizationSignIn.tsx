@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { startOrganizationSignIn } from "@/lib/auth-client";
-import { normalizeRecoveryOrganizationSlug } from "./join-recovery";
+import { normalizeOrganizationSlug } from "./sign-in-helpers";
 
 export function OrganizationSignIn() {
   const pathname = useRouterState({
@@ -37,7 +37,7 @@ export function OrganizationSignIn() {
           );
         })();
   const [slug, setSlug] = useState(directSlug);
-  const normalizedSlug = normalizeRecoveryOrganizationSlug(slug);
+  const normalizedSlug = normalizeOrganizationSlug(slug);
   const signIn = useMutation({
     mutationFn: () => {
       if (!normalizedSlug) throw new Error("Organization slug is invalid");
