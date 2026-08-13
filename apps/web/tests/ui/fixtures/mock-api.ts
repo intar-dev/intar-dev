@@ -343,9 +343,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           pathname,
           /^\/api\/admin\/users\/([^/]+)\/(?:ban|role)$/,
         );
-        const target = server.state.users.find(
-          (user) => user.id === userId,
-        );
+        const target = server.state.users.find((user) => user.id === userId);
         if (target) {
           if (pathname.endsWith("/ban") && typeof body.banned === "boolean") {
             target.banned = body.banned;
@@ -1057,7 +1055,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
 
       if (pathname === "/api/agent/hosts" && method === "GET") {
-        await json(route, { hosts: server.state.hosts });
+        await json(route, {
+          hosts: server.state.hosts.filter((host) => host.disabled !== true),
+        });
         return;
       }
       if (pathname === "/api/agent/hosts" && method === "POST") {
@@ -1069,10 +1069,21 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
       }
       const hostId = segment(pathname, /^\/api\/agent\/hosts\/([^/]+)$/);
       if (hostId && method === "GET") {
-        await json(route, { host: server.state.hosts[0] ?? null });
+        const host = server.state.hosts.find(
+          (candidate) => candidate.id === hostId,
+        );
+        await json(route, { host: host ?? null }, host ? 200 : 404);
         return;
       }
       if (hostId && method === "DELETE") {
+        const host = server.state.hosts.find(
+          (candidate) => candidate.id === hostId,
+        );
+        if (!host) {
+          await json(route, { error: "Host not found" }, 404);
+          return;
+        }
+        host.disabled = true;
         await json(route, { ok: true, hostId });
         return;
       }

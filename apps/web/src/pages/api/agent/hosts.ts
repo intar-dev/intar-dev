@@ -2,11 +2,7 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import {
-  agentHosts,
-  hostActualState,
-  scenarioRuns,
-} from "@/db/schema";
+import { agentHosts, hostActualState, scenarioRuns } from "@/db/schema";
 import type { HostStateReportV2 } from "@/generated/bridge";
 import {
   buildStoredBridgeStatus,
@@ -78,6 +74,7 @@ export const GET: APIRoute = async ({ request }) => {
       and(
         eq(agentHosts.userId, authz.context.userId),
         isNull(agentHosts.organizationId),
+        eq(agentHosts.disabled, false),
       ),
     )
     .orderBy(desc(agentHosts.createdAt));

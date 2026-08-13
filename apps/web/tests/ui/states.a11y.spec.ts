@@ -42,10 +42,7 @@ test.describe("focused state accessibility", () => {
     });
   }
 
-  test("beta invite ready announcement", async ({
-    page,
-    ui,
-  }, testInfo) => {
+  test("beta invite ready announcement", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("join-beta"), theme: "light" });
 
     const status = page.getByRole("status");
@@ -104,6 +101,35 @@ test.describe("focused state accessibility", () => {
     ).toBeVisible();
     await expect(page.getByRole("group", { name: "Host role" })).toBeVisible();
     await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("host removal confirmation", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-hosts"), theme: "light" });
+    await expect(
+      page.getByRole("heading", { name: "workshop-eu-1" }),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Host actions" }).click();
+    await page.getByRole("menuitem", { name: "Remove host" }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("heading", { name: "Remove this host?" }),
+    ).toBeVisible();
+    await expect(dialog).toContainText("Its run history remains available.");
+    await expectNoAxeViolations(page, testInfo);
+
+    await dialog
+      .getByLabel("Type workshop-eu-1 to confirm")
+      .fill("workshop-eu-1");
+    await dialog.getByRole("button", { name: "Remove host" }).click();
+
+    await expect(
+      page.getByRole("heading", { name: "workshop-eu-1" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("heading", { name: "No hosts yet" }),
+    ).toBeVisible();
   });
 
   test("build details", async ({ page, ui }, testInfo) => {

@@ -7,7 +7,6 @@ import {
   hostDesiredState,
   imageBuilds,
   runtimeExecutions,
-  scenarioRuns,
   workshopPublications,
 } from "@/db/schema";
 import type {
@@ -23,12 +22,16 @@ import {
   parseInventory,
   requireAdminUserContext,
 } from "@/lib/agent-bridge";
+import { nonDetachableWorkshopPublication } from "@/lib/agent-host-deletion";
 import {
-  deleteAgentHostPreservingHistory,
-  nonDetachableWorkshopPublication,
-} from "@/lib/agent-host-deletion";
+  accessInviteError,
+  accessInviteJson,
+  accessInviteNoStore,
+} from "@/lib/access-invite-http";
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 import { retireHostRuntime } from "@/lib/host-runtime-wake";
+import { retirePersonalHost } from "@/lib/personal-host-retirement";
+import { requireSameOriginJsonMutation } from "@/lib/request-security";
 
 export const prerender = false;
 
@@ -88,117 +91,117 @@ export const GET: APIRoute = async ({ request, params }) => {
 };
 
 export const DELETE: APIRoute = async ({ request, params }) => {
-  const authz = await requireAdminUserContext(request);
-  if (!authz.ok) {
-    return authz.response;
-  }
+  try {
+    requireSameOriginJsonMutation(request);
+    const authz = await requireAdminUserContext(request);
+    if (!authz.ok) return accessInviteNoStore(authz.response);
 
-  const hostId = params.hostId?.trim() ?? "";
-  if (!hostId) {
-    return jsonResponse({ error: "hostId is required" }, { status: 400 });
-  }
+    const hostId = params.hostId?.trim() ?? "";
+    if (!hostId) {
+      return accessInviteJson({ error: "hostId is required" }, { status: 400 });
+    }
 
-  const host = await loadHostForUser(hostId, authz.context.userId);
-  if (!host) {
-    return jsonResponse({ error: "host not found" }, { status: 404 });
-  }
+    const host = await loadHostForUser(hostId, authz.context.userId);
+    if (!host) {
+      return accessInviteJson({ error: "host not found" }, { status: 404 });
+    }
+    if (host.connected || host.active_session_id) {
+      return hostMustDisconnectResponse(host.id);
+    }
 
-  const db = drizzle(env.DB);
-  const referencedRuns = await db
-    .select({ runId: scenarioRuns.runId })
-    .from(scenarioRuns)
-    .where(eq(scenarioRuns.hostId, host.id))
-    .limit(1);
-  if (referencedRuns.length > 0) {
-    return hostHasRunHistoryResponse(host.id);
-  }
+    const db = drizzle(env.DB);
 
-  const activeWorkshopRuntimes = await db
-    .select({ executionId: runtimeExecutions.id })
-    .from(runtimeExecutions)
-    .where(
-      and(
-        eq(runtimeExecutions.hostId, host.id),
-        eq(runtimeExecutions.domainKind, "workshop"),
-        inArray(runtimeExecutions.state, [
-          "queued",
-          "provisioning",
-          "ready",
-          "archiving",
-        ]),
-      ),
-    )
-    .limit(1);
-  if (activeWorkshopRuntimes.length > 0) {
-    return hostHasActiveWorkshopRuntimesResponse(host.id);
-  }
-
-  const unfinishedWorkshopPublications = await db
-    .select({ publicationId: workshopPublications.id })
-    .from(workshopPublications)
-    .where(
-      and(
-        eq(workshopPublications.builderHostId, host.id),
-        nonDetachableWorkshopPublication(),
-      ),
-    )
-    .limit(1);
-  if (unfinishedWorkshopPublications.length > 0) {
-    return hostHasUnfinishedWorkshopPublicationsResponse(host.id);
-  }
-
-  if (host.role === "builder") {
-    const activeBuilds = await db
-      .select({ buildId: imageBuilds.id })
-      .from(imageBuilds)
+    const activeWorkshopRuntimes = await db
+      .select({ executionId: runtimeExecutions.id })
+      .from(runtimeExecutions)
       .where(
         and(
-          eq(imageBuilds.hostId, host.id),
-          inArray(imageBuilds.status, ["assigned", "building"]),
+          eq(runtimeExecutions.hostId, host.id),
+          eq(runtimeExecutions.domainKind, "workshop"),
+          inArray(runtimeExecutions.state, [
+            "queued",
+            "provisioning",
+            "ready",
+            "archiving",
+          ]),
         ),
       )
       .limit(1);
-    if (activeBuilds.length > 0) {
-      return hostHasActiveBuildsResponse(host.id);
+    if (activeWorkshopRuntimes.length > 0) {
+      return hostHasActiveWorkshopRuntimesResponse(host.id);
     }
-  }
 
-  const deleted = await deleteAgentHostPreservingHistory(db, {
-    hostId: host.id,
-    userId: authz.context.userId,
-  });
-  if (!deleted) {
-    return jsonResponse(
-      {
-        error:
-          "host deletion conflicted with new history, unfinished work, or a concurrent update",
-        code: "host_delete_conflict",
-        hostId: host.id,
-      },
-      { status: 409 },
-    );
-  }
+    const unfinishedWorkshopPublications = await db
+      .select({ publicationId: workshopPublications.id })
+      .from(workshopPublications)
+      .where(
+        and(
+          eq(workshopPublications.builderHostId, host.id),
+          nonDetachableWorkshopPublication(),
+        ),
+      )
+      .limit(1);
+    if (unfinishedWorkshopPublications.length > 0) {
+      return hostHasUnfinishedWorkshopPublicationsResponse(host.id);
+    }
 
-  try {
-    await retireHostRuntime(host.id);
+    if (host.role === "builder") {
+      const activeBuilds = await db
+        .select({ buildId: imageBuilds.id })
+        .from(imageBuilds)
+        .where(
+          and(
+            eq(imageBuilds.hostId, host.id),
+            inArray(imageBuilds.status, ["assigned", "building"]),
+          ),
+        )
+        .limit(1);
+      if (activeBuilds.length > 0) {
+        return hostHasActiveBuildsResponse(host.id);
+      }
+    }
+
+    const retired = await retirePersonalHost({
+      d1: env.DB,
+      hostId: host.id,
+      userId: authz.context.userId,
+      betaAdmission: authz.context.betaAdmission,
+    });
+    if (!retired) {
+      return accessInviteJson(
+        {
+          error:
+            "host removal conflicted with a connection, active work, or a concurrent access change",
+          code: "host_remove_conflict",
+          hostId: host.id,
+        },
+        { status: 409 },
+      );
+    }
+
+    try {
+      await retireHostRuntime(host.id);
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          message: "host runtime retirement failed after host removal",
+          hostId: host.id,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+
+    return accessInviteJson({ ok: true, hostId });
   } catch (error) {
-    console.warn(
-      JSON.stringify({
-        message: "host runtime retirement failed after host deletion",
-        hostId: host.id,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
+    return accessInviteError(error, "the host could not be removed");
   }
-
-  return jsonResponse({ ok: true, hostId });
 };
 
-function hostHasRunHistoryResponse(hostId: string): Response {
-  return jsonResponse(
+function hostMustDisconnectResponse(hostId: string): Response {
+  return accessInviteJson(
     {
-      error: "host has scenario run history and cannot be deleted",
-      code: "host_has_run_history",
+      error: "host is connected and must be stopped before it can be removed",
+      code: "host_must_disconnect",
       hostId,
     },
     { status: 409 },
@@ -206,7 +209,7 @@ function hostHasRunHistoryResponse(hostId: string): Response {
 }
 
 function hostHasActiveBuildsResponse(hostId: string): Response {
-  return jsonResponse(
+  return accessInviteJson(
     {
       error: "builder host has active image builds and must be drained first",
       code: "host_has_active_builds",
@@ -217,7 +220,7 @@ function hostHasActiveBuildsResponse(hostId: string): Response {
 }
 
 function hostHasActiveWorkshopRuntimesResponse(hostId: string): Response {
-  return jsonResponse(
+  return accessInviteJson(
     {
       error:
         "host has active workshop runtimes and must be drained or recovered first",
@@ -231,7 +234,7 @@ function hostHasActiveWorkshopRuntimesResponse(hostId: string): Response {
 function hostHasUnfinishedWorkshopPublicationsResponse(
   hostId: string,
 ): Response {
-  return jsonResponse(
+  return accessInviteJson(
     {
       error:
         "host has unfinished workshop publications and must be completed or cleaned up first",

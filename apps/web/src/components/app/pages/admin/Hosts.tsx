@@ -48,33 +48,42 @@ import type { AgentHostApi } from "@/components/app/admin/hosts/types";
 export function AdminHosts() {
   const [vmError, setVmError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<AgentHostApi | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [removeTarget, setRemoveTarget] = useState<AgentHostApi | null>(null);
+  const [removeConfirm, setRemoveConfirm] = useState("");
+  const [removedHostIds, setRemovedHostIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   const { hosts, hostRecords, refreshHost, forgetHost } = useHostFleet();
+  const activeHostRecords = hostRecords.filter(
+    ({ host }) => !host.disabled && !removedHostIds.has(host.id),
+  );
 
-  const deleteHost = useMutation({
+  const removeHost = useMutation({
     mutationFn: async (hostId: string) => {
       const response = await fetch(
         `/api/agent/hosts/${encodeURIComponent(hostId)}`,
         {
           method: "DELETE",
           credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: "{}",
         },
       );
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(body?.error ?? `Delete failed (${response.status})`);
+        throw new Error(body?.error ?? `Remove failed (${response.status})`);
       }
       return (await response.json()) as { ok: boolean; hostId: string };
     },
     onSuccess: (result) => {
+      setRemovedHostIds((current) => new Set(current).add(result.hostId));
       forgetHost(result.hostId);
-      setDeleteTarget(null);
-      setDeleteConfirm("");
+      setRemoveTarget(null);
+      setRemoveConfirm("");
       void hosts.refetch();
     },
   });
@@ -124,13 +133,13 @@ export function AdminHosts() {
             </AlertDescription>
           </Alert>
         ) : null}
-        {deleteHost.error ? (
+        {removeHost.error ? (
           <Alert variant="destructive">
-            <AlertTitle>Host deletion failed</AlertTitle>
+            <AlertTitle>Host removal failed</AlertTitle>
             <AlertDescription>
-              {deleteHost.error instanceof Error
-                ? deleteHost.error.message
-                : "Delete failed"}
+              {removeHost.error instanceof Error
+                ? removeHost.error.message
+                : "Remove failed"}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -148,17 +157,17 @@ export function AdminHosts() {
 
       {hosts.isPending ? (
         <CardGridSkeleton cards={4} cardClassName="h-40" />
-      ) : hostRecords.length ? (
+      ) : activeHostRecords.length ? (
         <PaginatedCollection
-          items={hostRecords}
+          items={activeHostRecords}
           pageSize={COLLECTION_PAGE_SIZE.cards}
           itemLabel="hosts"
         >
           {(visibleHosts) => (
             <div className="divide-y overflow-hidden rounded-xl border bg-card">
               {visibleHosts.map(({ host, hostVms, hostRuns, capacity }) => {
-                const isDeletingThisHost =
-                  deleteHost.isPending && deleteHost.variables === host.id;
+                const isRemovingThisHost =
+                  removeHost.isPending && removeHost.variables === host.id;
                 const isRefreshing = busyKey === `${host.id}:refresh`;
                 const memorySummary = capacity
                   ? `${capacity.memory_available_mib} / ${capacity.memory_total_mib} MiB`
@@ -228,11 +237,11 @@ export function AdminHosts() {
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               variant="destructive"
-                              disabled={isDeletingThisHost}
-                              onClick={() => setDeleteTarget(host)}
+                              disabled={isRemovingThisHost}
+                              onClick={() => setRemoveTarget(host)}
                             >
                               <Trash2 className="size-4" />
-                              Delete host
+                              Remove host
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -301,68 +310,68 @@ export function AdminHosts() {
       )}
 
       <Dialog
-        open={deleteTarget !== null}
+        open={removeTarget !== null}
         onOpenChange={(open) => {
           if (!open) {
-            setDeleteTarget(null);
-            setDeleteConfirm("");
+            setRemoveTarget(null);
+            setRemoveConfirm("");
           }
         }}
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete this host?</DialogTitle>
+            <DialogTitle>Remove this host?</DialogTitle>
             <DialogDescription>
-              {deleteTarget
-                ? `Deleting "${deleteTarget.name}" (${deleteTarget.id}) removes host access and bootstrap tokens. This cannot be undone.`
+              {removeTarget
+                ? `Removing "${removeTarget.name}" (${removeTarget.id}) revokes its access and bootstrap credentials. Its run history remains available.`
                 : null}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
             <label
-              htmlFor="delete-host-confirm"
+              htmlFor="remove-host-confirm"
               className="text-sm font-medium"
             >
-              Type <span className="font-semibold">{deleteTarget?.name}</span>{" "}
+              Type <span className="font-semibold">{removeTarget?.name}</span>{" "}
               to confirm
             </label>
             <Input
-              id="delete-host-confirm"
-              value={deleteConfirm}
-              onChange={(event) => setDeleteConfirm(event.target.value)}
+              id="remove-host-confirm"
+              value={removeConfirm}
+              onChange={(event) => setRemoveConfirm(event.target.value)}
               autoComplete="off"
             />
           </div>
-          {deleteHost.error ? (
+          {removeHost.error ? (
             <InlineFeedback tone="error">
-              {deleteHost.error instanceof Error
-                ? deleteHost.error.message
-                : "Host deletion failed"}
+              {removeHost.error instanceof Error
+                ? removeHost.error.message
+                : "Host removal failed"}
             </InlineFeedback>
           ) : null}
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setDeleteTarget(null)}
-              disabled={deleteHost.isPending}
+              onClick={() => setRemoveTarget(null)}
+              disabled={removeHost.isPending}
             >
               Keep host
             </Button>
             <Button
               variant="destructive"
               onClick={() => {
-                if (deleteTarget) {
-                  deleteHost.mutate(deleteTarget.id);
+                if (removeTarget) {
+                  removeHost.mutate(removeTarget.id);
                 }
               }}
               disabled={
-                deleteHost.isPending ||
-                !deleteTarget ||
-                deleteConfirm !== deleteTarget.name
+                removeHost.isPending ||
+                !removeTarget ||
+                removeConfirm !== removeTarget.name
               }
             >
               <Trash2 className="size-4" />
-              {deleteHost.isPending ? "Deleting…" : "Delete host"}
+              {removeHost.isPending ? "Removing…" : "Remove host"}
             </Button>
           </DialogFooter>
         </DialogContent>
