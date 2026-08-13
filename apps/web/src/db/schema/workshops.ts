@@ -57,6 +57,8 @@ export type WorkshopHelpRequestStatus =
   | "claimed"
   | "resolved"
   | "cancelled";
+export type WorkshopRouteIssuanceKind = "terminal" | "application";
+export type WorkshopRouteIssuanceState = "pending" | "issued" | "cancelled";
 
 export const workshopTemplates = sqliteTable(
   "workshop_templates",
@@ -119,6 +121,10 @@ export const workshopTemplateRevisions = sqliteTable(
     check(
       "workshop_template_revisions_revision_positive",
       sql`${table.revision} > 0`,
+    ),
+    check(
+      "workshop_template_revisions_manifest_json_valid",
+      sql`json_valid(${table.manifestJson})`,
     ),
   ],
 );
@@ -187,6 +193,18 @@ export const workshopSessions = sqliteTable(
       "workshop_sessions_lobby_before_start",
       sql`${table.lobbyOpensAt} <= ${table.scheduledStartAt}`,
     ),
+    check(
+      "workshop_sessions_released_modules_json_valid",
+      sql`json_valid(${table.releasedModuleIdsJson})`,
+    ),
+    check(
+      "workshop_sessions_revealed_hints_json_valid",
+      sql`json_valid(${table.revealedHintIdsJson})`,
+    ),
+    check(
+      "workshop_sessions_revealed_solutions_json_valid",
+      sql`json_valid(${table.revealedSolutionModuleIdsJson})`,
+    ),
   ],
 );
 
@@ -243,6 +261,10 @@ export const workshopSessionMembers = sqliteTable(
     check(
       "workshop_session_members_provision_state_valid",
       sql`${table.provisionState} in ('not_ready', 'queued', 'provisioning', 'ready', 'failed', 'ended')`,
+    ),
+    check(
+      "workshop_session_members_workspace_enabled_valid",
+      sql`${table.workspaceEnabled} in (0, 1)`,
     ),
   ],
 );
@@ -348,6 +370,64 @@ export const workshopWorkspaceGenerations = sqliteTable(
   ],
 );
 
+export const workshopRouteIssuanceIntents = sqliteTable(
+  "workshop_route_issuance_intents",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "restrict" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => workshopSessions.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workshopWorkspaces.id, { onDelete: "cascade" }),
+    generationId: text("generation_id")
+      .notNull()
+      .references(() => workshopWorkspaceGenerations.id, {
+        onDelete: "cascade",
+      }),
+    actorUserId: text("actor_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    kind: text("kind").$type<WorkshopRouteIssuanceKind>().notNull(),
+    routeKey: text("route_key").notNull(),
+    alternateRouteKey: text("alternate_route_key"),
+    state: text("state")
+      .$type<WorkshopRouteIssuanceState>()
+      .default("pending")
+      .notNull(),
+    capabilityExpiresAt: integer("capability_expires_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("workshop_route_issuance_intents_route_uidx").on(
+      table.kind,
+      table.routeKey,
+    ),
+    index("workshop_route_issuance_intents_member_idx").on(
+      table.organizationId,
+      table.actorUserId,
+      table.state,
+      table.createdAt,
+    ),
+    check(
+      "workshop_route_issuance_intents_kind_valid",
+      sql`${table.kind} in ('terminal', 'application')`,
+    ),
+    check(
+      "workshop_route_issuance_intents_state_valid",
+      sql`${table.state} in ('pending', 'issued', 'cancelled')`,
+    ),
+    check(
+      "workshop_route_issuance_intents_expiry_valid",
+      sql`${table.capabilityExpiresAt} >= ${table.createdAt}`,
+    ),
+  ],
+);
+
 export const workshopModuleProgress = sqliteTable(
   "workshop_module_progress",
   {
@@ -404,6 +484,10 @@ export const workshopModuleProgress = sqliteTable(
     check(
       "workshop_module_progress_explain_back_status_valid",
       sql`${table.explainBackStatus} in ('not_required', 'pending', 'completed')`,
+    ),
+    check(
+      "workshop_module_progress_revealed_hints_json_valid",
+      sql`json_valid(${table.revealedHintIdsJson})`,
     ),
   ],
 );
@@ -531,6 +615,10 @@ export const workshopEvents = sqliteTable(
     index("workshop_events_org_created_idx").on(
       table.organizationId,
       table.createdAt,
+    ),
+    check(
+      "workshop_events_payload_json_valid",
+      sql`json_valid(${table.payloadJson})`,
     ),
   ],
 );

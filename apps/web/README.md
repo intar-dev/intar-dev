@@ -37,7 +37,8 @@ Run from `apps/web/`:
 bun dev
 bun run test
 bun run build
-bun run db:migrate:local
+bun run db:generate
+bun run db:check
 bun run dev
 ```
 
@@ -56,107 +57,70 @@ Object, and rate-limit bindings are simulated locally and it intentionally has
 no production route or VPC service binding. Production checks and builds keep
 using `wrangler.jsonc`.
 
-`migrations/*.sql` is the canonical ordered D1 migration stream. Wrangler
-records each applied filename in its `d1_migrations` ledger, so both fresh and
-existing databases use the same command without a hand-maintained starting
-point:
+The TypeScript tables under `src/db/schema/` are the sole database schema
+source of truth. Drizzle Kit generates the ordered `migrations/*.sql` stream and
+its `migrations/meta/` provenance. Never edit those generated files, use
+`drizzle-kit generate --custom`, add SQL triggers, or create migrations through
+Wrangler.
 
 ```bash
-bun run db:migrate:local
+bun run db:generate
+bun run db:check
 bun run db:migrate:production
 ```
 
-Create future migrations with `wrangler d1 migrations create DB <name>`. Do not
-apply schema files with `wrangler d1 execute` or edit the migration ledger by
-hand. The production workflow builds the exact commit, applies pending
-migrations, and then deploys the new Worker. The deployment is forward-only: a
-migration must leave the currently deployed Worker functional enough for the
-short interval before replacement.
+Generation and checks do not need Cloudflare credentials. Remote migration uses
+Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
+`CLOUDFLARE_DATABASE_ID`, and either `CLOUDFLARE_D1_TOKEN` or
+`CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
+run Wrangler's D1 migration commands, or edit either migration ledger by hand.
+The production workflow builds the exact commit, applies pending Drizzle
+migrations, and then deploys the new Worker. A forward migration must leave the
+currently deployed Worker functional for the short interval before replacement.
 
-Pull requests run the test/build and UI quality gates. A merge to `main` that
-changes the website automatically builds that exact commit and deploys it
-through the `Website production` workflow; do not deploy an ignored local
-`dist/` artifact directly. The production workflow creates the deployable Astro
-artifact but does not repeat the pull request quality gates. Treat `main` as
-deploy-only: a direct website push bypasses those gates and deploys immediately.
+A deliberate database rebaseline uses two reviewed exact-`main` commits. From
+the first, dispatch `Prepare fresh production D1` with the exact confirmation
+and a new unique production name. That workflow creates one EU-jurisdiction D1,
+applies only the generated Drizzle stream, verifies the exact Drizzle ledger and
+canonical generated DDL (including table definitions, indexes, constraints, and
+the ledger table itself), proves that views, triggers, and foreign-key
+violations are absent, empirically proves REST batch rollback, and retains its
+UUID without changing the Worker. Put that evidence-backed name and UUID into
+`wrangler.jsonc` in the second commit.
 
-## Beta-access replacement cutover
+Deploy the second commit with `fresh_d1_cutover=true`, the exact cutover
+confirmation, the separate `ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE`
+acknowledgement, and both source and target name/UUID pairs. This is an
+explicit snapshot reset, not a lossless in-place database migration. The
+protected run
+fences the source Worker, performs the allowlisted durable-data copy, switches
+to the target while still fenced, re-verifies schema and data-copy evidence,
+then re-fingerprints every source application table and requires the source Time
+Travel bookmark to remain unchanged before it opens the target. While this
+fence is active, the maintenance bypass permits only GET/HEAD requests to the
+DB-independent `/api/maintenance/status` endpoint; application and OAuth routes
+cannot bypass maintenance, and no application mutation is permitted. The
+workflow retains the source bookmark captured immediately before fencing, but
+never restores it automatically. Any Phase A activation failure restores
+source/open; a copy or Phase B activation failure leaves source/maintenance;
+and copied-target/source-stability verification or Phase C activation failure
+leaves target/maintenance. The workflow never deletes the source D1; keep it as
+immutable rollback evidence, and do not switch back after the target has
+accepted writes.
 
-Beta access is a clean replacement, not a D1 migration. Do not merge or deploy
-this Worker through the normal migration-first production job while
-`BETA_ACCESS_MAINTENANCE` is off. There is no old-Worker rollback after the
-reset.
+Maintenance prevents new application mutations but cannot cancel a Worker
+invocation that started on the previous version. The final source fingerprint
+and bookmark catch writes completed before that check. A later write remains
+recoverable in the retained source archive but is deliberately outside the new
+control-plane snapshot. Drain externally active work first and treat provider,
+R2, route, and agent inventories as separate cleanup surfaces.
 
-1. Set a production-environment `BETA_MAINTENANCE_BYPASS_SECRET`; use at least
-   32 random bytes. The protected website deployment passes it to Wrangler's
-   secrets file without logging it.
-2. While the current Worker and old beta schema are still active, end every
-   active scenario run (including hidden runs and a user-owned run on an
-   organization runner), disconnect all personal agents, and close every issued
-   workshop terminal/application route. The replacement Worker cannot perform
-   this drain before the schema reset: its authorization queries intentionally
-   understand only the new allowlist shape.
-3. Deploy the Worker with `BETA_ACCESS_MAINTENANCE` set to `on`. Verify an
-   unauthenticated `/api/*` request returns HTTP 503 with
-   `{"code":"maintenance"}`. Keep maintenance enabled for at least one hour
-   before cutover. The replacement disables Better Auth's generic `/token`
-   endpoint, but wait at least 15 minutes for JWTs issued by the previous Worker
-   to expire. It also rejects OAuth resource/audience requests so every newly
-   issued OAuth access token is opaque and immediately revocable; wait the full
-   hour for any resource JWT minted by the previous Worker to reach its maximum
-   lifetime.
-4. In the browser used for the smoke test, establish the two-hour operator
-   bypass from the maintenance page's DevTools console. This keeps the secret
-   out of URLs and request logs:
-
-   ```js
-   await fetch("/api/maintenance/bypass", {
-     method: "POST",
-     headers: { "content-type": "application/json" },
-     body: JSON.stringify({ secret: prompt("Maintenance bypass secret") }),
-   });
-   ```
-
-   If a Stargate create or delete result from the pre-deploy drain was
-   ambiguous, wait out its four-hour maximum TTL before continuing. The cutover
-   command rejects live or recently terminal scenario routes and never disables
-   or deletes an organization-owned runner.
-5. Run the destructive command with a new, protected, absolute checkpoint path and the
-   known existing Better Auth administrator. It verifies maintenance and
-   provider-account uniqueness, exports D1, replaces only beta tables and
-   account indexes, removes sessions/OAuth grants/personal credentials, then
-   prints one bootstrap fragment link exactly once:
-
-   ```sh
-   bun run beta:cutover -- \
-     --remote \
-     --admin-user-id ADMIN_USER_ID \
-     --export /secure/checkpoints/intar-before-beta-cutover.sql \
-     --confirm-pure-replacement
-   ```
-
-6. Redeem the bootstrap link as that administrator. Create and claim a normal
-   invite, connect organization SSO, revoke the test user, and verify app,
-   OAuth, personal-agent bootstrap, and personal-route denial while an
-   organization runner remains healthy.
-7. Change `BETA_ACCESS_MAINTENANCE` to `off` and deploy the same forward-fixed
-   Worker only after the smoke checks pass. A failure stays in maintenance and
-   is fixed forward; the checkpoint is catastrophe recovery, not an
-   application rollback.
-
-Beta revocation cleanup uses a non-expiring D1 execution lock. Concurrent
-retries cannot run capability cleanup twice or delete routes created after a
-later admission. A timeout after dispatching an external route/runtime delete
-is recorded as `access.revocation_cleanup_stalled` and deliberately retains the
-lock because the remote operation may still finish. The same applies if a
-Worker is terminated mid-cleanup. Put the app in maintenance, prove that the
-recorded attempt and remote operations are no longer executing, and release it
-through an `access.revocation_cleanup_failed` audit insert carrying the exact
-user, revocation, and cleanup-attempt IDs with reason
-`operator_abandoned_cleanup`. The D1 trigger atomically records that failure and
-releases only that attempt; then retry the normal beta-user revoke endpoint.
-Never clear the lock with a direct allowlist update or while the original
-execution may still be live.
+Pull requests run the test/build and UI quality gates. Production is not
+automatic on merge: first dispatch `Website` against the exact `main` commit,
+then dispatch the protected `Website production` workflow only after that
+validation succeeds. The production workflow rebuilds the committed source; it
+never deploys an ignored local `dist/` artifact and does not repeat all
+validation gates.
 
 ## Organizations
 

@@ -28,6 +28,7 @@ import {
 import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
+import { withRuntimeAllocationLock } from "@/lib/runtime-allocation-lock";
 import {
   providerCredentialContext,
   providerCredentialEnvelope,
@@ -46,6 +47,10 @@ const DEFAULT_GCP_ZONES = [
   "europe-west3-c",
 ] as const;
 const DEFAULT_MAX_ALLOCATIONS = 5;
+
+function providerConnectionAllocationLockKey(connectionId: string): string {
+  return `runtime-provider-connection:${connectionId}`;
+}
 
 export interface ProviderConnectionRecord {
   id: string;
@@ -418,116 +423,140 @@ export async function rotateProviderCredential(input: {
   now?: number;
 }): Promise<ProviderConnectionRecord> {
   await requireOwner(input.organizationId, input.actorUserId);
-  const connection = await requireConnection(input.organizationId, input.connectionId);
-  const reconnecting = connection.state === "disconnected";
-  const previous = reconnecting
-    ? await loadCredentialVersion(connection)
-    : await loadActiveCredential(connection);
-  const raw = requiredCredential(input.credential);
-  const now = input.now ?? Date.now();
-  const versionRows = await drizzle(env.DB)
-    .select({ value: max(providerCredentialVersions.version) })
-    .from(providerCredentialVersions)
-    .where(eq(providerCredentialVersions.connectionId, connection.id));
-  const version = (versionRows[0]?.value ?? 0) + 1;
-  const credentialId = createAppId();
-  const context = {
-    organizationId: input.organizationId,
-    connectionId: connection.id,
-    credentialId,
-    provider: connection.providerKind,
-    version,
-  } as const;
-  const ownership = await providerOwnership(
+  const initialConnection = await requireConnection(
     input.organizationId,
-    connection.id,
-    "provider_connection_sentinel",
+    input.connectionId,
   );
-  let result: RotateHetznerCredentialResult | RotateGcpCredentialResult;
-  let credentialAuthority: "active" | "cleanup_only" = "active";
-  if (connection.providerKind === "hetzner_cloud") {
-    const details = await requireHetznerDetails(connection.id);
-    result = await invokeProviderOperation<RotateHetznerCredentialResult>(
-      "hetzner_cloud",
-      (binding) =>
-        binding.rotateCredential<RotateHetznerCredentialResult>({
-          requestId: createAppId(),
-          connectionId: connection.id,
-          credentialContext: context,
-          token: raw,
-          sentinelId: positiveInteger(details.sentinelFirewallId, "sentinel firewall"),
-          sentinelName: sentinelName(connection.id),
-          ownership,
-        }),
-    );
-  } else {
-    const details = await requireGcpDetails(connection.id);
-    result = await invokeProviderOperation<RotateGcpCredentialResult>(
-      "gcp_compute",
-      (binding) =>
-        binding.rotateCredential<RotateGcpCredentialResult>({
-          requestId: createAppId(),
-          connectionId: connection.id,
-          credentialContext: context,
-          serviceAccountKeyJson: raw,
-          projectId: connection.externalProjectId,
-          sentinelNetworkSelfLink: details.networkSelfLink,
-          ownership,
-        }),
-    );
-    credentialAuthority = result.authority;
-  }
-  const nextConnectionState = credentialAuthority === "active"
-    ? "active" as const
-    : await countLiveProviderAllocations(connection.id) > 0
-      ? "cleanup_pending" as const
-      : "rotation_required" as const;
-  const db = drizzle(env.DB);
-  await db.batch([
-    db.insert(providerCredentialVersions).values(
-      credentialInsert({
-        credentialId,
+  const now = input.now ?? Date.now();
+  return withRuntimeAllocationLock({
+    key: providerConnectionAllocationLockKey(initialConnection.id),
+    now,
+    operation: async () => {
+      // Re-read every mutable connection input after acquiring the same lock
+      // used by allocation. Rotation can change whether this connection is
+      // issuance-ready, so it must be serialized with seat claims.
+      await requireOwner(input.organizationId, input.actorUserId);
+      const connection = await requireConnection(
+        input.organizationId,
+        input.connectionId,
+      );
+      const reconnecting = connection.state === "disconnected";
+      const previous = reconnecting
+        ? await loadCredentialVersion(connection)
+        : await loadActiveCredential(connection);
+      const raw = requiredCredential(input.credential);
+      const versionRows = await drizzle(env.DB)
+        .select({ value: max(providerCredentialVersions.version) })
+        .from(providerCredentialVersions)
+        .where(eq(providerCredentialVersions.connectionId, connection.id));
+      const version = (versionRows[0]?.value ?? 0) + 1;
+      const credentialId = createAppId();
+      const context = {
+        organizationId: input.organizationId,
         connectionId: connection.id,
-        envelope: result.credential,
-        credentialFingerprint: await sha256Hex(raw),
-        actorUserId: input.actorUserId,
+        credentialId,
+        provider: connection.providerKind,
         version,
-        authority: credentialAuthority,
-        now,
-      }),
-    ),
-    db
-      .update(providerCredentialVersions)
-      .set({ supersededAt: now })
-      .where(eq(providerCredentialVersions.id, previous.id)),
-    db
-      .update(providerConnections)
-      .set({
-        activeCredentialVersionId: credentialId,
-        state: nextConnectionState,
-        lastValidatedAt: now,
-        disconnectedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(providerConnections.id, connection.id)),
-    auditInsert({
-      organizationId: input.organizationId,
-      connectionId: connection.id,
-      actorUserId: input.actorUserId,
-      type: credentialAuthority === "cleanup_only"
-        ? "provider.credential_rotated_cleanup_only"
-        : reconnecting
-          ? "provider.connection_reconnected"
-          : "provider.credential_rotated",
-      payload: {
-        providerKind: connection.providerKind,
-        version,
-        authority: credentialAuthority,
-      },
-      now,
-    }),
-  ]);
-  return requireListedConnection(input.organizationId, input.actorUserId, connection.id);
+      } as const;
+      const ownership = await providerOwnership(
+        input.organizationId,
+        connection.id,
+        "provider_connection_sentinel",
+      );
+      let result: RotateHetznerCredentialResult | RotateGcpCredentialResult;
+      let credentialAuthority: "active" | "cleanup_only" = "active";
+      if (connection.providerKind === "hetzner_cloud") {
+        const details = await requireHetznerDetails(connection.id);
+        result = await invokeProviderOperation<RotateHetznerCredentialResult>(
+          "hetzner_cloud",
+          (binding) =>
+            binding.rotateCredential<RotateHetznerCredentialResult>({
+              requestId: createAppId(),
+              connectionId: connection.id,
+              credentialContext: context,
+              token: raw,
+              sentinelId: positiveInteger(
+                details.sentinelFirewallId,
+                "sentinel firewall",
+              ),
+              sentinelName: sentinelName(connection.id),
+              ownership,
+            }),
+        );
+      } else {
+        const details = await requireGcpDetails(connection.id);
+        result = await invokeProviderOperation<RotateGcpCredentialResult>(
+          "gcp_compute",
+          (binding) =>
+            binding.rotateCredential<RotateGcpCredentialResult>({
+              requestId: createAppId(),
+              connectionId: connection.id,
+              credentialContext: context,
+              serviceAccountKeyJson: raw,
+              projectId: connection.externalProjectId,
+              sentinelNetworkSelfLink: details.networkSelfLink,
+              ownership,
+            }),
+        );
+        credentialAuthority = result.authority;
+      }
+      const nextConnectionState = credentialAuthority === "active"
+        ? "active" as const
+        : await countLiveProviderAllocations(connection.id) > 0
+          ? "cleanup_pending" as const
+          : "rotation_required" as const;
+      const db = drizzle(env.DB);
+      await db.batch([
+        db.insert(providerCredentialVersions).values(
+          credentialInsert({
+            credentialId,
+            connectionId: connection.id,
+            envelope: result.credential,
+            credentialFingerprint: await sha256Hex(raw),
+            actorUserId: input.actorUserId,
+            version,
+            authority: credentialAuthority,
+            now,
+          }),
+        ),
+        db
+          .update(providerCredentialVersions)
+          .set({ supersededAt: now })
+          .where(eq(providerCredentialVersions.id, previous.id)),
+        db
+          .update(providerConnections)
+          .set({
+            activeCredentialVersionId: credentialId,
+            state: nextConnectionState,
+            lastValidatedAt: now,
+            disconnectedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(providerConnections.id, connection.id)),
+        auditInsert({
+          organizationId: input.organizationId,
+          connectionId: connection.id,
+          actorUserId: input.actorUserId,
+          type: credentialAuthority === "cleanup_only"
+            ? "provider.credential_rotated_cleanup_only"
+            : reconnecting
+              ? "provider.connection_reconnected"
+              : "provider.credential_rotated",
+          payload: {
+            providerKind: connection.providerKind,
+            version,
+            authority: credentialAuthority,
+          },
+          now,
+        }),
+      ]);
+      return requireListedConnection(
+        input.organizationId,
+        input.actorUserId,
+        connection.id,
+      );
+    },
+  });
 }
 
 export async function updateProviderGuardrails(input: {
@@ -540,61 +569,88 @@ export async function updateProviderGuardrails(input: {
   now?: number;
 }): Promise<ProviderConnectionRecord> {
   await requireOwner(input.organizationId, input.actorUserId);
-  const connection = await requireConnection(input.organizationId, input.connectionId);
+  const initialConnection = await requireConnection(
+    input.organizationId,
+    input.connectionId,
+  );
   const now = input.now ?? Date.now();
-  const locations = locationsFor(connection.providerKind, input.approvedLocations);
-  const db = drizzle(env.DB);
-  if (connection.providerKind === "hetzner_cloud") {
-    const current = await requireHetznerDetails(connection.id);
-    await db
-      .update(hetznerConnectionDetails)
-      .set({
-        approvedLocationsJson:
-          input.approvedLocations === undefined
-            ? current.approvedLocationsJson
-            : locations,
-        maxConcurrentAllocations:
-          input.maxConcurrentAllocations === undefined
-            ? current.maxConcurrentAllocations
-            : allocationLimit(input.maxConcurrentAllocations),
-        maxSessionCostNanos:
-          input.maxSessionCostNanos === undefined
-            ? current.maxSessionCostNanos
-            : costLimit(input.maxSessionCostNanos),
-        updatedAt: now,
-      })
-      .where(eq(hetznerConnectionDetails.connectionId, connection.id));
-  } else {
-    const current = await requireGcpDetails(connection.id);
-    await db
-      .update(gcpConnectionDetails)
-      .set({
-        approvedZonesJson:
-          input.approvedLocations === undefined
-            ? current.approvedZonesJson
-            : locations,
-        maxConcurrentAllocations:
-          input.maxConcurrentAllocations === undefined
-            ? current.maxConcurrentAllocations
-            : allocationLimit(input.maxConcurrentAllocations),
-        maxSessionCostNanos:
-          input.maxSessionCostNanos === undefined
-            ? current.maxSessionCostNanos
-            : costLimit(input.maxSessionCostNanos),
-        updatedAt: now,
-      })
-      .where(eq(gcpConnectionDetails.connectionId, connection.id));
-  }
-  await db.insert(providerAuditEvents).values({
-    id: createAppId(),
-    organizationId: input.organizationId,
-    connectionId: connection.id,
-    actorUserId: input.actorUserId,
-    type: "provider.guardrails_updated",
-    payloadJson: { providerKind: connection.providerKind },
-    createdAt: now,
+  return withRuntimeAllocationLock({
+    key: providerConnectionAllocationLockKey(initialConnection.id),
+    now,
+    operation: async () => {
+      await requireOwner(input.organizationId, input.actorUserId);
+      const connection = await requireConnection(
+        input.organizationId,
+        input.connectionId,
+      );
+      const locations = locationsFor(
+        connection.providerKind,
+        input.approvedLocations,
+      );
+      const db = drizzle(env.DB);
+      const audit = db.insert(providerAuditEvents).values({
+        id: createAppId(),
+        organizationId: input.organizationId,
+        connectionId: connection.id,
+        actorUserId: input.actorUserId,
+        type: "provider.guardrails_updated",
+        payloadJson: { providerKind: connection.providerKind },
+        createdAt: now,
+      });
+      if (connection.providerKind === "hetzner_cloud") {
+        const current = await requireHetznerDetails(connection.id);
+        await db.batch([
+          db
+            .update(hetznerConnectionDetails)
+            .set({
+              approvedLocationsJson:
+                input.approvedLocations === undefined
+                  ? current.approvedLocationsJson
+                  : locations,
+              maxConcurrentAllocations:
+                input.maxConcurrentAllocations === undefined
+                  ? current.maxConcurrentAllocations
+                  : allocationLimit(input.maxConcurrentAllocations),
+              maxSessionCostNanos:
+                input.maxSessionCostNanos === undefined
+                  ? current.maxSessionCostNanos
+                  : costLimit(input.maxSessionCostNanos),
+              updatedAt: now,
+            })
+            .where(eq(hetznerConnectionDetails.connectionId, connection.id)),
+          audit,
+        ]);
+      } else {
+        const current = await requireGcpDetails(connection.id);
+        await db.batch([
+          db
+            .update(gcpConnectionDetails)
+            .set({
+              approvedZonesJson:
+                input.approvedLocations === undefined
+                  ? current.approvedZonesJson
+                  : locations,
+              maxConcurrentAllocations:
+                input.maxConcurrentAllocations === undefined
+                  ? current.maxConcurrentAllocations
+                  : allocationLimit(input.maxConcurrentAllocations),
+              maxSessionCostNanos:
+                input.maxSessionCostNanos === undefined
+                  ? current.maxSessionCostNanos
+                  : costLimit(input.maxSessionCostNanos),
+              updatedAt: now,
+            })
+            .where(eq(gcpConnectionDetails.connectionId, connection.id)),
+          audit,
+        ]);
+      }
+      return requireListedConnection(
+        input.organizationId,
+        input.actorUserId,
+        connection.id,
+      );
+    },
   });
-  return requireListedConnection(input.organizationId, input.actorUserId, connection.id);
 }
 
 export async function inspectProviderConnection(input: {
@@ -703,41 +759,59 @@ export async function disconnectProviderConnection(input: {
   now?: number;
 }): Promise<ProviderConnectionRecord> {
   await requireOwner(input.organizationId, input.actorUserId);
-  const connection = await requireConnection(input.organizationId, input.connectionId);
-  const live = await countLiveProviderAllocations(connection.id);
-  if (live > 0) {
-    throw appError(
-      409,
-      "provider_cleanup_required",
-      "provider resources must be deleted before disconnecting",
-    );
-  }
+  const initialConnection = await requireConnection(
+    input.organizationId,
+    input.connectionId,
+  );
   const now = input.now ?? Date.now();
-  const db = drizzle(env.DB);
-  const credential = connection.activeCredentialVersionId;
-  await db.batch([
-    db
-      .update(providerConnections)
-      .set({ state: "disconnected", disconnectedAt: now, updatedAt: now })
-      .where(eq(providerConnections.id, connection.id)),
-    ...(credential
-      ? [
-          db
-            .update(providerCredentialVersions)
-            .set({ revokedAt: now })
-            .where(eq(providerCredentialVersions.id, credential)),
-        ]
-      : []),
-    auditInsert({
-      organizationId: input.organizationId,
-      connectionId: connection.id,
-      actorUserId: input.actorUserId,
-      type: "provider.connection_disconnected",
-      payload: { providerKind: connection.providerKind },
-      now,
-    }),
-  ]);
-  return requireListedConnection(input.organizationId, input.actorUserId, connection.id);
+  return withRuntimeAllocationLock({
+    key: providerConnectionAllocationLockKey(initialConnection.id),
+    now,
+    operation: async () => {
+      await requireOwner(input.organizationId, input.actorUserId);
+      const connection = await requireConnection(
+        input.organizationId,
+        input.connectionId,
+      );
+      const live = await countLiveProviderAllocations(connection.id);
+      if (live > 0) {
+        throw appError(
+          409,
+          "provider_cleanup_required",
+          "provider resources must be deleted before disconnecting",
+        );
+      }
+      const db = drizzle(env.DB);
+      const credential = connection.activeCredentialVersionId;
+      await db.batch([
+        db
+          .update(providerConnections)
+          .set({ state: "disconnected", disconnectedAt: now, updatedAt: now })
+          .where(eq(providerConnections.id, connection.id)),
+        ...(credential
+          ? [
+              db
+                .update(providerCredentialVersions)
+                .set({ revokedAt: now })
+                .where(eq(providerCredentialVersions.id, credential)),
+            ]
+          : []),
+        auditInsert({
+          organizationId: input.organizationId,
+          connectionId: connection.id,
+          actorUserId: input.actorUserId,
+          type: "provider.connection_disconnected",
+          payload: { providerKind: connection.providerKind },
+          now,
+        }),
+      ]);
+      return requireListedConnection(
+        input.organizationId,
+        input.actorUserId,
+        connection.id,
+      );
+    },
+  });
 }
 
 export async function acknowledgeProviderManualCleanup(input: {

@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 5 ]; then
-  echo "usage: tools/deploy/activate-web-version.sh <wrangler-config> <database-id> <session-namespace-id> <secrets-file> <evidence.json>" >&2
+if [ "$#" -ne 7 ]; then
+  echo "usage: tools/deploy/activate-web-version.sh <wrangler-config> <current-database-id> <target-database-id> <session-namespace-id> <secrets-file> <evidence.json> <expected-current-mode>" >&2
   exit 64
 fi
 
 readonly config="$1"
-readonly database_id="$2"
-readonly session_namespace_id="$3"
-readonly secrets_file="$4"
-readonly evidence="$5"
+readonly current_database_id="$2"
+readonly target_database_id="$3"
+readonly session_namespace_id="$4"
+readonly secrets_file="$5"
+readonly evidence="$6"
+readonly expected_current_mode="$7"
 readonly worker_name="intar-dev"
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-web-deploy-${GITHUB_RUN_ID:-local}"
+readonly activation_label="${WEB_ACTIVATION_LABEL:-standard}"
+readonly runtime_root="${RUNNER_TEMP:-/tmp}/intar-web-deploy-${GITHUB_RUN_ID:-local}-${activation_label}"
 readonly before_deployment="${runtime_root}/before-deployment.json"
 readonly before_version="${runtime_root}/before-version.json"
 readonly before_health="${runtime_root}/before-health.json"
@@ -35,8 +38,14 @@ readonly attempt_evidence="${runtime_root}/attempt.json"
 mkdir -p "${runtime_root}"
 test -f "${config}"
 test -f "${secrets_file}"
-[[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+[[ "${current_database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+[[ "${target_database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
 [[ "${session_namespace_id}" =~ ^[0-9a-f]{32}$ ]]
+[[ "${activation_label}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]
+case "${expected_current_mode}" in
+  maintenance|open) ;;
+  *) echo "expected current mode must be maintenance or open" >&2; exit 64 ;;
+esac
 test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
 test -n "${CLOUDFLARE_API_TOKEN:-}"
 test -n "${GITHUB_SHA:-}"
@@ -90,19 +99,20 @@ jq -n \
   --arg source_sha "${GITHUB_SHA}" \
   --arg run_id "${GITHUB_RUN_ID}" \
   --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
-  --arg database_id "${database_id}" \
+  --arg current_database_id "${current_database_id}" \
+  --arg target_database_id "${target_database_id}" \
   --arg session_namespace_id "${session_namespace_id}" \
   --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{schema_version: 1, operation: "activate-exact-web-version-attempt", state: "started", source_sha: $source_sha, run_id: $run_id, run_attempt: ($run_attempt | tonumber), database_id: $database_id, session_namespace_id: $session_namespace_id, started_at: $started_at}' \
+  '{schema_version: 1, operation: "activate-exact-web-version-attempt", state: "started", source_sha: $source_sha, run_id: $run_id, run_attempt: ($run_attempt | tonumber), current_database_id: $current_database_id, target_database_id: $target_database_id, session_namespace_id: $session_namespace_id, started_at: $started_at}' \
   > "${attempt_evidence}"
 
 jq -e \
-  --arg database_id "${database_id}" \
+  --arg target_database_id "${target_database_id}" \
   --arg session_namespace_id "${session_namespace_id}" '
     ([.d1_databases[]? | select(.binding == "DB")]) as $databases |
     ([.kv_namespaces[]? | select(.binding == "SESSION")]) as $sessions |
     ($databases | length) == 1 and
-    $databases[0].database_id == $database_id and
+    $databases[0].database_id == $target_database_id and
     ($sessions | length) == 1 and
     $sessions[0].id == $session_namespace_id and
     (.migrations | type) == "array" and
@@ -129,7 +139,7 @@ bunx wrangler versions view "${before_version_id}" \
   --name "${worker_name}" --json > "${before_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
   active-runtime-bindings "${before_deployment}" "${before_version}" \
-  "${database_id}" "${session_namespace_id}" "${before_version_id}" \
+  "${current_database_id}" "${session_namespace_id}" "${before_version_id}" \
   >/dev/null
 jq -e --arg version_id "${before_version_id}" '
   .id == $version_id and
@@ -160,6 +170,7 @@ case "${before_maintenance_value}" in
   off) before_health_mode=open ;;
   *) echo "invalid active BETA_ACCESS_MAINTENANCE binding" >&2; exit 1 ;;
 esac
+test "${before_health_mode}" = "${expected_current_mode}"
 probe_root_health "before" "${before_health}" "${before_health_mode}"
 
 restore_required=false
@@ -287,6 +298,8 @@ restore_previous_on_exit() {
     --arg run_id "${GITHUB_RUN_ID}" \
     --arg before_version_id "${before_version_id}" \
     --arg attempted_version_id "${uploaded_version_id}" \
+    --arg current_database_id "${current_database_id}" \
+    --arg target_database_id "${target_database_id}" \
     --arg rollback_deployment_id "${rollback_deployment_id}" \
     --argjson original_exit_status "${exit_status}" \
     --argjson rollback_command_attempts "${rollback_command_attempts}" \
@@ -298,7 +311,7 @@ restore_previous_on_exit() {
     --slurpfile before_health "${before_health}" \
     --rawfile rollback_attempts_ndjson "${rollback_attempts}" \
     --rawfile rollback_propagation_attempts_ndjson "${rollback_propagation_attempts}" \
-    '{schema_version: 1, operation: "restore-exact-web-version", source_sha: $source_sha, run_id: $run_id, original_exit_status: $original_exit_status, before_version_id: $before_version_id, attempted_version_id: (if $attempted_version_id == "" then null else $attempted_version_id end), rollback_command_attempts: $rollback_command_attempts, rollback_reconcile_attempts: $rollback_reconcile_attempts, rollback_deployment_id: (if $rollback_deployment_id == "" then null else $rollback_deployment_id end), rollback_control_plane_proven: $rollback_control_plane_proven, rollback_health_proven: $rollback_health_proven, rollback_propagation_max_attempts: 12, rollback_propagation_retry_seconds: 2, rollback_propagation_observed_attempt: $rollback_propagation_observed_attempt, rollback_proven: $rollback_proven, before_health: $before_health[0], rollback_attempts_ndjson: $rollback_attempts_ndjson, rollback_propagation_attempts_ndjson: $rollback_propagation_attempts_ndjson, routes_mutated: false, crons_mutated: false, durable_object_lifecycle_mutated: false}' \
+    '{schema_version: 1, operation: "restore-exact-web-version", source_sha: $source_sha, run_id: $run_id, original_exit_status: $original_exit_status, before_version_id: $before_version_id, attempted_version_id: (if $attempted_version_id == "" then null else $attempted_version_id end), current_database_id: $current_database_id, target_database_id: $target_database_id, rollback_command_attempts: $rollback_command_attempts, rollback_reconcile_attempts: $rollback_reconcile_attempts, rollback_deployment_id: (if $rollback_deployment_id == "" then null else $rollback_deployment_id end), rollback_control_plane_proven: $rollback_control_plane_proven, rollback_health_proven: $rollback_health_proven, rollback_propagation_max_attempts: 12, rollback_propagation_retry_seconds: 2, rollback_propagation_observed_attempt: $rollback_propagation_observed_attempt, rollback_proven: $rollback_proven, before_health: $before_health[0], rollback_attempts_ndjson: $rollback_attempts_ndjson, rollback_propagation_attempts_ndjson: $rollback_propagation_attempts_ndjson, routes_mutated: false, crons_mutated: false, durable_object_lifecycle_mutated: false}' \
     > "${rollback_evidence}"
   set -e
   exit "${exit_status}"
@@ -327,7 +340,7 @@ test "${uploaded_version_id}" != "${before_version_id}"
 bunx wrangler versions view "${uploaded_version_id}" \
   --name "${worker_name}" --json > "${uploaded_version}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
-  version-runtime-bindings "${uploaded_version}" "${database_id}" \
+  version-runtime-bindings "${uploaded_version}" "${target_database_id}" \
   "${session_namespace_id}" "${uploaded_version_id}" >/dev/null
 jq -e '
   ([.resources.bindings[] | select(
@@ -385,7 +398,7 @@ bunx wrangler versions view "${uploaded_version_id}" \
 test "$(jq -er '.id' "${after_deployment}")" = "${deployed_deployment_id}"
 bun "${repository_root}/tools/deploy/worker-version.ts" \
   active-runtime-bindings "${after_deployment}" "${after_version}" \
-  "${database_id}" "${session_namespace_id}" "${uploaded_version_id}" \
+  "${target_database_id}" "${session_namespace_id}" "${uploaded_version_id}" \
   >/dev/null
 
 : > "${propagation_attempts}"
@@ -421,7 +434,8 @@ jq -n \
   --arg before_version_id "${before_version_id}" \
   --arg uploaded_version_id "${uploaded_version_id}" \
   --arg deployed_deployment_id "${deployed_deployment_id}" \
-  --arg database_id "${database_id}" \
+  --arg current_database_id "${current_database_id}" \
+  --arg target_database_id "${target_database_id}" \
   --arg session_namespace_id "${session_namespace_id}" \
   --argjson propagation_observed_attempt "${propagation_observed_attempt}" \
   --slurpfile before_health "${before_health}" \
@@ -439,7 +453,9 @@ jq -n \
       reference_version_id: $before_version_id,
       uploaded_version_id: $uploaded_version_id,
       deployed_deployment_id: $deployed_deployment_id,
-      database_id: $database_id,
+      current_database_id: $current_database_id,
+      target_database_id: $target_database_id,
+      database_binding_changed: ($current_database_id != $target_database_id),
       session_namespace_id: $session_namespace_id,
       current_active_version_used_as_reference: true,
       before_health_proven: true,
@@ -464,11 +480,14 @@ jq -n \
     }
   ' > "${evidence}"
 jq -e \
-  --arg database_id "${database_id}" \
+  --arg current_database_id "${current_database_id}" \
+  --arg target_database_id "${target_database_id}" \
   --arg session_namespace_id "${session_namespace_id}" '
     .schema_version == 1 and
     .operation == "activate-exact-web-version" and
-    .database_id == $database_id and
+    .current_database_id == $current_database_id and
+    .target_database_id == $target_database_id and
+    .database_binding_changed == ($current_database_id != $target_database_id) and
     .session_namespace_id == $session_namespace_id and
     .uploaded_version_id != .before_version_id and
     .reference_version_id == .before_version_id and

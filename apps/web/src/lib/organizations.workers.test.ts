@@ -15,6 +15,7 @@ import {
   vmScenarioVms,
 } from "@/db/schema";
 import { StaticFeatureToggleService } from "@/lib/feature-toggles";
+import { errorChainMatches } from "@/lib/app-error";
 import { createOrRotateOrganizationRunner } from "@/lib/organization-runners";
 import { createOrganization } from "@/lib/organizations";
 import { getScenarioProgressByScenario } from "@/lib/scenario-runs";
@@ -61,19 +62,19 @@ describe("organization boundaries", () => {
       slug: "race-org",
       createdAt: new Date(),
     });
-    await expect(
-      db.insert(member).values({
+    const ownerRace = db.insert(member).values({
         id: "race-owner",
         organizationId: "race-org",
         userId: "creator",
         role: "owner",
         createdAt: new Date(),
-      }),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringMatching(/member owner limit reached/),
-      }),
-    });
+      });
+    await expect(ownerRace).rejects.toSatisfy((error: unknown) =>
+      errorChainMatches(
+        error,
+        /unique constraint failed|member_single_owner_uidx/i,
+      ),
+    );
   });
 
   it("shows public scenarios plus only the requesting organization catalog", async () => {

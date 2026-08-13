@@ -250,7 +250,7 @@ const websiteDeployWorkflow = await readFile(
 );
 if (
   !websiteDeployWorkflow.includes(
-    "${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}/",
+    "${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-*/",
   )
 ) {
   throw new Error(

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { CanonicalProviderWrite } from "@intar/provider-contracts";
 import type { RuntimeProviderKind } from "@intar/workshop-contracts";
@@ -8,6 +8,7 @@ import {
   hetznerConnectionDetails,
   providerConnections,
   providerCredentialVersions,
+  providerPriceObservations,
   runtimeCheckpointBundles,
   runtimeExecutions,
   runtimeGuestCredentials,
@@ -18,10 +19,12 @@ import {
   workshopPublications,
   workshopRuntimeProfileCertifications,
   workshopRuntimeProfiles,
+  workshopSessionCostForecasts,
   workshopSessionRuntimeSelections,
   workshopSessions,
   workshopTemplateRevisions,
   workshopTemplates,
+  workshopWorkspaces,
 } from "@/db/schema";
 import { sha256Hex } from "@/control-plane/auth";
 import { AppError, appError } from "@/lib/app-error";
@@ -215,7 +218,7 @@ export async function allocateProviderWorkshopRuntime(
       const db = drizzle(env.DB);
       try {
         await db.batch([
-          db.insert(runtimeProviderAllocations).values({
+          guardedProviderAllocationInsert({
             id: allocationId,
             executionId: execution.executionId,
             connectionId: context.connection.id,
@@ -409,6 +412,8 @@ export async function allocateProviderCertificationRuntime(input: {
         eq(workshopPublications.status, "building"),
         eq(workshopPublications.certificationState, "verifying"),
         eq(providerConnections.state, "active"),
+        eq(providerCredentialVersions.authority, "active"),
+        isNull(providerCredentialVersions.revokedAt),
       ),
     )
     .limit(1);
@@ -595,7 +600,7 @@ export async function allocateProviderCertificationRuntime(input: {
       let claims;
       try {
         claims = await db.batch([
-          db.insert(runtimeProviderAllocations).values({
+          guardedProviderAllocationInsert({
             id: allocationId,
             executionId,
             connectionId: row.connection.id,
@@ -4014,7 +4019,7 @@ async function providerMutation(
     });
     if (adopted.status === "present") {
       await persistCanonicalWrites(input, adopted.writes);
-      await db
+      const adoptedOperation = await db
         .update(runtimeProviderOperations)
         .set({
           state: "succeeded",
@@ -4032,8 +4037,13 @@ async function providerMutation(
               runtimeProviderOperations.locationAttempt,
               input.locationAttempt,
             ),
+            currentProviderAttemptPredicate(input),
           ),
         );
+      await requireProviderOperationMutationCurrent(
+        input,
+        adoptedOperation.meta.changes,
+      );
       return adopted.writes;
     }
   }
@@ -4044,6 +4054,7 @@ async function providerMutation(
       previous.request_id,
     );
     if (writes.length > 0 || !isProviderCreateOperation(operationKind)) {
+      await requireCurrentProviderAttempt(input);
       return writes;
     }
   }
@@ -4055,7 +4066,13 @@ async function providerMutation(
       previous.state === "retryable") &&
     previous.provider_operation_id !== null
   ) {
-    return successfulOperationWrites(input, operationKind, previous.request_id);
+    const writes = await successfulOperationWrites(
+      input,
+      operationKind,
+      previous.request_id,
+    );
+    await requireCurrentProviderAttempt(input);
+    return writes;
   }
   const retrying =
     previous &&
@@ -4074,17 +4091,19 @@ async function providerMutation(
       );
   const attempt = retrying ? previous.attempt + 1 : logicalOrdinal;
   if (retrying) {
-    await db
+    const retried = await db
       .update(runtimeProviderOperations)
       .set({ state: "running", attempt, retryAt: null, updatedAt: input.now })
       .where(
         and(
           eq(runtimeProviderOperations.id, operationId),
           eq(runtimeProviderOperations.locationAttempt, input.locationAttempt),
+          currentProviderAttemptPredicate(input),
         ),
       );
+    await requireProviderOperationMutationCurrent(input, retried.meta.changes);
   } else {
-    await db.insert(runtimeProviderOperations).values({
+    const inserted = await guardedProviderOperationInsert({
       id: operationId,
       allocationId: input.allocationId,
       providerKind: input.context.providerKind,
@@ -4096,6 +4115,7 @@ async function providerMutation(
       createdAt: input.now,
       updatedAt: input.now,
     });
+    if (!inserted[0]) throw providerLocationAttemptStale();
   }
   const request = {
     requestId,
@@ -4172,8 +4192,13 @@ async function providerMutation(
             "running",
             "retryable",
           ]),
+          currentProviderAttemptPredicate(input),
         ),
       );
+    await requireProviderOperationMutationCurrent(
+      input,
+      operationUpdated.meta.changes,
+    );
     if (providerDeleteOperationTargetsResource(operationKind)) {
       await terminalizeConfirmedProviderDeleteOperations({
         allocationId: input.allocationId,
@@ -4231,10 +4256,131 @@ async function providerMutation(
             "running",
             "retryable",
           ]),
+          currentProviderAttemptPredicate(input),
         ),
       );
     throw error;
   }
+}
+
+function guardedProviderOperationInsert(
+  row: typeof runtimeProviderOperations.$inferInsert,
+) {
+  const db = drizzle(env.DB);
+  const createdAt = row.createdAt ?? Date.now();
+  const updatedAt = row.updatedAt ?? createdAt;
+  return db
+    .insert(runtimeProviderOperations)
+    .select(
+      db
+        .select({
+          id: sql<string>`${row.id}`.as("id"),
+          allocationId: runtimeProviderAllocations.id,
+          providerKind: runtimeProviderAllocations.providerKind,
+          operationKind: sql<string>`${row.operationKind}`.as(
+            "operation_kind",
+          ),
+          locationAttempt: runtimeProviderAllocations.locationAttempt,
+          providerOperationId: sql<string | null>`${row.providerOperationId ?? null}`.as(
+            "provider_operation_id",
+          ),
+          requestId: sql<string>`${row.requestId}`.as("request_id"),
+          state: sql<NonNullable<typeof row.state>>`${row.state ?? "pending"}`.as(
+            "state",
+          ),
+          attempt: sql<number>`${row.attempt ?? 1}`.as("attempt"),
+          retryAt: sql<number | null>`${row.retryAt ?? null}`.as("retry_at"),
+          lastPolledAt: sql<number | null>`${row.lastPolledAt ?? null}`.as(
+            "last_polled_at",
+          ),
+          completedAt: sql<number | null>`${row.completedAt ?? null}`.as(
+            "completed_at",
+          ),
+          errorClass: sql<string | null>`${row.errorClass ?? null}`.as(
+            "error_class",
+          ),
+          errorCode: sql<string | null>`${row.errorCode ?? null}`.as(
+            "error_code",
+          ),
+          sanitizedResultJson: sql<Record<string, unknown> | null>`${row.sanitizedResultJson == null ? null : JSON.stringify(row.sanitizedResultJson)}`.as(
+            "sanitized_result_json",
+          ),
+          createdAt: sql<number>`${createdAt}`.as("created_at"),
+          updatedAt: sql<number>`${updatedAt}`.as("updated_at"),
+        })
+        .from(runtimeProviderAllocations)
+        .where(
+          and(
+            eq(runtimeProviderAllocations.id, row.allocationId),
+            eq(runtimeProviderAllocations.providerKind, row.providerKind),
+            eq(
+              runtimeProviderAllocations.locationAttempt,
+              row.locationAttempt,
+            ),
+          ),
+        ),
+    )
+    .returning({ id: runtimeProviderOperations.id });
+}
+
+function currentProviderAttemptPredicate(
+  input: Pick<
+    CreationInput,
+    "allocationId" | "context" | "location" | "locationAttempt"
+  >,
+) {
+  return sql`EXISTS (
+    SELECT 1
+    FROM ${runtimeProviderAllocations} current_allocation
+    WHERE current_allocation.id = ${input.allocationId}
+      AND current_allocation.provider_kind = ${input.context.providerKind}
+      AND current_allocation.location_attempt = ${input.locationAttempt}
+      AND current_allocation.location = ${input.location}
+  )`;
+}
+
+async function requireCurrentProviderAttempt(
+  input: Pick<
+    CreationInput,
+    "allocationId" | "context" | "location" | "locationAttempt"
+  >,
+): Promise<void> {
+  const current = await drizzle(env.DB)
+    .select({ id: runtimeProviderAllocations.id })
+    .from(runtimeProviderAllocations)
+    .where(
+      and(
+        eq(runtimeProviderAllocations.id, input.allocationId),
+        eq(runtimeProviderAllocations.providerKind, input.context.providerKind),
+        eq(
+          runtimeProviderAllocations.locationAttempt,
+          input.locationAttempt,
+        ),
+        eq(runtimeProviderAllocations.location, input.location),
+      ),
+    )
+    .limit(1);
+  if (!current[0]) throw providerLocationAttemptStale();
+}
+
+async function requireProviderOperationMutationCurrent(
+  input: CreationInput,
+  changes: number,
+): Promise<void> {
+  if (changes === 1) return;
+  // Another reconciliation step may have terminalized this operation (for
+  // example, confirmed resource absence wins over a failed delete action).
+  // That is idempotent while this allocation attempt is still current. Only
+  // an attempt change makes the provider response unsafe to persist.
+  await requireCurrentProviderAttempt(input);
+}
+
+function providerLocationAttemptStale(): AppError {
+  return appError(
+    409,
+    "provider_location_attempt_stale",
+    "provider operation belongs to an obsolete location attempt",
+  );
 }
 
 export function nextProviderOperationLogicalOrdinal(
@@ -4347,13 +4493,20 @@ async function persistAdditionalProviderOperations(input: {
       `${input.operationKind}:provider-operation:${operation.id}`,
       index + 1,
     );
-    await env.DB.prepare(
+    const persisted = await env.DB.prepare(
       `INSERT INTO runtime_provider_operations (
          id, allocation_id, provider_kind, operation_kind, location_attempt,
          provider_operation_id, request_id, state, attempt, retry_at,
          completed_at, error_class, error_code, sanitized_result_json,
          created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+       )
+       SELECT ?, allocation.id, allocation.provider_kind, ?,
+              allocation.location_attempt, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?
+       FROM runtime_provider_allocations allocation
+       WHERE allocation.id = ?
+         AND allocation.provider_kind = ?
+         AND allocation.location_attempt = ?
+         AND allocation.location = ?
        ON CONFLICT(allocation_id, location_attempt, provider_operation_id) DO UPDATE SET
          state = excluded.state,
          retry_at = excluded.retry_at,
@@ -4361,14 +4514,19 @@ async function persistAdditionalProviderOperations(input: {
          error_class = excluded.error_class,
          error_code = excluded.error_code,
          sanitized_result_json = excluded.sanitized_result_json,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at
+       WHERE EXISTS (
+         SELECT 1
+         FROM runtime_provider_allocations current_allocation
+         WHERE current_allocation.id = excluded.allocation_id
+           AND current_allocation.provider_kind = excluded.provider_kind
+           AND current_allocation.location_attempt = excluded.location_attempt
+           AND current_allocation.location = ?
+       )`,
     )
       .bind(
         createAppId(),
-        input.input.allocationId,
-        input.input.context.providerKind,
         `${input.operationKind}:provider-operation`,
-        input.input.locationAttempt,
         operation.id,
         requestId,
         state,
@@ -4384,8 +4542,17 @@ async function persistAdditionalProviderOperations(input: {
         }),
         input.input.now,
         input.input.now,
+        input.input.allocationId,
+        input.input.context.providerKind,
+        input.input.locationAttempt,
+        input.input.location,
+        input.input.location,
       )
       .run();
+    await requireProviderOperationMutationCurrent(
+      input.input,
+      persisted.meta.changes,
+    );
   }
 }
 
@@ -4591,7 +4758,14 @@ export async function recordProviderOperationObservation(input: {
            sanitized_result_json = json_object('providerState', ?),
            updated_at = ?
        WHERE allocation_id = ? AND location_attempt = ? AND provider_operation_id = ?
-         AND state IN ('pending','running','retryable')`,
+         AND state IN ('pending','running','retryable')
+         AND EXISTS (
+           SELECT 1
+           FROM runtime_provider_allocations current_allocation
+           WHERE current_allocation.id = ?
+             AND current_allocation.location_attempt = ?
+             AND current_allocation.provider_kind = runtime_provider_operations.provider_kind
+         )`,
       )
       .bind(
         input.state,
@@ -4607,8 +4781,19 @@ export async function recordProviderOperationObservation(input: {
         input.allocationId,
         input.locationAttempt,
         input.providerOperationId,
+        input.allocationId,
+        input.locationAttempt,
       )
       .run();
+    if (
+      updated.meta.changes !== 1 &&
+      !(await providerLocationAttemptIsCurrent(
+        input.allocationId,
+        input.locationAttempt,
+      ))
+    ) {
+      throw providerLocationAttemptStale();
+    }
     if (input.state === "failed" && updated.meta.changes === 1) {
       await markAllocationProviderOperationFailed(
         input.allocationId,
@@ -4767,6 +4952,7 @@ async function pollPendingGcpOperations(
               runtimeProviderOperations.locationAttempt,
               input.locationAttempt,
             ),
+            currentProviderAttemptPredicate(input),
           ),
         );
       if (failure.state === "failed" && updated.meta.changes === 1) {
@@ -4982,6 +5168,7 @@ async function discoverExpectedHetznerResources(
               runtimeProviderOperations.locationAttempt,
               input.locationAttempt,
             ),
+            currentProviderAttemptPredicate(input),
           ),
         );
     }
@@ -5103,6 +5290,63 @@ async function deterministicProviderRequestId(
   return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
+function guardedProviderResourceInsert(
+  input: CreationInput,
+  row: typeof runtimeProviderResources.$inferInsert,
+) {
+  const db = drizzle(env.DB);
+  const createdAt = row.createdAt ?? Date.now();
+  const updatedAt = row.updatedAt ?? createdAt;
+  return db
+    .insert(runtimeProviderResources)
+    .select(
+      db
+        .select({
+          id: sql<string>`${row.id}`.as("id"),
+          allocationId: runtimeProviderAllocations.id,
+          providerKind: runtimeProviderAllocations.providerKind,
+          resourceKind: sql<NonNullable<typeof row.resourceKind>>`${row.resourceKind}`.as(
+            "resource_kind",
+          ),
+          providerResourceId: sql<string>`${row.providerResourceId}`.as(
+            "provider_resource_id",
+          ),
+          locationAttempt: runtimeProviderAllocations.locationAttempt,
+          location: runtimeProviderAllocations.location,
+          providerState: sql<string>`${row.providerState}`.as(
+            "provider_state",
+          ),
+          configurationJson: sql<Record<string, unknown>>`${JSON.stringify(row.configurationJson ?? {})}`.as(
+            "configuration_json",
+          ),
+          providerCreatedAt: sql<number | null>`${row.providerCreatedAt ?? null}`.as(
+            "provider_created_at",
+          ),
+          disappearanceConfirmedAt: sql<number | null>`${row.disappearanceConfirmedAt ?? null}`.as(
+            "disappearance_confirmed_at",
+          ),
+          createdAt: sql<number>`${createdAt}`.as("created_at"),
+          updatedAt: sql<number>`${updatedAt}`.as("updated_at"),
+        })
+        .from(runtimeProviderAllocations)
+        .where(
+          and(
+            eq(runtimeProviderAllocations.id, input.allocationId),
+            eq(
+              runtimeProviderAllocations.providerKind,
+              input.context.providerKind,
+            ),
+            eq(
+              runtimeProviderAllocations.locationAttempt,
+              input.locationAttempt,
+            ),
+            eq(runtimeProviderAllocations.location, input.location),
+          ),
+        ),
+    )
+    .returning({ id: runtimeProviderResources.id });
+}
+
 async function persistCanonicalWrites(
   input: CreationInput,
   writes: readonly CanonicalProviderWrite[],
@@ -5164,7 +5408,7 @@ async function persistCanonicalWrites(
             "provider resource identity changed within one allocation",
           );
         }
-        await db
+        const updated = await db
           .update(runtimeProviderResources)
           .set({
             providerState: write.state ?? "present",
@@ -5187,8 +5431,16 @@ async function persistCanonicalWrites(
               )`,
             ),
           );
+        if (updated.meta.changes !== 1) {
+          await requireCurrentProviderAttempt(input);
+          throw appError(
+            409,
+            "provider_resource_changed",
+            "provider resource state changed concurrently",
+          );
+        }
       } else {
-        await db.insert(runtimeProviderResources).values({
+        const inserted = await guardedProviderResourceInsert(input, {
           id: createAppId(),
           allocationId: input.allocationId,
           providerKind: input.context.providerKind,
@@ -5204,6 +5456,7 @@ async function persistCanonicalWrites(
           createdAt: input.now,
           updatedAt: input.now,
         });
+        if (!inserted[0]) throw providerLocationAttemptStale();
       }
       if (write.publicIpv4) {
         await db
@@ -5245,13 +5498,25 @@ async function persistCanonicalWrites(
        WHERE allocation_id = ? AND operation_kind = 'create_instance'
          AND location_attempt = ?
          AND provider_operation_id IS NULL
-         AND state IN ('pending','running','retryable')`,
+         AND state IN ('pending','running','retryable')
+         AND EXISTS (
+           SELECT 1
+           FROM runtime_provider_allocations current_allocation
+           WHERE current_allocation.id = ?
+             AND current_allocation.provider_kind = ?
+             AND current_allocation.location_attempt = ?
+             AND current_allocation.location = ?
+         )`,
     )
       .bind(
         input.now,
         input.now,
         input.allocationId,
         input.locationAttempt,
+        input.allocationId,
+        input.context.providerKind,
+        input.locationAttempt,
+        input.location,
       )
       .run();
   }
@@ -5291,6 +5556,7 @@ async function persistCanonicalWrites(
               input.locationAttempt,
             ),
             eq(runtimeProviderResources.resourceKind, "ipv4"),
+            currentProviderAttemptPredicate(input),
           ),
         ),
     ]);
@@ -5365,6 +5631,13 @@ function terminalizeConfirmedProviderDeleteOperationsStatement(input: {
      WHERE operation.allocation_id = ?
        AND operation.location_attempt = ?
        AND operation.state IN ('pending','running','retryable')
+       AND EXISTS (
+         SELECT 1
+         FROM runtime_provider_allocations AS current_allocation
+         WHERE current_allocation.id = operation.allocation_id
+           AND current_allocation.location_attempt = operation.location_attempt
+           AND current_allocation.provider_kind = operation.provider_kind
+       )
        AND EXISTS (
          SELECT 1
          FROM runtime_provider_resources AS resource
@@ -5724,6 +5997,234 @@ async function requireProviderConnectionSeat(
   }
 }
 
+/**
+ * Claims a provider seat and persists the full allocation identity in one SQL
+ * statement. The surrounding connection lock gives app commands a friendly
+ * busy response; this predicate is the commit-time fence that makes a stale
+ * disconnect, credential rotation, guardrail update, or identity preflight
+ * fail closed before any paid provider mutation.
+ */
+function guardedProviderAllocationInsert(
+  row: typeof runtimeProviderAllocations.$inferInsert,
+) {
+  const db = drizzle(env.DB);
+  const costForecastId = row.costForecastId ?? null;
+  const domainIdentity = costForecastId === null
+    ? and(
+        eq(runtimeExecutions.domainKind, "workshop_certification"),
+        exists(
+          db
+            .select({ id: workshopRuntimeProfileCertifications.id })
+            .from(workshopRuntimeProfileCertifications)
+            .where(
+              and(
+                eq(
+                  workshopRuntimeProfileCertifications.id,
+                  runtimeExecutions.domainId,
+                ),
+                eq(
+                  workshopRuntimeProfileCertifications.runtimeProfileId,
+                  row.runtimeProfileId,
+                ),
+                eq(
+                  workshopRuntimeProfileCertifications.connectionId,
+                  row.connectionId,
+                ),
+              ),
+            ),
+        ),
+      )
+    : and(
+        eq(runtimeExecutions.domainKind, "workshop"),
+        exists(
+          db
+            .select({ id: workshopWorkspaces.id })
+            .from(workshopWorkspaces)
+            .innerJoin(
+              workshopSessionCostForecasts,
+              and(
+                eq(workshopSessionCostForecasts.id, costForecastId),
+                eq(
+                  workshopSessionCostForecasts.sessionId,
+                  workshopWorkspaces.sessionId,
+                ),
+                eq(
+                  workshopSessionCostForecasts.priceObservationId,
+                  row.priceObservationId,
+                ),
+                eq(
+                  workshopSessionCostForecasts.providerKind,
+                  row.providerKind,
+                ),
+                eq(
+                  workshopSessionCostForecasts.currency,
+                  providerPriceObservations.currency,
+                ),
+              ),
+            )
+            .where(eq(workshopWorkspaces.id, runtimeExecutions.domainId)),
+        ),
+      );
+  const detailTable = row.providerKind === "hetzner_cloud"
+    ? hetznerConnectionDetails
+    : gcpConnectionDetails;
+  const seatAvailable = exists(
+    db
+      .select({ connectionId: detailTable.connectionId })
+      .from(detailTable)
+      .where(
+        and(
+          eq(detailTable.connectionId, row.connectionId),
+          sql`(
+            SELECT count(*)
+            FROM ${runtimeProviderAllocations}
+            WHERE ${runtimeProviderAllocations.connectionId} = ${row.connectionId}
+              AND ${runtimeProviderAllocations.state} <> 'deleted'
+          ) < ${detailTable.maxConcurrentAllocations}`,
+        ),
+      ),
+  );
+  return db
+    .insert(runtimeProviderAllocations)
+    .select(
+      db
+        .select(providerAllocationInsertFields(row))
+        .from(runtimeExecutions)
+        .innerJoin(
+          providerConnections,
+          and(
+            eq(providerConnections.id, row.connectionId),
+            eq(
+              providerConnections.organizationId,
+              runtimeExecutions.organizationId,
+            ),
+            eq(providerConnections.providerKind, row.providerKind),
+            eq(providerConnections.state, "active"),
+          ),
+        )
+        .innerJoin(
+          providerCredentialVersions,
+          and(
+            eq(
+              providerCredentialVersions.id,
+              providerConnections.activeCredentialVersionId,
+            ),
+            eq(
+              providerCredentialVersions.connectionId,
+              providerConnections.id,
+            ),
+            eq(providerCredentialVersions.authority, "active"),
+            isNull(providerCredentialVersions.revokedAt),
+          ),
+        )
+        .innerJoin(
+          workshopRuntimeProfiles,
+          and(
+            eq(workshopRuntimeProfiles.id, row.runtimeProfileId),
+            eq(workshopRuntimeProfiles.providerKind, row.providerKind),
+            eq(workshopRuntimeProfiles.machineType, row.machineType),
+            eq(workshopRuntimeProfiles.resolvedImageId, row.resolvedImageId),
+          ),
+        )
+        .innerJoin(
+          providerPriceObservations,
+          and(
+            eq(providerPriceObservations.id, row.priceObservationId),
+            eq(providerPriceObservations.connectionId, row.connectionId),
+            eq(
+              providerPriceObservations.runtimeProfileId,
+              row.runtimeProfileId,
+            ),
+            eq(providerPriceObservations.providerKind, row.providerKind),
+          ),
+        )
+        .where(
+          and(
+            eq(runtimeExecutions.id, row.executionId),
+            eq(runtimeExecutions.providerKind, row.providerKind),
+            eq(runtimeExecutions.providerConnectionId, row.connectionId),
+            domainIdentity,
+            seatAvailable,
+          ),
+        ),
+    )
+    .returning({ id: runtimeProviderAllocations.id });
+}
+
+function providerAllocationInsertFields(
+  row: typeof runtimeProviderAllocations.$inferInsert,
+) {
+  const createdAt = row.createdAt ?? Date.now();
+  const updatedAt = row.updatedAt ?? createdAt;
+  return {
+    id: sql<string>`${row.id}`.as("id"),
+    executionId: sql<string>`${row.executionId}`.as("execution_id"),
+    connectionId: sql<string>`${row.connectionId}`.as("connection_id"),
+    runtimeProfileId: sql<string>`${row.runtimeProfileId}`.as(
+      "runtime_profile_id",
+    ),
+    priceObservationId: sql<string>`${row.priceObservationId}`.as(
+      "price_observation_id",
+    ),
+    costForecastId: sql<string | null>`${row.costForecastId ?? null}`.as(
+      "cost_forecast_id",
+    ),
+    providerKind: sql<DirectCloudKind>`${row.providerKind}`.as(
+      "provider_kind",
+    ),
+    deterministicName: sql<string>`${row.deterministicName}`.as(
+      "deterministic_name",
+    ),
+    machineType: sql<string>`${row.machineType}`.as("machine_type"),
+    resolvedImageId: sql<string>`${row.resolvedImageId}`.as(
+      "resolved_image_id",
+    ),
+    locationAttemptsJson: sql<string[]>`${JSON.stringify(row.locationAttemptsJson)}`.as(
+      "location_attempts_json",
+    ),
+    location: sql<string>`${row.location}`.as("location"),
+    locationAttempt: sql<number>`${row.locationAttempt ?? 1}`.as(
+      "location_attempt",
+    ),
+    locationAttemptStartedAt: sql<number>`${row.locationAttemptStartedAt ?? createdAt}`.as(
+      "location_attempt_started_at",
+    ),
+    fallbackPending: sql<boolean>`${row.fallbackPending === true ? 1 : 0}`.as(
+      "fallback_pending",
+    ),
+    state: sql<NonNullable<typeof row.state>>`${row.state ?? "pending"}`.as(
+      "state",
+    ),
+    externalIpv4: sql<string | null>`${row.externalIpv4 ?? null}`.as(
+      "external_ipv4",
+    ),
+    retryCount: sql<number>`${row.retryCount ?? 0}`.as("retry_count"),
+    lastReportSequence: sql<number>`${row.lastReportSequence ?? 0}`.as(
+      "last_report_sequence",
+    ),
+    lastReportAt: sql<number | null>`${row.lastReportAt ?? null}`.as(
+      "last_report_at",
+    ),
+    lastErrorCode: sql<string | null>`${row.lastErrorCode ?? null}`.as(
+      "last_error_code",
+    ),
+    recordingDrainRequestedAt: sql<number | null>`${row.recordingDrainRequestedAt ?? null}`.as(
+      "recording_drain_requested_at",
+    ),
+    recordingDrainCompletedAt: sql<number | null>`${row.recordingDrainCompletedAt ?? null}`.as(
+      "recording_drain_completed_at",
+    ),
+    deletionRequestedAt: sql<number | null>`${row.deletionRequestedAt ?? null}`.as(
+      "deletion_requested_at",
+    ),
+    deletionConfirmedAt: sql<number | null>`${row.deletionConfirmedAt ?? null}`.as(
+      "deletion_confirmed_at",
+    ),
+    createdAt: sql<number>`${createdAt}`.as("created_at"),
+    updatedAt: sql<number>`${updatedAt}`.as("updated_at"),
+  };
+}
+
 function parseStoredObject(
   value: string | Record<string, unknown>,
 ): Record<string, unknown> | null {
@@ -5789,7 +6290,17 @@ async function requireAllocationContext(
   const credentials = await db
     .select()
     .from(providerCredentialVersions)
-    .where(eq(providerCredentialVersions.id, connection.activeCredentialVersionId))
+    .where(
+      and(
+        eq(
+          providerCredentialVersions.id,
+          connection.activeCredentialVersionId,
+        ),
+        eq(providerCredentialVersions.connectionId, connection.id),
+        eq(providerCredentialVersions.authority, "active"),
+        isNull(providerCredentialVersions.revokedAt),
+      ),
+    )
     .limit(1);
   const credential = credentials[0];
   if (!credential) throw appError(409, "provider_credential_missing", "provider credential is missing");

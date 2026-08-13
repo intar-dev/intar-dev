@@ -86,13 +86,6 @@ describe("host history database invariant", () => {
     await seedBuilderHistory("published", "verified");
 
     await expect(
-      db
-        .update(workshopPublications)
-        .set({ error: "tampered" })
-        .where(eq(workshopPublications.id, "publication-history")),
-    ).rejects.toThrow();
-
-    await expect(
       deleteAgentHostPreservingHistory(db, {
         hostId: "builder-history",
         userId: "user-builder-history",
@@ -240,11 +233,6 @@ describe("host history database invariant", () => {
   it("keeps terminal references attached while a workshop runtime is active", async () => {
     const db = drizzle(env.DB);
     await seedBuilderHistory("published", "verified");
-    // This test isolates the host-deletion guard; workshop authorization is
-    // covered separately and would otherwise require a complete live roster.
-    await env.DB.prepare(
-      "DROP TRIGGER runtime_executions_workshop_member_insert_guard",
-    ).run();
     await db.insert(runtimeExecutions).values({
       id: "runtime-builder-history",
       userId: "user-builder-history",

@@ -290,6 +290,7 @@ async function seedRuntimePool(now: number): Promise<void> {
     sessionId: "allocation-workshop-session",
     userId: "workshop-learner",
     role: "participant",
+    workspaceEnabled: true,
     assignedBy: "owner",
     createdAt: now,
     updatedAt: now,

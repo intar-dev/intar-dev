@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { releaseActiveRuntimeSlot } from "@/lib/runtime-executions";
+import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+  releaseActiveRuntimeSlot,
+} from "@/lib/runtime-executions";
 import { appError } from "@/lib/app-error";
 import {
   hostActualState,
@@ -208,7 +212,7 @@ export async function updateRunState(
         ? row.deleteRequestedAt
         : input.deleteRequestedAt;
     const now = Math.max(Date.now(), row.updatedAt + 1);
-    const updated = await db
+    const mutation = db
       .update(scenarioRuns)
       .set({
         state: nextState.phase,
@@ -238,6 +242,13 @@ export async function updateRunState(
         ),
       )
       .returning({ runId: scenarioRuns.runId });
+    const [updatedResult] = await executeScenarioRunRuntimeProjection({
+      d1: env.DB,
+      runId,
+      statements: [drizzleQueryToD1Statement(env.DB, mutation)],
+      mode: "update",
+    });
+    const updated = updatedResult?.results ?? [];
     if (updated.length) {
       if (
         row.runtimeExecutionId &&

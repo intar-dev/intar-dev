@@ -332,7 +332,7 @@ async function provisionAgentWorkshopRequest(
         error.code === "workshop_generation_stale") ||
         errorChainMatches(
           error,
-          /workshop runtime provisioning is no longer authorized/,
+          /workshop runtime provisioning is no longer authorized|FOREIGN KEY constraint failed/,
         ))
     ) {
       throw appError(

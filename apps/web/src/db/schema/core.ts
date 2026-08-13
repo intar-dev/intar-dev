@@ -170,6 +170,9 @@ export const member = sqliteTable(
     index("member_organizationId_idx").on(table.organizationId),
     index("member_userId_idx").on(table.userId),
     uniqueIndex("member_org_user_uidx").on(table.organizationId, table.userId),
+    uniqueIndex("member_single_owner_uidx")
+      .on(table.userId)
+      .where(sql`${table.role} = 'owner'`),
   ],
 );
 

@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { workshopRegistryTokens } from "@/db/schema";
-import { appError, errorChainMatches } from "@/lib/app-error";
+import { accessAllowlist, member, workshopRegistryTokens } from "@/db/schema";
+import { appError } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import { requireOrganizationRole } from "@/lib/organizations";
 
@@ -53,31 +53,46 @@ export async function createWorkshopRegistryToken(params: {
   const tokenHash = await hashWorkshopRegistryToken(token);
   const id = createAppId();
   const tokenPrefix = token.slice(0, TOKEN_PREFIX.length + 10);
-  try {
-    await drizzle(env.DB).insert(workshopRegistryTokens).values({
-      id,
-      organizationId: params.organizationId,
-      name,
-      tokenPrefix,
-      tokenHash,
-      createdBy: params.actorUserId,
-      expiresAt,
-      createdAt: now,
-    });
-  } catch (error) {
-    if (
-      errorChainMatches(
-        error,
-        /workshop registry token creator must have active beta access/i,
-      )
-    ) {
-      throw appError(
-        403,
-        "beta_access_revoked",
-        "active beta access is required to create a registry token",
-      );
-    }
-    throw error;
+  const db = drizzle(env.DB);
+  const inserted = await db
+    .insert(workshopRegistryTokens)
+    .select(
+      db
+        .select({
+          id: sql<string>`${id}`.as("id"),
+          organizationId: member.organizationId,
+          name: sql<string>`${name}`.as("name"),
+          tokenPrefix: sql<string>`${tokenPrefix}`.as("token_prefix"),
+          tokenHash: sql<string>`${tokenHash}`.as("token_hash"),
+          createdBy: member.userId,
+          lastUsedAt: sql<number | null>`NULL`.as("last_used_at"),
+          expiresAt: sql<number>`${expiresAt}`.as("expires_at"),
+          revokedAt: sql<number | null>`NULL`.as("revoked_at"),
+          createdAt: sql<number>`${now}`.as("created_at"),
+        })
+        .from(member)
+        .innerJoin(
+          accessAllowlist,
+          and(
+            eq(accessAllowlist.userId, member.userId),
+            eq(accessAllowlist.state, "active"),
+          ),
+        )
+        .where(
+          and(
+            eq(member.organizationId, params.organizationId),
+            eq(member.userId, params.actorUserId),
+            eq(member.role, "owner"),
+          ),
+        ),
+    )
+    .returning({ id: workshopRegistryTokens.id });
+  if (!inserted[0]) {
+    throw appError(
+      403,
+      "beta_access_revoked",
+      "active beta access is required to create a registry token",
+    );
   }
   return {
     id,

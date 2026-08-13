@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/website-deploy.yml"
+      - ".github/workflows/d1-rebaseline-prepare.yml"
       - ".github/workflows/website.yml"
       - ".github/workflows/control-plane-rollout.yml"
       - ".github/workflows/workshop-multicloud-flag.yml"

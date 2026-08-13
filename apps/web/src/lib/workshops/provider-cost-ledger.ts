@@ -7,6 +7,7 @@ import {
   isNull,
   ne,
   or,
+  sql,
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
@@ -414,26 +415,52 @@ async function ensureGcpEphemeralIpv4Resource(input: {
   const providerResourceId = `${instance.providerResourceId}:ephemeral-ipv4`;
   await db
     .insert(runtimeProviderResources)
-    .values({
-      id: createAppId(),
-      allocationId: input.allocation.id,
-      providerKind: "gcp_compute",
-      resourceKind: "ipv4",
-      providerResourceId,
-      locationAttempt: input.allocation.locationAttempt,
-      location: input.allocation.location,
-      providerState: instance.providerState,
-      configurationJson: {
-        deterministicName: `${input.allocation.deterministicName}-ipv4`,
-        address: input.allocation.externalIpv4,
-        lifecycle: "ephemeral_with_instance",
-      },
-      providerCreatedAt:
-        instance.providerCreatedAt ?? input.allocation.createdAt,
-      disappearanceConfirmedAt: instance.disappearanceConfirmedAt,
-      createdAt: input.now,
-      updatedAt: input.now,
-    })
+    .select(
+      db
+        .select({
+          id: sql<string>`${createAppId()}`.as("id"),
+          allocationId: runtimeProviderAllocations.id,
+          providerKind: runtimeProviderAllocations.providerKind,
+          resourceKind: sql<"ipv4">`'ipv4'`.as("resource_kind"),
+          providerResourceId: sql<string>`${providerResourceId}`.as(
+            "provider_resource_id",
+          ),
+          locationAttempt: runtimeProviderAllocations.locationAttempt,
+          location: runtimeProviderAllocations.location,
+          providerState: sql<string>`${instance.providerState}`.as(
+            "provider_state",
+          ),
+          configurationJson: sql<Record<string, unknown>>`${JSON.stringify({
+            deterministicName: `${input.allocation.deterministicName}-ipv4`,
+            address: input.allocation.externalIpv4,
+            lifecycle: "ephemeral_with_instance",
+          })}`.as("configuration_json"),
+          providerCreatedAt: sql<number>`${instance.providerCreatedAt ?? input.allocation.createdAt}`.as(
+            "provider_created_at",
+          ),
+          disappearanceConfirmedAt: sql<number | null>`${instance.disappearanceConfirmedAt}`.as(
+            "disappearance_confirmed_at",
+          ),
+          createdAt: sql<number>`${input.now}`.as("created_at"),
+          updatedAt: sql<number>`${input.now}`.as("updated_at"),
+        })
+        .from(runtimeProviderAllocations)
+        .where(
+          and(
+            eq(runtimeProviderAllocations.id, input.allocation.id),
+            eq(runtimeProviderAllocations.providerKind, "gcp_compute"),
+            eq(
+              runtimeProviderAllocations.locationAttempt,
+              input.allocation.locationAttempt,
+            ),
+            eq(runtimeProviderAllocations.location, input.allocation.location),
+            eq(
+              runtimeProviderAllocations.externalIpv4,
+              input.allocation.externalIpv4,
+            ),
+          ),
+        ),
+    )
     .onConflictDoNothing({
       target: [
         runtimeProviderResources.allocationId,
@@ -483,6 +510,15 @@ async function ensureGcpEphemeralIpv4Resource(input: {
         ),
         eq(runtimeProviderResources.resourceKind, "ipv4"),
         eq(runtimeProviderResources.providerResourceId, providerResourceId),
+        sql`EXISTS (
+          SELECT 1
+          FROM ${runtimeProviderAllocations} current_allocation
+          WHERE current_allocation.id = ${input.allocation.id}
+            AND current_allocation.provider_kind = 'gcp_compute'
+            AND current_allocation.location_attempt = ${input.allocation.locationAttempt}
+            AND current_allocation.location = ${input.allocation.location}
+            AND current_allocation.external_ipv4 = ${input.allocation.externalIpv4}
+        )`,
       ),
     );
 }

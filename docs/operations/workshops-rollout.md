@@ -129,9 +129,11 @@ Keep these protected runtime variables current:
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
 - the existing production-review variables required by the web workflow.
 
-The production D1 name and UUID are permanent resource configuration in
-`apps/web/wrangler.jsonc`. A D1 identity change is a reviewed code change; it is
-not an environment-variable override.
+The production D1 name and UUID are explicit resource configuration in
+`apps/web/wrangler.jsonc`; they are never an environment-variable override. A
+normal deployment keeps that identity stable. An exceptional rebaseline uses
+the separate protected preparation and cutover procedure below, with both old
+and new identities recorded in reviewed inputs and retained evidence.
 
 Provider KEKs are never passed to Astro build or web deployment jobs. The web
 deployment token is never passed to provider jobs.
@@ -163,12 +165,13 @@ learner, verifier, resource, operation, route, or active slot remains.
 
 ## 2. Maintain the production D1 schema
 
-`apps/web/wrangler.jsonc` pins the production database and
-`apps/web/migrations/*.sql` is its canonical ordered migration stream. Create a
-new migration with `wrangler d1 migrations create DB <name>`, apply it locally
-with `bun run --cwd apps/web db:migrate:local`, and commit it with the code that
-uses it. Do not apply schema files with `wrangler d1 execute`, edit the
-`d1_migrations` ledger, or seed production with workstation SQL.
+`apps/web/wrangler.jsonc` pins the production database. The TypeScript tables in
+`apps/web/src/db/schema/` are its sole schema source of truth; Drizzle Kit owns
+the ordered SQL and metadata under `apps/web/migrations/`. After a typed schema
+change, run `bun run --cwd apps/web db:generate` and commit all generated SQL
+and metadata with the code that uses it. Never hand-edit those files, use a
+custom Drizzle migration, add a SQL trigger, run Wrangler's D1 migration
+commands, edit a migration ledger, or seed production with workstation SQL.
 
 The website deployment applies pending migrations through the checked-in
 binding, verifies the resulting production schema, and retains the migration
@@ -176,6 +179,65 @@ log and verification result before web activation. Each migration must leave
 the currently active Worker functional for the short interval before the new
 version is activated. Review destructive or narrowing changes as a separate
 data-lifecycle operation rather than hiding them in an application deployment.
+
+For a fresh-D1 rebaseline, first merge the generated baseline without changing
+the checked-in production binding. Dispatch
+`.github/workflows/d1-rebaseline-prepare.yml` from that exact `main` SHA with
+confirmation `PREPARE FRESH DRIZZLE D1` and a unique name matching
+`intar-dev-control-plane-v<version>-<YYYYMMDD>[-suffix]`. The production-gated
+workflow creates one EU-jurisdiction D1, proves it was empty, applies the
+generated migration stream with Drizzle Kit's D1 HTTP driver, verifies the
+exact `__drizzle_migrations` hashes/timestamps and canonical generated DDL
+(including table definitions, indexes, constraints, predicates, and the ledger
+table itself), empirically proves that a failing D1 REST batch rolls back its
+first statement, and retains the new UUID. It does not deploy a Worker, copy
+data, change a binding, or delete any database.
+
+Then put the retained target name and UUID into `apps/web/wrangler.jsonc` in a
+second reviewed commit. Dispatch the web or control-plane rollout from that
+exact `main` SHA with `fresh_d1_cutover=true`, confirmation
+`CUT OVER FRESH DRIZZLE D1`, the separate acknowledgement
+`ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE`, and the exact source and
+target name/UUID pairs. This is a reviewed snapshot reset into a fresh schema,
+not a claim that the legacy database can be migrated in place without a write
+barrier.
+The single serialized run performs these fail-closed phases:
+
+1. capture and retain the source D1 Time Travel bookmark without restoring it;
+2. activate the source binding with maintenance on and prove the public 503
+   maintenance response;
+3. copy only the explicitly allowlisted durable rows into the prepared target;
+4. activate the target binding with maintenance still on, then re-prove its
+   Drizzle ledger, canonical generated DDL, foreign keys, and copy evidence;
+5. re-fingerprint every source application table after Phase B, repeat the
+   quiescence gates, and require its current Time Travel bookmark to equal the
+   pre-fence bookmark;
+6. activate the same target binding with maintenance off and prove public
+   health.
+
+Under the source fence, the maintenance bypass is read-only in operational
+effect: only GET/HEAD requests to the DB-independent
+`/api/maintenance/status` endpoint are allowed. Application, agent, invite,
+administration, and OAuth routes remain fenced, and no application mutation is
+permitted.
+
+A bookmark-capture failure changes no Worker version. A Phase A activation
+failure restores source/open; a copy failure leaves source/maintenance; a
+Phase B activation failure restores source/maintenance; and a copied-target
+verification, source-stability verification, or Phase C activation failure
+leaves target/maintenance. Never delete the source D1 in the cutover workflow.
+Once the target has accepted writes, do not roll back to the stale source; keep
+it intact for forensics and fix forward.
+
+The maintenance version rejects new application and Durable Object work, but
+Cloudflare does not expose a control-plane primitive that cancels every
+invocation already running on the prior version. The final fingerprint and
+Time Travel comparison detect writes that finish before the last check; a
+later write remains only in the retained source archive. The explicit snapshot
+reset acknowledgement accepts that boundary. Before dispatch, drain all
+provider, route, host, R2 upload, and build activity; after cutover, reconcile
+those external inventories separately rather than inferring their state from
+D1 alone.
 
 ## 3. Deploy providers and web
 

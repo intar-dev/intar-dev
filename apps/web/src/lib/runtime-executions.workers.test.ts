@@ -21,11 +21,13 @@ import {
   workshopWorkspaces,
   type WorkshopManifestV2,
 } from "@/db/schema";
-import { errorChainMatches } from "@/lib/app-error";
 import {
   archiveRuntimeExecution,
   createRuntimeExecution,
   createRuntimeRecoveryGeneration,
+  deleteScenarioRunRuntimeProjection,
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
   loadCurrentRuntimeVmTerminalTarget,
   recordRuntimeVmTerminalTarget,
   updateRuntimeExecutionState,
@@ -54,22 +56,16 @@ describe("domain-neutral runtime executions", () => {
       now: 1_000,
     });
 
-    let scenarioConflict: unknown;
-    try {
-      await db.insert(scenarioRuns).values(scenarioRun("scenario-run-a"));
-    } catch (error) {
-      scenarioConflict = error;
-    }
-    expect(
-      errorChainMatches(scenarioConflict, /scenario_runs\.active_key/),
-    ).toBe(true);
+    await expect(
+      insertScenarioRun(scenarioRun("scenario-run-a")),
+    ).rejects.toMatchObject({ code: "runtime_active_slot_conflict" });
 
     await archiveRuntimeExecution({
       executionId: workshop.executionId,
       expectedGeneration: 1,
       endedAt: 2_000,
     });
-    await db.insert(scenarioRuns).values(scenarioRun("scenario-run-a"));
+    await insertScenarioRun(scenarioRun("scenario-run-a"));
 
     const [scenarioExecution, slots] = await Promise.all([
       db
@@ -107,7 +103,7 @@ describe("domain-neutral runtime executions", () => {
       }),
     ).rejects.toMatchObject({ code: "runtime_active_slot_conflict" });
 
-    await db
+    const completion = db
       .update(scenarioRuns)
       .set({
         state: "completed",
@@ -117,6 +113,12 @@ describe("domain-neutral runtime executions", () => {
         updatedAt: 5_000,
       })
       .where(eq(scenarioRuns.runId, "scenario-run-a"));
+    await executeScenarioRunRuntimeProjection({
+      d1: env.DB,
+      runId: "scenario-run-a",
+      statements: [drizzleQueryToD1Statement(env.DB, completion)],
+      mode: "update",
+    });
     const [scenarioRuntime, releasedSlots] = await Promise.all([
       db
         .select({
@@ -189,22 +191,30 @@ describe("domain-neutral runtime executions", () => {
     await resetD1Database();
     await seedRuntimeOwner(false);
     const db = drizzle(env.DB);
-    await env.DB.batch([
-      legacyScenarioRunInsert({
+    await executeScenarioRunRuntimeProjection({
+      d1: env.DB,
+      runId: "active-scenario",
+      statements: [legacyScenarioRunInsert({
         runId: "active-scenario",
         state: "queued",
         stateRank: 0,
         activeKey: "learner",
         completedAt: null,
-      }),
-      legacyScenarioRunInsert({
+      })],
+      mode: "create",
+    });
+    await executeScenarioRunRuntimeProjection({
+      d1: env.DB,
+      runId: "archived-scenario",
+      statements: [legacyScenarioRunInsert({
         runId: "archived-scenario",
         state: "completed",
         stateRank: 8,
         activeKey: null,
         completedAt: 4_000,
-      }),
-    ]);
+      })],
+      mode: "create",
+    });
 
     const [runs, executions, slots] = await Promise.all([
       db
@@ -256,6 +266,42 @@ describe("domain-neutral runtime executions", () => {
         acquiredAt: 3_000,
       },
     ]);
+  });
+
+  it("deletes every runtime generation with its scenario domain", async () => {
+    const db = drizzle(env.DB);
+    await insertScenarioRun(scenarioRun("scenario-delete"));
+    await createRuntimeRecoveryGeneration({
+      sourceExecutionId: "scenario-delete",
+      expectedGeneration: 1,
+      executionId: "scenario-delete-generation-2",
+      checkpointId: "checkpoint-delete",
+      vms: [runtimeVm()],
+      now: 4_000,
+    });
+
+    await expect(
+      deleteScenarioRunRuntimeProjection({
+        d1: env.DB,
+        runId: "scenario-delete",
+        userId: "learner",
+      }),
+    ).resolves.toEqual({ deleted: true });
+
+    const [runs, executions, slots] = await Promise.all([
+      db
+        .select()
+        .from(scenarioRuns)
+        .where(eq(scenarioRuns.runId, "scenario-delete")),
+      db
+        .select()
+        .from(runtimeExecutions)
+        .where(eq(runtimeExecutions.domainId, "scenario-delete")),
+      db.select().from(activeRuntimeSlots),
+    ]);
+    expect(runs).toEqual([]);
+    expect(executions).toEqual([]);
+    expect(slots).toEqual([]);
   });
 
   it("creates a recovery generation without changing domain identity", async () => {
@@ -680,6 +726,7 @@ async function seedRuntimeOwner(seedWorkshopDomains = true) {
       sessionId: `session-${workspaceId}`,
       userId: "learner",
       role: "participant" as const,
+      workspaceEnabled: true,
       assignedBy: "learner",
       createdAt: 1_000,
       updatedAt: 1_000,
@@ -807,6 +854,20 @@ function scenarioRun(
     updatedAt: 3_000,
     ...overrides,
   };
+}
+
+async function insertScenarioRun(
+  row: typeof scenarioRuns.$inferInsert,
+): Promise<void> {
+  const db = drizzle(env.DB);
+  await executeScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId: row.runId,
+    statements: [
+      drizzleQueryToD1Statement(env.DB, db.insert(scenarioRuns).values(row)),
+    ],
+    mode: "create",
+  });
 }
 
 function legacyScenarioRunInsert(input: {

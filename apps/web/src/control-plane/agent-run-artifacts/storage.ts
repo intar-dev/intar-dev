@@ -22,6 +22,10 @@ import {
   type ScenarioReplayArtifact,
 } from "@/lib/run-state";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
+import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
 
 export interface AgentRunArtifactInput {
   ordinal?: number;
@@ -926,7 +930,7 @@ export async function persistStoredRunLifecycle(
     existingSolvedAt: run.solvedAt,
     now,
   });
-  await db
+  const mutation = db
     .update(scenarioRuns)
     .set({
       state: nextPhase,
@@ -947,6 +951,12 @@ export async function persistStoredRunLifecycle(
       updatedAt: now,
     })
     .where(eq(scenarioRuns.runId, runId));
+  await executeScenarioRunRuntimeProjection({
+    d1: db.$client,
+    runId,
+    statements: [drizzleQueryToD1Statement(db.$client, mutation)],
+    mode: "update",
+  });
 }
 
 export function deriveArchiveRunPhase(

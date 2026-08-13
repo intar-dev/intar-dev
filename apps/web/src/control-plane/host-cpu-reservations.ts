@@ -12,6 +12,12 @@ import {
   recomputeRunState,
   type RunStateDocument,
 } from "@/lib/run-state";
+import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
+
+type RuntimeD1Database = DrizzleD1Database & { $client: D1Database };
 
 export const HOST_CPU_RESERVATION_TTL_MS = 60_000;
 export const HOST_BOOT_CPU_MILLIS_PER_VM = 2_000;
@@ -73,7 +79,7 @@ export function bootCpuReservationForSteadyVms(
 }
 
 export async function reserveHostCpuInD1(
-  db: DrizzleD1Database,
+  db: RuntimeD1Database,
   input: {
     hostId: string;
     runId: string;
@@ -248,7 +254,7 @@ export async function rollbackPendingHostCpuReservation(
 }
 
 export async function reconcileHostCpuReservations(
-  db: DrizzleD1Database,
+  db: RuntimeD1Database,
   hostId: string,
   nowUnixMs: number,
 ): Promise<{
@@ -633,7 +639,7 @@ function pendingRunHasDurableDesiredVms(input: {
 }
 
 async function failExpiredUndispatchedRun(
-  db: DrizzleD1Database,
+  db: RuntimeD1Database,
   input: {
     hostId: string;
     runId: string;
@@ -705,7 +711,7 @@ async function failExpiredUndispatchedRun(
         )
       : undefined;
     const updatedAt = Math.max(input.nowUnixMs, run.updatedAt + 1);
-    const updated = await db
+    const mutation = db
       .update(scenarioRuns)
       .set({
         state: "failed",
@@ -727,6 +733,13 @@ async function failExpiredUndispatchedRun(
         ),
       )
       .returning({ runId: scenarioRuns.runId });
+    const [updatedResult] = await executeScenarioRunRuntimeProjection({
+      d1: db.$client,
+      runId: input.runId,
+      statements: [drizzleQueryToD1Statement(db.$client, mutation)],
+      mode: "update",
+    });
+    const updated = updatedResult?.results ?? [];
     if (updated.length > 0) {
       return "failed";
     }

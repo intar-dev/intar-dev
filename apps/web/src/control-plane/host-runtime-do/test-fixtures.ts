@@ -31,6 +31,10 @@ import { HOST_STATE_REPORT_SCHEMA_VERSION } from "@/generated/constants";
 import { upsertDesiredCachedImage, upsertDesiredVm } from "@/lib/desired-state";
 import { mutateStoredHostDesiredState } from "@/lib/desired-state-store";
 import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
+import {
   RUN_PHASE_ORDER,
   buildInitialRunState,
   recomputeRunState,
@@ -446,7 +450,7 @@ export async function seedRun(input: {
     })),
   });
 
-  await input.db.insert(scenarioRuns).values({
+  const mutation = input.db.insert(scenarioRuns).values({
     runId: input.runId,
     userId: "user-1",
     hostId: input.hostId,
@@ -468,6 +472,12 @@ export async function seedRun(input: {
     stateJson: JSON.stringify(state),
     createdAt: input.now,
     updatedAt: input.now,
+  });
+  await executeScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId: input.runId,
+    statements: [drizzleQueryToD1Statement(env.DB, mutation)],
+    mode: "create",
   });
 }
 

@@ -23,6 +23,41 @@ on:
         required: false
         default: false
         type: boolean
+      fresh_d1_cutover:
+        description: Perform the one-run old-D1 to fresh Drizzle-managed D1 cutover
+        required: false
+        default: false
+        type: boolean
+      fresh_d1_cutover_confirmation:
+        description: Exact additional confirmation for a fresh D1 cutover
+        required: false
+        default: ""
+        type: string
+      source_snapshot_reset_confirmation:
+        description: Acknowledge that the retained source is an archive, not a lossless live handoff
+        required: false
+        default: ""
+        type: string
+      source_database_id:
+        description: D1 UUID currently bound to the active Worker during cutover
+        required: false
+        default: ""
+        type: string
+      source_database_name:
+        description: D1 name currently bound to the active Worker during cutover
+        required: false
+        default: ""
+        type: string
+      target_database_id:
+        description: Fresh D1 UUID committed in wrangler.jsonc for cutover
+        required: false
+        default: ""
+        type: string
+      target_database_name:
+        description: Fresh D1 name committed in wrangler.jsonc for cutover
+        required: false
+        default: ""
+        type: string
     secrets:
       CLOUDFLARE_ACCOUNT_ID:
         required: true
@@ -34,6 +69,8 @@ on:
         required: true
       INTAR_IMAGE_PUBLISH_TOKEN:
         required: true
+      BETA_MAINTENANCE_BYPASS_SECRET:
+        required: true
   workflow_dispatch:
     inputs:
       confirmation:
@@ -43,6 +80,41 @@ on:
       single_operator_confirmation:
         description: Type SINGLE OPERATOR WORKSHOP CONTROL PLANE only when no independent reviewer exists
         required: false
+        type: string
+      fresh_d1_cutover:
+        description: Fence the old D1, copy into a fresh Drizzle D1, and cut over
+        required: true
+        default: false
+        type: boolean
+      fresh_d1_cutover_confirmation:
+        description: Type CUT OVER FRESH DRIZZLE D1 when fresh_d1_cutover is true
+        required: false
+        default: ""
+        type: string
+      source_snapshot_reset_confirmation:
+        description: Type ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE when fresh_d1_cutover is true
+        required: false
+        default: ""
+        type: string
+      source_database_id:
+        description: UUID currently bound to the active production Worker
+        required: false
+        default: ""
+        type: string
+      source_database_name:
+        description: Name currently paired with source_database_id
+        required: false
+        default: ""
+        type: string
+      target_database_id:
+        description: UUID of the fresh D1 committed in apps/web/wrangler.jsonc
+        required: false
+        default: ""
+        type: string
+      target_database_name:
+        description: Name paired with target_database_id in apps/web/wrangler.jsonc
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -76,6 +148,13 @@ jobs:
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
       PARENT_HOLDS_CONTROL_PLANE_LOCK: ${{ inputs.parent_holds_control_plane_lock || false }}
+      FRESH_D1_CUTOVER: ${{ inputs.fresh_d1_cutover || false }}
+      FRESH_D1_CUTOVER_CONFIRMATION: ${{ inputs.fresh_d1_cutover_confirmation }}
+      SOURCE_SNAPSHOT_RESET_CONFIRMATION: ${{ inputs.source_snapshot_reset_confirmation }}
+      SOURCE_DATABASE_ID: ${{ inputs.source_database_id }}
+      SOURCE_DATABASE_NAME: ${{ inputs.source_database_name }}
+      TARGET_DATABASE_ID: ${{ inputs.target_database_id }}
+      TARGET_DATABASE_NAME: ${{ inputs.target_database_name }}
 
     steps:
       - name: Checkout
@@ -96,6 +175,26 @@ jobs:
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
           test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
           test "${RUN_ATTEMPT}" = 1
+          case "${FRESH_D1_CUTOVER}" in
+            false)
+              test -z "${FRESH_D1_CUTOVER_CONFIRMATION}"
+              test -z "${SOURCE_DATABASE_ID}"
+              test -z "${SOURCE_DATABASE_NAME}"
+              test -z "${TARGET_DATABASE_ID}"
+              test -z "${TARGET_DATABASE_NAME}"
+              ;;
+            true)
+              test "${FRESH_D1_CUTOVER_CONFIRMATION}" = \
+                "CUT OVER FRESH DRIZZLE D1"
+              [[ "${SOURCE_DATABASE_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+              [[ "${TARGET_DATABASE_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+              test "${SOURCE_DATABASE_ID}" != "${TARGET_DATABASE_ID}"
+              [[ "${SOURCE_DATABASE_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]
+              [[ "${TARGET_DATABASE_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]
+              test "${SOURCE_DATABASE_NAME}" != "${TARGET_DATABASE_NAME}"
+              ;;
+            *) exit 1 ;;
+          esac
           case "${PROVENANCE_WORKFLOW_PATH}" in
             .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
             *) exit 1 ;;
@@ -304,6 +403,13 @@ jobs:
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
+      FRESH_D1_CUTOVER: ${{ inputs.fresh_d1_cutover || false }}
+      FRESH_D1_CUTOVER_CONFIRMATION: ${{ inputs.fresh_d1_cutover_confirmation }}
+      SOURCE_SNAPSHOT_RESET_CONFIRMATION: ${{ inputs.source_snapshot_reset_confirmation }}
+      SOURCE_DATABASE_ID_INPUT: ${{ inputs.source_database_id }}
+      SOURCE_DATABASE_NAME_INPUT: ${{ inputs.source_database_name }}
+      TARGET_DATABASE_ID_INPUT: ${{ inputs.target_database_id }}
+      TARGET_DATABASE_NAME_INPUT: ${{ inputs.target_database_name }}
 
     steps:
       - name: Checkout
@@ -448,6 +554,7 @@ jobs:
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
+          set -euo pipefail
           config="dist/server/wrangler.json"
           patched="${RUNNER_TEMP}/website-wrangler.json"
           jq \
@@ -455,16 +562,108 @@ jobs:
             '.vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys' \
             "${config}" > "${patched}"
           mv "${patched}" "${config}"
+
+          committed_database_id="$(jq -er '
+            [.d1_databases[] | select(.binding == "DB")] |
+            select(length == 1) | .[0].database_id
+          ' "${config}")"
+          committed_database_name="$(jq -er '
+            [.d1_databases[] | select(.binding == "DB")] |
+            select(length == 1) | .[0].database_name
+          ' "${config}")"
+
+          source_database_id="${committed_database_id}"
+          source_database_name="${committed_database_name}"
+          target_database_id="${committed_database_id}"
+          target_database_name="${committed_database_name}"
+
+          if [ "${FRESH_D1_CUTOVER}" = true ]; then
+            test "${FRESH_D1_CUTOVER_CONFIRMATION}" = \
+              "CUT OVER FRESH DRIZZLE D1"
+            test "${SOURCE_SNAPSHOT_RESET_CONFIRMATION}" = \
+              "ARCHIVE SOURCE SNAPSHOT AND RESET CONTROL PLANE"
+            source_database_id="${SOURCE_DATABASE_ID_INPUT}"
+            source_database_name="${SOURCE_DATABASE_NAME_INPUT}"
+            target_database_id="${TARGET_DATABASE_ID_INPUT}"
+            target_database_name="${TARGET_DATABASE_NAME_INPUT}"
+            test "${committed_database_id}" = "${target_database_id}"
+            test "${committed_database_name}" = "${target_database_name}"
+            test "${source_database_id}" != "${target_database_id}"
+            test "${source_database_name}" != "${target_database_name}"
+          else
+            test -z "${FRESH_D1_CUTOVER_CONFIRMATION}"
+            test -z "${SOURCE_SNAPSHOT_RESET_CONFIRMATION}"
+            test -z "${SOURCE_DATABASE_ID_INPUT}"
+            test -z "${SOURCE_DATABASE_NAME_INPUT}"
+            test -z "${TARGET_DATABASE_ID_INPUT}"
+            test -z "${TARGET_DATABASE_NAME_INPUT}"
+          fi
+
+          [[ "${source_database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          [[ "${target_database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          test "$(jq -er '.vars.BETA_ACCESS_MAINTENANCE // "off"' "${config}")" = off
+
+          source_maintenance_config="dist/server/wrangler-source-maintenance.json"
+          target_maintenance_config="dist/server/wrangler-target-maintenance.json"
+          target_open_config="dist/server/wrangler-target-open.json"
+          jq \
+            --arg database_id "${source_database_id}" \
+            --arg database_name "${source_database_name}" '
+              .d1_databases |= map(
+                if .binding == "DB" then
+                  .database_id = $database_id | .database_name = $database_name
+                else . end
+              ) |
+              .vars.BETA_ACCESS_MAINTENANCE = "on"
+            ' "${config}" > "${source_maintenance_config}"
+          jq '.vars.BETA_ACCESS_MAINTENANCE = "on"' \
+            "${config}" > "${target_maintenance_config}"
+          cp "${config}" "${target_open_config}"
+
           jq -e \
+            --arg database_id "${target_database_id}" \
+            --arg database_name "${target_database_name}" \
             --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
               ([.d1_databases[] | select(.binding == "DB")]) as $databases |
               ([.kv_namespaces[] | select(.binding == "SESSION")]) as $sessions |
               ($databases | length) == 1 and
-              $databases[0].database_id == "1aade7e2-85e6-4304-9851-2bc71e082476" and
-              $databases[0].database_name == "intar-dev-control-plane-v2-20260803-r3" and
+              $databases[0].database_id == $database_id and
+              $databases[0].database_name == $database_name and
               ($sessions | length) == 1 and
               $sessions[0].id == $session_namespace_id
             ' "${config}" >/dev/null
+
+          {
+            printf 'SOURCE_DATABASE_ID=%s\n' "${source_database_id}"
+            printf 'SOURCE_DATABASE_NAME=%s\n' "${source_database_name}"
+            printf 'TARGET_DATABASE_ID=%s\n' "${target_database_id}"
+            printf 'TARGET_DATABASE_NAME=%s\n' "${target_database_name}"
+            printf 'SOURCE_MAINTENANCE_CONFIG=%s\n' "${source_maintenance_config}"
+            printf 'TARGET_MAINTENANCE_CONFIG=%s\n' "${target_maintenance_config}"
+            printf 'TARGET_OPEN_CONFIG=%s\n' "${target_open_config}"
+          } >> "${GITHUB_ENV}"
+
+          jq -n \
+            --arg source_database_id "${source_database_id}" \
+            --arg source_database_name "${source_database_name}" \
+            --arg target_database_id "${target_database_id}" \
+            --arg target_database_name "${target_database_name}" \
+            --argjson fresh_d1_cutover "${FRESH_D1_CUTOVER}" \
+            --argjson source_snapshot_reset_acknowledged "${FRESH_D1_CUTOVER}" \
+            --arg source_sha "${GITHUB_SHA}" '
+              {
+                schema_version: 1,
+                operation: "prepare-web-d1-deployment",
+                source_sha: $source_sha,
+                fresh_d1_cutover: $fresh_d1_cutover,
+                source_snapshot_reset_acknowledged: $source_snapshot_reset_acknowledged,
+                source_database_id: $source_database_id,
+                source_database_name: $source_database_name,
+                target_database_id: $target_database_id,
+                target_database_name: $target_database_name,
+                source_database_retained: true
+              }
+            ' > "${RUNNER_TEMP}/fresh-d1-cutover-attempt.json"
 
       - name: Recheck sole-operator window immediately before mutation
         working-directory: ${{ github.workspace }}
@@ -587,119 +786,865 @@ jobs:
             --jurisdiction eu \
             --remote
 
-      - name: Apply production D1 migrations
+      - name: Prove the cutover source and target identities
+        if: ${{ inputs.fresh_d1_cutover }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          bun run db:migrate:production |
-            tee "${RUNNER_TEMP}/production-d1-migrations.log"
+          result="${RUNNER_TEMP}/fresh-d1-target-before.json"
+          bunx wrangler d1 list --json > "${result}"
+          jq -e \
+            --arg source_id "${SOURCE_DATABASE_ID}" \
+            --arg source_name "${SOURCE_DATABASE_NAME}" \
+            --arg id "${TARGET_DATABASE_ID}" \
+            --arg name "${TARGET_DATABASE_NAME}" '
+              type == "array" and
+              ([.[] | select(
+                .uuid == $source_id and
+                .name == $source_name
+              )] | length) == 1 and
+              ([.[] | select(
+                .uuid == $id and
+                .name == $name and
+                .jurisdiction == "eu"
+              )] | length) == 1
+          ' "${result}" >/dev/null
 
-      - name: Verify production D1 state
+      - name: Prove the standard target is already Drizzle-managed
+        if: ${{ !inputs.fresh_d1_cutover }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          ledger="${RUNNER_TEMP}/production-d1-ledger.json"
-          result="${RUNNER_TEMP}/production-d1-verification.json"
+          marker="${RUNNER_TEMP}/production-d1-pre-migration-marker.json"
+          expected="${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.json"
+          observed="${RUNNER_TEMP}/production-d1-pre-migration-ledger.json"
+          expected_manifest="${RUNNER_TEMP}/production-d1-pre-migration-expected-manifest.json"
+          observed_manifest="${RUNNER_TEMP}/production-d1-pre-migration-manifest.json"
+          foreign_keys="${RUNNER_TEMP}/production-d1-pre-migration-foreign-keys.json"
+          generated_schema="${RUNNER_TEMP}/production-d1-pre-migration-generated-schema.json"
+
+          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
+            --database-id "${TARGET_DATABASE_ID}" \
+            --expect observed-ledger-prefix \
+            --evidence "${generated_schema}"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .status == "exact_generated_schema_verified" and
+              .expectation == "observed-ledger-prefix" and
+              .accountId == $account_id and
+              .databaseId == $database_id and
+              .appliedMigrationCount > 0 and
+              .appliedMigrationCount <= .committedMigrationCount and
+              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
+              (.objects | length) > 0 and
+              all(.objects[]; .type == "table" or .type == "index") and
+              .foreignKeyViolations == 0 and
+              .triggers == 0 and
+              .views == 0
+            ' "${generated_schema}" >/dev/null
+
           bunx wrangler d1 execute DB \
             --remote \
-            --config dist/server/wrangler.json \
-            --command "SELECT id, name, applied_at FROM d1_migrations ORDER BY id" \
-            --json > "${ledger}"
-          jq -e '
-            length == 1 and
-            .[0].success == true and
-            (.[0].results | map(.name)) == [
-              "0000_clean_multicloud.sql",
-              "0001_finalize_production_schema.sql",
-              "0002_allow_retired_builder_history_detach.sql",
-              "0003_archive_access_invites.sql"
-            ]
-          ' "${ledger}" >/dev/null
-          schema_query="SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('runtime_provider_allocations', 'runtime_provider_resources', 'provider_price_observations', 'workshop_session_cost_forecasts')) AS required_tables, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'clean_d1_commissioning') AS obsolete_tables, (SELECT COUNT(*) FROM pragma_index_list('workshop_template_revisions') WHERE name = 'workshop_template_revisions_content_idx' AND \"unique\" = 0) AS current_content_indexes, (SELECT COUNT(*) FROM pragma_index_list('workshop_template_revisions') WHERE name = 'workshop_template_revisions_content_uidx') AS obsolete_content_indexes, (SELECT COUNT(*) FROM d1_migrations WHERE name = '0001_finalize_production_schema.sql') AS finalization_migrations, (SELECT COUNT(*) FROM d1_migrations WHERE name = '0002_allow_retired_builder_history_detach.sql') AS builder_history_detach_migrations, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name = 'workshop_publications_published_immutable' AND instr(sql, 'builder_host_id') > 0 AND instr(sql, 'IS NOT OLD') > 0) AS builder_history_detach_triggers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'access_invite_removals') AS invite_removal_tables, (SELECT COUNT(*) FROM d1_migrations WHERE name = '0003_archive_access_invites.sql') AS invite_removal_migrations, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name IN ('access_invite_removals_insert_command', 'access_invite_removals_append_only_update', 'access_invite_removals_append_only_delete', 'access_invite_removals_event')) AS invite_removal_triggers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name = 'access_events_insert_guard' AND instr(sql, 'invite.removed') > 0) AS invite_removal_event_guards, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'access_invite_codes' AND instr(sql, '172800000') > 0 AND instr(sql, '1209600000') > 0) AS invite_lifetime_constraints, (SELECT COUNT(*) FROM pragma_foreign_key_check) AS foreign_key_violations, (SELECT COUNT(*) FROM runtime_provider_operations AS operation JOIN runtime_provider_allocations AS allocation ON allocation.id = operation.allocation_id AND allocation.location_attempt = operation.location_attempt WHERE operation.state IN ('pending','running','retryable') AND allocation.state = 'deleted' AND allocation.deletion_confirmed_at IS NOT NULL AND EXISTS (SELECT 1 FROM runtime_provider_resources AS resource WHERE resource.allocation_id = operation.allocation_id AND resource.location_attempt = operation.location_attempt AND resource.disappearance_confirmed_at IS NOT NULL AND ((resource.resource_kind = 'instance' AND (operation.operation_kind = 'delete_server' OR operation.operation_kind GLOB 'delete_server:*' OR operation.operation_kind = 'delete_instance' OR operation.operation_kind GLOB 'delete_instance:*')) OR (resource.resource_kind = 'boot_disk' AND (operation.operation_kind = 'delete_disk' OR operation.operation_kind GLOB 'delete_disk:*')) OR (resource.resource_kind = 'ipv4' AND (operation.operation_kind = 'delete_primary_ip' OR operation.operation_kind GLOB 'delete_primary_ip:*')) OR (resource.resource_kind = 'ssh_key' AND (operation.operation_kind = 'delete_ssh_key' OR operation.operation_kind GLOB 'delete_ssh_key:*'))))) AS residual_delete_operations"
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config dist/server/wrangler.json \
-            --command "${schema_query}" \
-            --json > "${result}"
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '__drizzle_migrations') AS drizzle_ledgers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'd1_migrations') AS wrangler_ledgers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger') AS triggers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'view') AS views" \
+            --json > "${marker}"
           jq -e '
             length == 1 and
             .[0].success == true and
             .[0].results == [{
-              required_tables: 4,
-              obsolete_tables: 0,
-              current_content_indexes: 1,
-              obsolete_content_indexes: 0,
-              finalization_migrations: 1,
-              builder_history_detach_migrations: 1,
-              builder_history_detach_triggers: 1,
-              invite_removal_tables: 1,
-              invite_removal_migrations: 1,
-              invite_removal_triggers: 4,
-              invite_removal_event_guards: 1,
-              invite_lifetime_constraints: 1,
-              foreign_key_violations: 0,
-              residual_delete_operations: 0
+              drizzle_ledgers: 1,
+              wrangler_ledgers: 0,
+              triggers: 0,
+              views: 0
             }]
-          ' "${result}" >/dev/null
+          ' "${marker}" >/dev/null
+
+          : > "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson"
+          while IFS=$'\t' read -r tag created_at; do
+            test -n "${tag}"
+            test -f "migrations/${tag}.sql"
+            hash="$(sha256sum "migrations/${tag}.sql" | cut -d ' ' -f 1)"
+            jq -cn \
+              --arg hash "${hash}" \
+              --argjson created_at "${created_at}" \
+              '{hash: $hash, created_at: $created_at}' \
+              >> "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson"
+          done < <(jq -r '.entries[] | [.tag, (.when | tostring)] | @tsv' \
+            migrations/meta/_journal.json)
+          jq -s 'sort_by(.created_at)' \
+            "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson" \
+            > "${expected}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
+            --json > "${observed}"
+          jq -e --slurpfile expected "${expected}" '
+            length == 1 and
+            .[0].success == true and
+            (.[0].results | length) > 0 and
+            (.[0].results | length) <= ($expected[0] | length) and
+            .[0].results == $expected[0][0:(.[0].results | length)]
+          ' "${observed}" >/dev/null
+
+          applied_migration_count="$(jq -er '.[0].results | length' "${observed}")"
+          pre_migration_snapshot_index="$(jq -er \
+            --argjson entry "$((applied_migration_count - 1))" \
+            '.entries[$entry].idx' migrations/meta/_journal.json)"
+          printf -v pre_migration_snapshot_path \
+            'migrations/meta/%04d_snapshot.json' \
+            "${pre_migration_snapshot_index}"
+          test -f "${pre_migration_snapshot_path}"
+          jq '
+            [
+              (.tables | to_entries[] | {
+                type: "table", name: .key, table_name: .key
+              }),
+              (.tables | to_entries[] | . as $table |
+                (($table.value.indexes // {}) | keys[]) | {
+                  type: "index", name: ., table_name: $table.key
+                })
+            ] + [{
+              type: "table",
+              name: "__drizzle_migrations",
+              table_name: "__drizzle_migrations"
+            }] | sort_by(.type, .name, .table_name)
+          ' "${pre_migration_snapshot_path}" > "${expected_manifest}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
+            --json > "${observed_manifest}"
+          jq -e --slurpfile expected "${expected_manifest}" '
+            length == 1 and
+            .[0].success == true and
+            (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0] and
+            ([.[0].results[] | select(.type == "trigger" or .type == "view")] | length) == 0 and
+            ([.[0].results[] | select(.name == "d1_migrations")] | length) == 0
+          ' "${observed_manifest}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "PRAGMA foreign_key_check" \
+            --json > "${foreign_keys}"
+          jq -e '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == []
+          ' "${foreign_keys}" >/dev/null
+
+      - name: Apply the generated Drizzle migration stream to the target D1
+        if: ${{ !inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          DRIZZLE_D1_HTTP: "1"
+        run: |
+          set -euo pipefail
+          export CLOUDFLARE_DATABASE_ID="${TARGET_DATABASE_ID}"
+          bunx drizzle-kit migrate --config drizzle.config.ts 2>&1 |
+            tee "${RUNNER_TEMP}/production-d1-drizzle-migrate.log"
+
+      - name: Verify the exact Drizzle schema and migration ledger
+        if: ${{ !inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          generated_schema="${RUNNER_TEMP}/production-d1-generated-schema.json"
+          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
+            --database-id "${TARGET_DATABASE_ID}" \
+            --expect full \
+            --evidence "${generated_schema}"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .status == "exact_generated_schema_verified" and
+              .expectation == "full" and
+              .accountId == $account_id and
+              .databaseId == $database_id and
+              .appliedMigrationCount == .committedMigrationCount and
+              .appliedMigrationCount > 0 and
+              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
+              (.objects | length) > 0 and
+              all(.objects[]; .type == "table" or .type == "index") and
+              .foreignKeyViolations == 0 and
+              .triggers == 0 and
+              .views == 0
+            ' "${generated_schema}" >/dev/null
+          expected_ledger="${RUNNER_TEMP}/production-d1-expected-ledger.json"
+          ledger="${RUNNER_TEMP}/production-d1-ledger.json"
+          expected_manifest="${RUNNER_TEMP}/production-d1-expected-manifest.json"
+          manifest="${RUNNER_TEMP}/production-d1-manifest.json"
+          foreign_keys="${RUNNER_TEMP}/production-d1-foreign-keys.json"
+
+          : > "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
+          while IFS=$'\t' read -r tag created_at; do
+            test -n "${tag}"
+            test -f "migrations/${tag}.sql"
+            hash="$(sha256sum "migrations/${tag}.sql" | cut -d ' ' -f 1)"
+            jq -cn \
+              --arg hash "${hash}" \
+              --argjson created_at "${created_at}" \
+              '{hash: $hash, created_at: $created_at}' \
+              >> "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
+          done < <(jq -r '.entries[] | [.tag, (.when | tostring)] | @tsv' \
+            migrations/meta/_journal.json)
+          jq -s 'sort_by(.created_at)' \
+            "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson" \
+            > "${expected_ledger}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
+            --json > "${ledger}"
+          jq -e --slurpfile expected "${expected_ledger}" '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == $expected[0] and
+            (.[0].results | length) > 0
+          ' "${ledger}" >/dev/null
+
+          final_snapshot_index="$(jq -er '.entries[-1].idx' \
+            migrations/meta/_journal.json)"
+          printf -v final_snapshot_path \
+            'migrations/meta/%04d_snapshot.json' "${final_snapshot_index}"
+          test -f "${final_snapshot_path}"
+          jq '
+            [
+              (.tables | to_entries[] | {
+                type: "table", name: .key, table_name: .key
+              }),
+              (.tables | to_entries[] | . as $table |
+                (($table.value.indexes // {}) | keys[]) | {
+                  type: "index", name: ., table_name: $table.key
+                })
+            ] + [{
+              type: "table",
+              name: "__drizzle_migrations",
+              table_name: "__drizzle_migrations"
+            }] | sort_by(.type, .name, .table_name)
+          ' "${final_snapshot_path}" > "${expected_manifest}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
+            --json > "${manifest}"
+          jq -e --slurpfile expected "${expected_manifest}" '
+            length == 1 and
+            .[0].success == true and
+            (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0] and
+            ([.[0].results[] | select(.type == "trigger" or .type == "view")] | length) == 0 and
+            ([.[0].results[] | select(.name == "d1_migrations")] | length) == 0
+          ' "${manifest}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "PRAGMA foreign_key_check" \
+            --json > "${foreign_keys}"
+          jq -e '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == []
+          ' "${foreign_keys}" >/dev/null
+
+      - name: Verify the prepared cutover target Drizzle state
+        if: ${{ inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          generated_schema="${RUNNER_TEMP}/production-d1-generated-schema.json"
+          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
+            --database-id "${TARGET_DATABASE_ID}" \
+            --expect full \
+            --evidence "${generated_schema}"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .status == "exact_generated_schema_verified" and
+              .expectation == "full" and
+              .accountId == $account_id and
+              .databaseId == $database_id and
+              .appliedMigrationCount == .committedMigrationCount and
+              .appliedMigrationCount > 0 and
+              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
+              (.objects | length) > 0 and
+              all(.objects[]; .type == "table" or .type == "index") and
+              .foreignKeyViolations == 0 and
+              .triggers == 0 and
+              .views == 0
+            ' "${generated_schema}" >/dev/null
+          expected_ledger="${RUNNER_TEMP}/production-d1-expected-ledger.json"
+          ledger="${RUNNER_TEMP}/production-d1-ledger.json"
+          expected_manifest="${RUNNER_TEMP}/production-d1-expected-manifest.json"
+          manifest="${RUNNER_TEMP}/production-d1-manifest.json"
+          foreign_keys="${RUNNER_TEMP}/production-d1-foreign-keys.json"
+
+          : > "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
+          while IFS=$'\t' read -r tag created_at; do
+            test -n "${tag}"
+            test -f "migrations/${tag}.sql"
+            hash="$(sha256sum "migrations/${tag}.sql" | cut -d ' ' -f 1)"
+            jq -cn \
+              --arg hash "${hash}" \
+              --argjson created_at "${created_at}" \
+              '{hash: $hash, created_at: $created_at}' \
+              >> "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
+          done < <(jq -r '.entries[] | [.tag, (.when | tostring)] | @tsv' \
+            migrations/meta/_journal.json)
+          jq -s 'sort_by(.created_at)' \
+            "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson" \
+            > "${expected_ledger}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
+            --json > "${ledger}"
+          jq -e --slurpfile expected "${expected_ledger}" '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == $expected[0] and
+            (.[0].results | length) > 0
+          ' "${ledger}" >/dev/null
+
+          final_snapshot_index="$(jq -er '.entries[-1].idx' \
+            migrations/meta/_journal.json)"
+          printf -v final_snapshot_path \
+            'migrations/meta/%04d_snapshot.json' "${final_snapshot_index}"
+          test -f "${final_snapshot_path}"
+          jq '
+            [
+              (.tables | to_entries[] | {
+                type: "table", name: .key, table_name: .key
+              }),
+              (.tables | to_entries[] | . as $table |
+                (($table.value.indexes // {}) | keys[]) | {
+                  type: "index", name: ., table_name: $table.key
+                })
+            ] + [{
+              type: "table",
+              name: "__drizzle_migrations",
+              table_name: "__drizzle_migrations"
+            }] | sort_by(.type, .name, .table_name)
+          ' "${final_snapshot_path}" > "${expected_manifest}"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
+            --json > "${manifest}"
+          jq -e --slurpfile expected "${expected_manifest}" '
+            length == 1 and
+            .[0].success == true and
+            (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0] and
+            ([.[0].results[] | select(.type == "trigger" or .type == "view")] | length) == 0 and
+            ([.[0].results[] | select(.name == "d1_migrations")] | length) == 0
+          ' "${manifest}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_OPEN_CONFIG}" \
+            --command "PRAGMA foreign_key_check" \
+            --json > "${foreign_keys}"
+          jq -e '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == []
+          ' "${foreign_keys}" >/dev/null
+
+      - name: Dry-run the allowlisted production D1 copy
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          bun tools/database/copy-production-d1.ts \
+            --source-database-id "${SOURCE_DATABASE_ID}" \
+            --target-database-id "${TARGET_DATABASE_ID}" \
+            --dry-run \
+            --evidence "${RUNNER_TEMP}/production-d1-copy-dry-run.json"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .mode == "dry-run" and
+              .status == "preflight_passed" and
+              .accountId == $account_id and
+              .sourceDatabaseId == $source_database_id and
+              .targetDatabaseId == $target_database_id and
+              .sourceDatabaseId != .targetDatabaseId and
+              .schema.foreignKeyViolations == 0 and
+              .schema.triggers == 0 and
+              .schema.views == 0 and
+              all(.sourceGates[]; .count == 0) and
+              (.sourceBefore | type) == "object" and
+              (.sourceAllBefore | type) == "object" and
+              .sourceAllAfter == null and
+              .sourceAfter == null and
+              .targetAfter == null
+            ' \
+            "${RUNNER_TEMP}/production-d1-copy-dry-run.json" >/dev/null
 
       - name: Retain production D1 migration evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: production-d1-migrations-${{ github.sha }}-${{ github.run_id }}
+          name: production-d1-drizzle-${{ github.sha }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/production-d1-migrations.log
+            ${{ runner.temp }}/fresh-d1-cutover-attempt.json
+            ${{ runner.temp }}/fresh-d1-target-before.json
+            ${{ runner.temp }}/production-d1-pre-migration-*.json
+            ${{ runner.temp }}/production-d1-drizzle-migrate.log
+            ${{ runner.temp }}/production-d1-expected-ledger.json
             ${{ runner.temp }}/production-d1-ledger.json
-            ${{ runner.temp }}/production-d1-verification.json
+            ${{ runner.temp }}/production-d1-expected-manifest.json
+            ${{ runner.temp }}/production-d1-manifest.json
+            ${{ runner.temp }}/production-d1-foreign-keys.json
+            ${{ runner.temp }}/production-d1-generated-schema.json
+            ${{ runner.temp }}/production-d1-copy-dry-run.json
           if-no-files-found: error
           retention-days: 90
 
-      - name: Activate exact immutable web version
-        id: exact_web_activation
+      - name: Prepare ephemeral Worker activation secrets
+        id: activation_secrets
         working-directory: ${{ github.workspace }}
         env:
           BETA_MAINTENANCE_BYPASS_SECRET: ${{ secrets.BETA_MAINTENANCE_BYPASS_SECRET }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
-          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
-          test -n "${CLOUDFLARE_ACCOUNT_ID}"
-          test -n "${CLOUDFLARE_API_TOKEN}"
           test "${#BETA_MAINTENANCE_BYPASS_SECRET}" -ge 43
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
-          trap 'rm -f "${secrets_file}"' EXIT
           jq -n '{
             BETA_MAINTENANCE_BYPASS_SECRET: env.BETA_MAINTENANCE_BYPASS_SECRET,
             STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
           }' \
             > "${secrets_file}"
           chmod 600 "${secrets_file}"
-          database_id="$(jq -er '
-            [.d1_databases[] | select(.binding == "DB")] |
-            select(length == 1) | .[0].database_id
-          ' apps/web/dist/server/wrangler.json)"
+          printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
+            >> "${GITHUB_ENV}"
+
+      - name: Capture the source D1 Time Travel bookmark
+        if: ${{ inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          raw="${RUNNER_TEMP}/source-d1-time-travel-raw.json"
+          evidence="${RUNNER_TEMP}/source-d1-time-travel.json"
+          bunx wrangler d1 time-travel info DB \
+            --config "${SOURCE_MAINTENANCE_CONFIG}" \
+            --json > "${raw}"
+          jq -e '
+            type == "object" and
+            (.bookmark | type) == "string" and
+            (.bookmark | length) > 0
+          ' "${raw}" >/dev/null
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg source_database_name "${SOURCE_DATABASE_NAME}" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile observed "${raw}" '
+              {
+                schema_version: 1,
+                operation: "capture-source-d1-time-travel-bookmark",
+                source_sha: $source_sha,
+                source_database_id: $source_database_id,
+                source_database_name: $source_database_name,
+                captured_at: $captured_at,
+                bookmark: $observed[0].bookmark,
+                read_only: true,
+                restore_attempted: false,
+                source_database_deleted: false
+              }
+            ' > "${evidence}"
+          jq -e \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" '
+              .operation == "capture-source-d1-time-travel-bookmark" and
+              .source_database_id == $source_database_id and
+              (.bookmark | type) == "string" and
+              (.bookmark | length) > 0 and
+              .read_only == true and
+              .restore_attempted == false and
+              .source_database_deleted == false
+            ' "${evidence}" >/dev/null
+
+      - name: Activate the standard exact immutable web version
+        id: exact_web_activation
+        if: ${{ !inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+          WEB_ACTIVATION_LABEL: standard
+        run: |
+          set -euo pipefail
           tools/deploy/activate-web-version.sh \
-            apps/web/dist/server/wrangler.json \
-            "${database_id}" \
+            "${TARGET_OPEN_CONFIG}" \
+            "${SOURCE_DATABASE_ID}" \
+            "${TARGET_DATABASE_ID}" \
             "${SESSION_KV_NAMESPACE_ID}" \
-            "${secrets_file}" \
-            "${RUNNER_TEMP}/exact-web-version-activation.json"
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/exact-web-version-activation-standard.json" \
+            open
+
+      - name: Phase A - fence the source D1 behind maintenance
+        id: fence_source_d1
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+          WEB_ACTIVATION_LABEL: source-maintenance
+        run: |
+          set -euo pipefail
+          tools/deploy/activate-web-version.sh \
+            "${SOURCE_MAINTENANCE_CONFIG}" \
+            "${SOURCE_DATABASE_ID}" \
+            "${SOURCE_DATABASE_ID}" \
+            "${SESSION_KV_NAMESPACE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/exact-web-version-activation-source-maintenance.json" \
+            open
+
+      - name: Copy the allowlisted durable production data
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          bun tools/database/copy-production-d1.ts \
+            --source-database-id "${SOURCE_DATABASE_ID}" \
+            --target-database-id "${TARGET_DATABASE_ID}" \
+            --apply \
+            --evidence "${RUNNER_TEMP}/production-d1-copy.json"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .mode == "apply" and
+              .status == "copy_verified" and
+              .accountId == $account_id and
+              .sourceDatabaseId == $source_database_id and
+              .targetDatabaseId == $target_database_id and
+              .sourceDatabaseId != .targetDatabaseId and
+              .schema.foreignKeyViolations == 0 and
+              .schema.triggers == 0 and
+              .schema.views == 0 and
+              all(.sourceGates[]; .count == 0) and
+              (.sourceBefore | type) == "object" and
+              (.sourceAllBefore | type) == "object" and
+              .sourceAllAfter == .sourceAllBefore and
+              .sourceAfter == .sourceBefore and
+              .targetAfter == .sourceBefore and
+              (.copiedRows | type) == "number" and
+              .copiedRows >= 0
+            ' \
+            "${RUNNER_TEMP}/production-d1-copy.json" >/dev/null
+
+      - name: Phase B - switch to the target D1 under maintenance
+        id: activate_target_maintenance
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+          WEB_ACTIVATION_LABEL: target-maintenance
+        run: |
+          set -euo pipefail
+          tools/deploy/activate-web-version.sh \
+            "${TARGET_MAINTENANCE_CONFIG}" \
+            "${SOURCE_DATABASE_ID}" \
+            "${TARGET_DATABASE_ID}" \
+            "${SESSION_KV_NAMESPACE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/exact-web-version-activation-target-maintenance.json" \
+            maintenance
+
+      - name: Verify the copied target while traffic remains fenced
+        if: ${{ inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          copied_generated_schema="${RUNNER_TEMP}/production-d1-copied-generated-schema.json"
+          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
+            --database-id "${TARGET_DATABASE_ID}" \
+            --expect full \
+            --evidence "${copied_generated_schema}"
+          jq -e \
+            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
+            --arg database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .status == "exact_generated_schema_verified" and
+              .expectation == "full" and
+              .accountId == $account_id and
+              .databaseId == $database_id and
+              .appliedMigrationCount == .committedMigrationCount and
+              .appliedMigrationCount > 0 and
+              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
+              (.objects | length) > 0 and
+              all(.objects[]; .type == "table" or .type == "index") and
+              .foreignKeyViolations == 0 and
+              .triggers == 0 and
+              .views == 0
+            ' "${copied_generated_schema}" >/dev/null
+          copied_manifest="${RUNNER_TEMP}/production-d1-copied-manifest.json"
+          copied_foreign_keys="${RUNNER_TEMP}/production-d1-copied-foreign-keys.json"
+          copied_ledger="${RUNNER_TEMP}/production-d1-copied-ledger.json"
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_MAINTENANCE_CONFIG}" \
+            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
+            --json > "${copied_manifest}"
+          jq -e \
+            --slurpfile expected "${RUNNER_TEMP}/production-d1-expected-manifest.json" '
+              length == 1 and
+              .[0].success == true and
+              (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0]
+            ' "${copied_manifest}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_MAINTENANCE_CONFIG}" \
+            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
+            --json > "${copied_ledger}"
+          jq -e \
+            --slurpfile expected "${RUNNER_TEMP}/production-d1-expected-ledger.json" '
+              length == 1 and
+              .[0].success == true and
+              .[0].results == $expected[0]
+            ' "${copied_ledger}" >/dev/null
+
+          bunx wrangler d1 execute DB \
+            --remote \
+            --config "${TARGET_MAINTENANCE_CONFIG}" \
+            --command "PRAGMA foreign_key_check" \
+            --json > "${copied_foreign_keys}"
+          jq -e '
+            length == 1 and
+            .[0].success == true and
+            .[0].results == []
+          ' "${copied_foreign_keys}" >/dev/null
+
+      - name: Prove the source stayed unchanged after Phase B
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/production-d1-source-after-phase-b.json"
+          bun tools/database/copy-production-d1.ts \
+            --verify-source-unchanged \
+            --source-database-id "${SOURCE_DATABASE_ID}" \
+            --target-database-id "${TARGET_DATABASE_ID}" \
+            --copy-evidence "${RUNNER_TEMP}/production-d1-copy.json" \
+            --evidence "${evidence}"
+          jq -e \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" '
+              .version == 1 and
+              .status == "source_unchanged_after_target_activation" and
+              .sourceDatabaseId == $source_database_id and
+              .targetDatabaseId == $target_database_id and
+              .sourceDatabaseId != .targetDatabaseId and
+              (.sourceAllExpected | type) == "object" and
+              .sourceAllObserved == .sourceAllExpected
+            ' "${evidence}" >/dev/null
+
+      - name: Reconfirm the source Time Travel bookmark before Phase C
+        if: ${{ inputs.fresh_d1_cutover }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          before="${RUNNER_TEMP}/source-d1-time-travel-raw.json"
+          after="${RUNNER_TEMP}/source-d1-time-travel-after-phase-b-raw.json"
+          evidence="${RUNNER_TEMP}/source-d1-time-travel-after-phase-b.json"
+          bunx wrangler d1 time-travel info DB \
+            --config "${SOURCE_MAINTENANCE_CONFIG}" \
+            --json > "${after}"
+          jq -e \
+            --arg bookmark "$(jq -er '.bookmark' "${before}")" '
+              type == "object" and
+              .bookmark == $bookmark and
+              (.bookmark | length) > 0
+            ' "${after}" >/dev/null
+          jq -n \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg source_database_name "${SOURCE_DATABASE_NAME}" \
+            --arg verified_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile before "${before}" \
+            --slurpfile after "${after}" '
+              {
+                schema_version: 1,
+                operation: "verify-source-time-travel-bookmark-stable",
+                source_database_id: $source_database_id,
+                source_database_name: $source_database_name,
+                verified_at: $verified_at,
+                before_bookmark: $before[0].bookmark,
+                after_bookmark: $after[0].bookmark,
+                unchanged: ($before[0].bookmark == $after[0].bookmark),
+                read_only: true,
+                restore_attempted: false,
+                source_database_deleted: false
+              }
+            ' > "${evidence}"
+          jq -e '
+            .operation == "verify-source-time-travel-bookmark-stable" and
+            .before_bookmark == .after_bookmark and
+            .unchanged == true and
+            .read_only == true and
+            .restore_attempted == false and
+            .source_database_deleted == false
+          ' "${evidence}" >/dev/null
+
+      - name: Phase C - open the verified target D1
+        id: open_target_d1
+        if: ${{ inputs.fresh_d1_cutover }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+          WEB_ACTIVATION_LABEL: target-open
+        run: |
+          set -euo pipefail
+          tools/deploy/activate-web-version.sh \
+            "${TARGET_OPEN_CONFIG}" \
+            "${TARGET_DATABASE_ID}" \
+            "${TARGET_DATABASE_ID}" \
+            "${SESSION_KV_NAMESPACE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/exact-web-version-activation-target-open.json" \
+            maintenance
+
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg source_database_name "${SOURCE_DATABASE_NAME}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" \
+            --arg target_database_name "${TARGET_DATABASE_NAME}" \
+            --slurpfile source_maintenance \
+              "${RUNNER_TEMP}/exact-web-version-activation-source-maintenance.json" \
+            --slurpfile copy "${RUNNER_TEMP}/production-d1-copy.json" \
+            --slurpfile target_maintenance \
+              "${RUNNER_TEMP}/exact-web-version-activation-target-maintenance.json" \
+            --slurpfile target_open \
+              "${RUNNER_TEMP}/exact-web-version-activation-target-open.json" \
+            --slurpfile source_time_travel \
+              "${RUNNER_TEMP}/source-d1-time-travel.json" \
+            --slurpfile source_after_phase_b \
+              "${RUNNER_TEMP}/production-d1-source-after-phase-b.json" \
+            --slurpfile source_time_travel_after_phase_b \
+              "${RUNNER_TEMP}/source-d1-time-travel-after-phase-b.json" '
+              {
+                schema_version: 1,
+                operation: "fresh-drizzle-d1-cutover",
+                source_sha: $source_sha,
+                source_database_id: $source_database_id,
+                source_database_name: $source_database_name,
+                target_database_id: $target_database_id,
+                target_database_name: $target_database_name,
+                source_snapshot_reset_acknowledged: true,
+                source_database_retained: true,
+                source_database_deleted: false,
+                source_time_travel: $source_time_travel[0],
+                source_after_phase_b: $source_after_phase_b[0],
+                source_time_travel_after_phase_b: $source_time_travel_after_phase_b[0],
+                phase_a_source_maintenance: $source_maintenance[0],
+                durable_data_copy: $copy[0],
+                phase_b_target_maintenance: $target_maintenance[0],
+                phase_c_target_open: $target_open[0]
+              }
+            ' > "${RUNNER_TEMP}/fresh-d1-cutover.json"
+
+          jq -e \
+            --arg source_database_id "${SOURCE_DATABASE_ID}" \
+            --arg target_database_id "${TARGET_DATABASE_ID}" '
+              .operation == "fresh-drizzle-d1-cutover" and
+              .source_database_id == $source_database_id and
+              .target_database_id == $target_database_id and
+              .source_database_id != .target_database_id and
+              .source_snapshot_reset_acknowledged == true and
+              .source_database_retained == true and
+              .source_database_deleted == false and
+              .source_time_travel.source_database_id == $source_database_id and
+              .source_time_travel.read_only == true and
+              .source_time_travel.restore_attempted == false and
+              .source_after_phase_b.status == "source_unchanged_after_target_activation" and
+              .source_after_phase_b.sourceDatabaseId == $source_database_id and
+              .source_after_phase_b.targetDatabaseId == $target_database_id and
+              .source_after_phase_b.sourceAllObserved == .source_after_phase_b.sourceAllExpected and
+              .source_time_travel_after_phase_b.unchanged == true and
+              .source_time_travel_after_phase_b.before_bookmark == .source_time_travel_after_phase_b.after_bookmark and
+              .phase_a_source_maintenance.after_health_proven == true and
+              .durable_data_copy.version == 1 and
+              .durable_data_copy.mode == "apply" and
+              .durable_data_copy.status == "copy_verified" and
+              .durable_data_copy.sourceDatabaseId == $source_database_id and
+              .durable_data_copy.targetDatabaseId == $target_database_id and
+              .durable_data_copy.sourceAllAfter == .durable_data_copy.sourceAllBefore and
+              .durable_data_copy.sourceAfter == .durable_data_copy.sourceBefore and
+              .durable_data_copy.targetAfter == .durable_data_copy.sourceBefore and
+              .phase_b_target_maintenance.after_health_proven == true and
+              .phase_c_target_open.after_health_proven == true
+            ' "${RUNNER_TEMP}/fresh-d1-cutover.json" >/dev/null
+
+      - name: Remove ephemeral Worker activation secrets
+        if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
+        working-directory: ${{ github.workspace }}
+        run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
 
       - name: Retain exact web-version activation attempt
-        if: ${{ always() && steps.exact_web_activation.outcome != 'skipped' }}
+        if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/exact-web-version-activation.json
-            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}/
+            ${{ runner.temp }}/fresh-d1-cutover-attempt.json
+            ${{ runner.temp }}/fresh-d1-cutover.json
+            ${{ runner.temp }}/production-d1-copy*.json
+            ${{ runner.temp }}/production-d1-copied-*.json
+            ${{ runner.temp }}/production-d1-source-after-phase-b.json
+            ${{ runner.temp }}/source-d1-time-travel*.json
+            ${{ runner.temp }}/exact-web-version-activation-*.json
+            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-*/
           if-no-files-found: error
           retention-days: 90
 

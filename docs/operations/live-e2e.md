@@ -105,27 +105,11 @@ The GitHub OAuth app callback URL for this local Worker is:
 http://127.0.0.1:8788/api/auth/callback/github
 ```
 
-Then initialize local D1 state, approve your GitHub username, and run the
-Worker:
-
-```sh
-export GITHUB_USERNAME="your-github-username"
-cd apps/web
-fnm exec bun run db:migrate:local
-fnm exec bunx wrangler d1 execute DB --local --config wrangler.local.jsonc \
-  --persist-to .wrangler/local-ui-state \
-  --command "INSERT INTO access_allowlist (github_username, approved_by, approved_at) VALUES (lower('${GITHUB_USERNAME}'), NULL, cast(unixepoch('subsecond') * 1000 as integer)) ON CONFLICT(github_username) DO UPDATE SET approved_by = NULL, approved_at = excluded.approved_at;"
-fnm exec bun run dev -- --host 127.0.0.1 --port 8788
-```
-
-Sign in once at `http://127.0.0.1:8788`. In another terminal, grant the local
-user admin role while the development server keeps running:
-
-```sh
-fnm exec bunx wrangler d1 execute DB --local --config wrangler.local.jsonc \
-  --persist-to .wrangler/local-ui-state \
-  --command "update \"user\" set role = 'admin' where username = '${GITHUB_USERNAME}';"
-```
+The former local bootstrap recipe applied schema and seeded authorization with
+direct Wrangler SQL. It has been retired because that creates a second schema
+path and its seed rows no longer satisfy the typed beta-access model. Do not
+recreate it. Use the deployed live harness until a typed local bootstrap owns
+both Drizzle migration application and beta-access seeding.
 
 Create a builder host through the admin Hosts UI, or with the authenticated
 browser cookie:

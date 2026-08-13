@@ -8,7 +8,6 @@ import {
   scenarioRunArtifacts,
   scenarioRunArtifactUploads,
   scenarioRuns,
-  runtimeExecutions,
 } from "@/db/schema";
 import { markDesiredVmAbsent } from "@/lib/desired-state";
 import {
@@ -32,6 +31,7 @@ import {
   stargateRouteTtlMs,
 } from "@/lib/stargate";
 import { loadScenarioRunSshKey } from "@/lib/scenario-run-ssh-keys";
+import { deleteScenarioRunRuntimeProjection } from "@/lib/runtime-executions";
 import { listUserAuthorizedSshKeysForNativeRoutes } from "@/lib/user-ssh-keys";
 import {
   type ScenarioTerminalSessionResult,
@@ -312,12 +312,11 @@ export async function deleteFinishedScenarioRunForUser(params: {
     });
   }
 
-  await db.delete(scenarioRuns).where(eq(scenarioRuns.runId, row.runId));
-  if (row.runtimeExecutionId) {
-    await db
-      .delete(runtimeExecutions)
-      .where(eq(runtimeExecutions.id, row.runtimeExecutionId));
-  }
+  await deleteScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId: row.runId,
+    userId: params.userId,
+  });
 }
 
 export async function expireOverdueRunLeases(

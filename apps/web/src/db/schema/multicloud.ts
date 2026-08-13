@@ -603,6 +603,10 @@ export const runtimeProviderResources = sqliteTable(
       table.resourceKind,
     ),
     check(
+      "runtime_provider_resources_provider_valid",
+      sql`${table.providerKind} in ('hetzner_cloud', 'gcp_compute')`,
+    ),
+    check(
       "runtime_provider_resources_kind_valid",
       sql`${table.resourceKind} in ('instance', 'boot_disk', 'ipv4', 'ssh_key')`,
     ),
@@ -663,6 +667,10 @@ export const runtimeProviderOperations = sqliteTable(
       table.state,
       table.retryAt,
       table.updatedAt,
+    ),
+    check(
+      "runtime_provider_operations_provider_valid",
+      sql`${table.providerKind} in ('hetzner_cloud', 'gcp_compute')`,
     ),
     check(
       "runtime_provider_operations_state_valid",
@@ -987,8 +995,16 @@ export const workshopSessionCostForecasts = sqliteTable(
       table.expiresAt,
     ),
     check(
+      "workshop_session_cost_forecasts_provider_valid",
+      sql`${table.providerKind} in ('agent_kvm', 'hetzner_cloud', 'gcp_compute')`,
+    ),
+    check(
       "workshop_session_cost_forecasts_values_valid",
       sql`${table.version} > 0 AND ${table.participantCount} >= 0 AND ${table.expectedCostNanos} >= 0 AND ${table.leaseCeilingCostNanos} >= 0 AND ${table.oneRestoreCostNanos} >= 0`,
+    ),
+    check(
+      "workshop_session_cost_forecasts_json_valid",
+      sql`json_valid(${table.assumptionsJson}) AND json_valid(${table.exclusionsJson})`,
     ),
   ],
 );
@@ -1089,6 +1105,10 @@ export const runtimeProviderCostLedger = sqliteTable(
     index("runtime_provider_cost_ledger_execution_idx").on(
       table.executionId,
       table.providerCreatedAt,
+    ),
+    check(
+      "runtime_provider_cost_ledger_provider_valid",
+      sql`${table.providerKind} in ('hetzner_cloud', 'gcp_compute')`,
     ),
     check(
       "runtime_provider_cost_ledger_values_valid",

@@ -27,12 +27,14 @@ import {
   user,
 } from "@/db/schema";
 import { resetD1Database } from "@/test/d1-migrations";
+import { withRuntimeAllocationLock } from "@/lib/runtime-allocation-lock";
 import {
   connectProviderProject,
   disconnectProviderConnection,
   inspectProviderConnection,
   listProviderConnections,
   rotateProviderCredential,
+  updateProviderGuardrails,
 } from "./provider-connections";
 
 describe("generic Workshop BYOK connections", () => {
@@ -287,6 +289,74 @@ describe("generic Workshop BYOK connections", () => {
     await expectNoPlaintext("rotated-private-key");
   });
 
+  it("serializes lifecycle and guardrail changes with provider allocation", async () => {
+    mocks.invoke.mockResolvedValue(hetznerConnectionResult());
+    const connected = await connectProviderProject({
+      organizationId: "org-a",
+      actorUserId: "owner-a",
+      providerKind: "hetzner_cloud",
+      credential: "initial-hcloud-token",
+    });
+    let entered!: () => void;
+    const lockEntered = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const allocationFinished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const allocation = withRuntimeAllocationLock({
+      key: `runtime-provider-connection:${connected.id}`,
+      now: 100,
+      operation: async () => {
+        entered();
+        await allocationFinished;
+      },
+    });
+    await lockEntered;
+
+    const attempts = await Promise.allSettled([
+      updateProviderGuardrails({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+        maxConcurrentAllocations: 1,
+        now: 100,
+      }),
+      disconnectProviderConnection({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+        now: 100,
+      }),
+      rotateProviderCredential({
+        organizationId: "org-a",
+        connectionId: connected.id,
+        actorUserId: "owner-a",
+        credential: "replacement-hcloud-token",
+        now: 100,
+      }),
+    ]);
+    expect(attempts).toEqual([
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "runtime_allocation_busy" }),
+      }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "runtime_allocation_busy" }),
+      }),
+      expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "runtime_allocation_busy" }),
+      }),
+    ]);
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+
+    release();
+    await allocation;
+  });
+
   it("records dormant GCP rotation as cleanup-only instead of issuance-ready", async () => {
     mocks.invoke
       .mockResolvedValueOnce(gcpConnectionResult())
@@ -321,11 +391,7 @@ describe("generic Workshop BYOK connections", () => {
       state: "rotation_required",
       credential: { version: 2, authority: "cleanup_only" },
     });
-    await expect(
-      env.DB.prepare(
-        `UPDATE provider_connections SET state = 'active' WHERE id = ?`,
-      ).bind(connected.id).run(),
-    ).rejects.toThrow(/active credential does not belong/u);
+    expect(rotated.state).toBe("rotation_required");
     const credentials = await drizzle(env.DB)
       .select({ version: providerCredentialVersions.version, authority: providerCredentialVersions.authority })
       .from(providerCredentialVersions);

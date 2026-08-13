@@ -73,6 +73,7 @@ export {
   workshopEvents,
   workshopHelpRequests,
   workshopModuleProgress,
+  workshopRouteIssuanceIntents,
   workshopSessionMembers,
   workshopSessions,
   workshopTemplateRevisions,

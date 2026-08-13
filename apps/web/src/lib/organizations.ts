@@ -141,7 +141,12 @@ export async function createOrganization(params: {
       }),
     ]);
   } catch (error) {
-    if (errorChainMatches(error, /member owner limit reached/)) {
+    if (
+      errorChainMatches(
+        error,
+        /member owner limit reached|member\.user_id|member_single_owner_uidx/i,
+      )
+    ) {
       throw appError(
         409,
         "organization_limit_reached",

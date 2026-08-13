@@ -112,15 +112,10 @@ function UsersPanel() {
 
   const setBanned = useMutation({
     mutationFn: async (params: { userId: string; banned: boolean }) => {
-      const result = params.banned
-        ? await authClient.admin.banUser({
-            userId: params.userId,
-            banReason: "Access revoked by admin",
-          })
-        : await authClient.admin.unbanUser({ userId: params.userId });
-      if (result.error) {
-        throw new Error(result.error.message ?? "Failed to update user");
-      }
+      await mutatePlatformUser(params.userId, "ban", {
+        banned: params.banned,
+        reason: params.banned ? "Access revoked by admin" : null,
+      });
     },
     onSuccess: async () => {
       setConfirmation(null);
@@ -130,13 +125,7 @@ function UsersPanel() {
 
   const setRole = useMutation({
     mutationFn: async (params: { userId: string; role: "user" | "admin" }) => {
-      const result = await authClient.admin.setRole({
-        userId: params.userId,
-        role: params.role,
-      });
-      if (result.error) {
-        throw new Error(result.error.message ?? "Failed to update role");
-      }
+      await mutatePlatformUser(params.userId, "role", { role: params.role });
     },
     onSuccess: async () => {
       setConfirmation(null);
@@ -381,6 +370,33 @@ function UsersPanel() {
       </Dialog>
     </>
   );
+}
+
+async function mutatePlatformUser(
+  userId: string,
+  action: "ban" | "role",
+  body: Record<string, unknown>,
+): Promise<void> {
+  const response = await fetch(
+    `/api/admin/users/${encodeURIComponent(userId)}/${action}`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  const result = (await response.json().catch(() => null)) as {
+    error?: unknown;
+  } | null;
+  if (!response.ok) {
+    throw new Error(
+      typeof result?.error === "string"
+        ? result.error
+        : "Failed to update user",
+    );
+  }
 }
 
 interface AdminOrganizationRow {

@@ -60,6 +60,10 @@ import { recordWorkshopGenerationState } from "@/lib/workshops/provisioning";
 import { recoverWorkshopRuntimesFromFailedHost } from "@/lib/workshops/runtime-orchestrator";
 import { reconcileHostScenarioImages } from "@/lib/scenario-image-cache";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
+import {
+  betaAccessMaintenanceEnabled,
+  maintenanceJsonResponse,
+} from "@/maintenance";
 
 export const WORKSHOP_HOST_FAILURE_RECOVERY_AFTER_MS = 90_000;
 export const WORKSHOP_HOST_FAILURE_RECOVERY_BATCH_SIZE = 8;
@@ -106,6 +110,9 @@ export class HostRuntimeDO extends HostRuntimeBase {
   private nextScenarioImageCacheReconciliationAtMs: number | null = null;
 
   override async fetch(request: Request): Promise<Response> {
+    if (betaAccessMaintenanceEnabled(this.env)) {
+      return maintenanceJsonResponse();
+    }
     const url = new URL(request.url);
 
     if (url.pathname === "/connect") {
@@ -128,6 +135,10 @@ export class HostRuntimeDO extends HostRuntimeBase {
   }
 
   override async alarm(): Promise<void> {
+    if (betaAccessMaintenanceEnabled(this.env)) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
     const hostId = await this.loadKnownHostId();
     if (!hostId) {
       await this.ctx.storage.deleteAlarm();
@@ -143,6 +154,14 @@ export class HostRuntimeDO extends HostRuntimeBase {
     ws: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
+    if (betaAccessMaintenanceEnabled(this.env)) {
+      try {
+        ws.close(1012, "maintenance");
+      } catch {
+        // ignore an already-closed hibernatable socket
+      }
+      return;
+    }
     const attachment = this.readSocketAttachment(ws);
     if (!attachment) {
       try {
@@ -172,10 +191,12 @@ export class HostRuntimeDO extends HostRuntimeBase {
     _reason: string,
     _wasClean: boolean,
   ): Promise<void> {
+    if (betaAccessMaintenanceEnabled(this.env)) return;
     await this.handleSocketClosed(ws);
   }
 
   override async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+    if (betaAccessMaintenanceEnabled(this.env)) return;
     await this.handleSocketClosed(ws);
   }
 

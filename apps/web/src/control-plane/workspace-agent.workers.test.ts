@@ -983,6 +983,7 @@ async function seedGeneration(
     sessionId: "session-1",
     userId: "learner-1",
     role: "participant",
+    workspaceEnabled: true,
     provisionState: "provisioning",
     assignedBy: "learner-1",
     createdAt: NOW,

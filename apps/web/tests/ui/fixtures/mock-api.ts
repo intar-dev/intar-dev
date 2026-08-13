@@ -335,17 +335,22 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (
-        /^\/api\/auth\/admin\/(ban-user|unban-user|set-role)$/.test(pathname) &&
+        /^\/api\/admin\/users\/[^/]+\/(ban|role)$/.test(pathname) &&
         method === "POST"
       ) {
         const body = await requestBody(route);
+        const userId = segment(
+          pathname,
+          /^\/api\/admin\/users\/([^/]+)\/(?:ban|role)$/,
+        );
         const target = server.state.users.find(
-          (user) => user.id === body.userId,
+          (user) => user.id === userId,
         );
         if (target) {
-          if (pathname.endsWith("ban-user")) target.banned = true;
-          if (pathname.endsWith("unban-user")) target.banned = false;
-          if (pathname.endsWith("set-role") && typeof body.role === "string") {
+          if (pathname.endsWith("/ban") && typeof body.banned === "boolean") {
+            target.banned = body.banned;
+          }
+          if (pathname.endsWith("/role") && typeof body.role === "string") {
             target.role = body.role;
           }
         }

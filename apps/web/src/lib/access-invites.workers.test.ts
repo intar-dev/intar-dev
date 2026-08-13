@@ -45,6 +45,10 @@ describe("beta invitation storage invariants", () => {
       "access_invite_codes",
       "access_invite_removals",
     ]);
+    const triggers = await env.DB.prepare(
+      "SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name",
+    ).all<{ name: string }>();
+    expect(triggers.results).toEqual([]);
 
     await seedUserOnly({ id: "index-user", username: "index-user" });
     await expect(
@@ -135,11 +139,17 @@ describe("beta invitation storage invariants", () => {
     expect(await inviteAndEventCounts()).toEqual(countsBeforeRetry);
     await expect(
       env.DB.prepare(
-        "DELETE FROM access_invite_removals WHERE invite_id = ?",
+        `SELECT invite_id, invite_version, removed_by, removed_at
+         FROM access_invite_removals WHERE invite_id = ?`,
       )
         .bind(invite.id)
-        .run(),
-    ).rejects.toThrow("access invite removals are append-only");
+        .first(),
+    ).resolves.toEqual({
+      invite_id: invite.id,
+      invite_version: invite.version,
+      removed_by: "admin-a",
+      removed_at: 4_000,
+    });
   });
 
   it("removes a leased invite and invalidates the exact sign-in lease", async () => {
@@ -410,11 +420,20 @@ describe("beta invitation storage invariants", () => {
     expect(listJson).not.toContain(created.code);
     expect(listJson).not.toContain(stored?.code_hash);
     expect(auditJson).not.toContain(created.code);
+    await removeAccessInvite({
+      d1: env.DB,
+      inviteId: created.id,
+      expectedVersion: created.version,
+      actorUserId: "admin-a",
+      now: 2_100,
+    });
     await expect(
-      env.DB.prepare("DELETE FROM access_invite_codes WHERE id = ?")
+      env.DB.prepare(
+        "SELECT id, state FROM access_invite_codes WHERE id = ?",
+      )
         .bind(created.id)
-        .run(),
-    ).rejects.toThrow("retained in the audit timeline");
+        .first(),
+    ).resolves.toEqual({ id: created.id, state: "revoked" });
   });
 
   it("gives one lease to 100 concurrent starters", async () => {
@@ -1007,9 +1026,9 @@ describe("beta invitation storage invariants", () => {
       "SELECT state FROM access_allowlist WHERE user_id = 'revoked-user'",
     ).first();
     const events = await env.DB.prepare(
-      `SELECT id, event_type FROM access_events
+      `SELECT id, event_type, reason FROM access_events
        WHERE subject_user_id = 'revoked-user' ORDER BY created_at`,
-    ).all<{ id: string; event_type: string }>();
+    ).all<{ id: string; event_type: string; reason: string | null }>();
     expect(access).toEqual({ state: "active" });
     expect(events.results.map(({ event_type }) => event_type)).toEqual(
       expect.arrayContaining([
@@ -1023,18 +1042,10 @@ describe("beta invitation storage invariants", () => {
     const failedCleanupEvent = events.results.find(
       ({ event_type }) => event_type === "access.revocation_cleanup_failed",
     );
-    await expect(
-      env.DB.prepare(
-        "UPDATE access_events SET reason = 'tampered' WHERE id = ?",
-      )
-        .bind(failedCleanupEvent!.id)
-        .run(),
-    ).rejects.toThrow("append-only");
-    await expect(
-      env.DB.prepare("DELETE FROM access_events WHERE id = ?")
-        .bind(failedCleanupEvent!.id)
-        .run(),
-    ).rejects.toThrow("append-only");
+    expect(failedCleanupEvent).toMatchObject({
+      event_type: "access.revocation_cleanup_failed",
+      reason: "operator_abandoned_cleanup",
+    });
   });
 
   it("serializes cleanup attempts without an expiring takeover", async () => {
@@ -1105,11 +1116,6 @@ describe("beta invitation storage invariants", () => {
       }),
     ).rejects.toMatchObject({ code: "beta_revocation_cleanup_in_progress" });
     await expect(
-      env.DB.prepare(
-        "DELETE FROM access_allowlist WHERE user_id = 'cleanup-race-user'",
-      ).run(),
-    ).rejects.toThrow("audited completed block clear");
-    await expect(
       allowBetaReinvite({
         d1: env.DB,
         userId: "cleanup-race-user",
@@ -1118,6 +1124,12 @@ describe("beta invitation storage invariants", () => {
         now: 69_000,
       }),
     ).rejects.toMatchObject({ code: "beta_revocation_cleanup_incomplete" });
+    await expect(
+      env.DB.prepare(
+        `SELECT state, revocation_cleanup_completed_at AS completed_at
+         FROM access_allowlist WHERE user_id = 'cleanup-race-user'`,
+      ).first(),
+    ).resolves.toEqual({ state: "blocked", completed_at: null });
 
     const winner = winners[0]!.value;
     if (winner.status !== "acquired") throw new Error("cleanup race lost");
@@ -1142,9 +1154,10 @@ describe("beta invitation storage invariants", () => {
     });
     await expect(
       env.DB.prepare(
-        "DELETE FROM access_allowlist WHERE user_id = 'cleanup-race-user'",
-      ).run(),
-    ).rejects.toThrow("audited completed block clear");
+        `SELECT state, revocation_cleanup_completed_at AS completed_at
+         FROM access_allowlist WHERE user_id = 'cleanup-race-user'`,
+      ).first(),
+    ).resolves.toEqual({ state: "blocked", completed_at: 69_100 });
   });
 
   it("rejects cross-provider lease state and a GitHub account owned by another user", async () => {
@@ -1264,7 +1277,7 @@ describe("beta invitation storage invariants", () => {
     ).rejects.toMatchObject({ code: "last_beta_admin" });
   });
 
-  it("atomically prevents concurrent native demotion, ban, and deletion of the last admin", async () => {
+  it("atomically prevents concurrent command revocations of every administrator", async () => {
     await seedGithubUser({
       id: "admin-b",
       accountId: "8000",
@@ -1273,16 +1286,24 @@ describe("beta invitation storage invariants", () => {
     });
     await bootstrapAdmin("admin-b", 90_000);
 
-    const demotions = await Promise.allSettled([
-      env.DB.prepare(
-        "UPDATE user SET role = 'user' WHERE id = 'admin-a'",
-      ).run(),
-      env.DB.prepare(
-        "UPDATE user SET role = 'user' WHERE id = 'admin-b'",
-      ).run(),
+    const revocations = await Promise.allSettled([
+      revokeBetaUser({
+        d1: env.DB,
+        userId: "admin-a",
+        actorUserId: "admin-a",
+        reason: "concurrent_admin_revoke",
+        now: 91_000,
+      }),
+      revokeBetaUser({
+        d1: env.DB,
+        userId: "admin-b",
+        actorUserId: "admin-a",
+        reason: "concurrent_admin_revoke",
+        now: 91_000,
+      }),
     ]);
     expect(
-      demotions.filter(({ status }) => status === "fulfilled"),
+      revocations.filter(({ status }) => status === "fulfilled"),
     ).toHaveLength(1);
     const remaining = await env.DB.prepare(
       `SELECT identity.id
@@ -1295,13 +1316,14 @@ describe("beta invitation storage invariants", () => {
     expect(remaining?.id).toMatch(/^admin-[ab]$/u);
 
     await expect(
-      env.DB.prepare("UPDATE user SET banned = 1 WHERE id = ?")
-        .bind(remaining!.id)
-        .run(),
-    ).rejects.toThrow("last active beta administrator");
-    await expect(
-      env.DB.prepare("DELETE FROM user WHERE id = ?").bind(remaining!.id).run(),
-    ).rejects.toThrow("last active beta administrator");
+      revokeBetaUser({
+        d1: env.DB,
+        userId: remaining!.id,
+        actorUserId: remaining!.id,
+        reason: "last_admin_revoke",
+        now: 92_000,
+      }),
+    ).rejects.toMatchObject({ code: "last_beta_admin" });
   });
 });
 

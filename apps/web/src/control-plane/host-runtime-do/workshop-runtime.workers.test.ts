@@ -884,6 +884,7 @@ async function seedWorkshopRuntime(input: {
     sessionId: "workshop-session",
     userId: "user-1",
     role: "participant",
+    workspaceEnabled: true,
     checkedInAt: input.now,
     provisionState: "provisioning",
     assignedBy: "user-1",

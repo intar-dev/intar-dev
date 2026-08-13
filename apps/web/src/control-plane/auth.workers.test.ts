@@ -15,6 +15,7 @@ import {
   user,
 } from "@/db/schema";
 import {
+  ACCESS_INVITE_LIFETIME_MS,
   acquireBetaRevocationCleanup,
   allowBetaReinvite,
   completeBetaRevocationCleanup,
@@ -173,7 +174,7 @@ describe("agent JWT secret validation", () => {
       state: "leased",
       createdBy: FIXTURE_BETA_ADMIN_ID,
       createdAt: freshCreatedAt,
-      expiresAt: freshCreatedAt + 172_800_000,
+      expiresAt: freshCreatedAt + ACCESS_INVITE_LIFETIME_MS,
       leaseId: freshLeaseId,
       leasedAt: freshCreatedAt,
       leaseExpiresAt: freshCreatedAt + 600_000,

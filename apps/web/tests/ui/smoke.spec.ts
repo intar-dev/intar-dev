@@ -515,6 +515,32 @@ test("admin operations expose URL-backed people views", async ({
   ).toBeVisible();
 });
 
+test("admin role changes use the app-owned user endpoint", async ({
+  page,
+  ui,
+}) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "dark" });
+  await page.getByRole("tab", { name: "Users" }).click();
+
+  await page.getByRole("button", { name: "Make admin" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Grant admin access?" });
+  await expect(dialog).toContainText("Mina Learner");
+  const roleRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/admin/users/user-learner/role"),
+  );
+  await dialog.getByRole("button", { name: "Confirm change" }).click();
+
+  expect((await roleRequest).postDataJSON()).toEqual({ role: "admin" });
+  expect(ui.server.requests).toContain(
+    "POST /api/admin/users/user-learner/role",
+  );
+  await expect(
+    page.getByRole("button", { name: "Make user" }).first(),
+  ).toBeVisible();
+});
+
 test("authoring editor validates with the browser WASM shell", async ({
   page,
   ui,

@@ -1,0 +1,2 @@
+apps/web/migrations/*.sql text eol=lf linguist-generated=true
+apps/web/migrations/meta/*.json text eol=lf linguist-generated=true

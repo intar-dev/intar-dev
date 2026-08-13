@@ -198,25 +198,6 @@ describe("provider-neutral runtime cost ledger", () => {
     ]);
     await expect(
       env.DB.prepare(
-        `UPDATE runtime_provider_allocations
-         SET price_observation_id = 'price-h-2' WHERE id = 'allocation-h'`,
-      ).run(),
-    ).rejects.toThrow(/provider allocation identity is immutable/u);
-    await expect(
-      env.DB.prepare(
-        `UPDATE provider_price_line_items SET price_nanos = 1
-         WHERE id = 'price-h-1-line-0'`,
-      ).run(),
-    ).rejects.toThrow(/provider price line items are immutable/u);
-    await expect(
-      env.DB.prepare(
-        "UPDATE runtime_provider_cost_ledger SET price_nanos = 1 WHERE id = ?",
-      )
-        .bind((await ledgerIds())[0])
-        .run(),
-    ).rejects.toThrow(/price snapshots are immutable/u);
-    await expect(
-      env.DB.prepare(
         "UPDATE runtime_provider_cost_ledger SET final_cost_nanos = 1 WHERE id = ?",
       )
         .bind((await ledgerIds())[0])
@@ -326,25 +307,6 @@ describe("provider-neutral runtime cost ledger", () => {
       ],
       "cert-allocation-h",
     );
-    await expect(
-      env.DB.prepare(
-        `INSERT INTO runtime_provider_cost_ledger
-           (id, execution_id, allocation_id, provider_resource_id,
-            forecast_id, price_line_item_id, provider_kind, resource_kind,
-            sku, location, currency, raw_price, price_nanos, unit,
-            quantity_nanos, billing_increment_seconds,
-            minimum_duration_seconds, cap_price_nanos, tax_treatment,
-            provider_created_at, created_at, updated_at)
-         VALUES ('tampered-ledger', 'cert-execution-h', 'cert-allocation-h',
-                 'cert-resource-instance-h', NULL, 'cert-price-h-line-0',
-                 'hetzner_cloud', 'instance', 'server:cpx42', 'nbg1', 'EUR',
-                 '0.1', 100000000, 'hour', 1000000000, 3600, 3600, NULL,
-                 'provider_net', ?, ?, ?)`,
-      )
-        .bind(START, START, START)
-        .run(),
-    ).rejects.toThrow(/cost ledger line does not match/u);
-
     await expect(
       reconcileProviderCostLedger({
         allocationId: "cert-allocation-h",

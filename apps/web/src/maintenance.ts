@@ -6,17 +6,26 @@ export async function handleMaintenanceMode(
   request: Request,
   workerEnv: Cloudflare.Env,
 ): Promise<Response | null> {
-  if (String(workerEnv.BETA_ACCESS_MAINTENANCE) !== "on") return null;
+  if (!betaAccessMaintenanceEnabled(workerEnv)) return null;
 
   const pathname = new URL(request.url).pathname;
   if (pathname === "/api/maintenance/bypass" && request.method === "POST") {
     return establishMaintenanceBypass(request, workerEnv);
   }
 
-  if (await hasMaintenanceBypass(request, workerEnv)) return null;
+  // An operator cookie can prove the fence is the expected protected version,
+  // but it never enters the application. Even GET/HEAD application routes are
+  // unsafe here: OAuth callbacks and session refreshes can write D1.
+  if (
+    pathname === "/api/maintenance/status" &&
+    (request.method === "GET" || request.method === "HEAD") &&
+    (await hasMaintenanceBypass(request, workerEnv))
+  ) {
+    return maintenanceStatus(request.method === "HEAD");
+  }
 
   if (pathname.startsWith("/api/") || pathname.startsWith("/agent/")) {
-    return maintenanceJson();
+    return maintenanceJsonResponse();
   }
   return maintenancePage();
 }
@@ -35,7 +44,7 @@ async function establishMaintenanceBypass(
     (fetchSite && fetchSite !== "same-origin") ||
     !contentType.startsWith("application/json")
   ) {
-    return maintenanceJson(403, "maintenance bypass denied");
+    return maintenanceJsonResponse(403, "maintenance bypass denied");
   }
 
   const body = (await request.json().catch(() => null)) as {
@@ -49,7 +58,7 @@ async function establishMaintenanceBypass(
     encoder.encode(configuredSecret).byteLength < 32 ||
     !(await equalSecrets(suppliedSecret, configuredSecret))
   ) {
-    return maintenanceJson(403, "maintenance bypass denied");
+    return maintenanceJsonResponse(403, "maintenance bypass denied");
   }
 
   const expiresAt = Date.now() + BYPASS_TTL_MS;
@@ -57,10 +66,9 @@ async function establishMaintenanceBypass(
   const headers = maintenanceHeaders("application/json; charset=utf-8");
   headers.set(
     "set-cookie",
-    // Lax is required for the top-level GitHub/OIDC callback that redeems the
-    // bootstrap invite. The __Host- prefix still makes this host-only, while
-    // the bypass-creation endpoint itself remains exact-origin JSON only.
-    `${BYPASS_COOKIE}=${expiresAt}.${signature}; Path=/; Max-Age=${Math.floor(BYPASS_TTL_MS / 1000)}; Secure; HttpOnly; SameSite=Lax`,
+    // This cookie authorizes only the database-independent maintenance status
+    // endpoint. It never bypasses the application or an OAuth callback.
+    `${BYPASS_COOKIE}=${expiresAt}.${signature}; Path=/; Max-Age=${Math.floor(BYPASS_TTL_MS / 1000)}; Secure; HttpOnly; SameSite=Strict`,
   );
   return new Response(JSON.stringify({ bypass: true, expiresAt }), {
     status: 200,
@@ -117,7 +125,13 @@ async function equalSecrets(left: string, right: string): Promise<boolean> {
   return mismatch === 0;
 }
 
-function maintenanceJson(
+export function betaAccessMaintenanceEnabled(
+  workerEnv: Pick<Cloudflare.Env, "BETA_ACCESS_MAINTENANCE">,
+): boolean {
+  return String(workerEnv.BETA_ACCESS_MAINTENANCE) === "on";
+}
+
+export function maintenanceJsonResponse(
   status = 503,
   error = "beta access maintenance is in progress",
 ): Response {
@@ -127,6 +141,14 @@ function maintenanceJson(
     status,
     headers,
   });
+}
+
+function maintenanceStatus(head: boolean): Response {
+  const headers = maintenanceHeaders("application/json; charset=utf-8");
+  return new Response(
+    head ? null : JSON.stringify({ maintenance: true, fence: "verified" }),
+    { status: 200, headers },
+  );
 }
 
 function maintenancePage(): Response {
@@ -171,7 +193,7 @@ function maintenancePage(): Response {
       <form id="operator-login" action="/api/maintenance/bypass" method="post">
         <label for="operator-secret">Operator maintenance secret</label>
         <input id="operator-secret" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required>
-        <button id="operator-submit" type="submit">Enter maintenance mode</button>
+        <button id="operator-submit" type="submit">Verify maintenance fence</button>
         <p id="operator-status" role="status" aria-live="polite" aria-atomic="true"></p>
       </form>
     </main>
@@ -216,8 +238,14 @@ function maintenancePage(): Response {
               secretInput.focus();
               return;
             }
-            status.textContent = "Access granted. Reloading…";
-            window.location.reload();
+            const statusResponse = await fetch("/api/maintenance/status", {
+              method: "GET",
+              credentials: "same-origin",
+              cache: "no-store",
+              redirect: "error",
+            });
+            if (!statusResponse.ok) throw new Error("status check failed");
+            status.textContent = "Maintenance fence verified. Application access remains blocked.";
           } catch {
             status.setAttribute("data-error", "true");
             status.textContent = "Operator access could not be checked. Try again.";

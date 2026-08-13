@@ -142,7 +142,7 @@ export const imageBuildCoordinationLocks = sqliteTable(
   {
     key: text("key").primaryKey(),
     ownerToken: text("owner_token").notNull(),
-    expiresAt: integer("expires_at"),
+    expiresAt: integer("expires_at").notNull(),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     updatedAt: integer("updated_at").default(nowMsDefault).notNull(),
   },

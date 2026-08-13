@@ -41,6 +41,8 @@ import {
 } from "@/lib/runtime-allocation-lock";
 import {
   createRuntimeExecution,
+  deleteScenarioRunRuntimeProjection,
+  executeScenarioRunRuntimeProjection,
   updateRuntimeExecutionState,
   type RuntimeVmSpec,
 } from "@/lib/runtime-executions";
@@ -366,6 +368,7 @@ export async function startScenarioRunInternal(params: {
     await assertScenarioStartWriteFence({
       userId: params.userId,
       runId,
+      hostId,
       betaAdmission: params.betaAdmission,
     });
   } catch (error) {
@@ -496,7 +499,12 @@ export async function insertScenarioRunForAdmission(input: {
       ),
     ),
   ];
-  const [inserted] = await env.DB.batch(statements);
+  const [inserted] = await executeScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId: row.runId,
+    statements,
+    mode: "create",
+  });
   if (
     !inserted?.results.some(
       (result) =>
@@ -558,44 +566,34 @@ export async function rollbackScenarioStartAfterFailure(
 
   let durableStatePreserved = false;
   if (input.runInserted) {
-    const statements: D1PreparedStatement[] = [
-      env.DB
-        .prepare(
-          `DELETE FROM scenario_runs
-           WHERE run_id = ?1
-             AND user_id = ?2
-             AND EXISTS (
-               SELECT 1 FROM access_allowlist
-               WHERE user_id = ?2
-                 AND state = 'active'
-                 AND source_invite_id = ?3
-                 AND source_lease_id = ?4
-                 AND granted_at = ?5
-             )`,
-        )
-        .bind(
-          input.runId,
-          input.userId,
-          input.betaAdmission.sourceInviteId,
-          input.betaAdmission.sourceLeaseId,
-          input.betaAdmission.grantedAt,
-        ),
-    ];
-    if (input.runtimeCreated) {
-      statements.push(
+    const deleted = await deleteScenarioRunRuntimeProjection({
+      d1: env.DB,
+      runId: input.runId,
+      statements: [
         env.DB
           .prepare(
-            `DELETE FROM runtime_executions
-             WHERE id = ?1
-               AND NOT EXISTS (
-                 SELECT 1 FROM scenario_runs WHERE run_id = ?1
+            `DELETE FROM scenario_runs
+             WHERE run_id = ?1
+               AND user_id = ?2
+               AND EXISTS (
+                 SELECT 1 FROM access_allowlist
+                 WHERE user_id = ?2
+                   AND state = 'active'
+                   AND source_invite_id = ?3
+                   AND source_lease_id = ?4
+                   AND granted_at = ?5
                )`,
           )
-          .bind(input.runId),
-      );
-    }
-    const [deletedRun] = await env.DB.batch(statements);
-    durableStatePreserved = deletedRun?.meta.changes !== 1;
+          .bind(
+            input.runId,
+            input.userId,
+            input.betaAdmission.sourceInviteId,
+            input.betaAdmission.sourceLeaseId,
+            input.betaAdmission.grantedAt,
+          ),
+      ],
+    });
+    durableStatePreserved = !deleted.deleted;
   } else if (input.runtimeCreated) {
     await env.DB.prepare("DELETE FROM runtime_executions WHERE id = ?1")
       .bind(input.runId)
@@ -637,6 +635,7 @@ async function assertScenarioStartAdmission(
 async function assertScenarioStartWriteFence(input: {
   userId: string;
   runId: string;
+  hostId: string;
   betaAdmission: BetaAdmissionEpoch;
 }): Promise<void> {
   const current = await env.DB.prepare(
@@ -645,10 +644,11 @@ async function assertScenarioStartWriteFence(input: {
      INNER JOIN scenario_runs run
        ON run.user_id = access.user_id AND run.run_id = ?2
      WHERE access.user_id = ?1
+       AND run.host_id = ?3
        AND access.state = 'active'
-       AND access.source_invite_id = ?3
-       AND access.source_lease_id = ?4
-       AND access.granted_at = ?5
+       AND access.source_invite_id = ?4
+       AND access.source_lease_id = ?5
+       AND access.granted_at = ?6
        AND run.state = 'provisioning'
        AND run.delete_requested_at IS NULL
      LIMIT 1`,
@@ -656,6 +656,7 @@ async function assertScenarioStartWriteFence(input: {
     .bind(
       input.userId,
       input.runId,
+      input.hostId,
       input.betaAdmission.sourceInviteId,
       input.betaAdmission.sourceLeaseId,
       input.betaAdmission.grantedAt,
@@ -1051,6 +1052,7 @@ export async function upsertRunVmsIntoDesiredState(input: {
           AND access.source_invite_id = ${input.betaAdmission.sourceInviteId}
           AND access.source_lease_id = ${input.betaAdmission.sourceLeaseId}
           AND access.granted_at = ${input.betaAdmission.grantedAt}
+          AND run.host_id = ${input.hostId}
           AND run.state = 'provisioning'
           AND run.delete_requested_at IS NULL
       )`,
@@ -1058,6 +1060,7 @@ export async function upsertRunVmsIntoDesiredState(input: {
         assertScenarioStartWriteFence({
           userId: input.userId,
           runId: input.runId,
+          hostId: input.hostId,
           betaAdmission: input.betaAdmission,
         }),
     },

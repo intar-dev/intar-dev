@@ -22,6 +22,10 @@ import {
   user,
 } from "@/db/schema";
 import { createEmptyHostDesiredState } from "@/lib/desired-state";
+import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
 import { resetD1Database } from "@/test/d1-migrations";
 import type { VmActualStateV2 } from "@/generated/bridge";
 
@@ -102,7 +106,7 @@ describe("host CPU reservations", () => {
 
     await expect(
       seedRunningDesiredState(hostId, runId, `${runId}-vm`, now),
-    ).rejects.toThrow('Failed query: insert into "host_desired_state"');
+    ).rejects.toThrow("desired running VM requires an active local run");
 
     await seedRun(hostId, runId, now);
     await expect(
@@ -110,12 +114,9 @@ describe("host CPU reservations", () => {
     ).resolves.toBeUndefined();
 
     const triggers = await env.DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'host_desired_running_vm_requires_active_run_%' ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'trigger'",
     ).all<{ name: string }>();
-    expect(triggers.results.map(({ name }) => name)).toEqual([
-      "host_desired_running_vm_requires_active_run_insert",
-      "host_desired_running_vm_requires_active_run_update",
-    ]);
+    expect(triggers.results).toEqual([]);
   });
 
   it("serializes concurrent boot reservations and admits exactly eight 125m VMs", async () => {
@@ -640,7 +641,8 @@ async function seedRun(
   now: number,
   state: unknown = { vms: [] },
 ): Promise<void> {
-  await drizzle(env.DB)
+  const db = drizzle(env.DB);
+  const mutation = db
     .insert(scenarioRuns)
     .values({
       runId,
@@ -671,6 +673,12 @@ async function seedRun(
       createdAt: now,
       updatedAt: now,
     });
+  await executeScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId,
+    statements: [drizzleQueryToD1Statement(env.DB, mutation)],
+    mode: "create",
+  });
 }
 
 function projectedQuotaState(
@@ -727,13 +735,26 @@ async function seedRunningDesiredState(
       },
     ],
   };
-  await drizzle(env.DB).insert(hostDesiredState).values({
-    hostId,
-    version: 1,
-    docJson: desired,
-    createdAt: now,
-    updatedAt: now,
-  });
+  const inserted = await env.DB.prepare(
+    `INSERT INTO host_desired_state (
+       host_id, version, doc_json, created_at, updated_at
+     )
+     SELECT ?1, 1, ?2, ?3, ?3
+     WHERE EXISTS (
+       SELECT 1
+       FROM scenario_runs run
+       WHERE run.run_id = ?4
+         AND run.host_id = ?1
+         AND run.active_key IS NOT NULL
+         AND run.completed_at IS NULL
+         AND run.failed_at IS NULL
+     )`,
+  )
+    .bind(hostId, JSON.stringify(desired), now, runId)
+    .run();
+  if (inserted.meta.changes !== 1) {
+    throw new Error("desired running VM requires an active local run");
+  }
 }
 
 async function seedGenericRuntimeReservation(

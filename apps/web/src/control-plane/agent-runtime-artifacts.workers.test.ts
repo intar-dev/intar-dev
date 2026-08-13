@@ -30,6 +30,10 @@ import { AppError } from "@/lib/app-error";
 import { grantFixtureBetaAccess } from "@/test/beta-access-fixtures";
 import { listWorkshopArtifactsForOwner } from "@/lib/workshops/artifacts";
 import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
+import {
   RUN_PHASE_ORDER,
   buildInitialRunState,
   recomputeRunState,
@@ -283,9 +287,9 @@ async function seedScenarioRuntime(): Promise<string> {
     phase: "archiving",
     vms: initial.vms.map((vm) => ({ ...vm, phase: "archived" as const })),
   });
-  await db.insert(scenarioRuns).values({
+  const runInsert = db.insert(scenarioRuns).values({
     runId: "scenario-execution",
-    runtimeExecutionId: "scenario-execution",
+    runtimeExecutionId: null,
     userId: "scenario-owner",
     hostId: "scenario-host",
     scenarioId: "scenario",
@@ -306,6 +310,12 @@ async function seedScenarioRuntime(): Promise<string> {
     stateJson: JSON.stringify(archiving),
     createdAt: now,
     updatedAt: now,
+  });
+  await executeScenarioRunRuntimeProjection({
+    d1: env.DB,
+    runId: "scenario-execution",
+    statements: [drizzleQueryToD1Statement(env.DB, runInsert)],
+    mode: "create",
   });
   await db.insert(runtimeVms).values(runtimeVmRow(1, "scenario"));
   return issueAgentToken("scenario-host");
@@ -377,6 +387,7 @@ async function seedWorkshopRuntime(input: {
       sessionId: "workshop-session",
       userId: "learner",
       role: "participant",
+      workspaceEnabled: true,
       checkedInAt: now,
       provisionState: "ready",
       assignedBy: "facilitator",

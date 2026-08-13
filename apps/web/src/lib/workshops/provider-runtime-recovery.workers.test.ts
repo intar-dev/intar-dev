@@ -23,6 +23,7 @@ import {
   initialProviderReadinessTimedOut,
   nextProviderOperationLogicalOrdinal,
   providerLocationFallbackBootstrapEligible,
+  recordProviderOperationObservation,
   shouldDiscoverHetznerCreateBeforeRetry,
   sweepWorkshopProviderRuntimes,
 } from "./provider-runtime";
@@ -869,6 +870,54 @@ describe("provider runtime recovery", () => {
     expect(
       nextProviderOperationLogicalOrdinal({ state: "retryable", attempt: 4 }),
     ).toBe(1);
+  });
+
+  it("rejects a late provider operation observation after location fallback advanced", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_operations
+           (id, allocation_id, provider_kind, operation_kind, location_attempt,
+            provider_operation_id, request_id, state, attempt, created_at, updated_at)
+         VALUES ('attempt-1-operation', 'cert-allocation', 'gcp_compute',
+                 'create_instance', 1, 'operation-self-link',
+                 'attempt-1-request', 'running', 1, 1, 1)`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET location = 'europe-west3-b', location_attempt = 2,
+             location_attempt_started_at = 2, updated_at = 2
+         WHERE id = 'cert-allocation' AND location_attempt = 1`,
+      ),
+    ]);
+
+    await expect(
+      recordProviderOperationObservation({
+        allocationId: "cert-allocation",
+        locationAttempt: 1,
+        providerOperationId: "operation-self-link",
+        providerState: "DONE",
+        state: "succeeded",
+        now: 3,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "provider_location_attempt_stale",
+    });
+    const operation = await env.DB.prepare(
+      `SELECT state, last_polled_at, completed_at
+       FROM runtime_provider_operations
+       WHERE id = 'attempt-1-operation'`,
+    ).first<{
+      state: string;
+      last_polled_at: number | null;
+      completed_at: number | null;
+    }>();
+    expect(operation).toEqual({
+      state: "running",
+      last_polled_at: null,
+      completed_at: null,
+    });
   });
 
   it("discovers a Hetzner create left running without an action identity before any POST retry", () => {

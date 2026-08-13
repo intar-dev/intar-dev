@@ -13,6 +13,10 @@ import {
 import { recordProbeTransitions } from "@/lib/run-probe-history";
 import { nextSolvedAt } from "@/lib/scenario-run-outcome";
 import {
+  drizzleQueryToD1Statement,
+  executeScenarioRunRuntimeProjection,
+} from "@/lib/runtime-executions";
+import {
   loadOrCreateHostDesiredState,
   mutateStoredHostDesiredState,
 } from "@/lib/desired-state-store";
@@ -160,7 +164,7 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
       }
 
       const expectedHostSession = options?.expectedHostSession;
-      const updated = await db
+      const mutation = db
         .update(scenarioRuns)
         .set({
           state: merged.phase,
@@ -198,6 +202,13 @@ export class HostRuntimeBase extends DurableObject<Cloudflare.Env> {
           ),
         )
         .returning({ runId: scenarioRuns.runId });
+      const [updatedResult] = await executeScenarioRunRuntimeProjection({
+        d1: this.env.DB,
+        runId,
+        statements: [drizzleQueryToD1Statement(this.env.DB, mutation)],
+        mode: "update",
+      });
+      const updated = updatedResult?.results ?? [];
       if (!updated.length) {
         if (
           expectedHostSession &&

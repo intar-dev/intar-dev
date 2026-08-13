@@ -97,6 +97,326 @@ interface RuntimeExecutionIdentityRow {
   current_generation: number;
 }
 
+export function drizzleQueryToD1Statement(
+  d1: D1Database,
+  query: { toSQL(): { sql: string; params: unknown[] } },
+): D1PreparedStatement {
+  const compiled = query.toSQL();
+  return d1.prepare(compiled.sql).bind(...compiled.params);
+}
+
+/**
+ * Runs a scenario-run mutation and its provider-neutral runtime projection in
+ * one D1 batch. The projection used to be maintained by scenario_runs
+ * triggers; keeping it in the command batch preserves the same rollback and
+ * cross-domain active-slot semantics without schema-owned behavior.
+ */
+export async function executeScenarioRunRuntimeProjection(input: {
+  d1: D1Database;
+  runId: string;
+  statements: D1PreparedStatement[];
+  mode: "create" | "update";
+}): Promise<D1Result<unknown>[]> {
+  const runId = requiredId(input.runId, "runId");
+  const projection = scenarioRunRuntimeProjectionStatements(
+    input.d1,
+    runId,
+    input.mode,
+  );
+  try {
+    return await input.d1.batch([...input.statements, ...projection]);
+  } catch (error) {
+    if (isActiveRuntimeSlotConflict(error)) {
+      throw activeRuntimeSlotConflict();
+    }
+    if (
+      errorChainMatches(
+        error,
+        /runtime_executions_generation_positive|scenario runtime execution identity mismatch/i,
+      )
+    ) {
+      throw appError(
+        409,
+        "scenario_runtime_execution_identity_mismatch",
+        "the scenario run does not reference its generation-one runtime execution",
+      );
+    }
+    throw error;
+  }
+}
+
+/** Deletes a scenario run and every execution generation in its domain. */
+export async function deleteScenarioRunRuntimeProjection(input: {
+  d1: D1Database;
+  runId: string;
+  userId?: string;
+  statements?: D1PreparedStatement[];
+}): Promise<{ deleted: boolean }> {
+  const runId = requiredId(input.runId, "runId");
+  const userId = normalizedOptionalId(input.userId);
+  const deleteStatements =
+    input.statements ??
+    [
+      input.d1
+        .prepare(
+          `DELETE FROM scenario_runs
+           WHERE run_id = ?1 AND (?2 IS NULL OR user_id = ?2)`,
+        )
+        .bind(runId, userId),
+    ];
+  if (deleteStatements.length === 0) {
+    throw invalidRuntimeInput("a scenario delete requires a mutation statement");
+  }
+  const results = await input.d1.batch([
+    ...deleteStatements,
+    input.d1
+      .prepare(
+        `DELETE FROM runtime_executions
+         WHERE domain_kind = 'scenario'
+           AND domain_id = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM scenario_runs WHERE run_id = ?1
+           )`,
+      )
+      .bind(runId),
+  ]);
+  return { deleted: changes(results[0]) === 1 };
+}
+
+function scenarioRunRuntimeProjectionStatements(
+  d1: D1Database,
+  runId: string,
+  mode: "create" | "update",
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
+  if (mode === "create") {
+    statements.push(
+      d1
+        .prepare(
+          `INSERT INTO runtime_executions (
+             id, user_id, organization_id, host_id, provider_kind,
+             provider_connection_id, domain_kind, domain_id, generation,
+             source_execution_id, checkpoint_id, state, lease_expires_at,
+             archive_requested_at, ended_at, created_at, updated_at
+           )
+           SELECT
+             coalesce(run.runtime_execution_id, run.run_id),
+             run.user_id,
+             run.organization_id,
+             run.host_id,
+             'agent_kvm',
+             NULL,
+             'scenario',
+             run.run_id,
+             1,
+             NULL,
+             NULL,
+             CASE
+               WHEN run.state = 'queued' THEN 'queued'
+               WHEN run.state = 'provisioning' THEN 'provisioning'
+               WHEN run.state IN (
+                 'teardown_requested', 'tearing_down', 'archiving'
+               ) THEN 'archiving'
+               WHEN run.state = 'completed' THEN 'archived'
+               WHEN run.state = 'failed' THEN 'failed'
+               ELSE 'ready'
+             END,
+             NULL,
+             CASE
+               WHEN run.state IN (
+                 'teardown_requested', 'tearing_down', 'archiving',
+                 'completed', 'failed'
+               ) THEN run.updated_at
+               ELSE NULL
+             END,
+             CASE
+               WHEN run.state = 'completed'
+                 THEN coalesce(run.completed_at, run.updated_at)
+               WHEN run.state = 'failed'
+                 THEN coalesce(run.failed_at, run.updated_at)
+               ELSE NULL
+             END,
+             run.created_at,
+             run.updated_at
+           FROM scenario_runs run
+           WHERE run.run_id = ?1
+             AND NOT EXISTS (
+               SELECT 1
+               FROM runtime_executions execution
+               WHERE execution.id = coalesce(
+                 run.runtime_execution_id,
+                 run.run_id
+               )
+             )`,
+        )
+        .bind(runId),
+      // A deliberately invalid generation is a transaction sentinel. It is
+      // selected only for a mismatched pre-existing identity, so the named
+      // Drizzle CHECK constraint aborts and rolls the entire command back.
+      d1
+        .prepare(
+          `INSERT INTO runtime_executions (
+             id, user_id, organization_id, host_id, provider_kind,
+             provider_connection_id, domain_kind, domain_id, generation,
+             source_execution_id, checkpoint_id, state, lease_expires_at,
+             archive_requested_at, ended_at, created_at, updated_at
+           )
+           SELECT
+             '__scenario_projection_mismatch__:' || run.run_id,
+             run.user_id,
+             run.organization_id,
+             run.host_id,
+             'agent_kvm',
+             NULL,
+             'scenario',
+             run.run_id,
+             0,
+             NULL,
+             NULL,
+             'queued',
+             NULL,
+             NULL,
+             NULL,
+             run.created_at,
+             run.updated_at
+           FROM scenario_runs run
+           INNER JOIN runtime_executions execution
+             ON execution.id = coalesce(
+               run.runtime_execution_id,
+               run.run_id
+             )
+           WHERE run.run_id = ?1
+             AND NOT (
+               execution.user_id = run.user_id
+               AND execution.organization_id IS run.organization_id
+               AND execution.domain_kind = 'scenario'
+               AND execution.domain_id = run.run_id
+               AND execution.generation = 1
+             )`,
+        )
+        .bind(runId),
+      d1
+        .prepare(
+          `UPDATE scenario_runs
+           SET runtime_execution_id = coalesce(runtime_execution_id, run_id)
+           WHERE run_id = ?1 AND runtime_execution_id IS NULL`,
+        )
+        .bind(runId),
+    );
+  }
+
+  statements.push(
+    d1
+      .prepare(
+        `UPDATE runtime_executions
+         SET
+           host_id = (
+             SELECT run.host_id
+             FROM scenario_runs run
+             WHERE run.run_id = ?1
+           ),
+           state = (
+             SELECT CASE
+               WHEN run.state = 'queued' THEN 'queued'
+               WHEN run.state = 'provisioning' THEN 'provisioning'
+               WHEN run.state IN (
+                 'teardown_requested', 'tearing_down', 'archiving'
+               ) THEN 'archiving'
+               WHEN run.state = 'completed' THEN 'archived'
+               WHEN run.state = 'failed' THEN 'failed'
+               ELSE 'ready'
+             END
+             FROM scenario_runs run
+             WHERE run.run_id = ?1
+           ),
+           archive_requested_at = CASE
+             WHEN (
+               SELECT run.state
+               FROM scenario_runs run
+               WHERE run.run_id = ?1
+             ) IN (
+               'teardown_requested', 'tearing_down', 'archiving',
+               'completed', 'failed'
+             ) THEN coalesce(
+               archive_requested_at,
+               (
+                 SELECT run.updated_at
+                 FROM scenario_runs run
+                 WHERE run.run_id = ?1
+               )
+             )
+             ELSE archive_requested_at
+           END,
+           ended_at = CASE
+             WHEN (
+               SELECT run.state
+               FROM scenario_runs run
+               WHERE run.run_id = ?1
+             ) = 'completed' THEN (
+               SELECT coalesce(run.completed_at, run.updated_at)
+               FROM scenario_runs run
+               WHERE run.run_id = ?1
+             )
+             WHEN (
+               SELECT run.state
+               FROM scenario_runs run
+               WHERE run.run_id = ?1
+             ) = 'failed' THEN (
+               SELECT coalesce(run.failed_at, run.updated_at)
+               FROM scenario_runs run
+               WHERE run.run_id = ?1
+             )
+             ELSE ended_at
+           END,
+           updated_at = (
+             SELECT run.updated_at
+             FROM scenario_runs run
+             WHERE run.run_id = ?1
+           )
+         WHERE id = (
+             SELECT run.runtime_execution_id
+             FROM scenario_runs run
+             WHERE run.run_id = ?1
+           )
+           AND domain_kind = 'scenario'
+           AND domain_id = ?1`,
+      )
+      .bind(runId),
+    d1
+      .prepare(
+        `DELETE FROM active_runtime_slots
+         WHERE execution_id = (
+           SELECT run.runtime_execution_id
+           FROM scenario_runs run
+           WHERE run.run_id = ?1 AND run.active_key IS NULL
+         )`,
+      )
+      .bind(runId),
+    // No conflict handler is intentional: a slot owned by another runtime
+    // aborts the whole D1 batch, just as the old trigger did.
+    d1
+      .prepare(
+        `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
+         SELECT
+           run.user_id,
+           run.runtime_execution_id,
+           CASE WHEN ?2 = 'create' THEN run.created_at ELSE run.updated_at END
+         FROM scenario_runs run
+         WHERE run.run_id = ?1
+           AND run.active_key IS NOT NULL
+           AND run.runtime_execution_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM active_runtime_slots slot
+             WHERE slot.user_id = run.user_id
+               AND slot.execution_id = run.runtime_execution_id
+           )`,
+      )
+      .bind(runId, mode),
+  );
+  return statements;
+}
+
 export async function createRuntimeExecution(
   input: CreateRuntimeExecutionInput,
 ): Promise<RuntimeExecutionHandle> {
@@ -138,7 +458,31 @@ export async function createRuntimeExecution(
         provider_connection_id, domain_kind, domain_id,
         generation, source_execution_id, checkpoint_id, state,
         lease_expires_at, archive_requested_at, ended_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?)`,
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, 'queued', ?, NULL, NULL, ?, ?
+      WHERE ? <> 'workshop'
+         OR EXISTS (
+           SELECT 1
+           FROM workshop_workspaces workspace
+           JOIN workshop_sessions session ON session.id = workspace.session_id
+           JOIN workshop_workspace_generations generation
+             ON generation.workspace_id = workspace.id
+            AND generation.id = workspace.current_generation_id
+           JOIN workshop_session_members roster
+             ON roster.session_id = session.id
+            AND roster.user_id = workspace.user_id
+            AND roster.workspace_enabled = 1
+           JOIN member organization_member
+             ON organization_member.organization_id = session.organization_id
+            AND organization_member.user_id = workspace.user_id
+           WHERE workspace.id = ?
+             AND workspace.user_id = ?
+             AND session.organization_id = ?
+             AND session.state IN ('lobby', 'live')
+             AND workspace.state NOT IN ('ending', 'ended')
+             AND generation.state NOT IN ('archiving', 'archived')
+             AND organization_member.workshop_access_revoking_at IS NULL
+         )`,
     ).bind(
       executionId,
       userId,
@@ -152,6 +496,10 @@ export async function createRuntimeExecution(
       leaseExpiresAt,
       now,
       now,
+      input.domainKind,
+      domainId,
+      userId,
+      organizationId,
     ),
     ...vms.map((vm) => runtimeVmInsert(vm, now)),
   ];
@@ -177,7 +525,14 @@ export async function createRuntimeExecution(
   }
 
   try {
-    await env.DB.batch(statements);
+    const results = await env.DB.batch(statements);
+    if (changes(results[0]) !== 1) {
+      throw appError(
+        409,
+        "runtime_execution_authorization_changed",
+        "workshop runtime provisioning is no longer authorized",
+      );
+    }
   } catch (error) {
     if (isActiveRuntimeSlotConflict(error)) {
       throw activeRuntimeSlotConflict();
@@ -269,6 +624,31 @@ export async function createRuntimeRecoveryGeneration(
       FROM runtime_executions source
       WHERE source.id = ?
         AND source.generation = ?
+        AND (
+          source.domain_kind <> 'workshop'
+          OR EXISTS (
+            SELECT 1
+            FROM workshop_workspaces workspace
+            JOIN workshop_sessions session ON session.id = workspace.session_id
+            JOIN workshop_workspace_generations workspace_generation
+              ON workspace_generation.workspace_id = workspace.id
+             AND workspace_generation.id = workspace.current_generation_id
+            JOIN workshop_session_members roster
+              ON roster.session_id = session.id
+             AND roster.user_id = workspace.user_id
+             AND roster.workspace_enabled = 1
+            JOIN member organization_member
+              ON organization_member.organization_id = session.organization_id
+             AND organization_member.user_id = workspace.user_id
+            WHERE workspace.id = source.domain_id
+              AND workspace.user_id = source.user_id
+              AND session.organization_id = source.organization_id
+              AND session.state IN ('lobby', 'live')
+              AND workspace.state NOT IN ('ending', 'ended')
+              AND workspace_generation.state NOT IN ('archiving', 'archived')
+              AND organization_member.workshop_access_revoking_at IS NULL
+          )
+        )
         AND NOT EXISTS (
           SELECT 1
           FROM runtime_executions newer
@@ -313,12 +693,31 @@ export async function createRuntimeRecoveryGeneration(
        FROM runtime_executions source
        WHERE source.id = ? AND source.generation = ?
        ON CONFLICT (user_id) DO UPDATE SET
-         execution_id = CASE
-           WHEN active_runtime_slots.execution_id = ? THEN excluded.execution_id
-           ELSE ''
-         END,
-         acquired_at = excluded.acquired_at`,
+         execution_id = excluded.execution_id,
+         acquired_at = excluded.acquired_at
+       WHERE active_runtime_slots.execution_id = ?`,
     ).bind(executionId, now, source.id, input.expectedGeneration, source.id),
+    // If another domain owns the user slot, force the named unique constraint
+    // instead of manufacturing an invalid FK value. That keeps the conflict
+    // recognizable on D1 and rolls the complete recovery batch back.
+    env.DB.prepare(
+      `INSERT INTO active_runtime_slots (user_id, execution_id, acquired_at)
+       SELECT source.user_id, ?, ?
+       FROM runtime_executions source
+       WHERE source.id = ? AND source.generation = ?
+         AND NOT EXISTS (
+           SELECT 1
+           FROM active_runtime_slots slot
+           WHERE slot.user_id = source.user_id
+             AND slot.execution_id = ?
+         )`,
+    ).bind(
+      executionId,
+      now,
+      source.id,
+      input.expectedGeneration,
+      executionId,
+    ),
     env.DB.prepare(
       `UPDATE scenario_runs
        SET runtime_execution_id = ?
@@ -342,6 +741,13 @@ export async function createRuntimeRecoveryGeneration(
   try {
     const results = await env.DB.batch(statements);
     if (changes(results[0]) !== 1) {
+      if (source.domain_kind === "workshop") {
+        throw appError(
+          409,
+          "runtime_execution_authorization_changed",
+          "workshop runtime provisioning is no longer authorized",
+        );
+      }
       throw runtimeGenerationStale(source);
     }
   } catch (error) {
@@ -352,6 +758,19 @@ export async function createRuntimeRecoveryGeneration(
       current.current_generation !== input.expectedGeneration
     ) {
       throw runtimeGenerationStale(current ?? source);
+    }
+    if (
+      source.domain_kind === "workshop" &&
+      errorChainMatches(
+        error,
+        /FOREIGN KEY constraint failed|workshop runtime provisioning is no longer authorized/i,
+      )
+    ) {
+      throw appError(
+        409,
+        "runtime_execution_authorization_changed",
+        "workshop runtime provisioning is no longer authorized",
+      );
     }
     if (isActiveRuntimeSlotConflict(error)) {
       throw activeRuntimeSlotConflict();

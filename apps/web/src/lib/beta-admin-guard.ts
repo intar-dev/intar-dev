@@ -1,85 +1,194 @@
-import { env } from "cloudflare:workers";
+import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { accessAllowlist, user } from "@/db/schema";
 import { appError } from "@/lib/app-error";
 
-interface AdminAccessRow {
-  target_is_active_admin: number;
-  active_admin_count: number;
+export type PlatformUserRole = "user" | "admin";
+
+interface PlatformUserMutationInput {
+  d1: D1Database;
+  targetUserId: string;
+  actorUserId: string;
+  now?: number;
 }
 
-/**
- * Platform administration is useful only while at least one active beta user
- * can reach it. This guard is shared by beta revocation and native Better Auth
- * ban/role/removal routes.
- */
-export async function assertNotLastActivePlatformAdmin(
-  targetUserId: string,
+export async function setPlatformUserRole(
+  input: PlatformUserMutationInput & { role: PlatformUserRole },
 ): Promise<void> {
-  const row = await env.DB.prepare(
-    `SELECT
-       EXISTS(
-         SELECT 1
-         FROM access_allowlist AS access
-         INNER JOIN user AS identity ON identity.id = access.user_id
-         WHERE access.user_id = ?1
-           AND access.state = 'active'
-           AND identity.role = 'admin'
-           AND identity.banned = 0
-       ) AS target_is_active_admin,
-       (
-         SELECT COUNT(*)
-         FROM access_allowlist AS access
-         INNER JOIN user AS identity ON identity.id = access.user_id
-         WHERE access.state = 'active'
-           AND identity.role = 'admin'
-           AND identity.banned = 0
-       ) AS active_admin_count`,
-  )
-    .bind(targetUserId)
-    .first<AdminAccessRow>();
+  const targetUserId = requiredId(input.targetUserId, "target user");
+  const actorUserId = requiredId(input.actorUserId, "actor user");
+  const now = validNow(input.now);
+  const db = drizzle(input.d1);
+  const updated = await db
+    .update(user)
+    .set({ role: input.role, updatedAt: new Date(now) })
+    .where(
+      and(
+        eq(user.id, targetUserId),
+        activeAdministratorPredicate(actorUserId),
+        input.role === "admin"
+          ? undefined
+          : lastAdministratorSafePredicate(targetUserId),
+      ),
+    )
+    .returning({ id: user.id });
+  if (updated.length === 1) return;
+  await throwPlatformUserMutationFailure({
+    d1: input.d1,
+    targetUserId,
+    actorUserId,
+  });
+}
 
-  if (row?.target_is_active_admin === 1 && row.active_admin_count <= 1) {
+export async function setPlatformUserBanned(
+  input: PlatformUserMutationInput & {
+    banned: boolean;
+    reason?: string | null;
+  },
+): Promise<void> {
+  const targetUserId = requiredId(input.targetUserId, "target user");
+  const actorUserId = requiredId(input.actorUserId, "actor user");
+  const now = validNow(input.now);
+  const reason = input.banned
+    ? input.reason?.trim().slice(0, 255) || "Access revoked by admin"
+    : null;
+  const db = drizzle(input.d1);
+  const updated = await db
+    .update(user)
+    .set({
+      banned: input.banned,
+      banReason: reason,
+      banExpires: null,
+      updatedAt: new Date(now),
+    })
+    .where(
+      and(
+        eq(user.id, targetUserId),
+        activeAdministratorPredicate(actorUserId),
+        input.banned
+          ? lastAdministratorSafePredicate(targetUserId)
+          : undefined,
+      ),
+    )
+    .returning({ id: user.id });
+  if (updated.length === 1) return;
+  await throwPlatformUserMutationFailure({
+    d1: input.d1,
+    targetUserId,
+    actorUserId,
+  });
+}
+
+function activeAdministratorPredicate(actorUserId: string) {
+  return sql`exists (
+    select 1
+    from ${accessAllowlist} as actor_access
+    join ${user} as actor_identity
+      on actor_identity.id = actor_access.user_id
+    where actor_access.user_id = ${actorUserId}
+      and actor_access.state = 'active'
+      and coalesce(actor_identity.banned, 0) = 0
+      and instr(
+        ',' || replace(lower(coalesce(actor_identity.role, '')), ' ', '') || ',',
+        ',admin,'
+      ) > 0
+  )`;
+}
+
+function lastAdministratorSafePredicate(targetUserId: string) {
+  return sql`(
+    not exists (
+      select 1
+      from ${accessAllowlist} as target_access
+      join ${user} as target_identity
+        on target_identity.id = target_access.user_id
+      where target_access.user_id = ${targetUserId}
+        and target_access.state = 'active'
+        and coalesce(target_identity.banned, 0) = 0
+        and instr(
+          ',' || replace(lower(coalesce(target_identity.role, '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0
+    )
+    or exists (
+      select 1
+      from ${accessAllowlist} as other_access
+      join ${user} as other_identity
+        on other_identity.id = other_access.user_id
+      where other_access.state = 'active'
+        and other_access.user_id <> ${targetUserId}
+        and coalesce(other_identity.banned, 0) = 0
+        and instr(
+          ',' || replace(lower(coalesce(other_identity.role, '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0
+    )
+  )`;
+}
+
+async function throwPlatformUserMutationFailure(input: {
+  d1: D1Database;
+  targetUserId: string;
+  actorUserId: string;
+}): Promise<never> {
+  const db = drizzle(input.d1);
+  const [target, actor] = await Promise.all([
+    db
+      .select({ id: user.id })
+      .from(user)
+      .where(eq(user.id, input.targetUserId))
+      .limit(1),
+    db
+      .select({ id: user.id })
+      .from(user)
+      .innerJoin(
+        accessAllowlist,
+        and(
+          eq(accessAllowlist.userId, user.id),
+          eq(accessAllowlist.state, "active"),
+        ),
+      )
+      .where(
+        and(
+          eq(user.id, input.actorUserId),
+          sql`coalesce(${user.banned}, 0) = 0`,
+          sql`instr(
+            ',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',',
+            ',admin,'
+          ) > 0`,
+        ),
+      )
+      .limit(1),
+  ]);
+  if (target.length === 0) {
+    throw appError(404, "user_not_found", "user not found");
+  }
+  if (actor.length === 0) {
     throw appError(
-      409,
-      "last_active_admin",
-      "the last active platform administrator cannot be removed",
+      403,
+      "admin_required",
+      "active beta administrator access is required",
     );
   }
+  throw appError(
+    409,
+    "last_active_admin",
+    "the last active platform administrator cannot be removed",
+  );
 }
 
-export async function guardNativeAdminMutation(request: Request): Promise<void> {
-  const path = new URL(request.url).pathname.replace(/^\/api\/auth/u, "");
-  if (
-    path !== "/admin/ban-user" &&
-    path !== "/admin/remove-user" &&
-    path !== "/admin/set-role" &&
-    path !== "/admin/update-user"
-  ) {
-    return;
+function requiredId(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 255) {
+    throw appError(400, "invalid_user_id", `${label} id is invalid`);
   }
+  return normalized;
+}
 
-  const body = (await request.clone().json().catch(() => null)) as
-    | {
-        userId?: unknown;
-        role?: unknown;
-        data?: { role?: unknown; banned?: unknown };
-      }
-    | null;
-  const targetUserId =
-    typeof body?.userId === "string" ? body.userId.trim() : "";
-  if (!targetUserId) return;
-
-  if (path === "/admin/set-role") {
-    const roles = Array.isArray(body?.role) ? body.role : [body?.role];
-    if (roles.some((role) => role === "admin")) return;
+function validNow(value: number | undefined): number {
+  const now = value ?? Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) {
+    throw appError(500, "clock_invalid", "the server clock is invalid");
   }
-
-  if (path === "/admin/update-user") {
-    const data = body?.data;
-    const removesAdmin =
-      data?.role !== undefined && data.role !== "admin";
-    const bansUser = data?.banned === true;
-    if (!removesAdmin && !bansUser) return;
-  }
-
-  await assertNotLastActivePlatformAdmin(targetUserId);
+  return now;
 }

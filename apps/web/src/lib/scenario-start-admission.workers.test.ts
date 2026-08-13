@@ -104,6 +104,50 @@ describe("scenario start beta-admission fence", () => {
     expect(JSON.stringify(desired[0]?.doc ?? {})).not.toContain("allocated-run");
   });
 
+  it("cannot dispatch a run's desired VM state to a different host", async () => {
+    const admission = await seedScenarioStartFixture();
+    await insertScenarioRunForAdmission({
+      row: scenarioRunRow("host-bound-run"),
+      sshKeyRows: [scenarioSshKeyRow("host-bound-run")],
+      betaAdmission: admission,
+    });
+    await drizzle(env.DB).insert(agentHosts).values({
+      id: "different-runner",
+      userId: FIXTURE_BETA_ADMIN_ID,
+      organizationId: "scenario-organization",
+      name: "Different runner",
+      role: "agent",
+      scenarioEnabled: false,
+      disabled: false,
+      connected: true,
+      createdAt: 10_000,
+      updatedAt: 10_000,
+    });
+
+    const vm = scenarioVm("host-bound-run");
+    await expect(
+      upsertRunVmsIntoDesiredState({
+        hostId: "different-runner",
+        runId: "host-bound-run",
+        userId: "scenario-user",
+        betaAdmission: admission,
+        vms: [vm],
+        nowUnixMs: 10_001,
+        sshAuthorizedKeysByVmId: new Map([
+          [vm.id, ["ssh-ed25519 AAAAC3Nza host-fence"]],
+        ]),
+      }),
+    ).rejects.toMatchObject({ code: "beta_access_revoked" });
+
+    const desired = await drizzle(env.DB)
+      .select({ doc: hostDesiredState.docJson })
+      .from(hostDesiredState)
+      .where(eq(hostDesiredState.hostId, "different-runner"));
+    expect(JSON.stringify(desired[0]?.doc ?? {})).not.toContain(
+      "host-bound-run",
+    );
+  });
+
   it("does not attach SSH keys to a colliding run when the conditional insert loses admission", async () => {
     const admission = await seedScenarioStartFixture();
     await insertScenarioRunForAdmission({

@@ -1,13 +1,14 @@
-import { and, desc, eq, inArray, isNull, notExists } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, notExists, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import {
   accessAllowlist,
   accessEvents,
   accessInviteCodes,
   accessInviteRemovals,
+  type AccessEventType,
   type AccessInviteKind,
 } from "@/db/schema/application";
-import { user } from "@/db/schema/core";
+import { account, user } from "@/db/schema/core";
 import { appError, errorChainMatches } from "@/lib/app-error";
 import { isValidGithubUsername } from "@/lib/github-username";
 import { createAppId } from "@/lib/id";
@@ -24,6 +25,8 @@ const ID_MAX_LENGTH = 255;
 
 type InviteRow = typeof accessInviteCodes.$inferSelect;
 type AllowlistRow = typeof accessAllowlist.$inferSelect;
+type InviteInsertRow = typeof accessInviteCodes.$inferInsert;
+type AccessEventInsertRow = typeof accessEvents.$inferInsert;
 
 export interface AccessInviteSummary {
   id: string;
@@ -138,19 +141,36 @@ export async function createAccessInvite(
     version: 1,
     updatedAt: now,
   };
-
-  try {
-    const inserted = await drizzle(params.d1)
-      .insert(accessInviteCodes)
-      .values(row)
-      .returning();
-    return { ...toInviteSummary(inserted[0]!), code: generated.code };
-  } catch (error) {
-    if (isInviteAdministratorGuardError(error)) {
-      throw inviteIssuerForbidden();
-    }
-    throw error;
-  }
+  const db = drizzle(params.d1);
+  const createdEvent = accessEvent({
+    eventType: "invite.created",
+    inviteId: row.id,
+    actorUserId,
+    reason: params.kind,
+    createdAt: now,
+  });
+  const insert = db
+    .insert(accessInviteCodes)
+    .select(
+      db
+        .select(inviteInsertFields(row))
+        .from(sql`(select 1) as command_source`)
+        .where(
+          params.kind === "bootstrap_admin"
+            ? sql`true`
+            : activeAdministratorPredicate(actorUserId!),
+        ),
+    )
+    .returning();
+  const eventInsert = db.insert(accessEvents).select(
+    db
+      .select(accessEventInsertFields(createdEvent))
+      .from(accessInviteCodes)
+      .where(eq(accessInviteCodes.id, row.id)),
+  );
+  const [inserted] = await db.batch([insert, eventInsert]);
+  if (!inserted[0]) throw inviteIssuerForbidden();
+  return { ...toInviteSummary(inserted[0]), code: generated.code };
 }
 
 export async function listAccessInvites(params: {
@@ -265,31 +285,74 @@ export async function leaseAccessInvite(params: {
   const inviteId = validId(params.inviteId, "invite");
   const leaseId = createAppId();
   const leaseExpiresAt = now + ACCESS_INVITE_LEASE_MS;
-  const leased = await params.d1
-    .prepare(
-      `UPDATE access_invite_codes
-       SET state = 'leased',
-           lease_id = ?,
-           leased_at = ?,
-           lease_expires_at = ?,
-           version = version + 1,
-           updated_at = ?
-       WHERE id = ?
-         AND expires_at > ?
-         AND (
-           state = 'pending'
-           OR (state = 'leased' AND lease_expires_at <= ?)
-         )
-       RETURNING id AS inviteId,
-                 lease_id AS leaseId,
-                 kind,
-                 lease_expires_at AS leaseExpiresAt,
-                 expires_at AS inviteExpiresAt,
-                 version`,
-    )
-    .bind(leaseId, now, leaseExpiresAt, now, inviteId, now, now)
-    .first<AccessInviteLease>();
-  if (leased) return leased;
+  const db = drizzle(params.d1);
+  const event = accessEvent({
+    eventType: "invite.leased",
+    inviteId,
+    createdAt: now,
+  });
+  const [leased] = await db.batch([
+    db
+      .update(accessInviteCodes)
+      .set({
+        state: "leased",
+        leaseId,
+        leasedAt: now,
+        leaseExpiresAt,
+        version: sql`${accessInviteCodes.version} + 1`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(accessInviteCodes.id, inviteId),
+          sql`${accessInviteCodes.expiresAt} > ${now}`,
+          sql`(
+            ${accessInviteCodes.state} = 'pending'
+            OR (
+              ${accessInviteCodes.state} = 'leased'
+              AND ${accessInviteCodes.leaseExpiresAt} <= ${now}
+            )
+          )`,
+        ),
+      )
+      .returning({
+        inviteId: accessInviteCodes.id,
+        leaseId: accessInviteCodes.leaseId,
+        kind: accessInviteCodes.kind,
+        leaseExpiresAt: accessInviteCodes.leaseExpiresAt,
+        inviteExpiresAt: accessInviteCodes.expiresAt,
+        version: accessInviteCodes.version,
+      }),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(event))
+        .from(accessInviteCodes)
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "leased"),
+            eq(accessInviteCodes.leaseId, leaseId),
+            eq(accessInviteCodes.leasedAt, now),
+            eq(accessInviteCodes.leaseExpiresAt, leaseExpiresAt),
+          ),
+        ),
+    ),
+  ]);
+  const row = leased[0];
+  if (
+    row?.leaseId &&
+    row.leaseExpiresAt != null &&
+    row.inviteExpiresAt != null
+  ) {
+    return {
+      inviteId: row.inviteId,
+      leaseId: row.leaseId,
+      kind: row.kind,
+      leaseExpiresAt: row.leaseExpiresAt,
+      inviteExpiresAt: row.inviteExpiresAt,
+      version: row.version,
+    };
+  }
 
   await recordAccessFailure({
     d1: params.d1,
@@ -365,26 +428,59 @@ export async function releaseAccessInviteLease(params: {
   now?: number;
 }): Promise<boolean> {
   const now = validTimestamp(params.now ?? Date.now());
-  const result = await params.d1
-    .prepare(
-      `UPDATE access_invite_codes
-       SET state = 'pending',
-           lease_id = NULL,
-           leased_at = NULL,
-           lease_expires_at = NULL,
-           version = version + 1,
-           updated_at = ?
-       WHERE id = ?
-         AND state = 'leased'
-         AND lease_id = ?`,
-    )
-    .bind(
-      now,
-      validId(params.inviteId, "invite"),
-      validId(params.leaseId, "lease"),
-    )
-    .run();
-  return result.meta.changes === 1;
+  const inviteId = validId(params.inviteId, "invite");
+  const leaseId = validId(params.leaseId, "lease");
+  const db = drizzle(params.d1);
+  const event = accessEvent({
+    eventType: "invite.lease_released",
+    inviteId,
+    createdAt: now,
+  });
+  const [released] = await db.batch([
+    db
+      .update(accessInviteCodes)
+      .set({
+        state: "pending",
+        leaseId: null,
+        leasedAt: null,
+        leaseExpiresAt: null,
+        version: sql`${accessInviteCodes.version} + 1`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(accessInviteCodes.id, inviteId),
+          eq(accessInviteCodes.state, "leased"),
+          eq(accessInviteCodes.leaseId, leaseId),
+        ),
+      )
+      .returning({ id: accessInviteCodes.id }),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(event))
+        .from(accessInviteCodes)
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "pending"),
+            eq(accessInviteCodes.updatedAt, now),
+            notExists(
+              db
+                .select({ id: accessEvents.id })
+                .from(accessEvents)
+                .where(
+                  and(
+                    eq(accessEvents.eventType, "invite.lease_released"),
+                    eq(accessEvents.inviteId, inviteId),
+                    eq(accessEvents.createdAt, now),
+                  ),
+                ),
+            ),
+          ),
+        ),
+    ),
+  ]);
+  return released[0]?.id === inviteId;
 }
 
 export async function replaceAccessInvite(params: {
@@ -397,6 +493,8 @@ export async function replaceAccessInvite(params: {
 }): Promise<AccessInviteSummary & { code: string }> {
   const now = validTimestamp(params.now ?? Date.now());
   const actorUserId = validId(params.actorUserId, "actor");
+  const inviteId = validId(params.inviteId, "invite");
+  const expectedVersion = validVersion(params.expectedVersion);
   const generated = await generateAccessInviteCode();
   const row: typeof accessInviteCodes.$inferInsert = {
     id: createAppId(),
@@ -408,31 +506,97 @@ export async function replaceAccessInvite(params: {
     createdBy: actorUserId,
     createdAt: now,
     expiresAt: now + ACCESS_INVITE_LIFETIME_MS,
-    replacesInviteId: validId(params.inviteId, "invite"),
-    replacesInviteVersion: validVersion(params.expectedVersion),
+    replacesInviteId: inviteId,
+    replacesInviteVersion: expectedVersion,
     version: 1,
     updatedAt: now,
   };
-  try {
-    const inserted = await drizzle(params.d1)
-      .insert(accessInviteCodes)
-      .values(row)
-      .returning();
-    return { ...toInviteSummary(inserted[0]!), code: generated.code };
-  } catch (error) {
-    if (isInviteAdministratorGuardError(error)) {
-      throw inviteIssuerForbidden();
-    }
-    if (
-      errorChainMatches(
-        error,
-        /replacement lost its version race|only an administrator can replace/i,
+  const db = drizzle(params.d1);
+  const replacedEvent = accessEvent({
+    eventType: "invite.replaced",
+    inviteId,
+    actorUserId,
+    reason: "replaced",
+    createdAt: now,
+  });
+  const createdEvent = accessEvent({
+    eventType: "invite.created",
+    inviteId: row.id,
+    actorUserId,
+    reason: "standard",
+    createdAt: now,
+  });
+  const [replaced, inserted] = await db.batch([
+    db
+      .update(accessInviteCodes)
+      .set({
+        state: "revoked",
+        leaseId: null,
+        leasedAt: null,
+        leaseExpiresAt: null,
+        revokedBy: actorUserId,
+        revocationReason: "replaced",
+        revokedAt: now,
+        replacedByInviteId: row.id,
+        version: expectedVersion + 1,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(accessInviteCodes.id, inviteId),
+          eq(accessInviteCodes.kind, "standard"),
+          eq(accessInviteCodes.version, expectedVersion),
+          inArray(accessInviteCodes.state, ["pending", "leased"]),
+          activeAdministratorPredicate(actorUserId),
+        ),
       )
-    ) {
-      throw staleInvite();
-    }
-    throw error;
+      .returning({ id: accessInviteCodes.id }),
+    db
+      .insert(accessInviteCodes)
+      .select(
+        db
+          .select(inviteInsertFields(row))
+          .from(accessInviteCodes)
+          .where(
+            and(
+              eq(accessInviteCodes.id, inviteId),
+              eq(accessInviteCodes.state, "revoked"),
+              eq(accessInviteCodes.version, expectedVersion + 1),
+              eq(accessInviteCodes.replacedByInviteId, row.id),
+              eq(accessInviteCodes.revokedBy, actorUserId),
+              eq(accessInviteCodes.revocationReason, "replaced"),
+              eq(accessInviteCodes.revokedAt, now),
+            ),
+          ),
+      )
+      .returning(),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(replacedEvent))
+        .from(accessInviteCodes)
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "revoked"),
+            eq(accessInviteCodes.replacedByInviteId, row.id),
+            eq(accessInviteCodes.version, expectedVersion + 1),
+          ),
+        ),
+    ),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(createdEvent))
+        .from(accessInviteCodes)
+        .where(eq(accessInviteCodes.id, row.id)),
+    ),
+  ]);
+  if (replaced[0]?.id === inviteId && inserted[0]) {
+    return { ...toInviteSummary(inserted[0]), code: generated.code };
   }
+  if (!(await isActiveAdministrator(params.d1, actorUserId))) {
+    throw inviteIssuerForbidden();
+  }
+  throw staleInvite();
 }
 
 export async function revokeAccessInvite(params: {
@@ -447,16 +611,25 @@ export async function revokeAccessInvite(params: {
   const now = validTimestamp(params.now ?? Date.now());
   const inviteId = validId(params.inviteId, "invite");
   const expectedVersion = validVersion(params.expectedVersion);
-  try {
-    const updated = await db
+  const actorUserId = validId(params.actorUserId, "actor");
+  const reason = validReason(params.reason);
+  const event = accessEvent({
+    eventType: "invite.revoked",
+    inviteId,
+    actorUserId,
+    reason,
+    createdAt: now,
+  });
+  const [updated] = await db.batch([
+    db
       .update(accessInviteCodes)
       .set({
         state: "revoked",
         leaseId: null,
         leasedAt: null,
         leaseExpiresAt: null,
-        revokedBy: validId(params.actorUserId, "actor"),
-        revocationReason: validReason(params.reason),
+        revokedBy: actorUserId,
+        revocationReason: reason,
         revokedAt: now,
         version: expectedVersion + 1,
         updatedAt: now,
@@ -466,16 +639,31 @@ export async function revokeAccessInvite(params: {
           eq(accessInviteCodes.id, inviteId),
           eq(accessInviteCodes.version, expectedVersion),
           inArray(accessInviteCodes.state, ["pending", "leased"]),
+          activeAdministratorPredicate(actorUserId),
         ),
       )
-      .returning();
-    const row = updated[0];
-    if (row && row.state === "revoked") return toInviteSummary(row);
-  } catch (error) {
-    if (isInviteRevokerGuardError(error)) throw inviteRevokerForbidden();
-    throw error;
+      .returning(),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(event))
+        .from(accessInviteCodes)
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "revoked"),
+            eq(accessInviteCodes.version, expectedVersion + 1),
+            eq(accessInviteCodes.revokedBy, actorUserId),
+            eq(accessInviteCodes.revocationReason, reason),
+            eq(accessInviteCodes.revokedAt, now),
+          ),
+        ),
+    ),
+  ]);
+  const row = updated[0];
+  if (row?.state === "revoked") return toInviteSummary(row);
+  if (!(await isActiveAdministrator(params.d1, actorUserId))) {
+    throw inviteRevokerForbidden();
   }
-
   throw staleInvite();
 }
 
@@ -491,38 +679,129 @@ export async function removeAccessInvite(params: {
   const actorUserId = validId(params.actorUserId, "actor");
   const expectedVersion = validVersion(params.expectedVersion);
   const now = validTimestamp(params.now ?? Date.now());
-
-  try {
-    const inserted = await db
+  const removedEvent = accessEvent({
+    eventType: "invite.removed",
+    inviteId,
+    actorUserId,
+    reason: "admin_removed",
+    createdAt: now,
+  });
+  const revokedEvent = accessEvent({
+    eventType: "invite.revoked",
+    inviteId,
+    actorUserId,
+    reason: "admin_removed",
+    createdAt: now,
+  });
+  const [inserted] = await db.batch([
+    db
       .insert(accessInviteRemovals)
-      .values({
-        inviteId,
-        inviteVersion: expectedVersion,
-        removedBy: actorUserId,
-        removedAt: now,
+      .select(
+        db
+          .select({
+            inviteId: accessInviteCodes.id,
+            inviteVersion: accessInviteCodes.version,
+            removedBy: sql<string>`${actorUserId}`.as("removed_by"),
+            removedAt: sql<number>`${now}`.as("removed_at"),
+          })
+          .from(accessInviteCodes)
+          .where(
+            and(
+              eq(accessInviteCodes.id, inviteId),
+              eq(accessInviteCodes.version, expectedVersion),
+              activeAdministratorPredicate(actorUserId),
+            ),
+          ),
+      )
+      .onConflictDoNothing()
+      .returning({ inviteId: accessInviteRemovals.inviteId }),
+    db
+      .update(accessInviteCodes)
+      .set({
+        state: "revoked",
+        leaseId: null,
+        leasedAt: null,
+        leaseExpiresAt: null,
+        revokedBy: actorUserId,
+        revocationReason: "admin_removed",
+        revokedAt: now,
+        version: expectedVersion + 1,
+        updatedAt: now,
       })
-      .returning({ inviteId: accessInviteRemovals.inviteId });
-    if (inserted[0]?.inviteId === inviteId) return;
-
-    // The database command is idempotent and ignores a repeated insert after
-    // re-checking administrator authority.
-    if (await hasInviteRemoval(params.d1, inviteId)) return;
-  } catch (error) {
-    if (isInviteRemoverGuardError(error)) throw inviteRemoverForbidden();
-    if (!errorChainMatches(error, /invite removal lost its version race/i)) {
-      throw error;
-    }
-
-    if (await hasInviteRemoval(params.d1, inviteId)) return;
-    const invite = await db
-      .select({ id: accessInviteCodes.id })
-      .from(accessInviteCodes)
-      .where(eq(accessInviteCodes.id, inviteId))
-      .limit(1);
-    if (!invite[0]) throw unavailableInvite();
-    throw staleInvite();
+      .where(
+        and(
+          eq(accessInviteCodes.id, inviteId),
+          eq(accessInviteCodes.version, expectedVersion),
+          inArray(accessInviteCodes.state, ["pending", "leased"]),
+          sql`exists (
+            select 1 from ${accessInviteRemovals}
+            where ${accessInviteRemovals.inviteId} = ${inviteId}
+              and ${accessInviteRemovals.inviteVersion} = ${expectedVersion}
+              and ${accessInviteRemovals.removedBy} = ${actorUserId}
+              and ${accessInviteRemovals.removedAt} = ${now}
+          )`,
+        ),
+      ),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(revokedEvent))
+        .from(accessInviteCodes)
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "revoked"),
+            eq(accessInviteCodes.version, expectedVersion + 1),
+            eq(accessInviteCodes.revokedBy, actorUserId),
+            eq(accessInviteCodes.revocationReason, "admin_removed"),
+            eq(accessInviteCodes.revokedAt, now),
+            notExists(
+              db
+                .select({ id: accessEvents.id })
+                .from(accessEvents)
+                .where(
+                  and(
+                    eq(accessEvents.eventType, "invite.revoked"),
+                    eq(accessEvents.inviteId, inviteId),
+                    eq(accessEvents.reason, "admin_removed"),
+                  ),
+                ),
+            ),
+          ),
+        ),
+    ),
+    db.insert(accessEvents).select(
+      db
+        .select(accessEventInsertFields(removedEvent))
+        .from(accessInviteRemovals)
+        .where(
+          and(
+            eq(accessInviteRemovals.inviteId, inviteId),
+            notExists(
+              db
+                .select({ id: accessEvents.id })
+                .from(accessEvents)
+                .where(
+                  and(
+                    eq(accessEvents.eventType, "invite.removed"),
+                    eq(accessEvents.inviteId, inviteId),
+                  ),
+                ),
+            ),
+          ),
+        ),
+    ),
+  ]);
+  if (inserted[0]?.inviteId === inviteId) return;
+  if (!(await isActiveAdministrator(params.d1, actorUserId))) {
+    throw inviteRemoverForbidden();
   }
-
+  if (await hasInviteRemoval(params.d1, inviteId)) return;
+  const invite = await db
+    .select({ id: accessInviteCodes.id })
+    .from(accessInviteCodes)
+    .where(eq(accessInviteCodes.id, inviteId))
+    .limit(1);
+  if (!invite[0]) throw unavailableInvite();
   throw staleInvite();
 }
 
@@ -550,76 +829,183 @@ export async function confirmAccessInvite(params: {
   }
 
   const db = drizzle(params.d1);
-  const invite = (
-    await db
-      .select({
-        id: accessInviteCodes.id,
-        kind: accessInviteCodes.kind,
-        createdBy: accessInviteCodes.createdBy,
-      })
-      .from(accessInviteCodes)
-      .where(
-        and(
-          eq(accessInviteCodes.id, inviteId),
-          eq(accessInviteCodes.state, "leased"),
-          eq(accessInviteCodes.leaseId, leaseId),
-        ),
-      )
-      .limit(1)
-  )[0];
-  if (!invite) throw invalidLease();
-
-  const value: typeof accessAllowlist.$inferInsert = {
-    userId,
-    state: "active",
+  const redeemedEvent = accessEvent({
+    eventType: "invite.redeemed",
+    inviteId,
+    subjectUserId: userId,
     githubAccountId,
-    githubUsername,
-    sourceInviteId: inviteId,
-    sourceLeaseId: leaseId,
-    grantedBy: invite.createdBy,
-    grantReason: invite.kind,
-    grantedAt: now,
-  };
+    actorUserId: userId,
+    createdAt: now,
+  });
+  const grantedEventId = createAppId();
   try {
-    // Deliberately one plain INSERT. The D1 trigger performs the invitation
-    // CAS; conflict helpers such as INSERT OR IGNORE would break atomicity.
-    const inserted = await db.insert(accessAllowlist).values(value).returning();
-    return toBetaUserSummary(inserted[0]!, null, null);
+    const [redeemed, admitted] = await db.batch([
+      db
+        .update(accessInviteCodes)
+        .set({
+          state: "redeemed",
+          redeemerUserId: userId,
+          redeemerGithubAccountId: githubAccountId,
+          redeemerGithubUsername: githubUsername,
+          redeemedAt: now,
+          version: sql`${accessInviteCodes.version} + 1`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(accessInviteCodes.id, inviteId),
+            eq(accessInviteCodes.state, "leased"),
+            eq(accessInviteCodes.leaseId, leaseId),
+            sql`${accessInviteCodes.leasedAt} <= ${now}`,
+            sql`${accessInviteCodes.leaseExpiresAt} > ${now}`,
+            notExists(
+              db
+                .select({ inviteId: accessInviteRemovals.inviteId })
+                .from(accessInviteRemovals)
+                .where(eq(accessInviteRemovals.inviteId, inviteId)),
+            ),
+            sql`exists (
+              select 1 from ${account}
+              where ${account.providerId} = 'github'
+                and ${account.accountId} = ${githubAccountId}
+                and ${account.userId} = ${userId}
+            )`,
+            sql`not exists (
+              select 1 from ${accessEvents}
+              where ${accessEvents.eventType} = 'access.reinvite_allowed'
+                and ${accessEvents.subjectUserId} = ${userId}
+                and ${accessEvents.createdAt} >= ${accessInviteCodes.createdAt}
+            )`,
+            sql`(
+              ${accessInviteCodes.kind} <> 'bootstrap_admin'
+              or exists (
+                select 1 from ${user}
+                where ${user.id} = ${userId}
+                  and instr(
+                    ',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',',
+                    ',admin,'
+                  ) > 0
+              )
+            )`,
+          ),
+        )
+        .returning({ id: accessInviteCodes.id }),
+      db
+        .insert(accessAllowlist)
+        .select(
+          db
+            .select({
+              userId: sql<string>`${userId}`.as("user_id"),
+              state: sql<"active">`'active'`.as("state"),
+              githubAccountId: sql<string>`${githubAccountId}`.as("github_account_id"),
+              githubUsername: sql<string>`${githubUsername}`.as("github_username"),
+              sourceInviteId: accessInviteCodes.id,
+              sourceLeaseId: sql<string>`${leaseId}`.as("source_lease_id"),
+              grantedBy: accessInviteCodes.createdBy,
+              grantReason: accessInviteCodes.kind,
+              grantedAt: sql<number>`${now}`.as("granted_at"),
+              revocationId: sql<string | null>`null`.as("revocation_id"),
+              revokedBy: sql<string | null>`null`.as("revoked_by"),
+              revocationReason: sql<string | null>`null`.as("revocation_reason"),
+              revokedAt: sql<number | null>`null`.as("revoked_at"),
+              revocationCleanupAttemptId: sql<string | null>`null`.as("revocation_cleanup_attempt_id"),
+              revocationCleanupStartedAt: sql<number | null>`null`.as("revocation_cleanup_started_at"),
+              revocationCleanupCompletedAt: sql<number | null>`null`.as("revocation_cleanup_completed_at"),
+            })
+            .from(accessInviteCodes)
+            .where(
+              and(
+                eq(accessInviteCodes.id, inviteId),
+                eq(accessInviteCodes.state, "redeemed"),
+                eq(accessInviteCodes.leaseId, leaseId),
+                eq(accessInviteCodes.redeemerUserId, userId),
+                eq(accessInviteCodes.redeemerGithubAccountId, githubAccountId),
+                eq(accessInviteCodes.redeemerGithubUsername, githubUsername),
+                eq(accessInviteCodes.redeemedAt, now),
+              ),
+            ),
+        )
+        .returning(),
+      db.insert(accessEvents).select(
+        db
+          .select(accessEventInsertFields(redeemedEvent))
+          .from(accessInviteCodes)
+          .where(
+            and(
+              eq(accessInviteCodes.id, inviteId),
+              eq(accessInviteCodes.state, "redeemed"),
+              eq(accessInviteCodes.redeemerUserId, userId),
+              eq(accessInviteCodes.redeemerGithubAccountId, githubAccountId),
+              eq(accessInviteCodes.redeemedAt, now),
+            ),
+          ),
+      ),
+      db.insert(accessEvents).select(
+        db
+          .select({
+            id: sql<string>`${grantedEventId}`.as("id"),
+            eventType: sql<AccessEventType>`'access.granted'`.as("event_type"),
+            inviteId: accessAllowlist.sourceInviteId,
+            subjectUserId: accessAllowlist.userId,
+            githubAccountId: accessAllowlist.githubAccountId,
+            actorUserId: accessAllowlist.grantedBy,
+            revocationId: sql<string | null>`null`.as("revocation_id"),
+            cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+            reason: accessAllowlist.grantReason,
+            createdAt: accessAllowlist.grantedAt,
+          })
+          .from(accessAllowlist)
+          .where(
+            and(
+              eq(accessAllowlist.userId, userId),
+              eq(accessAllowlist.sourceInviteId, inviteId),
+              eq(accessAllowlist.sourceLeaseId, leaseId),
+              eq(accessAllowlist.grantedAt, now),
+            ),
+          ),
+      ),
+    ]);
+    if (redeemed[0]?.id === inviteId && admitted[0]) {
+      return toBetaUserSummary(admitted[0], null, null);
+    }
   } catch (error) {
     if (
       !errorChainMatches(
         error,
-        /invite lease is invalid|does not belong|fresh beta invite required|unique constraint failed:\s*access_allowlist\.(?:user_id|github_account_id|source_invite_id)/i,
+        /unique constraint failed:\s*access_allowlist\.(?:user_id|github_account_id|source_invite_id)/i,
       )
     ) {
       throw error;
     }
-    const freshInviteRequired = errorChainMatches(
-      error,
-      /fresh beta invite required/i,
-    );
-    const reason = errorChainMatches(error, /does not belong/i)
-      ? "identity_mismatch"
-      : "claim_conflict";
-    await recordAccessFailure({
-      d1: params.d1,
-      eventType: "invite.claim_failed",
-      inviteId,
-      subjectUserId: userId,
-      githubAccountId,
-      reason,
-      now,
-    });
-    throw appError(
-      409,
-      freshInviteRequired
-        ? "fresh_beta_invite_required"
-        : "access_invite_claim_conflict",
-      freshInviteRequired
-        ? "an administrator must issue a fresh invite after clearing a beta block"
-        : "the invite could not be claimed",
-    );
   }
+  const freshInviteRequired = await requiresFreshInvite(
+    params.d1,
+    inviteId,
+    userId,
+  );
+  const identityMatches = await githubAccountBelongsToUser(
+    params.d1,
+    githubAccountId,
+    userId,
+  );
+  await recordAccessFailure({
+    d1: params.d1,
+    eventType: "invite.claim_failed",
+    inviteId,
+    subjectUserId: userId,
+    githubAccountId,
+    reason: identityMatches ? "claim_conflict" : "identity_mismatch",
+    now,
+  });
+  throw appError(
+    409,
+    freshInviteRequired
+      ? "fresh_beta_invite_required"
+      : "access_invite_claim_conflict",
+    freshInviteRequired
+      ? "an administrator must issue a fresh invite after clearing a beta block"
+      : "the invite could not be claimed",
+  );
 }
 
 export async function listBetaUsers(params: {
@@ -651,49 +1037,79 @@ export async function revokeBetaUser(params: {
   const db = drizzle(params.d1);
   const now = validTimestamp(params.now ?? Date.now());
   const userId = validId(params.userId, "user");
+  const actorUserId = validId(params.actorUserId, "actor");
+  const reason = validReason(params.reason);
   const revocationId = createAppId();
-  try {
-    const updated = await db
+  const blockedEventId = createAppId();
+  const [updated] = await db.batch([
+    db
       .update(accessAllowlist)
       .set({
         state: "blocked",
         revocationId,
-        revokedBy: validId(params.actorUserId, "actor"),
-        revocationReason: validReason(params.reason),
+        revokedBy: actorUserId,
+        revocationReason: reason,
         revokedAt: now,
+        revocationCleanupAttemptId: null,
+        revocationCleanupStartedAt: null,
         revocationCleanupCompletedAt: null,
       })
       .where(
         and(
           eq(accessAllowlist.userId, userId),
           eq(accessAllowlist.state, "active"),
+          activeAdministratorPredicate(actorUserId),
+          lastAdministratorSafePredicate(userId),
         ),
       )
-      .returning();
-    if (!updated[0]) {
-      throw appError(
-        409,
-        "beta_user_not_active",
-        "the beta user is not active",
-      );
-    }
+      .returning(),
+    db.insert(accessEvents).select(
+      db
+        .select({
+          id: sql<string>`${blockedEventId}`.as("id"),
+          eventType: sql<AccessEventType>`'access.blocked'`.as("event_type"),
+          inviteId: accessAllowlist.sourceInviteId,
+          subjectUserId: accessAllowlist.userId,
+          githubAccountId: accessAllowlist.githubAccountId,
+          actorUserId: accessAllowlist.revokedBy,
+          revocationId: accessAllowlist.revocationId,
+          cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+          reason: accessAllowlist.revocationReason,
+          createdAt: accessAllowlist.revokedAt,
+        })
+        .from(accessAllowlist)
+        .where(
+          and(
+            eq(accessAllowlist.userId, userId),
+            eq(accessAllowlist.state, "blocked"),
+            eq(accessAllowlist.revocationId, revocationId),
+            eq(accessAllowlist.revokedBy, actorUserId),
+            eq(accessAllowlist.revocationReason, reason),
+            eq(accessAllowlist.revokedAt, now),
+          ),
+        ),
+    ),
+  ]);
+  if (updated[0]) {
     return {
       user: toBetaUserSummary(updated[0], null, null),
       revocationId,
     };
-  } catch (error) {
-    if (isBetaAdministratorGuardError(error)) {
-      throw betaAdministratorForbidden();
-    }
-    if (errorChainMatches(error, /last active beta administrator/i)) {
-      throw appError(
-        409,
-        "last_beta_admin",
-        "the last active beta administrator cannot be revoked",
-      );
-    }
-    throw error;
   }
+  if (!(await isActiveAdministrator(params.d1, actorUserId))) {
+    throw betaAdministratorForbidden();
+  }
+  if (
+    (await isActiveAdministrator(params.d1, userId)) &&
+    !(await hasOtherActiveAdministrator(params.d1, userId))
+  ) {
+    throw appError(
+      409,
+      "last_beta_admin",
+      "the last active beta administrator cannot be revoked",
+    );
+  }
+  throw appError(409, "beta_user_not_active", "the beta user is not active");
 }
 
 export async function acquireBetaRevocationCleanup(params: {
@@ -789,19 +1205,63 @@ export async function completeBetaRevocationCleanup(params: {
   const userId = validId(params.userId, "user");
   const revocationId = validId(params.revocationId, "revocation");
   const cleanupAttemptId = validId(params.cleanupAttemptId, "cleanup attempt");
-  const updated = await db
-    .update(accessAllowlist)
-    .set({ revocationCleanupCompletedAt: now })
-    .where(
-      and(
-        eq(accessAllowlist.userId, userId),
-        eq(accessAllowlist.state, "blocked"),
-        eq(accessAllowlist.revocationId, revocationId),
-        eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
-        isNull(accessAllowlist.revocationCleanupCompletedAt),
-      ),
-    )
-    .returning();
+  const completedEventId = createAppId();
+  const [updated] = await db.batch([
+    db
+      .update(accessAllowlist)
+      .set({ revocationCleanupCompletedAt: now })
+      .where(
+        and(
+          eq(accessAllowlist.userId, userId),
+          eq(accessAllowlist.state, "blocked"),
+          eq(accessAllowlist.revocationId, revocationId),
+          eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
+          isNull(accessAllowlist.revocationCleanupCompletedAt),
+        ),
+      )
+      .returning(),
+    db.insert(accessEvents).select(
+      db
+        .select({
+          id: sql<string>`${completedEventId}`.as("id"),
+          eventType: sql<AccessEventType>`'access.revocation_cleanup_completed'`.as("event_type"),
+          inviteId: accessAllowlist.sourceInviteId,
+          subjectUserId: accessAllowlist.userId,
+          githubAccountId: accessAllowlist.githubAccountId,
+          actorUserId: sql<string | null>`null`.as("actor_user_id"),
+          revocationId: accessAllowlist.revocationId,
+          cleanupAttemptId: accessAllowlist.revocationCleanupAttemptId,
+          reason: sql<string>`'cleanup_completed'`.as("reason"),
+          createdAt: accessAllowlist.revocationCleanupCompletedAt,
+        })
+        .from(accessAllowlist)
+        .where(
+          and(
+            eq(accessAllowlist.userId, userId),
+            eq(accessAllowlist.state, "blocked"),
+            eq(accessAllowlist.revocationId, revocationId),
+            eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
+            eq(accessAllowlist.revocationCleanupCompletedAt, now),
+            notExists(
+              db
+                .select({ id: accessEvents.id })
+                .from(accessEvents)
+                .where(
+                  and(
+                    eq(
+                      accessEvents.eventType,
+                      "access.revocation_cleanup_completed",
+                    ),
+                    eq(accessEvents.subjectUserId, userId),
+                    eq(accessEvents.revocationId, revocationId),
+                    eq(accessEvents.cleanupAttemptId, cleanupAttemptId),
+                  ),
+                ),
+            ),
+          ),
+        ),
+    ),
+  ]);
   if (updated[0]) return toBetaUserSummary(updated[0], null, null);
 
   const current = await db
@@ -842,35 +1302,60 @@ export async function recordBetaRevocationCleanupFailure(params: {
   const revocationId = validId(params.revocationId, "revocation");
   const cleanupAttemptId = validId(params.cleanupAttemptId, "cleanup attempt");
   const eventId = createAppId();
-  const recorded = await params.d1
-    .prepare(
-      `INSERT INTO access_events (
-         id, event_type, invite_id, subject_user_id, github_account_id,
-         actor_user_id, revocation_id, cleanup_attempt_id, reason, created_at
-       )
-       SELECT ?, 'access.revocation_cleanup_failed', source_invite_id, user_id,
-              github_account_id, ?, revocation_id, ?, ?, ?
-       FROM access_allowlist
-       WHERE user_id = ?
-         AND state = 'blocked'
-         AND revocation_id = ?
-         AND revocation_cleanup_attempt_id = ?
-         AND revocation_cleanup_started_at IS NOT NULL
-         AND revocation_cleanup_completed_at IS NULL
-       RETURNING id`,
-    )
-    .bind(
-      eventId,
-      optionalId(params.actorUserId, "actor"),
-      cleanupAttemptId,
-      validReason(params.reason),
-      now,
-      userId,
-      revocationId,
-      cleanupAttemptId,
-    )
-    .first<{ id: string }>();
-  if (recorded?.id === eventId) return;
+  const actorUserId = optionalId(params.actorUserId, "actor");
+  const reason = validReason(params.reason);
+  const db = drizzle(params.d1);
+  const [recorded] = await db.batch([
+    db
+      .insert(accessEvents)
+      .select(
+        db
+          .select({
+            id: sql<string>`${eventId}`.as("id"),
+            eventType: sql<AccessEventType>`'access.revocation_cleanup_failed'`.as("event_type"),
+            inviteId: accessAllowlist.sourceInviteId,
+            subjectUserId: accessAllowlist.userId,
+            githubAccountId: accessAllowlist.githubAccountId,
+            actorUserId: sql<string | null>`${actorUserId}`.as("actor_user_id"),
+            revocationId: accessAllowlist.revocationId,
+            cleanupAttemptId: sql<string>`${cleanupAttemptId}`.as("cleanup_attempt_id"),
+            reason: sql<string>`${reason}`.as("reason"),
+            createdAt: sql<number>`${now}`.as("created_at"),
+          })
+          .from(accessAllowlist)
+          .where(
+            and(
+              eq(accessAllowlist.userId, userId),
+              eq(accessAllowlist.state, "blocked"),
+              eq(accessAllowlist.revocationId, revocationId),
+              eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
+              sql`${accessAllowlist.revocationCleanupStartedAt} is not null`,
+              isNull(accessAllowlist.revocationCleanupCompletedAt),
+            ),
+          ),
+      )
+      .returning({ id: accessEvents.id }),
+    db
+      .update(accessAllowlist)
+      .set({
+        revocationCleanupAttemptId: null,
+        revocationCleanupStartedAt: null,
+      })
+      .where(
+        and(
+          eq(accessAllowlist.userId, userId),
+          eq(accessAllowlist.state, "blocked"),
+          eq(accessAllowlist.revocationId, revocationId),
+          eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
+          sql`exists (
+            select 1 from ${accessEvents}
+            where ${accessEvents.id} = ${eventId}
+              and ${accessEvents.eventType} = 'access.revocation_cleanup_failed'
+          )`,
+        ),
+      ),
+  ]);
+  if (recorded[0]?.id === eventId) return;
 
   throw appError(
     409,
@@ -893,35 +1378,39 @@ export async function recordBetaRevocationCleanupStall(params: {
   const revocationId = validId(params.revocationId, "revocation");
   const cleanupAttemptId = validId(params.cleanupAttemptId, "cleanup attempt");
   const eventId = createAppId();
-  const recorded = await params.d1
-    .prepare(
-      `INSERT INTO access_events (
-         id, event_type, invite_id, subject_user_id, github_account_id,
-         actor_user_id, revocation_id, cleanup_attempt_id, reason, created_at
-       )
-       SELECT ?, 'access.revocation_cleanup_stalled', source_invite_id, user_id,
-              github_account_id, ?, revocation_id, ?, ?, ?
-       FROM access_allowlist
-       WHERE user_id = ?
-         AND state = 'blocked'
-         AND revocation_id = ?
-         AND revocation_cleanup_attempt_id = ?
-         AND revocation_cleanup_started_at IS NOT NULL
-         AND revocation_cleanup_completed_at IS NULL
-       RETURNING id`,
+  const actorUserId = optionalId(params.actorUserId, "actor");
+  const reason = validReason(params.reason);
+  const db = drizzle(params.d1);
+  const recorded = await db
+    .insert(accessEvents)
+    .select(
+      db
+        .select({
+          id: sql<string>`${eventId}`.as("id"),
+          eventType: sql<AccessEventType>`'access.revocation_cleanup_stalled'`.as("event_type"),
+          inviteId: accessAllowlist.sourceInviteId,
+          subjectUserId: accessAllowlist.userId,
+          githubAccountId: accessAllowlist.githubAccountId,
+          actorUserId: sql<string | null>`${actorUserId}`.as("actor_user_id"),
+          revocationId: accessAllowlist.revocationId,
+          cleanupAttemptId: sql<string>`${cleanupAttemptId}`.as("cleanup_attempt_id"),
+          reason: sql<string>`${reason}`.as("reason"),
+          createdAt: sql<number>`${now}`.as("created_at"),
+        })
+        .from(accessAllowlist)
+        .where(
+          and(
+            eq(accessAllowlist.userId, userId),
+            eq(accessAllowlist.state, "blocked"),
+            eq(accessAllowlist.revocationId, revocationId),
+            eq(accessAllowlist.revocationCleanupAttemptId, cleanupAttemptId),
+            sql`${accessAllowlist.revocationCleanupStartedAt} is not null`,
+            isNull(accessAllowlist.revocationCleanupCompletedAt),
+          ),
+        ),
     )
-    .bind(
-      eventId,
-      optionalId(params.actorUserId, "actor"),
-      cleanupAttemptId,
-      validReason(params.reason),
-      now,
-      userId,
-      revocationId,
-      cleanupAttemptId,
-    )
-    .first<{ id: string }>();
-  if (recorded?.id === eventId) return;
+    .returning({ id: accessEvents.id });
+  if (recorded[0]?.id === eventId) return;
 
   throw appError(
     409,
@@ -938,34 +1427,63 @@ export async function allowBetaReinvite(params: {
   now?: number;
 }): Promise<void> {
   const now = validTimestamp(params.now ?? Date.now());
-  try {
-    // The event trigger deletes only the exact blocked row after cleanup has
-    // completed. The audit append and block clear therefore share one D1
-    // statement and cannot split under a race or lost response.
-    await drizzle(params.d1)
+  const userId = validId(params.userId, "user");
+  const actorUserId = validId(params.actorUserId, "actor");
+  const revocationId = validId(params.revocationId, "revocation");
+  const eventId = createAppId();
+  const db = drizzle(params.d1);
+  const [inserted] = await db.batch([
+    db
       .insert(accessEvents)
-      .values({
-        id: createAppId(),
-        eventType: "access.reinvite_allowed",
-        subjectUserId: validId(params.userId, "user"),
-        actorUserId: validId(params.actorUserId, "actor"),
-        revocationId: validId(params.revocationId, "revocation"),
-        reason: "admin_cleared_block",
-        createdAt: now,
-      });
-  } catch (error) {
-    if (isBetaAdministratorGuardError(error)) {
-      throw betaAdministratorForbidden();
-    }
-    if (errorChainMatches(error, /block is stale|block-clear/i)) {
-      throw appError(
-        409,
-        "beta_revocation_cleanup_incomplete",
-        "revocation cleanup must complete before another invite is allowed",
-      );
-    }
-    throw error;
+      .select(
+        db
+          .select({
+            id: sql<string>`${eventId}`.as("id"),
+            eventType: sql<AccessEventType>`'access.reinvite_allowed'`.as("event_type"),
+            inviteId: sql<string | null>`null`.as("invite_id"),
+            subjectUserId: accessAllowlist.userId,
+            githubAccountId: sql<string | null>`null`.as("github_account_id"),
+            actorUserId: sql<string>`${actorUserId}`.as("actor_user_id"),
+            revocationId: accessAllowlist.revocationId,
+            cleanupAttemptId: sql<string | null>`null`.as("cleanup_attempt_id"),
+            reason: sql<string>`'admin_cleared_block'`.as("reason"),
+            createdAt: sql<number>`${now}`.as("created_at"),
+          })
+          .from(accessAllowlist)
+          .where(
+            and(
+              eq(accessAllowlist.userId, userId),
+              eq(accessAllowlist.state, "blocked"),
+              eq(accessAllowlist.revocationId, revocationId),
+              sql`${accessAllowlist.revocationCleanupCompletedAt} is not null`,
+              activeAdministratorPredicate(actorUserId),
+            ),
+          ),
+      )
+      .returning({ id: accessEvents.id }),
+    db.delete(accessAllowlist).where(
+      and(
+        eq(accessAllowlist.userId, userId),
+        eq(accessAllowlist.state, "blocked"),
+        eq(accessAllowlist.revocationId, revocationId),
+        sql`${accessAllowlist.revocationCleanupCompletedAt} is not null`,
+        sql`exists (
+          select 1 from ${accessEvents}
+          where ${accessEvents.id} = ${eventId}
+            and ${accessEvents.eventType} = 'access.reinvite_allowed'
+        )`,
+      ),
+    ),
+  ]);
+  if (inserted[0]?.id === eventId) return;
+  if (!(await isActiveAdministrator(params.d1, actorUserId))) {
+    throw betaAdministratorForbidden();
   }
+  throw appError(
+    409,
+    "beta_revocation_cleanup_incomplete",
+    "revocation cleanup must complete before another invite is allowed",
+  );
 }
 
 export async function recordAccessFailure(params: {
@@ -1064,6 +1582,202 @@ function toBetaUserSummary(
     revokedAt: row.revokedAt,
     revocationCleanupCompletedAt: row.revocationCleanupCompletedAt,
   };
+}
+
+function inviteInsertFields(row: InviteInsertRow) {
+  return {
+    id: sql<string>`${row.id}`.as("id"),
+    codeHash: sql<string>`${row.codeHash}`.as("code_hash"),
+    codePrefix: sql<string>`${row.codePrefix}`.as("code_prefix"),
+    kind: sql<AccessInviteKind>`${row.kind}`.as("kind"),
+    state: sql<"pending" | "leased" | "redeemed" | "revoked">`${row.state ?? "pending"}`.as("state"),
+    label: sql<string | null>`${row.label ?? null}`.as("label"),
+    createdBy: sql<string | null>`${row.createdBy ?? null}`.as("created_by"),
+    createdAt: sql<number>`${row.createdAt}`.as("created_at"),
+    expiresAt: sql<number>`${row.expiresAt}`.as("expires_at"),
+    leaseId: sql<string | null>`${row.leaseId ?? null}`.as("lease_id"),
+    leasedAt: sql<number | null>`${row.leasedAt ?? null}`.as("leased_at"),
+    leaseExpiresAt: sql<number | null>`${row.leaseExpiresAt ?? null}`.as("lease_expires_at"),
+    redeemerUserId: sql<string | null>`${row.redeemerUserId ?? null}`.as("redeemer_user_id"),
+    redeemerGithubAccountId: sql<string | null>`${row.redeemerGithubAccountId ?? null}`.as("redeemer_github_account_id"),
+    redeemerGithubUsername: sql<string | null>`${row.redeemerGithubUsername ?? null}`.as("redeemer_github_username"),
+    redeemedAt: sql<number | null>`${row.redeemedAt ?? null}`.as("redeemed_at"),
+    revokedBy: sql<string | null>`${row.revokedBy ?? null}`.as("revoked_by"),
+    revocationReason: sql<string | null>`${row.revocationReason ?? null}`.as("revocation_reason"),
+    revokedAt: sql<number | null>`${row.revokedAt ?? null}`.as("revoked_at"),
+    replacesInviteId: sql<string | null>`${row.replacesInviteId ?? null}`.as("replaces_invite_id"),
+    replacesInviteVersion: sql<number | null>`${row.replacesInviteVersion ?? null}`.as("replaces_invite_version"),
+    replacedByInviteId: sql<string | null>`${row.replacedByInviteId ?? null}`.as("replaced_by_invite_id"),
+    version: sql<number>`${row.version ?? 1}`.as("version"),
+    updatedAt: sql<number>`${row.updatedAt}`.as("updated_at"),
+  };
+}
+
+function accessEvent(params: {
+  eventType: AccessEventType;
+  inviteId?: string | null;
+  subjectUserId?: string | null;
+  githubAccountId?: string | null;
+  actorUserId?: string | null;
+  revocationId?: string | null;
+  cleanupAttemptId?: string | null;
+  reason?: string | null;
+  createdAt: number;
+}): AccessEventInsertRow {
+  return {
+    id: createAppId(),
+    eventType: params.eventType,
+    inviteId: params.inviteId ?? null,
+    subjectUserId: params.subjectUserId ?? null,
+    githubAccountId: params.githubAccountId ?? null,
+    actorUserId: params.actorUserId ?? null,
+    revocationId: params.revocationId ?? null,
+    cleanupAttemptId: params.cleanupAttemptId ?? null,
+    reason: params.reason ?? null,
+    createdAt: params.createdAt,
+  };
+}
+
+function accessEventInsertFields(event: AccessEventInsertRow) {
+  return {
+    id: sql<string>`${event.id}`.as("id"),
+    eventType: sql<AccessEventType>`${event.eventType}`.as("event_type"),
+    inviteId: sql<string | null>`${event.inviteId ?? null}`.as("invite_id"),
+    subjectUserId: sql<string | null>`${event.subjectUserId ?? null}`.as("subject_user_id"),
+    githubAccountId: sql<string | null>`${event.githubAccountId ?? null}`.as("github_account_id"),
+    actorUserId: sql<string | null>`${event.actorUserId ?? null}`.as("actor_user_id"),
+    revocationId: sql<string | null>`${event.revocationId ?? null}`.as("revocation_id"),
+    cleanupAttemptId: sql<string | null>`${event.cleanupAttemptId ?? null}`.as("cleanup_attempt_id"),
+    reason: sql<string | null>`${event.reason ?? null}`.as("reason"),
+    createdAt: sql<number>`${event.createdAt}`.as("created_at"),
+  };
+}
+
+function activeAdministratorPredicate(actorUserId: string) {
+  return sql`exists (
+    select 1
+    from ${accessAllowlist}
+    join ${user} on ${user.id} = ${accessAllowlist.userId}
+    where ${accessAllowlist.userId} = ${actorUserId}
+      and ${accessAllowlist.state} = 'active'
+      and coalesce(${user.banned}, 0) = 0
+      and instr(
+        ',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',',
+        ',admin,'
+      ) > 0
+  )`;
+}
+
+function lastAdministratorSafePredicate(targetUserId: string) {
+  return sql`(
+    not exists (
+      select 1 from "user" as target_identity
+      where target_identity."id" = ${targetUserId}
+        and coalesce(target_identity."banned", 0) = 0
+        and instr(
+          ',' || replace(lower(coalesce(target_identity."role", '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0
+    )
+    or exists (
+      select 1
+      from "access_allowlist" as other_access
+      join "user" as other_identity
+        on other_identity."id" = other_access."user_id"
+      where other_access."state" = 'active'
+        and other_access."user_id" <> ${targetUserId}
+        and coalesce(other_identity."banned", 0) = 0
+        and instr(
+          ',' || replace(lower(coalesce(other_identity."role", '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0
+    )
+  )`;
+}
+
+async function isActiveAdministrator(
+  d1: D1Database,
+  userId: string,
+): Promise<boolean> {
+  const rows = await drizzle(d1)
+    .select({ userId: accessAllowlist.userId })
+    .from(accessAllowlist)
+    .innerJoin(user, eq(user.id, accessAllowlist.userId))
+    .where(
+      and(
+        eq(accessAllowlist.userId, userId),
+        eq(accessAllowlist.state, "active"),
+        sql`coalesce(${user.banned}, 0) = 0`,
+        sql`instr(
+          ',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0`,
+      ),
+    )
+    .limit(1);
+  return rows[0]?.userId === userId;
+}
+
+async function hasOtherActiveAdministrator(
+  d1: D1Database,
+  userId: string,
+): Promise<boolean> {
+  const rows = await drizzle(d1)
+    .select({ userId: accessAllowlist.userId })
+    .from(accessAllowlist)
+    .innerJoin(user, eq(user.id, accessAllowlist.userId))
+    .where(
+      and(
+        eq(accessAllowlist.state, "active"),
+        sql`${accessAllowlist.userId} <> ${userId}`,
+        sql`coalesce(${user.banned}, 0) = 0`,
+        sql`instr(
+          ',' || replace(lower(coalesce(${user.role}, '')), ' ', '') || ',',
+          ',admin,'
+        ) > 0`,
+      ),
+    )
+    .limit(1);
+  return rows.length === 1;
+}
+
+async function githubAccountBelongsToUser(
+  d1: D1Database,
+  githubAccountId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows = await drizzle(d1)
+    .select({ id: account.id })
+    .from(account)
+    .where(
+      and(
+        eq(account.providerId, "github"),
+        eq(account.accountId, githubAccountId),
+        eq(account.userId, userId),
+      ),
+    )
+    .limit(1);
+  return rows.length === 1;
+}
+
+async function requiresFreshInvite(
+  d1: D1Database,
+  inviteId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows = await drizzle(d1)
+    .select({ id: accessEvents.id })
+    .from(accessEvents)
+    .innerJoin(accessInviteCodes, eq(accessInviteCodes.id, inviteId))
+    .where(
+      and(
+        eq(accessEvents.eventType, "access.reinvite_allowed"),
+        eq(accessEvents.subjectUserId, userId),
+        sql`${accessEvents.createdAt} >= ${accessInviteCodes.createdAt}`,
+      ),
+    )
+    .limit(1);
+  return rows.length === 1;
 }
 
 async function generateAccessInviteCode(): Promise<{
@@ -1178,34 +1892,6 @@ function staleInvite() {
     409,
     "access_invite_stale_version",
     "the invite changed; refresh and retry",
-  );
-}
-
-function isInviteAdministratorGuardError(error: unknown): boolean {
-  return errorChainMatches(
-    error,
-    /access invite (?:issuer|revoker) must be an active unbanned administrator/i,
-  );
-}
-
-function isInviteRevokerGuardError(error: unknown): boolean {
-  return errorChainMatches(
-    error,
-    /access invite revoker must be an active unbanned administrator/i,
-  );
-}
-
-function isInviteRemoverGuardError(error: unknown): boolean {
-  return errorChainMatches(
-    error,
-    /access invite remover must be an active unbanned administrator/i,
-  );
-}
-
-function isBetaAdministratorGuardError(error: unknown): boolean {
-  return errorChainMatches(
-    error,
-    /(?:beta access revoker|beta block-clear actor) must be an active unbanned administrator/i,
   );
 }
 

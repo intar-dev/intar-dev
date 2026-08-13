@@ -21,13 +21,19 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 const beforeVersionId = "11111111-2222-4333-8444-555555555555";
 const uploadedVersionId = "22222222-3333-4444-8555-666666666666";
 const databaseId = "33333333-4444-4555-8666-777777777777";
+const targetDatabaseId = "44444444-5555-4666-8777-888888888888";
 const sessionNamespaceId = "87ad9df7e37e4ced900553aa1a7775a1";
 
 function runAmbiguousActivation(
   restoreFailures: number,
   beforeMaintenance = false,
   targetMaintenance = false,
+  changeDatabaseBinding = false,
+  currentDatabaseId = databaseId,
 ) {
+  const activationTargetDatabaseId = changeDatabaseBinding
+    ? targetDatabaseId
+    : currentDatabaseId;
   const root = mkdtempSync(join(tmpdir(), "intar-web-activation-test-"));
   const bin = join(root, "bin");
   const runnerTemp = join(root, "runner");
@@ -48,7 +54,12 @@ function runAmbiguousActivation(
     config,
     JSON.stringify({
       name: "intar-dev",
-      d1_databases: [{ binding: "DB", database_id: databaseId }],
+      d1_databases: [
+        {
+          binding: "DB",
+          database_id: activationTargetDatabaseId,
+        },
+      ],
       kv_namespaces: [{ binding: "SESSION", id: sessionNamespaceId }],
       vars: {
         BETA_ACCESS_MAINTENANCE: targetMaintenance ? "on" : "off",
@@ -89,8 +100,8 @@ if [ "$1 $2" = "deployments status" ]; then
 fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
-  if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
-  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
+  if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; db="$CURRENT_DATABASE_ID"; else maintenance="$TARGET_MAINTENANCE"; db="$TARGET_DATABASE_ID"; fi
+  jq -cn --arg id "$version" --arg db "$db" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"BETA_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"BETA_ACCESS_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -183,10 +194,12 @@ fi
     [
       join(repositoryRoot, "tools/deploy/activate-web-version.sh"),
       config,
-      databaseId,
+      currentDatabaseId,
+      activationTargetDatabaseId,
       sessionNamespaceId,
       secrets,
       evidence,
+      beforeMaintenance ? "maintenance" : "open",
     ],
     {
       cwd: repositoryRoot,
@@ -205,7 +218,8 @@ fi
         MOCK_RESTORE_FAILURES: String(restoreFailures),
         BEFORE_VERSION_ID: beforeVersionId,
         UPLOADED_VERSION_ID: uploadedVersionId,
-        DATABASE_ID: databaseId,
+        CURRENT_DATABASE_ID: currentDatabaseId,
+        TARGET_DATABASE_ID: activationTargetDatabaseId,
         SESSION_NAMESPACE_ID: sessionNamespaceId,
         DO_NAMESPACE_ID: "667e00c5c90a4a68b08676230cbb6e5c",
         BEFORE_DEPLOYMENT_ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -216,7 +230,7 @@ fi
       },
     },
   );
-  const runtime = join(runnerTemp, "intar-web-deploy-12345");
+  const runtime = join(runnerTemp, "intar-web-deploy-12345-standard");
   const rollbackPath = join(runtime, "rollback-evidence.json");
   if (!existsSync(rollbackPath)) {
     throw new Error(
@@ -291,6 +305,83 @@ describe("exact web-version activation", () => {
     );
     expect(script).toContain('"${before_version}" "${uploaded_version}"');
     expect(script).toContain("current_active_version_used_as_reference: true");
+  });
+
+  it("validates the active and target D1 bindings independently during cutover", () => {
+    expect(script).toContain('"${current_database_id}" "${session_namespace_id}"');
+    expect(script).toContain(
+      'version-runtime-bindings "${uploaded_version}" "${target_database_id}"',
+    );
+    expect(script).toContain(
+      'active-runtime-bindings "${after_deployment}" "${after_version}"',
+    );
+
+    const run = runAmbiguousActivation(0, true, true, true);
+    try {
+      expect(run.result.status).toBe(42);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.rollback).toMatchObject({
+        before_version_id: beforeVersionId,
+        attempted_version_id: uploadedVersionId,
+        rollback_proven: true,
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("restores source/open when phase A activation fails", () => {
+    const run = runAmbiguousActivation(0, false, true);
+    try {
+      expect(run.result.status).toBe(42);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.rollback).toMatchObject({
+        current_database_id: databaseId,
+        target_database_id: databaseId,
+        rollback_proven: true,
+        before_health: { expected_mode: "open", healthy: true },
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("restores source/maintenance when phase B activation fails", () => {
+    const run = runAmbiguousActivation(0, true, true, true);
+    try {
+      expect(run.result.status).toBe(42);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.rollback).toMatchObject({
+        current_database_id: databaseId,
+        target_database_id: targetDatabaseId,
+        rollback_proven: true,
+        before_health: { expected_mode: "maintenance", healthy: true },
+      });
+    } finally {
+      run.cleanup();
+    }
+  });
+
+  it("restores target/maintenance when phase C activation fails", () => {
+    const run = runAmbiguousActivation(
+      0,
+      true,
+      false,
+      false,
+      targetDatabaseId,
+    );
+    try {
+      expect(run.result.status).toBe(42);
+      expect(run.state).toBe(beforeVersionId);
+      expect(run.rollback).toMatchObject({
+        current_database_id: targetDatabaseId,
+        target_database_id: targetDatabaseId,
+        rollback_proven: true,
+        before_health: { expected_mode: "maintenance", healthy: true },
+      });
+    } finally {
+      run.cleanup();
+    }
   });
 
   it("requires the expected open or exact maintenance state before and after activation", () => {

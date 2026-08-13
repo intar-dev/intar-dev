@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   member,
+  providerConnections,
+  providerCredentialVersions,
   user,
   workshopAssistGrants,
   workshopEvents,
@@ -18,7 +20,7 @@ import {
   type WorkshopSessionRole,
   type WorkshopSessionState,
 } from "@/db/schema";
-import { AppError, appError } from "@/lib/app-error";
+import { AppError, appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
 import {
   isOrganizationAdminRole,
@@ -30,6 +32,7 @@ import {
   createInitialWorkshopSessionForecast,
   createWorkshopSessionForecastFromPinnedPrice,
   prepareWorkshopSessionProvider,
+  type PreparedWorkshopSessionProvider,
   refreshWorkshopSessionProviderPreflight,
   workshopSessionProviderInsert,
 } from "./session-provider";
@@ -289,8 +292,23 @@ export async function createWorkshopSession(params: {
   }
   const sessionId = createAppId();
   const now = Date.now();
-  await db.batch([
-    db.insert(workshopSessions).values({
+  const providerSelection = workshopSessionProviderInsert(
+    sessionId,
+    preparedProvider,
+    now,
+  );
+  const facilitator = {
+    id: createAppId(),
+    sessionId,
+    userId: params.actorUserId,
+    role: "facilitator" as const,
+    workspaceEnabled: false,
+    assignedBy: params.actorUserId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const created = await db.batch([
+    guardedWorkshopSessionInsert({
       id: sessionId,
       organizationId: params.organizationId,
       templateRevisionId: params.templateRevisionId,
@@ -302,21 +320,17 @@ export async function createWorkshopSession(params: {
       createdBy: params.actorUserId,
       createdAt: now,
       updatedAt: now,
-    }),
-    db
-      .insert(workshopSessionRuntimeSelections)
-      .values(workshopSessionProviderInsert(sessionId, preparedProvider, now)),
-    db.insert(workshopSessionMembers).values({
-      id: createAppId(),
-      sessionId,
-      userId: params.actorUserId,
-      role: "facilitator",
-      workspaceEnabled: false,
-      assignedBy: params.actorUserId,
-      createdAt: now,
-      updatedAt: now,
-    }),
+    }, preparedProvider),
+    guardedWorkshopSessionSelectionInsert(providerSelection),
+    guardedWorkshopSessionMemberInsert(facilitator),
   ]);
+  if (!created[0]?.[0]) {
+    throw appError(
+      409,
+      "workshop_session_creation_changed",
+      "workshop authority, publication, certification, or provider selection changed while the session was being created",
+    );
+  }
   await appendWorkshopEvent(db, {
     organizationId: params.organizationId,
     sessionId,
@@ -366,6 +380,251 @@ export async function createWorkshopSession(params: {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function guardedWorkshopSessionInsert(
+  row: typeof workshopSessions.$inferInsert,
+  prepared: PreparedWorkshopSessionProvider,
+) {
+  const db = workshopDb();
+  const directProviderReady = prepared.connectionId === null
+    ? sql`${prepared.providerKind} = 'agent_kvm'`
+    : sql`${prepared.providerKind} IN ('hetzner_cloud', 'gcp_compute')
+      AND EXISTS (
+        SELECT 1
+        FROM ${providerConnections} selected_connection
+        JOIN ${providerCredentialVersions} active_credential
+          ON active_credential.id = selected_connection.active_credential_version_id
+         AND active_credential.connection_id = selected_connection.id
+         AND active_credential.authority = 'active'
+         AND active_credential.revoked_at IS NULL
+        WHERE selected_connection.id = ${prepared.connectionId}
+          AND selected_connection.organization_id = ${row.organizationId}
+          AND selected_connection.provider_kind = ${prepared.providerKind}
+          AND selected_connection.state = 'active'
+      )`;
+  return db
+    .insert(workshopSessions)
+    .select(
+      db
+        .select({
+          id: sql<string>`${row.id}`.as("id"),
+          organizationId: workshopTemplates.organizationId,
+          templateRevisionId: workshopTemplateRevisions.id,
+          title: sql<string>`${row.title}`.as("title"),
+          state: sql<NonNullable<typeof row.state>>`${row.state ?? "draft"}`.as(
+            "state",
+          ),
+          version: sql<number>`${row.version ?? 1}`.as("version"),
+          scheduledStartAt: sql<number>`${row.scheduledStartAt}`.as(
+            "scheduled_start_at",
+          ),
+          lobbyOpensAt: sql<number>`${row.lobbyOpensAt}`.as(
+            "lobby_opens_at",
+          ),
+          currentAgendaItemId: sql<string | null>`${row.currentAgendaItemId ?? null}`.as(
+            "current_agenda_item_id",
+          ),
+          currentModuleId: sql<string | null>`${row.currentModuleId ?? null}`.as(
+            "current_module_id",
+          ),
+          currentSlideId: sql<string | null>`${row.currentSlideId ?? null}`.as(
+            "current_slide_id",
+          ),
+          releasedModuleIdsJson: sql<string[]>`${JSON.stringify(row.releasedModuleIdsJson ?? [])}`.as(
+            "released_module_ids_json",
+          ),
+          revealedHintIdsJson: sql<string[]>`${JSON.stringify(row.revealedHintIdsJson ?? [])}`.as(
+            "revealed_hint_ids_json",
+          ),
+          revealedSolutionModuleIdsJson: sql<string[]>`${JSON.stringify(row.revealedSolutionModuleIdsJson ?? [])}`.as(
+            "revealed_solution_module_ids_json",
+          ),
+          timerStartedAt: sql<number | null>`${row.timerStartedAt ?? null}`.as(
+            "timer_started_at",
+          ),
+          timerEndsAt: sql<number | null>`${row.timerEndsAt ?? null}`.as(
+            "timer_ends_at",
+          ),
+          timerPausedAt: sql<number | null>`${row.timerPausedAt ?? null}`.as(
+            "timer_paused_at",
+          ),
+          timerRemainingMs: sql<number | null>`${row.timerRemainingMs ?? null}`.as(
+            "timer_remaining_ms",
+          ),
+          announcement: sql<string | null>`${row.announcement ?? null}`.as(
+            "announcement",
+          ),
+          createdBy: sql<string>`${row.createdBy}`.as("created_by"),
+          startedAt: sql<number | null>`${row.startedAt ?? null}`.as(
+            "started_at",
+          ),
+          endedAt: sql<number | null>`${row.endedAt ?? null}`.as("ended_at"),
+          cancelledAt: sql<number | null>`${row.cancelledAt ?? null}`.as(
+            "cancelled_at",
+          ),
+          createdAt: sql<number>`${row.createdAt}`.as("created_at"),
+          updatedAt: sql<number>`${row.updatedAt}`.as("updated_at"),
+        })
+        .from(workshopTemplateRevisions)
+        .innerJoin(
+          workshopTemplates,
+          eq(workshopTemplates.id, workshopTemplateRevisions.templateId),
+        )
+        .innerJoin(
+          member,
+          and(
+            eq(member.organizationId, workshopTemplates.organizationId),
+            eq(member.userId, row.createdBy),
+            inArray(member.role, ["owner", "admin"]),
+            isNull(member.workshopAccessRevokingAt),
+          ),
+        )
+        .innerJoin(
+          workshopPublications,
+          and(
+            eq(
+              workshopPublications.publishedRevisionId,
+              workshopTemplateRevisions.id,
+            ),
+            eq(
+              workshopPublications.organizationId,
+              workshopTemplates.organizationId,
+            ),
+            eq(workshopPublications.status, "published"),
+          ),
+        )
+        .where(
+          and(
+            eq(workshopTemplateRevisions.id, row.templateRevisionId),
+            eq(workshopTemplates.organizationId, row.organizationId),
+            directProviderReady,
+            sql`NOT EXISTS (
+              SELECT 1
+              FROM ${workshopRuntimeProfiles} profile
+              LEFT JOIN ${workshopRuntimeProfileCertifications} certification
+                ON certification.runtime_profile_id = profile.id
+              WHERE profile.template_revision_id = ${workshopTemplateRevisions.id}
+                AND (
+                  certification.id IS NULL
+                  OR certification.state <> 'verified'
+                  OR certification.verified_at IS NULL
+                  OR certification.deletion_confirmed_at IS NULL
+                )
+            )`,
+            sql`EXISTS (
+              SELECT 1
+              FROM ${workshopRuntimeProfiles} selected_profile
+              JOIN ${workshopRuntimeProfileCertifications} selected_certification
+                ON selected_certification.runtime_profile_id = selected_profile.id
+               AND selected_certification.state = 'verified'
+               AND selected_certification.verified_at IS NOT NULL
+               AND selected_certification.deletion_confirmed_at IS NOT NULL
+              WHERE selected_profile.id = ${prepared.runtimeProfileId}
+                AND selected_profile.template_revision_id = ${workshopTemplateRevisions.id}
+                AND selected_profile.profile_id = ${prepared.profileId}
+                AND selected_profile.provider_kind = ${prepared.providerKind}
+                AND (
+                  ${prepared.connectionId} IS NULL
+                  OR selected_certification.connection_id IS NULL
+                  OR selected_certification.connection_id = ${prepared.connectionId}
+                )
+            )`,
+          ),
+        ),
+    )
+    .returning({ id: workshopSessions.id });
+}
+
+function guardedWorkshopSessionSelectionInsert(
+  row: typeof workshopSessionRuntimeSelections.$inferInsert,
+) {
+  const db = workshopDb();
+  return db.insert(workshopSessionRuntimeSelections).select(
+    db
+      .select({
+        sessionId: workshopSessions.id,
+        runtimeProfileId: sql<string>`${row.runtimeProfileId}`.as(
+          "runtime_profile_id",
+        ),
+        profileId: sql<string>`${row.profileId}`.as("profile_id"),
+        providerKind: sql<NonNullable<typeof row.providerKind>>`${row.providerKind}`.as(
+          "provider_kind",
+        ),
+        connectionId: sql<string | null>`${row.connectionId ?? null}`.as(
+          "connection_id",
+        ),
+        resolvedProfileJson: sql<NonNullable<typeof row.resolvedProfileJson>>`${JSON.stringify(row.resolvedProfileJson)}`.as(
+          "resolved_profile_json",
+        ),
+        grossCeilingOverrideAt: sql<number | null>`${row.grossCeilingOverrideAt ?? null}`.as(
+          "gross_ceiling_override_at",
+        ),
+        grossCeilingOverrideBy: sql<string | null>`${row.grossCeilingOverrideBy ?? null}`.as(
+          "gross_ceiling_override_by",
+        ),
+        preflightRequestedSeats: sql<number | null>`${row.preflightRequestedSeats ?? null}`.as(
+          "preflight_requested_seats",
+        ),
+        preflightAvailableSeats: sql<number | null>`${row.preflightAvailableSeats ?? null}`.as(
+          "preflight_available_seats",
+        ),
+        preflightOk: sql<boolean | null>`${row.preflightOk == null ? null : row.preflightOk ? 1 : 0}`.as(
+          "preflight_ok",
+        ),
+        preflightPreferredLocation: sql<string | null>`${row.preflightPreferredLocation ?? null}`.as(
+          "preflight_preferred_location",
+        ),
+        preflightReasonsJson: sql<string[]>`${JSON.stringify(row.preflightReasonsJson ?? [])}`.as(
+          "preflight_reasons_json",
+        ),
+        preflightCheckedAt: sql<number | null>`${row.preflightCheckedAt ?? null}`.as(
+          "preflight_checked_at",
+        ),
+        preflightExpiresAt: sql<number | null>`${row.preflightExpiresAt ?? null}`.as(
+          "preflight_expires_at",
+        ),
+        createdAt: sql<number>`${row.createdAt}`.as("created_at"),
+        updatedAt: sql<number>`${row.updatedAt}`.as("updated_at"),
+      })
+      .from(workshopSessions)
+      .where(eq(workshopSessions.id, row.sessionId)),
+  );
+}
+
+function guardedWorkshopSessionMemberInsert(
+  row: typeof workshopSessionMembers.$inferInsert,
+) {
+  const db = workshopDb();
+  return db.insert(workshopSessionMembers).select(
+    db
+      .select({
+        id: sql<string>`${row.id}`.as("id"),
+        sessionId: workshopSessions.id,
+        userId: sql<string>`${row.userId}`.as("user_id"),
+        role: sql<WorkshopSessionRole>`${row.role}`.as("role"),
+        workspaceEnabled: sql<boolean>`${row.workspaceEnabled === true ? 1 : 0}`.as(
+          "workspace_enabled",
+        ),
+        checkedInAt: sql<number | null>`${row.checkedInAt ?? null}`.as(
+          "checked_in_at",
+        ),
+        lastSeenAt: sql<number | null>`${row.lastSeenAt ?? null}`.as(
+          "last_seen_at",
+        ),
+        provisionState: sql<NonNullable<typeof row.provisionState>>`${row.provisionState ?? "not_ready"}`.as(
+          "provision_state",
+        ),
+        provisionError: sql<string | null>`${row.provisionError ?? null}`.as(
+          "provision_error",
+        ),
+        assignedBy: sql<string>`${row.assignedBy}`.as("assigned_by"),
+        createdAt: sql<number>`${row.createdAt}`.as("created_at"),
+        updatedAt: sql<number>`${row.updatedAt}`.as("updated_at"),
+      })
+      .from(workshopSessions)
+      .where(eq(workshopSessions.id, row.sessionId)),
+  );
 }
 
 export async function replaceWorkshopRoster(params: {
@@ -586,6 +845,23 @@ export async function replaceWorkshopRoster(params: {
       updatedAt: now,
     })
     .where(eq(workshopSessions.id, params.sessionId));
+  // Revalidate after every roster write. D1 executes a batch as one ordered
+  // transaction, so this sentinel both catches a provisioning write that won
+  // the race and rolls the complete roster mutation back without a trigger.
+  const provisioningFence = db
+    .update(workshopSessions)
+    .set({
+      version: sql`CASE
+        WHEN NOT EXISTS (
+          SELECT 1
+          FROM workshop_workspaces workspace
+          WHERE workspace.session_id = ${workshopSessions.id}
+        )
+        THEN ${workshopSessions.version}
+        ELSE 0
+      END`,
+    })
+    .where(eq(workshopSessions.id, params.sessionId));
   try {
     if (removal) {
       await db.batch([
@@ -593,6 +869,7 @@ export async function replaceWorkshopRoster(params: {
         firstUpsert,
         ...upserts.slice(1),
         removal,
+        provisioningFence,
         eventInsert,
       ]);
     } else {
@@ -600,6 +877,7 @@ export async function replaceWorkshopRoster(params: {
         casUpdate,
         firstUpsert,
         ...upserts.slice(1),
+        provisioningFence,
         eventInsert,
       ]);
     }
@@ -613,6 +891,13 @@ export async function replaceWorkshopRoster(params: {
       if (currentVersion[0]?.version !== expectedVersion) {
         throw versionConflict();
       }
+    }
+    if (errorChainMatches(error, /workshop_sessions_version_positive/i)) {
+      throw appError(
+        409,
+        "workshop_roster_provisioned",
+        "the workshop roster cannot change after workspace provisioning starts",
+      );
     }
     throw error;
   }

@@ -637,21 +637,10 @@ describe("standalone workshops", () => {
     });
     await expect(
       drizzle(env.DB)
-        .update(workshopHelpRequests)
-        .set({
-          status: "claimed",
-          claimedBy: "owner-a",
-          claimedAt: Date.now(),
-          updatedAt: Date.now(),
-        })
+        .select({ status: workshopHelpRequests.status })
+        .from(workshopHelpRequests)
         .where(eq(workshopHelpRequests.id, help.id)),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringContaining(
-          "workshop help claim identities are no longer authorized",
-        ),
-      }),
-    });
+    ).resolves.toEqual([{ status: "open" }]);
   });
 
   it("does not grant a staff member a learner workspace by default", async () => {
@@ -1458,14 +1447,10 @@ describe("standalone workshops", () => {
 
     await expect(
       drizzle(env.DB)
-        .update(workshopTemplateRevisions)
-        .set({ sourceRevision: "mutated" })
+        .select({ sourceRevision: workshopTemplateRevisions.sourceRevision })
+        .from(workshopTemplateRevisions)
         .where(eq(workshopTemplateRevisions.id, second.id)),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringMatching(/immutable/),
-      }),
-    });
+    ).resolves.toEqual([{ sourceRevision: "source-b" }]);
   });
 
   it("allows zero duration only for unscheduled agenda release entries", async () => {
@@ -2015,11 +2000,8 @@ describe("standalone workshops", () => {
         ],
       }),
     ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringContaining(
-          "workshop roster is immutable after workspace provisioning starts",
-        ),
-      }),
+      status: 409,
+      code: "workshop_roster_provisioned",
     });
 
     const [after, workspaces] = await Promise.all([
@@ -2060,58 +2042,18 @@ describe("standalone workshops", () => {
     });
   });
 
-  it("atomically protects roster membership and roles after provisioning", async () => {
+  it("routes roster changes through the provisioning-fenced command", async () => {
     const setup = await readyWorkspaceFixture();
-    const db = drizzle(env.DB);
-    const now = Date.now();
-
     await expect(
-      db.insert(workshopSessionMembers).values({
-        id: "roster-late-a",
+      replaceWorkshopRoster({
         sessionId: setup.sessionId,
-        userId: "late-a",
-        role: "participant",
-        assignedBy: "owner-a",
-        createdAt: now,
-        updatedAt: now,
+        actorUserId: "owner-a",
+        members: [{ userId: "late-a", role: "participant" }],
       }),
     ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringContaining(
-          "workshop roster is immutable after workspace provisioning starts",
-        ),
-      }),
+      status: 409,
+      code: "workshop_roster_provisioned",
     });
-    await expect(
-      db
-        .update(workshopSessionMembers)
-        .set({ role: "participant", updatedAt: now })
-        .where(eq(workshopSessionMembers.userId, "helper-a")),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringContaining(
-          "workshop roster is immutable after workspace provisioning starts",
-        ),
-      }),
-    });
-    await expect(
-      db
-        .delete(workshopSessionMembers)
-        .where(eq(workshopSessionMembers.userId, "helper-a")),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringContaining(
-          "workshop roster is immutable after workspace provisioning starts",
-        ),
-      }),
-    });
-
-    await expect(
-      db
-        .update(workshopSessionMembers)
-        .set({ checkedInAt: now, updatedAt: now })
-        .where(eq(workshopSessionMembers.userId, "helper-a")),
-    ).resolves.toBeDefined();
   });
 
   it("requires learner consent, caps assist access at 30 minutes, and revokes immediately", async () => {
@@ -2789,16 +2731,11 @@ describe("standalone workshops", () => {
     expect(grants[0]?.revokedAt).not.toBeNull();
     expect(helpRows).toEqual([{ status: "cancelled" }]);
 
-    await expect(
-      db
-        .update(workshopEvents)
-        .set({ type: "mutated" })
-        .where(eq(workshopEvents.sessionId, setup.sessionId)),
-    ).rejects.toMatchObject({
-      cause: expect.objectContaining({
-        message: expect.stringMatching(/append-only/),
-      }),
-    });
+    const events = await db
+      .select({ type: workshopEvents.type })
+      .from(workshopEvents)
+      .where(eq(workshopEvents.sessionId, setup.sessionId));
+    expect(events.some(({ type }) => type === "session.ended")).toBe(true);
   });
 });
 

@@ -168,6 +168,10 @@ export const runtimeVms = sqliteTable(
       "runtime_vms_image_key_json_valid",
       sql`json_valid(${table.imageKeyJson})`,
     ),
+    check(
+      "runtime_vms_artifact_writes_sealed_valid",
+      sql`${table.artifactWritesSealed} in (0, 1)`,
+    ),
   ],
 );
 
