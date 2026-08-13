@@ -7,6 +7,14 @@ import {
 } from "./generated-d1-schema";
 
 describe("exact generated D1 schema verifier", () => {
+  test("models the Drizzle-created ledger with SQLite dialect quoting", () => {
+    const ledger = expectedGeneratedD1Schema().objects.find(
+      ({ name }) => name === "__drizzle_migrations",
+    );
+    expect(ledger?.sql).toStartWith('CREATE TABLE "__drizzle_migrations"');
+    expect(ledger?.sql).not.toContain("`__drizzle_migrations`");
+  });
+
   test("accepts the full generated schema and ledger", async () => {
     const fixture = generatedDatabase();
     try {

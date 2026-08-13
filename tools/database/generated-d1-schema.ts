@@ -188,8 +188,10 @@ function generatedObjects(
   const database = new Database(":memory:", { strict: true });
   try {
     database.exec("PRAGMA foreign_keys = ON");
+    // Match the pinned sqlite-proxy migrator: SQLiteDialect renders
+    // sql.identifier("__drizzle_migrations") with double quotes.
     database.exec(
-      "CREATE TABLE IF NOT EXISTS `__drizzle_migrations` (\n\tid SERIAL PRIMARY KEY,\n\thash text NOT NULL,\n\tcreated_at numeric\n)",
+      'CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (\n\tid SERIAL PRIMARY KEY,\n\thash text NOT NULL,\n\tcreated_at numeric\n)',
     );
     for (const migration of migrations) {
       for (const statement of migration.sql

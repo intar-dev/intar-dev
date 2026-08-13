@@ -554,7 +554,7 @@ function generatedDatabase(
     database.exec(statement);
   }
   database.exec(
-    "CREATE TABLE IF NOT EXISTS `__drizzle_migrations` (\n\tid SERIAL PRIMARY KEY,\n\thash text NOT NULL,\n\tcreated_at numeric\n)",
+    'CREATE TABLE IF NOT EXISTS "__drizzle_migrations" (\n\tid SERIAL PRIMARY KEY,\n\thash text NOT NULL,\n\tcreated_at numeric\n)',
   );
   const journal = JSON.parse(
     readFileSync(`${webRoot}migrations/meta/_journal.json`, "utf8"),
