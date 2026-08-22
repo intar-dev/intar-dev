@@ -4,30 +4,28 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_API_JSON_BODY_BYTES,
   MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES,
+  MAX_PROVIDER_JSON_BODY_BYTES,
   guardBetterAuthRequest,
+  guardCanonicalRequestPath,
   guardCustomApiMutation,
   secureApplicationApiRequest,
   sensitiveRateLimitActionFor,
 } from "./request-security";
 
 function securityEnv(
-  limit: (input: { key: string }) => Promise<{ success: boolean }> = async () => ({
+  limit: (input: {
+    key: string;
+  }) => Promise<{ success: boolean }> = async () => ({
     success: true,
   }),
 ) {
   return {
     BETTER_AUTH_URL: "https://intar.dev",
     ACCESS_INVITE_RATE_LIMITER: { limit },
-  } as Pick<
-    Cloudflare.Env,
-    "ACCESS_INVITE_RATE_LIMITER" | "BETTER_AUTH_URL"
-  >;
+  } as Pick<Cloudflare.Env, "ACCESS_INVITE_RATE_LIMITER" | "BETTER_AUTH_URL">;
 }
 
-function customMutation(
-  pathname: string,
-  init: RequestInit = {},
-): Request {
+function customMutation(pathname: string, init: RequestInit = {}): Request {
   const headers = new Headers({
     origin: "https://intar.dev",
     "sec-fetch-site": "same-origin",
@@ -37,18 +35,42 @@ function customMutation(
   }
   return new Request(`https://intar.dev${pathname}`, {
     ...init,
-    method: "POST",
+    method: init.method ?? "POST",
     headers,
   });
 }
 
-async function responseBody(result: Awaited<ReturnType<typeof guardCustomApiMutation>>) {
+async function responseBody(
+  result: Awaited<ReturnType<typeof guardCustomApiMutation>>,
+) {
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("expected request rejection");
   return result.response.json() as Promise<{ error: string; code: string }>;
 }
 
 describe("worker API request security", () => {
+  it("rejects encoded paths before Astro can decode them into protected routes", async () => {
+    for (const pathname of [
+      "/%61pi/scenarios/demo/start",
+      "/api/%61uth/sign-in/social",
+      "/api/auth/sso/%73aml2/callback/provider",
+      "/%61gent/connect",
+    ]) {
+      const result = guardCanonicalRequestPath(
+        new Request(`https://intar.dev${pathname}`, { method: "POST" }),
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("expected encoded path rejection");
+      expect(result.response.status).toBe(400);
+      expect(result.response.headers.get("cache-control")).toContain(
+        "no-store",
+      );
+      await expect(result.response.json()).resolves.toMatchObject({
+        code: "encoded_path_not_allowed",
+      });
+    }
+  });
+
   it("accepts exact-origin bodyless custom mutations", async () => {
     const result = await secureApplicationApiRequest(
       customMutation("/api/admin/builds/build-1/retry"),
@@ -151,6 +173,19 @@ describe("worker API request security", () => {
     });
   });
 
+  it("rejects provider mutation bodies at the 64 KiB edge boundary", async () => {
+    const oversized = await guardCustomApiMutation(
+      customMutation("/api/organizations/org/workshop-providers", {
+        headers: { "content-type": "application/json" },
+        body: "x".repeat(MAX_PROVIDER_JSON_BODY_BYTES + 1),
+      }),
+      securityEnv(),
+    );
+    expect(oversized.ok).toBe(false);
+    if (oversized.ok) throw new Error("expected provider body rejection");
+    expect(oversized.response.status).toBe(413);
+  });
+
   it("accepts multipart only for declared, bounded organization bundle uploads", async () => {
     const valid = await guardCustomApiMutation(
       customMutation("/api/organizations/example/scenarios/bundles", {
@@ -213,8 +248,8 @@ describe("worker API request security", () => {
     }
   });
 
-  it("keeps Better Auth OIDC callbacks reachable but blocks tenant IdP and SAML paths", () => {
-    const tenantMutation = guardBetterAuthRequest(
+  it("keeps Better Auth OIDC callbacks reachable but blocks tenant IdP and SAML paths", async () => {
+    const tenantMutation = await guardBetterAuthRequest(
       new Request("https://intar.dev/api/auth/sign-in/sso", {
         method: "POST",
         headers: {
@@ -229,7 +264,7 @@ describe("worker API request security", () => {
       expect(tenantMutation.response.status).toBe(403);
     }
 
-    const oidcCallback = guardBetterAuthRequest(
+    const oidcCallback = await guardBetterAuthRequest(
       new Request(
         "https://intar.dev/api/auth/sso/callback/provider-oidc?code=code&state=state",
       ),
@@ -237,7 +272,7 @@ describe("worker API request security", () => {
     );
     expect(oidcCallback.ok).toBe(true);
 
-    const samlCallback = guardBetterAuthRequest(
+    const samlCallback = await guardBetterAuthRequest(
       new Request("https://intar.dev/api/auth/sso/saml2/callback/provider"),
       securityEnv(),
     );
@@ -246,7 +281,7 @@ describe("worker API request security", () => {
       expect(samlCallback.response.status).toBe(404);
     }
 
-    const samlMutation = guardBetterAuthRequest(
+    const samlMutation = await guardBetterAuthRequest(
       customMutation("/api/auth/sso/saml/register", {
         headers: { "content-type": "application/json" },
         body: "{}",
@@ -259,11 +294,34 @@ describe("worker API request security", () => {
     }
   });
 
+  it("bounds Better Auth protocol bodies without requiring JSON", async () => {
+    const oversized = await guardBetterAuthRequest(
+      customMutation("/api/auth/sign-in/social", {
+        headers: { "content-type": "application/json" },
+        body: "x".repeat(MAX_API_JSON_BODY_BYTES + 1),
+      }),
+      securityEnv(),
+    );
+    expect(oversized.ok).toBe(false);
+    if (oversized.ok) throw new Error("expected Better Auth body rejection");
+    expect(oversized.response.status).toBe(413);
+
+    const formBody = "grant_type=authorization_code&code=test";
+    const form = await guardBetterAuthRequest(
+      customMutation("/api/auth/oauth2/token", {
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: formBody,
+      }),
+      securityEnv(),
+    );
+    expect(form.ok).toBe(true);
+    if (!form.ok) return;
+    expect(await form.request.text()).toBe(formBody);
+  });
+
   it("uses the shared 20-per-minute namespace for every expensive action", () => {
     expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/scenarios/demo/start"),
-      ),
+      sensitiveRateLimitActionFor(customMutation("/api/scenarios/demo/start")),
     ).toBe("scenario-start");
     expect(
       sensitiveRateLimitActionFor(
@@ -285,11 +343,30 @@ describe("worker API request security", () => {
         customMutation("/api/admin/builds/build-1/retry"),
       ),
     ).toBe("build-retry");
+    for (const path of [
+      "/api/admin/authoring/build",
+      "/api/organizations/org/scenarios/build",
+      "/api/organizations/org/scenarios/bundles",
+    ]) {
+      expect(sensitiveRateLimitActionFor(customMutation(path))).toBe(
+        "build-start",
+      );
+    }
     expect(
       sensitiveRateLimitActionFor(
         customMutation("/api/organizations/org/workshop-providers"),
       ),
     ).toBe("provider-connect");
+    for (const method of ["PATCH", "DELETE"]) {
+      expect(
+        sensitiveRateLimitActionFor(
+          customMutation(
+            "/api/organizations/org/workshop-providers/connection",
+            { method },
+          ),
+        ),
+      ).toBe("provider-mutation");
+    }
     expect(
       sensitiveRateLimitActionFor(
         customMutation(
@@ -305,9 +382,7 @@ describe("worker API request security", () => {
       ),
     ).toBe("provider-cleanup");
     expect(
-      sensitiveRateLimitActionFor(
-        customMutation("/api/auth/sign-in/social"),
-      ),
+      sensitiveRateLimitActionFor(customMutation("/api/auth/sign-in/social")),
     ).toBe("auth-start");
   });
 
@@ -322,7 +397,9 @@ describe("worker API request security", () => {
       expect(rejected.response.headers.get("retry-after")).toBe("60");
     }
 
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     const unavailable = await secureApplicationApiRequest(
       customMutation("/api/scenarios/demo/start"),
       securityEnv(async () => {

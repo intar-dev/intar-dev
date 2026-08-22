@@ -7,6 +7,7 @@ export const NO_STORE_HEADERS = {
 } as const;
 
 export const MAX_API_JSON_BODY_BYTES = 1024 * 1024;
+export const MAX_PROVIDER_JSON_BODY_BYTES = 64 * 1024;
 export const MAX_ORGANIZATION_SCENARIO_BUNDLE_MULTIPART_BYTES =
   65 * 1024 * 1024;
 
@@ -23,8 +24,10 @@ type SensitiveRateLimitAction =
   | "workshop-start"
   | "terminal-issuance"
   | "ssh-issuance"
+  | "build-start"
   | "build-retry"
   | "provider-connect"
+  | "provider-mutation"
   | "provider-rotate"
   | "provider-cleanup";
 
@@ -36,8 +39,25 @@ type RateLimitAction =
   | "access-invite:sso-link";
 
 export type ApiRequestSecurityResult =
-  | { ok: true; request: Request }
-  | { ok: false; response: Response };
+  { ok: true; request: Request } | { ok: false; response: Response };
+
+/**
+ * Astro decodes route paths before matching them. Reject encoded path bytes so
+ * every dispatcher, API boundary, rate limit, and response policy classifies
+ * the same canonical path.
+ */
+export function guardCanonicalRequestPath(
+  request: Request,
+): ApiRequestSecurityResult {
+  if (!new URL(request.url).pathname.includes("%")) {
+    return { ok: true, request };
+  }
+  return deny(
+    400,
+    "encoded_path_not_allowed",
+    "encoded request paths are not allowed",
+  );
+}
 
 /**
  * Worker-level browser mutation boundary. This runs after the bearer-only
@@ -48,10 +68,13 @@ export async function secureApplicationApiRequest(
   request: Request,
   workerEnv: RequestSecurityEnv,
 ): Promise<ApiRequestSecurityResult> {
-  const authResult = guardBetterAuthRequest(request, workerEnv);
+  const authResult = await guardBetterAuthRequest(request, workerEnv);
   if (!authResult.ok) return authResult;
 
-  const customResult = await guardCustomApiMutation(request, workerEnv);
+  const customResult = await guardCustomApiMutation(
+    authResult.request,
+    workerEnv,
+  );
   if (!customResult.ok) return customResult;
 
   const action = sensitiveRateLimitActionFor(request);
@@ -68,10 +91,10 @@ export async function secureApplicationApiRequest(
  * origin/fetch-metadata guard instead of the JSON-only Astro endpoint guard.
  * GET callback routes stay available to OIDC identity providers.
  */
-export function guardBetterAuthRequest(
+export async function guardBetterAuthRequest(
   request: Request,
   workerEnv: Pick<Cloudflare.Env, "BETTER_AUTH_URL">,
-): ApiRequestSecurityResult {
+): Promise<ApiRequestSecurityResult> {
   const pathname = new URL(request.url).pathname;
   if (!isBetterAuthPath(pathname)) return { ok: true, request };
 
@@ -80,7 +103,39 @@ export function guardBetterAuthRequest(
   }
   if (!isMutatingMethod(request.method)) return { ok: true, request };
 
-  return validateCanonicalBrowserOrigin(request, workerEnv);
+  const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
+  if (!originResult.ok) return originResult;
+
+  if (request.body === null) {
+    const declaredLength = request.headers.get("content-length");
+    if (declaredLength !== null && declaredLength !== "0") {
+      return deny(
+        400,
+        "request_body_unavailable",
+        "request body is unavailable",
+      );
+    }
+    return { ok: true, request };
+  }
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = canonicalContentLength(declaredLength);
+    if (parsedLength === null) {
+      return deny(
+        400,
+        "invalid_content_length",
+        "content-length must be a canonical decimal value",
+      );
+    }
+    if (parsedLength > MAX_API_JSON_BODY_BYTES) return bodyTooLarge();
+  }
+  try {
+    const body = await readBoundedBody(request.body, MAX_API_JSON_BODY_BYTES);
+    return { ok: true, request: rebuildRequestWithBody(request, body) };
+  } catch (error) {
+    if (error instanceof BodyLimitExceededError) return bodyTooLarge();
+    return deny(400, "invalid_request_body", "request body could not be read");
+  }
 }
 
 /**
@@ -129,6 +184,9 @@ export async function guardCustomApiMutation(
   if (!isJsonContentType(request.headers.get("content-type"))) {
     return deny(415, "json_required", "content-type must be application/json");
   }
+  const maxBodyBytes = isProviderMutationPath(pathname)
+    ? MAX_PROVIDER_JSON_BODY_BYTES
+    : MAX_API_JSON_BODY_BYTES;
 
   const declaredLength = request.headers.get("content-length");
   if (declaredLength !== null) {
@@ -140,13 +198,13 @@ export async function guardCustomApiMutation(
         "content-length must be a canonical decimal value",
       );
     }
-    if (parsedLength > MAX_API_JSON_BODY_BYTES) {
+    if (parsedLength > maxBodyBytes) {
       return bodyTooLarge();
     }
   }
 
   try {
-    const body = await readBoundedBody(request.body, MAX_API_JSON_BODY_BYTES);
+    const body = await readBoundedBody(request.body, maxBodyBytes);
     return { ok: true, request: rebuildRequestWithBody(request, body) };
   } catch (error) {
     if (error instanceof BodyLimitExceededError) return bodyTooLarge();
@@ -155,7 +213,9 @@ export async function guardCustomApiMutation(
 }
 
 /** Require the one custom multipart upload to be declared and bounded. */
-export function requireOrganizationScenarioBundleMultipart(request: Request): void {
+export function requireOrganizationScenarioBundleMultipart(
+  request: Request,
+): void {
   if (!isMultipartFormData(request.headers.get("content-type"))) {
     throw appError(
       415,
@@ -247,11 +307,23 @@ export function sensitiveRateLimitActionFor(
   if (/^\/api\/workshops\/[^/]+\/terminal$/u.test(pathname)) {
     return "terminal-issuance";
   }
+  if (
+    pathname === "/api/admin/authoring/build" ||
+    /^\/api\/organizations\/[^/]+\/scenarios\/build$/u.test(pathname) ||
+    isOrganizationScenarioBundleUpload(pathname)
+  ) {
+    return "build-start";
+  }
   if (/^\/api\/admin\/builds\/[^/]+\/retry$/u.test(pathname)) {
     return "build-retry";
   }
   if (/^\/api\/organizations\/[^/]+\/workshop-providers$/u.test(pathname)) {
     return "provider-connect";
+  }
+  if (
+    /^\/api\/organizations\/[^/]+\/workshop-providers\/[^/]+$/u.test(pathname)
+  ) {
+    return "provider-mutation";
   }
   if (
     /^\/api\/organizations\/[^/]+\/workshop-providers\/[^/]+\/rotate$/u.test(
@@ -275,7 +347,8 @@ async function enforceRateLimit(
   workerEnv: Pick<Cloudflare.Env, "ACCESS_INVITE_RATE_LIMITER">,
   action: RateLimitAction,
 ): Promise<ApiRequestSecurityResult> {
-  const remoteAddress = request.headers.get("cf-connecting-ip")?.trim() || "unknown";
+  const remoteAddress =
+    request.headers.get("cf-connecting-ip")?.trim() || "unknown";
   const remoteKey = await sha256Prefix(remoteAddress);
   let result: { success: boolean };
   try {
@@ -323,7 +396,11 @@ function validateCanonicalBrowserOrigin(
   }
   const fetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
   if (fetchSite && fetchSite !== "same-origin") {
-    return deny(403, "cross_site_request", "cross-site requests are not allowed");
+    return deny(
+      403,
+      "cross_site_request",
+      "cross-site requests are not allowed",
+    );
   }
   return { ok: true, request };
 }
@@ -361,6 +438,12 @@ function isPrehandledBearerApiPath(pathname: string): boolean {
 
 function isOrganizationScenarioBundleUpload(pathname: string): boolean {
   return /^\/api\/organizations\/[^/]+\/scenarios\/bundles$/u.test(pathname);
+}
+
+function isProviderMutationPath(pathname: string): boolean {
+  return /^\/api\/organizations\/[^/]+\/workshop-providers(?:\/|$)/u.test(
+    pathname,
+  );
 }
 
 function isJsonContentType(value: string | null): boolean {
@@ -438,7 +521,10 @@ function bodyTooLarge(): ApiRequestSecurityResult {
   return deny(413, "request_too_large", "request body is too large");
 }
 
-function errorResponse(error: unknown, fallback: string): ApiRequestSecurityResult {
+function errorResponse(
+  error: unknown,
+  fallback: string,
+): ApiRequestSecurityResult {
   if (error instanceof AppError) {
     return deny(error.status, error.code, error.message);
   }
@@ -460,7 +546,10 @@ function deny(
   }
   return {
     ok: false,
-    response: new Response(JSON.stringify({ error, code }), { status, headers }),
+    response: new Response(JSON.stringify({ error, code }), {
+      status,
+      headers,
+    }),
   };
 }
 

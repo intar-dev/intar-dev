@@ -1,5 +1,6 @@
 const BYPASS_COOKIE = "__Host-intar-maintenance";
 const BYPASS_TTL_MS = 2 * 60 * 60 * 1000;
+export const MAX_MAINTENANCE_BYPASS_JSON_BYTES = 64 * 1024;
 const encoder = new TextEncoder();
 
 export async function handleMaintenanceMode(
@@ -35,23 +36,43 @@ async function establishMaintenanceBypass(
   workerEnv: Cloudflare.Env,
 ): Promise<Response> {
   const expectedOrigin = safeOrigin(workerEnv.BETTER_AUTH_URL);
-  const suppliedOrigin = safeOrigin(request.headers.get("origin"));
-  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
-  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  const suppliedOrigin = request.headers.get("origin")?.trim();
+  const fetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
+  const contentType = request.headers.get("content-type")?.trim() ?? "";
   if (
     !expectedOrigin ||
     suppliedOrigin !== expectedOrigin ||
     (fetchSite && fetchSite !== "same-origin") ||
-    !contentType.startsWith("application/json")
+    !/^application\/json(?:\s*;|$)/iu.test(contentType)
   ) {
     return maintenanceJsonResponse(403, "maintenance bypass denied");
   }
 
-  const body = (await request.json().catch(() => null)) as {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    if (!/^(?:0|[1-9]\d*)$/u.test(declaredLength)) {
+      return maintenanceJsonResponse(400, "maintenance bypass denied");
+    }
+    const length = Number(declaredLength);
+    if (!Number.isSafeInteger(length)) {
+      return maintenanceJsonResponse(400, "maintenance bypass denied");
+    }
+    if (length > MAX_MAINTENANCE_BYPASS_JSON_BYTES) {
+      return maintenanceJsonResponse(413, "maintenance bypass denied");
+    }
+  }
+
+  const encodedBody = await readBoundedBody(
+    request.body,
+    MAX_MAINTENANCE_BYPASS_JSON_BYTES,
+  );
+  if (!encodedBody) {
+    return maintenanceJsonResponse(413, "maintenance bypass denied");
+  }
+  const body = parseJson(encodedBody) as {
     secret?: unknown;
   } | null;
-  const suppliedSecret =
-    typeof body?.secret === "string" ? body.secret : "";
+  const suppliedSecret = typeof body?.secret === "string" ? body.secret : "";
   const configuredSecret = workerEnv.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET;
   if (
     typeof configuredSecret !== "string" ||
@@ -74,6 +95,47 @@ async function establishMaintenanceBypass(
     status: 200,
     headers,
   });
+}
+
+async function readBoundedBody(
+  body: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<Uint8Array | null> {
+  if (!body) return new Uint8Array();
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  const combined = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined;
+}
+
+function parseJson(body: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(body)) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 async function hasMaintenanceBypass(
@@ -114,8 +176,14 @@ async function signExpiry(expiresAt: number, secret: string): Promise<string> {
 }
 
 async function equalSecrets(left: string, right: string): Promise<boolean> {
-  const leftDigest = await crypto.subtle.digest("SHA-256", encoder.encode(left));
-  const rightDigest = await crypto.subtle.digest("SHA-256", encoder.encode(right));
+  const leftDigest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(left),
+  );
+  const rightDigest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(right),
+  );
   const leftBytes = new Uint8Array(leftDigest);
   const rightBytes = new Uint8Array(rightDigest);
   let mismatch = leftBytes.length ^ rightBytes.length;

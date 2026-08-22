@@ -10,13 +10,19 @@ import { sweepWorkshopProviderRuntimes } from "@/lib/workshops/provider-runtime"
 import { recoverWorkshopRuntimesFromFailedProvider } from "@/lib/workshops/runtime-orchestrator";
 import { handleMaintenanceMode } from "@/maintenance";
 import { hardenJoinResponse } from "@/lib/join-security";
-import { secureApplicationApiRequest } from "@/lib/request-security";
+import {
+  guardCanonicalRequestPath,
+  secureApplicationApiRequest,
+} from "@/lib/request-security";
 import { hardenWorkerResponse } from "@/lib/response-security";
 
 export default {
   async fetch(request, env, ctx) {
     const respond = (response: Response) =>
       hardenWorkerResponse(request, response, env);
+    const canonicalPath = guardCanonicalRequestPath(request);
+    if (!canonicalPath.ok) return respond(canonicalPath.response);
+
     const maintenanceResponse = await handleMaintenanceMode(request, env);
     if (maintenanceResponse) return respond(maintenanceResponse);
 
@@ -66,12 +72,13 @@ export default {
     if (!securedRequest.ok) return respond(securedRequest.response);
 
     const response = await handle(securedRequest.request, env, ctx);
-    const applicationResponse = url.pathname === "/join"
-      ? hardenJoinResponse(response, {
-          localDevelopment:
-            new URL(env.BETTER_AUTH_URL).hostname === "localhost",
-        })
-      : response;
+    const applicationResponse =
+      url.pathname === "/join"
+        ? hardenJoinResponse(response, {
+            localDevelopment:
+              new URL(env.BETTER_AUTH_URL).hostname === "localhost",
+          })
+        : response;
     return respond(applicationResponse);
   },
   async scheduled(controller, env) {
@@ -79,9 +86,7 @@ export default {
     // is part of the same maintenance fence as HTTP traffic; otherwise a minute
     // tick can issue or mutate runtimes while the control plane is fenced.
     if (String(env.CONTROL_PLANE_MAINTENANCE) === "on") {
-      console.info(
-        JSON.stringify({ event: "scheduled_maintenance_fenced" }),
-      );
+      console.info(JSON.stringify({ event: "scheduled_maintenance_fenced" }));
       return;
     }
     const [lobbies, providerRuntimes] = await Promise.all([

@@ -37,6 +37,7 @@ import {
 import {
   auth,
   authCookiePolicy,
+  assertNoAdditionalBetterAuthTrustedOrigins,
   captureBetaAdmissionEpoch,
   captureOAuthIssuanceAdmission,
   createAdmissionBoundRefreshToken,
@@ -86,6 +87,15 @@ describe("auth policy", () => {
     expect(() => trustedBrowserOrigin("http://intar.dev")).toThrow(
       "better_auth_browser_origin_invalid",
     );
+    expect(() =>
+      assertNoAdditionalBetterAuthTrustedOrigins("https://tenant-idp.example"),
+    ).toThrow("better_auth_additional_trusted_origins_forbidden");
+    expect(() =>
+      assertNoAdditionalBetterAuthTrustedOrigins("  "),
+    ).not.toThrow();
+
+    expect(auth.options.logger).toEqual({ disabled: true });
+    expect(auth.options.onAPIError).toMatchObject({ throw: true });
   });
 
   it("loads an encrypted organization OIDC provider through Better Auth sign-in", async () => {

@@ -1,7 +1,10 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
-import { handleMaintenanceMode } from "./maintenance";
+import {
+  handleMaintenanceMode,
+  MAX_MAINTENANCE_BYPASS_JSON_BYTES,
+} from "./maintenance";
 
 const maintenanceEnv = {
   BETTER_AUTH_URL: "https://intar.dev",
@@ -62,10 +65,10 @@ describe("control-plane maintenance fence", () => {
 
   it("is database-independent and defaults open when disabled", async () => {
     await expect(
-      handleMaintenanceMode(
-        new Request("https://intar.dev/courses"),
-        { ...maintenanceEnv, CONTROL_PLANE_MAINTENANCE: "off" } as unknown as Cloudflare.Env,
-      ),
+      handleMaintenanceMode(new Request("https://intar.dev/courses"), {
+        ...maintenanceEnv,
+        CONTROL_PLANE_MAINTENANCE: "off",
+      } as unknown as Cloudflare.Env),
     ).resolves.toBeNull();
   });
 
@@ -208,6 +211,16 @@ describe("control-plane maintenance fence", () => {
         origin: "https://intar.dev",
         "sec-fetch-site": "same-origin",
       },
+      {
+        "content-type": "application/json",
+        origin: "https://intar.dev/",
+        "sec-fetch-site": "same-origin",
+      },
+      {
+        "content-type": "application/jsonp",
+        origin: "https://intar.dev",
+        "sec-fetch-site": "same-origin",
+      },
     ]) {
       const response = await handleMaintenanceMode(
         new Request("https://intar.dev/api/maintenance/bypass", {
@@ -220,5 +233,37 @@ describe("control-plane maintenance fence", () => {
       expect(response?.status).toBe(403);
       expect(response?.headers.has("set-cookie")).toBe(false);
     }
+  });
+
+  it("rejects declared and streamed maintenance bypass bodies over 64 KiB", async () => {
+    const headers = {
+      "content-type": "application/json",
+      origin: "https://intar.dev",
+      "sec-fetch-site": "same-origin",
+    };
+    const declared = await handleMaintenanceMode(
+      new Request("https://intar.dev/api/maintenance/bypass", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-length": String(MAX_MAINTENANCE_BYPASS_JSON_BYTES + 1),
+        },
+        body: "{}",
+      }),
+      maintenanceEnv,
+    );
+    expect(declared?.status).toBe(413);
+
+    const streamed = await handleMaintenanceMode(
+      new Request("https://intar.dev/api/maintenance/bypass", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          secret: "x".repeat(MAX_MAINTENANCE_BYPASS_JSON_BYTES),
+        }),
+      }),
+      maintenanceEnv,
+    );
+    expect(streamed?.status).toBe(413);
   });
 });

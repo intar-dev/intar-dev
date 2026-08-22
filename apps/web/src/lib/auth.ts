@@ -1235,6 +1235,16 @@ async function validateProviderIdentity(
 }
 
 function buildAuthInstance() {
+  assertNoAdditionalBetterAuthTrustedOrigins(
+    typeof process === "undefined"
+      ? undefined
+      : process.env.BETTER_AUTH_TRUSTED_ORIGINS,
+  );
+  assertNoAdditionalBetterAuthTrustedOrigins(
+    (env as unknown as Record<string, unknown>)[
+      "BETTER_AUTH_TRUSTED_ORIGINS"
+    ],
+  );
   const oauthProviderPlugin = oauthProvider({
     loginPage: "/",
     consentPage: "/oauth/consent",
@@ -1335,6 +1345,12 @@ function buildAuthInstance() {
     // origins. Public OIDC endpoints pass the SSO plugin's fetch checks without
     // widening Better Auth's redirect and Origin allowlist.
     trustedOrigins: [trustedBrowserOrigin(baseURL)],
+    // Better Auth has global and per-instance log paths that can include raw
+    // IdP response objects. App-owned boundaries emit fixed events instead.
+    logger: { disabled: true },
+    // Bubble non-redirect failures to the app-owned callback boundary before
+    // BetterCall can log an upstream object or synthesize a detailed response.
+    onAPIError: { throw: true },
     advanced: authCookiePolicy(baseURL),
     hooks: {
       before: betaAuthBeforeRequest,
@@ -1680,6 +1696,14 @@ export function trustedBrowserOrigin(baseUrl: string): string {
     throw new Error("better_auth_browser_origin_invalid");
   }
   return url.origin;
+}
+
+export function assertNoAdditionalBetterAuthTrustedOrigins(
+  value: unknown,
+): void {
+  if (typeof value === "string" && value.trim() !== "") {
+    throw new Error("better_auth_additional_trusted_origins_forbidden");
+  }
 }
 
 function oidcSsoSecretRuntime(): OidcSsoSecretAdapterRuntime {

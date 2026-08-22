@@ -1,6 +1,5 @@
 import { appError } from "@/lib/app-error";
-
-const PROVIDER_CREDENTIAL_BODY_LIMIT_BYTES = 64 * 1024;
+import { MAX_PROVIDER_JSON_BODY_BYTES } from "@/lib/request-security";
 
 /** Read a credential-bearing JSON body without buffering an unbounded request. */
 export async function readProviderRequestBody(
@@ -10,7 +9,7 @@ export async function readProviderRequestBody(
   if (
     declaredLength !== null &&
     (!/^\d+$/u.test(declaredLength) ||
-      Number(declaredLength) > PROVIDER_CREDENTIAL_BODY_LIMIT_BYTES)
+      Number(declaredLength) > MAX_PROVIDER_JSON_BODY_BYTES)
   ) {
     throw bodyTooLarge();
   }
@@ -25,7 +24,7 @@ export async function readProviderRequestBody(
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > PROVIDER_CREDENTIAL_BODY_LIMIT_BYTES) {
+      if (total > MAX_PROVIDER_JSON_BODY_BYTES) {
         await reader.cancel();
         throw bodyTooLarge();
       }
