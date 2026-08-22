@@ -15,7 +15,6 @@ on:
       release_tag:
         description: Exact Stargate release tag for plan/apply
         required: false
-        default: stargate/v0.2.7
         type: string
       rollback_backup:
         description: Exact host backup ID for rollback
