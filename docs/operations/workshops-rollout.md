@@ -38,11 +38,10 @@ Keep these boundaries intact:
   cleanup or reconciliation.
 
 The Platform Engineering Workshop requires 4 vCPU, 16 GiB RAM, and 32 GiB
-disk. The first immutable production revision contains the exact Hetzner
-`cpx42` profile. GCP remains implemented but operationally deferred; adding
-`e2-standard-4` with a 32 GiB `pd-balanced` boot disk in `europe-west3-a`, then
-`b`, then `c` creates a later immutable revision after GCP can be certified.
-Intar does not resize or substitute either profile.
+disk. Its immutable production revision contains both exact profiles:
+Hetzner `cpx42`, and GCP `e2-standard-4` with a 32 GiB `pd-balanced` boot disk
+in `europe-west3-a`, then `b`, then `c`. Intar does not resize or substitute
+either profile. Both profiles must certify before this revision can publish.
 
 ## Operator boundary
 
@@ -117,7 +116,7 @@ web/R2 deployment, and protected Flagship targeting:
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
-| `STARGATE_EGRESS_IPV4_CIDRS`            | web runtime configuration only                                     |
+| `STARGATE_EGRESS_IPV4_CIDRS`            | web runtime; comma-separated canonical Stargate IPv4 `/32` CIDRs   |
 
 Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
@@ -152,9 +151,9 @@ just check-hydrated
 
 The hydrated Platform Engineering manifest must report format 2, eleven
 modules, 240 scheduled minutes, 85 slides and 85 note files, a 32,768 MiB
-workspace requirement, and exactly the `hetzner-cpx42` runtime profile for the
-first production revision. Every OCI image lock entry must contain a lowercase
-SHA-256 digest.
+workspace requirement, and exactly the ordered `hetzner-cpx42` and
+`gcp-e2-standard-4` runtime profiles. Every OCI image lock entry must contain a
+lowercase SHA-256 digest.
 
 For changes that affect provider lifecycle, deletion, or reconciliation, review
 the live provider inventory and the non-terminal allocation and operation rows
@@ -213,11 +212,31 @@ Dispatch `.github/workflows/control-plane-rollout.yml` from the exact reviewed
 - web confirmation `DEPLOY WORKSHOP CONTROL PLANE`;
 - the time-bounded sole-operator confirmation only when the protected
   environment is explicitly configured for that commissioning mode;
-- when GCP credentials are intentionally deferred, `gcp_dormant=true` and the
-  separate exact confirmation `DEPLOY DORMANT GCP PROVIDER`.
+- `gcp_dormant=false` and an empty dormant confirmation for the active GCP
+  rollout.
 
-Dormant GCP is an explicit protected deployment choice, never a fallback
-inferred from a missing `GCP_CATALOG_API_KEY`. The workflow deploys the
+In reviewed mode, the active dispatch is:
+
+```sh
+gh workflow run control-plane-rollout.yml \
+  --repo intar-dev/intar-dev \
+  --ref main \
+  -f provider_confirmation='DEPLOY PROVIDER WORKERS' \
+  -f gcp_dormant=false \
+  -f gcp_dormant_confirmation='' \
+  -f web_confirmation='DEPLOY WORKSHOP CONTROL PLANE' \
+  -f single_operator_confirmation=''
+```
+
+Configure `GCP_CATALOG_API_KEY` before this dispatch. The active GCP job must
+fail if the key is absent. It passes `--var GCP_PROVIDER_MODE:active`; the
+checked-in Wrangler configuration remains dormant so a raw deploy cannot start
+new GCP work.
+
+Dormant GCP is an explicit protected break-glass choice, never a fallback
+inferred from a missing `GCP_CATALOG_API_KEY`. Use `gcp_dormant=true` with the
+separate exact confirmation `DEPLOY DORMANT GCP PROVIDER` only when active
+GCP work must stay disabled. The workflow deploys the
 route-less `intar-provider-gcp`, validates its service-binding capability
 contract, omits the catalog key from its secrets file, and removes a catalog
 secret left by a prior active deployment. Its `connect`, `resolve_profile`,
@@ -234,20 +253,22 @@ The workflow:
 1. validates both provider packages independently;
 2. deploys each provider with only its own token and secrets;
 3. calls both deployed `capabilities()` services through the remote probe;
-4. fails closed on any protocol mismatch;
-5. builds the Astro web artifact;
-6. verifies the permanent D1 and `SESSION` KV bindings in the built artifact;
-7. publishes the content-addressed workspace-agent and Kino bytes;
-8. applies pending D1 migrations and verifies the production schema;
-9. activates the exact immutable web version with automatic previous-version
+4. calls GCP `readiness()` and, in active mode, requires a successful live
+   catalog quote with `readyForNewWork=true`;
+5. fails closed on any protocol, mode, or readiness mismatch;
+6. builds the Astro web artifact;
+7. verifies the permanent D1 and `SESSION` KV bindings in the built artifact;
+8. publishes the content-addressed workspace-agent and Kino bytes;
+9. applies pending D1 migrations and verifies the production schema;
+10. activates the exact immutable web version with automatic previous-version
    restoration on activation failure;
-10. queues the exact Scenario source bundle.
+11. queues the exact Scenario source bundle.
 
-Retain the provider capability artifact, provider Worker versions, D1 migration
-and verification artifact, web activation artifact, guest tool hashes, D1 UUID,
-source SHA, and workflow run IDs. The executable order is therefore provider
-deployment and capability probing, ordered D1 migrations, then exact web-version
-activation.
+Retain the provider capability and readiness artifact, provider Worker versions,
+D1 migration and verification artifact, web activation artifact, guest tool
+hashes, D1 UUID, source SHA, and workflow run IDs. The executable order is
+therefore provider deployment and readiness probing, ordered D1 migrations,
+then exact web-version activation.
 
 ## 4. Operate the pilot organization
 
@@ -257,8 +278,8 @@ Both Workshop flags remain disabled by default for every organization:
    IDs;
 2. target `workshops_enabled` only to that exact organization, leaving
    `workshop_multicloud_runtime_enabled` false;
-3. connect available provider projects through the owner-only BYOK screens and
-   validate inspection, credential rotation, and cost forecasts while the
+3. connect both dedicated provider projects through the owner-only BYOK screens
+   and validate inspection, credential rotation, and cost forecasts while the
    multicloud flag remains false. Do not submit a GCP key while the GCP Worker
    is explicitly dormant;
 4. publish or update the required Scenario and Course catalogs;
@@ -364,41 +385,193 @@ machine type.
 
 ## 6. Connect the GCP project
 
-The initial GCP live connection and pilot are explicitly deferred and remain
-unproven while `intar-provider-gcp` is deployed in dormant mode. Dormant mode is
-useful only for build, deployment, service-binding, and capability-contract
-proof; it is not proof of catalog access, project validation, allocation, cost,
-or teardown.
+Use active mode for GCP onboarding. First require retained rollout evidence in
+which GCP `readiness()` reports `readyForNewWork=true` and a completed catalog
+check. `capabilities()` alone is not sufficient.
 
-To activate later, add `GCP_CATALOG_API_KEY` to the protected production
-environment and redeploy with `gcp_dormant=false` and without the dormant
-confirmation. The protected workflow must pass the explicit Wrangler override
-`--var GCP_PROVIDER_MODE:active`; the checked-in configuration and any raw
-deploy remain dormant. Only after that deployment and capability probe succeed
-should the owner continue with the project connection below. Missing credentials must
-fail the non-dormant deployment; they must never select dormant mode implicitly.
+Create the `GCP_CATALOG_API_KEY` in a separate administration or FinOps project,
+not in a learner-runtime project. The project administrator can create it with
+an API-only restriction and write it directly to the protected GitHub
+environment secret without printing it:
 
-Use one dedicated, initially empty GCP project. Enable the required Compute and
-billing catalog APIs and grant the dedicated service account only the
-permissions needed by the provider contract. The owner submits its JSON key.
+```sh
+export INTAR_GCP_CATALOG_PROJECT_ID='<administration-project-id>'
+export INTAR_GCP_CATALOG_KEY_ID='intar-gcp-catalog'
 
-Intar must reject foreign Compute resources and must block if the default VPC
-still exists. It never deletes that VPC automatically. After validation it
-creates the Intar custom-mode VPC, Frankfurt subnet, and persistent SSH-only
-firewall sentinel, then envelope-encrypts the JSON key.
+gcloud services enable \
+  apikeys.googleapis.com \
+  cloudbilling.googleapis.com \
+  --project="${INTAR_GCP_CATALOG_PROJECT_ID}"
+
+gcloud services api-keys create \
+  --project="${INTAR_GCP_CATALOG_PROJECT_ID}" \
+  --key-id="${INTAR_GCP_CATALOG_KEY_ID}" \
+  --display-name='Intar GCP catalog' \
+  --api-target='service=cloudbilling.googleapis.com' \
+  --format='value(name)'
+
+gcloud services api-keys describe "${INTAR_GCP_CATALOG_KEY_ID}" \
+  --project="${INTAR_GCP_CATALOG_PROJECT_ID}" \
+  --format=json | jq -e '
+    (.restrictions.apiTargets // []) as $targets |
+    ($targets | length) == 1 and
+    $targets[0].service == "cloudbilling.googleapis.com" and
+    (($targets[0].methods // []) | length) == 0
+  ' >/dev/null
+
+intar_catalog_key_dir="$(mktemp -d)"
+intar_catalog_key_file="${intar_catalog_key_dir}/catalog-api-key"
+chmod 700 "${intar_catalog_key_dir}"
+gcloud services api-keys get-key-string "${INTAR_GCP_CATALOG_KEY_ID}" \
+  --project="${INTAR_GCP_CATALOG_PROJECT_ID}" \
+  --format='value(keyString)' > "${intar_catalog_key_file}"
+chmod 600 "${intar_catalog_key_file}"
+test -s "${intar_catalog_key_file}"
+gh secret set GCP_CATALOG_API_KEY \
+  --repo intar-dev/intar-dev \
+  --env production < "${intar_catalog_key_file}"
+rm -f -- "${intar_catalog_key_file}"
+rmdir -- "${intar_catalog_key_dir}"
+unset intar_catalog_key_file intar_catalog_key_dir
+```
+
+The `describe` result must contain exactly one API target,
+`cloudbilling.googleapis.com`. Do not add another API target. Then run the
+active rollout in section 3. Follow Google's
+[Cloud Billing Catalog API setup](https://docs.cloud.google.com/billing/v1/how-tos/catalog-api),
+[`gcloud services api-keys create` reference](https://docs.cloud.google.com/sdk/gcloud/reference/services/api-keys/create),
+and [API-key restriction](https://docs.cloud.google.com/api-keys/docs/add-restrictions-api-keys)
+instructions. Do not submit this key through the BYOK screen.
+
+Use one dedicated, initially empty GCP runtime project with billing enabled.
+The project owner can prepare it with an authenticated `gcloud` session:
+
+```sh
+export INTAR_GCP_PROJECT_ID='<dedicated-project-id>'
+export INTAR_GCP_SERVICE_ACCOUNT_ID='intar-workshop-provider'
+export INTAR_GCP_ROLE_ID='intarWorkshopProvider'
+
+gcloud services enable \
+  cloudasset.googleapis.com \
+  cloudbilling.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  compute.googleapis.com \
+  iam.googleapis.com \
+  serviceusage.googleapis.com \
+  --project="${INTAR_GCP_PROJECT_ID}"
+
+gcloud billing projects describe "${INTAR_GCP_PROJECT_ID}" --format=json
+if gcloud compute networks describe default \
+  --project="${INTAR_GCP_PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud compute networks delete default --project="${INTAR_GCP_PROJECT_ID}"
+fi
+```
+
+The billing response must contain `billingEnabled: true` and a non-empty
+`billingAccountName`. Delete the default VPC only in this dedicated empty
+project. Intar fails closed when it sees the default VPC or any foreign Compute
+resource; it never deletes either one.
+
+Create one custom project role with exactly the provider's active and cleanup
+permissions:
+
+```sh
+intar_gcp_permissions='cloudasset.assets.searchAllResources,compute.addresses.list,compute.backendServices.list,compute.disks.create,compute.disks.delete,compute.disks.get,compute.disks.list,compute.disks.setLabels,compute.disks.use,compute.firewalls.create,compute.firewalls.get,compute.firewalls.list,compute.forwardingRules.list,compute.globalOperations.get,compute.images.list,compute.instanceGroups.list,compute.instanceTemplates.list,compute.instances.create,compute.instances.delete,compute.instances.get,compute.instances.list,compute.instances.reset,compute.instances.setLabels,compute.instances.setMetadata,compute.instances.setServiceAccount,compute.instances.setTags,compute.machineTypes.get,compute.networks.create,compute.networks.get,compute.networks.getEffectiveFirewalls,compute.networks.getRegionEffectiveFirewalls,compute.networks.list,compute.networks.updatePolicy,compute.networks.use,compute.networks.useExternalIp,compute.projects.get,compute.regionOperations.get,compute.regions.get,compute.routes.list,compute.snapshots.list,compute.subnetworks.create,compute.subnetworks.get,compute.subnetworks.list,compute.subnetworks.use,compute.subnetworks.useExternalIp,compute.targetPools.list,compute.zoneOperations.get,resourcemanager.projects.get,serviceusage.services.list,serviceusage.services.use'
+
+gcloud iam roles create "${INTAR_GCP_ROLE_ID}" \
+  --project="${INTAR_GCP_PROJECT_ID}" \
+  --title='Intar Workshop Provider' \
+  --description='Least-privilege Intar workshop VM lifecycle' \
+  --stage=GA \
+  --permissions="${intar_gcp_permissions}"
+
+gcloud iam service-accounts create "${INTAR_GCP_SERVICE_ACCOUNT_ID}" \
+  --project="${INTAR_GCP_PROJECT_ID}" \
+  --display-name='Intar Workshop Provider'
+
+intar_gcp_service_account="${INTAR_GCP_SERVICE_ACCOUNT_ID}@${INTAR_GCP_PROJECT_ID}.iam.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "${INTAR_GCP_PROJECT_ID}" \
+  --member="serviceAccount:${intar_gcp_service_account}" \
+  --role="projects/${INTAR_GCP_PROJECT_ID}/roles/${INTAR_GCP_ROLE_ID}"
+```
+
+The list includes the field-level permissions required by the exact instance
+insert: instance tags, metadata, labels, and an explicit empty service-account
+list, boot-disk labels, and external IPv4 use on both the network and subnet.
+It also includes network policy updates required to attach the subnet and
+firewall sentinel, plus global and regional effective-firewall reads. Intar
+uses those reads to reject an inherited policy that can expose a learner VM to
+non-Stargate ingress, block Stargate SSH, or stop required outbound bootstrap
+and runtime traffic. Keep the role exact. The provider verifies every project
+permission before it stores the credential. Google's
+[`instances.insert` reference](https://docs.cloud.google.com/compute/docs/reference/rest/v1/instances/insert)
+and the [`subnetworks.insert`](https://docs.cloud.google.com/compute/docs/reference/rest/v1/subnetworks/insert)
+and [`firewalls.insert`](https://docs.cloud.google.com/compute/docs/reference/rest/v1/firewalls/insert)
+references are the authority for these field-level requirements. Cloud Asset
+Inventory also requires both `cloudasset.assets.searchAllResources` and
+`serviceusage.services.use`, as specified by its
+[roles and permissions reference](https://docs.cloud.google.com/asset-inventory/docs/roles-permissions).
+
+Create a service-account JSON key only when the organization policy permits
+this credential type. Keep the plaintext in a private temporary directory:
+
+```sh
+intar_gcp_key_dir="$(mktemp -d)"
+intar_gcp_key_file="${intar_gcp_key_dir}/service-account.json"
+chmod 700 "${intar_gcp_key_dir}"
+gcloud iam service-accounts keys create "${intar_gcp_key_file}" \
+  --iam-account="${intar_gcp_service_account}" \
+  --project="${INTAR_GCP_PROJECT_ID}"
+chmod 600 "${intar_gcp_key_file}"
+```
+
+In the owner-only BYOK screen, select GCP Compute, enter the exact project ID,
+submit that JSON file, keep the ordered zones `europe-west3-a`,
+`europe-west3-b`, and `europe-west3-c`, and set the connection concurrency and
+cost limits. After the screen confirms an active connection, remove the local
+plaintext file and directory. Do not print, email, upload to GitHub, or retain
+the key in an artifact.
+
+```sh
+rm -f -- "${intar_gcp_key_file}"
+rmdir -- "${intar_gcp_key_dir}"
+unset intar_gcp_key_file intar_gcp_key_dir
+```
+
+Connection validates project identity, billing, enabled APIs, exact IAM
+permissions, quota, the empty inventory, machine type, Debian 13 image family,
+zones, the inherent Compute Project asset, and global and regional effective
+firewall policy. It then creates the
+deterministic Intar custom-mode VPC,
+`10.77.0.0/20` Frankfurt subnet, and SSH-only firewall sentinel restricted to
+the canonical `/32` values in `STARGATE_EGRESS_IPV4_CIDRS`. Before each VM
+create, it also requires the generated subnet route and exactly one untagged,
+priority-1000 `0.0.0.0/0` route to the default Internet gateway. A missing or
+competing custom route fails closed. Only after all checks succeed does the
+provider envelope-encrypt the JSON key.
+
+For credential rotation, create a second key in a new private temporary
+directory, submit it through the connection's owner-only rotation action, and
+prove that inspection succeeds with the new credential. Only then delete the
+old key in GCP by its recorded key ID. Keep at least one working cleanup
+credential until all instances, disks, addresses, operations, and reconciliation
+rows have terminal deletion evidence.
 
 The runtime profile resolves the Debian 13 family to an immutable image before
 publication. Learner instances have no guest service account, project-wide SSH
 keys, IPv6, extra disk, static address, snapshot, image, load balancer, or
 public application port.
 
+Repository validation and active readiness do not prove a live runtime. GCP
+remains operationally unproven until the certification, one-user pilot, and
+complete teardown evidence below have all been retained.
+
 ## 7. Publish and certify every declared profile
 
-The first production revision declares only `hetzner-cpx42`, so it can be
-published while GCP remains dormant. Adding `gcp-e2-standard-4` later creates a
-new immutable revision, and that revision remains blocked until GCP is active,
-connected, and certifiable. No publication may skip one of its declared
-profiles.
+The production revision declares both `hetzner-cpx42` and
+`gcp-e2-standard-4`. It remains blocked until both providers are active, their
+dedicated projects are connected, and both profiles certify. No publication
+may skip, substitute, or defer one of its declared profiles.
 
 Publication uses one temporary verifier VM for each declared profile. For each
 profile, require evidence that the harness:
@@ -421,10 +594,11 @@ content. Checkpoint bundles and guest tools are signed and generation-bound.
 Create a draft session by selecting exactly one revision profile and, for
 direct cloud, its compatible organization connection. The latest forecast must
 be unexpired and below the organization's ceiling before entering the lobby.
-Forecast refresh is available while the multicloud feature flag is off. An
-explicitly dormant GCP Worker has no catalog key and therefore rejects GCP quote
-operations before contacting Google; this does not prevent validating Hetzner
-forecasts during the deferred period.
+Forecast refresh is available while the multicloud feature flag is off. Active
+GCP readiness and the session forecast must both use the protected catalog key.
+An explicitly dormant GCP Worker has no catalog key and rejects GCP quote
+operations before contacting Google; a revision that declares GCP cannot
+publish in that state.
 
 Review all three immutable scenarios:
 
@@ -441,10 +615,10 @@ discounts, negotiated pricing, and invoice adjustments are excluded.
 
 ## 9. Run one-user pilots
 
-Publish and test the Hetzner-only revision first. The GCP `e2-standard-4`
-revision and session remain deferred and unproven until the dedicated project,
-connection, certification, and live-test window are available. Run the same
-sequence separately for each provider when its revision is published:
+After both certifications succeed, run the same one-user sequence separately
+with `hetzner-cpx42` and `gcp-e2-standard-4`. Do not treat the Hetzner run as
+evidence for GCP. The GCP path remains unproven until its own live sequence and
+teardown complete:
 
 1. schedule the sole owner as facilitator with **Learner workspace** selected,
    then check in and bulk-provision that workspace from checkpoint 00;
@@ -469,11 +643,11 @@ not a successful pilot.
 
 ## 10. Prove two-user isolation
 
-Run a separate session with two enrolled learner workspaces. Prove distinct
-executions, generations, provider resources, guest credentials, terminal
-sessions, application routes/cookies, recordings, artifacts, and cost-ledger
-entries. Cross-user access must fail before reaching Stargate or a provider
-service.
+Run a separate session with two enrolled learner workspaces for each declared
+direct-cloud profile. Prove distinct executions, generations, provider
+resources, guest credentials, terminal sessions, application routes/cookies,
+recordings, artifacts, and cost-ledger entries. Cross-user access must fail
+before reaching Stargate or a provider service.
 
 End the session and require:
 
@@ -512,10 +686,10 @@ previous and activated web version UUIDs and D1 binding evidence
 automatic restoration evidence when an activation attempt fails
 ```
 
-Successful CI, dormant GCP deployment, or capability probing alone is not GCP
-runtime acceptance. Record the GCP pilot as deferred and unproven until a real
-allocation and complete teardown evidence exist. Full multicloud acceptance
-still requires real allocations and complete teardown evidence for both
+Successful CI, active or dormant GCP deployment, readiness, or capability
+probing alone is not GCP runtime acceptance. Record the GCP path as unproven
+until a real allocation and complete teardown evidence exist. Full multicloud
+acceptance requires real allocations and complete teardown evidence for both
 providers.
 
 ## Incident response

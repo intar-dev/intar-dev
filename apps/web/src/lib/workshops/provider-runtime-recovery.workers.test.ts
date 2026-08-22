@@ -954,6 +954,231 @@ describe("provider runtime recovery", () => {
     ).toBe(1);
   });
 
+  it("retries cleanup when an immediate DONE GCP delete contains an error", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      ...[
+        ["core", "compute_core", 4_000_000_000],
+        ["ram", "compute_ram", 16_000_000_000],
+      ].map(([suffix, resourceKind, quantityNanos]) =>
+        env.DB.prepare(
+          `INSERT INTO provider_price_line_items
+             (id, observation_id, sku, resource_kind, location, raw_price,
+              price_nanos, unit, quantity_nanos, billing_increment_seconds,
+              minimum_duration_seconds, tax_treatment, metadata_json)
+           VALUES (?, 'cert-price', ?, ?, 'europe-west3-a', '0.01', 10000000,
+                   'hour', ?, 1, 1, 'tax_excluded_public_list', '{}')`,
+        ).bind(
+          `delete-price-${suffix}`,
+          `delete-${suffix}`,
+          resourceKind,
+          quantityNanos,
+        )
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_resources
+           (id, allocation_id, provider_kind, resource_kind,
+            provider_resource_id, location_attempt, location, provider_state,
+            configuration_json, provider_created_at, created_at, updated_at)
+         VALUES ('delete-instance', 'cert-allocation', 'gcp_compute',
+                 'instance', 'instance-9001', 1, 'europe-west3-a', 'RUNNING',
+                 '{"deterministicName":"intar-certification"}', 1, 1, 1)`,
+      ),
+      env.DB.prepare(
+        `UPDATE workshop_runtime_profile_certifications
+         SET state = 'cleanup_pending', error_code = 'test_cleanup',
+             evidence_json = json_set(evidence_json, '$.phase', 'cleanup_pending'),
+             updated_at = 100
+         WHERE id = 'certification'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'deleting', deletion_requested_at = 100, updated_at = 100
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET desired_state = 'deleted', observed_state = 'deleting',
+             sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+             updated_at = 100
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+    ]);
+    const deleteRequests: Array<{ requestId: string }> = [];
+    let deleteAttempt = 0;
+    const failedOperationSelfLink =
+      "https://compute.googleapis.com/compute/v1/projects/project/zones/europe-west3-a/operations/delete-1";
+    const runOperation = vi.fn(async (request: {
+      requestId: string;
+      connectionId: string;
+      operation: Record<string, unknown>;
+    }) => {
+      const kind = String(request.operation.kind);
+      if (kind === "delete_instance") {
+        deleteRequests.push({ requestId: request.requestId });
+        deleteAttempt += 1;
+        if (deleteAttempt === 1) {
+          return {
+            canonicalWrites: [
+              {
+                requestId: request.requestId,
+                connectionId: request.connectionId,
+                observedAt: new Date(100).toISOString(),
+                operation: "resource_deletion_requested" as const,
+                resourceKind: "instance",
+                externalId: "intar-certification",
+                name: "intar-certification",
+                operationIds: ["1"],
+                state: "deleting",
+                location: "europe-west3-a",
+              },
+              {
+                requestId: request.requestId,
+                connectionId: request.connectionId,
+                observedAt: new Date(100).toISOString(),
+                operation: "operation_observed" as const,
+                resourceKind: "operation",
+                externalId: failedOperationSelfLink,
+                name: "delete-1",
+                operationIds: ["1"],
+                state: "DONE",
+                errorCode: "gcp_operation_internal_error",
+              },
+            ],
+            data: {
+              operation: {
+                status: "DONE",
+                error: { errors: [{ code: "INTERNAL_ERROR" }] },
+              },
+            },
+          };
+        }
+        return {
+          canonicalWrites: [
+            {
+              requestId: request.requestId,
+              connectionId: request.connectionId,
+              observedAt: new Date(110).toISOString(),
+              operation: "resource_deleted" as const,
+              resourceKind: "instance",
+              externalId: "intar-certification",
+              name: "intar-certification",
+              operationIds: [],
+              state: "deleted",
+              location: "europe-west3-a",
+            },
+          ],
+          data: null,
+        };
+      }
+      if (kind === "observe_allocation") {
+        return {
+          canonicalWrites: [
+            {
+              requestId: request.requestId,
+              connectionId: request.connectionId,
+              observedAt: new Date(110).toISOString(),
+              operation: "resource_deleted" as const,
+              resourceKind: "instance",
+              externalId: "intar-certification",
+              name: "intar-certification",
+              operationIds: [],
+              state: "deleted",
+              location: "europe-west3-a",
+            },
+          ],
+          data: { status: "missing" },
+        };
+      }
+      throw new Error(`unexpected provider operation ${kind}`);
+    });
+    mocks.invokeProviderOperation.mockImplementation(
+      async (_providerKind, invoke) => invoke({ runOperation }),
+    );
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 100, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 1, pending: 0, deleted: 0 });
+    const firstAttempt = await env.DB.prepare(
+      `SELECT state, provider_operation_id, error_code, completed_at
+       FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'delete_instance' AND attempt = 1`,
+    ).first<{
+      state: string;
+      provider_operation_id: string | null;
+      error_code: string | null;
+      completed_at: number | null;
+    }>();
+    expect(firstAttempt).toEqual({
+      state: "failed",
+      provider_operation_id: failedOperationSelfLink,
+      error_code: "gcp_operation_internal_error",
+      completed_at: 100,
+    });
+    const retryState = await env.DB.prepare(
+      `SELECT allocation.state, reconciliation.sweep_after,
+              reconciliation.consecutive_failures
+       FROM runtime_provider_allocations allocation
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<{
+      state: string;
+      sweep_after: number;
+      consecutive_failures: number;
+    }>();
+    expect(retryState).toEqual({
+      state: "cleanup_pending",
+      sweep_after: 10_100,
+      consecutive_failures: 1,
+    });
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 10_100, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 0, deleted: 1 });
+    expect(deleteRequests).toHaveLength(2);
+    expect(deleteRequests[1]?.requestId).not.toBe(deleteRequests[0]?.requestId);
+    const attempts = await env.DB.prepare(
+      `SELECT attempt, state, error_code
+       FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'delete_instance'
+       ORDER BY attempt`,
+    ).all<{ attempt: number; state: string; error_code: string | null }>();
+    expect(attempts.results).toEqual([
+      {
+        attempt: 1,
+        state: "failed",
+        error_code: "gcp_operation_internal_error",
+      },
+      { attempt: 2, state: "succeeded", error_code: null },
+    ]);
+    const final = await env.DB.prepare(
+      `SELECT allocation.state AS allocation_state,
+              allocation.deletion_confirmed_at,
+              certification.state AS certification_state,
+              certification.deletion_confirmed_at AS certification_deleted_at,
+              execution.state AS execution_state,
+              reconciliation.observed_state
+       FROM runtime_provider_allocations allocation
+       JOIN workshop_runtime_profile_certifications certification
+         ON certification.verifier_allocation_id = allocation.id
+       JOIN runtime_executions execution ON execution.id = allocation.execution_id
+       JOIN runtime_provider_reconciliation reconciliation
+         ON reconciliation.allocation_id = allocation.id
+       WHERE allocation.id = 'cert-allocation'`,
+    ).first<Record<string, string | number | null>>();
+    expect(final).toMatchObject({
+      allocation_state: "deleted",
+      deletion_confirmed_at: 10_100,
+      certification_state: "failed",
+      certification_deleted_at: 10_100,
+      execution_state: "archived",
+      observed_state: "deleted",
+    });
+  });
+
   it("rejects a late provider operation observation after location fallback advanced", async () => {
     await seedCumulativeCertification();
     await env.DB.batch([
@@ -1000,6 +1225,377 @@ describe("provider runtime recovery", () => {
       last_polled_at: null,
       completed_at: null,
     });
+  });
+
+  it("starts late GCP attempt-B resources at the attempt time and closes all four price lines", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      ...[
+        ["core", "compute_core", 4_000_000_000],
+        ["ram", "compute_ram", 16_000_000_000],
+        ["disk", "pd_balanced", 32_000_000_000],
+        ["ip", "external_ipv4", 1_000_000_000],
+      ].map(([suffix, resourceKind, quantityNanos]) =>
+        env.DB.prepare(
+          `INSERT INTO provider_price_line_items
+             (id, observation_id, sku, resource_kind, location, raw_price,
+              price_nanos, unit, quantity_nanos, billing_increment_seconds,
+              minimum_duration_seconds, tax_treatment, metadata_json)
+           VALUES (?, 'cert-price', ?, ?, 'europe-west3-b', '0.01', 10000000,
+                   ?, ?, 1, 1, 'tax_excluded_public_list', '{}')`,
+        ).bind(
+          `cert-price-${suffix}`,
+          `gcp-${suffix}`,
+          resourceKind,
+          resourceKind === "pd_balanced" ? "gib_month" : "hour",
+          quantityNanos,
+        )
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET location = 'europe-west3-b', location_attempt = 2,
+             location_attempt_started_at = 200, state = 'creating',
+             updated_at = 200
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET desired_state = 'ready', observed_state = 'creating',
+             sweep_after = 0, claim_id = NULL, claim_expires_at = NULL,
+             updated_at = 200
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_resources
+           (id, allocation_id, provider_kind, resource_kind,
+            provider_resource_id, location_attempt, location, provider_state,
+            configuration_json, provider_created_at, created_at, updated_at)
+         VALUES ('attempt-b-instance', 'cert-allocation', 'gcp_compute',
+                 'instance', 'instance-b', 2, 'europe-west3-b', 'PROVISIONING',
+                 '{"deterministicName":"intar-certification"}', 200, 200, 200)`,
+      ),
+    ]);
+    mocks.invokeProviderOperation.mockResolvedValue({
+      canonicalWrites: [
+        {
+          requestId: "observe-attempt-b",
+          connectionId: "connection",
+          observedAt: new Date(500).toISOString(),
+          operation: "resource_observed",
+          resourceKind: "instance",
+          externalId: "instance-b",
+          name: "intar-certification",
+          operationIds: [],
+          state: "RUNNING",
+          location: "europe-west3-b",
+          publicIpv4: "192.0.2.50",
+          resourceCreatedAt: new Date(250).toISOString(),
+        },
+        {
+          requestId: "observe-attempt-b",
+          connectionId: "connection",
+          observedAt: new Date(500).toISOString(),
+          operation: "resource_observed",
+          resourceKind: "boot_disk",
+          externalId: "disk-b",
+          name: "intar-certification",
+          operationIds: [],
+          state: "READY",
+          location: "europe-west3-b",
+        },
+        {
+          requestId: "observe-attempt-b",
+          connectionId: "connection",
+          observedAt: new Date(500).toISOString(),
+          operation: "resource_observed",
+          resourceKind: "ipv4",
+          externalId: "instance-b:ephemeral-ipv4",
+          name: "intar-certification-ephemeral-ipv4",
+          operationIds: [],
+          state: "present",
+          location: "europe-west3-b",
+          publicIpv4: "192.0.2.50",
+        },
+      ],
+      data: { status: "present" },
+    });
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 500, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    const created = await env.DB.prepare(
+      `SELECT resource_kind, provider_created_at
+       FROM runtime_provider_resources
+       WHERE allocation_id = 'cert-allocation'
+       ORDER BY resource_kind`,
+    ).all<{ resource_kind: string; provider_created_at: number }>();
+    expect(created.results).toEqual([
+      { resource_kind: "boot_disk", provider_created_at: 200 },
+      { resource_kind: "instance", provider_created_at: 250 },
+      { resource_kind: "ipv4", provider_created_at: 200 },
+    ]);
+    const ledger = await env.DB.prepare(
+      `SELECT sku, provider_created_at FROM runtime_provider_cost_ledger
+       WHERE allocation_id = 'cert-allocation' ORDER BY sku`,
+    ).all<{ sku: string; provider_created_at: number }>();
+    expect(ledger.results).toEqual([
+      { sku: "gcp-core", provider_created_at: 250 },
+      { sku: "gcp-disk", provider_created_at: 200 },
+      { sku: "gcp-ip", provider_created_at: 200 },
+      { sku: "gcp-ram", provider_created_at: 250 },
+    ]);
+
+    await env.DB.prepare(
+      `UPDATE runtime_provider_resources
+       SET provider_state = 'deleted', disappearance_confirmed_at = 700,
+           updated_at = 700
+       WHERE allocation_id = 'cert-allocation'`,
+    ).run();
+    await expect(
+      reconcileProviderCostLedger({ allocationId: "cert-allocation", now: 700 }),
+    ).resolves.toMatchObject({ inserted: 0, closed: 4 });
+  });
+
+  it("advances location immediately when a DONE GCP create reports POOL_CAPACITY_INSUFFICIENT", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'creating', location_attempt_started_at = 100,
+             updated_at = 100
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET observed_state = 'creating', sweep_after = 0,
+             claim_id = NULL, claim_expires_at = NULL, updated_at = 100
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_guest_credentials
+         SET bootstrap_consumed_at = NULL, report_credential_hash = NULL,
+             report_credential_issued_at = NULL,
+             checkpoint_download_token_hash = NULL,
+             checkpoint_download_expires_at = NULL,
+             checkpoint_first_downloaded_at = NULL, updated_at = 100
+         WHERE execution_id = 'cert-execution'`,
+      ),
+    ]);
+    await Promise.all([
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        "checkpoint-00.tar.zst",
+        new Uint8Array([1]),
+      ),
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        `workspace-agent/releases/${"c".repeat(64)}/intar-workspace-agent`,
+        new Uint8Array([1]),
+      ),
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        `workspace-agent/kino/releases/${"d".repeat(64)}/kino`,
+        new Uint8Array([1]),
+      ),
+    ]);
+    const operationSelfLink =
+      "https://compute.googleapis.com/compute/v1/projects/project/zones/europe-west3-a/operations/create-1";
+    const operations: string[] = [];
+    const runOperation = vi.fn(async (request: {
+      requestId: string;
+      connectionId: string;
+      operation: Record<string, unknown>;
+    }) => {
+      const kind = String(request.operation.kind);
+      operations.push(kind);
+      if (kind !== "create_instance") {
+        return { canonicalWrites: [], data: { status: "absent" } };
+      }
+      return {
+        canonicalWrites: [
+          {
+            requestId: request.requestId,
+            connectionId: request.connectionId,
+            observedAt: new Date(100).toISOString(),
+            operation: "operation_observed" as const,
+            resourceKind: "operation",
+            externalId: operationSelfLink,
+            name: "create-1",
+            operationIds: ["1"],
+            state: "DONE",
+            errorCode: "gcp_resource_unavailable",
+          },
+        ],
+        data: {
+          outcome: "created",
+          operation: {
+            status: "DONE",
+            error: {
+              errors: [{ code: "POOL_CAPACITY_INSUFFICIENT" }],
+            },
+          },
+        },
+      };
+    });
+    mocks.invokeProviderOperation.mockImplementation(
+      async (_providerKind, invoke) => invoke({ runOperation }),
+    );
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 100, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    expect(operations).toEqual([
+      "observe_allocation",
+      "validate_foundation",
+      "create_instance",
+    ]);
+    const allocation = await env.DB.prepare(
+      `SELECT location, location_attempt, state, fallback_pending, retry_count
+       FROM runtime_provider_allocations
+       WHERE id = 'cert-allocation'`,
+    ).first<{
+      location: string;
+      location_attempt: number;
+      state: string;
+      fallback_pending: number;
+      retry_count: number;
+    }>();
+    expect(allocation).toEqual({
+      location: "europe-west3-b",
+      location_attempt: 2,
+      state: "creating",
+      fallback_pending: 0,
+      retry_count: 1,
+    });
+    const create = await env.DB.prepare(
+      `SELECT state, provider_operation_id, error_code, completed_at
+       FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'create_instance'`,
+    ).first<{
+      state: string;
+      provider_operation_id: string | null;
+      error_code: string | null;
+      completed_at: number | null;
+    }>();
+    expect(create).toEqual({
+      state: "failed",
+      provider_operation_id: operationSelfLink,
+      error_code: "gcp_resource_unavailable",
+      completed_at: 100,
+    });
+    const evidence = await env.DB.prepare(
+      `SELECT evidence_json
+       FROM workshop_runtime_profile_certifications
+       WHERE id = 'certification'`,
+    ).first<{ evidence_json: string }>();
+    expect(JSON.parse(evidence?.evidence_json ?? "{}")).toMatchObject({
+      phase: "allocating",
+      fallbackErrorCode: "gcp_resource_unavailable",
+      location: "europe-west3-b",
+      locationAttempt: 2,
+    });
+  });
+
+  it("revalidates the GCP foundation immediately before create and blocks drift", async () => {
+    await seedCumulativeCertification();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE runtime_provider_allocations
+         SET state = 'creating', location_attempt_started_at = 100,
+             updated_at = 100
+         WHERE id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_provider_reconciliation
+         SET observed_state = 'creating', sweep_after = 0,
+             claim_id = NULL, claim_expires_at = NULL, updated_at = 100
+         WHERE allocation_id = 'cert-allocation'`,
+      ),
+      env.DB.prepare(
+        `INSERT INTO runtime_provider_operations
+           (id, allocation_id, provider_kind, operation_kind,
+            location_attempt, request_id, state, attempt, completed_at,
+            created_at, updated_at)
+         VALUES ('old-foundation-check', 'cert-allocation', 'gcp_compute',
+                 'validate_foundation', 1, 'old-foundation-request',
+                 'succeeded', 1, 50, 50, 50)`,
+      ),
+      env.DB.prepare(
+        `UPDATE runtime_guest_credentials
+         SET bootstrap_consumed_at = NULL, report_credential_hash = NULL,
+             report_credential_issued_at = NULL,
+             checkpoint_download_token_hash = NULL,
+             checkpoint_download_expires_at = NULL,
+             checkpoint_first_downloaded_at = NULL, updated_at = 100
+         WHERE execution_id = 'cert-execution'`,
+      ),
+    ]);
+    await Promise.all([
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        "checkpoint-00.tar.zst",
+        new Uint8Array([1]),
+      ),
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        `workspace-agent/releases/${"c".repeat(64)}/intar-workspace-agent`,
+        new Uint8Array([1]),
+      ),
+      env.VM_IMAGE_REGISTRY_BUCKET.put(
+        `workspace-agent/kino/releases/${"d".repeat(64)}/kino`,
+        new Uint8Array([1]),
+      ),
+    ]);
+    const operations: Array<Record<string, unknown>> = [];
+    const runOperation = vi.fn(async (request: {
+      operation: Record<string, unknown>;
+    }) => {
+      operations.push(request.operation);
+      if (request.operation.kind === "validate_foundation") {
+        throw new AppError({
+          status: 409,
+          code: "gcp_foundation_drift",
+          message: "the GCP foundation changed",
+        });
+      }
+      if (request.operation.kind === "create_instance") {
+        throw new Error("create_instance must not run after foundation drift");
+      }
+      return { canonicalWrites: [], data: { status: "absent" } };
+    });
+    mocks.invokeProviderOperation.mockImplementation(
+      async (_providerKind, invoke) => invoke({ runOperation }),
+    );
+
+    await expect(
+      sweepWorkshopProviderRuntimes({ now: 100, limit: 10 }),
+    ).resolves.toMatchObject({ failed: 0, pending: 1 });
+    expect(operations.map((operation) => operation.kind)).toEqual([
+      "observe_allocation",
+      "validate_foundation",
+    ]);
+    expect(operations[1]).toMatchObject({
+      kind: "validate_foundation",
+      foundation: {
+        stargateEgressIpv4Cidrs: ["192.0.2.10/32"],
+        ownership: {
+          purpose: "provider_connection_sentinel",
+          organizationRef: expect.stringMatching(/^[a-f0-9]{32}$/u),
+          connectionRef: expect.stringMatching(/^[a-f0-9]{32}$/u),
+        },
+      },
+    });
+    expect(runOperation).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: expect.objectContaining({ kind: "create_instance" }),
+      }),
+    );
+    const validationAttempts = await env.DB.prepare(
+      `SELECT state, attempt FROM runtime_provider_operations
+       WHERE allocation_id = 'cert-allocation'
+         AND operation_kind = 'validate_foundation'
+       ORDER BY attempt`,
+    ).all<{ state: string; attempt: number }>();
+    expect(validationAttempts.results).toEqual([
+      { state: "succeeded", attempt: 1 },
+      { state: "failed", attempt: 2 },
+    ]);
   });
 
   it("discovers a Hetzner create left running without an action identity before any POST retry", () => {

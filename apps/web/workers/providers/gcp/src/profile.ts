@@ -32,12 +32,18 @@ export function assertCertifiedProfileInput(input: {
     });
   }
   if (
-    input.zones.length !== GCP_FRANKFURT_ZONE_FALLBACK.length ||
-    input.zones.some((zone, index) => zone !== GCP_FRANKFURT_ZONE_FALLBACK[index])
+    input.zones.length === 0 ||
+    input.zones.length > GCP_FRANKFURT_ZONE_FALLBACK.length ||
+    new Set(input.zones).size !== input.zones.length ||
+    input.zones.some(
+      (zone) => !GCP_FRANKFURT_ZONE_FALLBACK.includes(
+        zone as (typeof GCP_FRANKFURT_ZONE_FALLBACK)[number],
+      ),
+    )
   ) {
     throw new ProviderServiceError({
       code: "gcp_zone_fallback_invalid",
-      message: "GCP profile must use the certified Frankfurt zone fallback order",
+      message: "GCP profile must use unique certified Frankfurt zones",
       retryable: false,
     });
   }

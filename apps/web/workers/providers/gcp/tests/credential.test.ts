@@ -78,4 +78,11 @@ describe("GCP credential boundary", () => {
     expect(() => parseServiceAccountKey(JSON.stringify({ ...key, token_uri: "https://evil.test" })))
       .toThrow("GCP service-account key is invalid");
   });
+
+  it("rejects a service account whose email belongs to another project", () => {
+    expect(() => parseServiceAccountKey(JSON.stringify({
+      ...key,
+      client_email: "intar-runtime@different-project.iam.gserviceaccount.com",
+    }))).toThrow("GCP service-account key is invalid");
+  });
 });

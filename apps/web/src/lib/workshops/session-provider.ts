@@ -512,6 +512,7 @@ async function assertPinnedProfileStillAvailable(input: {
           machineType: input.profile.machineType,
           zones: input.profile.locationsJson,
           imageFamily: input.profile.systemImage,
+          resolvedImageId: input.profile.resolvedImageId,
         };
   const request = {
     requestId,

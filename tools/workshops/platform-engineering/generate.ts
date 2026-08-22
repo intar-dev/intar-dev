@@ -591,7 +591,7 @@ the facilitator can restore the canonical checkpoint instead of switching runtim
     )
     .replace(
       `Hardware honesty, one more time: 16 GB RAM minimum with at least 10 GB allocatable to Docker; 32 GB is comfortable. The full platform idles around 8 GB inside the cluster. On 16 GB machines: close the Electron zoo. macOS: OrbStack or Docker Desktop with a raised memory limit. WSL2: raise it in .wslconfig — and WSL2 is our least-tested platform, so lifeboats apply.`,
-      "Capacity honesty: this revision offers one exact VM per learner: Hetzner CPX42 with 16 GiB RAM and a 160 GiB system disk, exceeding the workshop's 32 GiB disk requirement. That leaves headroom for the roughly 7.5–8 GiB in-cluster workload plus Talos, Docker, and the operating system. Intar blocks provisioning if the pinned profile, price, quota, or required location is unavailable; it never resizes or substitutes the profile silently. A later immutable revision can add a separately certified GCP profile.",
+      "Capacity honesty: this revision offers one selected VM profile per learner: Hetzner CPX42 with 16 GiB RAM and a 160 GiB system disk, or GCP e2-standard-4 with 16 GiB RAM and a 32 GiB pd-balanced boot disk in the ordered Frankfurt zones. Both profiles meet the workshop's 4 vCPU, 16 GiB RAM, and 32 GiB disk requirement. That leaves headroom for the roughly 7.5–8 GiB in-cluster workload plus Talos, Docker, and the operating system. Intar blocks provisioning if the selected profile, price, quota, or required location is unavailable; it never resizes or substitutes the profile silently.",
     )
     .replace(
       `Set the timer visibly. The task: run the pre-flight, fix what it flags (most common: Docker not running, or Docker memory limit below 10 GB), and run the module's verify.sh.`,
@@ -969,7 +969,8 @@ function moduleContent(module: ModuleDefinition, readme: string): string {
       /### Enable Kagent and point it at your platform[\s\S]*?(?=### Beat 2:)/u,
       `### Use the hosted-model path
 
-The certified CPX42 profile has 16 GiB RAM, so Intar intentionally omits the
+The certified Hetzner CPX42 and GCP e2-standard-4 profiles each have 16 GiB RAM,
+so Intar intentionally omits the
 source workshop's host-side Ollama beat. Enable Kagent through the GitOps catalog as described,
 then replace its default ModelConfig with the hosted provider configuration in
 Beat 2 before opening an investigation. The human-only fault diagnosis and
@@ -1047,7 +1048,7 @@ function importModule(module: ModuleDefinition, allSlides: ImportedSlide[]) {
         },
         {
           title: "Docker reports too little CPU or memory",
-          body: "This is a provider sizing or guest-runtime failure. The first Platform Engineering production revision requires at least 4 vCPU, 16 GiB RAM, and 32 GiB disk and pins CPX42 for Hetzner sessions. A later immutable revision can add a separately certified GCP profile.",
+          body: "This is a provider sizing or guest-runtime failure. The Platform Engineering production revision requires at least 4 vCPU, 16 GiB RAM, and 32 GiB disk. It pins CPX42 for Hetzner sessions and e2-standard-4 with a pd-balanced boot disk for GCP sessions.",
         },
         {
           title: "DNS, TLS, or registry access changed after provisioning",
@@ -2210,6 +2211,19 @@ workspace {
     vm_id         = "learner"
     machine_type  = "cpx42"
     system_image  = "debian-13"
+  }
+
+  runtime_profile "gcp-e2-standard-4" {
+    provider       = "gcp_compute"
+    vm_id          = "learner"
+    machine_type   = "e2-standard-4"
+    system_image   = "projects/debian-cloud/global/images/family/debian-13"
+    root_disk_type = "pd-balanced"
+    locations = [
+      "europe-west3-a",
+      "europe-west3-b",
+      "europe-west3-c",
+    ]
   }
 
 `;

@@ -30,6 +30,8 @@ describe("GCP connection validation", () => {
       services: [
         { name: "projects/123/services/compute.googleapis.com", state: "ENABLED" },
         { name: "projects/123/services/cloudresourcemanager.googleapis.com", state: "ENABLED" },
+        { name: "projects/123/services/serviceusage.googleapis.com", state: "ENABLED" },
+        { name: "projects/123/services/cloudasset.googleapis.com", state: "ENABLED" },
       ],
     })) as typeof fetch);
     await expect(runtime.assertRequiredServices("123"))
@@ -46,6 +48,20 @@ describe("GCP connection validation", () => {
       [...REQUIRED_IAM_PERMISSIONS].sort(),
     );
     expect(REQUIRED_IAM_PERMISSIONS).toContain("compute.regions.get");
+    expect(REQUIRED_IAM_PERMISSIONS).toEqual(expect.arrayContaining([
+      "compute.disks.setLabels",
+      "compute.instances.setLabels",
+      "compute.instances.setMetadata",
+      "compute.instances.setServiceAccount",
+      "compute.instances.setTags",
+      "compute.networks.getEffectiveFirewalls",
+      "compute.networks.getRegionEffectiveFirewalls",
+      "compute.networks.updatePolicy",
+      "compute.networks.useExternalIp",
+      "compute.subnetworks.useExternalIp",
+      "serviceusage.services.use",
+    ]));
+    expect(REQUIRED_IAM_PERMISSIONS).not.toContain("compute.instances.setDeletionProtection");
     expect(body).toEqual({ permissions: REQUIRED_IAM_PERMISSIONS });
 
     const incomplete = client((async () => Response.json({
@@ -53,6 +69,36 @@ describe("GCP connection validation", () => {
     })) as typeof fetch);
     await expect(incomplete.assertRequiredIamPermissions())
       .rejects.toMatchObject({ shape: { code: "gcp_permission_missing" } });
+  });
+
+  it("requires an enabled Cloud Billing account for the same project", async () => {
+    const urls: URL[] = [];
+    const enabled = client((async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      urls.push(url);
+      return Response.json({
+        name: `projects/${key.project_id}/billingInfo`,
+        projectId: key.project_id,
+        billingAccountName: "billingAccounts/ABCDEF-123456-ABCDEF",
+        billingEnabled: true,
+      });
+    }) as typeof fetch);
+    await expect(enabled.assertBillingEnabled()).resolves.toEqual({
+      projectId: key.project_id,
+      billingAccountName: "billingAccounts/ABCDEF-123456-ABCDEF",
+      billingEnabled: true,
+    });
+    expect(urls[0]!.hostname).toBe("cloudbilling.googleapis.com");
+    expect(urls[0]!.pathname).toBe(`/v1/projects/${key.project_id}/billingInfo`);
+
+    const disabled = client((async () => Response.json({
+      name: `projects/${key.project_id}/billingInfo`,
+      projectId: key.project_id,
+      billingAccountName: "",
+      billingEnabled: false,
+    })) as typeof fetch);
+    await expect(disabled.assertBillingEnabled())
+      .rejects.toMatchObject({ shape: { code: "gcp_billing_disabled" } });
   });
 
   it("validates cleanup authority independently from spare capacity", async () => {
@@ -66,6 +112,9 @@ describe("GCP connection validation", () => {
     );
     expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.instances.delete");
     expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.regionOperations.get");
+    expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.networks.getEffectiveFirewalls");
+    expect(CLEANUP_IAM_PERMISSIONS).toContain("compute.networks.getRegionEffectiveFirewalls");
+    expect(CLEANUP_IAM_PERMISSIONS).toContain("serviceusage.services.use");
     expect(CLEANUP_IAM_PERMISSIONS).not.toContain("compute.instances.create");
     expect(CLEANUP_IAM_PERMISSIONS).not.toContain("compute.instances.reset");
     expect(REQUIRED_IAM_PERMISSIONS).toContain("compute.instances.reset");
@@ -93,17 +142,19 @@ describe("GCP connection validation", () => {
     await expect(sufficient.assertMinimumQuotas()).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ metric: "CPUS", available: 8 })]),
     );
-    expect(requests).toHaveLength(1);
-    expect(requests[0]!.pathname).toBe(
+    expect(requests).toHaveLength(2);
+    expect(requests.map(({ pathname }) => pathname)).toEqual([
       `/compute/v1/projects/${key.project_id}/regions/europe-west3`,
-    );
-    expect(requests[0]!.searchParams.get("fields")).toBe("quotas");
+      `/compute/v1/projects/${key.project_id}`,
+    ]);
+    expect(requests.every((url) => url.searchParams.get("fields") === "quotas"))
+      .toBe(true);
 
     const insufficient = client((async (input: RequestInfo | URL) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      expect(url.pathname).toBe(
-        `/compute/v1/projects/${key.project_id}/regions/europe-west3`,
-      );
+      if (!url.pathname.endsWith("/regions/europe-west3")) {
+        return Response.json({ quotas: [] });
+      }
       return Response.json({ quotas: [
         { metric: "CPUS", limit: 4, usage: 1 },
         { metric: "INSTANCES", limit: 5, usage: 0 },
@@ -151,6 +202,53 @@ describe("GCP connection validation", () => {
     })).resolves.toMatchObject({
       availableSeats: 0,
       reasons: ["GCP did not return the IN_USE_ADDRESSES quota"],
+    });
+  });
+
+  it("caps regional CPU seats by the optional all-regions CPU quota", async () => {
+    const observe = (globalRemaining?: number) => client((async (
+      input: RequestInfo | URL,
+    ) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (url.pathname.endsWith("/regions/europe-west3")) {
+        return Response.json({ quotas: [
+          { metric: "CPUS", limit: 12, usage: 0 },
+          { metric: "INSTANCES", limit: 10, usage: 0 },
+          { metric: "IN_USE_ADDRESSES", limit: 10, usage: 0 },
+          { metric: "SSD_TOTAL_GB", limit: 128, usage: 0 },
+        ] });
+      }
+      return Response.json({
+        quotas: globalRemaining === undefined
+          ? []
+          : [{ metric: "CPUS_ALL_REGIONS", limit: globalRemaining, usage: 0 }],
+      });
+    }) as typeof fetch).observeCapacity({
+      requestedSeats: 3,
+      cpuPerSeat: 4,
+      instancesPerSeat: 1,
+      addressesPerSeat: 1,
+      diskGibPerSeat: 32,
+    });
+
+    await expect(observe(8)).resolves.toMatchObject({
+      availableSeats: 2,
+      reasons: [
+        "GCP CPUS_ALL_REGIONS quota has 8 remaining but 12 is required",
+      ],
+      quotas: expect.arrayContaining([
+        expect.objectContaining({ metric: "CPUS_ALL_REGIONS", available: 8 }),
+      ]),
+    });
+    await expect(observe(0)).resolves.toMatchObject({
+      availableSeats: 0,
+      reasons: [
+        "GCP CPUS_ALL_REGIONS quota has 0 remaining but 12 is required",
+      ],
+    });
+    await expect(observe()).resolves.toMatchObject({
+      availableSeats: 3,
+      reasons: [],
     });
   });
 });

@@ -18,6 +18,7 @@ import { PageShell } from "@/components/app/patterns/PageShell";
 import { ErrorState, EmptyState } from "@/components/app/patterns/StateCard";
 import { usePageChrome } from "@/components/app/shell/page-chrome";
 import {
+  abandonWorkshopProviderAttempt,
   acknowledgeWorkshopProviderManualCleanup,
   connectWorkshopProvider,
   createWorkshopSession,
@@ -313,6 +314,7 @@ function ConnectProviderProjectCard({
           await onChanged();
         } catch (connectionError) {
           setError(providerActionError(connectionError));
+          await onChanged();
         } finally {
           setBusy(false);
         }
@@ -399,7 +401,7 @@ function ConnectProviderProjectCard({
   );
 }
 
-function ProviderConnectionCard({
+export function ProviderConnectionCard({
   organizationId,
   role,
   connection,
@@ -422,6 +424,10 @@ function ProviderConnectionCard({
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const failedHealth =
+    connection.state === "rotation_required" &&
+    (connection.credential === null ||
+      connection.credential.authority === "active");
 
   useEffect(() => {
     setLocations(connection.guardrails.locations.join(", "));
@@ -437,6 +443,7 @@ function ProviderConnectionCard({
       await onChanged();
     } catch (actionError) {
       setError(providerActionError(actionError));
+      await onChanged();
     } finally {
       setBusy(null);
     }
@@ -464,7 +471,9 @@ function ProviderConnectionCard({
           connection.guardrails.locations.join(" → "),
           connection.lastValidatedAt === null
             ? "not yet checked"
-            : `checked ${formatSessionDate(connection.lastValidatedAt)}`,
+            : failedHealth
+              ? `check failed ${formatSessionDate(connection.lastValidatedAt)}`
+              : `checked ${formatSessionDate(connection.lastValidatedAt)}`,
         ]}
       />
       <p className="mt-2 text-xs text-muted-foreground">
@@ -496,6 +505,26 @@ function ProviderConnectionCard({
               .
             </p>
           ) : null}
+        </div>
+      ) : null}
+
+      {failedHealth ? (
+        <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+          <p className="text-xs font-semibold">Connection check failed</p>
+          <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+            New learner VMs are blocked. Fix provider access, then inspect the
+            project again. Submit a key below if setup did not finish.
+          </p>
+        </div>
+      ) : null}
+
+      {connection.credential?.authority === "cleanup_only" ? (
+        <div className="mt-3 rounded-lg border border-warning-border bg-warning-subtle p-3">
+          <p className="text-xs font-semibold">Cleanup-only credential</p>
+          <p className="mt-1 text-[0.6875rem] text-muted-foreground">
+            This key can clean up existing resources, but it cannot create new
+            learner VMs.
+          </p>
         </div>
       ) : null}
 
@@ -567,7 +596,9 @@ function ProviderConnectionCard({
 
           <details className="text-xs">
             <summary className="w-fit cursor-pointer font-medium">
-              {connection.state === "disconnected"
+              {connection.credential === null
+                ? "Resume connection"
+                : connection.state === "disconnected"
                 ? "Reconnect provider"
                 : "Rotate credential"}
             </summary>
@@ -578,17 +609,31 @@ function ProviderConnectionCard({
                 const submittedCredential = credential;
                 setCredential("");
                 void mutate("credential", () =>
-                  rotateWorkshopProviderCredential(
-                    organizationId,
-                    connection.id,
-                    submittedCredential,
-                  ),
+                  connection.credential === null
+                    ? connectWorkshopProvider(organizationId, {
+                        providerKind: connection.providerKind,
+                        credential: submittedCredential,
+                        displayName: connection.displayName,
+                        approvedLocations: connection.guardrails.locations,
+                        maxConcurrentAllocations:
+                          connection.guardrails.maxConcurrentAllocations,
+                        maxSessionCostNanos:
+                          connection.guardrails.maxSessionCostNanos,
+                        externalProjectId: connection.externalProjectId,
+                      })
+                    : rotateWorkshopProviderCredential(
+                        organizationId,
+                        connection.id,
+                        submittedCredential,
+                      ),
                 );
               }}
             >
               <label className="min-w-64 flex-1 space-y-1 font-medium">
                 {connection.providerKind === "gcp_compute"
-                  ? "New service-account JSON key"
+                  ? connection.credential === null
+                    ? "Service-account JSON key"
+                    : "New service-account JSON key"
                   : "New read/write API token"}
                 {connection.providerKind === "gcp_compute" ? (
                   <Textarea
@@ -618,7 +663,9 @@ function ProviderConnectionCard({
               >
                 {busy === "credential"
                   ? "Validating…"
-                  : connection.state === "disconnected"
+                  : connection.credential === null
+                    ? "Resume"
+                    : connection.state === "disconnected"
                     ? "Reconnect"
                     : "Submit credential"}
               </Button>
@@ -629,7 +676,11 @@ function ProviderConnectionCard({
             <Button
               size="sm"
               variant="outline"
-              disabled={busy !== null || connection.state === "disconnected"}
+              disabled={
+                busy !== null ||
+                connection.state === "disconnected" ||
+                connection.credential === null
+              }
               onClick={() =>
                 void mutate("inspect", () =>
                   inspectWorkshopProviderConnection(
@@ -668,7 +719,34 @@ function ProviderConnectionCard({
                   : "Acknowledge manual cleanup"}
               </Button>
             ) : null}
-            {connection.state !== "disconnected" ? (
+            {connection.credential === null &&
+            (connection.state === "rotation_required" ||
+              connection.state === "validating") ? (
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={busy !== null}
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      `First delete any Intar network, subnet, and firewall from ${connection.externalProjectId}. Then confirm to abandon this setup attempt. The acknowledgement is saved but is not verified.`,
+                    )
+                  ) {
+                    return;
+                  }
+                  void mutate("abandon", () =>
+                    abandonWorkshopProviderAttempt(
+                      organizationId,
+                      connection.id,
+                    ),
+                  );
+                }}
+              >
+                {busy === "abandon" ? "Abandoning…" : "Abandon setup"}
+              </Button>
+            ) : null}
+            {connection.state !== "disconnected" &&
+            connection.credential !== null ? (
               <Button
                 size="sm"
                 variant="destructive"

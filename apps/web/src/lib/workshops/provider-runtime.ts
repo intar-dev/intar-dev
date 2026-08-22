@@ -76,7 +76,14 @@ import {
   finalizeWorkshopCostAfterAllocationDeletion,
   reconcileProviderCostLedger,
 } from "./provider-cost-ledger";
-import { preflightDirectCloudProvider } from "./direct-provider-preflight";
+import {
+  gcpFoundation,
+  providerOwnership,
+} from "./provider-connections";
+import {
+  preflightDirectCloudProvider,
+  rootDiskGibForPreflight,
+} from "./direct-provider-preflight";
 
 // A verifier gets 30 minutes for allocate/delete plus four hours per cumulative
 // checkpoint (the guest apply timeout is three hours). Reject plans above 48
@@ -290,6 +297,7 @@ export async function allocateProviderWorkshopRuntime(
       deterministicName,
       location,
       locationAttempt: 1,
+      locationAttemptStartedAt: now,
       kinoProbes: request.manifest.modules.flatMap((module) =>
         module.probeIds.map((probeId) => ({ moduleId: module.id, probeId })),
       ),
@@ -762,6 +770,7 @@ export async function allocateProviderCertificationRuntime(input: {
           deterministicName,
           location,
           locationAttempt: 1,
+          locationAttemptStartedAt: now,
           kinoProbes: manifest.modules.flatMap((module) =>
             module.probeIds.map((probeId) => ({ moduleId: module.id, probeId })),
           ),
@@ -2054,6 +2063,7 @@ async function advanceProviderCreation(
       deterministicName: context.allocation.deterministicName,
       location: context.allocation.location,
       locationAttempt: context.allocation.locationAttempt,
+      locationAttemptStartedAt: context.allocation.locationAttemptStartedAt,
       kinoProbes: await loadRuntimeKinoProbes(context.profile.templateRevisionId),
       ...(context.certificationOwnership
         ? { certification: context.certificationOwnership }
@@ -2766,6 +2776,19 @@ async function createGcpResources(input: CreationInput) {
     .limit(1);
   const foundation = details[0];
   if (!foundation) throw appError(409, "provider_connection_incomplete", "GCP connection details are missing");
+  const sentinelOwnership = await providerOwnership(
+    input.execution.organizationId!,
+    input.context.connection.id,
+    "provider_connection_sentinel",
+  );
+  await providerMutation(input, "validate_foundation", {
+    kind: "validate_foundation",
+    foundation: gcpFoundation(
+      input.context.connection.id,
+      foundation.approvedZonesJson,
+      sentinelOwnership,
+    ),
+  });
   await providerMutation(input, "create_instance", {
     kind: "create_instance",
     name: input.deterministicName,
@@ -2773,11 +2796,10 @@ async function createGcpResources(input: CreationInput) {
     machineType: input.context.profile.machineType,
     sourceImage: input.context.profile.resolvedImageId,
     rootDiskType: input.context.profile.rootDiskType,
-    rootDiskGib: input.context.profile.diskMib / 1024,
+    rootDiskGib: rootDiskGibForPreflight(input.context.profile.diskMib),
     networkSelfLink: foundation.networkSelfLink,
     subnetworkSelfLink: foundation.subnetSelfLink,
-    sshPublicKey: input.sshPublicKey,
-    startupScript: input.cloudInit,
+    cloudInit: input.cloudInit,
     ownership: ownershipLabels(input),
     generation: input.execution.generation,
   });
@@ -3630,6 +3652,7 @@ interface CreationInput {
   deterministicName: string;
   location: string;
   locationAttempt: number;
+  locationAttemptStartedAt: number;
   sshPublicKey: string;
   cloudInit: string;
   certification?: { publicationId: string; checkpointId: string };
@@ -3646,6 +3669,7 @@ async function prepareProviderCreationInput(input: {
   deterministicName: string;
   location: string;
   locationAttempt: number;
+  locationAttemptStartedAt: number;
   kinoProbes: Array<{ moduleId: string; probeId: string }>;
   reportExpiresAt?: number;
   certification?: { publicationId: string; checkpointId: string };
@@ -3688,6 +3712,7 @@ async function prepareProviderCreationInput(input: {
     deterministicName: input.deterministicName,
     location: input.location,
     locationAttempt: input.locationAttempt,
+    locationAttemptStartedAt: input.locationAttemptStartedAt,
     sshPublicKey: learnerKey.publicKeyOpenssh,
     cloudInit: buildWorkspaceAgentCloudInit({
       identity: bootstrap.identity,
@@ -4059,7 +4084,10 @@ async function providerMutation(
     );
   }
   const db = drizzle(env.DB);
-  const repeatable = operationKind === "observe_allocation" || operationKind === "reconcile";
+  const repeatable =
+    operationKind === "observe_allocation" ||
+    operationKind === "reconcile" ||
+    operationKind === "validate_foundation";
   const previous = await env.DB.prepare(
     `SELECT id, request_id, state, attempt, provider_operation_id
      FROM runtime_provider_operations
@@ -4507,16 +4535,14 @@ function summarizeProviderOperations(
   errorCode?: string;
 } {
   if (operations.length === 0) return { state: "succeeded" };
+  const operationErrorCode = operations.find(
+    (operation) => operation.errorCode,
+  )?.errorCode;
+  if (operationErrorCode) {
+    return { state: "failed", errorCode: operationErrorCode };
+  }
   if (providerResultHasError(resultData)) {
-    return {
-      state: "failed",
-      ...(operations.find((operation) => operation.errorCode)?.errorCode
-        ? {
-            errorCode: operations.find((operation) => operation.errorCode)!
-              .errorCode!,
-          }
-        : {}),
-    };
+    return { state: "failed" };
   }
   const states = operations.map((operation) => operation.state.toLowerCase());
   if (
@@ -5484,6 +5510,9 @@ async function persistCanonicalWrites(
           .set({
             providerState: write.state ?? "present",
             configurationJson: { deterministicName },
+            ...(write.resourceCreatedAt
+              ? { providerCreatedAt: Date.parse(write.resourceCreatedAt) }
+              : {}),
             disappearanceConfirmedAt: null,
             updatedAt: input.now,
           })
@@ -5523,7 +5552,9 @@ async function persistCanonicalWrites(
           configurationJson: { deterministicName },
           providerCreatedAt: write.resourceCreatedAt
             ? Date.parse(write.resourceCreatedAt)
-            : input.now,
+            : input.context.providerKind === "gcp_compute"
+              ? input.locationAttemptStartedAt
+              : input.now,
           createdAt: input.now,
           updatedAt: input.now,
         });
@@ -6636,6 +6667,7 @@ function creationInputFromContext(context: ExecutionAllocationContext, now: numb
     deterministicName: context.allocation.deterministicName,
     location: context.allocation.location,
     locationAttempt: context.allocation.locationAttempt,
+    locationAttemptStartedAt: context.allocation.locationAttemptStartedAt,
     sshPublicKey: "unused-during-reconciliation",
     cloudInit: "",
     ...(context.certificationOwnership

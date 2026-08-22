@@ -8,6 +8,7 @@ import type {
 import type {
   ConnectGcpProjectRequest,
   ConnectGcpProjectResult,
+  GcpProviderReadinessResult,
   RotateGcpCredentialRequest,
   RotateGcpCredentialResult,
   RunGcpOperationRequest,
@@ -19,6 +20,7 @@ import {
 import { GCP_PROVIDER_CAPABILITIES } from "./capabilities";
 import {
   connectProject as connectProjectWithProvider,
+  providerReadiness,
   rotateCredential as rotateCredentialWithProvider,
   runOperation as runProviderOperation,
   type GcpProviderDeployment,
@@ -86,6 +88,14 @@ export class GcpConnectionDO extends DurableObject<Env> {
 export class GcpProviderService extends WorkerEntrypoint<Env> {
   capabilities(): ProviderCapabilities<"gcp_compute"> {
     return GCP_PROVIDER_CAPABILITIES;
+  }
+
+  async readiness(): Promise<ProviderRpcResult<GcpProviderReadinessResult>> {
+    try {
+      return { ok: true, value: await providerReadiness(deployment(this.env)) };
+    } catch (error) {
+      return { ok: false, error: safeUnknownError(error) };
+    }
   }
 
   #connection(connectionId: string): DurableObjectStub<GcpConnectionDO> {

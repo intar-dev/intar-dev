@@ -706,6 +706,7 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
+          EXPECTED_GCP_PROVIDER_MODE: ${{ inputs.deploy_gcp && (inputs.gcp_dormant && 'dormant' || 'active') || '' }}
         run: >-
           bun tools/providers/probe-live-capabilities.ts
           "${RUNNER_TEMP}/provider-capabilities.json"

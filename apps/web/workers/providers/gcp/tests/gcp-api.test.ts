@@ -50,6 +50,24 @@ describe("GCP API failure classification", () => {
     });
   });
 
+  it("retries a legacy 403 rate limit and bounds Retry-After", async () => {
+    const rate = apiWith(Response.json({
+      error: { errors: [{ reason: "rateLimitExceeded" }] },
+    }, {
+      status: 403,
+      headers: { "retry-after": "999999" },
+    }));
+
+    await expect(rate.compute("/projects/p/zones/z/instances"))
+      .rejects.toMatchObject({
+        shape: {
+          code: "gcp_rate_limit_exceeded",
+          retryable: true,
+          retryAfterSeconds: 3_600,
+        },
+      });
+  });
+
   it("classifies an ambiguous transport failure as retryable and credential-free", async () => {
     const api = new GcpApi(key, {
       fetcher: (async () => { throw new Error("socket closed with secret-access-token"); }) as typeof fetch,
@@ -91,5 +109,87 @@ describe("GCP API failure classification", () => {
         error: { errors: [{ code: "ZONE_RESOURCE_POOL_EXHAUSTED" }] },
       }),
     ).toBe("gcp_resource_unavailable");
+  });
+
+  it("maps the detailed zonal exhaustion code from an insert response", async () => {
+    const capacity = apiWith(Response.json({
+      error: {
+        errors: [{ code: "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS" }],
+      },
+    }, { status: 503 }));
+
+    await expect(capacity.compute(
+      "/projects/p/zones/europe-west3-a/instances",
+      { method: "POST" },
+    )).rejects.toMatchObject({
+      shape: { code: "gcp_resource_unavailable", retryable: true },
+    });
+  });
+
+  it("finds an HTTP zonal capacity code after another error", async () => {
+    const capacity = apiWith(Response.json({
+      error: {
+        errors: [
+          { reason: "backendError" },
+          { code: "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS" },
+        ],
+      },
+    }, { status: 503 }));
+
+    await expect(capacity.compute(
+      "/projects/p/zones/europe-west3-a/instances",
+      { method: "POST" },
+    )).rejects.toMatchObject({
+      shape: { code: "gcp_resource_unavailable", retryable: true },
+    });
+  });
+
+  it("maps the detailed zonal exhaustion code from a polled operation", () => {
+    expect(gcpOperationErrorCode({
+      id: "2",
+      name: "operation-2",
+      selfLink: "https://compute.googleapis.com/operation-2",
+      status: "DONE",
+      error: {
+        errors: [{ code: "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS" }],
+      },
+    })).toBe("gcp_resource_unavailable");
+  });
+
+  it("finds a polled zonal capacity code after another operation error", () => {
+    expect(gcpOperationErrorCode({
+      id: "3",
+      name: "operation-3",
+      selfLink: "https://compute.googleapis.com/operation-3",
+      status: "DONE",
+      error: {
+        errors: [
+          { code: "INTERNAL_ERROR" },
+          { code: "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS" },
+        ],
+      },
+    })).toBe("gcp_resource_unavailable");
+  });
+
+  it("maps pool capacity insufficiency to zonal fallback", async () => {
+    const capacity = apiWith(Response.json({
+      error: {
+        errors: [{ code: "POOL_CAPACITY_INSUFFICIENT" }],
+      },
+    }, { status: 429 }));
+
+    await expect(capacity.compute(
+      "/projects/p/zones/europe-west3-a/instances",
+      { method: "POST" },
+    )).rejects.toMatchObject({
+      shape: { code: "gcp_resource_unavailable", retryable: true },
+    });
+    expect(gcpOperationErrorCode({
+      id: "4",
+      name: "operation-4",
+      selfLink: "https://compute.googleapis.com/operation-4",
+      status: "DONE",
+      error: { errors: [{ code: "POOL_CAPACITY_INSUFFICIENT" }] },
+    })).toBe("gcp_resource_unavailable");
   });
 });

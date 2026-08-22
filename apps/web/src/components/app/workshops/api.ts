@@ -182,6 +182,7 @@ export function connectWorkshopProvider(
     displayName: string;
     approvedLocations: string[];
     maxConcurrentAllocations: number;
+    maxSessionCostNanos?: number | null;
     externalProjectId?: string;
   },
 ): Promise<unknown> {
@@ -233,6 +234,19 @@ export function disconnectWorkshopProvider(
   return workshopRequest(
     `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/${encodeURIComponent(connectionId)}`,
     { method: "DELETE" },
+  );
+}
+
+export function abandonWorkshopProviderAttempt(
+  organizationId: string,
+  connectionId: string,
+): Promise<unknown> {
+  return workshopRequest(
+    `/api/organizations/${encodeURIComponent(organizationId)}/workshop-providers/${encodeURIComponent(connectionId)}/abandon`,
+    {
+      method: "POST",
+      body: JSON.stringify({ manualCleanupAcknowledged: true }),
+    },
   );
 }
 

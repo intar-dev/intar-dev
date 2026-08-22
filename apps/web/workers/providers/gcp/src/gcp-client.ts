@@ -8,6 +8,7 @@ import type {
   GcpFoundationSpec,
   GcpInstanceAdvanceResult,
   GcpMachineType,
+  GcpProjectBillingInfo,
   GcpProjectIdentity,
   GcpProjectInventory,
   GcpOperationalInventoryClassification,
@@ -17,14 +18,17 @@ import type {
   GcpServiceAccountKey,
 } from "@intar/provider-contracts/gcp";
 import type { ProviderOwnership } from "@intar/provider-contracts";
+import { createHash } from "node:crypto";
 import {
   ProviderServiceError,
   deterministicRequestId,
 } from "@intar/provider-worker-core";
 import { GcpApi, GcpApiError, type GcpApiOptions } from "./gcp-api";
+import { GCP_CERTIFIED_MACHINE_TYPE } from "./profile";
 
 const REQUIRED_SERVICES = [
   "compute.googleapis.com",
+  "cloudbilling.googleapis.com",
   "cloudresourcemanager.googleapis.com",
   "serviceusage.googleapis.com",
   "cloudasset.googleapis.com",
@@ -47,6 +51,8 @@ export const CLEANUP_IAM_PERMISSIONS = [
   "compute.instances.get",
   "compute.instances.list",
   "compute.networks.get",
+  "compute.networks.getEffectiveFirewalls",
+  "compute.networks.getRegionEffectiveFirewalls",
   "compute.networks.list",
   "compute.projects.get",
   "compute.regionOperations.get",
@@ -57,17 +63,25 @@ export const CLEANUP_IAM_PERMISSIONS = [
   "compute.targetPools.list",
   "compute.zoneOperations.get",
   "resourcemanager.projects.get",
+  "serviceusage.services.use",
 ] as const;
 export const REQUIRED_IAM_PERMISSIONS = [
   ...CLEANUP_IAM_PERMISSIONS,
   "compute.disks.create",
+  "compute.disks.setLabels",
   "compute.disks.use",
   "compute.firewalls.create",
   "compute.instances.create",
   "compute.instances.reset",
+  "compute.instances.setLabels",
+  "compute.instances.setMetadata",
+  "compute.instances.setServiceAccount",
+  "compute.instances.setTags",
   "compute.machineTypes.get",
   "compute.networks.create",
+  "compute.networks.updatePolicy",
   "compute.networks.use",
+  "compute.networks.useExternalIp",
   "compute.regions.get",
   "compute.subnetworks.create",
   "compute.subnetworks.use",
@@ -77,7 +91,53 @@ export const REQUIRED_IAM_PERMISSIONS = [
 const PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
 const WORKSHOP_REGION = "europe-west3" as const;
 const ZONE_PATTERN = /^europe-west3-[abc]$/u;
-const RESOURCE_NAME_PATTERN = /^intar-[a-z](?:[a-z0-9-]{0,59}[a-z0-9])?$/u;
+const RESOURCE_NAME_PATTERN = /^intar-[a-z](?:[a-z0-9-]{0,55}[a-z0-9])?$/u;
+const OWNERSHIP_REF_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$/u;
+const CHECKPOINT_REF_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const GCP_LABEL_VALUE_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$/u;
+const COMPUTE_PROJECT_ASSET_TYPE = "compute.googleapis.com/Project";
+const CLOUD_INIT_MAX_BYTES = 256 * 1024;
+const GCP_CLOUD_INIT_STARTUP_SCRIPT = String.raw`#!/bin/bash
+set -euo pipefail
+
+readonly marker="/var/lib/intar/cloud-init-seeded"
+if [[ -e "$marker" ]]; then
+  exit 0
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install --yes --no-install-recommends ca-certificates cloud-init curl
+
+readonly metadata_base="http://metadata.google.internal/computeMetadata/v1"
+install -d -m 0755 /var/lib/intar
+install -d -m 0700 /var/lib/cloud/seed/nocloud
+curl --fail --silent --show-error --retry 5 \
+  -H "Metadata-Flavor: Google" \
+  "$metadata_base/instance/attributes/user-data" \
+  -o /var/lib/cloud/seed/nocloud/user-data
+readonly instance_id="$(curl --fail --silent --show-error --retry 5 \
+  -H "Metadata-Flavor: Google" \
+  "$metadata_base/instance/id")"
+printf 'instance-id: intar-%s\n' "$instance_id" \
+  > /var/lib/cloud/seed/nocloud/meta-data
+chmod 0600 \
+  /var/lib/cloud/seed/nocloud/user-data \
+  /var/lib/cloud/seed/nocloud/meta-data
+
+install -d -m 0755 /etc/cloud/cloud.cfg.d
+printf '%s\n' 'datasource_list: [ NoCloud ]' \
+  > /etc/cloud/cloud.cfg.d/99-intar-nocloud.cfg
+rm -f /etc/cloud/cloud-init.disabled
+cloud-init clean --logs
+systemctl enable \
+  cloud-init-local.service \
+  cloud-init.service \
+  cloud-config.service \
+  cloud-final.service
+touch "$marker"
+systemctl reboot
+`;
 
 interface ListResponse<T> {
   items?: T[];
@@ -97,6 +157,7 @@ interface ApiResource {
   zone?: string;
   region?: string;
   status?: string;
+  creationTimestamp?: string;
   description?: string;
   network?: string;
   routeType?: string;
@@ -104,6 +165,21 @@ interface ApiResource {
   destRange?: string;
   priority?: number;
   tags?: string[];
+  autoCreateSubnetworks?: boolean;
+  routingConfig?: { routingMode?: string };
+  ipCidrRange?: string;
+  privateIpGoogleAccess?: boolean;
+  stackType?: string;
+  direction?: string;
+  destinationRanges?: string[];
+  sourceRanges?: string[];
+  sourceTags?: string[];
+  sourceServiceAccounts?: string[];
+  targetTags?: string[];
+  targetServiceAccounts?: string[];
+  allowed?: Array<{ IPProtocol?: string; ports?: string[] }>;
+  denied?: Array<{ IPProtocol?: string; ports?: string[] }>;
+  disabled?: boolean;
 }
 
 interface ApiInstance extends ApiResource {
@@ -135,6 +211,17 @@ interface ComputeRegionResponse {
   quotas?: Array<{ metric?: string; limit?: number; usage?: number }>;
 }
 
+interface ComputeProjectResponse {
+  quotas?: Array<{ metric?: string; limit?: number; usage?: number }>;
+}
+
+interface ProjectBillingInfoResponse {
+  name?: string;
+  projectId?: string;
+  billingAccountName?: string;
+  billingEnabled?: boolean;
+}
+
 export interface GcpQuotaCapacity {
   quotas: GcpQuotaObservation[];
   availableSeats: number;
@@ -161,6 +248,19 @@ function resourceRef(value: ApiResource, scope?: string): GcpResourceRef {
       retryable: false,
     });
   }
+  if (
+    value.creationTimestamp !== undefined &&
+    (
+      typeof value.creationTimestamp !== "string" ||
+      !Number.isFinite(Date.parse(value.creationTimestamp))
+    )
+  ) {
+    throw new ProviderServiceError({
+      code: "gcp_invalid_response",
+      message: "GCP API returned an invalid resource creation timestamp",
+      retryable: false,
+    });
+  }
   const zone = value.zone ?? (scope?.startsWith("zones/") ? scope : undefined);
   const region = value.region ?? (scope?.startsWith("regions/") ? scope : undefined);
   return {
@@ -171,6 +271,9 @@ function resourceRef(value: ApiResource, scope?: string): GcpResourceRef {
     ...(zone ? { zone } : {}),
     ...(region ? { region } : {}),
     ...(value.status ? { status: value.status } : {}),
+    ...(value.creationTimestamp
+      ? { creationTimestamp: value.creationTimestamp }
+      : {}),
     ...(value.description ? { description: value.description } : {}),
     ...(value.network ? { network: value.network } : {}),
     ...(value.routeType ? { routeType: value.routeType } : {}),
@@ -210,12 +313,245 @@ function validIpv4(value: string): boolean {
   });
 }
 
-function validIpv4Cidr(value: string, prefix: 24 | 32): boolean {
+function validIpv4Cidr(value: string, prefix: 20 | 32): boolean {
   const suffix = `/${prefix}`;
   if (!value.endsWith(suffix)) return false;
   const address = value.slice(0, -suffix.length);
   if (!validIpv4(address)) return false;
-  return prefix !== 24 || address.endsWith(".0");
+  const numeric = address.split(".").reduce(
+    (result, octet) => result * 256 + Number(octet),
+    0,
+  );
+  const hostBits = 32 - prefix;
+  const hostMask = hostBits === 0 ? 0 : 2 ** hostBits - 1;
+  return (numeric & hostMask) === 0;
+}
+
+function validCloudInit(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    (value.startsWith("#cloud-config\n") || value.startsWith("#cloud-config\r\n")) &&
+    !value.includes("\0") &&
+    new TextEncoder().encode(value).byteLength <= CLOUD_INIT_MAX_BYTES
+  );
+}
+
+function sameStringSet(actual: unknown, expected: readonly string[]): boolean {
+  const sortedExpected = [...expected].sort();
+  return Array.isArray(actual) && actual.every((value) => typeof value === "string") &&
+    actual.length === expected.length &&
+    [...actual].sort().every((value, index) => value === sortedExpected[index]);
+}
+
+function noValues(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.length === 0);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function effectiveFirewallResponseInvalid(): never {
+  throw new ProviderServiceError({
+    code: "gcp_invalid_response",
+    message: "GCP API returned invalid effective firewall rules",
+    retryable: false,
+  });
+}
+
+function optionalStringArray(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    effectiveFirewallResponseInvalid();
+  }
+  return value;
+}
+
+function exactTcp22Layer4(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== 1 || !isRecord(value[0])) {
+    return false;
+  }
+  return value[0].ipProtocol === "tcp" && sameStringSet(value[0].ports, ["22"]);
+}
+
+function exactClassicTcp22Allow(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== 1 || !isRecord(value[0])) {
+    return false;
+  }
+  return value[0].IPProtocol === "tcp" && sameStringSet(value[0].ports, ["22"]);
+}
+
+function policyRuleTargetsLearner(
+  rule: Record<string, unknown>,
+  projectId: string,
+  networkName: string,
+): boolean {
+  const targetType = rule.targetType ?? "INSTANCES";
+  if (targetType === "INTERNAL_MANAGED_LB") return false;
+  if (targetType !== "INSTANCES") effectiveFirewallResponseInvalid();
+  if (optionalStringArray(rule.targetForwardingRules).length > 0) return false;
+  if (optionalStringArray(rule.targetServiceAccounts).length > 0) return false;
+  if (rule.targetSecureTags !== undefined) {
+    if (!Array.isArray(rule.targetSecureTags)) effectiveFirewallResponseInvalid();
+    for (const secureTag of rule.targetSecureTags) {
+      if (
+        !isRecord(secureTag) ||
+        typeof secureTag.name !== "string" ||
+        (secureTag.state !== "EFFECTIVE" && secureTag.state !== "INEFFECTIVE")
+      ) {
+        effectiveFirewallResponseInvalid();
+      }
+    }
+    // Workshop instances have no Resource Manager secure tags.
+    if (rule.targetSecureTags.length > 0) return false;
+  }
+  const targetResources = optionalStringArray(rule.targetResources);
+  if (targetResources.length === 0) return true;
+  const expectedNetwork = `projects/${projectId}/global/networks/${networkName}`;
+  return targetResources.some((resource) => resource.endsWith(expectedNetwork));
+}
+
+function exactSafePolicyAllow(
+  rule: Record<string, unknown>,
+  stargateCidrs: readonly string[],
+): boolean {
+  if (!isRecord(rule.match)) return false;
+  const match = rule.match;
+  return sameStringSet(match.srcIpRanges, stargateCidrs) &&
+    exactTcp22Layer4(match.layer4Configs) &&
+    noValues(match.srcSecureTags) &&
+    noValues(match.srcAddressGroups) &&
+    noValues(match.srcFqdns) &&
+    noValues(match.srcRegionCodes) &&
+    noValues(match.srcThreatIntelligences) &&
+    noValues(match.srcNetworks) &&
+    (match.srcNetworkType === undefined || match.srcNetworkType === "UNSPECIFIED") &&
+    (match.srcNetworkContext === undefined || match.srcNetworkContext === "UNSPECIFIED");
+}
+
+function assertSafeEffectiveFirewallResponse(
+  response: unknown,
+  projectId: string,
+  foundation: GcpFoundationSpec,
+): void {
+  if (!isRecord(response) || !Array.isArray(response.firewalls)) {
+    effectiveFirewallResponseInvalid();
+  }
+  let foundationFirewallPresent = false;
+  for (const firewall of response.firewalls) {
+    if (!isRecord(firewall)) effectiveFirewallResponseInvalid();
+    if (firewall.name === foundation.firewallName) foundationFirewallPresent = true;
+    if (firewall.disabled !== undefined && typeof firewall.disabled !== "boolean") {
+      effectiveFirewallResponseInvalid();
+    }
+    if (firewall.disabled === true) {
+      if (firewall.name === foundation.firewallName) foundationDrift("effective firewall");
+      continue;
+    }
+    const direction = firewall.direction ?? "INGRESS";
+    const targetTags = optionalStringArray(firewall.targetTags);
+    if (targetTags.length > 0 && !targetTags.includes("intar-learner")) continue;
+    // Workshop instances explicitly attach no service account.
+    if (optionalStringArray(firewall.targetServiceAccounts).length > 0) continue;
+    if (direction === "EGRESS") {
+      if (firewall.allowed !== undefined && !Array.isArray(firewall.allowed)) {
+        effectiveFirewallResponseInvalid();
+      }
+      if (firewall.denied !== undefined && !Array.isArray(firewall.denied)) {
+        effectiveFirewallResponseInvalid();
+      }
+      if (firewall.allowed === undefined && firewall.denied === undefined) {
+        effectiveFirewallResponseInvalid();
+      }
+      if (Array.isArray(firewall.denied) && firewall.denied.length > 0) {
+        foundationDrift("effective firewall egress policy");
+      }
+      continue;
+    }
+    if (direction !== "INGRESS") effectiveFirewallResponseInvalid();
+    if (firewall.denied !== undefined && !Array.isArray(firewall.denied)) {
+      effectiveFirewallResponseInvalid();
+    }
+    if (Array.isArray(firewall.denied) && firewall.denied.length > 0) {
+      foundationDrift("effective firewall ingress policy");
+    }
+    if (firewall.allowed === undefined) {
+      if (Array.isArray(firewall.denied)) continue;
+      effectiveFirewallResponseInvalid();
+    }
+    if (!Array.isArray(firewall.allowed)) effectiveFirewallResponseInvalid();
+    if (firewall.allowed.length === 0) continue;
+    if (
+      !sameStringSet(firewall.sourceRanges, foundation.stargateEgressIpv4Cidrs) ||
+      !noValues(firewall.sourceTags) ||
+      !noValues(firewall.sourceServiceAccounts) ||
+      !exactClassicTcp22Allow(firewall.allowed)
+    ) {
+      foundationDrift("effective firewall policy");
+    }
+  }
+  if (!foundationFirewallPresent) foundationDrift("effective firewall");
+
+  const policies = response.firewallPolicys;
+  if (policies === undefined) return;
+  if (!Array.isArray(policies)) effectiveFirewallResponseInvalid();
+  for (const policy of policies) {
+    if (!isRecord(policy)) effectiveFirewallResponseInvalid();
+    if (policy.rules === undefined) continue;
+    if (!Array.isArray(policy.rules)) effectiveFirewallResponseInvalid();
+    for (const rule of policy.rules) {
+      if (!isRecord(rule)) effectiveFirewallResponseInvalid();
+      if (rule.disabled !== undefined && typeof rule.disabled !== "boolean") {
+        effectiveFirewallResponseInvalid();
+      }
+      if (rule.disabled === true) continue;
+      if (!policyRuleTargetsLearner(rule, projectId, foundation.networkName)) continue;
+      if (rule.direction === "EGRESS") {
+        if (rule.action === "allow" || rule.action === "goto_next") continue;
+        foundationDrift("effective firewall egress policy");
+      }
+      if (rule.direction !== "INGRESS") effectiveFirewallResponseInvalid();
+      if (rule.action === "deny") {
+        foundationDrift("effective firewall ingress policy");
+      }
+      if (rule.action === "goto_next") continue;
+      if (
+        rule.action !== "allow" ||
+        !exactSafePolicyAllow(rule, foundation.stargateEgressIpv4Cidrs)
+      ) {
+        foundationDrift("effective firewall policy");
+      }
+    }
+  }
+}
+
+function foundationDrift(resourceKind: string): never {
+  throw new ProviderServiceError({
+    code: "gcp_foundation_drift",
+    message: `Existing GCP ${resourceKind} does not match the locked Workshop foundation`,
+    retryable: false,
+  });
+}
+
+function assertFoundationSpec(foundation: GcpFoundationSpec): void {
+  if (
+    foundation.subnetworkRegion !== "europe-west3" ||
+    foundation.subnetworkCidr !== "10.77.0.0/20" ||
+    !validIpv4Cidr(foundation.subnetworkCidr, 20) ||
+    ![foundation.networkName, foundation.subnetworkName, foundation.firewallName]
+      .every((name) => RESOURCE_NAME_PATTERN.test(name)) ||
+    foundation.stargateEgressIpv4Cidrs.length === 0 ||
+    foundation.stargateEgressIpv4Cidrs.length > 32 ||
+    new Set(foundation.stargateEgressIpv4Cidrs).size !==
+      foundation.stargateEgressIpv4Cidrs.length ||
+    foundation.stargateEgressIpv4Cidrs.some((cidr) => !validIpv4Cidr(cidr, 32))
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "GCP foundation specification is invalid",
+      retryable: false,
+    });
+  }
 }
 
 function validComputeSelfLink(value: string, expectedPath: RegExp): boolean {
@@ -236,7 +572,137 @@ function validComputeSelfLink(value: string, expectedPath: RegExp): boolean {
   }
 }
 
+function parseResolvedImage(
+  value: Record<string, unknown>,
+  imageProject: string,
+  options: { expectedName?: string; family?: string } = {},
+): GcpResolvedImage {
+  if (
+    typeof value.id !== "string" || typeof value.name !== "string" ||
+    !/^[a-z0-9-]{1,63}$/u.test(value.name) ||
+    typeof value.selfLink !== "string" || typeof value.architecture !== "string" ||
+    typeof value.status !== "string" || typeof value.diskSizeGb !== "string" ||
+    typeof value.creationTimestamp !== "string" ||
+    (options.expectedName !== undefined && value.name !== options.expectedName)
+  ) {
+    throw new ProviderServiceError({
+      code: "gcp_invalid_response",
+      message: "GCP image response is invalid",
+      retryable: false,
+    });
+  }
+  if (
+    value.architecture !== "X86_64" ||
+    value.status !== "READY" ||
+    !validComputeSelfLink(
+      value.selfLink,
+      new RegExp(
+        `^/compute/v1/projects/${imageProject}/global/images/${value.name}$`,
+        "u",
+      ),
+    ) ||
+    (typeof value.deprecated === "object" && value.deprecated !== null)
+  ) {
+    throw new ProviderServiceError({
+      code: "gcp_image_unsupported",
+      message: "GCP system image is not a ready x86_64 image",
+      retryable: false,
+    });
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    selfLink: value.selfLink,
+    ...(options.family === undefined ? {} : { family: options.family }),
+    architecture: value.architecture,
+    status: value.status,
+    diskSizeGb: value.diskSizeGb,
+    creationTimestamp: value.creationTimestamp,
+  };
+}
+
+function assertOwnership(ownership: ProviderOwnership): void {
+  const invalidRef = (value: unknown): boolean =>
+    typeof value !== "string" || !OWNERSHIP_REF_PATTERN.test(value);
+  if (
+    invalidRef(ownership.organizationRef) ||
+    invalidRef(ownership.connectionRef)
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "GCP ownership reference is invalid",
+      retryable: false,
+    });
+  }
+  const scoped = ownership as ProviderOwnership & Record<string, unknown>;
+  if (ownership.purpose === "provider_connection_sentinel") {
+    if (
+      scoped.workspaceRef !== undefined ||
+      scoped.generation !== undefined ||
+      scoped.workshopPublicationRef !== undefined ||
+      scoped.checkpointRef !== undefined ||
+      scoped.attempt !== undefined
+    ) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message: "GCP sentinel ownership cannot include scoped references",
+        retryable: false,
+      });
+    }
+    return;
+  }
+  if (ownership.purpose === "workshop_publication_verifier") {
+    if (
+      scoped.workspaceRef !== undefined ||
+      scoped.generation !== undefined ||
+      invalidRef(ownership.workshopPublicationRef) ||
+      typeof ownership.checkpointRef !== "string" ||
+      !CHECKPOINT_REF_PATTERN.test(ownership.checkpointRef) ||
+      !Number.isSafeInteger(ownership.attempt) ||
+      (ownership.attempt ?? 0) < 1
+    ) {
+      throw new ProviderServiceError({
+        code: "invalid_provider_request",
+        message: "GCP publication ownership is invalid",
+        retryable: false,
+      });
+    }
+    return;
+  }
+  if (ownership.purpose !== "learner_workspace") {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "GCP ownership purpose is invalid",
+      retryable: false,
+    });
+  }
+  if (
+    scoped.workshopPublicationRef !== undefined ||
+    scoped.checkpointRef !== undefined ||
+    (ownership.workspaceRef !== undefined && invalidRef(ownership.workspaceRef)) ||
+    (ownership.generation !== undefined && (
+      !Number.isSafeInteger(ownership.generation) || ownership.generation < 1
+    )) ||
+    (ownership.attempt !== undefined && (
+      !Number.isSafeInteger(ownership.attempt) || ownership.attempt < 1
+    ))
+  ) {
+    throw new ProviderServiceError({
+      code: "invalid_provider_request",
+      message: "GCP learner ownership is invalid",
+      retryable: false,
+    });
+  }
+}
+
+function checkpointLabelValue(checkpointRef: string): string {
+  if (GCP_LABEL_VALUE_PATTERN.test(checkpointRef)) return checkpointRef;
+  const digest = createHash("sha256").update(checkpointRef, "utf8").digest("hex");
+  return `checkpoint-${digest.slice(0, 52)}`;
+}
+
 export function ownershipMarker(ownership: ProviderOwnership): string {
+  assertOwnership(ownership);
   return [
     "intar-managed=true",
     `organization=${ownership.organizationRef}`,
@@ -246,20 +712,22 @@ export function ownershipMarker(ownership: ProviderOwnership): string {
 }
 
 export function ownershipLabels(ownership: ProviderOwnership): Record<string, string> {
-  const normalized = (value: string): string => value.toLowerCase().replace(/[^a-z0-9_-]/gu, "_").slice(0, 63);
+  assertOwnership(ownership);
   const labels: Record<string, string> = {
     "intar-managed": "true",
     "intar-provider": "gcp-compute",
-    "intar-org": normalized(ownership.organizationRef),
-    "intar-connection": normalized(ownership.connectionRef),
-    "intar-purpose": normalized(ownership.purpose),
+    "intar-org": ownership.organizationRef,
+    "intar-connection": ownership.connectionRef,
+    "intar-purpose": ownership.purpose,
   };
-  if (ownership.workspaceRef) labels["intar-workspace"] = normalized(ownership.workspaceRef);
+  if (ownership.workspaceRef) labels["intar-workspace"] = ownership.workspaceRef;
   if (ownership.generation !== undefined) labels["intar-generation"] = String(ownership.generation);
   if (ownership.workshopPublicationRef) {
-    labels["intar-publication"] = normalized(ownership.workshopPublicationRef);
+    labels["intar-publication"] = ownership.workshopPublicationRef;
   }
-  if (ownership.checkpointRef) labels["intar-checkpoint"] = normalized(ownership.checkpointRef);
+  if (ownership.checkpointRef) {
+    labels["intar-checkpoint"] = checkpointLabelValue(ownership.checkpointRef);
+  }
   if (ownership.attempt !== undefined) labels["intar-attempt"] = String(ownership.attempt);
   return labels;
 }
@@ -295,29 +763,62 @@ function labelsMatchRuntimeResource(
   );
 }
 
+function routeUsesFoundationNetwork(
+  resource: GcpResourceRef,
+  foundation: GcpFoundationSpec,
+): boolean {
+  return resource.network?.endsWith(`/networks/${foundation.networkName}`) === true;
+}
+
+function isSafeDefaultInternetRoute(resource: GcpResourceRef): boolean {
+  return resource.routeType === "STATIC" &&
+    resource.destRange === "0.0.0.0/0" &&
+    resource.priority === 1_000 &&
+    resource.nextHopGateway?.endsWith("/global/gateways/default-internet-gateway") === true &&
+    (resource.tags?.length ?? 0) === 0;
+}
+
 function ownedFoundationRoute(
   resource: GcpResourceRef,
   foundation: GcpFoundationSpec,
   networkOwned: boolean,
 ): boolean {
   return networkOwned &&
-    resource.network?.endsWith(`/networks/${foundation.networkName}`) === true &&
+    routeUsesFoundationNetwork(resource, foundation) &&
     (
       resource.routeType === "SUBNET" ||
-      (
-        resource.routeType === "STATIC" &&
-        resource.destRange === "0.0.0.0/0" &&
-        resource.priority === 1_000 &&
-        resource.nextHopGateway?.endsWith("/global/gateways/default-internet-gateway") === true &&
-        (resource.tags?.length ?? 0) === 0
-      )
+      isSafeDefaultInternetRoute(resource)
     );
+}
+
+function assertSafeFoundationRoutes(
+  routes: readonly GcpResourceRef[],
+  foundation: GcpFoundationSpec,
+): void {
+  const safeDefaultRoutes = routes.filter((route) =>
+    routeUsesFoundationNetwork(route, foundation) && isSafeDefaultInternetRoute(route)
+  );
+  if (
+    safeDefaultRoutes.length !== 1 ||
+    routes.some((route) => !ownedFoundationRoute(route, foundation, true))
+  ) {
+    foundationDrift("routes");
+  }
+}
+
+function isInherentComputeProjectAsset(
+  asset: GcpComputeAsset,
+  projectId: string,
+): boolean {
+  return asset.assetType === COMPUTE_PROJECT_ASSET_TYPE &&
+    asset.fullResourceName === `//compute.googleapis.com/projects/${projectId}`;
 }
 
 export function classifyOperationalInventory(
   inventory: GcpProjectInventory,
   foundation: GcpFoundationSpec,
   runtimeConnectionOwnership: ProviderOwnership,
+  projectId: string,
 ): GcpOperationalInventoryClassification {
   const marker = ownershipMarker(foundation.ownership);
   const ownedFoundation = {
@@ -385,7 +886,13 @@ export function classifyOperationalInventory(
   ]);
   const ownedComputeAssets: GcpComputeAsset[] = [];
   const foreignComputeAssets: GcpComputeAsset[] = [];
+  let inherentProjectAssetSeen = false;
   for (const asset of inventory.computeAssets) {
+    const inherentProjectAsset = isInherentComputeProjectAsset(asset, projectId);
+    if (inherentProjectAsset && !inherentProjectAssetSeen) {
+      inherentProjectAssetSeen = true;
+      continue;
+    }
     const owned = asset.assetType === "compute.googleapis.com/Instance" ||
         asset.assetType === "compute.googleapis.com/Disk"
       ? labelsMatchRuntimeResource(asset.labels, runtimeConnectionOwnership)
@@ -479,6 +986,38 @@ export class GcpClient {
     return [...enabled].sort();
   }
 
+  async assertBillingEnabled(): Promise<GcpProjectBillingInfo> {
+    const billing = await this.#api.cloudBilling<ProjectBillingInfoResponse>(
+      `/projects/${this.#projectId}/billingInfo`,
+    );
+    if (
+      billing.name !== `projects/${this.#projectId}/billingInfo` ||
+      billing.projectId !== this.#projectId
+    ) {
+      throw new ProviderServiceError({
+        code: "gcp_invalid_response",
+        message: "Cloud Billing returned billing information for another project",
+        retryable: false,
+      });
+    }
+    if (
+      billing.billingEnabled !== true ||
+      typeof billing.billingAccountName !== "string" ||
+      !/^billingAccounts\/[A-Za-z0-9-]{6,128}$/u.test(billing.billingAccountName)
+    ) {
+      throw new ProviderServiceError({
+        code: "gcp_billing_disabled",
+        message: "GCP project billing is not enabled",
+        retryable: false,
+      });
+    }
+    return {
+      projectId: billing.projectId,
+      billingAccountName: billing.billingAccountName,
+      billingEnabled: true,
+    };
+  }
+
   async #assertIamPermissions(
     required: readonly string[],
     message: string,
@@ -555,27 +1094,63 @@ export class GcpClient {
         retryable: false,
       });
     }
-    const region = await this.#api.compute<ComputeRegionResponse>(
-      `/projects/${this.#projectId}/regions/${WORKSHOP_REGION}`,
-      undefined,
-      { fields: "quotas" },
-    );
-    const quotas = (region.quotas ?? []).flatMap((quota): GcpQuotaObservation[] => {
+    const [region, project] = await Promise.all([
+      this.#api.compute<ComputeRegionResponse>(
+        `/projects/${this.#projectId}/regions/${WORKSHOP_REGION}`,
+        undefined,
+        { fields: "quotas" },
+      ),
+      this.#api.compute<ComputeProjectResponse>(
+        `/projects/${this.#projectId}`,
+        undefined,
+        { fields: "quotas" },
+      ),
+    ]);
+    const toObservation = (
+      quota: { metric?: string; limit?: number; usage?: number },
+    ): GcpQuotaObservation | undefined => {
       if (
         !quota.metric ||
         typeof quota.limit !== "number" || !Number.isFinite(quota.limit) ||
         typeof quota.usage !== "number" || !Number.isFinite(quota.usage)
-      ) return [];
-      return [{
+      ) return undefined;
+      return {
         metric: quota.metric,
         limit: quota.limit,
         usage: quota.usage,
         available: Math.max(0, quota.limit - quota.usage),
-      }];
+      };
+    };
+    const quotas = (region.quotas ?? []).flatMap((quota) => {
+      const observation = toObservation(quota);
+      return observation ? [observation] : [];
     });
+    const globalCpuQuotas = (project.quotas ?? [])
+      .filter((quota) => quota.metric === "CPUS_ALL_REGIONS");
+    if (globalCpuQuotas.length > 1) {
+      throw new ProviderServiceError({
+        code: "gcp_invalid_response",
+        message: "GCP API returned duplicate global CPU quota",
+        retryable: false,
+      });
+    }
+    if (globalCpuQuotas[0]) {
+      const globalCpuQuota = toObservation(globalCpuQuotas[0]);
+      if (!globalCpuQuota) {
+        throw new ProviderServiceError({
+          code: "gcp_invalid_response",
+          message: "GCP API returned an invalid global CPU quota",
+          retryable: false,
+        });
+      }
+      quotas.push(globalCpuQuota);
+    }
     const byMetric = new Map(quotas.map((quota) => [quota.metric, quota.available]));
     const requirements = [
       ["CPUS", input.cpuPerSeat],
+      ...(byMetric.has("CPUS_ALL_REGIONS")
+        ? [["CPUS_ALL_REGIONS", input.cpuPerSeat] as const]
+        : []),
       ["INSTANCES", input.instancesPerSeat],
       ["IN_USE_ADDRESSES", input.addressesPerSeat],
       ["SSD_TOTAL_GB", input.diskGibPerSeat],
@@ -657,11 +1232,11 @@ export class GcpClient {
         },
       );
       for (const result of page.results ?? []) {
+        const isComputeProject = result.assetType === COMPUTE_PROJECT_ASSET_TYPE;
         if (
           !result.name ||
           !result.assetType?.startsWith("compute.googleapis.com/") ||
-          !result.displayName ||
-          !result.location
+          (!isComputeProject && (!result.displayName || !result.location))
         ) {
           throw new ProviderServiceError({
             code: "gcp_invalid_response",
@@ -672,8 +1247,8 @@ export class GcpClient {
         assets.push({
           fullResourceName: result.name,
           assetType: result.assetType,
-          displayName: result.displayName,
-          location: result.location,
+          displayName: result.displayName ?? result.name.split("/").at(-1) ?? result.name,
+          location: result.location ?? "global",
           ...(result.state ? { state: result.state } : {}),
           ...(result.labels ? { labels: result.labels } : {}),
         });
@@ -775,19 +1350,12 @@ export class GcpClient {
       : [];
     const allowedRoutes = foundation
       ? inventory.routes.filter((resource) =>
-          resource.network?.endsWith(`/networks/${foundation.networkName}`) &&
-          (
-            resource.routeType === "SUBNET" ||
-            (
-              resource.routeType === "STATIC" &&
-              resource.destRange === "0.0.0.0/0" &&
-              resource.priority === 1_000 &&
-              resource.nextHopGateway?.endsWith("/global/gateways/default-internet-gateway") === true &&
-              (resource.tags?.length ?? 0) === 0
-            )
-          ),
+          ownedFoundationRoute(resource, foundation, true)
         )
       : [];
+    if (foundation && allowedNetwork.length > 0) {
+      assertSafeFoundationRoutes(inventory.routes, foundation);
+    }
     const allowedAssetNames = new Map<string, Set<string>>();
     if (foundation) {
       allowedAssetNames.set("compute.googleapis.com/Network", new Set([foundation.networkName]));
@@ -798,9 +1366,16 @@ export class GcpClient {
         new Set(allowedRoutes.map((route) => route.name)),
       );
     }
-    const foreignAssets = inventory.computeAssets.filter((asset) =>
-      !allowedAssetNames.get(asset.assetType)?.has(asset.displayName),
-    );
+    let inherentProjectAssetSeen = false;
+    const foreignAssets = inventory.computeAssets.filter((asset) => {
+      if (isInherentComputeProjectAsset(asset, this.#projectId)) {
+        if (!inherentProjectAssetSeen) {
+          inherentProjectAssetSeen = true;
+          return false;
+        }
+      }
+      return !allowedAssetNames.get(asset.assetType)?.has(asset.displayName);
+    });
     if (
       allowedNetwork.length !== inventory.networks.length ||
       allowedSubnet.length !== inventory.subnetworks.length ||
@@ -858,7 +1433,7 @@ export class GcpClient {
         };
       }),
     );
-    if (machineTypes.some((type) => type.architecture !== "X86_64" || type.deprecated?.state === "DEPRECATED")) {
+    if (machineTypes.some((type) => type.architecture !== "X86_64" || type.deprecated !== undefined)) {
       throw new ProviderServiceError({
         code: "gcp_machine_type_unsupported",
         message: "GCP machine type is deprecated or not x86_64",
@@ -882,51 +1457,32 @@ export class GcpClient {
     const value = await this.#api.compute<Record<string, unknown>>(
       `/projects/${imageProject}/global/images/family/${family}`,
     );
-    if (
-      typeof value.id !== "string" || typeof value.name !== "string" ||
-      !/^[a-z0-9-]{1,63}$/u.test(value.name) ||
-      typeof value.selfLink !== "string" || typeof value.architecture !== "string" ||
-      typeof value.status !== "string" || typeof value.diskSizeGb !== "string" ||
-      typeof value.creationTimestamp !== "string"
-    ) {
-      throw new ProviderServiceError({
-        code: "gcp_invalid_response",
-        message: "GCP image response is invalid",
-        retryable: false,
-      });
-    }
-    if (
-      value.architecture !== "X86_64" ||
-      value.status !== "READY" ||
-      !validComputeSelfLink(
-        value.selfLink,
-        new RegExp(`^/compute/v1/projects/${imageProject}/global/images/${value.name}$`, "u"),
-      ) ||
-      (typeof value.deprecated === "object" && value.deprecated !== null)
-    ) {
+    return parseResolvedImage(value, imageProject, { family });
+  }
+
+  async resolveImage(imageSelfLink: string): Promise<GcpResolvedImage> {
+    const expectedPath =
+      /^\/compute\/v1\/projects\/debian-cloud\/global\/images\/(debian-13-[a-z0-9-]+)$/u;
+    if (!validComputeSelfLink(imageSelfLink, expectedPath)) {
       throw new ProviderServiceError({
         code: "gcp_image_unsupported",
-        message: "GCP system image is not a ready x86_64 image",
+        message: "GCP pinned system image must be an immutable Debian 13 image",
         retryable: false,
       });
     }
-    return {
-      id: value.id,
-      name: value.name,
-      selfLink: value.selfLink,
-      family,
-      architecture: value.architecture,
-      status: value.status,
-      diskSizeGb: value.diskSizeGb,
-      creationTimestamp: value.creationTimestamp,
-      ...(typeof value.deprecated === "object" && value.deprecated !== null
-        ? {
-            deprecated: value.deprecated as NonNullable<
-              GcpResolvedImage["deprecated"]
-            >,
-          }
-        : {}),
-    };
+    const match = expectedPath.exec(new URL(imageSelfLink).pathname);
+    const imageName = match?.[1];
+    if (!imageName) {
+      throw new ProviderServiceError({
+        code: "gcp_image_unsupported",
+        message: "GCP pinned system image must be an immutable Debian 13 image",
+        retryable: false,
+      });
+    }
+    const value = await this.#api.compute<Record<string, unknown>>(
+      `/projects/debian-cloud/global/images/${imageName}`,
+    );
+    return parseResolvedImage(value, "debian-cloud", { expectedName: imageName });
   }
 
   async observeResource(selfLink: string): Promise<GcpResourceRef | null> {
@@ -958,8 +1514,13 @@ export class GcpClient {
   }
 
   async #getOptional(path: string): Promise<GcpResourceRef | null> {
+    const value = await this.#getOptionalApiResource(path);
+    return value ? resourceRef(value) : null;
+  }
+
+  async #getOptionalApiResource(path: string): Promise<ApiResource | null> {
     try {
-      return resourceRef(await this.#api.compute<ApiResource>(path));
+      return await this.#api.compute<ApiResource>(path);
     } catch (error) {
       if (error instanceof GcpApiError && error.shape.code === "gcp_not_found") return null;
       throw error;
@@ -1006,27 +1567,166 @@ export class GcpClient {
     return settled;
   }
 
-  async ensureFoundation(foundation: GcpFoundationSpec): Promise<GcpFoundationObservation> {
-    if (
-      foundation.subnetworkRegion !== "europe-west3" ||
-      !foundation.subnetworkCidr.startsWith("10.") ||
-      !validIpv4Cidr(foundation.subnetworkCidr, 24) ||
-      ![foundation.networkName, foundation.subnetworkName, foundation.firewallName]
-        .every((name) => RESOURCE_NAME_PATTERN.test(name)) ||
-      foundation.stargateEgressIpv4Cidrs.length === 0 ||
-      foundation.stargateEgressIpv4Cidrs.some((cidr) => !validIpv4Cidr(cidr, 32))
-    ) {
+  #validateFoundationNetwork(
+    resource: ApiResource | null,
+    foundation: GcpFoundationSpec,
+    marker: string,
+  ): GcpResourceRef {
+    if (!resource || resource.description !== marker) {
       throw new ProviderServiceError({
-        code: "invalid_provider_request",
-        message: "GCP foundation specification is invalid",
+        code: "gcp_foundation_ownership_mismatch",
+        message: "GCP network sentinel ownership does not match",
         retryable: false,
       });
     }
+    const network = resourceRef(resource);
+    if (
+      resource.name !== foundation.networkName ||
+      resource.autoCreateSubnetworks !== false ||
+      resource.routingConfig?.routingMode !== "REGIONAL"
+    ) {
+      foundationDrift("network");
+    }
+    return network;
+  }
+
+  #validateFoundationSubnetwork(
+    resource: ApiResource | null,
+    foundation: GcpFoundationSpec,
+    marker: string,
+  ): GcpResourceRef {
+    if (!resource || resource.description !== marker) {
+      throw new ProviderServiceError({
+        code: "gcp_foundation_ownership_mismatch",
+        message: "GCP subnet sentinel ownership does not match",
+        retryable: false,
+      });
+    }
+    const subnetwork = resourceRef(resource);
+    const region = foundation.subnetworkRegion;
+    const expectedNetworkSuffix =
+      `/projects/${this.#projectId}/global/networks/${foundation.networkName}`;
+    if (
+      resource.name !== foundation.subnetworkName ||
+      resource.ipCidrRange !== foundation.subnetworkCidr ||
+      resource.network?.endsWith(expectedNetworkSuffix) !== true ||
+      (
+        resource.region !== region &&
+        resource.region?.endsWith(`/regions/${region}`) !== true
+      ) ||
+      resource.stackType !== "IPV4_ONLY" ||
+      resource.privateIpGoogleAccess !== false
+    ) {
+      foundationDrift("subnetwork");
+    }
+    return subnetwork;
+  }
+
+  #validateFoundationFirewall(
+    resource: ApiResource | null,
+    foundation: GcpFoundationSpec,
+    marker: string,
+  ): GcpResourceRef {
+    if (!resource || resource.description !== marker) {
+      throw new ProviderServiceError({
+        code: "gcp_foundation_ownership_mismatch",
+        message: "GCP firewall sentinel ownership does not match",
+        retryable: false,
+      });
+    }
+    const firewall = resourceRef(resource);
+    const expectedNetworkSuffix =
+      `/projects/${this.#projectId}/global/networks/${foundation.networkName}`;
+    const allowed = resource.allowed;
+    if (
+      resource.name !== foundation.firewallName ||
+      resource.network?.endsWith(expectedNetworkSuffix) !== true ||
+      resource.direction !== "INGRESS" ||
+      resource.priority !== 1_000 ||
+      resource.disabled !== false ||
+      (resource.destinationRanges?.length ?? 0) !== 0 ||
+      !sameStringSet(resource.sourceRanges, foundation.stargateEgressIpv4Cidrs) ||
+      (resource.sourceTags?.length ?? 0) !== 0 ||
+      (resource.sourceServiceAccounts?.length ?? 0) !== 0 ||
+      !sameStringSet(resource.targetTags, ["intar-learner"]) ||
+      (resource.targetServiceAccounts?.length ?? 0) !== 0 ||
+      allowed?.length !== 1 ||
+      allowed[0]?.IPProtocol !== "tcp" ||
+      !sameStringSet(allowed[0].ports, ["22"]) ||
+      (resource.denied?.length ?? 0) !== 0
+    ) {
+      foundationDrift("firewall");
+    }
+    return firewall;
+  }
+
+  async #assertEffectiveFoundationFirewalls(
+    foundation: GcpFoundationSpec,
+  ): Promise<void> {
+    const networkReference =
+      `projects/${this.#projectId}/global/networks/${foundation.networkName}`;
+    const [globalRules, regionalRules] = await Promise.all([
+      this.#api.compute<unknown>(
+        `/projects/${this.#projectId}/global/networks/${foundation.networkName}` +
+          "/getEffectiveFirewalls",
+      ),
+      this.#api.compute<unknown>(
+        `/projects/${this.#projectId}/regions/${foundation.subnetworkRegion}` +
+          "/firewallPolicies/getEffectiveFirewalls",
+        undefined,
+        { network: networkReference },
+      ),
+    ]);
+    assertSafeEffectiveFirewallResponse(globalRules, this.#projectId, foundation);
+    assertSafeEffectiveFirewallResponse(regionalRules, this.#projectId, foundation);
+  }
+
+  async #assertFoundationRoutes(foundation: GcpFoundationSpec): Promise<void> {
+    assertSafeFoundationRoutes(await this.#list("routes"), foundation);
+  }
+
+  async inspectFoundation(
+    foundation: GcpFoundationSpec,
+  ): Promise<GcpFoundationObservation> {
+    assertFoundationSpec(foundation);
+    const marker = ownershipMarker(foundation.ownership);
+    const [networkResource, subnetworkResource, firewallResource] = await Promise.all([
+      this.#getOptionalApiResource(
+        `/projects/${this.#projectId}/global/networks/${foundation.networkName}`,
+      ),
+      this.#getOptionalApiResource(
+        `/projects/${this.#projectId}/regions/${foundation.subnetworkRegion}` +
+          `/subnetworks/${foundation.subnetworkName}`,
+      ),
+      this.#getOptionalApiResource(
+        `/projects/${this.#projectId}/global/firewalls/${foundation.firewallName}`,
+      ),
+    ]);
+    const network = this.#validateFoundationNetwork(networkResource, foundation, marker);
+    const subnetwork = this.#validateFoundationSubnetwork(
+      subnetworkResource,
+      foundation,
+      marker,
+    );
+    const firewall = this.#validateFoundationFirewall(firewallResource, foundation, marker);
+    await this.#assertEffectiveFoundationFirewalls(foundation);
+    await this.#assertFoundationRoutes(foundation);
+    return {
+      network,
+      subnetwork,
+      firewall,
+      createdResourceSelfLinks: [],
+    };
+  }
+
+  async ensureFoundation(foundation: GcpFoundationSpec): Promise<GcpFoundationObservation> {
+    assertFoundationSpec(foundation);
     const createdResourceSelfLinks: string[] = [];
     const marker = ownershipMarker(foundation.ownership);
     const networkPath = `/projects/${this.#projectId}/global/networks/${foundation.networkName}`;
-    let network = await this.#getOptional(networkPath);
-    if (!network) {
+    let networkResource = await this.#getOptionalApiResource(networkPath);
+    let networkCreated = false;
+    if (!networkResource) {
       await this.#createAndWait(
         `/projects/${this.#projectId}/global/networks`,
         {
@@ -1037,21 +1737,21 @@ export class GcpClient {
         },
         [this.#projectId, foundation.networkName, "create-network"],
       );
-      network = await this.#getOptional(networkPath);
-      if (network) createdResourceSelfLinks.push(network.selfLink);
+      networkResource = await this.#getOptionalApiResource(networkPath);
+      networkCreated = true;
     }
-    if (!network || network.description !== marker) {
-      throw new ProviderServiceError({
-        code: "gcp_foundation_ownership_mismatch",
-        message: "GCP network sentinel ownership does not match",
-        retryable: false,
-      });
-    }
+    const network = this.#validateFoundationNetwork(
+      networkResource,
+      foundation,
+      marker,
+    );
+    if (networkCreated) createdResourceSelfLinks.push(network.selfLink);
 
     const region = foundation.subnetworkRegion;
     const subnetPath = `/projects/${this.#projectId}/regions/${region}/subnetworks/${foundation.subnetworkName}`;
-    let subnetwork = await this.#getOptional(subnetPath);
-    if (!subnetwork) {
+    let subnetworkResource = await this.#getOptionalApiResource(subnetPath);
+    let subnetworkCreated = false;
+    if (!subnetworkResource) {
       await this.#createAndWait(
         `/projects/${this.#projectId}/regions/${region}/subnetworks`,
         {
@@ -1064,20 +1764,20 @@ export class GcpClient {
         },
         [this.#projectId, foundation.subnetworkName, "create-subnetwork"],
       );
-      subnetwork = await this.#getOptional(subnetPath);
-      if (subnetwork) createdResourceSelfLinks.push(subnetwork.selfLink);
+      subnetworkResource = await this.#getOptionalApiResource(subnetPath);
+      subnetworkCreated = true;
     }
-    if (!subnetwork || subnetwork.description !== marker) {
-      throw new ProviderServiceError({
-        code: "gcp_foundation_ownership_mismatch",
-        message: "GCP subnet sentinel ownership does not match",
-        retryable: false,
-      });
-    }
+    const subnetwork = this.#validateFoundationSubnetwork(
+      subnetworkResource,
+      foundation,
+      marker,
+    );
+    if (subnetworkCreated) createdResourceSelfLinks.push(subnetwork.selfLink);
 
     const firewallPath = `/projects/${this.#projectId}/global/firewalls/${foundation.firewallName}`;
-    let firewall = await this.#getOptional(firewallPath);
-    if (!firewall) {
+    let firewallResource = await this.#getOptionalApiResource(firewallPath);
+    let firewallCreated = false;
+    if (!firewallResource) {
       await this.#createAndWait(
         `/projects/${this.#projectId}/global/firewalls`,
         {
@@ -1093,16 +1793,17 @@ export class GcpClient {
         },
         [this.#projectId, foundation.firewallName, "create-firewall"],
       );
-      firewall = await this.#getOptional(firewallPath);
-      if (firewall) createdResourceSelfLinks.push(firewall.selfLink);
+      firewallResource = await this.#getOptionalApiResource(firewallPath);
+      firewallCreated = true;
     }
-    if (!firewall || firewall.description !== marker) {
-      throw new ProviderServiceError({
-        code: "gcp_foundation_ownership_mismatch",
-        message: "GCP firewall sentinel ownership does not match",
-        retryable: false,
-      });
-    }
+    const firewall = this.#validateFoundationFirewall(
+      firewallResource,
+      foundation,
+      marker,
+    );
+    if (firewallCreated) createdResourceSelfLinks.push(firewall.selfLink);
+    await this.#assertEffectiveFoundationFirewalls(foundation);
+    await this.#assertFoundationRoutes(foundation);
     return { network, subnetwork, firewall, createdResourceSelfLinks };
   }
 
@@ -1112,13 +1813,13 @@ export class GcpClient {
   }> {
     if (
       !RESOURCE_NAME_PATTERN.test(operation.name) || !ZONE_PATTERN.test(operation.zone) ||
-      operation.rootDiskType !== "pd-balanced" || operation.rootDiskGib < 10 ||
-      operation.rootDiskGib > 65_536 || operation.startupScript.length > 256 * 1024 ||
-      operation.sshPublicKey.length > 8_192 ||
-      !/^ssh-(?:ed25519|rsa) [A-Za-z0-9+/]+={0,3}(?: [^\r\n]{1,256})?$/u.test(operation.sshPublicKey) ||
+      operation.rootDiskType !== "pd-balanced" ||
+      !Number.isSafeInteger(operation.rootDiskGib) || operation.rootDiskGib < 10 ||
+      operation.rootDiskGib > 65_536 || !validCloudInit(operation.cloudInit) ||
+      operation.machineType !== GCP_CERTIFIED_MACHINE_TYPE ||
       !validComputeSelfLink(
         operation.sourceImage,
-        /^\/compute\/v1\/projects\/[a-z0-9-]+\/global\/images\/[a-z0-9-]+$/u,
+        /^\/compute\/v1\/projects\/debian-cloud\/global\/images\/debian-13-[a-z0-9-]+$/u,
       ) ||
       !validComputeSelfLink(
         operation.networkSelfLink,
@@ -1128,7 +1829,7 @@ export class GcpClient {
         operation.subnetworkSelfLink,
         new RegExp(`^/compute/v1/projects/${this.#projectId}/regions/europe-west3/subnetworks/intar-[a-z0-9-]+$`, "u"),
       ) ||
-      operation.generation < 1
+      !Number.isSafeInteger(operation.generation) || operation.generation < 1
     ) {
       throw new ProviderServiceError({
         code: "invalid_provider_request",
@@ -1139,6 +1840,7 @@ export class GcpClient {
     const requestId = await deterministicRequestId([
       this.#projectId,
       operation.name,
+      operation.zone,
       String(operation.generation),
       "create-instance",
     ]);
@@ -1153,7 +1855,6 @@ export class GcpClient {
           labels: ownershipLabels(operation.ownership),
           tags: { items: ["intar-learner"] },
           canIpForward: false,
-          deletionProtection: false,
           disks: [
             {
               boot: true,
@@ -1179,8 +1880,8 @@ export class GcpClient {
           metadata: {
             items: [
               { key: "block-project-ssh-keys", value: "TRUE" },
-              { key: "ssh-keys", value: `intar:${operation.sshPublicKey}` },
-              { key: "startup-script", value: operation.startupScript },
+              { key: "user-data", value: operation.cloudInit },
+              { key: "startup-script", value: GCP_CLOUD_INIT_STARTUP_SCRIPT },
             ],
           },
           serviceAccounts: [],
@@ -1210,6 +1911,7 @@ export class GcpClient {
       const requestId = await deterministicRequestId([
         this.#projectId,
         operation.name,
+        operation.zone,
         String(operation.generation),
         "create-instance",
       ]);
@@ -1295,6 +1997,7 @@ export class GcpClient {
     zone: string,
     instanceName: string,
     ownership: ProviderOwnership,
+    logicalRequestId: string,
   ): Promise<GcpAsyncOperation> {
     assertAllocationIdentity(zone, instanceName);
     const path = `/projects/${this.#projectId}/zones/${zone}/instances/${instanceName}`;
@@ -1307,7 +2010,13 @@ export class GcpClient {
         retryable: false,
       });
     }
-    const requestId = await deterministicRequestId([this.#projectId, zone, instanceName, "reset"]);
+    const requestId = await deterministicRequestId([
+      this.#projectId,
+      zone,
+      instanceName,
+      "reset",
+      logicalRequestId,
+    ]);
     return this.#api.compute<GcpAsyncOperation>(
       `${path}/reset`,
       { method: "POST", body: "{}" },
@@ -1319,6 +2028,7 @@ export class GcpClient {
     zone: string,
     instanceName: string,
     ownership: ProviderOwnership,
+    logicalRequestId: string,
   ): Promise<GcpAsyncOperation | null> {
     assertAllocationIdentity(zone, instanceName);
     const path = `/projects/${this.#projectId}/zones/${zone}/instances/${instanceName}`;
@@ -1337,7 +2047,13 @@ export class GcpClient {
         retryable: false,
       });
     }
-    const requestId = await deterministicRequestId([this.#projectId, zone, instanceName, "delete"]);
+    const requestId = await deterministicRequestId([
+      this.#projectId,
+      zone,
+      instanceName,
+      "delete",
+      logicalRequestId,
+    ]);
     try {
       return await this.#api.compute<GcpAsyncOperation>(
         path,
@@ -1354,6 +2070,7 @@ export class GcpClient {
     zone: string,
     diskName: string,
     ownership: ProviderOwnership,
+    logicalRequestId: string,
   ): Promise<GcpAsyncOperation | null> {
     assertAllocationIdentity(zone, diskName);
     const path = `/projects/${this.#projectId}/zones/${zone}/disks/${diskName}`;
@@ -1377,6 +2094,7 @@ export class GcpClient {
       zone,
       diskName,
       "delete-disk",
+      logicalRequestId,
     ]);
     try {
       return await this.#api.compute<GcpAsyncOperation>(

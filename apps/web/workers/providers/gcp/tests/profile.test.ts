@@ -20,7 +20,7 @@ const key = {
 } satisfies GcpServiceAccountKey;
 
 describe("certified GCP runtime profile", () => {
-  it("locks e2-standard-4, Debian 13, and the Frankfurt fallback order", () => {
+  it("locks e2-standard-4, Debian 13, and the Frankfurt zone set", () => {
     expect(() => assertCertifiedProfileInput({
       machineType: GCP_CERTIFIED_MACHINE_TYPE,
       imageFamily: GCP_DEBIAN_13_IMAGE_FAMILY,
@@ -40,7 +40,17 @@ describe("certified GCP runtime profile", () => {
       machineType: GCP_CERTIFIED_MACHINE_TYPE,
       imageFamily: GCP_DEBIAN_13_IMAGE_FAMILY,
       zones: ["europe-west3-b", "europe-west3-a", "europe-west3-c"],
-    })).toThrow("fallback order");
+    })).not.toThrow();
+    expect(() => assertCertifiedProfileInput({
+      machineType: GCP_CERTIFIED_MACHINE_TYPE,
+      imageFamily: GCP_DEBIAN_13_IMAGE_FAMILY,
+      zones: ["europe-west3-b"],
+    })).not.toThrow();
+    expect(() => assertCertifiedProfileInput({
+      machineType: GCP_CERTIFIED_MACHINE_TYPE,
+      imageFamily: GCP_DEBIAN_13_IMAGE_FAMILY,
+      zones: ["europe-west3-b", "europe-west3-b"],
+    })).toThrow("unique certified Frankfurt zones");
   });
 
   it("resolves all zones and converts the mutable family to an immutable image", async () => {
@@ -99,5 +109,31 @@ describe("certified GCP runtime profile", () => {
     });
     await expect(client.resolveImageFamily(GCP_DEBIAN_13_IMAGE_FAMILY))
       .rejects.toThrow("not a ready x86_64 image");
+  });
+
+  it("rejects an obsolete machine type", async () => {
+    const client = new GcpClient(key, key.project_id, {
+      fetcher: (async (input: RequestInfo | URL) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        return Response.json({
+          id: "machine-europe-west3-a",
+          name: GCP_CERTIFIED_MACHINE_TYPE,
+          selfLink: `${url.origin}${url.pathname}`,
+          guestCpus: 4,
+          memoryMb: 16_384,
+          architecture: "X86_64",
+          deprecated: { state: "OBSOLETE" },
+        });
+      }) as typeof fetch,
+      tokenProvider: async () => ({
+        accessToken: "token",
+        expiresAtEpochSeconds: 4_000_000_000,
+      }),
+    });
+
+    await expect(client.resolveMachineTypes(
+      GCP_CERTIFIED_MACHINE_TYPE,
+      ["europe-west3-a"],
+    )).rejects.toMatchObject({ shape: { code: "gcp_machine_type_unsupported" } });
   });
 });

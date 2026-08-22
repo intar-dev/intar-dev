@@ -2,6 +2,10 @@ import type { ProviderPriceLineItem } from "@intar/workshop-contracts";
 import { ProviderServiceError } from "@intar/provider-worker-core";
 
 const COMPUTE_SERVICE_ID = "6F81-5844-456A";
+const FRANKFURT_ON_DEMAND_E2_CORE_SKU_ID = "C921-088E-792A";
+const FRANKFURT_ON_DEMAND_E2_RAM_SKU_ID = "7D80-F9E4-6A44";
+const FRANKFURT_ON_DEMAND_PD_BALANCED_SKU_ID = "B1B5-0BAA-CB31";
+const EXTERNAL_IPV4_SKU_ID = "C054-7F72-A02E";
 const DEFAULT_CATALOG_BASE = "https://cloudbilling.googleapis.com/v1";
 
 interface Money {
@@ -27,6 +31,10 @@ interface Sku {
     usageType?: string;
   };
   serviceRegions?: string[];
+  geoTaxonomy?: {
+    type?: string;
+    regions?: string[];
+  };
   pricingInfo?: Array<{
     effectiveTime?: string;
     pricingExpression?: PricingExpression;
@@ -67,19 +75,56 @@ const BILLING_POLICY: Record<
   external_ipv4: { billingGranularitySeconds: 1, minimumDurationSeconds: 1 },
 };
 
+const USAGE_UNITS: Record<PriceTarget, string> = {
+  compute_core: "h",
+  compute_ram: "GiBy.h",
+  pd_balanced: "GiBy.mo",
+  external_ipv4: "h",
+};
+
 function targetForSku(sku: Sku): PriceTarget | undefined {
-  const description = (sku.description ?? "").toLowerCase();
-  const group = (sku.category?.resourceGroup ?? "").toLowerCase();
-  const usage = (sku.category?.usageType ?? "").toLowerCase();
-  if (usage && usage !== "ondemand") return undefined;
-  if (description.includes("e2 instance core") && description.includes("running")) return "compute_core";
-  if (description.includes("e2 instance ram") && description.includes("running")) return "compute_ram";
-  if (group.includes("pdbalanced") || description.includes("balanced pd capacity")) return "pd_balanced";
+  switch (sku.skuId) {
+    case FRANKFURT_ON_DEMAND_E2_CORE_SKU_ID:
+      return "compute_core";
+    case FRANKFURT_ON_DEMAND_E2_RAM_SKU_ID:
+      return "compute_ram";
+    case FRANKFURT_ON_DEMAND_PD_BALANCED_SKU_ID:
+      return "pd_balanced";
+    case EXTERNAL_IPV4_SKU_ID:
+      return "external_ipv4";
+    default:
+      return undefined;
+  }
+}
+
+function isRegionalWorkshopSku(sku: Sku): boolean {
+  return sku.serviceRegions?.some(
+    (region) => region === "europe-west3" || region === "europe",
+  ) ?? false;
+}
+
+function assertGlobalExternalIpv4Sku(sku: Sku): void {
+  const taxonomy = sku.geoTaxonomy;
   if (
-    description.includes("external ip") &&
-    (description.includes("charge") || description.includes("in use"))
-  ) return "external_ipv4";
-  return undefined;
+    taxonomy !== undefined &&
+    (taxonomy.type !== "GLOBAL" || (taxonomy.regions?.length ?? 0) !== 0)
+  ) {
+    throw new ProviderServiceError({
+      code: "gcp_catalog_invalid",
+      message: "GCP catalog returned an invalid external IPv4 SKU location",
+      retryable: false,
+    });
+  }
+}
+
+function assertOnDemandWorkshopSku(sku: Sku): void {
+  if (sku.category?.usageType !== "OnDemand" || !isRegionalWorkshopSku(sku)) {
+    throw new ProviderServiceError({
+      code: "gcp_catalog_invalid",
+      message: "GCP catalog returned an invalid Workshop SKU",
+      retryable: false,
+    });
+  }
 }
 
 function moneyToNanos(money: Money): bigint {
@@ -98,7 +143,15 @@ function moneyToNanos(money: Money): bigint {
       retryable: false,
     });
   }
-  return BigInt(money.units ?? "0") * 1_000_000_000n + BigInt(nanos);
+  const value = BigInt(money.units ?? "0") * 1_000_000_000n + BigInt(nanos);
+  if (value < 0n) {
+    throw new ProviderServiceError({
+      code: "gcp_catalog_invalid",
+      message: "GCP catalog returned a negative price",
+      retryable: false,
+    });
+  }
+  return value;
 }
 
 function rawMoney(money: Money): string {
@@ -117,7 +170,12 @@ function lineItem(
   const expression = sku.pricingInfo?.[0]?.pricingExpression;
   const rate = expression?.tieredRates?.find((entry) => (entry.startUsageAmount ?? 0) === 0);
   const unitPrice = rate?.unitPrice;
-  if (!sku.skuId || !expression || !unitPrice) {
+  if (
+    !sku.skuId ||
+    !expression ||
+    !unitPrice ||
+    expression.usageUnit !== USAGE_UNITS[target]
+  ) {
     throw new ProviderServiceError({
       code: "gcp_catalog_invalid",
       message: "GCP catalog returned an incomplete price",
@@ -207,13 +265,24 @@ export class GcpCatalogClient {
       pageToken = page.nextPageToken || undefined;
     } while (pageToken);
 
-    const regional = skus.filter((sku) =>
-      sku.serviceRegions?.some((region) => region === "europe-west3" || region === "europe"),
-    );
     const selected = new Map<PriceTarget, Sku>();
-    for (const sku of regional) {
+    for (const sku of skus) {
       const target = targetForSku(sku);
-      if (target && !selected.has(target)) selected.set(target, sku);
+      if (!target) continue;
+      if (selected.has(target)) {
+        throw new ProviderServiceError({
+          code: "gcp_catalog_invalid",
+          message: "GCP catalog returned a duplicate Workshop SKU",
+          retryable: false,
+        });
+      }
+      if (target === "external_ipv4") {
+        assertGlobalExternalIpv4Sku(sku);
+        selected.set(target, sku);
+      } else {
+        assertOnDemandWorkshopSku(sku);
+        selected.set(target, sku);
+      }
     }
     const missing = (["compute_core", "compute_ram", "pd_balanced", "external_ipv4"] as const)
       .filter((target) => !selected.has(target));

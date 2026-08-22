@@ -15,6 +15,7 @@ import type {
   GcpProjectIdentity,
   GcpProjectInventory,
   GcpProjectValidation,
+  GcpProviderReadinessResult,
   GcpProviderOperation,
   RotateGcpCredentialRequest,
   RotateGcpCredentialResult,
@@ -37,7 +38,12 @@ import {
   ownershipMarker,
 } from "./gcp-client";
 import { gcpOperationErrorCode, type GcpApiOptions } from "./gcp-api";
-import { assertCertifiedProfileInput } from "./profile";
+import {
+  GCP_CERTIFIED_MACHINE_TYPE,
+  GCP_DEBIAN_13_IMAGE_FAMILY,
+  GCP_FRANKFURT_ZONE_FALLBACK,
+  assertCertifiedProfileInput,
+} from "./profile";
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/u;
 
@@ -76,6 +82,32 @@ function requireNewWorkCatalog(deployment: GcpProviderDeployment): string {
   return requireGcpCatalogApiKey(deployment.catalogApiKey);
 }
 
+export async function providerReadiness(
+  deployment: GcpProviderDeployment,
+  options: Pick<GcpProviderRuntimeOptions, "catalog"> = {},
+): Promise<GcpProviderReadinessResult> {
+  if (deploymentMode(deployment) === "dormant") {
+    return {
+      mode: "dormant",
+      readyForNewWork: false,
+      catalog: { checked: false },
+    };
+  }
+  const prices = await new GcpCatalogClient(
+    requireGcpCatalogApiKey(deployment.catalogApiKey),
+    options.catalog,
+  ).quoteE2Standard4([GCP_FRANKFURT_ZONE_FALLBACK[0]], 32);
+  return {
+    mode: "active",
+    readyForNewWork: true,
+    catalog: {
+      checked: true,
+      observedAt: prices[0]!.observedAt,
+      lineItemCount: prices.length,
+    },
+  };
+}
+
 function operationStartsNewWork(kind: GcpProviderOperation["kind"]): boolean {
   switch (kind) {
     case "resolve_profile":
@@ -85,6 +117,7 @@ function operationStartsNewWork(kind: GcpProviderOperation["kind"]): boolean {
     case "create_instance":
       return true;
     case "inspect_connection":
+    case "validate_foundation":
     case "observe_operation":
     case "observe_allocation":
     case "reboot_instance":
@@ -221,10 +254,11 @@ async function validateConnectionSetup(
   validation: GcpProjectValidation;
 }> {
   const identity = await client.inspectIdentity();
-  const [enabledServices, grantedPermissions, quotas] = await Promise.all([
+  const [enabledServices, grantedPermissions, quotas, billing] = await Promise.all([
     client.assertRequiredServices(identity.projectNumber),
     client.assertRequiredIamPermissions(),
     client.assertMinimumQuotas(),
+    client.assertBillingEnabled(),
   ]);
   const inventory = await client.inventory();
   if (foundation) client.assertDedicatedProject(inventory, foundation);
@@ -232,6 +266,7 @@ async function validateConnectionSetup(
     enabledServices,
     grantedPermissions,
     quotas,
+    billing,
   };
   return { identity, inventory, validation };
 }
@@ -240,21 +275,90 @@ async function inspectConnectedProject(
   client: GcpClient,
   foundation: ConnectGcpProjectRequest["foundation"],
   runtimeConnectionOwnership: ProviderOwnership,
+  mode: GcpProviderDeploymentMode,
+  zones: readonly string[],
 ): Promise<GcpOperationalConnectionInspection> {
   const identity = await client.inspectIdentity();
-  const [grantedCleanupPermissions, inventory] = await Promise.all([
-    client.assertCleanupIamPermissions(),
+  if (mode === "dormant") {
+    const [grantedCleanupPermissions, inventory] = await Promise.all([
+      client.assertCleanupIamPermissions(),
+      client.inventory(),
+    ]);
+    return {
+      identity,
+      inventory,
+      validation: { authority: "cleanup_only", grantedCleanupPermissions },
+      classification: classifyOperationalInventory(
+        inventory,
+        foundation,
+        runtimeConnectionOwnership,
+        identity.projectId,
+      ),
+    };
+  }
+  assertCertifiedProfileInput({
+    machineType: GCP_CERTIFIED_MACHINE_TYPE,
+    imageFamily: GCP_DEBIAN_13_IMAGE_FAMILY,
+    zones,
+  });
+  const [
+    enabledServices,
+    grantedPermissions,
+    quotas,
+    billing,
+    machineTypes,
+    resolvedImage,
+    inventory,
+    observedFoundation,
+  ] = await Promise.all([
+    client.assertRequiredServices(identity.projectNumber),
+    client.assertRequiredIamPermissions(),
+    client.assertMinimumQuotas(),
+    client.assertBillingEnabled(),
+    client.resolveMachineTypes(
+      GCP_CERTIFIED_MACHINE_TYPE,
+      zones,
+    ),
+    client.resolveImageFamily(GCP_DEBIAN_13_IMAGE_FAMILY),
     client.inventory(),
+    client.inspectFoundation(foundation),
   ]);
+  if (
+    machineTypes.some((type) => type.guestCpus < 4 || type.memoryMib < 16_384)
+  ) {
+    throw new ProviderServiceError({
+      code: "gcp_machine_type_undersized",
+      message: "GCP machine type does not satisfy the Workshop requirements",
+      retryable: false,
+    });
+  }
+  const classification = classifyOperationalInventory(
+    inventory,
+    foundation,
+    runtimeConnectionOwnership,
+    identity.projectId,
+  );
+  if (classification.status === "foreign_resources_present") {
+    throw new ProviderServiceError({
+      code: "gcp_project_not_empty",
+      message: "GCP project contains foreign Compute resources",
+      retryable: false,
+    });
+  }
   return {
     identity,
     inventory,
-    validation: { grantedCleanupPermissions },
-    classification: classifyOperationalInventory(
-      inventory,
-      foundation,
-      runtimeConnectionOwnership,
-    ),
+    validation: {
+      authority: "active",
+      enabledServices,
+      grantedPermissions,
+      quotas,
+      billing,
+      machineTypes,
+      resolvedImage,
+      foundation: observedFoundation,
+    },
+    classification,
   };
 }
 
@@ -315,6 +419,7 @@ export async function rotateCredential(
     await Promise.all([
       client.assertRequiredServices(identity.projectNumber),
       client.assertRequiredIamPermissions(),
+      client.assertBillingEnabled(),
     ]);
   } else {
     await client.assertCleanupIamPermissions();
@@ -388,6 +493,9 @@ function allocationWrites(
           name: observation.bootDisk.name,
           operationIds: [],
           state: observation.bootDisk.status ?? "present",
+          ...(observation.bootDisk.creationTimestamp
+            ? { resourceCreatedAt: observation.bootDisk.creationTimestamp }
+            : {}),
           ...(observation.bootDisk.zone ? { location: observation.bootDisk.zone } : {}),
         }
       : {
@@ -409,6 +517,9 @@ function allocationWrites(
     name: observation.instance.name,
     operationIds: [],
     state: observation.instance.status ?? "present",
+    ...(observation.instance.creationTimestamp
+      ? { resourceCreatedAt: observation.instance.creationTimestamp }
+      : {}),
     ...(observation.publicIpv4 ? { publicIpv4: observation.publicIpv4 } : {}),
     ...(observation.instance.zone ? { location: observation.instance.zone } : {}),
   })];
@@ -420,6 +531,9 @@ function allocationWrites(
       name: observation.bootDisk.name,
       operationIds: [],
       state: observation.bootDisk.status ?? "present",
+      ...(observation.bootDisk.creationTimestamp
+        ? { resourceCreatedAt: observation.bootDisk.creationTimestamp }
+        : {}),
       ...(observation.bootDisk.zone ? { location: observation.bootDisk.zone } : {}),
     }));
   }
@@ -435,6 +549,9 @@ function allocationWrites(
       name: `${observation.instance.name}-ephemeral-ipv4`,
       operationIds: [],
       state: "present",
+      ...(observation.instance.creationTimestamp
+        ? { resourceCreatedAt: observation.instance.creationTimestamp }
+        : {}),
       publicIpv4: observation.publicIpv4,
       ...(observation.instance.zone ? { location: observation.instance.zone } : {}),
     }));
@@ -450,13 +567,10 @@ export async function runOperation(
 ): Promise<ProviderOperationResult> {
   assertRequestIdentity(request);
   const operation: GcpProviderOperation = request.operation;
+  const mode = deploymentMode(deployment);
   let catalogApiKey: string | undefined;
   if (operationStartsNewWork(operation.kind)) {
     catalogApiKey = requireNewWorkCatalog(deployment);
-  } else {
-    // Existing-allocation reconciliation and cleanup must remain reachable even
-    // when production is deliberately returned to dormant mode.
-    deploymentMode(deployment);
   }
   const key = await openGcpCredential(request.credential, kekSecret, request.credentialContext);
   const client = new GcpClient(key, request.projectId, options.api);
@@ -467,7 +581,7 @@ export async function runOperation(
           organizationRef: request.credentialContext.organizationId,
           connectionRef: request.connectionId,
           purpose: "learner_workspace",
-        }),
+        }, mode, operation.zones),
         canonicalWrites: [],
         mustPersistBeforeNextOperation: false,
       };
@@ -480,7 +594,9 @@ export async function runOperation(
       });
       const [machineTypes, resolvedImage] = await Promise.all([
         client.resolveMachineTypes(operation.machineType, operation.zones),
-        client.resolveImageFamily(operation.imageFamily),
+        operation.resolvedImageId === undefined
+          ? client.resolveImageFamily(operation.imageFamily)
+          : client.resolveImage(operation.resolvedImageId),
       ]);
       return {
         data: { machineTypes, resolvedImage },
@@ -566,6 +682,10 @@ export async function runOperation(
       const canonicalWrites = foundationWrites(request, data, options);
       return { data, canonicalWrites, mustPersistBeforeNextOperation: canonicalWrites.length > 0 };
     }
+    case "validate_foundation": {
+      const data = await client.inspectFoundation(operation.foundation);
+      return { data, canonicalWrites: [], mustPersistBeforeNextOperation: false };
+    }
     case "create_instance": {
       const data = await client.advanceInstance(operation);
       if (data.outcome === "created" && !data.operation.targetId) {
@@ -614,6 +734,7 @@ export async function runOperation(
         operation.zone,
         operation.instanceName,
         operation.ownership,
+        request.requestId,
       );
       return {
         data,
@@ -626,6 +747,7 @@ export async function runOperation(
         operation.zone,
         operation.instanceName,
         operation.ownership,
+        request.requestId,
       );
       const canonicalWrites = [write(request, options, {
         operation: data ? "resource_deletion_requested" : "resource_deleted",
@@ -643,6 +765,7 @@ export async function runOperation(
         operation.zone,
         operation.diskName,
         operation.ownership,
+        request.requestId,
       );
       const canonicalWrites = [write(request, options, {
         operation: data ? "resource_deletion_requested" : "resource_deleted",

@@ -39,8 +39,8 @@ The canonical production order is:
    `apps/web/wrangler.jsonc` still pins the intended production D1 database;
 2. dispatch `.github/workflows/control-plane-rollout.yml`, which deploys and
    probes both provider Workers before invoking web deployment;
-3. retain the provider capability, D1 migration, and exact web-version
-   activation evidence, then verify the public control plane.
+3. retain the provider capability and readiness, D1 migration, and exact
+   web-version activation evidence, then verify the public control plane.
 
 The web workflow applies the ordered D1 migration stream before activating the
 new immutable Worker version. A failed or ambiguous activation restores the
@@ -93,14 +93,33 @@ workflow rejects any rule or default outside the exact pilot contract and
 retains before/after and target/control evaluation evidence. Direct dashboard
 or workstation flag changes are outside the production operator boundary.
 
-### Explicit dormant GCP deployment
+### Active GCP deployment and explicit dormant fallback
 
-The checked-in GCP Wrangler configuration defaults to dormant. When no GCP
-project or catalog credential is available, the protected workflow may deploy
+Active mode is required for GCP connection, quoting, certification, and new
+learner VMs. Store a Cloud Billing API key restricted to that API as the
+protected `GCP_CATALOG_API_KEY` secret. Dispatch the provider workflow from the
+exact reviewed `main` revision with `deploy_gcp=true`, `gcp_dormant=false`, an
+empty `gcp_dormant_confirmation`, and confirmation
+`DEPLOY PROVIDER WORKERS`. The workflow must pass the explicit Wrangler
+override `--var GCP_PROVIDER_MODE:active`; the checked-in configuration and a
+raw deploy remain dormant.
+
+The retained production probe must call `capabilities()` and `readiness()` on
+the deployed GCP service. Active readiness is successful only when it reports
+`readyForNewWork=true`, `catalog.checked=true`, a positive `lineItemCount`, and
+a canonical `observedAt` timestamp after a successful live `e2-standard-4`
+quote for `europe-west3-a` with a 32 GiB `pd-balanced` boot disk. A capability
+response alone proves only the service-binding protocol. It does not prove
+active mode, catalog access, a GCP project connection, certification,
+allocation, or teardown.
+
+The checked-in GCP Wrangler configuration defaults to dormant as a fail-closed
+fallback. When active setup is not ready, the protected workflow may deploy
 `intar-provider-gcp` as a route-less service so the web binding and
-`capabilities()` contract can be validated. This mode is never inferred from a
-missing secret. Set `gcp_dormant=true` and provide the separate exact
-confirmation `DEPLOY DORMANT GCP PROVIDER`; omitting either must fail closed.
+`capabilities()` contract can still be validated. Dormant mode is never
+inferred from a missing secret. Set `gcp_dormant=true` and provide the separate
+exact confirmation `DEPLOY DORMANT GCP PROVIDER`; omitting either must fail
+closed.
 
 The dormant deployment sets the Worker mode explicitly, omits
 `GCP_CATALOG_API_KEY` from the deployment secrets file, and removes any
@@ -120,18 +139,11 @@ resources. Do not delete the Worker, its KEK, encrypted credentials, or
 reconciliation state until every allocation and resource has confirmed
 deletion.
 
-To activate GCP later, configure the protected `GCP_CATALOG_API_KEY`, dispatch
-the workflow with `gcp_dormant=false`, and do not supply the dormant confirmation.
-The CI deployment must override the dormant config with the explicit Wrangler
-argument `--var GCP_PROVIDER_MODE:active`; a raw deploy without that override
-remains dormant.
-Only after the non-dormant deployment and capability probe succeed may an owner
-connect a GCP project or an administrator certify or issue a GCP runtime.
-
 The production gate uses `wrangler dev --remote` with the route-less
 `tools/providers/live-capability-probe/wrangler.jsonc` entry Worker. It binds to
-the two deployed services, calls both `capabilities()` methods through
-Cloudflare service-binding RPC, validates the exact response, then terminates.
+the two deployed services, calls both `capabilities()` methods and the GCP
+`readiness()` method through Cloudflare service-binding RPC, validates the
+expected deployment mode and response, then terminates.
 It neither deploys a persistent probe Worker nor creates a route. The protected
 `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN` is scoped separately from both provider
 deployment tokens, and CI retains the non-secret response as rollout evidence.

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { assertProviderCapabilities, assertRouteLessWorkerConfig } from "@intar/provider-testkit";
 import { GCP_PROVIDER_CAPABILITIES } from "../../apps/web/workers/providers/gcp/src/capabilities";
+import { REQUIRED_IAM_PERMISSIONS } from "../../apps/web/workers/providers/gcp/src/gcp-client";
 import { HETZNER_PROVIDER_CAPABILITIES } from "../../apps/web/workers/providers/hetzner/src/capabilities";
 
 type JsonObject = Record<string, unknown>;
@@ -164,9 +165,36 @@ for (const required of [
   '--var "GCP_PROVIDER_MODE:${provider_mode}"',
   "Recheck protected Hetzner mutation window",
   "Recheck protected GCP mutation window",
+  "EXPECTED_GCP_PROVIDER_MODE:",
 ]) {
   if (!providerWorkflow.includes(required)) {
     throw new Error(`Provider workflow is missing fail-closed deployment contract: ${required}`);
+  }
+}
+
+const liveProbeWorker = await readFile(
+  resolve(root, "tools/providers/live-capability-probe/src/index.ts"),
+  "utf8",
+);
+const liveProbeClient = await readFile(
+  resolve(root, "tools/providers/probe-live-capabilities.ts"),
+  "utf8",
+);
+for (const required of [
+  "GCP_PROVIDER_SERVICE.readiness()",
+  "gcpReadiness",
+]) {
+  if (!liveProbeWorker.includes(required)) {
+    throw new Error(`Live provider probe is missing GCP readiness RPC: ${required}`);
+  }
+}
+for (const required of [
+  "assertGcpReadiness",
+  "EXPECTED_GCP_PROVIDER_MODE",
+  "gcpReadyForNewWork",
+]) {
+  if (!liveProbeClient.includes(required)) {
+    throw new Error(`Live provider probe is missing readiness validation: ${required}`);
   }
 }
 if (countOccurrences(providerWorkflow, "single_operator_confirmation:") !== 2) {
@@ -248,6 +276,29 @@ const websiteDeployWorkflow = await readFile(
   resolve(root, ".github/workflows/website-deploy.yml"),
   "utf8",
 );
+const workshopRollout = await readFile(
+  resolve(root, "docs/operations/workshops-rollout.md"),
+  "utf8",
+);
+const documentedGcpPermissions =
+  /intar_gcp_permissions='([^']+)'/u.exec(workshopRollout)?.[1]?.split(",") ?? [];
+if (
+  new Set(documentedGcpPermissions).size !== documentedGcpPermissions.length ||
+  documentedGcpPermissions.sort().join(",") !==
+    [...REQUIRED_IAM_PERMISSIONS].sort().join(",")
+) {
+  throw new Error("GCP custom-role runbook permissions do not match the provider check");
+}
+for (const required of [
+  "cidrs.length > 0 && cidrs.length <= 32",
+  "new Set(cidrs).size === cidrs.length",
+  'const match = /^(\\d{1,3}(?:\\.\\d{1,3}){3})\\/32$/.exec(cidr);',
+  'String(parsed) === octet && parsed >= 0 && parsed <= 255',
+]) {
+  if (!websiteDeployWorkflow.includes(required)) {
+    throw new Error(`Web deployment does not enforce a canonical Stargate IPv4 /32: ${required}`);
+  }
+}
 if (
   !websiteDeployWorkflow.includes(
     "${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/",
@@ -322,6 +373,29 @@ for (const path of [
   if (!astroConfig.includes(`configPath: \"${path}\"`)) {
     throw new Error(`Astro auxiliary Worker config is missing ${path}`);
   }
+}
+
+const providerConnections = await readFile(
+  resolve(root, "apps/web/src/lib/workshops/provider-connections.ts"),
+  "utf8",
+);
+const gcpClient = await readFile(
+  resolve(root, "apps/web/workers/providers/gcp/src/gcp-client.ts"),
+  "utf8",
+);
+for (const [source, label] of [
+  [providerConnections, "web GCP connection"],
+  [gcpClient, "GCP provider"],
+] as const) {
+  if (!source.includes('"10.77.0.0/20"')) {
+    throw new Error(`${label} must use the canonical Workshop subnet`);
+  }
+}
+if (
+  !providerConnections.includes("validIpv4HostCidr(entry)") ||
+  !gcpClient.includes("!validIpv4Cidr(cidr, 32)")
+) {
+  throw new Error("Web and GCP provider must both require canonical Stargate IPv4 /32 ranges");
 }
 if (!astroConfig.includes("remoteBindings: false")) {
   throw new Error("Astro development must keep provider bindings local");

@@ -36,6 +36,9 @@ export function parseServiceAccountKey(value: string): GcpServiceAccountKey {
     !parsed.private_key.endsWith("\n-----END PRIVATE KEY-----\n") ||
     typeof parsed.client_email !== "string" ||
     !SERVICE_ACCOUNT_PATTERN.test(parsed.client_email) ||
+    !parsed.client_email.endsWith(
+      `@${parsed.project_id}.iam.gserviceaccount.com`,
+    ) ||
     typeof parsed.client_id !== "string" ||
     !/^\d{8,32}$/u.test(parsed.client_id) ||
     typeof parsed.auth_uri !== "string" ||
@@ -45,7 +48,16 @@ export function parseServiceAccountKey(value: string): GcpServiceAccountKey {
   ) {
     throw new CredentialEnvelopeError("GCP service-account key is invalid");
   }
-  return parsed as unknown as GcpServiceAccountKey;
+  return {
+    type: "service_account",
+    project_id: parsed.project_id,
+    private_key_id: parsed.private_key_id,
+    private_key: parsed.private_key,
+    client_email: parsed.client_email,
+    client_id: parsed.client_id,
+    auth_uri: parsed.auth_uri,
+    token_uri: parsed.token_uri,
+  };
 }
 
 function validServiceAccountJson(value: string): boolean {

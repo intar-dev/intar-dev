@@ -60,11 +60,13 @@ identity, architecture, disk policy, and permitted locations. Publication
 fails if any declared profile cannot be certified. Session creation never
 substitutes a provider, machine type, image, or location set.
 
-The first Platform Engineering production revision declares
-`hetzner-cpx42`: Hetzner CPX42 with Debian 13. A later immutable revision may
-add `gcp-e2-standard-4`: GCP `e2-standard-4`, a 32 GiB `pd-balanced` boot disk,
-and Frankfurt zones `europe-west3-a`, `b`, then `c`, after that profile can be
-certified.
+The Platform Engineering production revision declares two exact profiles:
+`hetzner-cpx42`, which uses Hetzner CPX42 with Debian 13, and
+`gcp-e2-standard-4`, which uses GCP `e2-standard-4`, a 32 GiB `pd-balanced`
+boot disk, the Debian 13 image family, and Frankfurt zones `europe-west3-a`,
+`b`, then `c`. Publication requires separate successful certification for both
+profiles. Declaring the GCP profile does not prove that a live GCP allocation or
+teardown has passed.
 
 Compatible profiles consume the same `direct_cloud_linux_x86_64_v1`
 checkpoint bundles. Bundles contain no OCI layers; the guest pulls every

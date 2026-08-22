@@ -183,6 +183,7 @@ export async function reconcileProviderCostLedger(input: {
     const providerCreatedAt = effectiveProviderCreatedAt({
       providerKind: context.allocation.providerKind,
       allocationCreatedAt: context.allocation.createdAt,
+      locationAttemptStartedAt: context.allocation.locationAttemptStartedAt,
       resourceCreatedAt: resource.providerCreatedAt,
     });
     for (const price of matchingPrices) {
@@ -435,7 +436,7 @@ async function ensureGcpEphemeralIpv4Resource(input: {
             address: input.allocation.externalIpv4,
             lifecycle: "ephemeral_with_instance",
           })}`.as("configuration_json"),
-          providerCreatedAt: sql<number>`${instance.providerCreatedAt ?? input.allocation.createdAt}`.as(
+          providerCreatedAt: sql<number>`${instance.providerCreatedAt ?? input.allocation.locationAttemptStartedAt}`.as(
             "provider_created_at",
           ),
           disappearanceConfirmedAt: sql<number | null>`${instance.disappearanceConfirmedAt}`.as(
@@ -546,13 +547,15 @@ function priceAppliesToResource(
 function effectiveProviderCreatedAt(input: {
   providerKind: "hetzner_cloud" | "gcp_compute";
   allocationCreatedAt: number;
+  locationAttemptStartedAt: number;
   resourceCreatedAt: number | null;
 }): number {
   if (input.providerKind === "gcp_compute") {
     // GCP creates the boot disk and ephemeral IPv4 in the same insert request as
     // the instance, but their subsequent observation does not expose a creation
-    // timestamp. The persisted allocation time is the conservative common start.
-    return input.resourceCreatedAt ?? input.allocationCreatedAt;
+    // timestamp. A fallback zone is a new provider request, so use that exact
+    // attempt start rather than the first allocation's older timestamp.
+    return input.resourceCreatedAt ?? input.locationAttemptStartedAt;
   }
   return input.resourceCreatedAt ?? input.allocationCreatedAt;
 }

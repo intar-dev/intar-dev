@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   list: vi.fn(),
   inspect: vi.fn(),
+  abandon: vi.fn(),
 }));
 
 vi.mock("@/lib/agent-bridge", async (importOriginal) => ({
@@ -21,6 +22,7 @@ vi.mock("@/lib/workshops/provider-connections", () => ({
   connectProviderProject: mocks.connect,
   listProviderConnections: mocks.list,
   inspectProviderConnection: mocks.inspect,
+  abandonProviderConnectionAttempt: mocks.abandon,
 }));
 
 import {
@@ -28,6 +30,7 @@ import {
   POST as connectProject,
 } from "./[orgId]/workshop-providers/index";
 import { GET as inspectConnection } from "./[orgId]/workshop-providers/[connectionId]/inspect";
+import { POST as abandonConnection } from "./[orgId]/workshop-providers/[connectionId]/abandon";
 
 describe("generic Workshop provider routes", () => {
   beforeEach(() => {
@@ -148,6 +151,36 @@ describe("generic Workshop provider routes", () => {
       organizationId: "organization-a",
       connectionId: "provider-gcp-a",
       actorUserId: "owner-a",
+    });
+  });
+
+  it("forwards an explicit manual-cleanup acknowledgement when setup is abandoned", async () => {
+    const result = {
+      abandoned: true,
+      connectionId: "provider-gcp-a",
+      externalProjectId: "project-a",
+      manualCleanupAcknowledged: true,
+    };
+    mocks.abandon.mockResolvedValue(result);
+    const response = await abandonConnection({
+      request: new Request(
+        "https://intar.dev/api/organizations/pilot/workshop-providers/provider-gcp-a/abandon",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ manualCleanupAcknowledged: true }),
+        },
+      ),
+      params: { orgId: "pilot", connectionId: "provider-gcp-a" },
+    } as never);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(result);
+    expect(mocks.abandon).toHaveBeenCalledWith({
+      organizationId: "organization-a",
+      connectionId: "provider-gcp-a",
+      actorUserId: "owner-a",
+      manualCleanupAcknowledged: true,
     });
   });
 });

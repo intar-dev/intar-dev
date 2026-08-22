@@ -10,6 +10,7 @@ const DEFAULT_COMPUTE_BASE = "https://compute.googleapis.com/compute/v1";
 const DEFAULT_RESOURCE_MANAGER_BASE = "https://cloudresourcemanager.googleapis.com/v1";
 const DEFAULT_SERVICE_USAGE_BASE = "https://serviceusage.googleapis.com/v1";
 const DEFAULT_CLOUD_ASSET_BASE = "https://cloudasset.googleapis.com/v1";
+const DEFAULT_CLOUD_BILLING_BASE = "https://cloudbilling.googleapis.com/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface GcpApiOptions {
@@ -18,6 +19,7 @@ export interface GcpApiOptions {
   resourceManagerBase?: string;
   serviceUsageBase?: string;
   cloudAssetBase?: string;
+  cloudBillingBase?: string;
   now?: () => Date;
   delay?: (milliseconds: number) => Promise<void>;
   tokenProvider?: () => Promise<GcpAccessToken>;
@@ -27,30 +29,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const RESOURCE_UNAVAILABLE_CODES = new Set([
+  "resourcePoolExhausted",
+  "resourcePoolExhaustedWithDetails",
+  "zoneResourcePoolExhausted",
+  "ZONE_RESOURCE_POOL_EXHAUSTED",
+  "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS",
+  "RESOURCE_POOL_EXHAUSTED",
+  "POOL_CAPACITY_INSUFFICIENT",
+  "poolCapacityInsufficient",
+]);
+const QUOTA_CODES = new Set([
+  "quotaExceeded",
+  "resourceQuotaExceeded",
+  "QUOTA_EXCEEDED",
+  "RESOURCE_QUOTA_EXCEEDED",
+]);
+const RATE_LIMIT_CODES = new Set([
+  "rateLimitExceeded",
+  "RATE_LIMIT_EXCEEDED",
+]);
+const PERMISSION_CODES = new Set([
+  "forbidden",
+  "PERMISSION_DENIED",
+]);
+
+function hasCode(codes: readonly string[], expected: ReadonlySet<string>): boolean {
+  return codes.some((code) => expected.has(code));
+}
+
 function providerCode(status: number, body: unknown): string {
   const providerStatus = isRecord(body) && isRecord(body.error) && typeof body.error.status === "string"
     ? body.error.status
     : undefined;
-  const detail =
+  const details =
     isRecord(body) && isRecord(body.error) && Array.isArray(body.error.errors)
-      ? body.error.errors.find(isRecord)
-      : undefined;
-  const reason = detail?.reason;
-  const errorCode = detail?.code;
-  if (
-    reason === "resourcePoolExhausted" ||
-    reason === "resourcePoolExhaustedWithDetails" ||
-    reason === "zoneResourcePoolExhausted" ||
-    reason === "ZONE_RESOURCE_POOL_EXHAUSTED" ||
-    errorCode === "ZONE_RESOURCE_POOL_EXHAUSTED" ||
-    errorCode === "RESOURCE_POOL_EXHAUSTED"
-  ) {
-    return "gcp_resource_unavailable";
-  }
+      ? body.error.errors.filter(isRecord)
+      : [];
+  const codes = details.flatMap((detail) => [detail.reason, detail.code])
+    .filter((value): value is string => typeof value === "string");
+  if (hasCode(codes, RESOURCE_UNAVAILABLE_CODES)) return "gcp_resource_unavailable";
   if (providerStatus === "RESOURCE_EXHAUSTED") return "gcp_quota_exceeded";
-  if (providerStatus === "PERMISSION_DENIED") return "gcp_permission_denied";
-  if (reason === "quotaExceeded" || reason === "resourceQuotaExceeded") return "gcp_quota_exceeded";
-  if (reason === "rateLimitExceeded" || status === 429) return "gcp_rate_limit_exceeded";
+  if (hasCode(codes, QUOTA_CODES)) return "gcp_quota_exceeded";
+  if (hasCode(codes, RATE_LIMIT_CODES) || status === 429) return "gcp_rate_limit_exceeded";
+  if (providerStatus === "PERMISSION_DENIED" || hasCode(codes, PERMISSION_CODES)) {
+    return "gcp_permission_denied";
+  }
   if (status === 401) return "gcp_credential_rejected";
   if (status === 403) return "gcp_permission_denied";
   if (status === 404) return "gcp_not_found";
@@ -61,17 +85,14 @@ function providerCode(status: number, body: unknown): string {
 export function gcpOperationErrorCode(
   operation: GcpAsyncOperation,
 ): string | undefined {
-  const code = operation.error?.errors?.find(
-    (error) => typeof error.code === "string",
-  )?.code;
-  if (
-    code === "ZONE_RESOURCE_POOL_EXHAUSTED" ||
-    code === "RESOURCE_POOL_EXHAUSTED" ||
-    code === "resourcePoolExhausted" ||
-    code === "resourcePoolExhaustedWithDetails"
-  ) {
-    return "gcp_resource_unavailable";
-  }
+  const codes = (operation.error?.errors ?? []).flatMap((error) =>
+    typeof error.code === "string" ? [error.code] : []
+  );
+  if (hasCode(codes, RESOURCE_UNAVAILABLE_CODES)) return "gcp_resource_unavailable";
+  if (hasCode(codes, QUOTA_CODES)) return "gcp_quota_exceeded";
+  if (hasCode(codes, RATE_LIMIT_CODES)) return "gcp_rate_limit_exceeded";
+  if (hasCode(codes, PERMISSION_CODES)) return "gcp_permission_denied";
+  const code = codes.find((value) => /^[A-Za-z0-9_.-]{1,80}$/u.test(value));
   return typeof code === "string" && /^[A-Za-z0-9_.-]{1,80}$/u.test(code)
     ? `gcp_operation_${code.toLowerCase().replace(/[^a-z0-9]+/gu, "_")}`
     : undefined;
@@ -87,10 +108,15 @@ function retryAfterSeconds(response: Response): number | undefined {
 export class GcpApiError extends ProviderServiceError {
   constructor(response: Response, body: unknown) {
     const retryAfter = retryAfterSeconds(response);
+    const code = providerCode(response.status, body);
     super({
-      code: providerCode(response.status, body),
+      code,
       message: "GCP API rejected the provider operation",
-      retryable: response.status === 408 || response.status === 429 || response.status >= 500,
+      retryable:
+        code === "gcp_rate_limit_exceeded" ||
+        response.status === 408 ||
+        response.status === 429 ||
+        response.status >= 500,
       providerStatus: response.status,
       ...(response.headers.get("x-guploader-uploadid")
         ? { providerRequestId: response.headers.get("x-guploader-uploadid")! }
@@ -108,6 +134,7 @@ export class GcpApi {
   readonly #resourceManagerBase: string;
   readonly #serviceUsageBase: string;
   readonly #cloudAssetBase: string;
+  readonly #cloudBillingBase: string;
   readonly #now: () => Date;
   readonly #delay: (milliseconds: number) => Promise<void>;
   readonly #tokenProvider: (() => Promise<GcpAccessToken>) | undefined;
@@ -120,6 +147,7 @@ export class GcpApi {
     this.#resourceManagerBase = options.resourceManagerBase ?? DEFAULT_RESOURCE_MANAGER_BASE;
     this.#serviceUsageBase = options.serviceUsageBase ?? DEFAULT_SERVICE_USAGE_BASE;
     this.#cloudAssetBase = options.cloudAssetBase ?? DEFAULT_CLOUD_ASSET_BASE;
+    this.#cloudBillingBase = options.cloudBillingBase ?? DEFAULT_CLOUD_BILLING_BASE;
     this.#now = options.now ?? (() => new Date());
     this.#delay = options.delay ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.#tokenProvider = options.tokenProvider;
@@ -144,7 +172,7 @@ export class GcpApi {
   }
 
   async request<T>(
-    base: "compute" | "resource_manager" | "service_usage" | "cloud_asset",
+    base: "compute" | "resource_manager" | "service_usage" | "cloud_asset" | "cloud_billing",
     path: string,
     init: RequestInit = {},
     query: Record<string, string | undefined> = {},
@@ -162,7 +190,9 @@ export class GcpApi {
         ? this.#resourceManagerBase
         : base === "service_usage"
           ? this.#serviceUsageBase
-          : this.#cloudAssetBase;
+          : base === "cloud_asset"
+            ? this.#cloudAssetBase
+            : this.#cloudBillingBase;
     const url = new URL(`${root}${path}`);
     for (const [name, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(name, value);
@@ -221,6 +251,10 @@ export class GcpApi {
 
   cloudAsset<T>(path: string, query?: Record<string, string | undefined>): Promise<T> {
     return this.request<T>("cloud_asset", path, undefined, query);
+  }
+
+  cloudBilling<T>(path: string): Promise<T> {
+    return this.request<T>("cloud_billing", path);
   }
 
   async waitForOperation(

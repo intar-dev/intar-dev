@@ -195,10 +195,14 @@ jobs:
           node - <<'NODE'
           const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
             .split(",").map((value) => value.trim()).filter(Boolean);
-          const validCidrs = cidrs.length > 0 && cidrs.every((cidr) => {
-            const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d|[12]\d|3[0-2])$/.exec(cidr);
-            return match && match[1].split(".").every((octet) => Number(octet) <= 255);
-          });
+          const validCidrs = cidrs.length > 0 && cidrs.length <= 32 &&
+            new Set(cidrs).size === cidrs.length && cidrs.every((cidr) => {
+              const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/32$/.exec(cidr);
+              return match && match[1].split(".").every((octet) => {
+                const parsed = Number(octet);
+                return String(parsed) === octet && parsed >= 0 && parsed <= 255;
+              });
+            });
           if (!validCidrs) throw new Error("STARGATE_EGRESS_IPV4_CIDRS is invalid");
 
           const keyId = process.env.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID ?? "";

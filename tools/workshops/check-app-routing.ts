@@ -57,23 +57,51 @@ const applicationBlock = (manifest: string, id: string) => {
   return match[1];
 };
 
+const runtimeProfileBlock = (manifest: string, id: string) => {
+  const match = manifest.match(
+    new RegExp(`  runtime_profile "${id}" \\{([\\s\\S]*?)\\n  \\}`, "u"),
+  );
+  if (!match?.[1]) {
+    throw new Error(
+      `workshop.hcl is missing runtime profile ${JSON.stringify(id)}`,
+    );
+  }
+  return match[1];
+};
+
 const manifest = read("workshop.hcl");
 const runtimeProfileIds = [...manifest.matchAll(/runtime_profile "([^"]+)"/gu)].map(
   (match) => match[1],
 );
 if (
-  runtimeProfileIds.length !== 1 ||
-  runtimeProfileIds[0] !== "hetzner-cpx42"
+  JSON.stringify(runtimeProfileIds) !==
+    JSON.stringify(["hetzner-cpx42", "gcp-e2-standard-4"])
 ) {
   throw new Error(
-    `the first production revision must declare only hetzner-cpx42; observed ${JSON.stringify(runtimeProfileIds)}`,
+    `the production revision must declare the ordered Hetzner and GCP profiles; observed ${JSON.stringify(runtimeProfileIds)}`,
   );
 }
-if (
-  !manifest.includes('provider      = "hetzner_cloud"') ||
-  manifest.includes('provider       = "gcp_compute"')
-) {
-  throw new Error("the first production revision has an unexpected provider");
+const hetznerProfile = runtimeProfileBlock(manifest, "hetzner-cpx42");
+const expectedHetznerProfile = `provider      = "hetzner_cloud"
+    vm_id         = "learner"
+    machine_type  = "cpx42"
+    system_image  = "debian-13"`;
+if (hetznerProfile.trim() !== expectedHetznerProfile) {
+  throw new Error("the Hetzner runtime profile does not match its pinned contract");
+}
+const gcpProfile = runtimeProfileBlock(manifest, "gcp-e2-standard-4");
+const expectedGcpProfile = `provider       = "gcp_compute"
+    vm_id          = "learner"
+    machine_type   = "e2-standard-4"
+    system_image   = "projects/debian-cloud/global/images/family/debian-13"
+    root_disk_type = "pd-balanced"
+    locations = [
+      "europe-west3-a",
+      "europe-west3-b",
+      "europe-west3-c",
+    ]`;
+if (gcpProfile.trim() !== expectedGcpProfile) {
+  throw new Error("the GCP runtime profile does not match its pinned contract");
 }
 const knative = applicationBlock(manifest, "knative");
 for (const expected of [
@@ -751,6 +779,7 @@ requireText(
   "facilitator/module-00.md",
   "dedicated Intar workspace",
   "Hetzner CPX42",
+  "GCP e2-standard-4",
   "registry egress",
   "Intar recovery path",
 );
@@ -762,16 +791,13 @@ rejectText(
   "Codespaces",
   "airplane mode",
   "prework email",
-  "or GCP e2-standard-4",
 );
 requireText(
   "hints/module-00-02.md",
-  "first Platform Engineering production revision",
+  "Platform Engineering production revision",
   "pins CPX42 for Hetzner sessions",
-  "later immutable revision",
-  "separately certified GCP profile",
+  "e2-standard-4 with a pd-balanced boot disk for GCP sessions",
 );
-rejectText("hints/module-00-02.md", "for GCP sessions");
 requireText(
   "slides/slide-005.md",
   "inside your **own workspace**",

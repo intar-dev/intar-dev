@@ -1,7 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { RosterEditor } from "./OrganizationWorkshops";
+import {
+  ProviderConnectionCard,
+  RosterEditor,
+} from "./OrganizationWorkshops";
 
 describe("workshop roster editor", () => {
   it("keeps the organization manager as facilitator while opting into a learner workspace", () => {
@@ -54,5 +57,53 @@ describe("workshop roster editor", () => {
     const checkbox = markup.match(/<input[^>]*type="checkbox"[^>]*>/)?.[0];
     expect(checkbox).toContain('checked=""');
     expect(checkbox).toContain('disabled=""');
+  });
+});
+
+describe("provider connection health", () => {
+  it("shows a failed active check as unhealthy", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProviderConnectionCard, {
+        organizationId: "org-a",
+        role: "admin",
+        connection: {
+          id: "provider-gcp-a",
+          providerKind: "gcp_compute",
+          displayName: "GCP Compute",
+          state: "rotation_required",
+          externalProjectId: "intar-pilot-123",
+          guardrails: {
+            locations: ["europe-west3-a"],
+            maxConcurrentAllocations: 5,
+            maxSessionCostNanos: null,
+          },
+          providerDetails: {
+            providerKind: "gcp_compute",
+            projectNumber: "1234567890",
+            networkName: "intar-network",
+            subnetName: "intar-subnet",
+            firewallName: "intar-firewall",
+            nativeCurrency: "USD",
+          },
+          credential: {
+            version: 1,
+            authority: "active",
+            fingerprint: "aaaa…bbbb",
+            activatedAt: 100,
+          },
+          lastValidatedAt: 200,
+          createdAt: 100,
+          updatedAt: 200,
+          cleanupAcknowledgement: null,
+        },
+        onChanged: async () => {},
+      }),
+    );
+
+    expect(markup).toContain("rotation required");
+    expect(markup).toContain("check failed");
+    expect(markup).toContain("Connection check failed");
+    expect(markup).toContain("New learner VMs are blocked");
+    expect(markup).not.toContain(">active<");
   });
 });

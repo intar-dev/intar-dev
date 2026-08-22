@@ -86,19 +86,63 @@ describe("GCP allocation lifecycle", () => {
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
 
-    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.rebootInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-reset-1",
+    ))
       .resolves.toMatchObject({ name: "reset-1" });
-    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.rebootInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-reset-1",
+    )).resolves.toMatchObject({ name: "reset-1" });
+    await expect(client.rebootInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-reset-2",
+    )).resolves.toMatchObject({ name: "reset-1" });
+    await expect(client.deleteInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-1",
+    )).resolves.toMatchObject({ name: "delete-1" });
+    await expect(client.deleteInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-1",
+    )).resolves.toMatchObject({ name: "delete-1" });
+    await expect(client.deleteInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-2",
+    ))
       .resolves.toMatchObject({ name: "delete-1" });
     const swept = await client.sweep(ownership);
     expect(swept.instances).toHaveLength(1);
     expect(swept.disks).toHaveLength(1);
     expect(swept.addresses).toHaveLength(1);
-    expect(mutationRequests.map((request) => request.method)).toEqual(["POST", "DELETE"]);
+    expect(mutationRequests.map((request) => request.method)).toEqual([
+      "POST",
+      "POST",
+      "POST",
+      "DELETE",
+      "DELETE",
+      "DELETE",
+    ]);
     const requestIds = mutationRequests.map((request) => new URL(request.url).searchParams.get("requestId"));
     expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(requestIds[1]).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(requestIds[0]).not.toBe(requestIds[1]);
+    expect(requestIds[0]).toBe(requestIds[1]);
+    expect(requestIds[0]).not.toBe(requestIds[2]);
+    expect(requestIds[2]).not.toBe(requestIds[3]);
+    expect(requestIds[3]).toBe(requestIds[4]);
+    expect(requestIds[3]).not.toBe(requestIds[5]);
   });
 
   it("treats an already deleted instance as confirmed missing", async () => {
@@ -106,7 +150,12 @@ describe("GCP allocation lifecycle", () => {
       fetcher: (async () => Response.json({ error: { status: "NOT_FOUND" } }, { status: 404 })) as typeof fetch,
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
-    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.deleteInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-missing",
+    ))
       .resolves.toBeNull();
   });
 
@@ -135,13 +184,42 @@ describe("GCP allocation lifecycle", () => {
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
 
-    await expect(client.deleteDisk("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.deleteDisk(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-disk-1",
+    )).resolves.toMatchObject({ name: "delete-disk-1" });
+    await expect(client.deleteDisk(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-disk-1",
+    )).resolves.toMatchObject({ name: "delete-disk-1" });
+    await expect(client.deleteDisk(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-disk-2",
+    ))
       .resolves.toMatchObject({ name: "delete-disk-1" });
     foreign = true;
-    await expect(client.deleteDisk("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.deleteDisk(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-disk-3",
+    ))
       .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
-    expect(methods).toEqual(["GET", "DELETE", "GET"]);
+    expect(methods).toEqual([
+      "GET", "DELETE",
+      "GET", "DELETE",
+      "GET", "DELETE",
+      "GET",
+    ]);
     expect(requestIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(requestIds[0]).toBe(requestIds[1]);
+    expect(requestIds[0]).not.toBe(requestIds[2]);
   });
 
   it("refuses to reboot or delete a foreign instance at the deterministic name", async () => {
@@ -160,9 +238,19 @@ describe("GCP allocation lifecycle", () => {
       }) as typeof fetch,
       tokenProvider: async () => ({ accessToken: "token", expiresAtEpochSeconds: 4_000_000_000 }),
     });
-    await expect(client.rebootInstance("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.rebootInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-reset-1",
+    ))
       .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
-    await expect(client.deleteInstance("europe-west3-a", "intar-learner-abc", ownership))
+    await expect(client.deleteInstance(
+      "europe-west3-a",
+      "intar-learner-abc",
+      ownership,
+      "logical-delete-foreign",
+    ))
       .rejects.toMatchObject({ shape: { code: "gcp_allocation_ownership_mismatch" } });
     expect(methods).toEqual(["GET", "GET"]);
   });

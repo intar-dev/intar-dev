@@ -72,11 +72,34 @@ export interface GcpQuotaObservation {
   available: number;
 }
 
+export interface GcpProjectBillingInfo {
+  projectId: string;
+  billingAccountName: string;
+  billingEnabled: true;
+}
+
 export interface GcpProjectValidation {
   enabledServices: string[];
   grantedPermissions: string[];
   quotas: GcpQuotaObservation[];
+  billing: GcpProjectBillingInfo;
 }
+
+export type GcpProviderReadinessResult =
+  | {
+      mode: "dormant";
+      readyForNewWork: false;
+      catalog: { checked: false };
+    }
+  | {
+      mode: "active";
+      readyForNewWork: true;
+      catalog: {
+        checked: true;
+        observedAt: string;
+        lineItemCount: number;
+      };
+    };
 
 export interface GcpResourceRef {
   id: string;
@@ -86,6 +109,7 @@ export interface GcpResourceRef {
   zone?: string;
   region?: string;
   status?: string;
+  creationTimestamp?: string;
   description?: string;
   network?: string;
   routeType?: string;
@@ -144,12 +168,26 @@ export interface GcpOperationalInventoryClassification {
   defaultNetworkPresent: boolean;
 }
 
+export type GcpOperationalConnectionValidation =
+  | {
+      authority: "cleanup_only";
+      grantedCleanupPermissions: string[];
+    }
+  | {
+      authority: "active";
+      enabledServices: string[];
+      grantedPermissions: string[];
+      quotas: GcpQuotaObservation[];
+      billing: GcpProjectBillingInfo;
+      machineTypes: GcpMachineType[];
+      resolvedImage: GcpResolvedImage;
+      foundation: GcpFoundationObservation;
+    };
+
 export interface GcpOperationalConnectionInspection {
   identity: GcpProjectIdentity;
   inventory: GcpProjectInventory;
-  validation: {
-    grantedCleanupPermissions: string[];
-  };
+  validation: GcpOperationalConnectionValidation;
   classification: GcpOperationalInventoryClassification;
 }
 
@@ -221,6 +259,7 @@ export interface ResolveGcpProfileOperation {
   machineType: string;
   zones: string[];
   imageFamily: string;
+  resolvedImageId?: string;
 }
 
 export interface QuoteGcpProfileOperation {
@@ -252,10 +291,16 @@ export interface GcpCapacityObservation extends ProviderCapacityObservation {
 export interface InspectGcpConnectionOperation {
   kind: "inspect_connection";
   foundation: GcpFoundationSpec;
+  zones: string[];
 }
 
 export interface EnsureGcpFoundationOperation {
   kind: "ensure_foundation";
+  foundation: GcpFoundationSpec;
+}
+
+export interface ValidateGcpFoundationOperation {
+  kind: "validate_foundation";
   foundation: GcpFoundationSpec;
 }
 
@@ -269,8 +314,7 @@ export interface CreateGcpInstanceOperation {
   rootDiskGib: number;
   networkSelfLink: string;
   subnetworkSelfLink: string;
-  sshPublicKey: string;
-  startupScript: string;
+  cloudInit: string;
   ownership: ProviderOwnership;
   generation: number;
 }
@@ -320,6 +364,7 @@ export type GcpProviderOperation =
   | PreflightGcpProfileOperation
   | InspectGcpConnectionOperation
   | EnsureGcpFoundationOperation
+  | ValidateGcpFoundationOperation
   | CreateGcpInstanceOperation
   | ObserveGcpOperationOperation
   | ObserveGcpAllocationOperation
