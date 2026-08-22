@@ -9,11 +9,11 @@ const workflow = readFileSync(
 );
 
 describe("protected OIDC secret migration workflow", () => {
-  it("allows only the supported operations on protected main", () => {
+  it("allows only non-destructive standalone operations on protected main", () => {
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("- plan");
     expect(workflow).toContain("- backfill");
-    expect(workflow).toContain("- cleanup");
+    expect(workflow).not.toContain("- cleanup");
     expect(workflow).not.toContain("- restore");
     expect(workflow).toContain('test "${GITHUB_REF}" = "refs/heads/main"');
     expect(workflow).toContain('test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"');
@@ -25,10 +25,10 @@ describe("protected OIDC secret migration workflow", () => {
     for (const confirmation of [
       "PLAN OIDC SECRET MIGRATION",
       "BACKFILL OIDC SECRET MIGRATION",
-      "CLEANUP OIDC SECRET MIGRATION",
     ]) {
       expect(workflow).toContain(confirmation);
     }
+    expect(workflow).not.toContain("CLEANUP OIDC SECRET MIGRATION");
     expect(workflow).toContain("--counts-output");
     expect(workflow).toContain("counts-only migration evidence");
     expect(workflow).toContain("OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1");
@@ -52,15 +52,11 @@ describe("protected OIDC secret migration workflow", () => {
     }
   });
 
-  it("permits cleanup only after an active encrypted Worker binding", () => {
-    const guard = workflow.indexOf(
+  it("leaves plaintext cleanup coupled to exact Worker activation", () => {
+    expect(workflow).not.toContain("inputs.operation == 'cleanup'");
+    expect(workflow).not.toContain(
       "Require encrypted Worker activation before cleanup",
     );
-    const migration = workflow.indexOf("Run counts-only migration operation");
-    expect(guard).toBeGreaterThan(-1);
-    expect(migration).toBeGreaterThan(guard);
-    expect(workflow).toContain("wrangler deployments status --name intar-dev");
-    expect(workflow).toContain("wrangler versions view");
-    expect(workflow).toContain("OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1");
+    expect(workflow).not.toContain("--operation cleanup");
   });
 });
