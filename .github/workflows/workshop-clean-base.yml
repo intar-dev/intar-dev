@@ -151,12 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            debian-archive-keyring \
-            e2fsprogs \
-            mmdebstrap \
-            qemu-system-x86 \
-            zstd
+          sudo apt-get install -y --no-install-recommends debian-archive-keyring=2023.4ubuntu1 e2fsprogs=1.47.0-2.4~exp1ubuntu4.1 mmdebstrap=1.4.3-6 qemu-system-x86=1:8.2.2+ds-0ubuntu1.18 zstd=1.5.5+dfsg2-2build1.1
           sudo test -s /usr/share/keyrings/debian-archive-keyring.gpg
           test "$(uname -m)" = x86_64
           test -c /dev/kvm

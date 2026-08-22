@@ -884,7 +884,7 @@ jobs:
           mkdir -p "${extract_dir}"
           tar -xzf "${archive}" -C "${extract_dir}"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
+          sudo apt-get install -y --no-install-recommends shellcheck=0.9.0-1
 
           mapfile -t packaged_files < <(
             find "${extract_dir}" -type f -printf '%P\n' | LC_ALL=C sort

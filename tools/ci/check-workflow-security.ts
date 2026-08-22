@@ -12,6 +12,23 @@ const PINNED_TAIKI_TOOLS = new Map([
   ["wasm-pack", "0.15.0"],
 ]);
 const SHA = /^[0-9a-f]{40}$/u;
+const EXACT_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+const RUST_TOOLCHAIN = "1.97.0";
+const NODE_VERSION = "24.17.0";
+const BUN_VERSION = "1.3.14";
+const GO_VERSION = "1.27.0";
+// Miniflare 5.20260820.0-alpha is the newest published runtime on 2026-08-23
+// and rejects 2026-08-23 as a future compatibility date. Keep every Worker
+// and its test pool on the newest supported date until that runtime advances.
+const WORKER_COMPATIBILITY_DATE = "2026-08-20";
+const WORKER_COMPATIBILITY_FILES = [
+  "apps/web/wrangler.jsonc",
+  "apps/web/wrangler.local.jsonc",
+  "apps/web/workers/providers/gcp/wrangler.jsonc",
+  "apps/web/workers/providers/hetzner/wrangler.jsonc",
+  "tools/providers/live-capability-probe/wrangler.jsonc",
+  "apps/web/vitest.workers.config.ts",
+] as const;
 
 export function checkWorkflowSecurity(repositoryRoot: string): string[] {
   const workflowRoot = resolve(repositoryRoot, WORKFLOW_DIRECTORY);
@@ -30,8 +47,28 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
           `${name}:${lineNumber}: pull_request_target is forbidden`,
         );
       }
+      checkInstalledToolVersions(content, name, lineNumber, violations);
+      const containerImage = /^image:\s*([^\s#]+)\s*$/u.exec(content)?.[1];
+      if (containerImage && !/@sha256:[0-9a-f]{64}$/u.test(containerImage)) {
+        violations.push(
+          `${name}:${lineNumber}: container images must use an exact sha256 digest`,
+        );
+      }
+      const shorthandContainer = /^container:\s*([^\s#]+)\s*$/u.exec(
+        content,
+      )?.[1];
+      if (
+        shorthandContainer &&
+        !/@sha256:[0-9a-f]{64}$/u.test(shorthandContainer)
+      ) {
+        violations.push(
+          `${name}:${lineNumber}: container images must use an exact sha256 digest`,
+        );
+      }
 
-      const use = /^(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#\s*(\S.*))?\s*$/u.exec(content);
+      const use = /^(?:-\s+)?uses:\s*([^\s#]+)(?:\s+#\s*(\S.*))?\s*$/u.exec(
+        content,
+      );
       if (!use) continue;
       const reference = use[1];
       const tagComment = use[2];
@@ -63,6 +100,76 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
       if (action === "mlugg/setup-zig") {
         checkZigVersion(lines, index, name, violations);
       }
+      if (action === "actions/setup-node") {
+        const version = stepProperty(lines, index, "node-version");
+        const versionFile = stepProperty(lines, index, "node-version-file");
+        if (
+          version !== NODE_VERSION &&
+          versionFile !== "apps/web/.node-version"
+        ) {
+          violations.push(
+            `${name}:${lineNumber}: Node must be pinned to ${NODE_VERSION} or apps/web/.node-version`,
+          );
+        }
+      }
+      if (
+        action === "oven-sh/setup-bun" &&
+        stepProperty(lines, index, "bun-version") !== BUN_VERSION
+      ) {
+        violations.push(
+          `${name}:${lineNumber}: Bun must be pinned to ${BUN_VERSION}`,
+        );
+      }
+      if (
+        action === "actions/setup-go" &&
+        stepProperty(lines, index, "go-version") !== GO_VERSION
+      ) {
+        violations.push(
+          `${name}:${lineNumber}: Go must be pinned to ${GO_VERSION}`,
+        );
+      }
+    }
+  }
+  const nodeVersionFile = resolve(repositoryRoot, "apps/web/.node-version");
+  try {
+    if (readFileSync(nodeVersionFile, "utf8").trim() !== NODE_VERSION) {
+      violations.push(
+        `apps/web/.node-version: Node must be pinned to ${NODE_VERSION}`,
+      );
+    }
+  } catch {
+    violations.push(
+      "apps/web/.node-version: pinned Node version file is missing",
+    );
+  }
+  for (const relativePath of WORKER_COMPATIBILITY_FILES) {
+    const path = resolve(repositoryRoot, relativePath);
+    let source: string;
+    try {
+      source = readFileSync(path, "utf8");
+    } catch {
+      violations.push(
+        `${relativePath}: required Worker configuration is missing`,
+      );
+      continue;
+    }
+    const property = relativePath.endsWith(".ts")
+      ? "compatibilityDate"
+      : '"compatibility_date"';
+    const expected = `${property}: "${WORKER_COMPATIBILITY_DATE}"`;
+    if (!source.includes(expected)) {
+      violations.push(
+        `${relativePath}: compatibility date must be ${WORKER_COMPATIBILITY_DATE}`,
+      );
+    }
+    if (
+      (relativePath === "apps/web/wrangler.jsonc" ||
+        relativePath === "apps/web/wrangler.local.jsonc") &&
+      !source.includes('"run_worker_first": true')
+    ) {
+      violations.push(
+        `${relativePath}: static assets must run through the Worker first`,
+      );
     }
   }
   return violations;
@@ -83,7 +190,10 @@ function visit(directory: string, paths: string[]): void {
       visit(path, paths);
       continue;
     }
-    if (metadata.isFile() && (name.endsWith(".yml") || name.endsWith(".yaml"))) {
+    if (
+      metadata.isFile() &&
+      (name.endsWith(".yml") || name.endsWith(".yaml"))
+    ) {
       paths.push(path);
     }
   }
@@ -106,7 +216,7 @@ function checkTaikiToolVersions(
     const separator = entry.lastIndexOf("@");
     const name = separator > 0 ? entry.slice(0, separator) : entry;
     const version = separator > 0 ? entry.slice(separator + 1) : "";
-    if (!name || !version || version === "latest") {
+    if (!name || !EXACT_VERSION.test(version)) {
       violations.push(
         `${workflowName}:${useLineIndex + 1}: taiki tool ${entry} must use an exact version`,
       );
@@ -116,6 +226,67 @@ function checkTaikiToolVersions(
     if (expectedVersion && version !== expectedVersion) {
       violations.push(
         `${workflowName}:${useLineIndex + 1}: taiki tool ${name} must be ${expectedVersion}`,
+      );
+    }
+  }
+}
+
+function checkInstalledToolVersions(
+  content: string,
+  workflowName: string,
+  lineNumber: number,
+  violations: string[],
+): void {
+  if (content.includes("rustup toolchain install")) {
+    const match = /rustup\s+toolchain\s+install\s+(\S+)/u.exec(content);
+    if (match?.[1] !== RUST_TOOLCHAIN) {
+      violations.push(
+        `${workflowName}:${lineNumber}: Rust toolchain must be pinned to ${RUST_TOOLCHAIN}`,
+      );
+    }
+  }
+  if (/rustup\s+(?:target|component)\s+add\b/u.test(content)) {
+    const match = /--toolchain\s+(\S+)/u.exec(content);
+    if (match?.[1] !== RUST_TOOLCHAIN) {
+      violations.push(
+        `${workflowName}:${lineNumber}: rustup target and component installs must use --toolchain ${RUST_TOOLCHAIN}`,
+      );
+    }
+  }
+
+  const goInstall = /\bgo\s+install\s+["']?([^\s"']+)["']?/u.exec(content);
+  if (goInstall?.[1]) {
+    const separator = goInstall[1].lastIndexOf("@");
+    const version = separator > 0 ? goInstall[1].slice(separator + 1) : "";
+    if (!EXACT_VERSION.test(version)) {
+      violations.push(
+        `${workflowName}:${lineNumber}: go install must use a literal exact version`,
+      );
+    }
+  }
+
+  if (/\bcargo\s+install\b/u.test(content)) {
+    const version = /--version\s+["']?([^\s"']+)/u.exec(content)?.[1] ?? "";
+    if (!EXACT_VERSION.test(version) || !/\s--locked(?:\s|$)/u.test(content)) {
+      violations.push(
+        `${workflowName}:${lineNumber}: cargo install must use an exact --version and --locked`,
+      );
+    }
+  }
+
+  const aptInstall = /\bapt(?:-get)?\s+install\b([^;&|]*)/u.exec(content);
+  if (aptInstall) {
+    const packages = (aptInstall[1] ?? "")
+      .trim()
+      .split(/\s+/u)
+      .filter((value) => value && !value.startsWith("-") && value !== "\\");
+    if (
+      content.endsWith("\\") ||
+      packages.length === 0 ||
+      packages.some((value) => !/^[A-Za-z0-9.+-]+=[^\s=]+$/u.test(value))
+    ) {
+      violations.push(
+        `${workflowName}:${lineNumber}: apt installs must pin every package with package=version`,
       );
     }
   }

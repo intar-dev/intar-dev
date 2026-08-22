@@ -7,7 +7,7 @@ export default defineConfig({
     cloudflareTest({
       main: "./src/test/host-runtime-worker.ts",
       miniflare: {
-        compatibilityDate: "2026-07-09",
+        compatibilityDate: "2026-08-20",
         compatibilityFlags: ["global_fetch_strictly_public", "nodejs_compat"],
         bindings: {
           AGENT_JWT_AUDIENCE: "agent-connect",

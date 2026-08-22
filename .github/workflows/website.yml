@@ -181,7 +181,7 @@ jobs:
     runs-on: namespace-profile-intar-dev
     needs: scenario-wasm
     container:
-      image: mcr.microsoft.com/playwright:v1.61.1-noble
+      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
       options: --ipc=host
 
     steps:
@@ -200,7 +200,7 @@ jobs:
           node-version-file: apps/web/.node-version
 
       - name: Install Bun setup prerequisite
-        run: apt-get update && apt-get install --yes --no-install-recommends unzip
+        run: apt-get update && apt-get install --yes --no-install-recommends unzip=6.0-28ubuntu4.1
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
