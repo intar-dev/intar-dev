@@ -18,7 +18,6 @@ import {
 import {
   canonicalApplicationOrigin,
   rateLimitPublicAccessInvite,
-  requireSameOriginJsonMutation,
 } from "@/lib/request-security";
 import { copySetCookies } from "@/lib/response-cookies";
 
@@ -26,7 +25,6 @@ export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
   try {
-    requireSameOriginJsonMutation(request);
     await rateLimitPublicAccessInvite({ request, action: "sso-link" });
     const authz = await requireUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);

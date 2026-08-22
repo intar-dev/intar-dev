@@ -13,13 +13,6 @@ const hostRuntimeMock = vi.hoisted(() => ({ retireHostRuntime: vi.fn() }));
 const hostRetirementMock = vi.hoisted(() => ({
   retirePersonalHost: vi.fn(),
 }));
-const requestSecurityMock = vi.hoisted(() => ({
-  NO_STORE_HEADERS: {
-    "cache-control": "no-store, max-age=0",
-    pragma: "no-cache",
-  },
-  requireSameOriginJsonMutation: vi.fn(),
-}));
 const hostDeletionMock = vi.hoisted(() => ({
   nonDetachableWorkshopPublication: vi.fn(() => "unfinished-publication"),
 }));
@@ -58,7 +51,6 @@ vi.mock("@/lib/agent-bridge", () => agentBridgeMock);
 vi.mock("@/lib/agent-host-deletion", () => hostDeletionMock);
 vi.mock("@/lib/host-runtime-wake", () => hostRuntimeMock);
 vi.mock("@/lib/personal-host-retirement", () => hostRetirementMock);
-vi.mock("@/lib/request-security", () => requestSecurityMock);
 vi.mock("drizzle-orm/d1", () => ({ drizzle: dbMock.drizzle }));
 vi.mock("cloudflare:workers", () => ({ env: { DB: "test-db" } }));
 
@@ -92,13 +84,10 @@ describe("personal host removal route", () => {
     hostRuntimeMock.retireHostRuntime.mockResolvedValue(undefined);
   });
 
-  it("requires the same-origin JSON mutation boundary", async () => {
+  it("accepts a bodyless delete after the Worker edge guard", async () => {
     const response = await removeHostRequest();
 
     expect(response.status).toBe(200);
-    expect(
-      requestSecurityMock.requireSameOriginJsonMutation,
-    ).toHaveBeenCalledOnce();
   });
 
   it("requires the daemon to disconnect before removal", async () => {
@@ -198,8 +187,6 @@ async function removeHostRequest(): Promise<Response> {
   return DELETE({
     request: new Request("https://intar.test/api/agent/hosts/host-1", {
       method: "DELETE",
-      headers: { "content-type": "application/json" },
-      body: "{}",
     }),
     params: { hostId: "host-1" },
   } as never);

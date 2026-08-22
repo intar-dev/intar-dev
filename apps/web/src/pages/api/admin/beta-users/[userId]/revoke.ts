@@ -13,13 +13,11 @@ import {
   cleanupBetaRevocation,
   getBetaRevocationStatus,
 } from "@/lib/beta-access-revocation";
-import { requireSameOriginJsonMutation } from "@/lib/request-security";
 
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request, params }) => {
   try {
-    requireSameOriginJsonMutation(request);
     const authz = await requireAdminUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);
     const userId = params.userId?.trim();

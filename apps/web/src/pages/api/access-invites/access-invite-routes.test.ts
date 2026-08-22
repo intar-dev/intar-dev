@@ -18,7 +18,6 @@ const authMock = vi.hoisted(() => ({
 const requestSecurityMock = vi.hoisted(() => ({
   canonicalApplicationOrigin: vi.fn(),
   rateLimitPublicAccessInvite: vi.fn(),
-  requireSameOriginJsonMutation: vi.fn(),
 }));
 
 vi.mock("cloudflare:workers", () => ({

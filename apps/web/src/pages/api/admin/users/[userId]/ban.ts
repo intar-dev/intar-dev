@@ -9,13 +9,11 @@ import {
 import { requireAdminUserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
 import { setPlatformUserBanned } from "@/lib/beta-admin-guard";
-import { requireSameOriginJsonMutation } from "@/lib/request-security";
 
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request, params }) => {
   try {
-    requireSameOriginJsonMutation(request);
     const authz = await requireAdminUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);
     const targetUserId = params.userId?.trim();

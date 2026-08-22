@@ -31,7 +31,6 @@ import {
 import { hostHealth, type HostHealth } from "@/lib/host-health";
 import { retireHostRuntime } from "@/lib/host-runtime-wake";
 import { retirePersonalHost } from "@/lib/personal-host-retirement";
-import { requireSameOriginJsonMutation } from "@/lib/request-security";
 
 export const prerender = false;
 
@@ -92,7 +91,6 @@ export const GET: APIRoute = async ({ request, params }) => {
 
 export const DELETE: APIRoute = async ({ request, params }) => {
   try {
-    requireSameOriginJsonMutation(request);
     const authz = await requireAdminUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);
 

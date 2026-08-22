@@ -27,7 +27,6 @@ import {
 import {
   canonicalApplicationOrigin,
   rateLimitPublicAccessInvite,
-  requireSameOriginJsonMutation,
 } from "@/lib/request-security";
 import { copySetCookies } from "@/lib/response-cookies";
 
@@ -36,7 +35,6 @@ export const prerender = false;
 export const POST: APIRoute = async ({ request }) => {
   let leased: { inviteId: string; leaseId: string } | null = null;
   try {
-    requireSameOriginJsonMutation(request);
     await rateLimitPublicAccessInvite({ request, action: "start" });
     const body = await readJsonObject(request);
     if (body.mode !== undefined && body.mode !== "github") {

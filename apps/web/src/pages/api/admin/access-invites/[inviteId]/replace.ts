@@ -9,16 +9,12 @@ import {
 } from "@/lib/access-invite-http";
 import { requireAdminUserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
-import {
-  canonicalApplicationOrigin,
-  requireSameOriginJsonMutation,
-} from "@/lib/request-security";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
 
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request, params }) => {
   try {
-    requireSameOriginJsonMutation(request);
     const authz = await requireAdminUserContext(request);
     if (!authz.ok) return accessInviteNoStore(authz.response);
     const inviteId = params.inviteId?.trim();

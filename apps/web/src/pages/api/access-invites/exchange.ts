@@ -11,16 +11,12 @@ import {
   newInviteAttempt,
   readInviteAttempt,
 } from "@/lib/invite-attempt";
-import {
-  rateLimitPublicAccessInvite,
-  requireSameOriginJsonMutation,
-} from "@/lib/request-security";
+import { rateLimitPublicAccessInvite } from "@/lib/request-security";
 
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
   try {
-    requireSameOriginJsonMutation(request);
     await rateLimitPublicAccessInvite({ request, action: "exchange" });
     const body = await readJsonObject(request);
     const code = typeof body.code === "string" ? body.code : "";

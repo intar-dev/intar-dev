@@ -10,11 +10,15 @@ import { sweepWorkshopProviderRuntimes } from "@/lib/workshops/provider-runtime"
 import { recoverWorkshopRuntimesFromFailedProvider } from "@/lib/workshops/runtime-orchestrator";
 import { handleMaintenanceMode } from "@/maintenance";
 import { hardenJoinResponse } from "@/lib/join-security";
+import { secureApplicationApiRequest } from "@/lib/request-security";
+import { hardenWorkerResponse } from "@/lib/response-security";
 
 export default {
   async fetch(request, env, ctx) {
+    const respond = (response: Response) =>
+      hardenWorkerResponse(request, response, env);
     const maintenanceResponse = await handleMaintenanceMode(request, env);
-    if (maintenanceResponse) return maintenanceResponse;
+    if (maintenanceResponse) return respond(maintenanceResponse);
 
     const url = new URL(request.url);
 
@@ -22,25 +26,25 @@ export default {
       url.pathname === "/agent/bootstrap" ||
       url.pathname === "/api/agent/bootstrap"
     ) {
-      return handleAgentBootstrap(request, env);
+      return respond(await handleAgentBootstrap(request, env));
     }
 
     if (
       url.pathname === "/agent/connect" ||
       url.pathname === "/api/agent/connect"
     ) {
-      return handleAgentConnect(request, env);
+      return respond(await handleAgentConnect(request, env));
     }
 
     const workspaceAgentResponse =
       await handleWorkspaceAgentControlPlaneRequest(request, env);
     if (workspaceAgentResponse) {
-      return workspaceAgentResponse;
+      return respond(workspaceAgentResponse);
     }
 
     const registryResponse = await handleImageRegistryRequest(request, env);
     if (registryResponse) {
-      return registryResponse;
+      return respond(registryResponse);
     }
 
     const workshopRegistryResponse = await handleWorkshopRegistryRequest(
@@ -48,23 +52,27 @@ export default {
       env,
     );
     if (workshopRegistryResponse) {
-      return workshopRegistryResponse;
+      return respond(workshopRegistryResponse);
     }
 
     if (url.pathname.startsWith("/agent/runs")) {
       const response = await handleAgentRunArtifactRequest(request, env);
       if (response) {
-        return response;
+        return respond(response);
       }
     }
 
-    const response = await handle(request, env, ctx);
-    return url.pathname === "/join"
+    const securedRequest = await secureApplicationApiRequest(request, env);
+    if (!securedRequest.ok) return respond(securedRequest.response);
+
+    const response = await handle(securedRequest.request, env, ctx);
+    const applicationResponse = url.pathname === "/join"
       ? hardenJoinResponse(response, {
           localDevelopment:
             new URL(env.BETTER_AUTH_URL).hostname === "localhost",
         })
       : response;
+    return respond(applicationResponse);
   },
   async scheduled(controller, env) {
     // Planned control-plane maintenance must be database-independent. Cron work

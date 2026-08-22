@@ -159,6 +159,7 @@ async function upload(meta: Record<string, unknown>): Promise<Response> {
   return POST({
     request: new Request("https://intar.test/api/organizations/org-a/scenarios/bundles", {
       method: "POST",
+      headers: { "content-length": "1024" },
       body: form,
     }),
     params: { orgId: "org-a" },

@@ -15,6 +15,7 @@ import {
 import { createAppId } from "@/lib/id";
 import { tryWakeHostRuntimeViaNamespace } from "@/lib/host-runtime-wake-client";
 import { getOrganizationDetail } from "@/lib/organizations";
+import { requireOrganizationScenarioBundleMultipart } from "@/lib/request-security";
 import {
   syncScenarioCourseCatalogSnapshot,
   validateScenarioCourseCatalogReferences,
@@ -24,6 +25,16 @@ import { tryReconcileScenarioImagesForPublicationScope } from "@/lib/scenario-im
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request, params }) => {
+  try {
+    requireOrganizationScenarioBundleMultipart(request);
+  } catch (error) {
+    const { status, body } = toErrorResponse(
+      error,
+      "invalid scenario bundle upload",
+    );
+    return jsonResponse(body, { status });
+  }
+
   const authz = await requireUserContext(request);
   if (!authz.ok) return authz.response;
 

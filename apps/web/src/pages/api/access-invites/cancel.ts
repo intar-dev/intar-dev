@@ -7,14 +7,12 @@ import {
   clearInviteAttemptCookie,
   readInviteAttempt,
 } from "@/lib/invite-attempt";
-import { requireSameOriginJsonMutation } from "@/lib/request-security";
 import { copySetCookies } from "@/lib/response-cookies";
 
 export const prerender = false;
 
 export const POST: APIRoute = async ({ request }) => {
   try {
-    requireSameOriginJsonMutation(request);
     // Cancellation must remain available even after an attempt cookie expires
     // or is corrupted so a restricted invite session can always sign out.
     const attempt = await readInviteAttempt(request).catch(() => null);

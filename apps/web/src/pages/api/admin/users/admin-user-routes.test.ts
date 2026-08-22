@@ -5,7 +5,6 @@ const requestSecurityMock = vi.hoisted(() => ({
     "cache-control": "no-store, max-age=0",
     pragma: "no-cache",
   },
-  requireSameOriginJsonMutation: vi.fn(),
 }));
 const agentBridgeMock = vi.hoisted(() => ({
   requireAdminUserContext: vi.fn(),
@@ -35,28 +34,6 @@ describe("admin user mutation routes", () => {
     betaAdminGuardMock.setPlatformUserRole.mockResolvedValue(undefined);
   });
 
-  it("rejects a role update before authentication when the origin guard fails", async () => {
-    requestSecurityMock.requireSameOriginJsonMutation.mockImplementationOnce(
-      () => {
-        throw appError(403, "invalid_origin", "request origin is not allowed");
-      },
-    );
-    const request = mutationRequest("role", { role: "admin" });
-
-    const response = await updateRole(routeContext(request, "target-user"));
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({
-      error: "request origin is not allowed",
-      code: "invalid_origin",
-    });
-    expect(
-      requestSecurityMock.requireSameOriginJsonMutation,
-    ).toHaveBeenCalledWith(request);
-    expect(agentBridgeMock.requireAdminUserContext).not.toHaveBeenCalled();
-    expect(betaAdminGuardMock.setPlatformUserRole).not.toHaveBeenCalled();
-  });
-
   it("returns an unauthenticated ban response with no-store headers", async () => {
     agentBridgeMock.requireAdminUserContext.mockResolvedValueOnce({
       ok: false,
@@ -75,7 +52,6 @@ describe("admin user mutation routes", () => {
       code: "authentication_required",
     });
     expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
-    expect(requestSecurityMock.requireSameOriginJsonMutation).toHaveBeenCalled();
     expect(agentBridgeMock.requireAdminUserContext).toHaveBeenCalledWith(
       request,
     );
