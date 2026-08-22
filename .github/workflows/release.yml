@@ -695,6 +695,8 @@ jobs:
           set -euo pipefail
           dist_dir="${PWD}/dist"
           mkdir -p "${dist_dir}"
+          # Values are supplied by the step's reviewed env contract.
+          # shellcheck disable=SC2153
           build_archive() {
             local arch="$1"
             local target="$2"

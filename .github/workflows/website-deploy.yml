@@ -396,10 +396,12 @@ jobs:
           test "${agent_size}" -gt 0
           test "${#kino_sha}" -eq 64
           test "${kino_size}" -gt 0
-          echo "sha256=${agent_sha}" >> "${GITHUB_OUTPUT}"
-          echo "size_bytes=${agent_size}" >> "${GITHUB_OUTPUT}"
-          echo "kino_sha256=${kino_sha}" >> "${GITHUB_OUTPUT}"
-          echo "kino_size_bytes=${kino_size}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "sha256=${agent_sha}"
+            echo "size_bytes=${agent_size}"
+            echo "kino_sha256=${kino_sha}"
+            echo "kino_size_bytes=${kino_size}"
+          } >> "${GITHUB_OUTPUT}"
           jq -n \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg source_sha "${GITHUB_SHA}" \

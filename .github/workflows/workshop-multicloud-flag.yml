@@ -557,6 +557,8 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          # GitHub expressions are intentionally literal shell arguments.
+          # shellcheck disable=SC2016
           jq -n \
             --arg source_sha "${GITHUB_SHA}" \
             --arg run_id "${GITHUB_RUN_ID}" \
