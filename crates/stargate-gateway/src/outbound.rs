@@ -18,7 +18,10 @@ use russh::{
     ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, Preferred,
     client::{self, Msg},
     kex,
-    keys::{PrivateKeyWithHashAlg, ssh_key::PublicKey},
+    keys::{
+        PrivateKeyWithHashAlg,
+        ssh_key::{Algorithm, PublicKey},
+    },
 };
 use stargate_core::{RouteRecord, WorkspaceAppRouteRecord};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -399,8 +402,14 @@ impl PreparedSshTarget {
             .with_context(|| format!("target_ip '{target_ip}' is not a literal IP"))?;
         let expected_host_key =
             PublicKey::from_openssh(target_host_key_openssh).context("invalid target host key")?;
+        if expected_host_key.algorithm() != Algorithm::Ed25519 {
+            bail!("target host key must use ssh-ed25519");
+        }
         let private_key = russh::keys::decode_secret_key(target_private_key_openssh, None)
             .context("invalid target private key")?;
+        if private_key.algorithm() != Algorithm::Ed25519 {
+            bail!("target private key must use ssh-ed25519");
+        }
 
         Ok(Self {
             addr: SocketAddr::new(ip, target_port),
@@ -423,15 +432,10 @@ async fn connect_authenticated_target(
     )
     .await
     .with_context(|| format!("failed connecting to target {}", target.addr))?;
-    let rsa_hash_alg = session
-        .best_supported_rsa_hash()
-        .await
-        .context("failed to negotiate target public-key hash algorithms")?
-        .flatten();
     let auth_result = session
         .authenticate_publickey(
             target_username,
-            PrivateKeyWithHashAlg::new(target.private_key, rsa_hash_alg),
+            PrivateKeyWithHashAlg::new(target.private_key, None),
         )
         .await
         .context("target public-key authentication failed")?;
@@ -457,7 +461,8 @@ impl client::Handler for StrictHostKey {
         // `.pub` file (which carries a `root@host` comment) while the key the
         // server presents over the wire has none — so full-value equality
         // always rejected a correct host key.
-        Ok(server_public_key.key_data() == self.expected.key_data())
+        Ok(server_public_key.algorithm() == Algorithm::Ed25519
+            && server_public_key.key_data() == self.expected.key_data())
     }
 }
 
@@ -521,15 +526,10 @@ async fn run_bridge_inner(
     .await
     .with_context(|| format!("failed connecting to target {}", target.addr))?;
 
-    let rsa_hash_alg = session
-        .best_supported_rsa_hash()
-        .await
-        .context("failed to negotiate target public-key hash algorithms")?
-        .flatten();
     let auth_result = session
         .authenticate_publickey(
             route.target_username,
-            PrivateKeyWithHashAlg::new(target.private_key, rsa_hash_alg),
+            PrivateKeyWithHashAlg::new(target.private_key, None),
         )
         .await
         .context("target public-key authentication failed")?;
@@ -707,6 +707,7 @@ fn client_config() -> Arc<client::Config> {
     // curve25519 KEX both sides implement compatibly.
     let preferred = Preferred {
         kex: Cow::Borrowed(&[kex::CURVE25519, kex::CURVE25519_PRE_RFC_8731]),
+        key: Cow::Borrowed(&[Algorithm::Ed25519]),
         ..Preferred::DEFAULT
     };
     Arc::new(client::Config {
@@ -726,14 +727,23 @@ mod tests {
 
     use futures_util::{pin_mut, poll};
     use russh::client::Handler as _;
-    use russh::keys::ssh_key::PublicKey;
+    use russh::keys::{
+        PrivateKey,
+        ssh_key::{Algorithm, EcdsaCurve, PublicKey},
+    };
+    use stargate_core::{
+        RouteMetadata, RouteRecord, WorkspaceAppProtocol, WorkspaceAppRouteRecord,
+    };
+    use time::OffsetDateTime;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        BridgeEvent, BridgeInput, ExecBridgeControl, StrictHostKey, drive_bridge_pumps,
-        send_bridge_event,
+        BridgeEvent, BridgeInput, ExecBridgeControl, PreparedSshTarget, StrictHostKey,
+        client_config, drive_bridge_pumps, send_bridge_event,
     };
+
+    const ECDSA_PUBLIC_KEY: &str = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHwf2HMM5TRXvo2SQJjsNkiDD5KqiiNjrGVv3UUh+mMT5RHxiRtOnlqvjhQtBq0VpmpCV/PwUdhOig4vkbqAcEc= user@example.com";
 
     #[tokio::test]
     async fn bridge_input_applies_backpressure_at_capacity() {
@@ -850,5 +860,97 @@ mod tests {
 
         let mut handler = StrictHostKey { expected };
         assert!(!handler.check_server_key(&other).await.expect("check ok"));
+
+        let legacy = PublicKey::from_openssh(ECDSA_PUBLIC_KEY).expect("legacy host key parses");
+        let mut handler = StrictHostKey {
+            expected: legacy.clone(),
+        };
+        assert!(
+            !handler
+                .check_server_key(&legacy)
+                .await
+                .expect("legacy host key must be rejected")
+        );
+    }
+
+    #[test]
+    fn prepared_target_requires_ed25519_credentials_from_persisted_routes() {
+        let mut rng = russh::keys::key::safe_rng();
+        let target_host_key =
+            PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("target host key");
+        let target_private_key =
+            PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("target private key");
+        let legacy_key = PrivateKey::random(
+            &mut rng,
+            Algorithm::Ecdsa {
+                curve: EcdsaCurve::NistP256,
+            },
+        )
+        .expect("legacy key");
+
+        let target_host_key_openssh = target_host_key.public_key().to_openssh().expect("host key");
+        let target_private_key_openssh = private_key_openssh(&target_private_key);
+        let legacy_host_key_openssh = legacy_key.public_key().to_openssh().expect("legacy host");
+        let legacy_private_key_openssh = private_key_openssh(&legacy_key);
+
+        let terminal_route = RouteRecord {
+            route_username: "run-01-worker".to_owned(),
+            target_username: "ubuntu".to_owned(),
+            target_ip: "127.0.0.1".to_owned(),
+            target_port: 22,
+            authorized_client_public_keys_openssh: Vec::new(),
+            target_host_key_openssh: target_host_key_openssh.clone(),
+            target_private_key_openssh: target_private_key_openssh.clone(),
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            metadata: RouteMetadata::default(),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        };
+        assert!(PreparedSshTarget::new(&terminal_route).is_ok());
+
+        let legacy_terminal_route = RouteRecord {
+            target_host_key_openssh: legacy_host_key_openssh,
+            ..terminal_route
+        };
+        assert!(PreparedSshTarget::new(&legacy_terminal_route).is_err());
+
+        let legacy_workspace_app_route = WorkspaceAppRouteRecord {
+            route_id: "wa-key-policy".to_owned(),
+            target_username: "ubuntu".to_owned(),
+            target_ip: "127.0.0.1".to_owned(),
+            target_ssh_port: 22,
+            target_host_key_openssh,
+            target_private_key_openssh: legacy_private_key_openssh,
+            target_app_port: 8080,
+            protocol: WorkspaceAppProtocol::Http,
+            upstream_host: None,
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            metadata: RouteMetadata::default(),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+        };
+        assert!(
+            PreparedSshTarget::from_parts(
+                &legacy_workspace_app_route.target_ip,
+                legacy_workspace_app_route.target_ssh_port,
+                &legacy_workspace_app_route.target_host_key_openssh,
+                &legacy_workspace_app_route.target_private_key_openssh,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn outbound_client_only_negotiates_ed25519_host_keys() {
+        assert_eq!(
+            client_config().preferred.key.as_ref(),
+            &[Algorithm::Ed25519]
+        );
+    }
+
+    fn private_key_openssh(key: &PrivateKey) -> String {
+        key.to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("private key")
+            .to_string()
     }
 }
