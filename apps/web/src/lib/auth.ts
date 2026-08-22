@@ -1331,10 +1331,10 @@ function buildAuthInstance() {
       drizzleAdapter(db, { provider: "sqlite", schema }),
       oidcSsoSecretRuntime,
     ),
-    // Better Auth also uses this list to validate its server-side OIDC
-    // discovery, authorization, token, and JWKS fetches. It is not the
-    // browser-origin boundary; Worker edge middleware enforces that boundary.
-    trustedOrigins: async () => trustedSsoServerOrigins(),
+    // Tenant IdP endpoints are server-side fetch targets, not trusted browser
+    // origins. Public OIDC endpoints pass the SSO plugin's fetch checks without
+    // widening Better Auth's redirect and Origin allowlist.
+    trustedOrigins: [trustedBrowserOrigin(baseURL)],
     advanced: authCookiePolicy(baseURL),
     hooks: {
       before: betaAuthBeforeRequest,
@@ -1643,38 +1643,6 @@ function buildAuthInstance() {
   });
 }
 
-async function trustedSsoServerOrigins(): Promise<string[]> {
-  const origins = new Set<string>();
-  const appOrigin = safeOrigin(baseURL);
-  if (appOrigin) origins.add(appOrigin);
-
-  const providers = await db
-    .select({
-      issuer: schema.ssoProvider.issuer,
-      oidcConfig: schema.ssoProvider.oidcConfig,
-    })
-    .from(schema.ssoProvider);
-
-  for (const provider of providers) {
-    const issuerOrigin = safeOrigin(provider.issuer);
-    if (issuerOrigin) origins.add(issuerOrigin);
-    const config = parseJsonRecord(provider.oidcConfig);
-    for (const key of [
-      "discoveryEndpoint",
-      "authorizationEndpoint",
-      "tokenEndpoint",
-      "userInfoEndpoint",
-      "jwksEndpoint",
-    ]) {
-      const value = config?.[key];
-      const origin = typeof value === "string" ? safeOrigin(value) : null;
-      if (origin) origins.add(origin);
-    }
-  }
-
-  return [...origins];
-}
-
 export function authCookiePolicy(baseUrl: string): {
   useSecureCookies: boolean;
   defaultCookieAttributes: {
@@ -1698,6 +1666,22 @@ export function authCookiePolicy(baseUrl: string): {
   };
 }
 
+export function trustedBrowserOrigin(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error("better_auth_browser_origin_invalid");
+  }
+  if (
+    url.protocol !== "https:" &&
+    !(url.protocol === "http:" && url.hostname === "localhost")
+  ) {
+    throw new Error("better_auth_browser_origin_invalid");
+  }
+  return url.origin;
+}
+
 function oidcSsoSecretRuntime(): OidcSsoSecretAdapterRuntime {
   return {
     encryptionKey: runtimeBinding("OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"),
@@ -1716,31 +1700,6 @@ function isLocalhostBaseUrl(value: string): boolean {
     return new URL(value).hostname === "localhost";
   } catch {
     return false;
-  }
-}
-
-function safeOrigin(value: string): string | null {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.hostname === "localhost"
-      ? url.origin
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseJsonRecord(value: string | null): Record<string, unknown> | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return typeof parsed === "object" &&
-      parsed !== null &&
-      !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
   }
 }
 

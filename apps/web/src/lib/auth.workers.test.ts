@@ -49,6 +49,7 @@ import {
   getBetaOAuthAccessTokenClaims,
   INVITE_OAUTH_HANDOFF_HEADER,
   readAdmissionBoundRefreshToken,
+  trustedBrowserOrigin,
 } from "./auth";
 import { encryptOidcClientSecret } from "./oidc-sso-secret";
 
@@ -58,7 +59,7 @@ describe("auth policy", () => {
     await ensureFixtureBetaAdmin(env.DB, Date.now());
   });
 
-  it("uses host-only secure cookies outside localhost", async () => {
+  it("uses host-only secure cookies and trusts only the app origin", () => {
     expect(auth.options.advanced).toMatchObject({
       useSecureCookies: false,
       defaultCookieAttributes: {
@@ -78,10 +79,13 @@ describe("auth policy", () => {
       },
     });
 
-    const configuredOrigins = auth.options.trustedOrigins;
-    expect(configuredOrigins).toBeTypeOf("function");
-    if (typeof configuredOrigins !== "function") throw new Error("missing trusted origins");
-    await expect(configuredOrigins()).resolves.toEqual(["http://localhost"]);
+    expect(auth.options.trustedOrigins).toEqual(["http://localhost"]);
+    expect(trustedBrowserOrigin("https://intar.dev/auth")).toBe(
+      "https://intar.dev",
+    );
+    expect(() => trustedBrowserOrigin("http://intar.dev")).toThrow(
+      "better_auth_browser_origin_invalid",
+    );
   });
 
   it("loads an encrypted organization OIDC provider through Better Auth sign-in", async () => {
@@ -126,6 +130,16 @@ describe("auth policy", () => {
       organizationId,
       domainVerified: true,
     });
+
+    const crossOriginCallback = await auth.handler(
+      authRequest("/api/auth/sign-in/sso", {
+        providerId,
+        providerType: "oidc",
+        callbackURL: "https://login.example.test/steal",
+        errorCallbackURL: "https://login.example.test/steal-error",
+      }),
+    );
+    expect(crossOriginCallback.status).toBe(403);
 
     const response = await auth.handler(
       authRequest("/api/auth/sign-in/sso", {
