@@ -351,7 +351,10 @@ jq -e '
   )] | length) == 1 and
   ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"
-  )] | length) == 1
+  )] | length) == 1 and
+  ([.resources.bindings[] | select(
+    .name == "BETTER_AUTH_TRUSTED_ORIGINS"
+  )] | length) == 0
 ' "${uploaded_version}" >/dev/null
 jq -s -e '
   def durable_object_bindings:

@@ -13,6 +13,16 @@ on:
         required: false
         default: ""
         type: string
+      oidc_canary_confirmation:
+        description: Type OIDC CANARY PASSED only after a successful live OIDC canary
+        required: false
+        default: ""
+        type: string
+      oidc_canary_source_run_id:
+        description: Prior failed Website production run that carried the live OIDC canary
+        required: false
+        default: ""
+        type: string
       provenance_workflow_path:
         description: Exact top-level workflow path recorded in retained artifacts
         required: false
@@ -48,6 +58,14 @@ on:
         description: Type SINGLE OPERATOR WORKSHOP CONTROL PLANE only when no independent reviewer exists
         required: false
         type: string
+      oidc_canary_confirmation:
+        description: Type OIDC CANARY PASSED only after a successful live OIDC canary
+        required: false
+        type: string
+      oidc_canary_source_run_id:
+        description: Prior failed Website production run that carried the live OIDC canary
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -77,6 +95,8 @@ jobs:
       RUN_ATTEMPT: ${{ github.run_attempt }}
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
+      OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
+      OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
       PARENT_HOLDS_CONTROL_PLANE_LOCK: ${{ inputs.parent_holds_control_plane_lock || false }}
 
@@ -181,7 +201,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 24
+          node-version: 24.17.0
 
       - name: Validate Stargate egress and runtime signing keys
         working-directory: ${{ github.workspace }}
@@ -308,6 +328,8 @@ jobs:
       RUN_ATTEMPT: ${{ github.run_attempt }}
       CONFIRMATION: ${{ inputs.confirmation }}
       SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
+      OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
+      OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
       PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
 
     steps:
@@ -486,7 +508,8 @@ jobs:
               $databases[0].database_id == $database_id and
               $databases[0].database_name == $database_name and
               ($sessions | length) == 1 and
-              $sessions[0].id == $session_namespace_id
+              $sessions[0].id == $session_namespace_id and
+              .assets.run_worker_first == true
             ' "${config}" >/dev/null
 
           {
@@ -615,6 +638,280 @@ jobs:
             --file "${RUNNER_TEMP}/production-workshop-guest-tools/kino" \
             --jurisdiction eu \
             --remote
+
+      - name: Prepare ephemeral Worker activation secrets
+        id: activation_secrets
+        working-directory: ${{ github.workspace }}
+        env:
+          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
+          STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
+        run: |
+          set -euo pipefail
+          test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
+          test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
+          secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
+          jq -n '{
+            CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
+            OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
+            STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
+          }' \
+            > "${secrets_file}"
+          chmod 600 "${secrets_file}"
+          printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
+            >> "${GITHUB_ENV}"
+
+      - name: Prepare immutable maintenance-fence Worker configuration
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          maintenance_config="${RUNNER_TEMP}/website-maintenance-fence-wrangler.json"
+          test ! -e "${maintenance_config}"
+          jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
+            "${DEPLOYMENT_CONFIG}" > "${maintenance_config}"
+          jq -e \
+            --arg database_id "${DATABASE_ID}" '
+              ([.d1_databases[] | select(.binding == "DB")]) as $databases |
+              .vars.CONTROL_PLANE_MAINTENANCE == "on" and
+              ($databases | length) == 1 and
+              $databases[0].database_id == $database_id
+            ' "${maintenance_config}" >/dev/null
+          printf 'MAINTENANCE_DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
+            >> "${GITHUB_ENV}"
+
+      - name: Derive active web mode for a safe maintenance rerun
+        id: current_web_mode
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          deployment="${RUNNER_TEMP}/web-before-maintenance-deployment.json"
+          version="${RUNNER_TEMP}/web-before-maintenance-version.json"
+          test ! -e "${deployment}"
+          test ! -e "${version}"
+          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          version_id="$(jq -er '
+            .versions | select(length == 1) | .[0] |
+            select(.percentage == 100) | .version_id
+          ' "${deployment}")"
+          [[ "${version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          bunx wrangler versions view "${version_id}" \
+            --name intar-dev --json > "${version}"
+          maintenance_value="$(jq -er '
+            [.resources.bindings[] | select(
+              .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
+            )] |
+            if length == 0 then "off"
+            elif length == 1 then .[0].text
+            else "invalid"
+            end
+          ' "${version}")"
+          case "${maintenance_value}" in
+            on) mode=maintenance ;;
+            off) mode=open ;;
+            *)
+              printf 'Invalid active CONTROL_PLANE_MAINTENANCE value.\n' >&2
+              exit 1
+              ;;
+          esac
+          printf 'mode=%s\n' "${mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: Recheck sole-operator freshness before maintenance fence activation
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          case "${APPROVAL_MODE}" in
+            reviewed) ;;
+            single-operator)
+              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              printf 'single_operator_remaining_seconds=%s admin_attestation_age=%s\n' \
+                "${remaining_seconds}" "${attestation_age}"
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Activate exact immutable maintenance fence
+        id: maintenance_fence_activation
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+          WEB_ACTIVATION_LABEL: maintenance
+          EXPECTED_CURRENT_MODE: ${{ steps.current_web_mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          case "${EXPECTED_CURRENT_MODE}" in
+            open|maintenance) ;;
+            *) exit 1 ;;
+          esac
+          tools/deploy/activate-web-version.sh \
+            "${MAINTENANCE_DEPLOYMENT_CONFIG}" \
+            "${DATABASE_ID}" \
+            "${DATABASE_ID}" \
+            "${SESSION_KV_NAMESPACE_ID}" \
+            "${ACTIVATION_SECRETS_FILE}" \
+            "${RUNNER_TEMP}/exact-web-version-activation-maintenance.json" \
+            "${EXPECTED_CURRENT_MODE}"
+
+      - name: Drain old pre-fence requests before D1 and OIDC writes
+        id: maintenance_fence_drain
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          old_oidc_registration_discovery_timeout_seconds=10
+          old_request_drain_seconds=30
+          test "${old_request_drain_seconds}" -eq \
+            "$((old_oidc_registration_discovery_timeout_seconds * 3))"
+          drain_evidence="${RUNNER_TEMP}/oidc-maintenance-fence-drain.json"
+          test ! -e "${drain_evidence}"
+          started_epoch="$(date -u +%s)"
+          sleep "${old_request_drain_seconds}"
+          completed_epoch="$(date -u +%s)"
+          elapsed_seconds="$((completed_epoch - started_epoch))"
+          test "${elapsed_seconds}" -ge "${old_request_drain_seconds}"
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --argjson old_oidc_registration_discovery_timeout_seconds \
+              "${old_oidc_registration_discovery_timeout_seconds}" \
+            --argjson required_drain_seconds "${old_request_drain_seconds}" \
+            --argjson elapsed_seconds "${elapsed_seconds}" \
+            '{
+              schema_version: 1,
+              operation: "drain-old-pre-fence-requests",
+              source_sha: $source_sha,
+              run_id: $run_id,
+              old_oidc_registration_discovery_timeout_seconds: $old_oidc_registration_discovery_timeout_seconds,
+              required_drain_seconds: $required_drain_seconds,
+              elapsed_seconds: $elapsed_seconds,
+              drain_completed: true
+            }' > "${drain_evidence}"
+          jq -e '
+            .schema_version == 1 and
+            .operation == "drain-old-pre-fence-requests" and
+            .old_oidc_registration_discovery_timeout_seconds == 10 and
+            .required_drain_seconds == 30 and
+            .elapsed_seconds >= .required_drain_seconds and
+            .drain_completed == true
+          ' "${drain_evidence}" >/dev/null
+
+      - name: Reprove exact maintenance fence after old-request drain
+        id: maintenance_fence_reproof
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
+        run: |
+          set -euo pipefail
+          fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
+          drain_evidence="${RUNNER_TEMP}/oidc-maintenance-fence-drain.json"
+          deployment="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-deployment.json"
+          version="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-version.json"
+          proof="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-proof.json"
+          test -f "${fence_evidence}"
+          test -f "${drain_evidence}"
+          test ! -e "${deployment}"
+          test ! -e "${version}"
+          test ! -e "${proof}"
+          maintenance_version_id="$(jq -er \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg database_id "${DATABASE_ID}" \
+            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
+              select(
+                .schema_version == 1 and
+                .operation == "activate-exact-web-version" and
+                .source_sha == $source_sha and
+                .run_id == $run_id and
+                .current_database_id == $database_id and
+                .database_binding_changed == false and
+                .session_namespace_id == $session_namespace_id and
+                .uploaded_version_id != .before_version_id and
+                .exact_version_deployed == true and
+                .active_runtime_bindings_proven == true and
+                .after_health_proven == true and
+                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"maintenance\"")) and
+                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
+              ) | .uploaded_version_id
+            ' "${fence_evidence}")"
+          [[ "${maintenance_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          jq -e '
+            .schema_version == 1 and
+            .operation == "drain-old-pre-fence-requests" and
+            .old_oidc_registration_discovery_timeout_seconds == 10 and
+            .required_drain_seconds == 30 and
+            .elapsed_seconds >= .required_drain_seconds and
+            .drain_completed == true
+          ' "${drain_evidence}" >/dev/null
+          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
+          deployment_id="$(jq -er --arg maintenance_version_id "${maintenance_version_id}" '
+            .id as $deployment_id |
+            .versions | select(length == 1) | .[0] |
+            select(.version_id == $maintenance_version_id and .percentage == 100) |
+            $deployment_id
+          ' "${deployment}")"
+          [[ "${deployment_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          bunx wrangler versions view "${maintenance_version_id}" \
+            --name intar-dev --json > "${version}"
+          jq -e --arg maintenance_version_id "${maintenance_version_id}" \
+            --arg database_id "${DATABASE_ID}" \
+            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
+              .id == $maintenance_version_id and
+              ([.resources.bindings[] | select(
+                .type == "d1" and .name == "DB" and .id == $database_id
+              )] | length) == 1 and
+              ([.resources.bindings[] | select(
+                .type == "kv_namespace" and .name == "SESSION" and
+                .namespace_id == $session_namespace_id
+              )] | length) == 1 and
+              ([.resources.bindings[] | select(
+                .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE" and
+                .text == "on"
+              )] | length) == 1
+            ' "${version}" >/dev/null
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg maintenance_version_id "${maintenance_version_id}" \
+            --arg deployment_id "${deployment_id}" \
+            --arg database_id "${DATABASE_ID}" \
+            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" \
+            '{
+              schema_version: 1,
+              operation: "reprove-maintenance-fence-after-old-request-drain",
+              source_sha: $source_sha,
+              run_id: $run_id,
+              maintenance_version_id: $maintenance_version_id,
+              deployment_id: $deployment_id,
+              database_id: $database_id,
+              session_namespace_id: $session_namespace_id,
+              active_percent: 100,
+              maintenance_mode_proven: true,
+              exact_maintenance_version_active: true
+            }' > "${proof}"
+          jq -e --arg maintenance_version_id "${maintenance_version_id}" '
+            .schema_version == 1 and
+            .operation == "reprove-maintenance-fence-after-old-request-drain" and
+            .maintenance_version_id == $maintenance_version_id and
+            .active_percent == 100 and
+            .maintenance_mode_proven == true and
+            .exact_maintenance_version_active == true
+          ' "${proof}" >/dev/null
 
       - name: Prove the production D1 is already Drizzle-managed
         env:
@@ -943,28 +1240,53 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Prepare ephemeral Worker activation secrets
-        id: activation_secrets
+      - name: Reverify fenced OIDC ciphertext immediately before opening
+        id: oidc_preopen_reverify
         working-directory: ${{ github.workspace }}
         env:
-          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
-          STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
         run: |
           set -euo pipefail
-          test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
           test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
-          test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
-          secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
-          jq -n '{
-            CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
-            OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
-            STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
-          }' \
-            > "${secrets_file}"
-          chmod 600 "${secrets_file}"
-          printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
-            >> "${GITHUB_ENV}"
+          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
+          export OIDC_MIGRATION_CONFIRMATION="PLAN OIDC SECRET MIGRATION"
+          counts_file="${RUNNER_TEMP}/oidc-secret-pre-open-counts.json"
+          test ! -e "${counts_file}"
+          bun tools/database/oidc-secret-migration.ts \
+            --operation plan \
+            --counts-output "${counts_file}"
+          jq -e '
+            .version == 1 and
+            .operation == "plan" and
+            .status == "ready" and
+            (.counts | type == "object") and
+            (.counts | keys) == [
+              "casConflicts",
+              "ciphertextInvalid",
+              "ciphertextOnly",
+              "ciphertextPresent",
+              "ciphertextValid",
+              "configInvalid",
+              "dualWritten",
+              "missingSecretMaterial",
+              "plaintextOnly",
+              "plaintextPresent",
+              "scanned",
+              "secretMismatch",
+              "writesApplied"
+            ] and
+            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
+            .counts.plaintextOnly == 0 and
+            .counts.ciphertextInvalid == 0 and
+            .counts.configInvalid == 0 and
+            .counts.missingSecretMaterial == 0 and
+            .counts.secretMismatch == 0 and
+            .counts.ciphertextPresent == .counts.scanned and
+            .counts.ciphertextValid == .counts.scanned and
+            (.counts.dualWritten + .counts.ciphertextOnly) == .counts.scanned
+          ' "${counts_file}" >/dev/null
 
       - name: Activate the exact immutable web version
         id: exact_web_activation
@@ -983,12 +1305,135 @@ jobs:
             "${SESSION_KV_NAMESPACE_ID}" \
             "${ACTIVATION_SECRETS_FILE}" \
             "${RUNNER_TEMP}/exact-web-version-activation-standard.json" \
-            open
+            maintenance
 
       - name: Remove ephemeral Worker activation secrets
         if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
         working-directory: ${{ github.workspace }}
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
+
+      - name: Require completed OIDC canary before plaintext cleanup
+        id: oidc_canary_gate
+        if: ${{ steps.exact_web_activation.outcome == 'success' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
+          OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
+        run: |
+          set -euo pipefail
+          counts_file="${RUNNER_TEMP}/oidc-secret-pre-open-counts.json"
+          test -f "${counts_file}"
+          scanned="$(jq -er '.counts.scanned' "${counts_file}")"
+          [[ "${scanned}" =~ ^[0-9]+$ ]]
+          if [ "${scanned}" -eq 0 ]; then
+            printf 'oidc_provider_count=0 canary_confirmation_required=false\n' \
+              >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if [ "${OIDC_CANARY_CONFIRMATION}" != "OIDC CANARY PASSED" ]; then
+            printf 'A live OIDC canary is required before plaintext cleanup.\n' >&2
+            exit 1
+          fi
+          [[ "${OIDC_CANARY_SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          test "${OIDC_CANARY_SOURCE_RUN_ID}" -lt "${GITHUB_RUN_ID}"
+          source_run_json="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${OIDC_CANARY_SOURCE_RUN_ID}")"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg workflow_path "${PROVENANCE_WORKFLOW_PATH}" \
+            --argjson source_run_id "${OIDC_CANARY_SOURCE_RUN_ID}" '
+              .id == $source_run_id and
+              .repository.full_name == $repository and
+              .head_sha == $source_sha and
+              .run_attempt == 1 and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              .conclusion == "failure" and
+              .path == $workflow_path
+            ' <<< "${source_run_json}" >/dev/null
+          source_artifact="exact-web-version-attempt-${GITHUB_SHA}-${OIDC_CANARY_SOURCE_RUN_ID}"
+          source_artifact_dir="${RUNNER_TEMP}/oidc-canary-source-${OIDC_CANARY_SOURCE_RUN_ID}"
+          test ! -e "${source_artifact_dir}"
+          mkdir -p "${source_artifact_dir}"
+          gh run download "${OIDC_CANARY_SOURCE_RUN_ID}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name "${source_artifact}" \
+            --dir "${source_artifact_dir}"
+          mapfile -t source_evidence_files < <(
+            rg --files "${source_artifact_dir}" \
+              -g "exact-web-version-activation-standard.json"
+          )
+          test "${#source_evidence_files[@]}" -eq 1
+          source_evidence="${source_evidence_files[0]}"
+          source_uploaded_version_id="$(jq -er \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg source_run_id "${OIDC_CANARY_SOURCE_RUN_ID}" '
+              select(
+                .schema_version == 1 and
+                .operation == "activate-exact-web-version" and
+                .source_sha == $source_sha and
+                .run_id == $source_run_id and
+                .run_attempt == 1 and
+                .exact_version_deployed == true and
+                .active_runtime_bindings_proven == true and
+                .runtime_secret_binding_proven == true and
+                .after_health_proven == true and
+                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"open\"")) and
+                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
+              ) | .uploaded_version_id
+            ' "${source_evidence}")"
+          [[ "${source_uploaded_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          current_fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
+          test -f "${current_fence_evidence}"
+          current_fence_before_version_id="$(jq -er \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" '
+              select(
+                .schema_version == 1 and
+                .operation == "activate-exact-web-version" and
+                .source_sha == $source_sha and
+                .run_id == $run_id and
+                .before_version_id != .uploaded_version_id and
+                (.before_health | type == "object" and
+                  .expected_mode == "open" and .healthy == true) and
+                .exact_version_deployed == true and
+                .active_runtime_bindings_proven == true and
+                .after_health_proven == true and
+                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"maintenance\"")) and
+                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
+              ) | .before_version_id
+            ' "${current_fence_evidence}")"
+          [[ "${current_fence_before_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          test "${source_uploaded_version_id}" = \
+            "${current_fence_before_version_id}"
+          printf 'oidc_provider_count=%s canary_confirmation_required=true canary_source_run_id=%s\n' \
+            "${scanned}" "${OIDC_CANARY_SOURCE_RUN_ID}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Recheck sole-operator freshness before plaintext cleanup
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          case "${APPROVAL_MODE}" in
+            reviewed) ;;
+            single-operator)
+              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+              now_epoch="$(date -u +%s)"
+              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
+              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
+              remaining_seconds="$((expires_epoch - now_epoch))"
+              attestation_age="$((now_epoch - attested_epoch))"
+              test "${remaining_seconds}" -gt 0
+              test "${remaining_seconds}" -le 604800
+              test "${attestation_age}" -ge 0
+              test "${attestation_age}" -le 900
+              printf 'single_operator_remaining_seconds=%s admin_attestation_age=%s\n' \
+                "${remaining_seconds}" "${attestation_age}"
+              ;;
+            *) exit 1 ;;
+          esac
 
       - name: Remove plaintext after encrypted OIDC activation
         id: oidc_cleanup
@@ -1045,6 +1490,170 @@ jobs:
             .counts.ciphertextValid == .counts.scanned
           ' "${RUNNER_TEMP}/oidc-secret-cleanup-counts.json" >/dev/null
 
+      - name: Recover original open Worker after failed encrypted OIDC activation
+        id: pre_fence_open_recovery
+        if: ${{ always() && steps.maintenance_fence_activation.outcome == 'success' && steps.current_web_mode.outputs.mode == 'open' && steps.exact_web_activation.outcome != 'success' && steps.oidc_cleanup.outcome == 'skipped' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
+          recovery_evidence="${RUNNER_TEMP}/oidc-pre-fence-open-recovery.json"
+          pre_fence_version="${RUNNER_TEMP}/oidc-pre-fence-open-version.json"
+          deploy_output="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deploy.ndjson"
+          deploy_result="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deploy.json"
+          test -f "${fence_evidence}"
+          test ! -e "${recovery_evidence}"
+          test ! -e "${pre_fence_version}"
+          test ! -e "${deploy_output}"
+          test ! -e "${deploy_result}"
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            '{
+              schema_version: 1,
+              operation: "recover-pre-fence-open-web-version",
+              state: "started",
+              source_sha: $source_sha,
+              run_id: $run_id,
+              cleanup_started: false
+            }' > "${recovery_evidence}"
+          fence_versions="$(jq -er \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" '
+              select(
+                .schema_version == 1 and
+                .operation == "activate-exact-web-version" and
+                .source_sha == $source_sha and
+                .run_id == $run_id and
+                .before_version_id != .uploaded_version_id and
+                .current_active_version_used_as_reference == true and
+                .before_health_proven == true and
+                (.before_health | type == "object" and
+                  .expected_mode == "open" and .healthy == true) and
+                .exact_version_deployed == true and
+                .active_runtime_bindings_proven == true and
+                .after_health_proven == true
+              ) | [.before_version_id, .uploaded_version_id] | @tsv
+            ' "${fence_evidence}")"
+          IFS=$'\t' read -r pre_fence_version_id maintenance_fence_version_id \
+            <<< "${fence_versions}"
+          [[ "${pre_fence_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          [[ "${maintenance_fence_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          test "${pre_fence_version_id}" != "${maintenance_fence_version_id}"
+          bunx wrangler versions view "${pre_fence_version_id}" \
+            --name intar-dev --json > "${pre_fence_version}"
+          pre_fence_maintenance_value="$(jq -er \
+            --arg pre_fence_version_id "${pre_fence_version_id}" '
+              select(.id == $pre_fence_version_id) |
+              ([.resources.bindings[] | select(
+                .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
+              )] |
+                if length == 0 then "off"
+                elif length == 1 then .[0].text
+                else "invalid"
+                end)
+            ' "${pre_fence_version}")"
+          test "${pre_fence_maintenance_value}" = off
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg pre_fence_version_id "${pre_fence_version_id}" \
+            --arg maintenance_fence_version_id "${maintenance_fence_version_id}" \
+            '{
+              schema_version: 1,
+              operation: "recover-pre-fence-open-web-version",
+              state: "deploying",
+              source_sha: $source_sha,
+              run_id: $run_id,
+              pre_fence_version_id: $pre_fence_version_id,
+              maintenance_fence_version_id: $maintenance_fence_version_id,
+              cleanup_started: false
+            }' > "${recovery_evidence}"
+          WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
+            bunx wrangler versions deploy "${pre_fence_version_id}@100%" \
+              --name intar-dev \
+              --message "Restore pre-fence open Worker after failed encrypted OIDC activation for run ${GITHUB_RUN_ID}" \
+              --yes
+          bun "${GITHUB_WORKSPACE}/tools/deploy/wrangler-output.ts" \
+            version-deploy "${deploy_output}" intar-dev > "${deploy_result}"
+          recovery_deployment_id="$(jq -er '.deploymentId' "${deploy_result}")"
+          [[ "${recovery_deployment_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+          recovery_proven=false
+          recovery_observed_attempt=0
+          observed_deployment_id=""
+          root_status=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            deployment="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deployment-${attempt}.json"
+            test ! -e "${deployment}"
+            exact_pre_fence_version_active=false
+            if bunx wrangler deployments status --name intar-dev --json > "${deployment}" &&
+              jq -e \
+                --arg deployment_id "${recovery_deployment_id}" \
+                --arg pre_fence_version_id "${pre_fence_version_id}" '
+                  .id == $deployment_id and
+                  (.versions | length) == 1 and
+                  .versions[0].version_id == $pre_fence_version_id and
+                  .versions[0].percentage == 100
+                ' "${deployment}" >/dev/null; then
+              exact_pre_fence_version_active=true
+              observed_deployment_id="$(jq -er '.id' "${deployment}")"
+            fi
+            root_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
+              --header 'Cache-Control: no-cache' --output /dev/null \
+              --write-out '%{http_code}' https://intar.dev/; } || true)"
+            if [ "${exact_pre_fence_version_active}" = true ] && \
+              [ "${root_status}" = 200 ]; then
+              recovery_proven=true
+              recovery_observed_attempt="${attempt}"
+              break
+            fi
+            if [ "${attempt}" -lt 12 ]; then sleep 2; fi
+          done
+          test "${recovery_proven}" = true
+          jq -n \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg pre_fence_version_id "${pre_fence_version_id}" \
+            --arg maintenance_fence_version_id "${maintenance_fence_version_id}" \
+            --arg recovery_deployment_id "${recovery_deployment_id}" \
+            --arg observed_deployment_id "${observed_deployment_id}" \
+            --arg root_status "${root_status}" \
+            --argjson recovery_observed_attempt "${recovery_observed_attempt}" \
+            '{
+              schema_version: 1,
+              operation: "recover-pre-fence-open-web-version",
+              state: "completed",
+              source_sha: $source_sha,
+              run_id: $run_id,
+              pre_fence_version_id: $pre_fence_version_id,
+              maintenance_fence_version_id: $maintenance_fence_version_id,
+              recovery_deployment_id: $recovery_deployment_id,
+              observed_deployment_id: $observed_deployment_id,
+              active_percent: 100,
+              recovery_max_attempts: 12,
+              recovery_observed_attempt: $recovery_observed_attempt,
+              exact_pre_fence_version_active: true,
+              root_status: $root_status,
+              root_open_health_proven: true,
+              cleanup_started: false
+            }' > "${recovery_evidence}"
+          jq -e --arg pre_fence_version_id "${pre_fence_version_id}" '
+            .schema_version == 1 and
+            .operation == "recover-pre-fence-open-web-version" and
+            .state == "completed" and
+            .pre_fence_version_id == $pre_fence_version_id and
+            .active_percent == 100 and
+            .recovery_observed_attempt >= 1 and
+            .recovery_observed_attempt <= .recovery_max_attempts and
+            .exact_pre_fence_version_active == true and
+            .root_status == "200" and
+            .root_open_health_proven == true and
+            .cleanup_started == false
+          ' "${recovery_evidence}" >/dev/null
+
       - name: Retain counts-only OIDC cleanup evidence
         if: ${{ always() && steps.oidc_cleanup.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -1054,13 +1663,35 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Retain pre-fence open recovery evidence
+        if: ${{ always() && steps.pre_fence_open_recovery.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: oidc-pre-fence-open-recovery-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/oidc-pre-fence-open-recovery.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Retain counts-only OIDC pre-open verification evidence
+        if: ${{ always() && steps.oidc_preopen_reverify.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: oidc-secret-pre-open-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/oidc-secret-pre-open-counts.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Retain exact web-version activation attempt
         if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/exact-web-version-activation-maintenance.json
             ${{ runner.temp }}/exact-web-version-activation-standard.json
+            ${{ runner.temp }}/oidc-maintenance-fence-drain.json
+            ${{ runner.temp }}/oidc-maintenance-fence-post-drain-proof.json
+            ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
           if-no-files-found: error
           retention-days: 90

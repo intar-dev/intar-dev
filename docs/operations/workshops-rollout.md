@@ -107,30 +107,45 @@ Use protected production secrets. Provider, probe, and web credentials remain
 separate; the existing account token intentionally serves D1 migrations,
 web/R2 deployment, and protected Flagship targeting:
 
-| secret                                  | available to                                                       |
-| --------------------------------------- | ------------------------------------------------------------------ |
-| `CLOUDFLARE_ACCOUNT_ID`                 | protected rollout jobs                                             |
-| `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN` | Hetzner Worker deployment only                                     |
-| `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`     | GCP Worker deployment only                                         |
-| `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
-| `CLOUDFLARE_API_TOKEN`                  | D1 migrations, web/R2 deployment, and protected Flagship targeting |
-| `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | exact web-version activation and maintenance checks               |
-| `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
-| `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
-| `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
-| `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1`     | web activation and protected OIDC ciphertext migration only        |
-| `STARGATE_EGRESS_IPV4_CIDRS`            | web runtime configuration only                                     |
+| secret                                    | available to                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------ |
+| `CLOUDFLARE_ACCOUNT_ID`                   | protected rollout jobs                                             |
+| `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN`   | Hetzner Worker deployment only                                     |
+| `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`       | GCP Worker deployment only                                         |
+| `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`     | route-less capability probe only                                   |
+| `CLOUDFLARE_API_TOKEN`                    | D1 migrations, web/R2 deployment, and protected Flagship targeting |
+| `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | exact web-version activation and maintenance checks                |
+| `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`      | Hetzner Worker deployment only                                     |
+| `GCP_PROVIDER_CREDENTIAL_KEK_V1`          | GCP Worker deployment only                                         |
+| `GCP_CATALOG_API_KEY`                     | active GCP Worker deployment only; absent in explicit dormant mode |
+| `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1`       | web activation and protected OIDC ciphertext migration only        |
+| `STARGATE_EGRESS_IPV4_CIDRS`              | web runtime configuration only                                     |
 
 Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
 provider Worker envelope-encrypts them.
 
 `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
-random bytes. The production web workflow applies the additive D1 column,
-backfills ciphertext while the old Worker still has its plaintext data,
-activates the encrypted-only Worker, and only then removes every plaintext
-`clientSecret`. A failed backfill leaves the old Worker and plaintext intact;
-after cleanup, do not roll back to a Worker that predates this cutover.
+random bytes. The production web workflow first activates the exact new Worker
+in maintenance mode and drains old registration requests. It then applies the
+additive D1 column, backfills ciphertext, verifies every row again while fenced,
+opens the encrypted-only Worker, and only then removes every plaintext
+`clientSecret`. A pre-open failure restores the exact pre-fence Worker when the
+run started open; a retry that started in maintenance remains fenced on failure.
+After cleanup, do not roll back to a Worker that predates this cutover.
+
+If the counts-only proof finds one or more OIDC providers, the first run stops
+after the encrypted Worker opens and leaves plaintext intact. Complete a real
+authorization-code sign-in with an existing provider. Then rerun the same
+source SHA with `oidc_canary_confirmation` set to `OIDC CANARY PASSED`; only
+that run can remove plaintext. Set `oidc_canary_source_run_id` to the failed
+first Website production run. The continuation verifies that its canaried
+encrypted version was the exact version fenced by the cleanup run. Never use
+the confirmation for a discovery-only or synthetic check.
+
+The pinned Wrangler 4.125.0 and Miniflare 5.20260820.0-alpha runtime rejects
+`2026-08-23` as a future compatibility date. All Worker configs and the test
+pool therefore use the newest accepted date, `2026-08-20`; CI rejects drift.
 
 Keep these protected runtime variables current:
 

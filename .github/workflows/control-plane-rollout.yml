@@ -27,6 +27,16 @@ on:
         required: false
         default: ""
         type: string
+      oidc_canary_confirmation:
+        description: Type OIDC CANARY PASSED only after a successful live OIDC canary
+        required: false
+        default: ""
+        type: string
+      oidc_canary_source_run_id:
+        description: Failed Website production run whose exact encrypted Worker passed the canary
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -64,6 +74,8 @@ jobs:
     with:
       confirmation: ${{ inputs.web_confirmation }}
       single_operator_confirmation: ${{ inputs.single_operator_confirmation }}
+      oidc_canary_confirmation: ${{ inputs.oidc_canary_confirmation }}
+      oidc_canary_source_run_id: ${{ inputs.oidc_canary_source_run_id }}
       provenance_workflow_path: .github/workflows/control-plane-rollout.yml
       parent_holds_control_plane_lock: true
     secrets:

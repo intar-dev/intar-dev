@@ -265,6 +265,7 @@ describe("exact web-version activation", () => {
     expect(script).toContain('.name == "STARGATE_EGRESS_IPV4_CIDRS"');
     expect(script).toContain('.name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"');
     expect(script).toContain('.name == "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"');
+    expect(script).toContain('.name == "BETTER_AUTH_TRUSTED_ORIGINS"');
     expect(script).toContain("runtime_secret_binding_proven: true");
   });
 
