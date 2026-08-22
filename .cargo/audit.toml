@@ -1,7 +1,7 @@
 [advisories]
 ignore = [
-    # Transitive through jsonwebtoken 10.4.0 and russh 0.61.2; RustSec lists no fixed upgrade.
+    # Owner: Stargate. Transitive through jsonwebtoken 10.4.0 and russh 0.62.2; RustSec lists no fixed upgrade. Review by 2026-11-23.
     "RUSTSEC-2023-0071",
-    # Transitive through jiff 0.2.31 via kube; RustSec lists no fixed upgrade.
+    # Owner: Platform. Transitive through jiff 0.2.31 via kube; RustSec lists no fixed upgrade. Review by 2026-11-23.
     "RUSTSEC-2026-0173",
 ]
