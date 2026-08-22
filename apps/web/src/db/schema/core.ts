@@ -208,6 +208,7 @@ export const ssoProvider = sqliteTable(
     issuer: text("issuer").notNull(),
     domain: text("domain").notNull(),
     oidcConfig: text("oidc_config"),
+    oidcClientSecretCiphertext: text("oidc_client_secret_ciphertext"),
     samlConfig: text("saml_config"),
     userId: text("user_id")
       .notNull()

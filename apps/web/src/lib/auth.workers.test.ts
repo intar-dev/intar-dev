@@ -6,7 +6,13 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { accessInviteCodes } from "@/db/schema/application";
-import { account, session, ssoProvider, user } from "@/db/schema/core";
+import {
+  account,
+  organization,
+  session,
+  ssoProvider,
+  user,
+} from "@/db/schema/core";
 import {
   oauthAccessToken,
   oauthClient,
@@ -30,6 +36,7 @@ import {
 } from "@/test/beta-access-fixtures";
 import {
   auth,
+  authCookiePolicy,
   captureBetaAdmissionEpoch,
   captureOAuthIssuanceAdmission,
   createAdmissionBoundRefreshToken,
@@ -43,11 +50,241 @@ import {
   INVITE_OAUTH_HANDOFF_HEADER,
   readAdmissionBoundRefreshToken,
 } from "./auth";
+import { encryptOidcClientSecret } from "./oidc-sso-secret";
 
 describe("auth policy", () => {
   beforeEach(async () => {
     await resetD1Database();
     await ensureFixtureBetaAdmin(env.DB, Date.now());
+  });
+
+  it("uses host-only secure cookies outside localhost", async () => {
+    expect(auth.options.advanced).toMatchObject({
+      useSecureCookies: false,
+      defaultCookieAttributes: {
+        httpOnly: true,
+        path: "/",
+        sameSite: "lax",
+        secure: false,
+      },
+    });
+    expect(authCookiePolicy("https://intar.dev")).toEqual({
+      useSecureCookies: true,
+      defaultCookieAttributes: {
+        httpOnly: true,
+        path: "/",
+        sameSite: "lax",
+        secure: true,
+      },
+    });
+
+    const configuredOrigins = auth.options.trustedOrigins;
+    expect(configuredOrigins).toBeTypeOf("function");
+    if (typeof configuredOrigins !== "function") throw new Error("missing trusted origins");
+    await expect(configuredOrigins()).resolves.toEqual(["http://localhost"]);
+  });
+
+  it("loads an encrypted organization OIDC provider through Better Auth sign-in", async () => {
+    const organizationId = "encrypted-oidc-organization";
+    const providerRowId = "encrypted-oidc-provider-row";
+    const providerId = "encrypted-oidc-provider";
+    const clientSecret = "encrypted-provider-client-secret";
+    const ciphertext = await encryptOidcClientSecret({
+      encryptionKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      clientSecret,
+      identity: {
+        id: providerRowId,
+        providerId,
+        organizationId,
+      },
+    });
+    const now = new Date();
+    await drizzle(env.DB).insert(organization).values({
+      id: organizationId,
+      name: "Encrypted OIDC organization",
+      slug: "encrypted-oidc-organization",
+      createdAt: now,
+    });
+    await drizzle(env.DB).insert(ssoProvider).values({
+      id: providerRowId,
+      issuer: "https://login.example.test",
+      domain: "example.test",
+      oidcConfig: JSON.stringify({
+        issuer: "https://login.example.test",
+        clientId: "encrypted-oidc-client",
+        authorizationEndpoint: "https://login.example.test/oauth/authorize",
+        tokenEndpoint: "https://login.example.test/oauth/token",
+        tokenEndpointAuthentication: "client_secret_basic",
+        jwksEndpoint: "https://login.example.test/.well-known/jwks.json",
+        userInfoEndpoint: "https://login.example.test/oauth/userinfo",
+        pkce: true,
+        scopes: ["openid", "email", "profile"],
+      }),
+      oidcClientSecretCiphertext: ciphertext,
+      userId: FIXTURE_BETA_ADMIN_ID,
+      providerId,
+      organizationId,
+      domainVerified: true,
+    });
+
+    const response = await auth.handler(
+      authRequest("/api/auth/sign-in/sso", {
+        providerId,
+        providerType: "oidc",
+        callbackURL: "http://localhost/organizations/encrypted-oidc-organization",
+        errorCallbackURL:
+          "http://localhost/organizations/encrypted-oidc-organization/sign-in",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { redirect?: unknown; url?: unknown };
+    expect(body).toMatchObject({ redirect: true });
+    expect(body.url).toEqual(
+      expect.stringContaining("https://login.example.test/oauth/authorize"),
+    );
+    expect(String(body.url)).toContain("client_id=encrypted-oidc-client");
+    expect(JSON.stringify(body)).not.toContain(clientSecret);
+    expect(JSON.stringify(body)).not.toContain(ciphertext);
+  });
+
+  it("uses an encrypted provider through the Better Auth callback lock path", async () => {
+    const now = Date.now();
+    const userId = "encrypted-oidc-link-user";
+    const organizationId = "encrypted-oidc-link-organization";
+    const providerRowId = "encrypted-oidc-link-provider-row";
+    const providerId = "encrypted-oidc-link-provider";
+    const clientSecret = "encrypted-link-client-secret";
+    const ciphertext = await encryptOidcClientSecret({
+      encryptionKey: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      clientSecret,
+      identity: {
+        id: providerRowId,
+        providerId,
+        organizationId,
+      },
+    });
+    await seedActiveBetaUser({
+      id: userId,
+      accountId: "encrypted-oidc-link-github",
+      username: userId,
+      now,
+    });
+    await drizzle(env.DB).insert(organization).values({
+      id: organizationId,
+      name: "Encrypted OIDC link organization",
+      slug: organizationId,
+      createdAt: new Date(now),
+    });
+    await drizzle(env.DB).insert(ssoProvider).values({
+      id: providerRowId,
+      issuer: "https://login.example.test",
+      domain: "example.test",
+      oidcConfig: JSON.stringify({
+        issuer: "https://login.example.test",
+        clientId: "encrypted-oidc-link-client",
+        authorizationEndpoint: "https://login.example.test/oauth/authorize",
+        tokenEndpoint: "https://login.example.test/oauth/token",
+        tokenEndpointAuthentication: "client_secret_basic",
+        jwksEndpoint: "https://login.example.test/.well-known/jwks.json",
+        userInfoEndpoint: "https://login.example.test/oauth/userinfo",
+        pkce: true,
+      }),
+      oidcClientSecretCiphertext: ciphertext,
+      userId: FIXTURE_BETA_ADMIN_ID,
+      providerId,
+      organizationId,
+      domainVerified: true,
+    });
+    const admission = await captureBetaAdmissionEpoch(userId);
+    const handoff = await createSsoLinkOAuthHandoff({
+      ...admission,
+      providerId,
+      expiresAt: now + 600_000,
+    });
+    const sessionToken = "encrypted-oidc-link-session";
+    await drizzle(env.DB).insert(session).values({
+      id: "encrypted-oidc-link-session-row",
+      token: sessionToken,
+      userId,
+      expiresAt: new Date(now + 3_600_000),
+      createdAt: new Date(now),
+      updatedAt: new Date(now),
+    });
+    const sessionCookie = await signedSessionCookie(sessionToken);
+    const started = await auth.handler(
+      authRequest(
+        "/api/auth/sign-in/sso",
+        {
+          providerId,
+          providerType: "oidc",
+          callbackURL: "http://localhost/organizations/encrypted-oidc-link",
+          errorCallbackURL:
+            "http://localhost/organizations/encrypted-oidc-link/sign-in",
+        },
+        {
+          cookie: sessionCookie,
+          [INVITE_OAUTH_HANDOFF_HEADER]: handoff,
+        },
+      ),
+    );
+    expect(started.status).toBe(200);
+    const startedBody = (await started.json()) as { url?: string };
+    const state = startedBody.url
+      ? new URL(startedBody.url).searchParams.get("state")
+      : null;
+    const stateCookie = started.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(state).toBeTruthy();
+    expect(stateCookie).toBeTruthy();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (request): Promise<Response> => {
+        const url =
+          typeof request === "string"
+            ? request
+            : request instanceof URL
+              ? request.href
+              : request.url;
+        if (url === "https://login.example.test/oauth/token") {
+          return Response.json({
+            access_token: "encrypted-oidc-link-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          });
+        }
+        if (url === "https://login.example.test/oauth/userinfo") {
+          return Response.json({
+            sub: "encrypted-oidc-link-subject",
+            email: `${userId}@example.test`,
+            name: "Encrypted OIDC Link User",
+          });
+        }
+        throw new Error(`unexpected OIDC callback fetch: ${url}`);
+      },
+    );
+    let callback: Response;
+    try {
+      callback = await auth.handler(
+        new Request(
+          `http://localhost/api/auth/sso/callback/${providerId}?code=test-code&state=${encodeURIComponent(state!)}`,
+          { headers: { cookie: `${sessionCookie}; ${stateCookie}` } },
+        ),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(callback!.status).toBe(302);
+    expect(callback!.headers.get("location")).toBe(
+      "http://localhost/organizations/encrypted-oidc-link",
+    );
+    await expect(
+      env.DB.prepare(
+        "SELECT user_id AS userId FROM account WHERE provider_id = ? AND account_id = ?",
+      )
+        .bind(providerId, "encrypted-oidc-link-subject")
+        .first(),
+    ).resolves.toEqual({ userId });
   });
 
   it("rejects credential auth and stock identity administration", async () => {

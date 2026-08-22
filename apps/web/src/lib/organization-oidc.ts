@@ -1,10 +1,14 @@
 import { env } from "cloudflare:workers";
-import { DiscoveryError, discoverOIDCConfig } from "@better-auth/sso";
+import { discoverOIDCConfig } from "@better-auth/sso";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { account, ssoProvider, verification } from "@/db/schema";
 import { appError, errorChainMatches } from "@/lib/app-error";
 import { createAppId } from "@/lib/id";
+import {
+  encryptOidcClientSecret,
+  isOidcClientSecretLengthValid,
+} from "@/lib/oidc-sso-secret";
 
 const VERIFICATION_PREFIX = "intar-oidc";
 const VERIFICATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -48,7 +52,7 @@ export async function registerOrganizationOidc(
   if (!clientId || clientId.length > 512) {
     throw appError(400, "invalid_oidc_client_id", "OIDC client ID is required");
   }
-  if (!clientSecret || clientSecret.length > 4096) {
+  if (!clientSecret || !isOidcClientSecretLengthValid(clientSecret)) {
     throw appError(
       400,
       "invalid_oidc_client_secret",
@@ -77,15 +81,11 @@ export async function registerOrganizationOidc(
       timeout: 10_000,
       isTrustedOrigin: isSafePublicHttpsEndpoint,
     });
-  } catch (error) {
-    if (error instanceof DiscoveryError) {
-      throw appError(
-        400,
-        error.code ?? "oidc_discovery_failed",
-        `OIDC discovery failed: ${error.message}`,
-      );
-    }
-    throw error;
+  } catch {
+    // Keep upstream URLs, HTTP status text, and body excerpts out of both the
+    // response and observability output.
+    console.warn(JSON.stringify({ event: "oidc_discovery_failed" }));
+    throw appError(400, "oidc_discovery_failed", "OIDC discovery failed");
   }
 
   if (
@@ -114,14 +114,33 @@ export async function registerOrganizationOidc(
     }
   }
 
+  const providerRowId = createAppId();
   const providerId = `org-${createAppId()}`;
   const now = Date.now();
   const verificationToken = randomToken();
   const verificationIdentifier = verificationIdentifierFor(providerId);
+  const secretRuntime = oidcSsoSecretRuntime();
+  let oidcClientSecretCiphertext: string;
+  try {
+    oidcClientSecretCiphertext = await encryptOidcClientSecret({
+      encryptionKey: secretRuntime.encryptionKey,
+      clientSecret,
+      identity: {
+        id: providerRowId,
+        providerId,
+        organizationId: input.organizationId,
+      },
+    });
+  } catch {
+    throw appError(
+      503,
+      "oidc_secret_encryption_unavailable",
+      "OIDC provider configuration is unavailable",
+    );
+  }
   const oidcConfig = JSON.stringify({
     issuer: discovered.issuer,
     clientId,
-    clientSecret,
     authorizationEndpoint: discovered.authorizationEndpoint,
     tokenEndpoint: discovered.tokenEndpoint,
     tokenEndpointAuthentication: discovered.tokenEndpointAuthentication,
@@ -135,10 +154,11 @@ export async function registerOrganizationOidc(
   try {
     await db.batch([
       db.insert(ssoProvider).values({
-        id: createAppId(),
+        id: providerRowId,
         issuer,
         domain,
         oidcConfig,
+        oidcClientSecretCiphertext,
         samlConfig: null,
         userId: input.actorUserId,
         providerId,
@@ -496,6 +516,18 @@ function randomToken(): string {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
+}
+
+function oidcSsoSecretRuntime(): {
+  encryptionKey: string | undefined;
+} {
+  const bindings = env as unknown as Record<string, unknown>;
+  return {
+    encryptionKey:
+      typeof bindings.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 === "string"
+        ? bindings.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1
+        : undefined,
+  };
 }
 
 function parseRecord(value: string | null): Record<string, unknown> | null {

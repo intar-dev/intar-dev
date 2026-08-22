@@ -31,6 +31,10 @@ import {
 import { getUserRole, isAdminRole } from "./authz";
 import { createAppId } from "./id";
 import {
+  createOidcSsoSecretAdapterFactory,
+  type OidcSsoSecretAdapterRuntime,
+} from "./oidc-sso-secret-adapter";
+import {
   canCreateOrganization,
   hasReachedOwnedOrganizationLimit,
 } from "./organization-access";
@@ -1323,8 +1327,15 @@ function buildAuthInstance() {
       env.BETTER_AUTH_APP_NAME ??
       "Astro App",
     baseURL,
-    database: drizzleAdapter(db, { provider: "sqlite", schema }),
-    trustedOrigins: async () => trustedSsoOrigins(),
+    database: createOidcSsoSecretAdapterFactory(
+      drizzleAdapter(db, { provider: "sqlite", schema }),
+      oidcSsoSecretRuntime,
+    ),
+    // Better Auth also uses this list to validate its server-side OIDC
+    // discovery, authorization, token, and JWKS fetches. It is not the
+    // browser-origin boundary; Worker edge middleware enforces that boundary.
+    trustedOrigins: async () => trustedSsoServerOrigins(),
+    advanced: authCookiePolicy(baseURL),
     hooks: {
       before: betaAuthBeforeRequest,
       after: betaAuthAfterRequest,
@@ -1545,6 +1556,21 @@ function buildAuthInstance() {
       }),
       sso({
         providersLimit: 0,
+        schema: {
+          ssoProvider: {
+            additionalFields: {
+              // Better Auth needs the column in its adapter schema so the
+              // decorator can decrypt it. `returned` and `input` keep it out
+              // of plugin responses and disabled plugin write endpoints.
+              oidcClientSecretCiphertext: {
+                type: "string",
+                required: false,
+                returned: false,
+                input: false,
+              },
+            },
+          },
+        },
         domainVerification: {
           enabled: true,
           tokenPrefix: "intar-oidc",
@@ -1617,7 +1643,7 @@ function buildAuthInstance() {
   });
 }
 
-async function trustedSsoOrigins(): Promise<string[]> {
+async function trustedSsoServerOrigins(): Promise<string[]> {
   const origins = new Set<string>();
   const appOrigin = safeOrigin(baseURL);
   if (appOrigin) origins.add(appOrigin);
@@ -1647,6 +1673,50 @@ async function trustedSsoOrigins(): Promise<string[]> {
   }
 
   return [...origins];
+}
+
+export function authCookiePolicy(baseUrl: string): {
+  useSecureCookies: boolean;
+  defaultCookieAttributes: {
+    httpOnly: true;
+    path: "/";
+    sameSite: "lax";
+    secure: boolean;
+  };
+} {
+  const local = isLocalhostBaseUrl(baseUrl);
+  return {
+    // No domain attribute means host-only cookies. Local HTTP keeps the
+    // development exception explicit; every other base URL fails secure.
+    useSecureCookies: !local,
+    defaultCookieAttributes: {
+      httpOnly: true,
+      path: "/",
+      sameSite: "lax",
+      secure: !local,
+    },
+  };
+}
+
+function oidcSsoSecretRuntime(): OidcSsoSecretAdapterRuntime {
+  return {
+    encryptionKey: runtimeBinding("OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"),
+  };
+}
+
+function runtimeBinding(name: string): string | undefined {
+  const nodeValue = runtimeEnv?.[name];
+  if (typeof nodeValue === "string") return nodeValue;
+  const workerValue = (env as unknown as Record<string, unknown>)[name];
+  return typeof workerValue === "string" ? workerValue : undefined;
+}
+
+function isLocalhostBaseUrl(value: string): boolean {
+  try {
+    return new URL(value).hostname === "localhost";
+  } catch {
+    return false;
+  }
 }
 
 function safeOrigin(value: string): string | null {

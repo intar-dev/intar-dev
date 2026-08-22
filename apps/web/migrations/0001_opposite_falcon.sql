@@ -1,0 +1,1 @@
+ALTER TABLE `sso_provider` ADD `oidc_client_secret_ciphertext` text;
