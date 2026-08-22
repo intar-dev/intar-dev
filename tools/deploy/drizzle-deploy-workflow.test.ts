@@ -27,14 +27,22 @@ describe("Drizzle production deployment workflow", () => {
     const fullProof = deployWorkflow.indexOf(
       "Verify the exact Drizzle schema and migration ledger",
     );
+    const oidcBackfill = deployWorkflow.indexOf(
+      "Backfill OIDC ciphertext before encrypted Worker activation",
+    );
     const activation = deployWorkflow.indexOf(
       "Activate the exact immutable web version",
+    );
+    const oidcCleanup = deployWorkflow.indexOf(
+      "Remove plaintext after encrypted OIDC activation",
     );
 
     expect(prefixProof).toBeGreaterThan(-1);
     expect(migrate).toBeGreaterThan(prefixProof);
     expect(fullProof).toBeGreaterThan(migrate);
-    expect(activation).toBeGreaterThan(fullProof);
+    expect(oidcBackfill).toBeGreaterThan(fullProof);
+    expect(activation).toBeGreaterThan(oidcBackfill);
+    expect(oidcCleanup).toBeGreaterThan(activation);
 
     const prefixStep = deployWorkflow.slice(prefixProof, migrate);
     expect(prefixStep).toContain("tools/database/verify-generated-d1-schema.ts");
@@ -63,6 +71,14 @@ describe("Drizzle production deployment workflow", () => {
       "(.[0].results | sort_by(.type, .name, .table_name)) == $expected[0]",
     );
 
+    const backfillStep = deployWorkflow.slice(oidcBackfill, activation);
+    expect(backfillStep).toContain("oidc-secret-migration.ts");
+    expect(backfillStep).toContain("--operation backfill");
+    expect(backfillStep).toContain("BACKFILL OIDC SECRET MIGRATION");
+    expect(backfillStep).toContain(
+      "(.counts.dualWritten + .counts.ciphertextOnly) == .counts.scanned",
+    );
+
     const activationStep = deployWorkflow.slice(
       activation,
       deployWorkflow.indexOf("Remove ephemeral Worker activation secrets"),
@@ -74,6 +90,15 @@ describe("Drizzle production deployment workflow", () => {
       '"${RUNNER_TEMP}/exact-web-version-activation-standard.json"',
     );
     expect(activationStep).toMatch(/\n\s+open\n/u);
+
+    const cleanupStep = deployWorkflow.slice(
+      oidcCleanup,
+      deployWorkflow.indexOf("Retain exact web-version activation attempt"),
+    );
+    expect(cleanupStep).toContain("oidc-secret-migration.ts");
+    expect(cleanupStep).toContain("--operation cleanup");
+    expect(cleanupStep).toContain("CLEANUP OIDC SECRET MIGRATION");
+    expect(cleanupStep).toContain(".counts.plaintextPresent == 0");
   });
 
   it("uses one checked-in database identity and retains steady-state evidence", () => {
@@ -125,11 +150,17 @@ describe("Drizzle production deployment workflow", () => {
     expect(rolloutWorkflow).toContain(
       "confirmation: ${{ inputs.web_confirmation }}",
     );
-    expect(rolloutWorkflow).not.toContain(
-      "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
+    expect(rolloutWorkflow).toContain(
+      "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}",
     );
     expect(deployWorkflow).toContain(
       "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}",
+    );
+    expect(deployWorkflow).toContain(
+      "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}",
+    );
+    expect(rolloutWorkflow).toContain(
+      "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}",
     );
   });
 });

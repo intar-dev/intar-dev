@@ -48,7 +48,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -63,24 +63,24 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --profile minimal
-          rustup target add x86_64-unknown-linux-musl
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
           rustup show active-toolchain
 
       - name: Set up Namespace caches
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           cache: rust
 
       - name: Install just and cargo-zigbuild
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: just,cargo-zigbuild
+          tool: just@1.58.0,cargo-zigbuild@0.23.0
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: latest
+          version: 0.16.0
 
       - name: Build kino guest
         run: just build-kino-guest

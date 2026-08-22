@@ -30,7 +30,11 @@ on:
         required: true
       CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
         required: true
+      CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:
+        required: true
       STARGATE_EGRESS_IPV4_CIDRS:
+        required: true
+      OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1:
         required: true
       INTAR_IMAGE_PUBLISH_TOKEN:
         required: true
@@ -52,7 +56,6 @@ permissions:
 concurrency:
   group: ${{ inputs.parent_holds_control_plane_lock && format('website-reusable-{0}', github.run_id) || 'intar-control-plane-production' }}
   cancel-in-progress: false
-  queue: max
 
 defaults:
   run:
@@ -79,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
 
@@ -176,7 +179,7 @@ jobs:
             tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
@@ -184,11 +187,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID }}
         run: |
           test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
           test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
@@ -242,22 +247,22 @@ jobs:
     environment: production
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: apps/web/.node-version
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
 
       - name: Restore shared Bun cache
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           path: ~/.bun/install/cache
 
@@ -279,7 +284,7 @@ jobs:
           "${RUNNER_TEMP}/provider-capabilities.json"
 
       - name: Retain pre-web capability evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pre-web-provider-capabilities-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/provider-capabilities.json
@@ -307,7 +312,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
 
@@ -316,42 +321,42 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --profile minimal
-          rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup target add --toolchain 1.97.0 wasm32-unknown-unknown x86_64-unknown-linux-musl
           rustup show active-toolchain
 
       - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           cache: rust
 
       - name: Install pinned build tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: just,wasm-pack@0.15.0,cargo-zigbuild
+          tool: just@1.58.0,wasm-pack@0.15.0,cargo-zigbuild@0.23.0
           fallback: none
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: latest
+          version: 0.16.0
 
       - name: Build browser scenario validator
         working-directory: ${{ github.workspace }}
         run: just generate-scenario-wasm
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: apps/web/.node-version
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
 
       - name: Set up Namespace cache
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           path: ~/.bun/install/cache
 
@@ -856,9 +861,72 @@ jobs:
             .[0].results == []
           ' "${foreign_keys}" >/dev/null
 
+      - name: Backfill OIDC ciphertext before encrypted Worker activation
+        id: oidc_backfill
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
+        run: |
+          set -euo pipefail
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
+          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
+          export OIDC_MIGRATION_CONFIRMATION="BACKFILL OIDC SECRET MIGRATION"
+          counts_file="${RUNNER_TEMP}/oidc-secret-backfill-counts.json"
+          test ! -e "${counts_file}"
+          bun tools/database/oidc-secret-migration.ts \
+            --operation backfill \
+            --counts-output "${counts_file}"
+
+      - name: Verify complete OIDC ciphertext backfill
+        if: ${{ always() && steps.oidc_backfill.outcome != 'skipped' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          jq -e '
+            .version == 1 and
+            .operation == "backfill" and
+            .status == "completed" and
+            (.counts | type == "object") and
+            (.counts | keys) == [
+              "casConflicts",
+              "ciphertextInvalid",
+              "ciphertextOnly",
+              "ciphertextPresent",
+              "ciphertextValid",
+              "configInvalid",
+              "dualWritten",
+              "missingSecretMaterial",
+              "plaintextOnly",
+              "plaintextPresent",
+              "scanned",
+              "secretMismatch",
+              "writesApplied"
+            ] and
+            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
+            .counts.plaintextOnly == 0 and
+            .counts.ciphertextInvalid == 0 and
+            .counts.configInvalid == 0 and
+            .counts.missingSecretMaterial == 0 and
+            .counts.secretMismatch == 0 and
+            .counts.ciphertextPresent == .counts.scanned and
+            .counts.ciphertextValid == .counts.scanned and
+            (.counts.dualWritten + .counts.ciphertextOnly) == .counts.scanned
+          ' "${RUNNER_TEMP}/oidc-secret-backfill-counts.json" >/dev/null
+
+      - name: Retain counts-only OIDC backfill evidence
+        if: ${{ always() && steps.oidc_backfill.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: oidc-secret-backfill-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/oidc-secret-backfill-counts.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Retain production D1 migration evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-d1-drizzle-${{ github.sha }}-${{ github.run_id }}
           path: |
@@ -878,14 +946,17 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
         run: |
           set -euo pipefail
           test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
           jq -n '{
             CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
+            OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
             STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
           }' \
             > "${secrets_file}"
@@ -917,9 +988,73 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
 
+      - name: Remove plaintext after encrypted OIDC activation
+        id: oidc_cleanup
+        working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
+        run: |
+          set -euo pipefail
+          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
+          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
+          export OIDC_MIGRATION_CONFIRMATION="CLEANUP OIDC SECRET MIGRATION"
+          counts_file="${RUNNER_TEMP}/oidc-secret-cleanup-counts.json"
+          test ! -e "${counts_file}"
+          bun tools/database/oidc-secret-migration.ts \
+            --operation cleanup \
+            --counts-output "${counts_file}"
+
+      - name: Verify OIDC plaintext cleanup
+        if: ${{ always() && steps.oidc_cleanup.outcome != 'skipped' }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          jq -e '
+            .version == 1 and
+            .operation == "cleanup" and
+            .status == "completed" and
+            (.counts | type == "object") and
+            (.counts | keys) == [
+              "casConflicts",
+              "ciphertextInvalid",
+              "ciphertextOnly",
+              "ciphertextPresent",
+              "ciphertextValid",
+              "configInvalid",
+              "dualWritten",
+              "missingSecretMaterial",
+              "plaintextOnly",
+              "plaintextPresent",
+              "scanned",
+              "secretMismatch",
+              "writesApplied"
+            ] and
+            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
+            .counts.plaintextPresent == 0 and
+            .counts.plaintextOnly == 0 and
+            .counts.dualWritten == 0 and
+            .counts.ciphertextInvalid == 0 and
+            .counts.configInvalid == 0 and
+            .counts.missingSecretMaterial == 0 and
+            .counts.secretMismatch == 0 and
+            .counts.ciphertextOnly == .counts.scanned and
+            .counts.ciphertextValid == .counts.scanned
+          ' "${RUNNER_TEMP}/oidc-secret-cleanup-counts.json" >/dev/null
+
+      - name: Retain counts-only OIDC cleanup evidence
+        if: ${{ always() && steps.oidc_cleanup.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: oidc-secret-cleanup-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/oidc-secret-cleanup-counts.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Retain exact web-version activation attempt
         if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
           path: |
@@ -994,7 +1129,7 @@ jobs:
 
       - name: Preserve production guest tools for the workshop builder
         id: production_guest_tools
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-workshop-guest-tools-${{ github.sha }}
           path: ${{ runner.temp }}/production-workshop-guest-tools/

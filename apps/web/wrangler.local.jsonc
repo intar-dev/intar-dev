@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "compatibility_date": "2026-06-24",
+  "compatibility_date": "2026-08-20",
   "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
   "name": "intar-dev-local",
   "main": "src/worker.ts",

@@ -144,8 +144,10 @@ const providerWorkflow = await readFile(
   resolve(root, ".github/workflows/provider-workers.yml"),
   "utf8",
 );
+const pinnedSetupNodeAction =
+  "uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6";
 if (
-  countOccurrences(providerWorkflow, "uses: actions/setup-node@v6") !== 5 ||
+  countOccurrences(providerWorkflow, pinnedSetupNodeAction) !== 5 ||
   countOccurrences(
     providerWorkflow,
     "node-version-file: apps/web/.node-version",
@@ -261,7 +263,7 @@ const providerCapabilitiesJob = websiteDeployWorkflow
   .split("\n  provider-capabilities:\n")[1]
   ?.split("\n  deploy:\n")[0];
 if (
-  !providerCapabilitiesJob?.includes("uses: actions/setup-node@v6") ||
+  !providerCapabilitiesJob?.includes(pinnedSetupNodeAction) ||
   !providerCapabilitiesJob.includes(
     "node-version-file: apps/web/.node-version",
   )

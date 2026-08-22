@@ -66,21 +66,25 @@ describe("Drizzle-generated D1 migrations", () => {
     }
   });
 
-  test("applies the generated baseline to an empty SQLite database", () => {
+  test("applies the generated migration stream to an empty SQLite database", () => {
     const database = new Database(":memory:", { strict: true });
     try {
       database.exec("PRAGMA foreign_keys = ON");
-      const baseline = readFileSync(
-        join(migrationsRoot, "0000_init.sql"),
-        "utf8",
-      );
-      const statements = baseline
-        .split("--> statement-breakpoint")
-        .map((statement) => statement.trim())
-        .filter(Boolean);
-
       database.transaction(() => {
-        for (const statement of statements) database.exec(statement);
+        const journal = readJson<DrizzleJournal>(
+          join(metadataRoot, "_journal.json"),
+        );
+        for (const entry of journal.entries) {
+          const migration = readFileSync(
+            join(migrationsRoot, `${entry.tag}.sql`),
+            "utf8",
+          );
+          const statements = migration
+            .split("--> statement-breakpoint")
+            .map((statement) => statement.trim())
+            .filter(Boolean);
+          for (const statement of statements) database.exec(statement);
+        }
       })();
 
       expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -96,14 +100,16 @@ describe("Drizzle-generated D1 migrations", () => {
     }
   });
 
-  test("reproduces the committed baseline from the typed schema", () => {
+  test("reproduces the committed final schema from the typed schema", () => {
     const journal = readJson<DrizzleJournal>(join(metadataRoot, "_journal.json"));
-    expect(journal.entries).toHaveLength(1);
     expect(journal.entries[0]).toMatchObject({
       idx: 0,
       tag: "0000_init",
       breakpoints: true,
     });
+    expect(journal.entries.length).toBeGreaterThan(0);
+    const finalEntry = journal.entries.at(-1);
+    if (!finalEntry) throw new Error("Drizzle journal has no migrations");
 
     const temporaryRoot = mkdtempSync(join(tmpdir(), "intar-drizzle-generate-"));
     try {
@@ -142,13 +148,12 @@ describe("Drizzle-generated D1 migrations", () => {
       );
 
       expect(generated.status, generated.stderr || generated.stdout).toBe(0);
-      expect(readFileSync(join(temporaryRoot, "0000_init.sql"), "utf8")).toBe(
-        readFileSync(join(migrationsRoot, "0000_init.sql"), "utf8"),
-      );
-
       const committedSnapshot = normalizedSnapshot(
         readJson<Record<string, unknown>>(
-          join(metadataRoot, "0000_snapshot.json"),
+          join(
+            metadataRoot,
+            `${String(finalEntry.idx).padStart(4, "0")}_snapshot.json`,
+          ),
         ),
       );
       const regeneratedSnapshot = normalizedSnapshot(
@@ -161,9 +166,12 @@ describe("Drizzle-generated D1 migrations", () => {
       const regeneratedJournal = readJson<DrizzleJournal>(
         join(temporaryRoot, "meta/_journal.json"),
       );
-      expect(normalizedJournal(regeneratedJournal)).toEqual(
-        normalizedJournal(journal),
-      );
+      expect(regeneratedJournal.entries).toHaveLength(1);
+      expect(regeneratedJournal.entries[0]).toMatchObject({
+        idx: 0,
+        tag: "0000_init",
+        breakpoints: true,
+      });
     } finally {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }
@@ -177,12 +185,9 @@ function readJson<T>(path: string): T {
 function normalizedSnapshot(
   snapshot: Record<string, unknown>,
 ): Record<string, unknown> {
-  return { ...snapshot, id: "<generated>" };
-}
-
-function normalizedJournal(journal: DrizzleJournal): DrizzleJournal {
   return {
-    ...journal,
-    entries: journal.entries.map((entry) => ({ ...entry, when: 0 })),
+    ...snapshot,
+    id: "<generated>",
+    prevId: "<generated>",
   };
 }

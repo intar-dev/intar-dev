@@ -102,8 +102,8 @@ an active GitHub beta user connects that provider explicitly at
 to the stable provider subject and dynamically require active beta access.
 Beta invitations can only be claimed with GitHub; an existing SSO-only identity
 cannot use an invite to recover or link a GitHub identity. Already-active users
-can still explicitly connect OIDC, and already-linked active OIDC or SAML
-identities can sign in normally.
+can still explicitly connect OIDC, and already-linked active OIDC identities
+can sign in normally. SAML routes are disabled; organization SSO is OIDC-only.
 
 For Rawkode Academy, use issuer `https://id.rawkode.academy`. Discovery maps
 that issuer to `/auth/oauth2/authorize`, `/auth/oauth2/token`,
@@ -126,6 +126,8 @@ The control plane expects these Worker secrets/vars:
 - `AGENT_JWT_SECRET` (a randomly generated secret of at least 32 UTF-8 bytes)
 - `BETTER_AUTH_SECRET`
 - `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
+- `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` (unpadded base64url for exactly 32 random
+  bytes; it encrypts organization OIDC client secrets at rest)
 - `REGISTRY_PUBLISH_TOKEN`
 - `SCENARIO_RUN_KEY_ENCRYPTION_SECRET`
 - `STARGATE_ADMIN_AUTH_SECRET`

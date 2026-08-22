@@ -2,7 +2,7 @@
   "$schema": "../../../node_modules/wrangler/config-schema.json",
   "name": "intar-provider-capability-probe",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-09",
+  "compatibility_date": "2026-08-20",
   "workers_dev": false,
   "preview_urls": false,
   "services": [

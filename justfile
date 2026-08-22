@@ -50,7 +50,8 @@ verify: hydrate
     cargo nextest run --workspace
 
 security:
-    cargo audit
+    bun audit --audit-level=moderate
+    cargo audit --deny warnings
 
 generate-contracts:
     cargo run -p intar-contracts-typegen

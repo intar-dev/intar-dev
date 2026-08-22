@@ -52,27 +52,27 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@v9
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --profile minimal
-          rustup component add rustfmt clippy
-          rustup target add x86_64-unknown-linux-musl
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup component add --toolchain 1.97.0 rustfmt clippy
+          rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
           rustup show active-toolchain
 
       - name: Set up Namespace caches
-        uses: namespacelabs/nscloud-cache-action@v1
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           cache: rust
 
       - name: Install just and cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: just,cargo-nextest
+          tool: just@1.58.0,cargo-nextest@0.9.143
 
       - name: Install Bun for pinned workshop import checks
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
 
@@ -107,22 +107,22 @@ jobs:
           git diff --exit-code -- apps/web/src/generated/scenario-authoring-config.ts
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
 
       - name: Audit dependencies
-        run: cargo audit
+        run: cargo audit --deny warnings
 
       - name: Install Zig and cargo-zigbuild
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.0
 
       - name: Install Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: latest
+          version: 0.16.0
 
       - name: Compile kino guest
         run: just build-kino-guest

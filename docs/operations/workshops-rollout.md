@@ -114,14 +114,23 @@ web/R2 deployment, and protected Flagship targeting:
 | `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`     | GCP Worker deployment only                                         |
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`   | route-less capability probe only                                   |
 | `CLOUDFLARE_API_TOKEN`                  | D1 migrations, web/R2 deployment, and protected Flagship targeting |
+| `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | exact web-version activation and maintenance checks               |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`    | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`        | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                   | active GCP Worker deployment only; absent in explicit dormant mode |
+| `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1`     | web activation and protected OIDC ciphertext migration only        |
 | `STARGATE_EGRESS_IPV4_CIDRS`            | web runtime configuration only                                     |
 
 Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
 provider Worker envelope-encrypts them.
+
+`OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
+random bytes. The production web workflow applies the additive D1 column,
+backfills ciphertext while the old Worker still has its plaintext data,
+activates the encrypted-only Worker, and only then removes every plaintext
+`clientSecret`. A failed backfill leaves the old Worker and plaintext intact;
+after cleanup, do not roll back to a Worker that predates this cutover.
 
 Keep these protected runtime variables current:
 

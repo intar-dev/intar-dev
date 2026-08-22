@@ -2,7 +2,7 @@
   "$schema": "../../../../../node_modules/wrangler/config-schema.json",
   "name": "intar-provider-hetzner",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-09",
+  "compatibility_date": "2026-08-20",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,

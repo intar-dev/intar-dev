@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout exact main revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
@@ -165,11 +165,11 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --profile minimal
+          rustup toolchain install 1.97.0 --profile minimal
           rustup show active-toolchain
 
       - name: Set up Rust cache
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -269,7 +269,7 @@ jobs:
             ' "${CLEAN_BASE_PATH}/proof.json" >/dev/null
 
       - name: Upload clean-base evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-workshop-clean-base-${{ github.sha }}
           path: ${{ steps.clean_base.outputs.path }}/

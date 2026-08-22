@@ -48,7 +48,7 @@ function runAmbiguousActivation(
   writeFileSync(restoreCount, "0");
   writeFileSync(
     secrets,
-    '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
+    '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1":"test-oidc-config-encryption-key","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
   );
   writeFileSync(
     config,
@@ -100,8 +100,8 @@ if [ "$1 $2" = "deployments status" ]; then
 fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
-  if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; db="$CURRENT_DATABASE_ID"; else maintenance="$TARGET_MAINTENANCE"; db="$TARGET_DATABASE_ID"; fi
-  jq -cn --arg id "$version" --arg db "$db" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"}] + (if $maintenance == "true" then [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
+  if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; db="$CURRENT_DATABASE_ID"; oidc_secret='[]'; else maintenance="$TARGET_MAINTENANCE"; db="$TARGET_DATABASE_ID"; oidc_secret='[{"type":"secret_text","name":"OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"}]'; fi
+  jq -cn --arg id "$version" --arg db "$db" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" --argjson oidc_secret "$oidc_secret" '{id:$id,resources:{bindings:([{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"}] + $oidc_secret + (if $maintenance == "true" then [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"on"}] else [{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:"off"}] end)),script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1 $2" = "versions upload" ]; then
@@ -264,6 +264,7 @@ describe("exact web-version activation", () => {
     expect(script).toContain('--secrets-file "${secrets_file}"');
     expect(script).toContain('.name == "STARGATE_EGRESS_IPV4_CIDRS"');
     expect(script).toContain('.name == "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"');
+    expect(script).toContain('.name == "OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"');
     expect(script).toContain("runtime_secret_binding_proven: true");
   });
 
