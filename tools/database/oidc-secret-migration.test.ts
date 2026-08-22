@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   D1Statement,
   D1StatementResult,
@@ -307,12 +310,16 @@ describe("OIDC secret migration", () => {
       operation: "plan",
       encryptionKey: await testKey(),
     });
-    const path = `/private/tmp/oidc-secret-migration-${crypto.randomUUID()}.json`;
-    writeOidcMigrationEvidence(path, evidence);
-    const saved = await Bun.file(path).text();
-    expect(saved).toBe(`${JSON.stringify(evidence)}\n`);
-    for (const forbidden of [secret, "row-evidence", "provider-evidence", "org-evidence"]) {
-      expect(saved).not.toContain(forbidden);
+    const path = join(tmpdir(), `oidc-secret-migration-${crypto.randomUUID()}.json`);
+    try {
+      writeOidcMigrationEvidence(path, evidence);
+      const saved = await Bun.file(path).text();
+      expect(saved).toBe(`${JSON.stringify(evidence)}\n`);
+      for (const forbidden of [secret, "row-evidence", "provider-evidence", "org-evidence"]) {
+        expect(saved).not.toContain(forbidden);
+      }
+    } finally {
+      rmSync(path, { force: true });
     }
   });
 });
