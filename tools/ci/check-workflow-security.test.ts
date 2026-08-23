@@ -13,7 +13,18 @@ afterEach(() => {
   }
 });
 
-function check(source: string, compatibilityDate = "2026-08-20"): string[] {
+function check(
+  source: string,
+  compatibilityDate = "2026-08-20",
+  staticHeaders = `/*
+  Strict-Transport-Security: max-age=31536000
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()
+  Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'
+`,
+): string[] {
   const root = mkdtempSync(join(tmpdir(), "intar-workflow-security-"));
   roots.push(root);
   const workflows = join(root, ".github", "workflows");
@@ -31,13 +42,7 @@ function check(source: string, compatibilityDate = "2026-08-20"): string[] {
   ]) {
     const target = join(root, path);
     mkdirSync(join(target, ".."), { recursive: true });
-    writeFileSync(
-      target,
-      path === "apps/web/wrangler.jsonc" ||
-        path === "apps/web/wrangler.local.jsonc"
-        ? `{ "compatibility_date": "${compatibilityDate}", "assets": { "run_worker_first": true } }\n`
-        : `{ "compatibility_date": "${compatibilityDate}" }\n`,
-    );
+    writeFileSync(target, `{ "compatibility_date": "${compatibilityDate}" }\n`);
   }
   const vitestConfig = join(root, "apps/web/vitest.workers.config.ts");
   mkdirSync(join(vitestConfig, ".."), { recursive: true });
@@ -45,6 +50,9 @@ function check(source: string, compatibilityDate = "2026-08-20"): string[] {
     vitestConfig,
     `export default { compatibilityDate: "${compatibilityDate}" };\n`,
   );
+  const staticHeadersPath = join(root, "apps/web/public/_headers");
+  mkdirSync(join(staticHeadersPath, ".."), { recursive: true });
+  writeFileSync(staticHeadersPath, staticHeaders);
   return checkWorkflowSecurity(root);
 }
 
@@ -200,5 +208,11 @@ jobs:
         /apt installs must pin every package with package=version/gu,
       ),
     ).toHaveLength(1);
+  });
+
+  it("rejects static asset security-header drift", () => {
+    expect(
+      check("on: workflow_dispatch\n", "2026-08-20", "/*\n").join("\n"),
+    ).toContain("apps/web/public/_headers: missing");
   });
 });

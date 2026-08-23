@@ -409,7 +409,13 @@ describe("Drizzle production deployment workflow", () => {
     expect(
       deployWorkflow.match(/^\s+oidc_canary_source_run_id:/gmu),
     ).toHaveLength(2);
-    expect(deployWorkflow).toContain(".assets.run_worker_first == true");
+    expect(deployWorkflow).toContain('.assets.run_worker_first == ["/api/*"]');
+    expect(deployWorkflow).toContain(
+      'static_headers="${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"',
+    );
+    expect(deployWorkflow).toContain(
+      "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+    );
     expect(deployWorkflow).not.toContain("wrangler d1 migrations");
   });
 

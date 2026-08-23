@@ -162,14 +162,30 @@ export function checkWorkflowSecurity(repositoryRoot: string): string[] {
         `${relativePath}: compatibility date must be ${WORKER_COMPATIBILITY_DATE}`,
       );
     }
-    if (
-      (relativePath === "apps/web/wrangler.jsonc" ||
-        relativePath === "apps/web/wrangler.local.jsonc") &&
-      !source.includes('"run_worker_first": true')
-    ) {
-      violations.push(
-        `${relativePath}: static assets must run through the Worker first`,
-      );
+  }
+  const staticHeadersPath = "apps/web/public/_headers";
+  let staticHeaders: string;
+  try {
+    staticHeaders = readFileSync(
+      resolve(repositoryRoot, staticHeadersPath),
+      "utf8",
+    );
+  } catch {
+    violations.push(
+      `${staticHeadersPath}: static asset security headers are missing`,
+    );
+    staticHeaders = "";
+  }
+  for (const header of [
+    "Strict-Transport-Security: max-age=31536000",
+    "X-Frame-Options: DENY",
+    "X-Content-Type-Options: nosniff",
+    "Referrer-Policy: no-referrer",
+    "Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()",
+    "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+  ]) {
+    if (!staticHeaders.includes(header)) {
+      violations.push(`${staticHeadersPath}: missing ${header}`);
     }
   }
   return violations;

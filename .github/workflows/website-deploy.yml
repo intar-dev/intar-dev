@@ -509,8 +509,20 @@ jobs:
               $databases[0].database_name == $database_name and
               ($sessions | length) == 1 and
               $sessions[0].id == $session_namespace_id and
-              .assets.run_worker_first == true
+              .assets.run_worker_first == ["/api/*"]
             ' "${config}" >/dev/null
+
+          static_headers="${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
+          test -f "${static_headers}"
+          for required_header in \
+            'Strict-Transport-Security: max-age=31536000' \
+            'X-Frame-Options: DENY' \
+            'X-Content-Type-Options: nosniff' \
+            'Referrer-Policy: no-referrer' \
+            'Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()' \
+            "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'"; do
+            grep -F "${required_header}" "${static_headers}" >/dev/null
+          done
 
           {
             printf 'DATABASE_ID=%s\n' "${database_id}"
