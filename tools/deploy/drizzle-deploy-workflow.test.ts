@@ -96,6 +96,15 @@ describe("Drizzle production deployment workflow", () => {
     expect(maintenanceConfigStep).toContain(
       '.vars.CONTROL_PLANE_MAINTENANCE = "on"',
     );
+    expect(maintenanceConfigStep).toContain(
+      'deployment_config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"',
+    );
+    expect(maintenanceConfigStep).toContain(
+      'maintenance_config="${deployment_config_dir}/wrangler-maintenance-fence.json"',
+    );
+    expect(maintenanceConfigStep).not.toContain(
+      "${RUNNER_TEMP}/website-maintenance-fence-wrangler.json",
+    );
     expect(maintenanceConfigStep).toContain("MAINTENANCE_DEPLOYMENT_CONFIG");
     expect(maintenanceConfigStep).toContain(
       '.vars.CONTROL_PLANE_MAINTENANCE == "on"',

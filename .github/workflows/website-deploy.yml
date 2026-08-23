@@ -678,7 +678,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          maintenance_config="${RUNNER_TEMP}/website-maintenance-fence-wrangler.json"
+          deployment_config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
+          maintenance_config="${deployment_config_dir}/wrangler-maintenance-fence.json"
           test ! -e "${maintenance_config}"
           jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
             "${DEPLOYMENT_CONFIG}" > "${maintenance_config}"
@@ -1236,7 +1237,7 @@ jobs:
           retention-days: 90
 
       - name: Retain production D1 migration evidence
-        if: ${{ always() }}
+        if: ${{ always() && steps.maintenance_fence_reproof.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: production-d1-drizzle-${{ github.sha }}-${{ github.run_id }}
