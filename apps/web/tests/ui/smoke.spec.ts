@@ -66,7 +66,7 @@ test("beta invite fragment is scrubbed before the claim is inspected", async ({
   expect(ui.server.requests.join("\n")).not.toContain("intar_beta_");
 });
 
-test("admin can copy a new beta link again before closing it", async ({
+test("admin can copy a new beta link again from the list", async ({
   page,
   ui,
 }) => {
@@ -97,7 +97,7 @@ test("admin can copy a new beta link again before closing it", async ({
     .click();
 
   const oneTimeDialog = page.getByRole("dialog", {
-    name: "Copy this link now",
+    name: "Copy this link",
   });
   const linkInput = oneTimeDialog.getByLabel("Beta invite link");
   await expect(linkInput).toHaveValue(/\/join#invite=intar_beta_[A-Za-z0-9_-]+$/);
@@ -105,11 +105,19 @@ test("admin can copy a new beta link again before closing it", async ({
 
   await oneTimeDialog.getByRole("button", { name: "Copy link" }).click();
   await expect(oneTimeDialog.getByRole("status")).toHaveText("Link copied.");
-  const copyAgainButton = oneTimeDialog.getByRole("button", {
-    name: "Copy again",
-  });
-  await expect(copyAgainButton).toBeVisible();
-  await copyAgainButton.click();
+  await oneTimeDialog.getByRole("button", { name: "Close" }).click();
+
+  await expect(oneTimeDialog).toBeHidden();
+  const inviteRow = page
+    .getByRole("row")
+    .filter({ hasText: "September workshop cohort" });
+  const listCopyButton = inviteRow.getByRole("button", { name: "Copy link" });
+  await expect(listCopyButton).toBeVisible();
+  await listCopyButton.click();
+  await listCopyButton.click();
+  await expect(page.getByRole("status")).toHaveText(
+    "intar_beta_CCCCCCCC… link copied.",
+  );
   expect(
     await page.evaluate(
       () =>
@@ -119,13 +127,7 @@ test("admin can copy a new beta link again before closing it", async ({
           }
         ).__testClipboardWrites,
     ),
-  ).toEqual([rawLink, rawLink]);
-
-  await oneTimeDialog
-    .getByRole("button", { name: "Close and forget link" })
-    .click();
-
-  await expect(oneTimeDialog).toBeHidden();
+  ).toEqual([rawLink, rawLink, rawLink]);
   expect(
     await page.locator("input").evaluateAll((inputs) =>
       inputs.some((input) => (input as HTMLInputElement).value === rawLink),

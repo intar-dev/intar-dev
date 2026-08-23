@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
+  Check,
   Clipboard,
   KeyRound,
   RefreshCw,
@@ -97,6 +98,12 @@ export function BetaAccessPanel() {
     useState<BetaUserAction | null>(null);
   const [reason, setReason] = useState("");
   const [removalNotice, setRemovalNotice] = useState<string | null>(null);
+  const [inviteLinks, setInviteLinks] = useState<Record<string, string>>({});
+  const [copyFeedback, setCopyFeedback] = useState<{
+    inviteId: string;
+    message: string;
+    tone: "success" | "error";
+  } | null>(null);
 
   const access = useQuery({
     queryKey: ["admin", "beta-access"],
@@ -122,6 +129,11 @@ export function BetaAccessPanel() {
     onSuccess: async (result) => {
       setCreateOpen(false);
       setLabel("");
+      setInviteLinks((current) => ({
+        ...current,
+        [result.invite.id]: result.inviteUrl,
+      }));
+      setCopyFeedback(null);
       setOneTimeInvite(result);
       await refreshAccess();
     },
@@ -136,9 +148,16 @@ export function BetaAccessPanel() {
           body: JSON.stringify({ expectedVersion: invite.version }),
         },
       ),
-    onSuccess: async (result) => {
+    onSuccess: async (result, replacedInvite) => {
       setInviteAction(null);
       setReason("");
+      setInviteLinks((current) => {
+        const next = { ...current };
+        delete next[replacedInvite.id];
+        next[result.invite.id] = result.inviteUrl;
+        return next;
+      });
+      setCopyFeedback(null);
       setOneTimeInvite(result);
       await refreshAccess();
     },
@@ -156,9 +175,15 @@ export function BetaAccessPanel() {
           }),
         },
       ),
-    onSuccess: async () => {
+    onSuccess: async (_result, { invite }) => {
       setInviteAction(null);
       setReason("");
+      setInviteLinks((current) => {
+        const next = { ...current };
+        delete next[invite.id];
+        return next;
+      });
+      setCopyFeedback(null);
       await refreshAccess();
     },
   });
@@ -176,6 +201,12 @@ export function BetaAccessPanel() {
     onSuccess: async (_result, invite) => {
       setInviteAction(null);
       setReason("");
+      setInviteLinks((current) => {
+        const next = { ...current };
+        delete next[invite.id];
+        return next;
+      });
+      setCopyFeedback(null);
       setRemovalNotice(
         `${invite.codePrefix}… was removed from this list. Its audit history was retained.`,
       );
@@ -234,12 +265,32 @@ export function BetaAccessPanel() {
     removeInvite.isPending ||
     updateBetaUser.isPending;
 
+  const copyInviteLink = async (invite: AdminInvite) => {
+    const inviteUrl = inviteLinks[invite.id];
+    if (!inviteUrl) return;
+
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setCopyFeedback({
+        inviteId: invite.id,
+        message: `${invite.codePrefix}… link copied.`,
+        tone: "success",
+      });
+    } catch {
+      setCopyFeedback({
+        inviteId: invite.id,
+        message: `${invite.codePrefix}… link could not be copied.`,
+        tone: "error",
+      });
+    }
+  };
+
   return (
     <div className="space-y-4">
       <Section
         density="compact"
         title="Beta invite codes"
-        description="New single-use bearer links expire after 14 days. Only the safe code prefix remains visible after creation."
+        description="New single-use bearer links expire after 14 days. Links created on this page remain copyable until you leave or refresh; the server stores only a safe code prefix."
         actions={
           <Button
             ref={createInviteButton}
@@ -311,10 +362,26 @@ export function BetaAccessPanel() {
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="flex justify-end gap-1.5">
+                    <div className="flex flex-wrap justify-end gap-1.5">
                       {invite.state === "pending" ||
                       invite.state === "leased" ? (
                         <>
+                          {inviteLinks[invite.id] ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={actionPending}
+                              onClick={() => void copyInviteLink(invite)}
+                            >
+                              {copyFeedback?.inviteId === invite.id &&
+                              copyFeedback.tone === "success" ? (
+                                <Check />
+                              ) : (
+                                <Clipboard />
+                              )}
+                              Copy link
+                            </Button>
+                          ) : null}
                           <Button
                             size="sm"
                             variant="outline"
@@ -369,6 +436,11 @@ export function BetaAccessPanel() {
             description="Create a code when you are ready to admit one beta user."
           />
         )}
+        {copyFeedback ? (
+          <InlineFeedback tone={copyFeedback.tone} className="mt-3">
+            {copyFeedback.message}
+          </InlineFeedback>
+        ) : null}
       </Section>
 
       <Section
@@ -636,10 +708,11 @@ function OneTimeInviteDialog({
     >
       <DialogContent showCloseButton={false} className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Copy this link now</DialogTitle>
+          <DialogTitle>Copy this link</DialogTitle>
           <DialogDescription>
-            The raw code is shown once and cannot be recovered. Closing this
-            window permanently removes it from the admin screen.
+            The raw code is not stored on the server. After you close this
+            window, you can copy the link from its list row until you leave or
+            refresh this page.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -669,7 +742,7 @@ function OneTimeInviteDialog({
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={close}>
-            Close and forget link
+            Close
           </Button>
           <Button
             onClick={async () => {
@@ -684,8 +757,8 @@ function OneTimeInviteDialog({
               }
             }}
           >
-            <Clipboard />
-            {copied ? "Copy again" : "Copy link"}
+            {copied ? <Check /> : <Clipboard />}
+            {copied ? "Copied" : "Copy link"}
           </Button>
         </DialogFooter>
       </DialogContent>
