@@ -121,7 +121,7 @@ test.describe("focused visual states", () => {
   test("beta invite ready", async ({ page, ui }) => {
     await ui.open({ ...routeCase("join-beta"), theme: "light" });
     await expect(
-      page.getByRole("heading", { name: "Claim your beta invite" }),
+      page.getByRole("heading", { name: "Join the intar.dev beta" }),
     ).toBeVisible();
     await expectRouteScreenshot(page, "join-beta-ready-light-desktop");
   });
@@ -214,12 +214,14 @@ test.describe("focused visual states", () => {
     await ui.open({ ...routeCase("admin-people"), theme: "light" });
     const inviteRow = page
       .getByRole("row")
-      .filter({ hasText: "August workshop cohort" });
+      .filter({ hasText: "intar_beta_AAAAAAAA" });
     await inviteRow.getByRole("button", { name: "Revoke" }).click();
     const dialog = page.getByRole("dialog", { name: "Revoke this invite?" });
-    await dialog.getByLabel("Revocation reason code").fill("link_compromised");
     await dialog.getByRole("button", { name: "Revoke invite" }).click();
-    await expect(inviteRow.getByText("Revoked", { exact: true })).toBeVisible();
+    await page.locator("details > summary").filter({ hasText: "History" }).click();
+    await expect(
+      page.getByRole("row").filter({ hasText: "intar_beta_AAAAAAAA" }),
+    ).toContainText("Revoked");
     await expectRouteScreenshot(page, "people-invite-revoked-light-desktop");
   });
 

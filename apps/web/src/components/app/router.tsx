@@ -347,7 +347,7 @@ const adminPeopleRoute = createRoute({
   head: () =>
     routeHead(
       "People and access",
-      "Manage beta invite codes, beta users, roles, and platform organizations.",
+      "Manage beta invite links, beta users, roles, and platform organizations.",
     ),
   beforeLoad: requireAdminRoute,
   component: lazyRouteComponent(

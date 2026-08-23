@@ -217,6 +217,9 @@ bun "${repository_root}/tools/deploy/worker-version.ts" \
   "${database_id}" "${session_namespace_id}" "${deployed_version_id}" >/dev/null
 jq -e '
   ([.resources.bindings[] | select(
+    .type == "secret_text" and .name == "ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1"
+  )] | length) == 1 and
+  ([.resources.bindings[] | select(
     .type == "secret_text" and .name == "STARGATE_EGRESS_IPV4_CIDRS"
   )] | length) == 1 and
   ([.resources.bindings[] | select(

@@ -119,6 +119,7 @@ describe("automatic web deployment workflow", () => {
 
   it("passes only web runtime secrets into the deployed Worker", () => {
     for (const required of [
+      "ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1",
       "CLOUDFLARE_ACCOUNT_ID",
       "CLOUDFLARE_API_TOKEN",
       "CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET",
@@ -130,6 +131,12 @@ describe("automatic web deployment workflow", () => {
     expect(deployWorkflow).not.toContain("HETZNER_PROVIDER_CREDENTIAL_KEK_V1");
     expect(deployWorkflow).not.toContain("GCP_PROVIDER_CREDENTIAL_KEK_V1");
     expect(deployWorkflow).not.toContain("GCP_CATALOG_API_KEY");
+    expect(deployWorkflow).toContain(
+      '[[ "${ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1}" =~ ^[A-Za-z0-9_-]{43}$ ]]',
+    );
+    expect(deployWorkflow).toContain(
+      'decoded.toString("base64url") !== value',
+    );
   });
 });
 

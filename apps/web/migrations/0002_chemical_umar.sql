@@ -1,0 +1,1 @@
+ALTER TABLE `access_invite_codes` ADD `token_ciphertext` text;

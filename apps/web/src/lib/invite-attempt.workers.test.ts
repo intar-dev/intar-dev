@@ -3,7 +3,6 @@ import {
   newInviteAttempt,
   signInviteAttempt,
   verifyInviteAttempt,
-  withInviteLease,
 } from "./invite-attempt";
 
 const secret = "test-secret-that-is-at-least-thirty-two-bytes-long";
@@ -24,20 +23,5 @@ describe("invite attempt cookie", () => {
     await expect(
       verifyInviteAttempt(`${forgedPayload}.${signature}`, secret),
     ).resolves.toBeNull();
-  });
-
-  it("binds a lease without replacing the attempt identity", () => {
-    const attempt = newInviteAttempt("invite_1", 1_000);
-    const leased = withInviteLease(attempt, {
-      leaseId: "lease_1",
-      leaseExpiresAt: 700_000,
-    });
-
-    expect(leased).toMatchObject({
-      attemptId: attempt.attemptId,
-      inviteId: "invite_1",
-      leaseId: "lease_1",
-      leaseExpiresAt: 700_000,
-    });
   });
 });

@@ -1,13 +1,14 @@
 import { drizzle } from "drizzle-orm/d1";
-import { account, user } from "@/db/schema";
+import { accessAllowlist, accessInviteCodes, account, user } from "@/db/schema";
 import {
-  confirmAccessInvite,
-  createAccessInvite,
-  leaseAccessInvite,
-} from "@/lib/access-invites";
+  createBetaInvite,
+  redeemBetaInvite,
+} from "@/lib/beta-invites";
 import { createAppId } from "@/lib/id";
 
 export const FIXTURE_BETA_ADMIN_ID = "fixture-beta-admin";
+export const FIXTURE_INVITE_ENCRYPTION_KEY =
+  "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
 export async function grantFixtureBetaAccess(params: {
   d1: D1Database;
@@ -34,26 +35,20 @@ export async function grantFixtureBetaAccess(params: {
     now,
   });
   const githubUsername = params.githubUsername ?? params.userId;
-  const invite = await createAccessInvite({
+  const invite = await createBetaInvite({
     d1: params.d1,
-    kind: "standard",
     actorUserId: issuerUserId,
-    label: `fixture-${params.userId}`,
+    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
     now,
   });
-  const lease = await leaseAccessInvite({
+  await redeemBetaInvite({
     d1: params.d1,
     inviteId: invite.id,
-    now: now + 1,
-  });
-  await confirmAccessInvite({
-    d1: params.d1,
-    inviteId: invite.id,
-    leaseId: lease.leaseId,
+    attemptId: `fixture-attempt-${invite.id}`,
     userId: params.userId,
     githubAccountId,
     githubUsername,
-    now: now + 2,
+    now: now + 1,
   });
 }
 
@@ -100,25 +95,36 @@ export async function ensureFixtureBetaAdmin(
     accountId: "fixture-github-account-beta-admin",
     now,
   });
-  const invite = await createAccessInvite({
-    d1,
+  const bootstrapInviteId = "fixture-bootstrap-invite";
+  const leaseId = "fixture-bootstrap-lease";
+  await db.insert(accessInviteCodes).values({
+    id: bootstrapInviteId,
+    codeHash: "f".repeat(64),
+    codePrefix: "intar_beta_fixture",
     kind: "bootstrap_admin",
-    label: "fixture-bootstrap-admin",
-    now,
+    state: "redeemed",
+    createdAt: now,
+    expiresAt: now + 172_800_000,
+    leaseId,
+    leasedAt: now,
+    leaseExpiresAt: now + 600_000,
+    redeemerUserId: FIXTURE_BETA_ADMIN_ID,
+    redeemerGithubAccountId: githubAccountId,
+    redeemerGithubUsername: FIXTURE_BETA_ADMIN_ID,
+    redeemedAt: now,
+    version: 2,
+    updatedAt: now,
   });
-  const lease = await leaseAccessInvite({
-    d1,
-    inviteId: invite.id,
-    now: now + 1,
-  });
-  await confirmAccessInvite({
-    d1,
-    inviteId: invite.id,
-    leaseId: lease.leaseId,
+  await db.insert(accessAllowlist).values({
     userId: FIXTURE_BETA_ADMIN_ID,
+    state: "active",
     githubAccountId,
     githubUsername: FIXTURE_BETA_ADMIN_ID,
-    now: now + 2,
+    sourceInviteId: bootstrapInviteId,
+    sourceLeaseId: leaseId,
+    grantedBy: null,
+    grantReason: "bootstrap_admin",
+    grantedAt: now,
   });
   return FIXTURE_BETA_ADMIN_ID;
 }

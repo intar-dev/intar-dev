@@ -100,6 +100,158 @@ describe("Drizzle-generated D1 migrations", () => {
     }
   });
 
+  test("revokes every live pre-cutover invite and retains an audit event", () => {
+    const database = new Database(":memory:", { strict: true });
+    try {
+      database.exec("PRAGMA foreign_keys = ON");
+      const journal = readJson<DrizzleJournal>(
+        join(metadataRoot, "_journal.json"),
+      );
+      for (const entry of journal.entries.slice(0, 2)) {
+        applyMigration(database, entry.tag);
+      }
+
+      const createdAt = 1_000;
+      const expiresAt = createdAt + 1_209_600_000;
+      database
+        .query(
+          `INSERT INTO access_invite_codes (
+            id, code_hash, code_prefix, kind, state, created_by, created_at,
+            expires_at, version, updated_at
+          ) VALUES (?, ?, ?, 'standard', 'pending', ?, ?, ?, 1, ?)`,
+        )
+        .run(
+          "legacy-pending",
+          "a".repeat(64),
+          "legacy-A",
+          "admin-test",
+          createdAt,
+          expiresAt,
+          createdAt,
+        );
+      database
+        .query(
+          `INSERT INTO access_invite_codes (
+            id, code_hash, code_prefix, kind, state, created_by, created_at,
+            expires_at, lease_id, leased_at, lease_expires_at, version,
+            updated_at
+          ) VALUES (?, ?, ?, 'standard', 'leased', ?, ?, ?, ?, ?, ?, 1, ?)`,
+        )
+        .run(
+          "legacy-leased",
+          "b".repeat(64),
+          "legacy-B",
+          "admin-test",
+          createdAt,
+          expiresAt,
+          "legacy-lease",
+          createdAt + 1_000,
+          createdAt + 601_000,
+          createdAt + 1_000,
+        );
+      database
+        .query(
+          `INSERT INTO access_invite_codes (
+            id, code_hash, code_prefix, kind, state, created_by, created_at,
+            expires_at, version, updated_at
+          ) VALUES (?, ?, ?, 'bootstrap_admin', 'pending', null, ?, ?, 1, ?)`,
+        )
+        .run(
+          "legacy-bootstrap",
+          "c".repeat(64),
+          "legacy-C",
+          createdAt,
+          expiresAt,
+          createdAt,
+        );
+
+      for (const entry of journal.entries.slice(2)) {
+        applyMigration(database, entry.tag);
+      }
+
+      expect(
+        database
+          .query(
+            `SELECT
+              id,
+              state,
+              lease_id AS leaseId,
+              revoked_by AS revokedBy,
+              revocation_reason AS reason,
+              revoked_at IS NOT NULL AS hasRevokedAt,
+              version,
+              token_ciphertext AS tokenCiphertext,
+              claim_expires_at AS claimExpiresAt
+            FROM access_invite_codes
+            ORDER BY id`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "legacy-bootstrap",
+          state: "revoked",
+          leaseId: null,
+          revokedBy: "system:invite-cutover",
+          reason: "security_simplification_cutover",
+          hasRevokedAt: 1,
+          version: 2,
+          tokenCiphertext: null,
+          claimExpiresAt: null,
+        },
+        {
+          id: "legacy-leased",
+          state: "revoked",
+          leaseId: null,
+          revokedBy: "admin-test",
+          reason: "security_simplification_cutover",
+          hasRevokedAt: 1,
+          version: 2,
+          tokenCiphertext: null,
+          claimExpiresAt: null,
+        },
+        {
+          id: "legacy-pending",
+          state: "revoked",
+          leaseId: null,
+          revokedBy: "admin-test",
+          reason: "security_simplification_cutover",
+          hasRevokedAt: 1,
+          version: 2,
+          tokenCiphertext: null,
+          claimExpiresAt: null,
+        },
+      ]);
+      expect(
+        database
+          .query(
+            `SELECT invite_id AS inviteId, event_type AS eventType, reason
+             FROM access_events
+             ORDER BY invite_id`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          inviteId: "legacy-bootstrap",
+          eventType: "invite.revoked",
+          reason: "security_simplification_cutover",
+        },
+        {
+          inviteId: "legacy-leased",
+          eventType: "invite.revoked",
+          reason: "security_simplification_cutover",
+        },
+        {
+          inviteId: "legacy-pending",
+          eventType: "invite.revoked",
+          reason: "security_simplification_cutover",
+        },
+      ]);
+      expect(database.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      database.close(false);
+    }
+  });
+
   test("reproduces the committed final schema from the typed schema", () => {
     const journal = readJson<DrizzleJournal>(join(metadataRoot, "_journal.json"));
     expect(journal.entries[0]).toMatchObject({
@@ -180,6 +332,16 @@ describe("Drizzle-generated D1 migrations", () => {
 
 function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, "utf8")) as T;
+}
+
+function applyMigration(database: Database, tag: string): void {
+  const migration = readFileSync(join(migrationsRoot, `${tag}.sql`), "utf8");
+  for (const statement of migration
+    .split("--> statement-breakpoint")
+    .map((entry) => entry.trim())
+    .filter(Boolean)) {
+    database.exec(statement);
+  }
 }
 
 function normalizedSnapshot(

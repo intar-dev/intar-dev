@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Ban,
   CheckCircle2,
   CircleAlert,
   CircleUserRound,
-  Clock3,
   KeyRound,
   LoaderCircle,
   LogOut,
@@ -17,10 +15,9 @@ import { resolveGithubClaimRedirect } from "./sign-in-helpers";
 
 type ClaimState =
   | "ready"
-  | "leased"
   | "authenticated"
   | "active"
-  | "blocked"
+  | "github_required"
   | "expired"
   | "redeemed"
   | "revoked"
@@ -33,14 +30,16 @@ interface CurrentClaim {
     githubUsername: string;
   };
   expiresAt?: number;
-  leaseExpiresAt?: number;
-  ownsLease?: boolean;
 }
 
 interface StartClaimResponse {
   redirectUrl: string;
   redirectKind: "github";
-  leaseExpiresAt: number;
+}
+
+interface JoinProblem {
+  title: string;
+  description: string;
 }
 
 declare global {
@@ -53,22 +52,15 @@ export function JoinBeta() {
   const inviteCodeRef = useRef<string | null>(takeScrubbedInviteCode());
   const [claim, setClaim] = useState<CurrentClaim | null>(null);
   const [status, setStatus] = useState<
-    | "loading"
-    | "idle"
-    | "starting-github"
-    | "confirming"
-    | "canceling"
-    | "canceled"
+    "loading" | "idle" | "starting" | "confirming" | "canceling" | "canceled"
   >("loading");
   const [problem, setProblem] = useState<JoinProblem | null>(null);
 
-  const refresh = async (clearProblem = true) => {
-    const current = await apiJson<CurrentClaim>(
-      "/api/access-invites/current",
-      { method: "GET" },
-    );
+  const refresh = async () => {
+    const current = await apiJson<CurrentClaim>("/api/access-invites/current", {
+      method: "GET",
+    });
     setClaim(current);
-    if (clearProblem) setProblem(null);
     return current;
   };
 
@@ -84,44 +76,34 @@ export function JoinBeta() {
         inviteCodeRef.current = null;
       }
       await refresh();
-      setStatus("idle");
     } catch (error) {
       setProblem(problemFor(error));
+    } finally {
       setStatus("idle");
     }
   };
 
   useEffect(() => {
     void initialize();
-    // The invite is deliberately exchanged once per page load. It remains in
-    // memory only until the server acknowledges the attempt cookie.
+    // The fragment is exchanged once, then only the signed HttpOnly attempt
+    // cookie survives the page load and GitHub redirect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startClaim = async () => {
-    setStatus("starting-github");
+  const start = async () => {
+    setStatus("starting");
     setProblem(null);
     try {
-      const started = await apiJson<StartClaimResponse>(
+      const response = await apiJson<StartClaimResponse>(
         "/api/access-invites/start",
-        {
-          method: "POST",
-          body: "{}",
-        },
+        { method: "POST", body: "{}" },
       );
       const redirect = resolveGithubClaimRedirect({
-        redirectUrl: started.redirectUrl,
-        redirectKind: started.redirectKind,
+        ...response,
         applicationOrigin: window.location.origin,
       });
-      if (!redirect) {
-        throw new JoinApiError(
-          "invalid_oauth_redirect",
-          "The sign-in destination was rejected.",
-          500,
-        );
-      }
-      window.location.assign(redirect.href);
+      if (!redirect) throw new Error("The GitHub sign-in address was rejected.");
+      window.location.assign(redirect);
     } catch (error) {
       setProblem(problemFor(error));
       setStatus("idle");
@@ -136,16 +118,11 @@ export function JoinBeta() {
         method: "POST",
         body: "{}",
       });
-      await refresh();
-      setStatus("idle");
+      window.location.assign("/courses");
     } catch (error) {
       setProblem(problemFor(error));
       setStatus("idle");
-      try {
-        await refresh(false);
-      } catch {
-        // Keep the confirmation error if the follow-up inspection also fails.
-      }
+      await refresh().catch(() => undefined);
     }
   };
 
@@ -165,11 +142,14 @@ export function JoinBeta() {
     }
   };
 
-  const identityReady =
-    (claim?.state === "authenticated" || claim?.state === "leased") &&
-    Boolean(claim.user?.githubUsername);
-  const startingGithub = status === "starting-github";
-  const startPending = startingGithub;
+  const canCancel =
+    status !== "loading" &&
+    status !== "canceled" &&
+    claim?.state !== "active" &&
+    claim?.state !== "expired" &&
+    claim?.state !== "redeemed" &&
+    claim?.state !== "revoked" &&
+    claim?.state !== "invalid";
 
   return (
     <AuthShell
@@ -181,109 +161,75 @@ export function JoinBeta() {
       <div aria-live="polite" className="space-y-6">
         {status === "loading" ? (
           <JoinStatus icon={<LoaderCircle className="motion-safe:animate-spin" />}>
-            Checking the invite without consuming it…
+            Checking the invite…
           </JoinStatus>
         ) : status === "canceled" ? (
           <JoinStatus icon={<LogOut />}>
-            The attempt was canceled and the restricted session was signed out.
-            The invite was not consumed.
+            The claim was canceled and the session was signed out.
           </JoinStatus>
         ) : problem ? (
-          <JoinProblemCard problem={problem} />
+          <JoinStatus tone="error" icon={<CircleAlert />}>
+            <span className="font-semibold">{problem.title}</span>
+            <span className="mt-1 block">{problem.description}</span>
+          </JoinStatus>
         ) : claim?.state === "ready" ? (
           <>
             <JoinStatus icon={<KeyRound />}>
-              This code is valid. GitHub sign-in leases it for ten minutes; it
-              remains unconsumed until you confirm the identity.
+              This single-use link is ready. Sign in with the GitHub account
+              that should receive beta access.
             </JoinStatus>
-            <Button
-              className="w-full"
-              disabled={startPending}
-              onClick={() => void startClaim()}
-            >
+            <Button className="w-full" disabled={status !== "idle"} onClick={() => void start()}>
               <CircleUserRound />
-              {startingGithub ? "Opening GitHub…" : "Continue with GitHub"}
+              {status === "starting" ? "Opening GitHub…" : "Continue with GitHub"}
             </Button>
           </>
-        ) : identityReady ? (
+        ) : claim?.state === "authenticated" ? (
           <>
-            <div className="rounded-xl border border-brand-border bg-brand-subtle p-4">
-              <p className="text-caption">GitHub identity</p>
+            <div className="border-y py-4">
+              <p className="text-caption">GitHub account</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <CircleUserRound className="size-5" aria-hidden="true" />
                 <p className="font-mono text-base font-semibold">
                   @{claim.user?.githubUsername}
                 </p>
-                <Badge variant="warning">Not claimed</Badge>
+                <Badge variant="warning">Confirm</Badge>
               </div>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                Check this carefully. Access will be permanently bound to this
-                GitHub account ID, not the username text.
+                Access will stay bound to this GitHub account.
               </p>
             </div>
             <Button
               className="w-full whitespace-normal"
-              disabled={status === "confirming"}
+              disabled={status !== "idle"}
               onClick={() => void confirm()}
             >
               <CheckCircle2 />
               {status === "confirming"
-                ? "Claiming beta access…"
-                : `Claim beta access as @${claim.user?.githubUsername}`}
+                ? "Joining beta…"
+                : `Join beta as @${claim.user?.githubUsername}`}
             </Button>
           </>
-        ) : claim?.state === "leased" ? (
-          <>
-            <JoinStatus icon={<Clock3 />}>
-              {claim.ownsLease === false
-                ? "Another attempt holds this invite's active sign-in lease. Finish that flow or wait for the lease to expire."
-                : "This browser holds the active sign-in lease. Continue with GitHub to resume the claim."}
-              {claim.leaseExpiresAt
-                ? ` The lease ends ${formatDateTime(claim.leaseExpiresAt)}.`
-                : ""}
-            </JoinStatus>
-            {claim.ownsLease !== false ? (
-              <Button
-                className="w-full"
-                disabled={startPending}
-                onClick={() => void startClaim()}
-              >
-                <CircleUserRound />
-                {startingGithub ? "Opening GitHub…" : "Continue with GitHub"}
-              </Button>
-            ) : null}
-          </>
+        ) : claim?.state === "github_required" ? (
+          <JoinStatus tone="error" icon={<CircleAlert />}>
+            This session is not signed in with GitHub. Sign out, then open the
+            invite again and continue with GitHub.
+          </JoinStatus>
         ) : claim?.state === "active" ? (
           <>
             <JoinStatus tone="success" icon={<CheckCircle2 />}>
               {claim.user?.githubUsername
                 ? `Beta access is active for @${claim.user.githubUsername}.`
                 : "Beta access is active."}
-              {" "}This invite was not consumed if you already had access.
             </JoinStatus>
             <Button className="w-full" render={<a href="/courses" />}>
-              Open the workshop
+              Open courses
             </Button>
           </>
-        ) : claim?.state === "blocked" ? (
-          <JoinStatus tone="error" icon={<Ban />}>
-            This account is blocked from beta access. The invite was not
-            consumed. An administrator must clear the block before a fresh
-            invite can be claimed.
-          </JoinStatus>
         ) : claim ? (
-          <TerminalInviteState state={claim.state} />
+          <TerminalState state={claim.state} />
         ) : null}
 
-        {status !== "loading" &&
-        status !== "canceled" &&
-        (problem ||
-          (claim &&
-            claim.state !== "active" &&
-            claim.state !== "redeemed" &&
-            claim.state !== "expired" &&
-            claim.state !== "revoked" &&
-            claim.state !== "invalid")) ? (
+        {canCancel ? (
           <div className="border-t pt-4">
             <Button
               variant="ghost"
@@ -292,23 +238,17 @@ export function JoinBeta() {
               onClick={() => void cancel()}
             >
               <LogOut />
-              {status === "canceling" ? "Canceling…" : "Cancel and sign out"}
+              {status === "canceling" ? "Signing out…" : "Use another account"}
             </Button>
           </div>
         ) : null}
 
         {problem ? (
-          <Button
-            variant="outline"
-            className="w-full"
-            disabled={status === "loading"}
-            onClick={() => void initialize()}
-          >
+          <Button variant="outline" className="w-full" onClick={() => void initialize()}>
             <RotateCcw />
             Check again
           </Button>
         ) : null}
-
         {status === "canceled" ? (
           <Button variant="outline" className="w-full" render={<a href="/" />}>
             Return to intar.dev
@@ -316,6 +256,24 @@ export function JoinBeta() {
         ) : null}
       </div>
     </AuthShell>
+  );
+}
+
+function TerminalState({ state }: { state: ClaimState }) {
+  const copy = {
+    expired: "This invite expired. Ask a platform administrator for a new link.",
+    redeemed: "This invite was already used. Ask for a new link.",
+    revoked: "This invite was revoked. Ask for a new link.",
+    invalid: "This invite is invalid. Check that you opened the complete link.",
+    ready: "",
+    authenticated: "",
+    active: "",
+    github_required: "",
+  }[state];
+  return (
+    <JoinStatus tone="error" icon={<CircleAlert />}>
+      {copy}
+    </JoinStatus>
   );
 }
 
@@ -347,61 +305,45 @@ function JoinStatus({
   );
 }
 
-function JoinProblemCard({ problem }: { problem: JoinProblem }) {
-  return (
-    <JoinStatus tone="error" icon={<CircleAlert />}>
-      <span className="font-semibold">{problem.title}</span>
-      <span className="mt-1 block">{problem.description}</span>
-    </JoinStatus>
-  );
+function titleFor(
+  claim: CurrentClaim | null,
+  status: string,
+  problem: JoinProblem | null,
+): string {
+  if (status === "loading") return "Checking your invite";
+  if (status === "canceled") return "Claim canceled";
+  if (problem) return problem.title;
+  if (claim?.state === "authenticated") return "Confirm your GitHub account";
+  if (claim?.state === "active") return "You have beta access";
+  return "Join the intar.dev beta";
 }
 
-function TerminalInviteState({ state }: { state: ClaimState }) {
-  const content = {
-    expired: [
-      "Invite expired",
-      "This code passed its expiry and cannot be leased or claimed. Ask an administrator for a new link.",
-    ],
-    revoked: [
-      "Invite revoked",
-      "An administrator stopped this code. Any previous lease is invalid. Ask for a new link if access is still intended.",
-    ],
-    redeemed: [
-      "Invite already claimed",
-      "This single-use code has already granted beta access to another account. It cannot be reused.",
-    ],
-    invalid: [
-      "Invite not recognized",
-      "The code is incomplete or invalid. Open the complete link provided by an administrator.",
-    ],
-    ready: ["Invite ready", "Continue with GitHub to begin."],
-    leased: ["Invite leased", "Continue the GitHub sign-in flow."],
-    authenticated: ["Identity ready", "Confirm the GitHub identity."],
-    active: ["Access active", "Open the workshop."],
-    blocked: ["Account blocked", "An administrator must clear the block."],
-  } satisfies Record<ClaimState, [string, string]>;
-  const [title, description] = content[state];
-  return (
-    <JoinStatus tone="error" icon={<CircleAlert />}>
-      <span className="font-semibold">{title}</span>
-      <span className="mt-1 block">{description}</span>
-    </JoinStatus>
-  );
+function descriptionFor(
+  claim: CurrentClaim | null,
+  status: string,
+  problem: JoinProblem | null,
+): string {
+  if (status === "loading") return "This does not consume the invite.";
+  if (status === "canceled") return "The invite remains available if it is still active.";
+  if (problem) return "Resolve the issue below, then try again.";
+  if (claim?.state === "authenticated") {
+    return "Check the account before granting access.";
+  }
+  return "One link admits one GitHub account.";
+}
+
+function takeScrubbedInviteCode(): string | null {
+  if (typeof window === "undefined") return null;
+  const invite = window.__INTAR_BETA_INVITE__;
+  delete window.__INTAR_BETA_INVITE__;
+  return typeof invite === "string" && invite ? invite : null;
 }
 
 class JoinApiError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number,
-  ) {
+  constructor(readonly code: string, message: string) {
     super(message);
+    this.name = "JoinApiError";
   }
-}
-
-interface JoinProblem {
-  title: string;
-  description: string;
 }
 
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
@@ -409,9 +351,9 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   if (init.method !== "GET") headers.set("content-type", "application/json");
   const response = await fetch(path, {
     ...init,
+    headers,
     credentials: "include",
     cache: "no-store",
-    headers,
   });
   const body = (await response.json().catch(() => null)) as
     | { code?: string; error?: string; message?: string }
@@ -424,207 +366,25 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
       message?: string;
     } | null;
     throw new JoinApiError(
-      details?.code ?? "request_failed",
-      details?.error ??
-        details?.message ??
-        `The invite service returned ${response.status}.`,
-      response.status,
+      details?.code ?? "invite_request_failed",
+      details?.error ?? details?.message ?? `Invite request failed (${response.status})`,
     );
   }
   return body as T;
 }
 
-function takeScrubbedInviteCode() {
-  if (typeof window === "undefined") return null;
-  const invite = window.__INTAR_BETA_INVITE__;
-  delete window.__INTAR_BETA_INVITE__;
-  return typeof invite === "string" && invite.length > 0 ? invite : null;
-}
-
 function problemFor(error: unknown): JoinProblem {
-  const code = error instanceof JoinApiError ? error.code : "request_failed";
-  switch (code) {
-    case "attempt_not_found":
-    case "invite_missing":
-    case "invite_attempt_required":
-      return {
-        title: "Open a beta invite link",
-        description:
-          "This page has no invite attempt to resume. Use the complete fragment link provided by an administrator.",
-      };
-    case "invite_attempt_expired":
-    case "invite_expired":
-      return {
-        title: "Invite attempt expired",
-        description:
-          "Reopen the original link if its code is still valid, or ask an administrator for a fresh one.",
-      };
-    case "invite_revoked":
-      return {
-        title: "Invite revoked",
-        description: "This code and any active lease no longer work.",
-      };
-    case "invite_redeemed":
-      return {
-        title: "Invite already claimed",
-        description: "A single-use code cannot be used by a second account.",
-      };
-    case "access_invite_unavailable":
-      return {
-        title: "Invite unavailable",
-        description:
-          "The code is invalid, expired, revoked, or already claimed. Ask an administrator for a fresh link.",
-      };
-    case "invite_leased":
-    case "lease_conflict":
-    case "access_invite_lease_unavailable":
-      return {
-        title: "Invite sign-in already started",
-        description:
-          "Another attempt holds the ten-minute lease. Finish that flow or wait for the lease to expire.",
-      };
-    case "access_invite_lease_invalid":
-      return {
-        title: "Invite lease expired",
-        description:
-          "The ten-minute GitHub sign-in lease is no longer valid. Reopen the invite link and start again.",
-      };
-    case "access_invite_claim_conflict":
-      return {
-        title: "Invite could not be claimed",
-        description:
-          "The code changed or another confirmation won the race. No partial beta access was granted.",
-      };
-    case "fresh_beta_invite_required":
-      return {
-        title: "Fresh invite required",
-        description:
-          "This code predates the administrator's block clearance. Ask for a newly created invite link.",
-      };
-    case "blocked_user":
-    case "beta_user_blocked":
-      return {
-        title: "Account blocked",
-        description:
-          "The invite was not consumed. An administrator must clear the block, then issue a fresh invite.",
-      };
-    case "invite_lease_required":
-      return {
-        title: "GitHub step required",
-        description: "Continue with GitHub before confirming this invite.",
-      };
-    case "github_invite_claim_required":
-      return {
-        title: "GitHub is required",
-        description: "Beta invitations can only be claimed with GitHub.",
-      };
-    case "github_session_required":
-      return {
-        title: "Sign out before continuing",
-        description:
-          "This browser is signed in with a non-GitHub account. Cancel and sign out, then reopen the invite and continue with GitHub.",
-      };
-    case "github_identity_required":
-      return {
-        title: "GitHub link incomplete",
-        description:
-          "Return to the invite and continue with GitHub to explicitly link the account before confirming.",
-      };
-    case "authentication_required":
-      return {
-        title: "GitHub sign-in required",
-        description:
-          "The restricted identity session is missing or expired. Reopen the invite and continue with GitHub.",
-      };
-    case "origin_rejected":
-    case "csrf_rejected":
-    case "invalid_origin":
-    case "cross_site_request":
-      return {
-        title: "Request rejected",
-        description:
-          "Reload this exact intar.dev page before trying again. Cross-site claim requests are not accepted.",
-      };
-    case "rate_limited":
-      return {
-        title: "Too many attempts",
-        description: "Wait before checking or starting this invite again.",
-      };
-    case "invalid_oauth_redirect":
-      return {
-        title: "Sign-in destination rejected",
-        description:
-          "The server returned an unexpected OAuth destination. No claim was completed.",
-      };
-    default:
-      return {
-        title: "Invite could not be checked",
-        description:
-          error instanceof Error && error.message
-            ? error.message
-            : "The invite service is unavailable. Try again without sharing the link.",
-      };
-  }
-}
-
-function titleFor(
-  claim: CurrentClaim | null,
-  status: string,
-  problem: JoinProblem | null,
-) {
-  if (status === "loading") return "Checking your beta invite";
-  if (status === "canceled") return "Invite attempt canceled";
-  if (problem) return problem.title;
-  if (claim?.state === "active") return "Beta access is active";
-  if (claim?.state === "blocked") return "This account is blocked";
-  if (
-    (claim?.state === "authenticated" || claim?.state === "leased") &&
-    claim.user?.githubUsername
-  ) {
-    return "Confirm the GitHub account";
-  }
-  if (claim?.state === "ready") return "Claim your beta invite";
-  if (claim?.state === "leased") return "GitHub sign-in is in progress";
-  return "Beta invite unavailable";
-}
-
-function descriptionFor(
-  claim: CurrentClaim | null,
-  status: string,
-  problem: JoinProblem | null,
-) {
-  if (status === "loading") {
-    return "Opening a link never consumes it. We first establish a private, short-lived attempt.";
-  }
-  if (status === "canceled") {
-    return "You can reopen the original link while it remains pending and unexpired.";
-  }
-  if (problem) return problem.description;
-  if (claim?.state === "active") {
-    return "Every protected capability now checks this active entitlement dynamically.";
-  }
-  if (claim?.state === "blocked") {
-    return "Retained invite links cannot bypass a beta-access revocation.";
-  }
-  if (
-    (claim?.state === "authenticated" || claim?.state === "leased") &&
-    claim.user?.githubUsername
-  ) {
-    return "The invite remains unconsumed until you explicitly claim it as the resolved GitHub identity.";
-  }
-  if (claim?.state === "ready") {
-    return "Sign in with the GitHub account that should permanently receive access.";
-  }
-  if (claim?.state === "leased") {
-    return "Only the attempt holding the active ten-minute lease can complete sign-in.";
-  }
-  return "This code cannot grant beta access in its current state.";
-}
-
-function formatDateTime(value: number) {
-  return new Date(value).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
+  const code = error instanceof JoinApiError ? error.code : "invite_request_failed";
+  const description =
+    error instanceof Error && error.message
+      ? error.message
+      : "The invite could not be checked.";
+  const titles: Record<string, string> = {
+    access_invite_unavailable: "Invite unavailable",
+    access_invite_claim_conflict: "Invite already used",
+    beta_revocation_cleanup_incomplete: "Access cleanup is still running",
+    github_session_required: "GitHub sign-in required",
+    authentication_required: "Sign in with GitHub",
+  };
+  return { title: titles[code] ?? "Invite could not be completed", description };
 }

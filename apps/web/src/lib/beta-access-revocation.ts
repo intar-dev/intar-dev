@@ -10,7 +10,7 @@ import {
   completeBetaRevocationCleanup,
   recordBetaRevocationCleanupFailure,
   recordBetaRevocationCleanupStall,
-} from "@/lib/access-invites";
+} from "@/lib/beta-access-revocation-store";
 import { appError } from "@/lib/app-error";
 import { auth } from "@/lib/auth";
 import { retireHostRuntime } from "@/lib/host-runtime-wake";

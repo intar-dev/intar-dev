@@ -34,15 +34,18 @@ export const scenarioAssignments = sqliteTable(
 export type AccessInviteKind = "standard" | "bootstrap_admin";
 export type AccessInviteState = "pending" | "leased" | "redeemed" | "revoked";
 
-// Raw invite codes never enter D1. The public fragment is hashed before this
-// table is queried; codePrefix is intentionally short enough to be safe in
-// administration and audit surfaces.
+// Invite lookup always uses the hash. New active invites also retain an
+// AES-GCM envelope so an administrator can copy the same link later. The
+// envelope is erased when the invite becomes terminal. Legacy rows have no
+// envelope. The cutover migration revoked those rows and retained their audit
+// history; the application also treats any missed legacy row as revoked.
 export const accessInviteCodes = sqliteTable(
   "access_invite_codes",
   {
     id: text("id").primaryKey(),
     codeHash: text("code_hash").notNull(),
     codePrefix: text("code_prefix").notNull(),
+    tokenCiphertext: text("token_ciphertext"),
     kind: text("kind").$type<AccessInviteKind>().notNull(),
     state: text("state")
       .$type<AccessInviteState>()
@@ -52,6 +55,7 @@ export const accessInviteCodes = sqliteTable(
     createdBy: text("created_by"),
     createdAt: integer("created_at").default(nowMsDefault).notNull(),
     expiresAt: integer("expires_at").notNull(),
+    claimExpiresAt: integer("claim_expires_at"),
     leaseId: text("lease_id"),
     leasedAt: integer("leased_at"),
     leaseExpiresAt: integer("lease_expires_at"),
@@ -96,8 +100,6 @@ export const accessInviteCodes = sqliteTable(
     ),
     check(
       "access_invite_codes_expiry_valid",
-      // Existing audit rows retain the original 48-hour expiry. New invites
-      // use the 14-day default.
       sql`${table.expiresAt} in (${table.createdAt} + 172800000, ${table.createdAt} + 1209600000)`,
     ),
     check("access_invite_codes_version_valid", sql`${table.version} > 0`),
@@ -162,8 +164,8 @@ export const accessInviteCodes = sqliteTable(
   ],
 );
 
-// Removing an invite is a presentation-level archive, not a destructive
-// delete. The invite row remains the immutable authorization and audit source.
+// Legacy presentation archives stay in the schema for audit compatibility.
+// The simplified invite UI and API no longer create removal rows.
 export const accessInviteRemovals = sqliteTable(
   "access_invite_removals",
   {
@@ -261,6 +263,7 @@ export const accessAllowlist = sqliteTable(
 
 export type AccessEventType =
   | "invite.created"
+  | "invite.copied"
   | "invite.leased"
   | "invite.lease_released"
   | "invite.redeemed"

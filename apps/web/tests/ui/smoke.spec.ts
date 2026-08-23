@@ -53,10 +53,10 @@ test("beta invite fragment is scrubbed before the claim is inspected", async ({
 
   expect(new URL(page.url()).hash).toBe("");
   await expect(
-    page.getByRole("heading", { name: "Claim your beta invite" }),
+    page.getByRole("heading", { name: "Join the intar.dev beta" }),
   ).toBeVisible();
   await expect(page.getByRole("status")).toContainText(
-    /This code is valid/i,
+    /This single-use link is ready/i,
   );
   await expect(
     page.getByRole("button", { name: "Continue with GitHub" }),
@@ -88,35 +88,16 @@ test("admin can copy a new beta link again from the list", async ({
   await ui.open({ ...routeCase("admin-people"), theme: "light" });
   await page.getByRole("button", { name: "Create invite" }).click();
 
-  const createDialog = page.getByRole("dialog", {
-    name: "Create beta invite",
-  });
-  await createDialog.getByLabel(/Label/).fill("September workshop cohort");
-  await createDialog
-    .getByRole("button", { name: "Create single-use link" })
-    .click();
-
-  const oneTimeDialog = page.getByRole("dialog", {
-    name: "Copy this link",
-  });
-  const linkInput = oneTimeDialog.getByLabel("Beta invite link");
-  await expect(linkInput).toHaveValue(/\/join#invite=intar_beta_[A-Za-z0-9_-]+$/);
-  const rawLink = await linkInput.inputValue();
-
-  await oneTimeDialog.getByRole("button", { name: "Copy link" }).click();
-  await expect(oneTimeDialog.getByRole("status")).toHaveText("Link copied.");
-  await oneTimeDialog.getByRole("button", { name: "Close" }).click();
-
-  await expect(oneTimeDialog).toBeHidden();
+  const rawLink = `http://127.0.0.1:4330/join#invite=intar_beta_${"C".repeat(43)}`;
   const inviteRow = page
     .getByRole("row")
-    .filter({ hasText: "September workshop cohort" });
-  const listCopyButton = inviteRow.getByRole("button", { name: "Copy link" });
+    .filter({ hasText: "intar_beta_CCCCCCCC" });
+  const listCopyButton = inviteRow.getByRole("button", { name: "Copy" });
   await expect(listCopyButton).toBeVisible();
   await listCopyButton.click();
   await listCopyButton.click();
   await expect(page.getByRole("status")).toHaveText(
-    "intar_beta_CCCCCCCC… link copied.",
+    "intar_beta_CCCCCCCC… copied.",
   );
   expect(
     await page.evaluate(
@@ -127,50 +108,50 @@ test("admin can copy a new beta link again from the list", async ({
           }
         ).__testClipboardWrites,
     ),
-  ).toEqual([rawLink, rawLink, rawLink]);
-  expect(
-    await page.locator("input").evaluateAll((inputs) =>
-      inputs.some((input) => (input as HTMLInputElement).value === rawLink),
-    ),
-  ).toBe(false);
+  ).toEqual([rawLink, rawLink]);
   expect(ui.server.requests).toContain("POST /api/admin/access-invites");
+  expect(
+    ui.server.requests.filter(
+      (request) =>
+        request ===
+        "POST /api/admin/access-invites/invite-created-3/copy",
+    ),
+  ).toHaveLength(2);
 });
 
-test("admin can remove a redeemed invite without revoking its user", async ({
+test("admin can revoke an active invite into history", async ({
   page,
   ui,
 }) => {
   await ui.open({ ...routeCase("admin-people"), theme: "light" });
   const inviteRow = page
     .getByRole("row")
-    .filter({ hasText: "Facilitator preview" });
+    .filter({ hasText: "intar_beta_AAAAAAAA" });
 
-  await inviteRow.getByRole("button", { name: "Remove" }).click();
+  await inviteRow.getByRole("button", { name: "Revoke" }).click();
   const dialog = page.getByRole("dialog", {
-    name: "Remove this invite code?",
+    name: "Revoke this invite?",
   });
-  await expect(dialog).toContainText("redeemed user keeps beta access");
-  const removalRequest = page.waitForRequest(
+  await expect(dialog).toContainText("stops working immediately");
+  const revokeRequest = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&
       request.url().endsWith(
-        "/api/admin/access-invites/invite-redeemed/remove",
+        "/api/admin/access-invites/invite-pending/revoke",
       ),
   );
-  await dialog.getByRole("button", { name: "Remove from list" }).click();
-  expect((await removalRequest).postDataJSON()).toEqual({ expectedVersion: 3 });
+  await dialog.getByRole("button", { name: "Revoke invite" }).click();
+  expect((await revokeRequest).postDataJSON()).toEqual({ expectedVersion: 1 });
 
   await expect(inviteRow).toHaveCount(0);
-  await expect(page.getByRole("status")).toContainText(
-    "was removed from this list",
-  );
-  await expect(page.getByRole("button", { name: "Create invite" })).toBeFocused();
-  expect(ui.server.requests).toContain(
-    "POST /api/admin/access-invites/invite-redeemed/remove",
-  );
+  await expect(page.getByRole("status")).toHaveText("Invite revoked.");
+  await page.locator("details > summary").filter({ hasText: "History" }).click();
   await expect(
-    page.getByText("@minalearns", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("row").filter({ hasText: "intar_beta_AAAAAAAA" }),
+  ).toContainText("Revoked");
+  expect(ui.server.requests).toContain(
+    "POST /api/admin/access-invites/invite-pending/revoke",
+  );
 });
 
 test("learner discovery filters the catalog", async ({ page, ui }) => {

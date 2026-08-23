@@ -9,7 +9,7 @@ import {
   session,
   user,
 } from "@/db/schema";
-import { revokeBetaUser } from "@/lib/access-invites";
+import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import { getBetaAccess, isActiveBetaUser } from "@/lib/allowlist";
 import { auth } from "@/lib/auth";
 import { resetD1Database } from "@/test/d1-migrations";

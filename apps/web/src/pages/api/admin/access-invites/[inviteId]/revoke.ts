@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { revokeAccessInvite } from "@/lib/access-invites";
+import { revokeBetaInvite } from "@/lib/beta-invites";
 import {
   accessInviteError,
   accessInviteJson,
@@ -19,13 +19,12 @@ export const POST: APIRoute = async ({ request, params }) => {
     const inviteId = params.inviteId?.trim();
     if (!inviteId) throw appError(400, "invite_id_required", "invite id is required");
     const body = await readJsonObject(request);
-    const invite = await revokeAccessInvite({
+    const invite = await revokeBetaInvite({
       d1: env.DB,
       inviteId,
       expectedVersion:
         typeof body.expectedVersion === "number" ? body.expectedVersion : 0,
       actorUserId: authz.context.userId,
-      reason: typeof body.reason === "string" ? body.reason : "",
     });
     return accessInviteJson({ invite });
   } catch (error) {

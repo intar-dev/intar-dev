@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { revokeBetaUser } from "@/lib/access-invites";
+import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import {
   accessInviteError,
   accessInviteJson,
@@ -37,7 +37,7 @@ export const POST: APIRoute = async ({ request, params }) => {
           cleanup: "pending",
         };
       } catch (error) {
-        // A concurrent administrator may have won the active -> blocked CAS.
+        // A concurrent administrator may have won the revocation CAS.
         // Re-read that exact durable state instead of turning the loser into a
         // spurious non-idempotent failure.
         if (!(error instanceof AppError) || error.code !== "beta_user_not_active") {
@@ -51,7 +51,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     if (revocation.cleanup === "completed") {
       return accessInviteJson({
         userId,
-        state: "blocked",
+        state: "revoked",
         revocationId: revocation.revocationId,
         cleanupCompleted: true,
       });
@@ -64,7 +64,7 @@ export const POST: APIRoute = async ({ request, params }) => {
     });
     return accessInviteJson({
       userId,
-      state: "blocked",
+      state: "revoked",
       revocationId: revocation.revocationId,
       cleanupCompleted: true,
     });

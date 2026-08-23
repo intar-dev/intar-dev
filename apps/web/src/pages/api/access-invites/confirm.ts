@@ -1,12 +1,9 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import {
-  confirmAccessInvite,
-  releaseAccessInviteLease,
-} from "@/lib/access-invites";
 import { accessInviteError, accessInviteJson } from "@/lib/access-invite-http";
 import { getAccessClaimIdentity } from "@/lib/access-claim";
 import { appError } from "@/lib/app-error";
+import { redeemBetaInvite } from "@/lib/beta-invites";
 import {
   clearInviteAttemptCookie,
   readInviteAttempt,
@@ -19,62 +16,37 @@ export const POST: APIRoute = async ({ request }) => {
   try {
     await rateLimitPublicAccessInvite({ request, action: "confirm" });
     const attempt = await readInviteAttempt(request);
-    if (!attempt.leaseId || !attempt.leaseExpiresAt) {
-      throw appError(
-        409,
-        "invite_lease_required",
-        "continue with GitHub before claiming the invite",
-      );
-    }
     const identity = await getAccessClaimIdentity(request);
     if (!identity) {
       throw appError(401, "authentication_required", "GitHub sign-in is required");
     }
-
     if (identity.accessState === "active") {
-      await releaseAccessInviteLease({
-        d1: env.DB,
-        inviteId: attempt.inviteId,
-        leaseId: attempt.leaseId,
-      });
-      const headers = new Headers({
-        "set-cookie": clearInviteAttemptCookie(),
-      });
-      return accessInviteJson({ state: "active", alreadyActive: true }, { headers });
-    }
-    if (identity.accessState === "blocked") {
-      await releaseAccessInviteLease({
-        d1: env.DB,
-        inviteId: attempt.inviteId,
-        leaseId: attempt.leaseId,
-      });
-      throw appError(
-        403,
-        "beta_user_blocked",
-        "an administrator must clear this account's beta block",
+      return accessInviteJson(
+        { state: "active" },
+        { headers: { "set-cookie": clearInviteAttemptCookie() } },
       );
     }
     if (!identity.githubAccountId || !identity.githubUsername) {
       throw appError(
         409,
         "github_identity_required",
-        "link the GitHub account used for this invite before claiming",
+        "This invite must be claimed with GitHub",
       );
     }
 
-    const betaUser = await confirmAccessInvite({
+    const betaUser = await redeemBetaInvite({
       d1: env.DB,
       inviteId: attempt.inviteId,
-      leaseId: attempt.leaseId,
+      attemptId: attempt.attemptId,
       userId: identity.userId,
       githubAccountId: identity.githubAccountId,
       githubUsername: identity.githubUsername,
     });
-    const headers = new Headers({
-      "set-cookie": clearInviteAttemptCookie(),
-    });
-    return accessInviteJson({ state: "active", user: betaUser }, { headers });
+    return accessInviteJson(
+      { state: "active", user: betaUser },
+      { headers: { "set-cookie": clearInviteAttemptCookie() } },
+    );
   } catch (error) {
-    return accessInviteError(error, "the invite could not be claimed");
+    return accessInviteError(error, "The beta invite could not be claimed");
   }
 };

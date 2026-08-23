@@ -47,9 +47,9 @@ test.describe("focused state accessibility", () => {
 
     const status = page.getByRole("status");
     await expect(
-      page.getByRole("heading", { name: "Claim your beta invite" }),
+      page.getByRole("heading", { name: "Join the intar.dev beta" }),
     ).toBeVisible();
-    await expect(status).toContainText(/remains unconsumed until you confirm/i);
+    await expect(status).toContainText(/This single-use link is ready/i);
     await expect(
       page.getByRole("button", { name: "Continue with GitHub" }),
     ).toBeVisible();
@@ -275,6 +275,33 @@ test.describe("focused mobile state accessibility", () => {
     await expect(
       page.locator('ol[aria-label="Run timeline"] li[aria-current="step"]'),
     ).toHaveCount(1);
+    await expectNoAxeViolations(page, testInfo);
+  });
+});
+
+test.describe("small-screen invite access", () => {
+  test.use({ viewport: { width: 320, height: 844 }, hasTouch: true });
+
+  test("keeps active invite actions on screen", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+
+    const copy = page.getByRole("button", {
+      name: /^Copy intar_beta_AAAAAAAA invite$/,
+    });
+    const revoke = page.getByRole("button", {
+      name: /^Revoke intar_beta_AAAAAAAA invite$/,
+    });
+    await expect(copy).toBeVisible();
+    await expect(revoke).toBeVisible();
+    for (const control of [copy, revoke]) {
+      const bounds = await control.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.height).toBeGreaterThanOrEqual(44);
+    }
+    await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });
 });

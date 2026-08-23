@@ -12,8 +12,6 @@ export interface InviteAttempt {
   inviteId: string;
   issuedAt: number;
   expiresAt: number;
-  leaseId?: string;
-  leaseExpiresAt?: number;
 }
 
 export function newInviteAttempt(inviteId: string, now = Date.now()): InviteAttempt {
@@ -25,18 +23,6 @@ export function newInviteAttempt(inviteId: string, now = Date.now()): InviteAtte
     inviteId,
     issuedAt: now,
     expiresAt: now + ATTEMPT_TTL_MS,
-  };
-}
-
-export function withInviteLease(
-  attempt: InviteAttempt,
-  lease: { leaseId: string; leaseExpiresAt: number },
-): InviteAttempt {
-  return {
-    ...attempt,
-    leaseId: lease.leaseId,
-    leaseExpiresAt: lease.leaseExpiresAt,
-    expiresAt: Math.max(attempt.expiresAt, lease.leaseExpiresAt),
   };
 }
 
@@ -111,10 +97,7 @@ export async function verifyInviteAttempt(
       !parsed.inviteId ||
       typeof parsed.issuedAt !== "number" ||
       typeof parsed.expiresAt !== "number" ||
-      parsed.expiresAt <= parsed.issuedAt ||
-      (parsed.leaseId !== undefined && typeof parsed.leaseId !== "string") ||
-      (parsed.leaseExpiresAt !== undefined &&
-        typeof parsed.leaseExpiresAt !== "number")
+      parsed.expiresAt <= parsed.issuedAt
     ) {
       return null;
     }

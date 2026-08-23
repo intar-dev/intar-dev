@@ -10,7 +10,7 @@ import {
   user,
   workshopRegistryTokens,
 } from "@/db/schema";
-import { revokeBetaUser } from "@/lib/access-invites";
+import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import {
   FIXTURE_BETA_ADMIN_ID,
   grantFixtureBetaAccess,

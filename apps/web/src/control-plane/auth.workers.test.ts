@@ -9,22 +9,20 @@ import {
   sha256Hex,
 } from "./auth";
 import {
-  accessInviteCodes,
   agentBootstrapTokens,
   agentHosts,
   user,
 } from "@/db/schema";
 import {
-  ACCESS_INVITE_LIFETIME_MS,
   acquireBetaRevocationCleanup,
-  allowBetaReinvite,
   completeBetaRevocationCleanup,
-  confirmAccessInvite,
   revokeBetaUser,
-} from "@/lib/access-invites";
+} from "@/lib/beta-access-revocation-store";
+import { createBetaInvite, redeemBetaInvite } from "@/lib/beta-invites";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   FIXTURE_BETA_ADMIN_ID,
+  FIXTURE_INVITE_ENCRYPTION_KEY,
   grantFixtureBetaAccess,
 } from "@/test/beta-access-fixtures";
 
@@ -122,7 +120,6 @@ describe("agent JWT secret validation", () => {
     const oldJwt = ((await bootstrap.json()) as { accessToken: string })
       .accessToken;
 
-    const db = drizzle(env.DB);
     const oldAdmission = await env.DB.prepare(
       `SELECT source_invite_id, source_lease_id, granted_at
        FROM access_allowlist WHERE user_id = 'user-valid-secret'`,
@@ -155,35 +152,17 @@ describe("agent JWT secret validation", () => {
       cleanupAttemptId: cleanup.cleanupAttemptId,
       now: base + 2,
     });
-    await allowBetaReinvite({
+    const freshInvite = await createBetaInvite({
       d1: env.DB,
-      userId: "user-valid-secret",
       actorUserId: FIXTURE_BETA_ADMIN_ID,
-      revocationId: revoked.revocationId,
+      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
       now: base + 3,
     });
-
-    const freshInviteId = "fresh-agent-admission-invite";
-    const freshLeaseId = "fresh-agent-admission-lease";
-    const freshCreatedAt = base + 4;
-    await db.insert(accessInviteCodes).values({
-      id: freshInviteId,
-      codeHash: await sha256Hex("fresh-agent-admission-code"),
-      codePrefix: "fixture",
-      kind: "standard",
-      state: "leased",
-      createdBy: FIXTURE_BETA_ADMIN_ID,
-      createdAt: freshCreatedAt,
-      expiresAt: freshCreatedAt + ACCESS_INVITE_LIFETIME_MS,
-      leaseId: freshLeaseId,
-      leasedAt: freshCreatedAt,
-      leaseExpiresAt: freshCreatedAt + 600_000,
-      updatedAt: freshCreatedAt,
-    });
-    await confirmAccessInvite({
+    const freshAttemptId = "fresh-agent-admission-attempt";
+    await redeemBetaInvite({
       d1: env.DB,
-      inviteId: freshInviteId,
-      leaseId: freshLeaseId,
+      inviteId: freshInvite.id,
+      attemptId: freshAttemptId,
       userId: "user-valid-secret",
       githubAccountId: "test-github-account-user-valid-secret",
       githubUsername: "user-valid-secret",
@@ -198,8 +177,8 @@ describe("agent JWT secret validation", () => {
       granted_at: number;
     }>();
     expect(freshAdmission).toEqual({
-      source_invite_id: freshInviteId,
-      source_lease_id: freshLeaseId,
+      source_invite_id: freshInvite.id,
+      source_lease_id: freshAttemptId,
       granted_at: equalGrantedAt,
     });
     expect(freshAdmission!.granted_at).toBe(oldAdmission!.granted_at);

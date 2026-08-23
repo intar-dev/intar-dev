@@ -15,7 +15,7 @@ import {
 } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
-import { revokeBetaUser } from "@/lib/access-invites";
+import { revokeBetaUser } from "@/lib/beta-access-revocation-store";
 import { buildInitialVmState, type RunVmStateDocument } from "@/lib/run-state";
 import {
   insertScenarioRunForAdmission,

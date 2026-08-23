@@ -108,16 +108,20 @@ jobs:
         id: runtime-secrets
         working-directory: ${{ github.workspace }}
         env:
+          ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1: ${{ secrets.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1 }}
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
           OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
           STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
         run: |
           set -euo pipefail
+          [[ "${ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1}" =~ ^[A-Za-z0-9_-]{43}$ ]]
+          bun -e 'const value = process.env.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1 ?? ""; const decoded = Buffer.from(value, "base64url"); if (decoded.byteLength !== 32 || decoded.toString("base64url") !== value) process.exit(1)'
           test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
           test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
           test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
           secrets_file="${RUNNER_TEMP}/website-runtime-secrets.json"
           jq -n '{
+            ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1: env.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1,
             CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
             OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
             STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS

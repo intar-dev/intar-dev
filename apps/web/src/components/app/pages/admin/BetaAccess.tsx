@@ -1,15 +1,14 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
   Check,
+  ChevronDown,
   Clipboard,
+  History,
   KeyRound,
-  RefreshCw,
   ShieldCheck,
   TicketPlus,
-  Trash2,
-  Undo2,
 } from "lucide-react";
 import { formatRelativeTime } from "../../lib/format";
 import { InlineFeedback } from "../../patterns/InlineFeedback";
@@ -26,7 +25,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -36,206 +34,139 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const REASON_CODE_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,119}$/;
-
-type InviteState = "pending" | "leased" | "redeemed" | "revoked";
-type InviteKind = "standard" | "bootstrap_admin";
+type InviteState = "active" | "expired" | "redeemed" | "revoked";
 
 interface AdminInvite {
   id: string;
   codePrefix: string;
-  kind: InviteKind;
   state: InviteState;
-  label: string | null;
   createdAt: number;
   expiresAt: number;
-  leaseExpiresAt: number | null;
-  redeemedAt: number | null;
-  revokedAt: number | null;
+  completedAt: number | null;
   redeemerGithubUsername: string | null;
   version: number;
 }
 
 interface BetaUser {
   userId: string;
-  state: "active" | "blocked";
+  name: string | null;
+  role: string | null;
+  state: "active" | "revoked";
   githubUsername: string;
   grantedAt: number;
   revokedAt: number | null;
-  revocationReason: string | null;
-  role: string | null;
-  revocationId: string | null;
+  revocationCleanupCompletedAt: number | null;
 }
 
-interface AdminAccessResponse {
+interface BetaAccessResponse {
   invites: AdminInvite[];
   betaUsers: BetaUser[];
 }
 
-interface OneTimeInvite {
-  invite: AdminInvite;
+interface CopyResponse {
   inviteUrl: string;
 }
 
-type InviteAction =
-  | { kind: "replace"; invite: AdminInvite }
-  | { kind: "revoke"; invite: AdminInvite }
-  | { kind: "remove"; invite: AdminInvite };
-
-type BetaUserAction =
-  | { kind: "revoke"; user: BetaUser }
-  | { kind: "allow-reinvite"; user: BetaUser };
+type Feedback = {
+  tone: "success" | "error";
+  message: string;
+} | null;
 
 export function BetaAccessPanel() {
   const queryClient = useQueryClient();
-  const createInviteButton = useRef<HTMLButtonElement>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [label, setLabel] = useState("");
-  const [oneTimeInvite, setOneTimeInvite] =
-    useState<OneTimeInvite | null>(null);
-  const [inviteAction, setInviteAction] = useState<InviteAction | null>(null);
-  const [betaUserAction, setBetaUserAction] =
-    useState<BetaUserAction | null>(null);
-  const [reason, setReason] = useState("");
-  const [removalNotice, setRemovalNotice] = useState<string | null>(null);
-  const [inviteLinks, setInviteLinks] = useState<Record<string, string>>({});
-  const [copyFeedback, setCopyFeedback] = useState<{
-    inviteId: string;
-    message: string;
-    tone: "success" | "error";
-  } | null>(null);
+  const [feedback, setFeedback] = useState<Feedback>(null);
+  const [copyingId, setCopyingId] = useState<string | null>(null);
+  const [revokeInvite, setRevokeInvite] = useState<AdminInvite | null>(null);
+  const [revokeUser, setRevokeUser] = useState<BetaUser | null>(null);
 
   const access = useQuery({
     queryKey: ["admin", "beta-access"],
     queryFn: () =>
-      apiJson<AdminAccessResponse>("/api/admin/access-invites", {
+      apiJson<BetaAccessResponse>("/api/admin/access-invites", {
         method: "GET",
       }),
     staleTime: 5_000,
   });
 
-  const refreshAccess = async () => {
-    await queryClient.invalidateQueries({ queryKey: ["admin", "beta-access"] });
-  };
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["admin", "beta-access"] });
 
   const createInvite = useMutation({
     mutationFn: () =>
-      apiJson<OneTimeInvite>("/api/admin/access-invites", {
+      apiJson<void>("/api/admin/access-invites", {
         method: "POST",
-        body: JSON.stringify({
-          label: label.trim() || null,
-        }),
+        body: "{}",
       }),
-    onSuccess: async (result) => {
-      setCreateOpen(false);
-      setLabel("");
-      setInviteLinks((current) => ({
-        ...current,
-        [result.invite.id]: result.inviteUrl,
-      }));
-      setCopyFeedback(null);
-      setOneTimeInvite(result);
-      await refreshAccess();
-    },
-  });
-
-  const replaceInvite = useMutation({
-    mutationFn: (invite: AdminInvite) =>
-      apiJson<OneTimeInvite>(
-        `/api/admin/access-invites/${encodeURIComponent(invite.id)}/replace`,
-        {
-          method: "POST",
-          body: JSON.stringify({ expectedVersion: invite.version }),
-        },
-      ),
-    onSuccess: async (result, replacedInvite) => {
-      setInviteAction(null);
-      setReason("");
-      setInviteLinks((current) => {
-        const next = { ...current };
-        delete next[replacedInvite.id];
-        next[result.invite.id] = result.inviteUrl;
-        return next;
+    onMutate: () => setFeedback(null),
+    onSuccess: async () => {
+      await refresh();
+      setFeedback({
+        tone: "success",
+        message: "Invite created. It expires in 7 days.",
       });
-      setCopyFeedback(null);
-      setOneTimeInvite(result);
-      await refreshAccess();
     },
   });
 
-  const revokeInvite = useMutation({
-    mutationFn: ({ invite, reason }: { invite: AdminInvite; reason: string }) =>
+  const revokeInviteMutation = useMutation({
+    mutationFn: (invite: AdminInvite) =>
       apiJson<void>(
         `/api/admin/access-invites/${encodeURIComponent(invite.id)}/revoke`,
         {
           method: "POST",
-          body: JSON.stringify({
-            reason,
-            expectedVersion: invite.version,
-          }),
+          body: JSON.stringify({ expectedVersion: invite.version }),
         },
       ),
-    onSuccess: async (_result, { invite }) => {
-      setInviteAction(null);
-      setReason("");
-      setInviteLinks((current) => {
-        const next = { ...current };
-        delete next[invite.id];
-        return next;
-      });
-      setCopyFeedback(null);
-      await refreshAccess();
+    onSuccess: async () => {
+      setRevokeInvite(null);
+      await refresh();
+      setFeedback({ tone: "success", message: "Invite revoked." });
     },
   });
 
-  const removeInvite = useMutation({
-    mutationFn: (invite: AdminInvite) =>
+  const revokeUserMutation = useMutation({
+    mutationFn: (user: BetaUser) =>
       apiJson<void>(
-        `/api/admin/access-invites/${encodeURIComponent(invite.id)}/remove`,
+        `/api/admin/beta-users/${encodeURIComponent(user.userId)}/revoke`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason: "admin_revoked" }),
+        },
+      ),
+    onSuccess: async () => {
+      setRevokeUser(null);
+      await refresh();
+      setFeedback({
+        tone: "success",
+        message: "Beta access revoked. A fresh invite can restore access.",
+      });
+    },
+  });
+
+  const copyInvite = async (invite: AdminInvite) => {
+    setCopyingId(invite.id);
+    setFeedback(null);
+    try {
+      const result = await apiJson<CopyResponse>(
+        `/api/admin/access-invites/${encodeURIComponent(invite.id)}/copy`,
         {
           method: "POST",
           body: JSON.stringify({ expectedVersion: invite.version }),
         },
-      ),
-    onMutate: () => setRemovalNotice(null),
-    onSuccess: async (_result, invite) => {
-      setInviteAction(null);
-      setReason("");
-      setInviteLinks((current) => {
-        const next = { ...current };
-        delete next[invite.id];
-        return next;
-      });
-      setCopyFeedback(null);
-      setRemovalNotice(
-        `${invite.codePrefix}… was removed from this list. Its audit history was retained.`,
       );
-      await refreshAccess();
-      requestAnimationFrame(() => createInviteButton.current?.focus());
-    },
-  });
-
-  const updateBetaUser = useMutation({
-    mutationFn: ({ action, reason }: { action: BetaUserAction; reason: string }) =>
-      apiJson<void>(
-        action.kind === "revoke"
-          ? `/api/admin/beta-users/${encodeURIComponent(action.user.userId)}/revoke`
-          : `/api/admin/beta-users/${encodeURIComponent(action.user.userId)}/allow-reinvite`,
-        {
-          method: "POST",
-          body: JSON.stringify(
-            action.kind === "revoke"
-              ? { reason }
-              : { revocationId: action.user.revocationId },
-          ),
-        },
-      ),
-    onSuccess: async () => {
-      setBetaUserAction(null);
-      setReason("");
-      await refreshAccess();
-    },
-  });
+      await copyText(result.inviteUrl);
+      setFeedback({
+        tone: "success",
+        message: `${invite.codePrefix}… copied.`,
+      });
+    } catch (error) {
+      setFeedback({
+        tone: "error",
+        message: errorMessage(error, "The invite link could not be copied."),
+      });
+    } finally {
+      setCopyingId(null);
+    }
+  };
 
   if (access.error) {
     return (
@@ -246,211 +177,144 @@ export function BetaAccessPanel() {
       />
     );
   }
+  if (access.isPending) return <TableSkeleton />;
 
-  if (access.isPending) {
-    return <TableSkeleton />;
-  }
-
-  const invites = access.data.invites;
-  const betaUsers = access.data.betaUsers;
-  const actionError =
-    createInvite.error ??
-    replaceInvite.error ??
-    revokeInvite.error ??
-    removeInvite.error ??
-    updateBetaUser.error;
+  const activeInvites = access.data.invites.filter(
+    (invite) => invite.state === "active",
+  );
+  const inviteHistory = access.data.invites.filter(
+    (invite) => invite.state !== "active",
+  );
+  const activeUsers = access.data.betaUsers.filter(
+    (user) => user.state === "active",
+  );
+  const revokedUsers = access.data.betaUsers.filter(
+    (user) => user.state === "revoked",
+  );
   const actionPending =
-    replaceInvite.isPending ||
-    revokeInvite.isPending ||
-    removeInvite.isPending ||
-    updateBetaUser.isPending;
-
-  const copyInviteLink = async (invite: AdminInvite) => {
-    const inviteUrl = inviteLinks[invite.id];
-    if (!inviteUrl) return;
-
-    try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopyFeedback({
-        inviteId: invite.id,
-        message: `${invite.codePrefix}… link copied.`,
-        tone: "success",
-      });
-    } catch {
-      setCopyFeedback({
-        inviteId: invite.id,
-        message: `${invite.codePrefix}… link could not be copied.`,
-        tone: "error",
-      });
-    }
-  };
+    copyingId !== null ||
+    createInvite.isPending ||
+    revokeInviteMutation.isPending ||
+    revokeUserMutation.isPending;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <Section
         density="compact"
-        title="Beta invite codes"
-        description="New single-use bearer links expire after 14 days. Links created on this page remain copyable until you leave or refresh; the server stores only a safe code prefix."
+        title="Invite links"
+        description="Each link admits one GitHub account and expires after 7 days."
         actions={
           <Button
-            ref={createInviteButton}
             size="sm"
-            onClick={() => {
-              createInvite.reset();
-              setRemovalNotice(null);
-              setCreateOpen(true);
-            }}
+            className="min-h-11 sm:min-h-9"
+            disabled={actionPending}
+            onClick={() => createInvite.mutate()}
           >
             <TicketPlus />
-            Create invite
+            {createInvite.isPending ? "Creating…" : "Create invite"}
           </Button>
         }
       >
-        {invites.length ? (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Code</TableHead>
-                <TableHead>State</TableHead>
-                <TableHead>Label</TableHead>
-                <TableHead>Lifetime</TableHead>
-                <TableHead>Redeemer</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {invites.map((invite) => (
-                <TableRow key={invite.id}>
-                  <TableCell>
-                    <div className="space-y-1">
-                      <p className="font-mono text-xs">
-                        {invite.codePrefix}…
-                      </p>
-                      <p className="text-caption">
-                        {invite.kind === "bootstrap_admin"
-                          ? "Bootstrap admin"
-                          : "Standard"}
-                      </p>
+        {activeInvites.length ? (
+          <>
+            <div className="divide-y lg:hidden">
+              {activeInvites.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="space-y-4 py-4 first:pt-0 last:pb-0"
+                >
+                  <p className="font-mono text-sm font-semibold">
+                    {invite.codePrefix}…
+                  </p>
+                  <dl className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <dt className="text-caption">Created</dt>
+                      <dd className="mt-1">
+                        {formatRelativeTime(invite.createdAt)}
+                      </dd>
                     </div>
-                  </TableCell>
-                  <TableCell>
-                    <InviteStateBadge state={invite.state} />
-                    {invite.state === "leased" && invite.leaseExpiresAt ? (
-                      <p className="mt-1 text-caption">
-                        Lease ends {formatRelativeTime(invite.leaseExpiresAt)}
-                      </p>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="max-w-56 whitespace-normal">
-                    <p className="text-sm">{invite.label ?? "—"}</p>
-                  </TableCell>
-                  <TableCell>
-                    <p className="text-xs">
-                      Expires {formatRelativeTime(invite.expiresAt)}
-                    </p>
-                    <p className="text-caption">
-                      Created {formatRelativeTime(invite.createdAt)}
-                    </p>
-                  </TableCell>
-                  <TableCell>
-                    {invite.redeemerGithubUsername ? (
-                      <span className="font-mono text-xs">
-                        @{invite.redeemerGithubUsername}
-                      </span>
-                    ) : (
-                      <span className="text-caption">—</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex flex-wrap justify-end gap-1.5">
-                      {invite.state === "pending" ||
-                      invite.state === "leased" ? (
-                        <>
-                          {inviteLinks[invite.id] ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={actionPending}
-                              onClick={() => void copyInviteLink(invite)}
-                            >
-                              {copyFeedback?.inviteId === invite.id &&
-                              copyFeedback.tone === "success" ? (
-                                <Check />
-                              ) : (
-                                <Clipboard />
-                              )}
-                              Copy link
-                            </Button>
-                          ) : null}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={actionPending}
-                            onClick={() => {
-                              setReason("");
-                              setInviteAction({ kind: "replace", invite });
-                            }}
-                          >
-                            <RefreshCw />
-                            Replace
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="text-muted-foreground hover:text-destructive"
-                            disabled={actionPending}
-                            onClick={() => {
-                              setReason("");
-                              setInviteAction({ kind: "revoke", invite });
-                            }}
-                          >
-                            <Ban />
-                            Revoke
-                          </Button>
-                        </>
-                      ) : null}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-muted-foreground hover:text-destructive"
-                        disabled={actionPending}
-                        onClick={() => {
-                          setReason("");
-                          setRemovalNotice(null);
-                          setInviteAction({ kind: "remove", invite });
-                        }}
-                      >
-                        <Trash2 />
-                        Remove
-                      </Button>
+                    <div>
+                      <dt className="text-caption">Expires</dt>
+                      <dd className="mt-1">
+                        {formatRelativeTime(invite.expiresAt)}
+                      </dd>
                     </div>
-                  </TableCell>
-                </TableRow>
+                  </dl>
+                  <InviteActions
+                    invite={invite}
+                    copying={copyingId === invite.id}
+                    disabled={actionPending}
+                    mobile
+                    onCopy={() => void copyInvite(invite)}
+                    onRevoke={() => setRevokeInvite(invite)}
+                  />
+                </div>
               ))}
-            </TableBody>
-          </Table>
+            </div>
+            <div className="hidden lg:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Link</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {activeInvites.map((invite) => (
+                    <TableRow key={invite.id}>
+                      <TableCell className="font-mono text-xs">
+                        {invite.codePrefix}…
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatRelativeTime(invite.createdAt)}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatRelativeTime(invite.expiresAt)}
+                      </TableCell>
+                      <TableCell>
+                        <InviteActions
+                          invite={invite}
+                          copying={copyingId === invite.id}
+                          disabled={actionPending}
+                          onCopy={() => void copyInvite(invite)}
+                          onRevoke={() => setRevokeInvite(invite)}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </>
         ) : (
           <EmptyState
             icon={<KeyRound />}
-            title="No invite codes"
-            description="Create a code when you are ready to admit one beta user."
+            title="No active invites"
+            description="Create a link when you are ready to admit someone."
           />
         )}
-        {copyFeedback ? (
-          <InlineFeedback tone={copyFeedback.tone} className="mt-3">
-            {copyFeedback.message}
+
+        {createInvite.error ? (
+          <InlineFeedback tone="error" className="mt-3">
+            {errorMessage(createInvite.error, "The invite could not be created.")}
+          </InlineFeedback>
+        ) : feedback ? (
+          <InlineFeedback tone={feedback.tone} className="mt-3">
+            {feedback.message}
           </InlineFeedback>
         ) : null}
       </Section>
 
       <Section
         density="compact"
-        title="Beta users"
-        description="Access is keyed to the Better Auth user and immutable GitHub account ID. A cleared block does not grant access; the person still needs a fresh invite."
+        title="People with access"
+        description="Access stays bound to the same Better Auth user and GitHub account."
       >
-        {betaUsers.length ? (
+        {activeUsers.length ? (
           <div className="divide-y">
-            {betaUsers.map((user) => (
+            {activeUsers.map((user) => (
               <div
                 key={user.userId}
                 className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between"
@@ -460,40 +324,21 @@ export function BetaAccessPanel() {
                     <p className="font-mono text-sm font-semibold">
                       @{user.githubUsername}
                     </p>
-                    <Badge
-                      variant={user.state === "active" ? "success" : "destructive"}
-                    >
-                      {user.state === "active" ? "Active" : "Blocked"}
-                    </Badge>
                     {user.role === "admin" ? <Badge>Admin</Badge> : null}
                   </div>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {user.userId}
-                  </p>
                   <p className="text-caption">
-                    {user.state === "active"
-                      ? `Granted ${formatRelativeTime(user.grantedAt)}`
-                      : `${user.revocationReason ?? "Access revoked"}${
-                          user.revokedAt
-                            ? ` · ${formatRelativeTime(user.revokedAt)}`
-                            : ""
-                        }`}
+                    Access granted {formatRelativeTime(user.grantedAt)}
                   </p>
                 </div>
                 <Button
                   size="sm"
-                  variant={user.state === "active" ? "destructive" : "outline"}
+                  variant="ghost"
+                  className="min-h-11 self-start text-muted-foreground hover:text-destructive sm:min-h-9 sm:self-auto"
                   disabled={actionPending}
-                  onClick={() => {
-                    setReason("");
-                    setBetaUserAction({
-                      kind: user.state === "active" ? "revoke" : "allow-reinvite",
-                      user,
-                    });
-                  }}
+                  onClick={() => setRevokeUser(user)}
                 >
-                  {user.state === "active" ? <Ban /> : <Undo2 />}
-                  {user.state === "active" ? "Revoke access" : "Allow re-invite"}
+                  <Ban />
+                  Revoke access
                 </Button>
               </div>
             ))}
@@ -501,450 +346,247 @@ export function BetaAccessPanel() {
         ) : (
           <EmptyState
             icon={<ShieldCheck />}
-            title="No beta users"
-            description="A user appears here only after confirming an invite with GitHub."
+            title="No active beta users"
+            description="A person appears here after confirming an invite with GitHub."
           />
         )}
       </Section>
 
-      {actionError ? (
-        <InlineFeedback tone="error">
-          {errorMessage(actionError, "The access change could not be completed")}
-        </InlineFeedback>
-      ) : null}
+      <details className="group border-t pt-4">
+        <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-semibold marker:hidden">
+          <History className="size-4 text-muted-foreground" />
+          History
+          <span className="font-normal text-muted-foreground">
+            {inviteHistory.length + revokedUsers.length}
+          </span>
+          <ChevronDown className="ml-auto size-4 text-muted-foreground transition-transform group-open:rotate-180 motion-reduce:transition-none" />
+        </summary>
+        <div className="space-y-6 pt-4">
+          <InviteHistory invites={inviteHistory} />
+          <RevokedPeople users={revokedUsers} />
+        </div>
+      </details>
 
-      {removalNotice ? (
-        <InlineFeedback tone="success">{removalNotice}</InlineFeedback>
-      ) : null}
-
-      <CreateInviteDialog
-        open={createOpen}
-        label={label}
-        pending={createInvite.isPending}
-        error={createInvite.error}
-        onLabelChange={setLabel}
-        onOpenChange={(open) => {
-          if (!createInvite.isPending) setCreateOpen(open);
-        }}
-        onCreate={() => createInvite.mutate()}
+      <RevokeInviteDialog
+        invite={revokeInvite}
+        pending={revokeInviteMutation.isPending}
+        error={revokeInviteMutation.error}
+        onClose={() => !revokeInviteMutation.isPending && setRevokeInvite(null)}
+        onConfirm={() => revokeInvite && revokeInviteMutation.mutate(revokeInvite)}
       />
-
-      <OneTimeInviteDialog
-        result={oneTimeInvite}
-        onClose={() => {
-          setOneTimeInvite(null);
-          createInvite.reset();
-          replaceInvite.reset();
-        }}
-      />
-
-      <InviteActionDialog
-        action={inviteAction}
-        reason={reason}
-        pending={
-          replaceInvite.isPending ||
-          revokeInvite.isPending ||
-          removeInvite.isPending
-        }
-        error={
-          replaceInvite.error ?? revokeInvite.error ?? removeInvite.error
-        }
-        onReasonChange={setReason}
-        onClose={() => {
-          if (
-            !replaceInvite.isPending &&
-            !revokeInvite.isPending &&
-            !removeInvite.isPending
-          ) {
-            setInviteAction(null);
-            setReason("");
-          }
-        }}
-        onConfirm={() => {
-          if (!inviteAction) return;
-          if (inviteAction.kind === "replace") {
-            replaceInvite.mutate(inviteAction.invite);
-          } else if (inviteAction.kind === "remove") {
-            removeInvite.mutate(inviteAction.invite);
-          } else if (isValidReasonCode(reason)) {
-            revokeInvite.mutate({
-              invite: inviteAction.invite,
-              reason: reason.trim(),
-            });
-          }
-        }}
-      />
-
-      <BetaUserActionDialog
-        action={betaUserAction}
-        reason={reason}
-        pending={updateBetaUser.isPending}
-        error={updateBetaUser.error}
-        onReasonChange={setReason}
-        onClose={() => {
-          if (!updateBetaUser.isPending) {
-            setBetaUserAction(null);
-            setReason("");
-          }
-        }}
-        onConfirm={() => {
-          if (!betaUserAction) return;
-          if (
-            betaUserAction.kind === "revoke" &&
-            !isValidReasonCode(reason)
-          ) {
-            return;
-          }
-          updateBetaUser.mutate({
-            action: betaUserAction,
-            reason: reason.trim(),
-          });
-        }}
+      <RevokeUserDialog
+        user={revokeUser}
+        pending={revokeUserMutation.isPending}
+        error={revokeUserMutation.error}
+        onClose={() => !revokeUserMutation.isPending && setRevokeUser(null)}
+        onConfirm={() => revokeUser && revokeUserMutation.mutate(revokeUser)}
       />
     </div>
   );
 }
 
-function CreateInviteDialog({
-  open,
-  label,
-  pending,
-  error,
-  onOpenChange,
-  onLabelChange,
-  onCreate,
+function InviteActions({
+  invite,
+  copying,
+  disabled,
+  mobile = false,
+  onCopy,
+  onRevoke,
 }: {
-  open: boolean;
-  label: string;
-  pending: boolean;
-  error: unknown;
-  onOpenChange: (open: boolean) => void;
-  onLabelChange: (value: string) => void;
-  onCreate: () => void;
+  invite: AdminInvite;
+  copying: boolean;
+  disabled: boolean;
+  mobile?: boolean;
+  onCopy: () => void;
+  onRevoke: () => void;
 }) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Create beta invite</DialogTitle>
-          <DialogDescription>
-            This creates one unbound, single-use link that expires after 14
-            days. Anyone holding it can begin the claim.
-          </DialogDescription>
-        </DialogHeader>
-        <form
-          className="space-y-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onCreate();
-          }}
-        >
-          <div className="space-y-2">
-            <label htmlFor="invite-label" className="text-sm font-semibold">
-              Label{" "}
-              <span className="font-normal text-muted-foreground">
-                Optional
-              </span>
-            </label>
-            <Input
-              id="invite-label"
-              value={label}
-              maxLength={80}
-              onChange={(event) => onLabelChange(event.target.value)}
-              placeholder="Workshop facilitator"
-            />
-          </div>
-          <p className="text-caption">
-            The label is administrative metadata only. It never authorizes
-            access.
-          </p>
-          {error ? (
-            <InlineFeedback tone="error">
-              {errorMessage(error, "The invite could not be created")}
-            </InlineFeedback>
-          ) : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={pending}
-              onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={pending}>
-              {pending ? "Creating…" : "Create single-use link"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function OneTimeInviteDialog({
-  result,
-  onClose,
-}: {
-  result: OneTimeInvite | null;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState(false);
-  const close = () => {
-    setCopied(false);
-    setCopyError(false);
-    onClose();
-  };
-
-  return (
-    <Dialog
-      open={result !== null}
-      onOpenChange={(open) => {
-        if (!open) {
-          close();
-        }
-      }}
+    <div
+      className={
+        mobile
+          ? "grid grid-cols-2 gap-2"
+          : "flex flex-wrap justify-end gap-1.5"
+      }
     >
-      <DialogContent showCloseButton={false} className="sm:max-w-lg">
+      <Button
+        size="sm"
+        variant="outline"
+        className={mobile ? "min-h-11 w-full" : undefined}
+        disabled={disabled}
+        onClick={onCopy}
+        aria-label={`Copy ${invite.codePrefix} invite`}
+      >
+        {copying ? <Check /> : <Clipboard />}
+        {copying ? "Copying…" : "Copy"}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        className={
+          mobile
+            ? "min-h-11 w-full text-muted-foreground hover:text-destructive"
+            : "text-muted-foreground hover:text-destructive"
+        }
+        disabled={disabled}
+        onClick={onRevoke}
+        aria-label={`Revoke ${invite.codePrefix} invite`}
+      >
+        <Ban />
+        Revoke
+      </Button>
+    </div>
+  );
+}
+
+function InviteHistory({ invites }: { invites: AdminInvite[] }) {
+  if (!invites.length) {
+    return <p className="text-caption">No completed invites.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold">Invites</h3>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Link</TableHead>
+            <TableHead>Result</TableHead>
+            <TableHead>Completed</TableHead>
+            <TableHead>GitHub account</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {invites.map((invite) => (
+            <TableRow key={invite.id}>
+              <TableCell className="font-mono text-xs">
+                {invite.codePrefix}…
+              </TableCell>
+              <TableCell>
+                <InviteStateBadge state={invite.state} />
+              </TableCell>
+              <TableCell className="text-sm">
+                {invite.completedAt
+                  ? formatRelativeTime(invite.completedAt)
+                  : "—"}
+              </TableCell>
+              <TableCell className="font-mono text-xs">
+                {invite.redeemerGithubUsername
+                  ? `@${invite.redeemerGithubUsername}`
+                  : "—"}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function RevokedPeople({ users }: { users: BetaUser[] }) {
+  if (!users.length) return null;
+  return (
+    <div className="space-y-2">
+      <h3 className="text-sm font-semibold">Revoked access</h3>
+      <div className="divide-y">
+        {users.map((user) => (
+          <div
+            key={user.userId}
+            className="flex flex-wrap items-center justify-between gap-2 py-3"
+          >
+            <span className="font-mono text-sm">@{user.githubUsername}</span>
+            <span className="text-caption">
+              {user.revokedAt
+                ? formatRelativeTime(user.revokedAt)
+                : "Access revoked"}
+              {user.revocationCleanupCompletedAt ? " · Cleanup complete" : ""}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RevokeInviteDialog({
+  invite,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  invite: AdminInvite | null;
+  pending: boolean;
+  error: unknown;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={invite !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
         <DialogHeader>
-          <DialogTitle>Copy this link</DialogTitle>
+          <DialogTitle>Revoke this invite?</DialogTitle>
           <DialogDescription>
-            The raw code is not stored on the server. After you close this
-            window, you can copy the link from its list row until you leave or
-            refresh this page.
+            The link stops working immediately and moves to History.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-3">
-          <label htmlFor="one-time-invite" className="text-sm font-semibold">
-            Beta invite link
-          </label>
-          <Input
-            id="one-time-invite"
-            readOnly
-            value={result?.inviteUrl ?? ""}
-            className="font-mono text-sm"
-            onFocus={(event) => event.currentTarget.select()}
-            onClick={(event) => event.currentTarget.select()}
-          />
+        <p className="font-mono text-sm">{invite?.codePrefix}…</p>
+        {error ? (
+          <InlineFeedback tone="error">
+            {errorMessage(error, "The invite could not be revoked.")}
+          </InlineFeedback>
+        ) : null}
+        <DialogFooter>
+          <Button variant="outline" disabled={pending} onClick={onClose}>
+            Keep invite
+          </Button>
+          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+            {pending ? "Revoking…" : "Revoke invite"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RevokeUserDialog({
+  user,
+  pending,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  user: BetaUser | null;
+  pending: boolean;
+  error: unknown;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={user !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Revoke beta access?</DialogTitle>
+          <DialogDescription>
+            Sessions and personal runtime access are cleaned up. A fresh invite
+            can restore access after cleanup finishes.
+          </DialogDescription>
+        </DialogHeader>
+        <p className="font-mono text-sm">@{user?.githubUsername}</p>
+        {user?.role === "admin" ? (
           <p className="text-caption">
-            Send it through a trusted channel. Do not paste it into tickets,
-            logs, or analytics tools.
+            Last-admin protection is enforced by the server.
           </p>
-          {copied ? (
-            <InlineFeedback tone="success">Link copied.</InlineFeedback>
-          ) : copyError ? (
-            <InlineFeedback tone="error">
-              Clipboard access was blocked. Select the whole link and copy it
-              manually.
-            </InlineFeedback>
-          ) : null}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={close}>
-            Close
-          </Button>
-          <Button
-            onClick={async () => {
-              if (!result) return;
-              try {
-                await navigator.clipboard.writeText(result.inviteUrl);
-                setCopyError(false);
-                setCopied(true);
-              } catch {
-                setCopied(false);
-                setCopyError(true);
-              }
-            }}
-          >
-            {copied ? <Check /> : <Clipboard />}
-            {copied ? "Copied" : "Copy link"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function InviteActionDialog({
-  action,
-  reason,
-  pending,
-  error,
-  onReasonChange,
-  onClose,
-  onConfirm,
-}: {
-  action: InviteAction | null;
-  reason: string;
-  pending: boolean;
-  error: unknown;
-  onReasonChange: (value: string) => void;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  const replacing = action?.kind === "replace";
-  const removing = action?.kind === "remove";
-  const active =
-    action?.invite.state === "pending" || action?.invite.state === "leased";
-  return (
-    <Dialog open={action !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            {replacing
-              ? "Replace this invite?"
-              : removing
-                ? "Remove this invite code?"
-                : "Revoke this invite?"}
-          </DialogTitle>
-          <DialogDescription>
-            {replacing
-              ? "The current link and any active OAuth lease stop working immediately. A new raw link will be shown once."
-              : removing
-                ? active
-                  ? "The link and any active sign-in attempt stop working immediately, then the code disappears from this list. Its audit history remains."
-                  : action?.invite.state === "redeemed"
-                    ? "The code disappears from this list, but its audit history remains and the redeemed user keeps beta access."
-                    : "The code disappears from this list, but its audit history remains."
-                : "The link and any active OAuth lease stop working immediately. This cannot be undone."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="rounded-lg border bg-muted/40 p-3">
-          <p className="font-mono text-xs">{action?.invite.codePrefix}…</p>
-          <p className="mt-1 text-caption">
-            {action?.invite.label ?? "Unlabelled invite"}
-          </p>
-        </div>
-        {!replacing && !removing ? (
-          <div className="space-y-2">
-            <label htmlFor="invite-reason" className="text-sm font-semibold">
-              Revocation reason code
-            </label>
-            <Input
-              id="invite-reason"
-              value={reason}
-              maxLength={120}
-              pattern="[a-z0-9][a-z0-9._:-]{0,119}"
-              onChange={(event) => onReasonChange(event.target.value)}
-              placeholder="link_shared_publicly"
-            />
-            <p className="text-caption">
-              Lowercase letters, numbers, dots, underscores, colons, and
-              hyphens only. Do not enter personal data.
-            </p>
-          </div>
         ) : null}
         {error ? (
           <InlineFeedback tone="error">
-            {errorMessage(error, "The invite could not be updated")}
+            {errorMessage(error, "Beta access could not be revoked.")}
           </InlineFeedback>
         ) : null}
         <DialogFooter>
           <Button variant="outline" disabled={pending} onClick={onClose}>
-            Cancel
+            Keep access
           </Button>
-          <Button
-            variant={replacing ? "default" : "destructive"}
-            disabled={
-              pending ||
-              (!replacing && !removing && !isValidReasonCode(reason))
-            }
-            onClick={onConfirm}
-          >
-            {pending
-              ? "Updating…"
-              : replacing
-                ? "Replace and show new link"
-                : removing
-                  ? "Remove from list"
-                  : "Revoke invite"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function BetaUserActionDialog({
-  action,
-  reason,
-  pending,
-  error,
-  onReasonChange,
-  onClose,
-  onConfirm,
-}: {
-  action: BetaUserAction | null;
-  reason: string;
-  pending: boolean;
-  error: unknown;
-  onReasonChange: (value: string) => void;
-  onClose: () => void;
-  onConfirm: () => void;
-}) {
-  const revoking = action?.kind === "revoke";
-  return (
-    <Dialog open={action !== null} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
-            {revoking ? "Revoke beta access?" : "Allow a new invite?"}
-          </DialogTitle>
-          <DialogDescription>
-            {revoking
-              ? "Access is blocked first. Sessions, OAuth grants, personal routes, credentials, agents, and active personal runs are then cleaned up."
-              : "This only clears the block. The user remains without beta access until they claim a fresh invite."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="rounded-lg border bg-muted/40 p-3">
-          <p className="font-mono text-sm font-semibold">
-            @{action?.user.githubUsername}
-          </p>
-          {action?.user.role === "admin" ? (
-            <p className="mt-1 text-caption">
-              Platform administrator — last-admin protection is enforced by the
-              server.
-            </p>
-          ) : null}
-        </div>
-        {revoking ? (
-          <div className="space-y-2">
-            <label htmlFor="beta-reason" className="text-sm font-semibold">
-              Revocation reason code
-            </label>
-            <Input
-              id="beta-reason"
-              value={reason}
-              maxLength={120}
-              pattern="[a-z0-9][a-z0-9._:-]{0,119}"
-              onChange={(event) => onReasonChange(event.target.value)}
-              placeholder="policy_violation"
-            />
-            <p className="text-caption">
-              Use a normalized audit code and do not enter personal data.
-            </p>
-          </div>
-        ) : null}
-        {error ? (
-          <InlineFeedback tone="error">
-            {errorMessage(error, "The beta access change was rejected")}
-          </InlineFeedback>
-        ) : null}
-        <DialogFooter>
-          <Button variant="outline" disabled={pending} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant={revoking ? "destructive" : "default"}
-            disabled={pending || (revoking && !isValidReasonCode(reason))}
-            onClick={onConfirm}
-          >
-            {pending
-              ? "Updating…"
-              : revoking
-                ? "Revoke beta access"
-                : "Clear block only"}
+          <Button variant="destructive" disabled={pending} onClick={onConfirm}>
+            {pending ? "Revoking…" : "Revoke access"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -954,15 +596,20 @@ function BetaUserActionDialog({
 
 function InviteStateBadge({ state }: { state: InviteState }) {
   switch (state) {
-    case "pending":
-      return <Badge variant="success">Pending</Badge>;
-    case "leased":
-      return <Badge variant="warning">Leased</Badge>;
+    case "active":
+      return null;
+    case "expired":
+      return <Badge variant="outline">Expired</Badge>;
     case "redeemed":
-      return <Badge variant="outline">Redeemed</Badge>;
+      return <Badge variant="success">Used</Badge>;
     case "revoked":
       return <Badge variant="destructive">Revoked</Badge>;
   }
+}
+
+async function copyText(value: string): Promise<void> {
+  if (!navigator.clipboard) throw new Error("Clipboard access is unavailable.");
+  await navigator.clipboard.writeText(value);
 }
 
 async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
@@ -989,10 +636,6 @@ async function apiJson<T>(path: string, init: RequestInit): Promise<T> {
   return body as T;
 }
 
-function errorMessage(error: unknown, fallback: string) {
+function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function isValidReasonCode(value: string) {
-  return REASON_CODE_PATTERN.test(value.trim());
 }

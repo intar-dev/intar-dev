@@ -113,6 +113,7 @@ web/R2 deployment, and protected Flagship targeting:
 | `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`       | GCP Worker deployment only                                         |
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`     | route-less capability probe only                                   |
 | `CLOUDFLARE_API_TOKEN`                    | D1, web, guest-tool R2, and protected Flagship deployment           |
+| `ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1`   | active beta-invite link encryption only                             |
 | `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | web runtime and maintenance checks                                 |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`      | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`          | GCP Worker deployment only                                         |
@@ -123,6 +124,19 @@ web/R2 deployment, and protected Flagship targeting:
 Each KEK is standard-base64 for exactly 32 random bytes. BYOK credentials do
 not belong in GitHub; owners submit them through the web application and each
 provider Worker envelope-encrypts them.
+
+`ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
+random bytes. It encrypts only active, copyable beta invite links. Redeeming or
+revoking an invite erases its ciphertext while retaining the hash and audit row.
+
+Platform administrators manage beta access in **People > Beta access**. Create
+one fixed seven-day link, then use **Copy** or **Revoke** on its active row. A
+link admits one GitHub account. Terminal links and revoked users stay in the
+collapsed History section. Restoring a revoked user needs a fresh invite after
+cleanup completes; there is no re-invite switch or bootstrap-admin endpoint.
+The simplification cutover revokes every older pending or leased link and writes
+an `invite.revoked` audit event with reason
+`security_simplification_cutover`.
 
 `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
 random bytes. Normal web deployments bind this runtime secret but never run an

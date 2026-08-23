@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { exchangeAccessInviteCode } from "@/lib/access-invites";
+import { inspectBetaInviteCode } from "@/lib/beta-invites";
 import {
   accessInviteError,
   accessInviteJson,
@@ -20,7 +20,7 @@ export const POST: APIRoute = async ({ request }) => {
     await rateLimitPublicAccessInvite({ request, action: "exchange" });
     const body = await readJsonObject(request);
     const code = typeof body.code === "string" ? body.code : "";
-    const invite = await exchangeAccessInviteCode({ d1: env.DB, code });
+    const invite = await inspectBetaInviteCode({ d1: env.DB, code });
     const existingAttempt = await readInviteAttempt(request).catch(() => null);
     const attempt =
       existingAttempt?.inviteId === invite.inviteId

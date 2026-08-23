@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../db/schema";
 import { db } from "../db/client";
-import { validateGithubInviteLease } from "./access-invites";
+import { getBetaInvite } from "./beta-invites";
 import {
   getBetaAccess,
   getBetaAccessState,
@@ -96,7 +96,7 @@ type SessionIssuanceFence =
 export type GithubAccountIssuanceFence = {
   kind: "github-invite";
   inviteId: string;
-  leaseId: string;
+  attemptId: string;
   userId: string;
 };
 
@@ -176,7 +176,7 @@ type BetaAuthFlow =
   | {
       kind: "github-invite";
       inviteId: string;
-      leaseId: string;
+      attemptId: string;
     }
   | {
       kind: "sso-link";
@@ -258,14 +258,14 @@ export async function getBetaOAuthAccessTokenClaims(input: {
 
 export async function createInviteOAuthHandoff(input: {
   inviteId: string;
-  leaseId: string;
-  leaseExpiresAt: number;
+  attemptId: string;
+  expiresAt: number;
 }): Promise<string> {
   return signHandoff({
     kind: "github-invite",
     inviteId: requireSafeIdentifier(input.inviteId, "inviteId"),
-    leaseId: requireSafeIdentifier(input.leaseId, "leaseId"),
-    expiresAt: requireHandoffExpiry(input.leaseExpiresAt),
+    attemptId: requireSafeIdentifier(input.attemptId, "attemptId"),
+    expiresAt: requireHandoffExpiry(input.expiresAt),
   });
 }
 
@@ -446,7 +446,7 @@ function isHandoffPayload(value: unknown): value is HandoffPayload {
   switch (value.kind) {
     case "github-invite":
       return (
-        isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.leaseId)
+        isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.attemptId)
       );
     case "sso-link":
       return (
@@ -811,13 +811,7 @@ export async function enforceCreatedGithubAccountAdmission(input: {
     input.account.providerId === "github" &&
     input.account.userId === input.expected.userId &&
     (await getBetaAccessState(input.account.userId)) === null;
-  if (
-    validTarget &&
-    (await hasValidInviteLease(
-      input.expected.inviteId,
-      input.expected.leaseId,
-    ))
-  ) {
+  if (validTarget && (await hasActiveBetaInvite(input.expected.inviteId))) {
     return;
   }
 
@@ -852,19 +846,9 @@ export async function enforceCreatedAuthorizationCodeAdmission(input: {
   );
 }
 
-async function hasValidInviteLease(
-  inviteId: string,
-  leaseId: string,
-  now = Date.now(),
-): Promise<boolean> {
+async function hasActiveBetaInvite(inviteId: string): Promise<boolean> {
   try {
-    await validateGithubInviteLease({
-      d1: env.DB,
-      inviteId,
-      leaseId,
-      providerId: "github",
-      now,
-    });
+    await getBetaInvite({ d1: env.DB, inviteId });
     return true;
   } catch {
     return false;
@@ -893,8 +877,12 @@ function getTrustedBetaFlowFromState(
 
   switch (value.kind) {
     case "github-invite":
-      return isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.leaseId)
-        ? { kind: value.kind, inviteId: value.inviteId, leaseId: value.leaseId }
+      return isSafeIdentifier(value.inviteId) && isSafeIdentifier(value.attemptId)
+        ? {
+            kind: value.kind,
+            inviteId: value.inviteId,
+            attemptId: value.attemptId,
+          }
         : null;
     case "sso-link":
       return isSafeIdentifier(value.userId) &&
@@ -939,7 +927,7 @@ async function isValidRestrictedSessionFlow(
   switch (flow.kind) {
     case "github-invite":
       return (
-        (await hasValidInviteLease(flow.inviteId, flow.leaseId)) &&
+        (await hasActiveBetaInvite(flow.inviteId)) &&
         (await hasLinkedProviderAccount(userId, "github"))
       );
     case "sso-link":
@@ -967,11 +955,11 @@ const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
 
     switch (handoff.kind) {
       case "github-invite": {
-        const { inviteId, leaseId } = handoff;
+        const { inviteId, attemptId } = handoff;
         if (
           context.path !== "/sign-in/social" ||
           context.body?.provider !== "github" ||
-          !(await hasValidInviteLease(inviteId, leaseId))
+          !(await hasActiveBetaInvite(inviteId))
         ) {
           throwBetaAuthError(
             "invalid_beta_oauth_handoff",
@@ -979,7 +967,7 @@ const betaAuthBeforeRequest = createAuthMiddleware(async (context) => {
           );
         }
         await addOAuthServerContext({
-          intarBetaAuth: { kind: handoff.kind, inviteId, leaseId },
+          intarBetaAuth: { kind: handoff.kind, inviteId, attemptId },
         });
         acceptedHandoff = true;
         break;
@@ -1135,7 +1123,7 @@ async function validateProviderIdentity(
     if (
       data.source.action === "create-user" &&
       flow?.kind === "github-invite" &&
-      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
+      (await hasActiveBetaInvite(flow.inviteId))
     ) {
       return;
     }
@@ -1151,7 +1139,7 @@ async function validateProviderIdentity(
     if (
       data.source.action === "sign-in" &&
       flow?.kind === "github-invite" &&
-      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
+      (await hasActiveBetaInvite(flow.inviteId))
     ) {
       return;
     }
@@ -1159,9 +1147,9 @@ async function validateProviderIdentity(
     // Better Auth classifies a GitHub callback as `link-account` when its
     // verified email matches an existing user that does not yet have this
     // GitHub identity. That is still a GitHub-authenticated invite claim, not
-    // an OIDC claim: the trusted server-side OAuth state and live lease remain
+    // an OIDC claim: the trusted server-side OAuth state and live invite remain
     // the authority. Permit only an unadmitted target with no GitHub account;
-    // the account/session database hooks re-check the same lease before either
+    // the account/session database hooks re-check the same active invite before either
     // linked identity or restricted session can survive.
     if (
       data.source.action === "link-account" &&
@@ -1171,7 +1159,7 @@ async function validateProviderIdentity(
       targetUserId === incomingUserId &&
       accessState === null &&
       !(await hasLinkedProviderAccount(targetUserId, "github")) &&
-      (await hasValidInviteLease(flow.inviteId, flow.leaseId))
+      (await hasActiveBetaInvite(flow.inviteId))
     ) {
       return;
     }
@@ -1452,11 +1440,11 @@ function buildAuthInstance() {
                 flow?.kind === "github-invite" &&
                 accessState === null &&
                 !(await hasLinkedProviderAccount(account.userId, "github")) &&
-                (await hasValidInviteLease(flow.inviteId, flow.leaseId))
+                (await hasActiveBetaInvite(flow.inviteId))
                   ? {
                       kind: flow.kind,
                       inviteId: flow.inviteId,
-                      leaseId: flow.leaseId,
+                      attemptId: flow.attemptId,
                       userId: account.userId,
                     }
                   : null;

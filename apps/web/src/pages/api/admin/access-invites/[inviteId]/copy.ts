@@ -1,6 +1,5 @@
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
-import { removeAccessInvite } from "@/lib/access-invites";
 import {
   accessInviteError,
   accessInviteJson,
@@ -9,6 +8,8 @@ import {
 } from "@/lib/access-invite-http";
 import { requireAdminUserContext } from "@/lib/agent-bridge";
 import { appError } from "@/lib/app-error";
+import { copyBetaInvite } from "@/lib/beta-invites";
+import { canonicalApplicationOrigin } from "@/lib/request-security";
 
 export const prerender = false;
 
@@ -18,18 +19,21 @@ export const POST: APIRoute = async ({ request, params }) => {
     if (!authz.ok) return accessInviteNoStore(authz.response);
     const inviteId = params.inviteId?.trim();
     if (!inviteId) {
-      throw appError(400, "invite_id_required", "invite id is required");
+      throw appError(400, "invite_id_required", "Invite id is required");
     }
     const body = await readJsonObject(request);
-    await removeAccessInvite({
+    const code = await copyBetaInvite({
       d1: env.DB,
       inviteId,
       expectedVersion:
         typeof body.expectedVersion === "number" ? body.expectedVersion : 0,
       actorUserId: authz.context.userId,
+      encryptionKey: env.ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1,
     });
-    return accessInviteJson({ removed: true });
+    return accessInviteJson({
+      inviteUrl: `${canonicalApplicationOrigin()}/join#invite=${encodeURIComponent(code)}`,
+    });
   } catch (error) {
-    return accessInviteError(error, "the beta invite could not be removed");
+    return accessInviteError(error, "The beta invite link could not be copied");
   }
 };

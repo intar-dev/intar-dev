@@ -53,7 +53,7 @@ function runDeployment(options: RunOptions = {}) {
   writeFileSync(favicon, '<svg xmlns="http://www.w3.org/2000/svg"/>\n');
   writeFileSync(
     secrets,
-    '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1":"test-oidc-config-encryption-key","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
+    '{"ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1":"test-invite-token-encryption-key","CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1":"test-oidc-config-encryption-key","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
   );
   writeFileSync(
     config,
@@ -87,7 +87,7 @@ fi
 if [ "$1 $2" = "versions view" ]; then
   version="$3"
   if [ "$version" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
-  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"},{type:"secret_text",name:"OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"},{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:(if $maintenance == "true" then "on" else "off" end)}],script_runtime:{migration_tag:"v4"}}}'
+  jq -cn --arg id "$version" --arg db "$DATABASE_ID" --arg kv "$SESSION_NAMESPACE_ID" --arg do_id "$DO_NAMESPACE_ID" --arg maintenance "$maintenance" '{id:$id,resources:{bindings:[{type:"d1",name:"DB",id:$db},{type:"kv_namespace",name:"SESSION",namespace_id:$kv},{type:"durable_object_namespace",name:"HOST_RUNTIME",namespace_id:$do_id,class_name:"HostRuntimeDO"},{type:"secret_text",name:"ACCESS_INVITE_TOKEN_ENCRYPTION_KEY_V1"},{type:"secret_text",name:"STARGATE_EGRESS_IPV4_CIDRS"},{type:"secret_text",name:"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET"},{type:"secret_text",name:"OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1"},{type:"plain_text",name:"CONTROL_PLANE_MAINTENANCE",text:(if $maintenance == "true" then "on" else "off" end)}],script_runtime:{migration_tag:"v4"}}}'
   exit 0
 fi
 if [ "$1" = "deploy" ]; then

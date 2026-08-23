@@ -19,20 +19,21 @@ import {
   oauthRefreshToken,
 } from "@/db/schema/oauth";
 import {
-  ACCESS_INVITE_LIFETIME_MS,
   acquireBetaRevocationCleanup,
-  allowBetaReinvite,
   completeBetaRevocationCleanup,
-  confirmAccessInvite,
-  createAccessInvite,
-  leaseAccessInvite,
-  revokeAccessInvite,
   revokeBetaUser,
-} from "@/lib/access-invites";
+} from "@/lib/beta-access-revocation-store";
+import {
+  BETA_INVITE_LIFETIME_MS,
+  createBetaInvite,
+  redeemBetaInvite,
+  revokeBetaInvite,
+} from "@/lib/beta-invites";
 import { resetD1Database } from "@/test/d1-migrations";
 import {
   ensureFixtureBetaAdmin,
   FIXTURE_BETA_ADMIN_ID,
+  FIXTURE_INVITE_ENCRYPTION_KEY,
 } from "@/test/beta-access-fixtures";
 import {
   auth,
@@ -491,30 +492,27 @@ describe("auth policy", () => {
     ).resolves.toMatchObject({ error: "github_identity_required" });
   });
 
-  it("accepts only a signed server handoff for the leased GitHub flow", async () => {
+  it("accepts only a signed server handoff for an active GitHub invite", async () => {
     const now = Date.now();
     const fixtureAdmin = await ensureFixtureBetaAdmin(env.DB, now - 120_000);
-    const leasedAt = now - 1_000;
-    const leaseExpiresAt = leasedAt + 600_000;
     await drizzle(env.DB).insert(accessInviteCodes).values({
       id: "invite-auth-test",
       codeHash: "a".repeat(64),
       codePrefix: "auth-test",
+      tokenCiphertext: `v1.${"A".repeat(16)}.${"B".repeat(32)}`,
       kind: "standard",
-      state: "leased",
+      state: "pending",
       createdBy: fixtureAdmin,
       createdAt: now - 60_000,
-      expiresAt: now - 60_000 + ACCESS_INVITE_LIFETIME_MS,
-      leaseId: "lease-auth-test",
-      leasedAt,
-      leaseExpiresAt,
+      expiresAt: now - 60_000 + 14 * 24 * 60 * 60_000,
+      claimExpiresAt: now - 60_000 + BETA_INVITE_LIFETIME_MS,
       updatedAt: now,
     });
 
     const handoff = await createInviteOAuthHandoff({
       inviteId: "invite-auth-test",
-      leaseId: "lease-auth-test",
-      leaseExpiresAt,
+      attemptId: "attempt-auth-test",
+      expiresAt: now + 600_000,
     });
     const forged = `${handoff.slice(0, -1)}${handoff.endsWith("a") ? "b" : "a"}`;
 
@@ -528,7 +526,7 @@ describe("auth policy", () => {
           additionalData: {
             intarBetaAuth: {
               inviteId: "invite-auth-test",
-              leaseId: "lease-auth-test",
+              attemptId: "attempt-auth-test",
             },
           },
         },
@@ -548,7 +546,7 @@ describe("auth policy", () => {
           additionalData: {
             intarBetaAuth: {
               inviteId: "attacker-controlled",
-              leaseId: "attacker-controlled",
+              attemptId: "attacker-controlled",
             },
           },
         },
@@ -569,7 +567,7 @@ describe("auth policy", () => {
       email: "same-email-invite@example.test",
       now,
     });
-    const flow = await beginGithubInviteFlow("same-email-live-lease", now);
+    const flow = await beginGithubInviteFlow("same-email-live", now);
 
     const callback = await completeGithubCallback({
       ...flow,
@@ -613,7 +611,7 @@ describe("auth policy", () => {
       )
         .bind(flow.inviteId)
         .first(),
-    ).resolves.toEqual({ state: "leased", redeemerUserId: null });
+    ).resolves.toEqual({ state: "pending", redeemerUserId: null });
   });
 
   it("rejects a same-email implicit GitHub link without an invite flow", async () => {
@@ -635,20 +633,19 @@ describe("auth policy", () => {
     await expectGithubLinkAndSessionAbsent(target.id, "4242002");
   });
 
-  it("rejects a same-email implicit GitHub link after its exact lease expires", async () => {
+  it("rejects a same-email implicit GitHub link after its invite expires", async () => {
     const now = Date.now();
     const target = await seedOidcOnlyUser({
       id: "same-email-expired-target",
       email: "same-email-expired@example.test",
       now,
     });
-    const flow = await beginGithubInviteFlow("same-email-expired-lease", now);
+    const flow = await beginGithubInviteFlow("same-email-expired", now);
     const expiredAt = Date.now() - 1;
     await drizzle(env.DB)
       .update(accessInviteCodes)
       .set({
-        leasedAt: expiredAt - 600_000,
-        leaseExpiresAt: expiredAt,
+        claimExpiresAt: expiredAt,
       })
       .where(eq(accessInviteCodes.id, flow.inviteId));
 
@@ -663,20 +660,19 @@ describe("auth policy", () => {
     await expectGithubLinkAndSessionAbsent(target.id, "4242003");
   });
 
-  it("rejects a same-email implicit GitHub link after its exact lease is revoked", async () => {
+  it("rejects a same-email implicit GitHub link after its invite is revoked", async () => {
     const now = Date.now();
     const target = await seedOidcOnlyUser({
       id: "same-email-revoked-target",
       email: "same-email-revoked@example.test",
       now,
     });
-    const flow = await beginGithubInviteFlow("same-email-revoked-lease", now);
-    await revokeAccessInvite({
+    const flow = await beginGithubInviteFlow("same-email-revoked", now);
+    await revokeBetaInvite({
       d1: env.DB,
       inviteId: flow.inviteId,
       expectedVersion: flow.inviteVersion,
       actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "same_email_callback_race",
       now: now + 1,
     });
 
@@ -905,24 +901,16 @@ describe("auth policy", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    await drizzle(env.DB).insert(accessInviteCodes).values({
-      id: "blocked-oauth-invite",
-      codeHash: "c".repeat(64),
-      codePrefix: "oauth-test",
-      kind: "standard",
-      state: "leased",
-      createdBy: fixtureAdmin,
-      createdAt: now,
-      expiresAt: now + ACCESS_INVITE_LIFETIME_MS,
-      leaseId: "blocked-oauth-lease",
-      leasedAt: now,
-      leaseExpiresAt: now + 600_000,
-      updatedAt: now,
-    });
-    await confirmAccessInvite({
+    const invite = await createBetaInvite({
       d1: env.DB,
-      inviteId: "blocked-oauth-invite",
-      leaseId: "blocked-oauth-lease",
+      actorUserId: fixtureAdmin,
+      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
+      now,
+    });
+    await redeemBetaInvite({
+      d1: env.DB,
+      inviteId: invite.id,
+      attemptId: "blocked-oauth-attempt",
       userId,
       githubAccountId: "blocked-oauth-github-id",
       githubUsername: "blocked-oauth-user",
@@ -1340,7 +1328,7 @@ describe("auth policy", () => {
     ).resolves.toBeNull();
   });
 
-  it("deletes a GitHub link inserted after its exact invite lease is revoked", async () => {
+  it("deletes a GitHub link inserted after its invite is revoked", async () => {
     const now = Date.now();
     const userId = "github-link-race-user";
     await drizzle(env.DB).insert(user).values({
@@ -1351,17 +1339,11 @@ describe("auth policy", () => {
       createdAt: new Date(now),
       updatedAt: new Date(now),
     });
-    const invite = await createAccessInvite({
+    const invite = await createBetaInvite({
       d1: env.DB,
-      kind: "standard",
       actorUserId: FIXTURE_BETA_ADMIN_ID,
-      label: "github-link-race",
+      encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
       now,
-    });
-    const lease = await leaseAccessInvite({
-      d1: env.DB,
-      inviteId: invite.id,
-      now: now + 1,
     });
     const linkedAccount = {
       id: "github-link-race-row",
@@ -1372,12 +1354,11 @@ describe("auth policy", () => {
       updatedAt: new Date(now + 2),
     };
     await drizzle(env.DB).insert(account).values(linkedAccount);
-    await revokeAccessInvite({
+    await revokeBetaInvite({
       d1: env.DB,
       inviteId: invite.id,
-      expectedVersion: lease.version,
+      expectedVersion: invite.version,
       actorUserId: FIXTURE_BETA_ADMIN_ID,
-      reason: "github_link_race",
       now: now + 3,
     });
 
@@ -1387,7 +1368,7 @@ describe("auth policy", () => {
         expected: {
           kind: "github-invite",
           inviteId: invite.id,
-          leaseId: lease.leaseId,
+          attemptId: "github-link-race-attempt",
           userId,
         },
       }),
@@ -1533,8 +1514,8 @@ describe("auth policy", () => {
     await expect(
       createInviteOAuthHandoff({
         inviteId: "invite-expired",
-        leaseId: "lease-expired",
-        leaseExpiresAt: Date.now() - 1,
+        attemptId: "attempt-expired",
+        expiresAt: Date.now() - 1,
       }),
     ).rejects.toThrow("handoff expiry is outside the allowed window");
   });
@@ -1572,31 +1553,25 @@ async function seedOidcOnlyUser(input: {
 }
 
 async function beginGithubInviteFlow(
-  label: string,
+  attemptId: string,
   now: number,
 ): Promise<StartedGithubFlow & { inviteId: string; inviteVersion: number }> {
-  const invite = await createAccessInvite({
+  const invite = await createBetaInvite({
     d1: env.DB,
-    kind: "standard",
     actorUserId: FIXTURE_BETA_ADMIN_ID,
-    label,
+    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
     now: now - 2_000,
-  });
-  const lease = await leaseAccessInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    now: now - 1_000,
   });
   const handoff = await createInviteOAuthHandoff({
     inviteId: invite.id,
-    leaseId: lease.leaseId,
-    leaseExpiresAt: lease.leaseExpiresAt,
+    attemptId,
+    expiresAt: now + 600_000,
   });
   const started = await beginGithubFlow(handoff);
   return {
     ...started,
     inviteId: invite.id,
-    inviteVersion: lease.version,
+    inviteVersion: invite.version,
   };
 }
 
@@ -1725,26 +1700,20 @@ async function grantBetaAccessWithoutLinkedGithub(input: {
     createdAt: new Date(input.now),
     updatedAt: new Date(input.now),
   });
-  const invite = await createAccessInvite({
+  const invite = await createBetaInvite({
     d1: env.DB,
-    kind: "standard",
     actorUserId: FIXTURE_BETA_ADMIN_ID,
-    label: `access-${input.userId}`,
+    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
     now: input.now,
   });
-  const lease = await leaseAccessInvite({
+  await redeemBetaInvite({
     d1: env.DB,
     inviteId: invite.id,
-    now: input.now + 1,
-  });
-  await confirmAccessInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    leaseId: lease.leaseId,
+    attemptId: `access-attempt-${input.userId}`,
     userId: input.userId,
     githubAccountId: input.githubAccountId,
     githubUsername: input.githubUsername,
-    now: input.now + 2,
+    now: input.now + 1,
   });
   await drizzle(env.DB).delete(account).where(eq(account.id, githubRowId));
 }
@@ -1859,26 +1828,20 @@ async function seedActiveBetaUser(input: {
   now: number;
 }): Promise<void> {
   await seedGithubIdentity(input);
-  const invite = await createAccessInvite({
+  const invite = await createBetaInvite({
     d1: env.DB,
-    kind: "standard",
     actorUserId: FIXTURE_BETA_ADMIN_ID,
-    label: `auth-test-${input.id}`,
+    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
     now: input.now + 1,
   });
-  const lease = await leaseAccessInvite({
+  await redeemBetaInvite({
     d1: env.DB,
     inviteId: invite.id,
-    now: input.now + 2,
-  });
-  await confirmAccessInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    leaseId: lease.leaseId,
+    attemptId: `auth-attempt-${input.id}`,
     userId: input.id,
     githubAccountId: input.accountId,
     githubUsername: input.username,
-    now: input.now + 3,
+    now: input.now + 2,
   });
 }
 
@@ -1935,24 +1898,11 @@ async function revokeAndReadmitBetaUser(
     cleanupAttemptId: cleanup.cleanupAttemptId,
     now: now + 1,
   });
-  await allowBetaReinvite({
+  const invite = await createBetaInvite({
     d1: env.DB,
-    userId,
     actorUserId: FIXTURE_BETA_ADMIN_ID,
-    revocationId: revoked.revocationId,
-    now: now + 2,
-  });
-  const invite = await createAccessInvite({
-    d1: env.DB,
-    kind: "standard",
-    actorUserId: FIXTURE_BETA_ADMIN_ID,
-    label: `readmit-${userId}`,
+    encryptionKey: FIXTURE_INVITE_ENCRYPTION_KEY,
     now: now + 3,
-  });
-  const lease = await leaseAccessInvite({
-    d1: env.DB,
-    inviteId: invite.id,
-    now: now + 4,
   });
   const github = await env.DB.prepare(
     `SELECT account_id FROM account
@@ -1965,14 +1915,14 @@ async function revokeAndReadmitBetaUser(
   )
     .bind(userId)
     .first<{ username: string }>();
-  await confirmAccessInvite({
+  await redeemBetaInvite({
     d1: env.DB,
     inviteId: invite.id,
-    leaseId: lease.leaseId,
+    attemptId: `readmit-attempt-${userId}`,
     userId,
     githubAccountId: github!.account_id,
     githubUsername: identity!.username,
-    now: now + 5,
+    now: now + 4,
   });
 }
 

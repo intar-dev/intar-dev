@@ -1150,74 +1150,47 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         return;
       }
       if (pathname === "/api/admin/access-invites" && method === "POST") {
-        const body = await requestBody(route);
         const invite = {
           id: `invite-created-${server.state.accessInvites.length + 1}`,
           codePrefix: "intar_beta_CCCCCCCC",
-          kind: "standard",
-          state: "pending",
-          label: typeof body.label === "string" ? body.label : null,
-          createdBy: "user-admin",
+          state: "active",
           createdAt: FIXED_NOW,
-          expiresAt: FIXED_NOW + 14 * 24 * 60 * 60_000,
-          leaseExpiresAt: null,
-          redeemerUserId: null,
-          redeemerGithubAccountId: null,
+          expiresAt: FIXED_NOW + 7 * 24 * 60 * 60_000,
+          completedAt: null,
           redeemerGithubUsername: null,
-          redeemedAt: null,
-          revokedBy: null,
-          revocationReason: null,
-          revokedAt: null,
-          replacesInviteId: null,
-          replacedByInviteId: null,
           version: 1,
-          updatedAt: FIXED_NOW,
         };
         server.state.accessInvites.unshift(invite);
         await json(
           route,
-          {
-            invite,
-            inviteUrl: `http://127.0.0.1:4330/join#invite=intar_beta_${"C".repeat(43)}`,
-          },
+          { invite },
           201,
         );
         return;
       }
-      const replacedInviteId = segment(
+      const copiedInviteId = segment(
         pathname,
-        /^\/api\/admin\/access-invites\/([^/]+)\/replace$/,
+        /^\/api\/admin\/access-invites\/([^/]+)\/copy$/,
       );
-      if (replacedInviteId && method === "POST") {
-        const replaced = server.state.accessInvites.find(
-          (entry) => entry.id === replacedInviteId,
+      if (copiedInviteId && method === "POST") {
+        const body = await requestBody(route);
+        const invite = server.state.accessInvites.find(
+          (entry) => entry.id === copiedInviteId,
         );
-        if (replaced) {
-          replaced.state = "revoked";
-          replaced.revocationReason = "replaced";
-          replaced.revokedAt = FIXED_NOW;
-          replaced.updatedAt = FIXED_NOW;
-          replaced.version = Number(replaced.version ?? 0) + 1;
+        if (!invite || body.expectedVersion !== invite.version) {
+          await json(
+            route,
+            { code: "access_invite_stale_version", message: "stale invite" },
+            409,
+          );
+          return;
         }
-        const invite = {
-          ...(replaced ?? {}),
-          id: `${replacedInviteId}-replacement`,
-          codePrefix: "intar_beta_DDDDDDDD",
-          state: "pending",
-          createdAt: FIXED_NOW,
-          expiresAt: FIXED_NOW + 14 * 24 * 60 * 60_000,
-          revokedBy: null,
-          revocationReason: null,
-          revokedAt: null,
-          replacesInviteId: replacedInviteId,
-          replacedByInviteId: null,
-          version: 1,
-          updatedAt: FIXED_NOW,
-        };
-        server.state.accessInvites.unshift(invite);
         await json(route, {
-          invite,
-          inviteUrl: `http://127.0.0.1:4330/join#invite=intar_beta_${"D".repeat(43)}`,
+          inviteUrl: `http://127.0.0.1:4330/join#invite=intar_beta_${
+            copiedInviteId.startsWith("invite-created")
+              ? "C".repeat(43)
+              : "A".repeat(43)
+          }`,
         });
         return;
       }
@@ -1230,26 +1203,6 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         const invite = server.state.accessInvites.find(
           (entry) => entry.id === revokedInviteId,
         );
-        if (invite) {
-          invite.state = "revoked";
-          invite.revocationReason = body.reason;
-          invite.revokedBy = "user-admin";
-          invite.revokedAt = FIXED_NOW;
-          invite.updatedAt = FIXED_NOW;
-          invite.version = Number(invite.version ?? 0) + 1;
-        }
-        await json(route, { invite: invite ?? null });
-        return;
-      }
-      const removedInviteId = segment(
-        pathname,
-        /^\/api\/admin\/access-invites\/([^/]+)\/remove$/,
-      );
-      if (removedInviteId && method === "POST") {
-        const body = await requestBody(route);
-        const invite = server.state.accessInvites.find(
-          (entry) => entry.id === removedInviteId,
-        );
         if (!invite || body.expectedVersion !== invite.version) {
           await json(
             route,
@@ -1258,10 +1211,12 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           );
           return;
         }
-        server.state.accessInvites = server.state.accessInvites.filter(
-          (entry) => entry.id !== removedInviteId,
-        );
-        await json(route, { removed: true });
+        if (invite) {
+          invite.state = "revoked";
+          invite.completedAt = FIXED_NOW;
+          invite.version = Number(invite.version ?? 0) + 1;
+        }
+        await json(route, { invite: invite ?? null });
         return;
       }
       const revokedBetaUserId = segment(
@@ -1274,7 +1229,7 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
           (entry) => entry.userId === revokedBetaUserId,
         );
         if (betaUser) {
-          betaUser.state = "blocked";
+          betaUser.state = "revoked";
           betaUser.revocationId = `revocation-${revokedBetaUserId}`;
           betaUser.revocationReason = body.reason;
           betaUser.revokedBy = "user-admin";
@@ -1283,23 +1238,9 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         }
         await json(route, {
           userId: revokedBetaUserId,
-          state: "blocked",
+          state: "revoked",
           revocationId: betaUser?.revocationId ?? null,
           cleanupCompleted: true,
-        });
-        return;
-      }
-      const reinvitedBetaUserId = segment(
-        pathname,
-        /^\/api\/admin\/beta-users\/([^/]+)\/allow-reinvite$/,
-      );
-      if (reinvitedBetaUserId && method === "POST") {
-        server.state.betaUsers = server.state.betaUsers.filter(
-          (entry) => entry.userId !== reinvitedBetaUserId,
-        );
-        await json(route, {
-          userId: reinvitedBetaUserId,
-          state: "reinvite_allowed",
         });
         return;
       }

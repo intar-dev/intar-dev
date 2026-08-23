@@ -38,10 +38,9 @@ import {
 } from "@/lib/personal-agent-admission";
 import {
   acquireBetaRevocationCleanup,
-  allowBetaReinvite,
   completeBetaRevocationCleanup,
   revokeBetaUser,
-} from "@/lib/access-invites";
+} from "@/lib/beta-access-revocation-store";
 import type { BetaAdmissionEpoch } from "@/lib/allowlist";
 import {
   FIXTURE_BETA_ADMIN_ID,
@@ -185,19 +184,12 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       cleanupAttemptId: cleanup.cleanupAttemptId,
       now: equalGrantedAt - 4,
     });
-    await allowBetaReinvite({
-      d1: env.DB,
-      userId: "user-1",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      revocationId: blocked.revocationId,
-      now: equalGrantedAt - 3,
-    });
     await grantFixtureBetaAccess({
       d1: env.DB,
       userId: "user-1",
       githubAccountId: "host-runtime-github-user-1",
       githubUsername: "user-1",
-      now: equalGrantedAt - 2,
+      now: equalGrantedAt - 1,
     });
     const freshAdmission = await loadFixtureBetaAdmission("user-1");
     expect(freshAdmission.grantedAt).toBe(equalGrantedAt);
@@ -360,19 +352,12 @@ describe("HostRuntimeDO bridge dispatch and sessions", () => {
       cleanupAttemptId: cleanup.cleanupAttemptId,
       now: blocked.now + 2,
     });
-    await allowBetaReinvite({
-      d1: env.DB,
-      userId: "user-1",
-      actorUserId: FIXTURE_BETA_ADMIN_ID,
-      revocationId: blocked.revocationId,
-      now: blocked.now + 3,
-    });
     await grantFixtureBetaAccess({
       d1: env.DB,
       userId: "user-1",
       githubAccountId: "host-runtime-github-user-1",
       githubUsername: "user-1",
-      now: blocked.now + 4,
+      now: blocked.now + 3,
     });
     const freshAdmission = await loadFixtureBetaAdmission("user-1");
     expect(freshAdmission).not.toEqual(capturedAdmission);
