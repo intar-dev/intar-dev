@@ -69,18 +69,19 @@ probe_root_health() {
     --header 'Cache-Control: no-cache' --output "${root_body}" \
     --dump-header "${root_headers}" --write-out '%{http_code}' \
     https://intar.dev/; } || true)"
+  maintenance_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
+    --header 'Accept: application/json' --header 'Cache-Control: no-cache' \
+    --output "${maintenance_body}" --dump-header "${maintenance_headers}" \
+    --write-out '%{http_code}' \
+    https://intar.dev/api/control-plane-maintenance-probe; } || true)"
+  maintenance_code="$(jq -r '.code // empty' "${maintenance_body}" 2>/dev/null || true)"
   if [ "${expected_mode}" = maintenance ]; then
-    maintenance_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-      --header 'Accept: application/json' --header 'Cache-Control: no-cache' \
-      --output "${maintenance_body}" --dump-header "${maintenance_headers}" \
-      --write-out '%{http_code}' \
-      https://intar.dev/api/control-plane-maintenance-probe; } || true)"
-    maintenance_code="$(jq -r '.code // empty' "${maintenance_body}" 2>/dev/null || true)"
     if [ "${root_status}" = 503 ] && [ "${maintenance_status}" = 503 ] && \
       [ "${maintenance_code}" = maintenance ]; then
       healthy=true
     fi
-  elif [ "${expected_mode}" = open ] && [ "${root_status}" = 200 ]; then
+  elif [ "${expected_mode}" = open ] && [ "${root_status}" = 200 ] && \
+    [ "${maintenance_status}" = 404 ]; then
     healthy=true
   fi
   jq -n \
@@ -410,25 +411,36 @@ bun "${repository_root}/tools/deploy/worker-version.ts" \
 : > "${propagation_attempts}"
 propagation_proven=false
 propagation_observed_attempt=0
-for attempt in $(seq 1 12); do
+propagation_consecutive_healthy=0
+propagation_max_attempts=20
+propagation_required_consecutive_healthy=5
+propagation_retry_seconds=2
+for attempt in $(seq 1 "${propagation_max_attempts}"); do
   health_state="${runtime_root}/after-health-${attempt}.json"
   root_healthy=false
   if probe_root_health "after-${attempt}" "${health_state}" \
     "${target_health_mode}"; then
     root_healthy=true
+    propagation_consecutive_healthy="$((propagation_consecutive_healthy + 1))"
+  else
+    propagation_consecutive_healthy=0
   fi
   jq -cn \
     --argjson attempt "${attempt}" \
     --argjson root_healthy "${root_healthy}" \
+    --argjson consecutive_healthy "${propagation_consecutive_healthy}" \
     --slurpfile observed "${health_state}" \
-    '{attempt: $attempt, root_healthy: $root_healthy, observed: $observed[0]}' \
+    '{attempt: $attempt, root_healthy: $root_healthy, consecutive_healthy: $consecutive_healthy, observed: $observed[0]}' \
     >> "${propagation_attempts}"
-  if [ "${root_healthy}" = true ]; then
+  if [ "${propagation_consecutive_healthy}" -ge \
+    "${propagation_required_consecutive_healthy}" ]; then
     propagation_proven=true
     propagation_observed_attempt="${attempt}"
     break
   fi
-  if [ "${attempt}" -lt 12 ]; then sleep 2; fi
+  if [ "${attempt}" -lt "${propagation_max_attempts}" ]; then
+    sleep "${propagation_retry_seconds}"
+  fi
 done
 test "${propagation_proven}" = true
 
@@ -443,6 +455,10 @@ jq -n \
   --arg current_database_id "${current_database_id}" \
   --arg target_database_id "${target_database_id}" \
   --arg session_namespace_id "${session_namespace_id}" \
+  --argjson propagation_max_attempts "${propagation_max_attempts}" \
+  --argjson propagation_required_consecutive_healthy "${propagation_required_consecutive_healthy}" \
+  --argjson propagation_observed_consecutive_healthy "${propagation_consecutive_healthy}" \
+  --argjson propagation_retry_seconds "${propagation_retry_seconds}" \
   --argjson propagation_observed_attempt "${propagation_observed_attempt}" \
   --slurpfile before_health "${before_health}" \
   --rawfile propagation_attempts_ndjson "${propagation_attempts}" \
@@ -472,8 +488,10 @@ jq -n \
       runtime_secret_binding_proven: true,
       durable_object_binding_set_unchanged: true,
       durable_object_migration_tag_unchanged: true,
-      propagation_max_attempts: 12,
-      propagation_retry_seconds: 2,
+      propagation_max_attempts: $propagation_max_attempts,
+      propagation_required_consecutive_healthy: $propagation_required_consecutive_healthy,
+      propagation_observed_consecutive_healthy: $propagation_observed_consecutive_healthy,
+      propagation_retry_seconds: $propagation_retry_seconds,
       propagation_observed_attempt: $propagation_observed_attempt,
       after_health_proven: true,
       before_health: $before_health[0],
@@ -507,6 +525,9 @@ jq -e \
     .durable_object_binding_set_unchanged == true and
     .durable_object_migration_tag_unchanged == true and
     .after_health_proven == true and
+    .propagation_required_consecutive_healthy >= 2 and
+    .propagation_observed_consecutive_healthy >=
+      .propagation_required_consecutive_healthy and
     .propagation_observed_attempt >= 1 and
     .propagation_observed_attempt <= .propagation_max_attempts and
     .routes_mutated == false and

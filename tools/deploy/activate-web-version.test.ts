@@ -30,6 +30,8 @@ function runAmbiguousActivation(
   targetMaintenance = false,
   changeDatabaseBinding = false,
   currentDatabaseId = databaseId,
+  activationSucceeds = false,
+  targetHealthFailures = 0,
 ) {
   const activationTargetDatabaseId = changeDatabaseBinding
     ? targetDatabaseId
@@ -39,6 +41,7 @@ function runAmbiguousActivation(
   const runnerTemp = join(root, "runner");
   const state = join(root, "state");
   const restoreCount = join(root, "restore-count");
+  const targetHealthCount = join(root, "target-health-count");
   const config = join(root, "wrangler.json");
   const secrets = join(root, "secrets.json");
   const evidence = join(root, "evidence.json");
@@ -46,6 +49,7 @@ function runAmbiguousActivation(
   mkdirSync(runnerTemp, { recursive: true });
   writeFileSync(state, beforeVersionId);
   writeFileSync(restoreCount, "0");
+  writeFileSync(targetHealthCount, "0");
   writeFileSync(
     secrets,
     '{"CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET":"test-maintenance-secret-at-least-forty-three-characters","OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1":"test-oidc-config-encryption-key","STARGATE_EGRESS_IPV4_CIDRS":"192.0.2.1/32"}\n',
@@ -112,6 +116,10 @@ if [ "$1 $2" = "versions deploy" ]; then
   target="\${3%@*}"
   if [ "$target" = "$UPLOADED_VERSION_ID" ]; then
     printf '%s' "$UPLOADED_VERSION_ID" > "$MOCK_STATE"
+    if [ "$MOCK_ACTIVATION_SUCCEEDS" = true ]; then
+      jq -cn --arg id "$UPLOADED_DEPLOYMENT_ID" '{type:"version-deploy",version:1,worker_name:"intar-dev",deployment_id:$id}' > "$WRANGLER_OUTPUT_FILE_PATH"
+      exit 0
+    fi
     jq -cn '{type:"command-failed",version:1}' > "$WRANGLER_OUTPUT_FILE_PATH"
     exit 42
   fi
@@ -139,7 +147,8 @@ case "$1" in
     if [ "$2" = "version-upload" ]; then
       jq -cn --arg id "$UPLOADED_VERSION_ID" '{versionId:$id}'
     else
-      jq -cn --arg id "$RESTORE_DEPLOYMENT_ID" '{deploymentId:$id}'
+      id="$(jq -er '.deployment_id' "$3")"
+      jq -cn --arg id "$id" '{deploymentId:$id}'
     fi
     ;;
   *worker-version.ts) exit 0 ;;
@@ -165,7 +174,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 current="$(<"$MOCK_STATE")"
-if [ "$current" = "$BEFORE_VERSION_ID" ]; then maintenance="$BEFORE_MAINTENANCE"; else maintenance="$TARGET_MAINTENANCE"; fi
+if [ "$current" = "$BEFORE_VERSION_ID" ]; then
+  maintenance="$BEFORE_MAINTENANCE"
+else
+  count="$(<"$MOCK_TARGET_HEALTH_COUNT")"
+  if [ "$url" != "https://intar.dev/api/control-plane-maintenance-probe" ]; then
+    count="$((count + 1))"
+    printf '%s' "$count" > "$MOCK_TARGET_HEALTH_COUNT"
+  fi
+  if [ "$count" -le "$MOCK_TARGET_HEALTH_FAILURES" ]; then
+    maintenance="$BEFORE_MAINTENANCE"
+  else
+    maintenance="$TARGET_MAINTENANCE"
+  fi
+fi
 if [ -n "$headers" ]; then : > "$headers"; fi
 if [ "$url" = "https://intar.dev/api/control-plane-maintenance-probe" ]; then
   if [ "$maintenance" = true ]; then
@@ -216,6 +238,9 @@ fi
         MOCK_STATE: state,
         MOCK_RESTORE_COUNT: restoreCount,
         MOCK_RESTORE_FAILURES: String(restoreFailures),
+        MOCK_TARGET_HEALTH_COUNT: targetHealthCount,
+        MOCK_TARGET_HEALTH_FAILURES: String(targetHealthFailures),
+        MOCK_ACTIVATION_SUCCEEDS: String(activationSucceeds),
         BEFORE_VERSION_ID: beforeVersionId,
         UPLOADED_VERSION_ID: uploadedVersionId,
         CURRENT_DATABASE_ID: currentDatabaseId,
@@ -232,17 +257,30 @@ fi
   );
   const runtime = join(runnerTemp, "intar-web-deploy-12345-standard");
   const rollbackPath = join(runtime, "rollback-evidence.json");
-  if (!existsSync(rollbackPath)) {
+  if (!activationSucceeds && !existsSync(rollbackPath)) {
     throw new Error(
       `activation script did not reach rollback evidence (status ${String(result.status)}):\n${result.stdout}\n${result.stderr}`,
+    );
+  }
+  const evidencePath = join(root, "evidence.json");
+  if (activationSucceeds && !existsSync(evidencePath)) {
+    throw new Error(
+      `activation script did not produce activation evidence (status ${String(result.status)}):\n${result.stdout}\n${result.stderr}`,
     );
   }
   return {
     result,
     state: readFileSync(state, "utf8"),
-    rollback: JSON.parse(
-      readFileSync(rollbackPath, "utf8"),
-    ) as Record<string, unknown>,
+    rollback: existsSync(rollbackPath)
+      ? (JSON.parse(
+          readFileSync(rollbackPath, "utf8"),
+        ) as Record<string, unknown>)
+      : {},
+    evidence: existsSync(evidencePath)
+      ? (JSON.parse(
+          readFileSync(evidencePath, "utf8"),
+        ) as Record<string, unknown>)
+      : {},
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -394,8 +432,54 @@ describe("exact web-version activation", () => {
     );
     expect(script).toContain('"${maintenance_code}" = maintenance');
     expect(script).toContain('https://intar.dev/');
+    expect(script).toContain('[ "${maintenance_status}" = 404 ]');
     expect(script).toContain("before_health_proven: true");
     expect(script).toContain("after_health_proven: true");
+  });
+
+  it("requires stable public propagation before activation succeeds", () => {
+    expect(script).toContain("propagation_max_attempts=20");
+    expect(script).toContain("propagation_required_consecutive_healthy=5");
+    expect(script).toContain(
+      'propagation_consecutive_healthy="$((propagation_consecutive_healthy + 1))"',
+    );
+    expect(script).toContain("propagation_consecutive_healthy=0");
+    expect(script).toContain(
+      '"${propagation_required_consecutive_healthy}" ]; then',
+    );
+    expect(script).toContain(
+      "propagation_required_consecutive_healthy: $propagation_required_consecutive_healthy",
+    );
+    expect(script).toContain(
+      ".propagation_observed_consecutive_healthy >=",
+    );
+
+    const run = runAmbiguousActivation(
+      0,
+      true,
+      false,
+      false,
+      databaseId,
+      true,
+      2,
+    );
+    try {
+      expect(run.result.status).toBe(0);
+      expect(run.state).toBe(uploadedVersionId);
+      expect(run.evidence).toMatchObject({
+        exact_version_deployed: true,
+        after_health_proven: true,
+        propagation_max_attempts: 20,
+        propagation_required_consecutive_healthy: 5,
+        propagation_observed_consecutive_healthy: 5,
+        propagation_observed_attempt: 7,
+      });
+      expect(String(run.evidence.propagation_attempts_ndjson)).toContain(
+        '"consecutive_healthy":5',
+      );
+    } finally {
+      run.cleanup();
+    }
   });
 
   it("accepts the exact maintenance fence as the active rollback health state", () => {
