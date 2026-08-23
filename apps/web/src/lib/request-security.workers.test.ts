@@ -48,6 +48,46 @@ async function responseBody(
   return result.response.json() as Promise<{ error: string; code: string }>;
 }
 
+const BODYLESS_CUSTOM_MUTATIONS = [
+  ["POST", "/api/access-invites/cancel"],
+  ["POST", "/api/access-invites/confirm"],
+  ["DELETE", "/api/admin/authoring/sources/demo"],
+  ["POST", "/api/admin/builds/build-1/retry"],
+  ["POST", "/api/admin/scenarios/demo/enabled"],
+  ["DELETE", "/api/admin/scenarios/demo/enabled"],
+  ["DELETE", "/api/agent/hosts/host-1"],
+  ["DELETE", "/api/organizations/org/assignments/assignment-1"],
+  ["DELETE", "/api/organizations/org"],
+  ["POST", "/api/organizations/org/leave"],
+  ["DELETE", "/api/organizations/org/members/member-1"],
+  ["DELETE", "/api/organizations/org/runners/runner-1"],
+  ["DELETE", "/api/organizations/org/scenarios/demo"],
+  ["DELETE", "/api/organizations/org/scenarios/sources/demo"],
+  ["DELETE", "/api/organizations/org/sso"],
+  ["POST", "/api/organizations/org/sso/verification"],
+  ["POST", "/api/organizations/org/sso/verify"],
+  ["DELETE", "/api/organizations/org/workshop-providers/provider-1"],
+  [
+    "POST",
+    "/api/organizations/org/workshop-providers/provider-1/manual-cleanup",
+  ],
+  [
+    "POST",
+    "/api/organizations/org/workshop-sessions/session-1/cost/override",
+  ],
+  [
+    "POST",
+    "/api/organizations/org/workshop-sessions/session-1/cost/refresh",
+  ],
+  ["DELETE", "/api/organizations/org/workshops/tokens/token-1"],
+  ["DELETE", "/api/profile/ssh-keys/key-1"],
+  ["DELETE", "/api/scenarios/runs/run-1"],
+  ["POST", "/api/scenarios/runs/run-1/destroy"],
+  ["POST", "/api/scenarios/runs/run-1/solution/reveal"],
+  ["DELETE", "/api/workshops/session-1/help-requests/request-1"],
+  ["POST", "/api/workshops/session-1/presence"],
+] as const;
+
 describe("worker API request security", () => {
   it("rejects encoded paths before Astro can decode them into protected routes", async () => {
     for (const pathname of [
@@ -72,14 +112,75 @@ describe("worker API request security", () => {
   });
 
   it("accepts exact-origin bodyless custom mutations", async () => {
-    const result = await secureApplicationApiRequest(
-      customMutation("/api/admin/builds/build-1/retry"),
+    const nullBodyRequest = customMutation("/api/scenarios/demo/start", {
+      headers: {
+        "content-length": "0",
+        "content-type": "application/json",
+      },
+    });
+    const nullBody = await secureApplicationApiRequest(
+      nullBodyRequest,
       securityEnv(),
     );
+    expect(nullBody.ok).toBe(true);
+    if (!nullBody.ok) return;
+    expect(nullBody.request.body).toBeNull();
+    expect(nullBody.request.headers.get("content-length")).toBeNull();
+    expect(nullBody.request.headers.get("content-type")).toBeNull();
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.request.body).toBeNull();
+    const streamedEmptyRequest = customMutation(
+      "/api/scenarios/demo/start",
+      {
+        headers: {
+          "content-length": "0",
+          "content-type": "application/json",
+        },
+        body: new Uint8Array(),
+      },
+    );
+    expect(streamedEmptyRequest.body).not.toBeNull();
+    const streamedEmpty = await secureApplicationApiRequest(
+      streamedEmptyRequest,
+      securityEnv(),
+    );
+    expect(streamedEmpty.ok).toBe(true);
+    if (!streamedEmpty.ok) return;
+    expect(streamedEmpty.request.body).toBeNull();
+    expect(streamedEmpty.request.headers.get("content-length")).toBeNull();
+    expect(streamedEmpty.request.headers.get("content-type")).toBeNull();
+  });
+
+  it.each(BODYLESS_CUSTOM_MUTATIONS)(
+    "accepts streamed-empty %s %s",
+    async (method, pathname) => {
+      const result = await guardCustomApiMutation(
+        customMutation(pathname, { method, body: new Uint8Array() }),
+        securityEnv(),
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.request.body).toBeNull();
+      expect(result.request.headers.get("content-type")).toBeNull();
+    },
+  );
+
+  it("rate-limits sensitive requests before reading their bodies", async () => {
+    const request = customMutation("/api/scenarios/demo/start", {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payload: "x".repeat(1024 * 1024 - 32) }),
+    });
+    if (!request.body) throw new Error("expected request body");
+    const getReader = vi.spyOn(request.body, "getReader");
+
+    const result = await secureApplicationApiRequest(
+      request,
+      securityEnv(async () => ({ success: false })),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.response.status).toBe(429);
+    expect(getReader).not.toHaveBeenCalled();
   });
 
   it("accepts absent fetch metadata but rejects missing, sibling, and cross-site origins", async () => {
@@ -171,6 +272,43 @@ describe("worker API request security", () => {
     await expect(responseBody(jsonp)).resolves.toMatchObject({
       code: "json_required",
     });
+  });
+
+  it("rejects declared and actual body-length mismatches", async () => {
+    for (const [declaredLength, body] of [
+      ["1", new Uint8Array()],
+      ["0", "{}"],
+    ] as const) {
+      const custom = await guardCustomApiMutation(
+        customMutation("/api/scenarios/demo/start", {
+          headers: {
+            "content-length": declaredLength,
+            "content-type": "application/json",
+          },
+          body,
+        }),
+        securityEnv(),
+      );
+      await expect(responseBody(custom)).resolves.toMatchObject({
+        code: "content_length_mismatch",
+      });
+
+      const auth = await guardBetterAuthRequest(
+        customMutation("/api/auth/sign-in/social", {
+          headers: {
+            "content-length": declaredLength,
+            "content-type": "application/json",
+          },
+          body,
+        }),
+        securityEnv(),
+      );
+      expect(auth.ok).toBe(false);
+      if (auth.ok) throw new Error("expected Better Auth rejection");
+      await expect(auth.response.json()).resolves.toMatchObject({
+        code: "content_length_mismatch",
+      });
+    }
   });
 
   it("rejects provider mutation bodies at the 64 KiB edge boundary", async () => {
@@ -316,7 +454,23 @@ describe("worker API request security", () => {
     );
     expect(form.ok).toBe(true);
     if (!form.ok) return;
-    expect(await form.request.text()).toBe(formBody);
+    expect(
+      new TextDecoder().decode(await form.request.arrayBuffer()),
+    ).toBe(formBody);
+
+    const emptyForm = await guardBetterAuthRequest(
+      customMutation("/api/auth/sign-out", {
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new Uint8Array(),
+      }),
+      securityEnv(),
+    );
+    expect(emptyForm.ok).toBe(true);
+    if (!emptyForm.ok) return;
+    expect(emptyForm.request.headers.get("content-type")).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    expect((await emptyForm.request.arrayBuffer()).byteLength).toBe(0);
   });
 
   it("uses the shared 20-per-minute namespace for every expensive action", () => {

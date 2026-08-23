@@ -90,12 +90,8 @@ async function requestScenarioStart(
         method: "POST",
         credentials: "include",
         signal,
-        ...(organizationId
-          ? {
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ organizationId }),
-            }
-          : {}),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(organizationId ? { organizationId } : {}),
       },
     );
   } catch (error) {

@@ -32,6 +32,11 @@ describe("scenario capacity waiting", () => {
     await expect(result).resolves.toMatchObject({ runId: "run-1" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(onCapacityWait).toHaveBeenCalledTimes(1);
+    const [, request] = fetchMock.mock.calls[0] ?? [];
+    expect(new Headers(request?.headers).get("content-type")).toBe(
+      "application/json",
+    );
+    expect(request?.body).toBe("{}");
   });
 
   it("stops retrying when the user cancels", async () => {

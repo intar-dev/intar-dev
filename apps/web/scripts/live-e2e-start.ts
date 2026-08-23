@@ -2,7 +2,7 @@ export interface ScenarioStartRequest {
   path: string;
   init: {
     method: "POST";
-    json?: { hostId: string };
+    json: { hostId?: string };
   };
 }
 
@@ -14,7 +14,7 @@ export function scenarioStartRequest(
     path: `/api/scenarios/${encodeURIComponent(scenarioId)}/start`,
     init: {
       method: "POST",
-      ...(hostId ? { json: { hostId } } : {}),
+      json: hostId ? { hostId } : {},
     },
   };
 }

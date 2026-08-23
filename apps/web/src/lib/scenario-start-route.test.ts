@@ -42,7 +42,7 @@ describe("scenario start route", () => {
     });
   });
 
-  it("keeps the ordinary scenario launch bodyless and scheduler-driven", async () => {
+  it("starts an ordinary scenario from an empty JSON object", async () => {
     const response = await startRequest();
 
     expect(response.status).toBe(202);
@@ -53,6 +53,17 @@ describe("scenario start route", () => {
     await expect(response.json()).resolves.toMatchObject({
       run: { id: "run-1" },
     });
+    expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
+      scenarioId: "pair-ping",
+      userId: "user-1",
+      betaAdmission,
+    });
+  });
+
+  it("also accepts a valid bodyless scenario launch", async () => {
+    const response = await bodylessStartRequest();
+
+    expect(response.status).toBe(202);
     expect(scenarioRunsMock.startScenarioRunForUser).toHaveBeenCalledWith({
       scenarioId: "pair-ping",
       userId: "user-1",
@@ -136,23 +147,28 @@ describe("scenario start route", () => {
 });
 
 async function startRequest(
-  body?: unknown,
+  body: unknown = {},
   scenarioId = "pair-ping",
 ): Promise<Response> {
   const request = new Request(
     `https://intar.test/api/scenarios/${scenarioId}/start`,
     {
       method: "POST",
-      ...(body === undefined
-        ? {}
-        : {
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(body),
-          }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
     },
   );
   return POST({
     request,
     params: { scenarioId },
+  } as never);
+}
+
+async function bodylessStartRequest(): Promise<Response> {
+  return POST({
+    request: new Request("https://intar.test/api/scenarios/pair-ping/start", {
+      method: "POST",
+    }),
+    params: { scenarioId: "pair-ping" },
   } as never);
 }

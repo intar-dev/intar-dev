@@ -68,6 +68,16 @@ export async function secureApplicationApiRequest(
   request: Request,
   workerEnv: RequestSecurityEnv,
 ): Promise<ApiRequestSecurityResult> {
+  const action = sensitiveRateLimitActionFor(request);
+  if (action) {
+    // Reject an invalid browser boundary, then charge the shared limiter before
+    // any request body is read or allocated.
+    const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
+    if (!originResult.ok) return originResult;
+    const rateLimitResult = await enforceRateLimit(request, workerEnv, action);
+    if (!rateLimitResult.ok) return rateLimitResult;
+  }
+
   const authResult = await guardBetterAuthRequest(request, workerEnv);
   if (!authResult.ok) return authResult;
 
@@ -76,12 +86,6 @@ export async function secureApplicationApiRequest(
     workerEnv,
   );
   if (!customResult.ok) return customResult;
-
-  const action = sensitiveRateLimitActionFor(request);
-  if (action) {
-    const rateLimitResult = await enforceRateLimit(request, workerEnv, action);
-    if (!rateLimitResult.ok) return rateLimitResult;
-  }
 
   return customResult;
 }
@@ -106,9 +110,21 @@ export async function guardBetterAuthRequest(
   const originResult = validateCanonicalBrowserOrigin(request, workerEnv);
   if (!originResult.ok) return originResult;
 
+  const declaredLengthHeader = request.headers.get("content-length");
+  let declaredLength: number | null = null;
+  if (declaredLengthHeader !== null) {
+    declaredLength = canonicalContentLength(declaredLengthHeader);
+    if (declaredLength === null) {
+      return deny(
+        400,
+        "invalid_content_length",
+        "content-length must be a canonical decimal value",
+      );
+    }
+    if (declaredLength > MAX_API_JSON_BODY_BYTES) return bodyTooLarge();
+  }
   if (request.body === null) {
-    const declaredLength = request.headers.get("content-length");
-    if (declaredLength !== null && declaredLength !== "0") {
+    if (declaredLength !== null && declaredLength !== 0) {
       return deny(
         400,
         "request_body_unavailable",
@@ -117,20 +133,11 @@ export async function guardBetterAuthRequest(
     }
     return { ok: true, request };
   }
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength !== null) {
-    const parsedLength = canonicalContentLength(declaredLength);
-    if (parsedLength === null) {
-      return deny(
-        400,
-        "invalid_content_length",
-        "content-length must be a canonical decimal value",
-      );
-    }
-    if (parsedLength > MAX_API_JSON_BODY_BYTES) return bodyTooLarge();
-  }
   try {
     const body = await readBoundedBody(request.body, MAX_API_JSON_BODY_BYTES);
+    if (declaredLength !== null && declaredLength !== body.byteLength) {
+      return contentLengthMismatch();
+    }
     return { ok: true, request: rebuildRequestWithBody(request, body) };
   } catch (error) {
     if (error instanceof BodyLimitExceededError) return bodyTooLarge();
@@ -170,41 +177,59 @@ export async function guardCustomApiMutation(
     return { ok: true, request };
   }
 
-  if (request.body === null) {
-    const declaredLength = request.headers.get("content-length");
-    if (declaredLength !== null && declaredLength !== "0") {
-      return deny(
-        400,
-        "request_body_unavailable",
-        "request body is unavailable",
-      );
-    }
-    return { ok: true, request };
-  }
-  if (!isJsonContentType(request.headers.get("content-type"))) {
-    return deny(415, "json_required", "content-type must be application/json");
-  }
   const maxBodyBytes = isProviderMutationPath(pathname)
     ? MAX_PROVIDER_JSON_BODY_BYTES
     : MAX_API_JSON_BODY_BYTES;
-
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength !== null) {
-    const parsedLength = canonicalContentLength(declaredLength);
-    if (parsedLength === null) {
+  const declaredLengthHeader = request.headers.get("content-length");
+  let declaredLength: number | null = null;
+  if (declaredLengthHeader !== null) {
+    declaredLength = canonicalContentLength(declaredLengthHeader);
+    if (declaredLength === null) {
       return deny(
         400,
         "invalid_content_length",
         "content-length must be a canonical decimal value",
       );
     }
-    if (parsedLength > maxBodyBytes) {
-      return bodyTooLarge();
+    if (declaredLength > maxBodyBytes) return bodyTooLarge();
+  }
+
+  if (request.body === null) {
+    if (declaredLength !== null && declaredLength !== 0) {
+      return deny(
+        400,
+        "request_body_unavailable",
+        "request body is unavailable",
+      );
+    }
+    return { ok: true, request: rebuildRequestWithoutBody(request) };
+  }
+
+  if (!isJsonContentType(request.headers.get("content-type"))) {
+    try {
+      await readBoundedBody(request.body, 0);
+      if (declaredLength !== null && declaredLength !== 0) {
+        return contentLengthMismatch();
+      }
+      return { ok: true, request: rebuildRequestWithoutBody(request) };
+    } catch (error) {
+      if (error instanceof BodyLimitExceededError) {
+        return declaredLength === 0
+          ? contentLengthMismatch()
+          : jsonRequired();
+      }
+      return deny(400, "invalid_request_body", "request body could not be read");
     }
   }
 
   try {
     const body = await readBoundedBody(request.body, maxBodyBytes);
+    if (declaredLength !== null && declaredLength !== body.byteLength) {
+      return contentLengthMismatch();
+    }
+    if (body.byteLength === 0) {
+      return { ok: true, request: rebuildRequestWithoutBody(request) };
+    }
     return { ok: true, request: rebuildRequestWithBody(request, body) };
   } catch (error) {
     if (error instanceof BodyLimitExceededError) return bodyTooLarge();
@@ -517,8 +542,27 @@ function rebuildRequestWithBody(request: Request, body: Uint8Array): Request {
   return new Request(request, { headers, body: copiedBody });
 }
 
+function rebuildRequestWithoutBody(request: Request): Request {
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  headers.delete("content-type");
+  return new Request(request, { headers, body: null });
+}
+
 function bodyTooLarge(): ApiRequestSecurityResult {
   return deny(413, "request_too_large", "request body is too large");
+}
+
+function contentLengthMismatch(): ApiRequestSecurityResult {
+  return deny(
+    400,
+    "content_length_mismatch",
+    "content-length does not match the request body",
+  );
+}
+
+function jsonRequired(): ApiRequestSecurityResult {
+  return deny(415, "json_required", "content-type must be application/json");
 }
 
 function errorResponse(

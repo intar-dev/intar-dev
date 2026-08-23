@@ -5,7 +5,7 @@ describe("live E2E scenario start request", () => {
   it("uses the scenario-centric launch endpoint without a host override", () => {
     expect(scenarioStartRequest("pair-ping", null)).toEqual({
       path: "/api/scenarios/pair-ping/start",
-      init: { method: "POST" },
+      init: { method: "POST", json: {} },
     });
   });
 

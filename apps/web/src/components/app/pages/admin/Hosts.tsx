@@ -67,8 +67,6 @@ export function AdminHosts() {
         {
           method: "DELETE",
           credentials: "include",
-          headers: { "content-type": "application/json" },
-          body: "{}",
         },
       );
       if (!response.ok) {
