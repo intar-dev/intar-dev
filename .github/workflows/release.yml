@@ -33,7 +33,7 @@ on:
         type: string
         default: ""
       production_run_id:
-        description: Successful protected web or multicloud rollout run ID; required only for a new intar-workshop-builder release
+        description: Successful Guest tools main-push run ID; required only for a new intar-workshop-builder release
         required: false
         type: string
         default: ""
@@ -395,21 +395,15 @@ jobs:
           IFS=$'\t' read -r \
             run_id run_event run_branch run_source_sha run_path run_attempt \
             run_status run_conclusion <<<"${run_metadata}"
-          case "${run_path}" in
-            .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
-            *)
-              echo "Run ${PRODUCTION_RUN_ID} has an untrusted production workflow path." >&2
-              exit 1
-              ;;
-          esac
+          test "${run_path}" = ".github/workflows/guest-tools.yml"
           if [ "${run_id}" != "${PRODUCTION_RUN_ID}" ] || \
-            [ "${run_event}" != "workflow_dispatch" ] || \
+            [ "${run_event}" != "push" ] || \
             [ "${run_branch}" != "main" ] || \
             [ "${run_source_sha}" != "${GITHUB_SHA}" ] || \
             [ "${run_attempt}" != "1" ] || \
             [ "${run_status}" != "completed" ] || \
             [ "${run_conclusion}" != "success" ]; then
-            echo "Run ${PRODUCTION_RUN_ID} is not a successful protected control-plane run for ${GITHUB_SHA}." >&2
+            echo "Run ${PRODUCTION_RUN_ID} is not a successful guest-tool publication for ${GITHUB_SHA}." >&2
             exit 1
           fi
 
@@ -544,7 +538,7 @@ jobs:
               .workflow_path == $workflow_path and
               .workflow_run_id == $workflow_run_id and
               .workflow_run_attempt == $workflow_run_attempt and
-              .event == "workflow_dispatch" and
+              .event == "push" and
               .ref == "refs/heads/main" and
               .architecture == "x86_64" and
               .target == "x86_64-unknown-linux-musl" and

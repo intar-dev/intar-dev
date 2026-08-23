@@ -1,14 +1,13 @@
 name: Website
-run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website validate {0}', github.ref_name) }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Website validate PR #{0}', github.event.pull_request.number) || format('Website deploy main @ {0}', github.sha) }}"
 
 on:
-  workflow_dispatch:
-  pull_request:
+  push:
+    branches:
+      - main
     paths:
       - ".github/workflows/website-deploy.yml"
       - ".github/workflows/website.yml"
-      - ".github/workflows/control-plane-rollout.yml"
-      - ".github/workflows/workshop-multicloud-flag.yml"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -19,88 +18,62 @@ on:
       - "packages/provider-contracts/**"
       - "packages/workshop-contracts/**"
       - "tools/check-import-boundaries.ts"
+      - "tools/database/**"
       - "tools/deploy/**"
       - "tools/flagship/**"
-      - "tools/providers/**"
-      - "content/scenarios/build-tools.hcl"
       - "crates/intar-image-scenario/**"
       - "crates/intar-image-scenario-wasm/**"
-      - "crates/intar-kino-proto/**"
-      - "crates/intar-workspace-agent/**"
-      - "crates/kino/**"
+      - "apps/web/**"
+      - "!apps/web/workers/providers/**"
+  pull_request:
+    paths:
+      - ".github/workflows/website-deploy.yml"
+      - ".github/workflows/website.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "package.json"
+      - "bun.lock"
+      - "tsconfig.base.json"
+      - "packages/provider-contracts/**"
+      - "packages/workshop-contracts/**"
+      - "tools/check-import-boundaries.ts"
+      - "tools/database/**"
+      - "tools/deploy/**"
+      - "tools/flagship/**"
+      - "crates/intar-image-scenario/**"
+      - "crates/intar-image-scenario-wasm/**"
       - "apps/web/**"
       - "!apps/web/workers/providers/**"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: "website-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}"
-  cancel-in-progress: true
+  group: "website-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
   run:
     working-directory: apps/web
 
 jobs:
-  workspace-agent:
-    name: Build learner guest tools
-    runs-on: namespace-profile-intar-dev
-
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
-          rustup component add --toolchain 1.97.0 clippy
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
-        with:
-          tool: cargo-zigbuild@0.23.0
-          fallback: none
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
-
-      - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
-        with:
-          cache: rust
-
-      - name: Test and build guest tools
-        working-directory: ${{ github.workspace }}
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          cargo test --locked -p intar-workspace-agent -p kino
-          cargo clippy --locked -p intar-workspace-agent -p kino \
-            --all-targets -- -D warnings
-          cargo zigbuild --locked --release -p intar-workspace-agent -p kino \
-            --target x86_64-unknown-linux-musl
-          file target/x86_64-unknown-linux-musl/release/intar-workspace-agent \
-            | grep -E 'x86-64.*(static|statically linked)'
-          file target/x86_64-unknown-linux-musl/release/kino \
-            | grep -E 'x86-64.*(static|statically linked)'
-
   scenario-wasm:
-    name: Build scenario Wasm
+    name: Build browser scenario validator
     runs-on: namespace-profile-intar-dev
 
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup toolchain install 1.97.0 --profile minimal
           rustup target add --toolchain 1.97.0 wasm32-unknown-unknown
-          rustup show active-toolchain
 
       - name: Set up Rust cache
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
@@ -120,8 +93,7 @@ jobs:
       - name: Upload browser scenario validator
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          # run_id is stable across reruns; overwrite supports rerunning all jobs.
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
+          name: scenario-wasm-${{ github.sha }}
           path: apps/web/src/generated/scenario-wasm
           overwrite: true
           if-no-files-found: error
@@ -135,11 +107,13 @@ jobs:
     steps:
       - name: Checkout
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
 
       - name: Download browser scenario validator
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
+          name: scenario-wasm-${{ github.sha }}
           path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
@@ -152,7 +126,7 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Set up Namespace cache
+      - name: Set up Bun cache
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           path: ~/.bun/install/cache
@@ -161,12 +135,11 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
-      - name: Check monorepo import and provider contracts
+      - name: Check web contracts
         working-directory: ${{ github.workspace }}
         run: |
           bun run check:flagship
           bun run check:imports
-          bun run check:providers
           bun run check:deploy
           bun run check:database-migrations
 
@@ -176,8 +149,19 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Upload tested deployment artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: website-dist-${{ github.sha }}
+          path: apps/web/dist
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
   ui:
-    name: UI visual, accessibility, and smoke
+    name: Chromium smoke
     runs-on: namespace-profile-intar-dev
     needs: scenario-wasm
     container:
@@ -187,11 +171,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Download browser scenario validator
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: scenario-wasm-${{ github.sha }}-${{ github.run_id }}
+          name: scenario-wasm-${{ github.sha }}
           path: apps/web/src/generated/scenario-wasm
 
       - name: Set up Node
@@ -211,22 +197,28 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
-      - name: Install pinned Playwright browsers
-        run: bun run ui:install
-
-      - name: Run UI release gate
+      - name: Run Chromium smoke
         env:
           CI: "true"
           HOME: /root
-        run: bun run test:ui
+        run: bunx playwright test tests/ui/smoke.spec.ts --project=chromium-smoke
 
-      - name: Upload Playwright report and diffs
+      - name: Upload smoke report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: website-ui-report-${{ github.run_attempt }}
+          name: website-smoke-${{ github.run_attempt }}
           path: |
             .tmp/website-playwright/playwright-report
             .tmp/website-playwright/test-results
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
+
+  deploy:
+    name: Deploy production
+    if: github.event_name == 'push'
+    needs:
+      - validate
+      - ui
+    uses: ./.github/workflows/website-deploy.yml
+    secrets: inherit

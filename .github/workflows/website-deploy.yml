@@ -1,275 +1,47 @@
 name: Website production
-run-name: "Website deploy ${{ github.ref_name }} @ ${{ github.sha }}"
 
 on:
   workflow_call:
-    inputs:
-      confirmation:
-        description: Exact protected web deployment confirmation
-        required: true
-        type: string
-      single_operator_confirmation:
-        description: Sole-operator confirmation when that production mode is active
-        required: false
-        default: ""
-        type: string
-      oidc_canary_confirmation:
-        description: Type OIDC CANARY PASSED only after a successful live OIDC canary
-        required: false
-        default: ""
-        type: string
-      oidc_canary_source_run_id:
-        description: Prior failed Website production run that carried the live OIDC canary
-        required: false
-        default: ""
-        type: string
-      provenance_workflow_path:
-        description: Exact top-level workflow path recorded in retained artifacts
-        required: false
-        default: .github/workflows/website-deploy.yml
-        type: string
-      parent_holds_control_plane_lock:
-        description: True only when the protected multicloud wrapper owns serialization
-        required: false
-        default: false
-        type: boolean
-    secrets:
-      CLOUDFLARE_ACCOUNT_ID:
-        required: true
-      CLOUDFLARE_API_TOKEN:
-        required: true
-      CLOUDFLARE_PROVIDER_PROBE_API_TOKEN:
-        required: true
-      CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET:
-        required: true
-      STARGATE_EGRESS_IPV4_CIDRS:
-        required: true
-      OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1:
-        required: true
-      INTAR_IMAGE_PUBLISH_TOKEN:
-        required: true
-  workflow_dispatch:
-    inputs:
-      confirmation:
-        description: Type DEPLOY WORKSHOP CONTROL PLANE
-        required: true
-        type: string
-      single_operator_confirmation:
-        description: Type SINGLE OPERATOR WORKSHOP CONTROL PLANE only when no independent reviewer exists
-        required: false
-        type: string
-      oidc_canary_confirmation:
-        description: Type OIDC CANARY PASSED only after a successful live OIDC canary
-        required: false
-        type: string
-      oidc_canary_source_run_id:
-        description: Prior failed Website production run that carried the live OIDC canary
-        required: false
-        type: string
 
 permissions:
   actions: read
   contents: read
-
-concurrency:
-  group: ${{ inputs.parent_holds_control_plane_lock && format('website-reusable-{0}', github.run_id) || 'intar-control-plane-production' }}
-  cancel-in-progress: false
 
 defaults:
   run:
     working-directory: apps/web
 
 jobs:
-  preflight:
-    name: Validate protected runtime configuration
+  deploy:
+    name: Deploy production
     runs-on: namespace-profile-intar-dev
-    environment: production
-    env:
-      GH_TOKEN: ${{ github.token }}
-      APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
-      SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
-      SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
-      SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
-      SINGLE_OPERATOR_ADMIN_ATTESTED_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}
-      ACTOR_ID: ${{ github.actor_id }}
-      RUN_ATTEMPT: ${{ github.run_attempt }}
-      CONFIRMATION: ${{ inputs.confirmation }}
-      SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
-      OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
-      OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
-      PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
-      PARENT_HOLDS_CONTROL_PLANE_LOCK: ${{ inputs.parent_holds_control_plane_lock || false }}
+    environment:
+      name: production
+      url: https://intar.dev
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout exact main revision
         uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
         with:
           persist-credentials: false
 
-      - name: Verify protected production dispatch
+      - name: Verify automatic exact-main deployment
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          case "${GITHUB_EVENT_NAME}" in
-            workflow_call|workflow_dispatch) ;;
-            *) exit 1 ;;
-          esac
+          test "${GITHUB_EVENT_NAME}" = push
           test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
           test "${GITHUB_REF}" = refs/heads/main
           test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-          test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
-          test "${RUN_ATTEMPT}" = 1
-          case "${PROVENANCE_WORKFLOW_PATH}" in
-            .github/workflows/website-deploy.yml|.github/workflows/control-plane-rollout.yml) ;;
-            *) exit 1 ;;
-          esac
-          if [ "${PARENT_HOLDS_CONTROL_PLANE_LOCK}" = true ]; then
-            test "${PROVENANCE_WORKFLOW_PATH}" = ".github/workflows/control-plane-rollout.yml"
-          else
-            test "${PROVENANCE_WORKFLOW_PATH}" = ".github/workflows/website-deploy.yml"
-          fi
+          test "${GITHUB_WORKFLOW_REF}" = \
+            "intar-dev/intar-dev/.github/workflows/website.yml@refs/heads/main"
 
-          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
-          case "${APPROVAL_MODE}" in
-            reviewed)
-              test -z "${SINGLE_OPERATOR_CONFIRMATION}"
-              jq -e '
-                .can_admins_bypass == false and
-                any(
-                  .protection_rules[]?;
-                    .type == "required_reviewers" and
-                    .prevent_self_review == true and
-                    ((.reviewers // []) | length) > 0
-                )
-              ' <<<"${environment_json}" >/dev/null
-              ;;
-            single-operator)
-              test "${SINGLE_OPERATOR_CONFIRMATION}" = \
-                "SINGLE OPERATOR WORKSHOP CONTROL PLANE"
-              test -n "${SINGLE_OPERATOR_LOGIN}"
-              [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
-              [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
-              [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
-              [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
-              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
-              test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
-              test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
-              triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
-              jq -e \
-                --arg login "${SINGLE_OPERATOR_LOGIN}" \
-                --arg id "${SINGLE_OPERATOR_ID}" '
-                  .type == "User" and
-                  .login == $login and
-                  ((.id | tostring) == $id)
-                ' <<<"${triggering_actor_json}" >/dev/null
-              jq -e '
-                ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
-              ' <<<"${environment_json}" >/dev/null
-              now_epoch="$(date -u +%s)"
-              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
-              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
-              remaining_seconds="$((expires_epoch - now_epoch))"
-              attestation_age="$((now_epoch - attested_epoch))"
-              test "${remaining_seconds}" -gt 0
-              test "${remaining_seconds}" -le 604800
-              test "${attestation_age}" -ge 0
-              test "${attestation_age}" -le 900
-              printf 'single_operator_expires_at=%s remaining_seconds=%s admin_attestation_age=%s\n' \
-                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}" \
-                "${attestation_age}"
-              ;;
-            *)
-              printf 'Unsupported production approval mode: %s\n' \
-                "${APPROVAL_MODE:-<unset>}" >&2
-              exit 1
-              ;;
-          esac
-
-          branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
-          jq -e '
-            (.branch_policies // .) as $policies |
-            ($policies | length) == 1 and
-            $policies[0].type == "branch" and
-            $policies[0].name == "main"
-          ' <<<"${branch_policies}" >/dev/null
-
-          printf 'approval_mode=%s actor=%s\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
-            tee -a "${GITHUB_STEP_SUMMARY}"
-
-      - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - name: Download tested deployment artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          node-version: 24.17.0
-
-      - name: Validate Stargate egress and runtime signing keys
-        working-directory: ${{ github.workspace }}
-        env:
-          CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
-          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
-          STARGATE_EGRESS_IPV4_CIDRS: ${{ secrets.STARGATE_EGRESS_IPV4_CIDRS }}
-          WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
-          WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID }}
-        run: |
-          test "${#CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET}" -ge 43
-          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
-          test -n "${STARGATE_EGRESS_IPV4_CIDRS}"
-          test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
-          test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID}"
-          node - <<'NODE'
-          const cidrs = (process.env.STARGATE_EGRESS_IPV4_CIDRS ?? "")
-            .split(",").map((value) => value.trim()).filter(Boolean);
-          const validCidrs = cidrs.length > 0 && cidrs.every((cidr) => {
-            const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d|[12]\d|3[0-2])$/.exec(cidr);
-            return match && match[1].split(".").every((octet) => Number(octet) <= 255);
-          });
-          if (!validCidrs) throw new Error("STARGATE_EGRESS_IPV4_CIDRS is invalid");
-
-          const keyId = process.env.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID ?? "";
-          if (!/^[A-Za-z0-9._-]{1,128}$/.test(keyId)) {
-            throw new Error("WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID is invalid");
-          }
-          let keys;
-          try {
-            keys = JSON.parse(process.env.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON ?? "");
-          } catch {
-            throw new Error("WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON is not valid JSON");
-          }
-          if (!keys || Array.isArray(keys) || typeof keys !== "object") {
-            throw new Error("runtime signing keys must be a JSON object");
-          }
-          const entries = Object.entries(keys);
-          if (entries.length < 1 || entries.length > 16) {
-            throw new Error("runtime signing keys must contain between 1 and 16 keys");
-          }
-          for (const [id, value] of entries) {
-            if (!/^[A-Za-z0-9._-]{1,128}$/.test(id)) {
-              throw new Error(`runtime signing key ID is invalid: ${id}`);
-            }
-            if (typeof value !== "string" || !/^[A-Za-z0-9+/]{43}=$/.test(value)) {
-              throw new Error(`runtime signing public key is invalid: ${id}`);
-            }
-            const decoded = Buffer.from(value, "base64");
-            if (decoded.length !== 32 || decoded.toString("base64") !== value) {
-              throw new Error(`runtime signing public key is not a canonical Ed25519 key: ${id}`);
-            }
-          }
-          if (!Object.hasOwn(keys, keyId)) {
-            throw new Error("runtime signing key map does not contain the builder key ID");
-          }
-          NODE
-
-  provider-capabilities:
-    name: Validate provider capability contract
-    needs: preflight
-    runs-on: namespace-profile-intar-dev
-    environment: production
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-        with:
-          persist-credentials: false
+          name: website-dist-${{ github.sha }}
+          path: apps/web/dist
 
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -281,198 +53,16 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Restore shared Bun cache
+      - name: Set up Bun cache
         uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
         with:
           path: ~/.bun/install/cache
 
-      - name: Install the root workspace
+      - name: Install deployment dependencies
         working-directory: ${{ github.workspace }}
         run: bun install --frozen-lockfile
 
-      - name: Reject service-binding or capability drift
-        working-directory: ${{ github.workspace }}
-        run: bun run check:providers
-
-      - name: Call both deployed services through a temporary remote binding
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PROVIDER_PROBE_API_TOKEN }}
-        run: >-
-          bun tools/providers/probe-live-capabilities.ts
-          "${RUNNER_TEMP}/provider-capabilities.json"
-
-      - name: Retain pre-web capability evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: pre-web-provider-capabilities-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/provider-capabilities.json
-          if-no-files-found: error
-          retention-days: 90
-
-  deploy:
-    name: Deploy production
-    needs: provider-capabilities
-    runs-on: namespace-profile-intar-dev
-    timeout-minutes: 60
-    environment: production
-    env:
-      GH_TOKEN: ${{ github.token }}
-      APPROVAL_MODE: ${{ vars.STARGATE_DEPLOY_APPROVAL_MODE }}
-      SINGLE_OPERATOR_LOGIN: ${{ vars.STARGATE_SINGLE_OPERATOR_LOGIN }}
-      SINGLE_OPERATOR_ID: ${{ vars.STARGATE_SINGLE_OPERATOR_ID }}
-      SINGLE_OPERATOR_EXPIRES_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_EXPIRES_AT }}
-      SINGLE_OPERATOR_ADMIN_ATTESTED_AT: ${{ vars.STARGATE_SINGLE_OPERATOR_ADMIN_ATTESTED_AT }}
-      ACTOR_ID: ${{ github.actor_id }}
-      RUN_ATTEMPT: ${{ github.run_attempt }}
-      CONFIRMATION: ${{ inputs.confirmation }}
-      SINGLE_OPERATOR_CONFIRMATION: ${{ inputs.single_operator_confirmation }}
-      OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
-      OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
-      PROVENANCE_WORKFLOW_PATH: ${{ inputs.provenance_workflow_path || '.github/workflows/website-deploy.yml' }}
-
-    steps:
-      - name: Checkout
-        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
-        with:
-          persist-credentials: false
-
-      - name: Verify deployment revision
-        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          rustup target add --toolchain 1.97.0 wasm32-unknown-unknown x86_64-unknown-linux-musl
-          rustup show active-toolchain
-
-      - name: Set up Rust cache
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
-        with:
-          cache: rust
-
-      - name: Install pinned build tools
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
-        with:
-          tool: just@1.58.0,wasm-pack@0.15.0,cargo-zigbuild@0.23.0
-          fallback: none
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
-
-      - name: Build browser scenario validator
-        working-directory: ${{ github.workspace }}
-        run: just generate-scenario-wasm
-
-      - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version-file: apps/web/.node-version
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
-
-      - name: Set up Namespace cache
-        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
-        with:
-          path: ~/.bun/install/cache
-
-      - name: Install root workspace dependencies
-        working-directory: ${{ github.workspace }}
-        run: bun install --frozen-lockfile
-
-      - name: Build pinned learner guest tools
-        id: workspace-agent
-        working-directory: ${{ github.workspace }}
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          set -euo pipefail
-          cargo zigbuild --locked --release -p intar-workspace-agent -p kino \
-            --target x86_64-unknown-linux-musl
-          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
-          mkdir -p "${guest_tools_dir}"
-          cp \
-            "target/x86_64-unknown-linux-musl/release/intar-workspace-agent" \
-            "${guest_tools_dir}/intar-workspace-agent"
-          cp \
-            "target/x86_64-unknown-linux-musl/release/kino" \
-            "${guest_tools_dir}/kino"
-          chmod 0555 \
-            "${guest_tools_dir}/intar-workspace-agent" \
-            "${guest_tools_dir}/kino"
-          agent_path="${guest_tools_dir}/intar-workspace-agent"
-          kino_path="${guest_tools_dir}/kino"
-          file "${agent_path}" | grep -E 'x86-64.*(static|statically linked)'
-          file "${kino_path}" | grep -E 'x86-64.*(static|statically linked)'
-          agent_sha="$(sha256sum "${agent_path}" | cut -d ' ' -f 1)"
-          agent_size="$(stat --format='%s' "${agent_path}")"
-          kino_sha="$(sha256sum "${kino_path}" | cut -d ' ' -f 1)"
-          kino_size="$(stat --format='%s' "${kino_path}")"
-          test "${#agent_sha}" -eq 64
-          test "${agent_size}" -gt 0
-          test "${#kino_sha}" -eq 64
-          test "${kino_size}" -gt 0
-          {
-            echo "sha256=${agent_sha}"
-            echo "size_bytes=${agent_size}"
-            echo "kino_sha256=${kino_sha}"
-            echo "kino_size_bytes=${kino_size}"
-          } >> "${GITHUB_OUTPUT}"
-          jq -n \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg workflow_path "${PROVENANCE_WORKFLOW_PATH}" \
-            --arg workflow_run_id "${GITHUB_RUN_ID}" \
-            --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
-            --arg event "${GITHUB_EVENT_NAME}" \
-            --arg ref "${GITHUB_REF}" \
-            --arg agent_sha256 "${agent_sha}" \
-            --argjson agent_size_bytes "${agent_size}" \
-            --arg agent_object_key \
-              "workspace-agent/releases/${agent_sha}/intar-workspace-agent" \
-            --arg kino_sha256 "${kino_sha}" \
-            --argjson kino_size_bytes "${kino_size}" \
-            --arg kino_object_key \
-              "workspace-agent/kino/releases/${kino_sha}/kino" \
-            '{
-              schema_version: 1,
-              repository: $repository,
-              source_sha: $source_sha,
-              workflow_path: $workflow_path,
-              workflow_run_id: $workflow_run_id,
-              workflow_run_attempt: $workflow_run_attempt,
-              event: $event,
-              ref: $ref,
-              architecture: "x86_64",
-              target: "x86_64-unknown-linux-musl",
-              tools: {
-                "intar-workspace-agent": {
-                  sha256: $agent_sha256,
-                  size_bytes: $agent_size_bytes,
-                  r2_object_key: $agent_object_key
-                },
-                kino: {
-                  sha256: $kino_sha256,
-                  size_bytes: $kino_size_bytes,
-                  r2_object_key: $kino_object_key
-                }
-              }
-            }' > "${guest_tools_dir}/manifest.json"
-          (
-            cd "${guest_tools_dir}"
-            sha256sum intar-workspace-agent kino > SHA256SUMS
-          )
-
-      - name: Build deployment artifact
-        run: bun run build:deploy
-
-      - name: Pin protected runtime configuration in deployment artifact
+      - name: Pin and verify production configuration
         env:
           WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON: ${{ vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON }}
           SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
@@ -480,6 +70,8 @@ jobs:
           set -euo pipefail
           config="${GITHUB_WORKSPACE}/apps/web/dist/server/wrangler.json"
           patched="${RUNNER_TEMP}/website-wrangler.json"
+          test -f "${config}"
+          test -n "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}"
           jq \
             --arg keys "${WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON}" \
             '.vars.WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON = $keys' \
@@ -490,169 +82,30 @@ jobs:
             [.d1_databases[] | select(.binding == "DB")] |
             select(length == 1) | .[0].database_id
           ' "${config}")"
-          database_name="$(jq -er '
-            [.d1_databases[] | select(.binding == "DB")] |
-            select(length == 1) | .[0].database_name
-          ' "${config}")"
           [[ "${database_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          [[ "${database_name}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]
-          test "$(jq -er '.vars.CONTROL_PLANE_MAINTENANCE // "off"' "${config}")" = off
-
           jq -e \
             --arg database_id "${database_id}" \
-            --arg database_name "${database_name}" \
             --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
               ([.d1_databases[] | select(.binding == "DB")]) as $databases |
               ([.kv_namespaces[] | select(.binding == "SESSION")]) as $sessions |
+              .name == "intar-dev" and
+              .vars.CONTROL_PLANE_MAINTENANCE == "off" and
               ($databases | length) == 1 and
               $databases[0].database_id == $database_id and
-              $databases[0].database_name == $database_name and
               ($sessions | length) == 1 and
               $sessions[0].id == $session_namespace_id and
+              .assets.directory == "../client" and
               .assets.run_worker_first == ["/api/*"]
             ' "${config}" >/dev/null
-
-          static_headers="${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
-          test -f "${static_headers}"
-          for required_header in \
-            'Strict-Transport-Security: max-age=31536000' \
-            'X-Frame-Options: DENY' \
-            'X-Content-Type-Options: nosniff' \
-            'Referrer-Policy: no-referrer' \
-            'Permissions-Policy: accelerometer=(), autoplay=(), camera=(), clipboard-read=(), geolocation=(), gyroscope=(), microphone=(), payment=(), picture-in-picture=(), usb=()' \
-            "Content-Security-Policy: base-uri 'none'; object-src 'none'; frame-ancestors 'none'"; do
-            grep -F "${required_header}" "${static_headers}" >/dev/null
-          done
-
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/favicon.svg"
+          test -f "${GITHUB_WORKSPACE}/apps/web/dist/client/_headers"
           {
             printf 'DATABASE_ID=%s\n' "${database_id}"
-            printf 'DATABASE_NAME=%s\n' "${database_name}"
             printf 'DEPLOYMENT_CONFIG=%s\n' "${config}"
           } >> "${GITHUB_ENV}"
 
-      - name: Recheck sole-operator window immediately before mutation
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          case "${GITHUB_EVENT_NAME}" in
-            workflow_call|workflow_dispatch) ;;
-            *) exit 1 ;;
-          esac
-          test "${GITHUB_REPOSITORY}" = intar-dev/intar-dev
-          test "${GITHUB_REF}" = refs/heads/main
-          test "${GITHUB_SHA}" = "$(git rev-parse HEAD)"
-          test "${CONFIRMATION}" = "DEPLOY WORKSHOP CONTROL PLANE"
-          test "${RUN_ATTEMPT}" = 1
-
-          environment_json="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production")"
-          case "${APPROVAL_MODE}" in
-            reviewed)
-              test -z "${SINGLE_OPERATOR_CONFIRMATION}"
-              jq -e '
-                .can_admins_bypass == false and
-                any(
-                  .protection_rules[]?;
-                    .type == "required_reviewers" and
-                    .prevent_self_review == true and
-                    ((.reviewers // []) | length) > 0
-                )
-              ' <<<"${environment_json}" >/dev/null
-              ;;
-            single-operator)
-              test "${SINGLE_OPERATOR_CONFIRMATION}" = \
-                "SINGLE OPERATOR WORKSHOP CONTROL PLANE"
-              test -n "${SINGLE_OPERATOR_LOGIN}"
-              [[ "${SINGLE_OPERATOR_LOGIN}" =~ ^[A-Za-z0-9-]{1,39}$ ]]
-              [[ "${SINGLE_OPERATOR_LOGIN}" != -* ]]
-              [[ "${SINGLE_OPERATOR_LOGIN}" != *- ]]
-              [[ "${SINGLE_OPERATOR_ID}" =~ ^[0-9]+$ ]]
-              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              test "${GITHUB_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
-              test "${GITHUB_TRIGGERING_ACTOR}" = "${SINGLE_OPERATOR_LOGIN}"
-              test "${ACTOR_ID}" = "${SINGLE_OPERATOR_ID}"
-              triggering_actor_json="$(gh api "users/${GITHUB_TRIGGERING_ACTOR}")"
-              jq -e \
-                --arg login "${SINGLE_OPERATOR_LOGIN}" \
-                --arg id "${SINGLE_OPERATOR_ID}" '
-                  .type == "User" and
-                  .login == $login and
-                  ((.id | tostring) == $id)
-                ' <<<"${triggering_actor_json}" >/dev/null
-              jq -e '
-                ([.protection_rules[]? | select(.type == "required_reviewers")] | length) == 0
-              ' <<<"${environment_json}" >/dev/null
-              now_epoch="$(date -u +%s)"
-              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
-              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
-              remaining_seconds="$((expires_epoch - now_epoch))"
-              attestation_age="$((now_epoch - attested_epoch))"
-              test "${remaining_seconds}" -gt 0
-              test "${remaining_seconds}" -le 604800
-              test "${attestation_age}" -ge 0
-              test "${attestation_age}" -le 900
-              printf 'single_operator_expires_at=%s remaining_seconds=%s admin_attestation_age=%s\n' \
-                "${SINGLE_OPERATOR_EXPIRES_AT}" "${remaining_seconds}" \
-                "${attestation_age}"
-              ;;
-            *)
-              printf 'Unsupported production approval mode: %s\n' \
-                "${APPROVAL_MODE:-<unset>}" >&2
-              exit 1
-              ;;
-          esac
-
-          branch_policies="$(gh api "repos/${GITHUB_REPOSITORY}/environments/production/deployment-branch-policies")"
-          jq -e '
-            (.branch_policies // .) as $policies |
-            ($policies | length) == 1 and
-            $policies[0].type == "branch" and
-            $policies[0].name == "main"
-          ' <<<"${branch_policies}" >/dev/null
-
-          printf 'approval_mode=%s actor=%s\n' "${APPROVAL_MODE}" "${GITHUB_ACTOR}" |
-            tee -a "${GITHUB_STEP_SUMMARY}"
-
-      - name: Publish content-addressed learner workspace agent
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
-          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
-          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
-          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
-        run: |
-          set -euo pipefail
-          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
-          (
-            cd "${guest_tools_dir}"
-            sha256sum --check --strict SHA256SUMS
-          )
-          test "$(
-            sha256sum "${guest_tools_dir}/intar-workspace-agent" | cut -d ' ' -f 1
-          )" = "${AGENT_SHA256}"
-          test "$(
-            stat --format='%s' "${guest_tools_dir}/intar-workspace-agent"
-          )" = "${AGENT_SIZE_BYTES}"
-          test "$(
-            sha256sum "${guest_tools_dir}/kino" | cut -d ' ' -f 1
-          )" = "${KINO_SHA256}"
-          test "$(
-            stat --format='%s' "${guest_tools_dir}/kino"
-          )" = "${KINO_SIZE_BYTES}"
-          bunx wrangler r2 object put \
-            "intar-dev-vm-image-registry-20260709/workspace-agent/releases/${AGENT_SHA256}/intar-workspace-agent" \
-            --file "${RUNNER_TEMP}/production-workshop-guest-tools/intar-workspace-agent" \
-            --jurisdiction eu \
-            --remote
-          bunx wrangler r2 object put \
-            "intar-dev-vm-image-registry-20260709/workspace-agent/kino/releases/${KINO_SHA256}/kino" \
-            --file "${RUNNER_TEMP}/production-workshop-guest-tools/kino" \
-            --jurisdiction eu \
-            --remote
-
-      - name: Prepare ephemeral Worker activation secrets
-        id: activation_secrets
+      - name: Prepare runtime secrets
+        id: runtime-secrets
         working-directory: ${{ github.workspace }}
         env:
           CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: ${{ secrets.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET }}
@@ -668,394 +121,104 @@ jobs:
             CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET: env.CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET,
             OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: env.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1,
             STARGATE_EGRESS_IPV4_CIDRS: env.STARGATE_EGRESS_IPV4_CIDRS
-          }' \
-            > "${secrets_file}"
+          }' > "${secrets_file}"
           chmod 600 "${secrets_file}"
           printf 'ACTIVATION_SECRETS_FILE=%s\n' "${secrets_file}" \
             >> "${GITHUB_ENV}"
 
-      - name: Prepare immutable maintenance-fence Worker configuration
+      - name: Plan production D1 migrations
+        id: migrations
         working-directory: ${{ github.workspace }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          deployment_config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
-          maintenance_config="${deployment_config_dir}/wrangler-maintenance-fence.json"
+          evidence="${RUNNER_TEMP}/production-d1-plan.json"
+          bun tools/database/verify-generated-d1-schema.ts \
+            --database-id "${DATABASE_ID}" \
+            --expect observed-ledger-prefix \
+            --evidence "${evidence}"
+          applied="$(jq -er '.appliedMigrationCount' "${evidence}")"
+          committed="$(jq -er '.committedMigrationCount' "${evidence}")"
+          [[ "${applied}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${committed}" =~ ^[1-9][0-9]*$ ]]
+          test "${applied}" -le "${committed}"
+          if [ "${applied}" -lt "${committed}" ]; then
+            pending=true
+          else
+            pending=false
+          fi
+          {
+            printf 'pending=%s\n' "${pending}"
+            printf 'applied=%s\n' "${applied}"
+            printf 'committed=%s\n' "${committed}"
+          } >> "${GITHUB_OUTPUT}"
+          printf 'd1_applied=%s d1_committed=%s d1_pending=%s\n' \
+            "${applied}" "${committed}" "${pending}" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Prepare maintenance configuration
+        if: steps.migrations.outputs.pending == 'true'
+        run: |
+          set -euo pipefail
+          config_dir="$(cd "$(dirname "${DEPLOYMENT_CONFIG}")" && pwd)"
+          maintenance_config="${config_dir}/wrangler-maintenance.json"
           test ! -e "${maintenance_config}"
           jq '.vars.CONTROL_PLANE_MAINTENANCE = "on"' \
             "${DEPLOYMENT_CONFIG}" > "${maintenance_config}"
-          jq -e \
-            --arg database_id "${DATABASE_ID}" '
-              ([.d1_databases[] | select(.binding == "DB")]) as $databases |
-              .vars.CONTROL_PLANE_MAINTENANCE == "on" and
-              ($databases | length) == 1 and
-              $databases[0].database_id == $database_id
-            ' "${maintenance_config}" >/dev/null
+          jq -e '.vars.CONTROL_PLANE_MAINTENANCE == "on"' \
+            "${maintenance_config}" >/dev/null
           printf 'MAINTENANCE_DEPLOYMENT_CONFIG=%s\n' "${maintenance_config}" \
             >> "${GITHUB_ENV}"
 
-      - name: Derive active web mode for a safe maintenance rerun
-        id: current_web_mode
+      - name: Enable maintenance for pending migrations
+        if: steps.migrations.outputs.pending == 'true'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WEB_DEPLOY_LABEL: maintenance
         run: |
-          set -euo pipefail
-          deployment="${RUNNER_TEMP}/web-before-maintenance-deployment.json"
-          version="${RUNNER_TEMP}/web-before-maintenance-version.json"
-          test ! -e "${deployment}"
-          test ! -e "${version}"
-          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
-          version_id="$(jq -er '
-            .versions | select(length == 1) | .[0] |
-            select(.percentage == 100) | .version_id
-          ' "${deployment}")"
-          [[ "${version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          bunx wrangler versions view "${version_id}" \
-            --name intar-dev --json > "${version}"
-          maintenance_value="$(jq -er '
-            [.resources.bindings[] | select(
-              .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
-            )] |
-            if length == 0 then "off"
-            elif length == 1 then .[0].text
-            else "invalid"
-            end
-          ' "${version}")"
-          case "${maintenance_value}" in
-            on) mode=maintenance ;;
-            off) mode=open ;;
-            *)
-              printf 'Invalid active CONTROL_PLANE_MAINTENANCE value.\n' >&2
-              exit 1
-              ;;
-          esac
-          printf 'mode=%s\n' "${mode}" >> "${GITHUB_OUTPUT}"
-
-      - name: Recheck sole-operator freshness before maintenance fence activation
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          case "${APPROVAL_MODE}" in
-            reviewed) ;;
-            single-operator)
-              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              now_epoch="$(date -u +%s)"
-              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
-              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
-              remaining_seconds="$((expires_epoch - now_epoch))"
-              attestation_age="$((now_epoch - attested_epoch))"
-              test "${remaining_seconds}" -gt 0
-              test "${remaining_seconds}" -le 604800
-              test "${attestation_age}" -ge 0
-              test "${attestation_age}" -le 900
-              printf 'single_operator_remaining_seconds=%s admin_attestation_age=%s\n' \
-                "${remaining_seconds}" "${attestation_age}"
-              ;;
-            *) exit 1 ;;
-          esac
-
-      - name: Activate exact immutable maintenance fence
-        id: maintenance_fence_activation
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
-          WEB_ACTIVATION_LABEL: maintenance
-          EXPECTED_CURRENT_MODE: ${{ steps.current_web_mode.outputs.mode }}
-        run: |
-          set -euo pipefail
-          case "${EXPECTED_CURRENT_MODE}" in
-            open|maintenance) ;;
-            *) exit 1 ;;
-          esac
-          tools/deploy/activate-web-version.sh \
+          tools/deploy/deploy-web.sh \
             "${MAINTENANCE_DEPLOYMENT_CONFIG}" \
             "${DATABASE_ID}" \
-            "${DATABASE_ID}" \
-            "${SESSION_KV_NAMESPACE_ID}" \
+            "87ad9df7e37e4ced900553aa1a7775a1" \
             "${ACTIVATION_SECRETS_FILE}" \
-            "${RUNNER_TEMP}/exact-web-version-activation-maintenance.json" \
-            "${EXPECTED_CURRENT_MODE}"
+            "${RUNNER_TEMP}/web-maintenance.json"
 
-      - name: Drain old pre-fence requests before D1 and OIDC writes
-        id: maintenance_fence_drain
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          old_oidc_registration_discovery_timeout_seconds=10
-          old_request_drain_seconds=30
-          test "${old_request_drain_seconds}" -eq \
-            "$((old_oidc_registration_discovery_timeout_seconds * 3))"
-          drain_evidence="${RUNNER_TEMP}/oidc-maintenance-fence-drain.json"
-          test ! -e "${drain_evidence}"
-          started_epoch="$(date -u +%s)"
-          sleep "${old_request_drain_seconds}"
-          completed_epoch="$(date -u +%s)"
-          elapsed_seconds="$((completed_epoch - started_epoch))"
-          test "${elapsed_seconds}" -ge "${old_request_drain_seconds}"
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --argjson old_oidc_registration_discovery_timeout_seconds \
-              "${old_oidc_registration_discovery_timeout_seconds}" \
-            --argjson required_drain_seconds "${old_request_drain_seconds}" \
-            --argjson elapsed_seconds "${elapsed_seconds}" \
-            '{
-              schema_version: 1,
-              operation: "drain-old-pre-fence-requests",
-              source_sha: $source_sha,
-              run_id: $run_id,
-              old_oidc_registration_discovery_timeout_seconds: $old_oidc_registration_discovery_timeout_seconds,
-              required_drain_seconds: $required_drain_seconds,
-              elapsed_seconds: $elapsed_seconds,
-              drain_completed: true
-            }' > "${drain_evidence}"
-          jq -e '
-            .schema_version == 1 and
-            .operation == "drain-old-pre-fence-requests" and
-            .old_oidc_registration_discovery_timeout_seconds == 10 and
-            .required_drain_seconds == 30 and
-            .elapsed_seconds >= .required_drain_seconds and
-            .drain_completed == true
-          ' "${drain_evidence}" >/dev/null
-
-      - name: Reprove exact maintenance fence after old-request drain
-        id: maintenance_fence_reproof
+      - name: Drain and recheck maintenance
+        if: steps.migrations.outputs.pending == 'true'
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
         run: |
           set -euo pipefail
-          fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
-          drain_evidence="${RUNNER_TEMP}/oidc-maintenance-fence-drain.json"
-          deployment="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-deployment.json"
-          version="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-version.json"
-          proof="${RUNNER_TEMP}/oidc-maintenance-fence-post-drain-proof.json"
-          test -f "${fence_evidence}"
-          test -f "${drain_evidence}"
-          test ! -e "${deployment}"
-          test ! -e "${version}"
-          test ! -e "${proof}"
-          maintenance_version_id="$(jq -er \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg database_id "${DATABASE_ID}" \
-            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
-              select(
-                .schema_version == 1 and
-                .operation == "activate-exact-web-version" and
-                .source_sha == $source_sha and
-                .run_id == $run_id and
-                .current_database_id == $database_id and
-                .database_binding_changed == false and
-                .session_namespace_id == $session_namespace_id and
-                .uploaded_version_id != .before_version_id and
-                .exact_version_deployed == true and
-                .active_runtime_bindings_proven == true and
-                .after_health_proven == true and
-                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"maintenance\"")) and
-                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
-              ) | .uploaded_version_id
-            ' "${fence_evidence}")"
-          [[ "${maintenance_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          jq -e '
-            .schema_version == 1 and
-            .operation == "drain-old-pre-fence-requests" and
-            .old_oidc_registration_discovery_timeout_seconds == 10 and
-            .required_drain_seconds == 30 and
-            .elapsed_seconds >= .required_drain_seconds and
-            .drain_completed == true
-          ' "${drain_evidence}" >/dev/null
-          bunx wrangler deployments status --name intar-dev --json > "${deployment}"
-          deployment_id="$(jq -er --arg maintenance_version_id "${maintenance_version_id}" '
-            .id as $deployment_id |
-            .versions | select(length == 1) | .[0] |
-            select(.version_id == $maintenance_version_id and .percentage == 100) |
-            $deployment_id
-          ' "${deployment}")"
-          [[ "${deployment_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          bunx wrangler versions view "${maintenance_version_id}" \
-            --name intar-dev --json > "${version}"
-          jq -e --arg maintenance_version_id "${maintenance_version_id}" \
-            --arg database_id "${DATABASE_ID}" \
-            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" '
-              .id == $maintenance_version_id and
-              ([.resources.bindings[] | select(
-                .type == "d1" and .name == "DB" and .id == $database_id
-              )] | length) == 1 and
-              ([.resources.bindings[] | select(
-                .type == "kv_namespace" and .name == "SESSION" and
-                .namespace_id == $session_namespace_id
-              )] | length) == 1 and
-              ([.resources.bindings[] | select(
-                .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE" and
-                .text == "on"
-              )] | length) == 1
-            ' "${version}" >/dev/null
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg maintenance_version_id "${maintenance_version_id}" \
-            --arg deployment_id "${deployment_id}" \
-            --arg database_id "${DATABASE_ID}" \
-            --arg session_namespace_id "${SESSION_KV_NAMESPACE_ID}" \
-            '{
-              schema_version: 1,
-              operation: "reprove-maintenance-fence-after-old-request-drain",
-              source_sha: $source_sha,
-              run_id: $run_id,
-              maintenance_version_id: $maintenance_version_id,
-              deployment_id: $deployment_id,
-              database_id: $database_id,
-              session_namespace_id: $session_namespace_id,
-              active_percent: 100,
-              maintenance_mode_proven: true,
-              exact_maintenance_version_active: true
-            }' > "${proof}"
-          jq -e --arg maintenance_version_id "${maintenance_version_id}" '
-            .schema_version == 1 and
-            .operation == "reprove-maintenance-fence-after-old-request-drain" and
-            .maintenance_version_id == $maintenance_version_id and
-            .active_percent == 100 and
-            .maintenance_mode_proven == true and
-            .exact_maintenance_version_active == true
-          ' "${proof}" >/dev/null
+          sleep 30
+          expected_version_id="$(jq -er '.deployed_version_id' \
+            "${RUNNER_TEMP}/web-maintenance.json")"
+          deployment="${RUNNER_TEMP}/maintenance-after-drain-deployment.json"
+          bunx wrangler deployments status --name intar-dev --json \
+            > "${deployment}"
+          jq -e --arg expected_version_id "${expected_version_id}" '
+            .versions | length == 1 and
+            .[0].version_id == $expected_version_id and
+            .[0].percentage == 100
+          ' "${deployment}" >/dev/null
+          root_status="$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' https://intar.dev/)"
+          probe="${RUNNER_TEMP}/maintenance-after-drain.json"
+          probe_status="$(curl --silent --show-error \
+            --header 'Accept: application/json' --output "${probe}" \
+            --write-out '%{http_code}' \
+            https://intar.dev/api/control-plane-maintenance-probe)"
+          test "${root_status}" = 503
+          test "${probe_status}" = 503
+          test "$(jq -er '.code' "${probe}")" = maintenance
 
-      - name: Prove the production D1 is already Drizzle-managed
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          marker="${RUNNER_TEMP}/production-d1-pre-migration-marker.json"
-          expected="${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.json"
-          observed="${RUNNER_TEMP}/production-d1-pre-migration-ledger.json"
-          expected_manifest="${RUNNER_TEMP}/production-d1-pre-migration-expected-manifest.json"
-          observed_manifest="${RUNNER_TEMP}/production-d1-pre-migration-manifest.json"
-          foreign_keys="${RUNNER_TEMP}/production-d1-pre-migration-foreign-keys.json"
-          generated_schema="${RUNNER_TEMP}/production-d1-pre-migration-generated-schema.json"
-
-          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
-            --database-id "${DATABASE_ID}" \
-            --expect observed-ledger-prefix \
-            --evidence "${generated_schema}"
-          jq -e \
-            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
-            --arg database_id "${DATABASE_ID}" '
-              .version == 1 and
-              .status == "exact_generated_schema_verified" and
-              .expectation == "observed-ledger-prefix" and
-              .accountId == $account_id and
-              .databaseId == $database_id and
-              .appliedMigrationCount > 0 and
-              .appliedMigrationCount <= .committedMigrationCount and
-              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
-              (.objects | length) > 0 and
-              all(.objects[]; .type == "table" or .type == "index") and
-              .foreignKeyViolations == 0 and
-              .triggers == 0 and
-              .views == 0
-            ' "${generated_schema}" >/dev/null
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "SELECT (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '__drizzle_migrations') AS drizzle_ledgers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'd1_migrations') AS wrangler_ledgers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger') AS triggers, (SELECT COUNT(*) FROM sqlite_schema WHERE type = 'view') AS views" \
-            --json > "${marker}"
-          jq -e '
-            length == 1 and
-            .[0].success == true and
-            .[0].results == [{
-              drizzle_ledgers: 1,
-              wrangler_ledgers: 0,
-              triggers: 0,
-              views: 0
-            }]
-          ' "${marker}" >/dev/null
-
-          : > "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson"
-          while IFS=$'\t' read -r tag created_at; do
-            test -n "${tag}"
-            test -f "migrations/${tag}.sql"
-            hash="$(sha256sum "migrations/${tag}.sql" | cut -d ' ' -f 1)"
-            jq -cn \
-              --arg hash "${hash}" \
-              --argjson created_at "${created_at}" \
-              '{hash: $hash, created_at: $created_at}' \
-              >> "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson"
-          done < <(jq -r '.entries[] | [.tag, (.when | tostring)] | @tsv' \
-            migrations/meta/_journal.json)
-          jq -s 'sort_by(.created_at)' \
-            "${RUNNER_TEMP}/production-d1-pre-migration-expected-ledger.ndjson" \
-            > "${expected}"
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
-            --json > "${observed}"
-          jq -e --slurpfile expected "${expected}" '
-            length == 1 and
-            .[0].success == true and
-            (.[0].results | length) > 0 and
-            (.[0].results | length) <= ($expected[0] | length) and
-            .[0].results == $expected[0][0:(.[0].results | length)]
-          ' "${observed}" >/dev/null
-
-          applied_migration_count="$(jq -er '.[0].results | length' "${observed}")"
-          pre_migration_snapshot_index="$(jq -er \
-            --argjson entry "$((applied_migration_count - 1))" \
-            '.entries[$entry].idx' migrations/meta/_journal.json)"
-          printf -v pre_migration_snapshot_path \
-            'migrations/meta/%04d_snapshot.json' \
-            "${pre_migration_snapshot_index}"
-          test -f "${pre_migration_snapshot_path}"
-          jq '
-            [
-              (.tables | to_entries[] | {
-                type: "table", name: .key, table_name: .key
-              }),
-              (.tables | to_entries[] | . as $table |
-                (($table.value.indexes // {}) | keys[]) | {
-                  type: "index", name: ., table_name: $table.key
-                })
-            ] + [{
-              type: "table",
-              name: "__drizzle_migrations",
-              table_name: "__drizzle_migrations"
-            }] | sort_by(.type, .name, .table_name)
-          ' "${pre_migration_snapshot_path}" > "${expected_manifest}"
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
-            --json > "${observed_manifest}"
-          jq -e --slurpfile expected "${expected_manifest}" '
-            length == 1 and
-            .[0].success == true and
-            (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0] and
-            ([.[0].results[] | select(.type == "trigger" or .type == "view")] | length) == 0 and
-            ([.[0].results[] | select(.name == "d1_migrations")] | length) == 0
-          ' "${observed_manifest}" >/dev/null
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "PRAGMA foreign_key_check" \
-            --json > "${foreign_keys}"
-          jq -e '
-            length == 1 and
-            .[0].success == true and
-            .[0].results == []
-          ' "${foreign_keys}" >/dev/null
-
-      - name: Apply the generated Drizzle migration stream to production D1
+      - name: Apply pending D1 migrations
+        if: steps.migrations.outputs.pending == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -1063,769 +226,63 @@ jobs:
         run: |
           set -euo pipefail
           export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
-          bunx drizzle-kit migrate --config drizzle.config.ts 2>&1 |
-            tee "${RUNNER_TEMP}/production-d1-drizzle-migrate.log"
+          bun run db:migrate:production 2>&1 | \
+            tee "${RUNNER_TEMP}/production-d1-migrate.log"
 
-      - name: Verify the exact Drizzle schema and migration ledger
+      - name: Verify production D1 schema
+        working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          generated_schema="${RUNNER_TEMP}/production-d1-generated-schema.json"
-          bun "${GITHUB_WORKSPACE}/tools/database/verify-generated-d1-schema.ts" \
+          evidence="${RUNNER_TEMP}/production-d1-verified.json"
+          bun tools/database/verify-generated-d1-schema.ts \
             --database-id "${DATABASE_ID}" \
             --expect full \
-            --evidence "${generated_schema}"
-          jq -e \
-            --arg account_id "${CLOUDFLARE_ACCOUNT_ID}" \
-            --arg database_id "${DATABASE_ID}" '
-              .version == 1 and
-              .status == "exact_generated_schema_verified" and
-              .expectation == "full" and
-              .accountId == $account_id and
-              .databaseId == $database_id and
-              .appliedMigrationCount == .committedMigrationCount and
-              .appliedMigrationCount > 0 and
-              (.schemaSha256 | test("^[0-9a-f]{64}$")) and
-              (.objects | length) > 0 and
-              all(.objects[]; .type == "table" or .type == "index") and
-              .foreignKeyViolations == 0 and
-              .triggers == 0 and
-              .views == 0
-            ' "${generated_schema}" >/dev/null
-          expected_ledger="${RUNNER_TEMP}/production-d1-expected-ledger.json"
-          ledger="${RUNNER_TEMP}/production-d1-ledger.json"
-          expected_manifest="${RUNNER_TEMP}/production-d1-expected-manifest.json"
-          manifest="${RUNNER_TEMP}/production-d1-manifest.json"
-          foreign_keys="${RUNNER_TEMP}/production-d1-foreign-keys.json"
-
-          : > "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
-          while IFS=$'\t' read -r tag created_at; do
-            test -n "${tag}"
-            test -f "migrations/${tag}.sql"
-            hash="$(sha256sum "migrations/${tag}.sql" | cut -d ' ' -f 1)"
-            jq -cn \
-              --arg hash "${hash}" \
-              --argjson created_at "${created_at}" \
-              '{hash: $hash, created_at: $created_at}' \
-              >> "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson"
-          done < <(jq -r '.entries[] | [.tag, (.when | tostring)] | @tsv' \
-            migrations/meta/_journal.json)
-          jq -s 'sort_by(.created_at)' \
-            "${RUNNER_TEMP}/production-d1-expected-ledger.ndjson" \
-            > "${expected_ledger}"
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "SELECT hash, created_at FROM __drizzle_migrations ORDER BY created_at" \
-            --json > "${ledger}"
-          jq -e --slurpfile expected "${expected_ledger}" '
-            length == 1 and
-            .[0].success == true and
-            .[0].results == $expected[0] and
-            (.[0].results | length) > 0
-          ' "${ledger}" >/dev/null
-
-          final_snapshot_index="$(jq -er '.entries[-1].idx' \
-            migrations/meta/_journal.json)"
-          printf -v final_snapshot_path \
-            'migrations/meta/%04d_snapshot.json' "${final_snapshot_index}"
-          test -f "${final_snapshot_path}"
-          jq '
-            [
-              (.tables | to_entries[] | {
-                type: "table", name: .key, table_name: .key
-              }),
-              (.tables | to_entries[] | . as $table |
-                (($table.value.indexes // {}) | keys[]) | {
-                  type: "index", name: ., table_name: $table.key
-                })
-            ] + [{
-              type: "table",
-              name: "__drizzle_migrations",
-              table_name: "__drizzle_migrations"
-            }] | sort_by(.type, .name, .table_name)
-          ' "${final_snapshot_path}" > "${expected_manifest}"
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "SELECT type, name, tbl_name AS table_name FROM sqlite_schema WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND sql IS NOT NULL ORDER BY type, name, tbl_name" \
-            --json > "${manifest}"
-          jq -e --slurpfile expected "${expected_manifest}" '
-            length == 1 and
-            .[0].success == true and
-            (.[0].results | sort_by(.type, .name, .table_name)) == $expected[0] and
-            ([.[0].results[] | select(.type == "trigger" or .type == "view")] | length) == 0 and
-            ([.[0].results[] | select(.name == "d1_migrations")] | length) == 0
-          ' "${manifest}" >/dev/null
-
-          bunx wrangler d1 execute DB \
-            --remote \
-            --config "${DEPLOYMENT_CONFIG}" \
-            --command "PRAGMA foreign_key_check" \
-            --json > "${foreign_keys}"
+            --evidence "${evidence}"
           jq -e '
-            length == 1 and
-            .[0].success == true and
-            .[0].results == []
-          ' "${foreign_keys}" >/dev/null
+            .status == "exact_generated_schema_verified" and
+            .expectation == "full" and
+            .appliedMigrationCount == .committedMigrationCount and
+            .foreignKeyViolations == 0 and
+            .triggers == 0 and
+            .views == 0
+          ' "${evidence}" >/dev/null
 
-      - name: Backfill OIDC ciphertext before encrypted Worker activation
-        id: oidc_backfill
+      - name: Deploy production at 100 percent
         working-directory: ${{ github.workspace }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
+          WEB_DEPLOY_LABEL: standard
         run: |
-          set -euo pipefail
-          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
-          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
-          export OIDC_MIGRATION_CONFIRMATION="BACKFILL OIDC SECRET MIGRATION"
-          counts_file="${RUNNER_TEMP}/oidc-secret-backfill-counts.json"
-          test ! -e "${counts_file}"
-          bun tools/database/oidc-secret-migration.ts \
-            --operation backfill \
-            --counts-output "${counts_file}"
-
-      - name: Verify complete OIDC ciphertext backfill
-        if: ${{ always() && steps.oidc_backfill.outcome != 'skipped' }}
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          jq -e '
-            .version == 1 and
-            .operation == "backfill" and
-            .status == "completed" and
-            (.counts | type == "object") and
-            (.counts | keys) == [
-              "casConflicts",
-              "ciphertextInvalid",
-              "ciphertextOnly",
-              "ciphertextPresent",
-              "ciphertextValid",
-              "configInvalid",
-              "dualWritten",
-              "missingSecretMaterial",
-              "plaintextOnly",
-              "plaintextPresent",
-              "scanned",
-              "secretMismatch",
-              "writesApplied"
-            ] and
-            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
-            .counts.plaintextOnly == 0 and
-            .counts.ciphertextInvalid == 0 and
-            .counts.configInvalid == 0 and
-            .counts.missingSecretMaterial == 0 and
-            .counts.secretMismatch == 0 and
-            .counts.ciphertextPresent == .counts.scanned and
-            .counts.ciphertextValid == .counts.scanned and
-            (.counts.dualWritten + .counts.ciphertextOnly) == .counts.scanned
-          ' "${RUNNER_TEMP}/oidc-secret-backfill-counts.json" >/dev/null
-
-      - name: Retain counts-only OIDC backfill evidence
-        if: ${{ always() && steps.oidc_backfill.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: oidc-secret-backfill-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/oidc-secret-backfill-counts.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Retain production D1 migration evidence
-        if: ${{ always() && steps.maintenance_fence_reproof.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: production-d1-drizzle-${{ github.sha }}-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/production-d1-pre-migration-*.json
-            ${{ runner.temp }}/production-d1-drizzle-migrate.log
-            ${{ runner.temp }}/production-d1-expected-ledger.json
-            ${{ runner.temp }}/production-d1-ledger.json
-            ${{ runner.temp }}/production-d1-expected-manifest.json
-            ${{ runner.temp }}/production-d1-manifest.json
-            ${{ runner.temp }}/production-d1-foreign-keys.json
-            ${{ runner.temp }}/production-d1-generated-schema.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Reverify fenced OIDC ciphertext immediately before opening
-        id: oidc_preopen_reverify
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
-        run: |
-          set -euo pipefail
-          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
-          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
-          export OIDC_MIGRATION_CONFIRMATION="PLAN OIDC SECRET MIGRATION"
-          counts_file="${RUNNER_TEMP}/oidc-secret-pre-open-counts.json"
-          test ! -e "${counts_file}"
-          bun tools/database/oidc-secret-migration.ts \
-            --operation plan \
-            --counts-output "${counts_file}"
-          jq -e '
-            .version == 1 and
-            .operation == "plan" and
-            .status == "ready" and
-            (.counts | type == "object") and
-            (.counts | keys) == [
-              "casConflicts",
-              "ciphertextInvalid",
-              "ciphertextOnly",
-              "ciphertextPresent",
-              "ciphertextValid",
-              "configInvalid",
-              "dualWritten",
-              "missingSecretMaterial",
-              "plaintextOnly",
-              "plaintextPresent",
-              "scanned",
-              "secretMismatch",
-              "writesApplied"
-            ] and
-            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
-            .counts.plaintextOnly == 0 and
-            .counts.ciphertextInvalid == 0 and
-            .counts.configInvalid == 0 and
-            .counts.missingSecretMaterial == 0 and
-            .counts.secretMismatch == 0 and
-            .counts.ciphertextPresent == .counts.scanned and
-            .counts.ciphertextValid == .counts.scanned and
-            (.counts.dualWritten + .counts.ciphertextOnly) == .counts.scanned
-          ' "${counts_file}" >/dev/null
-
-      - name: Activate the exact immutable web version
-        id: exact_web_activation
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          SESSION_KV_NAMESPACE_ID: 87ad9df7e37e4ced900553aa1a7775a1
-          WEB_ACTIVATION_LABEL: standard
-        run: |
-          set -euo pipefail
-          tools/deploy/activate-web-version.sh \
+          tools/deploy/deploy-web.sh \
             "${DEPLOYMENT_CONFIG}" \
             "${DATABASE_ID}" \
-            "${DATABASE_ID}" \
-            "${SESSION_KV_NAMESPACE_ID}" \
+            "87ad9df7e37e4ced900553aa1a7775a1" \
             "${ACTIVATION_SECRETS_FILE}" \
-            "${RUNNER_TEMP}/exact-web-version-activation-standard.json" \
-            maintenance
+            "${RUNNER_TEMP}/web-production.json"
 
-      - name: Remove ephemeral Worker activation secrets
-        if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
+      - name: Remove runtime secret file
+        if: always() && steps.runtime-secrets.outcome != 'skipped'
         working-directory: ${{ github.workspace }}
         run: rm -f "${RUNNER_TEMP}/website-runtime-secrets.json"
 
-      - name: Require completed OIDC canary before plaintext cleanup
-        id: oidc_canary_gate
-        if: ${{ steps.exact_web_activation.outcome == 'success' }}
-        working-directory: ${{ github.workspace }}
-        env:
-          OIDC_CANARY_CONFIRMATION: ${{ inputs.oidc_canary_confirmation }}
-          OIDC_CANARY_SOURCE_RUN_ID: ${{ inputs.oidc_canary_source_run_id }}
-        run: |
-          set -euo pipefail
-          counts_file="${RUNNER_TEMP}/oidc-secret-pre-open-counts.json"
-          test -f "${counts_file}"
-          scanned="$(jq -er '.counts.scanned' "${counts_file}")"
-          [[ "${scanned}" =~ ^[0-9]+$ ]]
-          if [ "${scanned}" -eq 0 ]; then
-            printf 'oidc_provider_count=0 canary_confirmation_required=false\n' \
-              >> "${GITHUB_STEP_SUMMARY}"
-            exit 0
-          fi
-          if [ "${OIDC_CANARY_CONFIRMATION}" != "OIDC CANARY PASSED" ]; then
-            printf 'A live OIDC canary is required before plaintext cleanup.\n' >&2
-            exit 1
-          fi
-          [[ "${OIDC_CANARY_SOURCE_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
-          test "${OIDC_CANARY_SOURCE_RUN_ID}" -lt "${GITHUB_RUN_ID}"
-          source_run_json="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${OIDC_CANARY_SOURCE_RUN_ID}")"
-          jq -e \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg workflow_path "${PROVENANCE_WORKFLOW_PATH}" \
-            --argjson source_run_id "${OIDC_CANARY_SOURCE_RUN_ID}" '
-              .id == $source_run_id and
-              .repository.full_name == $repository and
-              .head_sha == $source_sha and
-              .run_attempt == 1 and
-              .event == "workflow_dispatch" and
-              .status == "completed" and
-              .conclusion == "failure" and
-              .path == $workflow_path
-            ' <<< "${source_run_json}" >/dev/null
-          source_artifact="exact-web-version-attempt-${GITHUB_SHA}-${OIDC_CANARY_SOURCE_RUN_ID}"
-          source_artifact_dir="${RUNNER_TEMP}/oidc-canary-source-${OIDC_CANARY_SOURCE_RUN_ID}"
-          test ! -e "${source_artifact_dir}"
-          mkdir -p "${source_artifact_dir}"
-          gh run download "${OIDC_CANARY_SOURCE_RUN_ID}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --name "${source_artifact}" \
-            --dir "${source_artifact_dir}"
-          mapfile -t source_evidence_files < <(
-            rg --files "${source_artifact_dir}" \
-              -g "exact-web-version-activation-standard.json"
-          )
-          test "${#source_evidence_files[@]}" -eq 1
-          source_evidence="${source_evidence_files[0]}"
-          source_uploaded_version_id="$(jq -er \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg source_run_id "${OIDC_CANARY_SOURCE_RUN_ID}" '
-              select(
-                .schema_version == 1 and
-                .operation == "activate-exact-web-version" and
-                .source_sha == $source_sha and
-                .run_id == $source_run_id and
-                .run_attempt == 1 and
-                .exact_version_deployed == true and
-                .active_runtime_bindings_proven == true and
-                .runtime_secret_binding_proven == true and
-                .after_health_proven == true and
-                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"open\"")) and
-                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
-              ) | .uploaded_version_id
-            ' "${source_evidence}")"
-          [[ "${source_uploaded_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          current_fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
-          test -f "${current_fence_evidence}"
-          current_fence_before_version_id="$(jq -er \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" '
-              select(
-                .schema_version == 1 and
-                .operation == "activate-exact-web-version" and
-                .source_sha == $source_sha and
-                .run_id == $run_id and
-                .before_version_id != .uploaded_version_id and
-                (.before_health | type == "object" and
-                  .expected_mode == "open" and .healthy == true) and
-                .exact_version_deployed == true and
-                .active_runtime_bindings_proven == true and
-                .after_health_proven == true and
-                (.propagation_attempts_ndjson | contains("\"expected_mode\":\"maintenance\"")) and
-                (.propagation_attempts_ndjson | contains("\"root_healthy\":true"))
-              ) | .before_version_id
-            ' "${current_fence_evidence}")"
-          [[ "${current_fence_before_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          test "${source_uploaded_version_id}" = \
-            "${current_fence_before_version_id}"
-          printf 'oidc_provider_count=%s canary_confirmation_required=true canary_source_run_id=%s\n' \
-            "${scanned}" "${OIDC_CANARY_SOURCE_RUN_ID}" \
-            >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Recheck sole-operator freshness before plaintext cleanup
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          case "${APPROVAL_MODE}" in
-            reviewed) ;;
-            single-operator)
-              [[ "${SINGLE_OPERATOR_EXPIRES_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              [[ "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
-              now_epoch="$(date -u +%s)"
-              expires_epoch="$(date -u -d "${SINGLE_OPERATOR_EXPIRES_AT}" +%s)"
-              attested_epoch="$(date -u -d "${SINGLE_OPERATOR_ADMIN_ATTESTED_AT}" +%s)"
-              remaining_seconds="$((expires_epoch - now_epoch))"
-              attestation_age="$((now_epoch - attested_epoch))"
-              test "${remaining_seconds}" -gt 0
-              test "${remaining_seconds}" -le 604800
-              test "${attestation_age}" -ge 0
-              test "${attestation_age}" -le 900
-              printf 'single_operator_remaining_seconds=%s admin_attestation_age=%s\n' \
-                "${remaining_seconds}" "${attestation_age}"
-              ;;
-            *) exit 1 ;;
-          esac
-
-      - name: Remove plaintext after encrypted OIDC activation
-        id: oidc_cleanup
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1: ${{ secrets.OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1 }}
-        run: |
-          set -euo pipefail
-          test -n "${OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1}"
-          export CLOUDFLARE_DATABASE_ID="${DATABASE_ID}"
-          export OIDC_MIGRATION_CONFIRMATION="CLEANUP OIDC SECRET MIGRATION"
-          counts_file="${RUNNER_TEMP}/oidc-secret-cleanup-counts.json"
-          test ! -e "${counts_file}"
-          bun tools/database/oidc-secret-migration.ts \
-            --operation cleanup \
-            --counts-output "${counts_file}"
-
-      - name: Verify OIDC plaintext cleanup
-        if: ${{ always() && steps.oidc_cleanup.outcome != 'skipped' }}
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          jq -e '
-            .version == 1 and
-            .operation == "cleanup" and
-            .status == "completed" and
-            (.counts | type == "object") and
-            (.counts | keys) == [
-              "casConflicts",
-              "ciphertextInvalid",
-              "ciphertextOnly",
-              "ciphertextPresent",
-              "ciphertextValid",
-              "configInvalid",
-              "dualWritten",
-              "missingSecretMaterial",
-              "plaintextOnly",
-              "plaintextPresent",
-              "scanned",
-              "secretMismatch",
-              "writesApplied"
-            ] and
-            (.counts | all(.[]; type == "number" and . >= 0 and floor == .)) and
-            .counts.plaintextPresent == 0 and
-            .counts.plaintextOnly == 0 and
-            .counts.dualWritten == 0 and
-            .counts.ciphertextInvalid == 0 and
-            .counts.configInvalid == 0 and
-            .counts.missingSecretMaterial == 0 and
-            .counts.secretMismatch == 0 and
-            .counts.ciphertextOnly == .counts.scanned and
-            .counts.ciphertextValid == .counts.scanned
-          ' "${RUNNER_TEMP}/oidc-secret-cleanup-counts.json" >/dev/null
-
-      - name: Recover original open Worker after failed encrypted OIDC activation
-        id: pre_fence_open_recovery
-        if: ${{ always() && steps.maintenance_fence_activation.outcome == 'success' && steps.current_web_mode.outputs.mode == 'open' && steps.exact_web_activation.outcome != 'success' && steps.oidc_cleanup.outcome == 'skipped' }}
-        working-directory: ${{ github.workspace }}
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          fence_evidence="${RUNNER_TEMP}/exact-web-version-activation-maintenance.json"
-          recovery_evidence="${RUNNER_TEMP}/oidc-pre-fence-open-recovery.json"
-          pre_fence_version="${RUNNER_TEMP}/oidc-pre-fence-open-version.json"
-          deploy_output="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deploy.ndjson"
-          deploy_result="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deploy.json"
-          test -f "${fence_evidence}"
-          test ! -e "${recovery_evidence}"
-          test ! -e "${pre_fence_version}"
-          test ! -e "${deploy_output}"
-          test ! -e "${deploy_result}"
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            '{
-              schema_version: 1,
-              operation: "recover-pre-fence-open-web-version",
-              state: "started",
-              source_sha: $source_sha,
-              run_id: $run_id,
-              cleanup_started: false
-            }' > "${recovery_evidence}"
-          fence_versions="$(jq -er \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" '
-              select(
-                .schema_version == 1 and
-                .operation == "activate-exact-web-version" and
-                .source_sha == $source_sha and
-                .run_id == $run_id and
-                .before_version_id != .uploaded_version_id and
-                .current_active_version_used_as_reference == true and
-                .before_health_proven == true and
-                (.before_health | type == "object" and
-                  .expected_mode == "open" and .healthy == true) and
-                .exact_version_deployed == true and
-                .active_runtime_bindings_proven == true and
-                .after_health_proven == true
-              ) | [.before_version_id, .uploaded_version_id] | @tsv
-            ' "${fence_evidence}")"
-          IFS=$'\t' read -r pre_fence_version_id maintenance_fence_version_id \
-            <<< "${fence_versions}"
-          [[ "${pre_fence_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          [[ "${maintenance_fence_version_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          test "${pre_fence_version_id}" != "${maintenance_fence_version_id}"
-          bunx wrangler versions view "${pre_fence_version_id}" \
-            --name intar-dev --json > "${pre_fence_version}"
-          pre_fence_maintenance_value="$(jq -er \
-            --arg pre_fence_version_id "${pre_fence_version_id}" '
-              select(.id == $pre_fence_version_id) |
-              ([.resources.bindings[] | select(
-                .type == "plain_text" and .name == "CONTROL_PLANE_MAINTENANCE"
-              )] |
-                if length == 0 then "off"
-                elif length == 1 then .[0].text
-                else "invalid"
-                end)
-            ' "${pre_fence_version}")"
-          test "${pre_fence_maintenance_value}" = off
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg pre_fence_version_id "${pre_fence_version_id}" \
-            --arg maintenance_fence_version_id "${maintenance_fence_version_id}" \
-            '{
-              schema_version: 1,
-              operation: "recover-pre-fence-open-web-version",
-              state: "deploying",
-              source_sha: $source_sha,
-              run_id: $run_id,
-              pre_fence_version_id: $pre_fence_version_id,
-              maintenance_fence_version_id: $maintenance_fence_version_id,
-              cleanup_started: false
-            }' > "${recovery_evidence}"
-          WRANGLER_OUTPUT_FILE_PATH="${deploy_output}" \
-            bunx wrangler versions deploy "${pre_fence_version_id}@100%" \
-              --name intar-dev \
-              --message "Restore pre-fence open Worker after failed encrypted OIDC activation for run ${GITHUB_RUN_ID}" \
-              --yes
-          bun "${GITHUB_WORKSPACE}/tools/deploy/wrangler-output.ts" \
-            version-deploy "${deploy_output}" intar-dev > "${deploy_result}"
-          recovery_deployment_id="$(jq -er '.deploymentId' "${deploy_result}")"
-          [[ "${recovery_deployment_id}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
-          recovery_proven=false
-          recovery_observed_attempt=0
-          observed_deployment_id=""
-          root_status=""
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            deployment="${RUNNER_TEMP}/oidc-pre-fence-open-recovery-deployment-${attempt}.json"
-            test ! -e "${deployment}"
-            exact_pre_fence_version_active=false
-            if bunx wrangler deployments status --name intar-dev --json > "${deployment}" &&
-              jq -e \
-                --arg deployment_id "${recovery_deployment_id}" \
-                --arg pre_fence_version_id "${pre_fence_version_id}" '
-                  .id == $deployment_id and
-                  (.versions | length) == 1 and
-                  .versions[0].version_id == $pre_fence_version_id and
-                  .versions[0].percentage == 100
-                ' "${deployment}" >/dev/null; then
-              exact_pre_fence_version_active=true
-              observed_deployment_id="$(jq -er '.id' "${deployment}")"
-            fi
-            root_status="$({ curl --silent --show-error --connect-timeout 1 --max-time 5 \
-              --header 'Cache-Control: no-cache' --output /dev/null \
-              --write-out '%{http_code}' https://intar.dev/; } || true)"
-            if [ "${exact_pre_fence_version_active}" = true ] && \
-              [ "${root_status}" = 200 ]; then
-              recovery_proven=true
-              recovery_observed_attempt="${attempt}"
-              break
-            fi
-            if [ "${attempt}" -lt 12 ]; then sleep 2; fi
-          done
-          test "${recovery_proven}" = true
-          jq -n \
-            --arg source_sha "${GITHUB_SHA}" \
-            --arg run_id "${GITHUB_RUN_ID}" \
-            --arg pre_fence_version_id "${pre_fence_version_id}" \
-            --arg maintenance_fence_version_id "${maintenance_fence_version_id}" \
-            --arg recovery_deployment_id "${recovery_deployment_id}" \
-            --arg observed_deployment_id "${observed_deployment_id}" \
-            --arg root_status "${root_status}" \
-            --argjson recovery_observed_attempt "${recovery_observed_attempt}" \
-            '{
-              schema_version: 1,
-              operation: "recover-pre-fence-open-web-version",
-              state: "completed",
-              source_sha: $source_sha,
-              run_id: $run_id,
-              pre_fence_version_id: $pre_fence_version_id,
-              maintenance_fence_version_id: $maintenance_fence_version_id,
-              recovery_deployment_id: $recovery_deployment_id,
-              observed_deployment_id: $observed_deployment_id,
-              active_percent: 100,
-              recovery_max_attempts: 12,
-              recovery_observed_attempt: $recovery_observed_attempt,
-              exact_pre_fence_version_active: true,
-              root_status: $root_status,
-              root_open_health_proven: true,
-              cleanup_started: false
-            }' > "${recovery_evidence}"
-          jq -e --arg pre_fence_version_id "${pre_fence_version_id}" '
-            .schema_version == 1 and
-            .operation == "recover-pre-fence-open-web-version" and
-            .state == "completed" and
-            .pre_fence_version_id == $pre_fence_version_id and
-            .active_percent == 100 and
-            .recovery_observed_attempt >= 1 and
-            .recovery_observed_attempt <= .recovery_max_attempts and
-            .exact_pre_fence_version_active == true and
-            .root_status == "200" and
-            .root_open_health_proven == true and
-            .cleanup_started == false
-          ' "${recovery_evidence}" >/dev/null
-
-      - name: Retain counts-only OIDC cleanup evidence
-        if: ${{ always() && steps.oidc_cleanup.outcome != 'skipped' }}
+      - name: Retain deployment evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: oidc-secret-cleanup-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/oidc-secret-cleanup-counts.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Retain pre-fence open recovery evidence
-        if: ${{ always() && steps.pre_fence_open_recovery.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: oidc-pre-fence-open-recovery-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/oidc-pre-fence-open-recovery.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Retain counts-only OIDC pre-open verification evidence
-        if: ${{ always() && steps.oidc_preopen_reverify.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: oidc-secret-pre-open-${{ github.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/oidc-secret-pre-open-counts.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Retain exact web-version activation attempt
-        if: ${{ always() && steps.activation_secrets.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: exact-web-version-attempt-${{ github.sha }}-${{ github.run_id }}
+          name: website-production-${{ github.sha }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/exact-web-version-activation-maintenance.json
-            ${{ runner.temp }}/exact-web-version-activation-standard.json
-            ${{ runner.temp }}/oidc-maintenance-fence-drain.json
-            ${{ runner.temp }}/oidc-maintenance-fence-post-drain-proof.json
+            ${{ runner.temp }}/production-d1-plan.json
+            ${{ runner.temp }}/production-d1-migrate.log
+            ${{ runner.temp }}/production-d1-verified.json
+            ${{ runner.temp }}/maintenance-after-drain-deployment.json
+            ${{ runner.temp }}/maintenance-after-drain.json
+            ${{ runner.temp }}/web-maintenance.json
+            ${{ runner.temp }}/web-production.json
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-maintenance/
             ${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Queue the exact scenario source bundle
-        working-directory: ${{ github.workspace }}
-        env:
-          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
-        run: |
-          set -euo pipefail
-          control_plane_maintenance="$(
-            jq -er '.vars.CONTROL_PLANE_MAINTENANCE // "off"' \
-              apps/web/dist/server/wrangler.json
-          )"
-          case "${control_plane_maintenance}" in
-            on)
-              printf 'Skipping scenario source bundle while control-plane maintenance is on.\n'
-              exit 0
-              ;;
-            off) ;;
-            *)
-              printf 'Invalid CONTROL_PLANE_MAINTENANCE value: %s\n' \
-                "${control_plane_maintenance}" >&2
-              exit 1
-              ;;
-          esac
-          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
-          revision="${GITHUB_SHA:0:12}"
-          just bundle-images \
-            broken-nginx \
-            builder.sample.amd64.hcl \
-            "${revision}" \
-            false \
-            "https://intar.dev/registry/v1/bundles"
-
-      - name: Recheck production guest tools before retention
-        env:
-          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
-          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
-          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
-          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
-        run: |
-          set -euo pipefail
-          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
-          (
-            cd "${guest_tools_dir}"
-            sha256sum --check --strict SHA256SUMS
-          )
-          test "$(
-            sha256sum "${guest_tools_dir}/intar-workspace-agent" | cut -d ' ' -f 1
-          )" = "${AGENT_SHA256}"
-          test "$(
-            stat --format='%s' "${guest_tools_dir}/intar-workspace-agent"
-          )" = "${AGENT_SIZE_BYTES}"
-          test "$(
-            sha256sum "${guest_tools_dir}/kino" | cut -d ' ' -f 1
-          )" = "${KINO_SHA256}"
-          test "$(
-            stat --format='%s' "${guest_tools_dir}/kino"
-          )" = "${KINO_SIZE_BYTES}"
-          chmod 0444 \
-            "${guest_tools_dir}/SHA256SUMS" \
-            "${guest_tools_dir}/manifest.json"
-          chmod 0555 \
-            "${guest_tools_dir}/intar-workspace-agent" \
-            "${guest_tools_dir}/kino" \
-            "${guest_tools_dir}"
-
-      - name: Preserve production guest tools for the workshop builder
-        id: production_guest_tools
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: production-workshop-guest-tools-${{ github.sha }}
-          path: ${{ runner.temp }}/production-workshop-guest-tools/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 90
-
-      # Keep this the final fallible step. The immutable binaries, D1
-      # migrations, Worker, and retained provenance must all succeed before
-      # production allocation can discover the new guest tools.
-      - name: Publish current learner guest-tool manifest
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          AGENT_SHA256: ${{ steps.workspace-agent.outputs.sha256 }}
-          AGENT_SIZE_BYTES: ${{ steps.workspace-agent.outputs.size_bytes }}
-          KINO_SHA256: ${{ steps.workspace-agent.outputs.kino_sha256 }}
-          KINO_SIZE_BYTES: ${{ steps.workspace-agent.outputs.kino_size_bytes }}
-        run: |
-          set -euo pipefail
-          object_path="intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json"
-          desired="${RUNNER_TEMP}/workspace-agent-current.json"
-          observed="${RUNNER_TEMP}/workspace-agent-current-observed.json"
-          jq -n \
-            --arg sha256 "${AGENT_SHA256}" \
-            --argjson size_bytes "${AGENT_SIZE_BYTES}" \
-            --arg kino_sha256 "${KINO_SHA256}" \
-            --argjson kino_size_bytes "${KINO_SIZE_BYTES}" \
-            '{schema_version: 2, sha256: $sha256, size_bytes: $size_bytes, kino_sha256: $kino_sha256, kino_size_bytes: $kino_size_bytes}' \
-            > "${desired}"
-
-          pointer_verified=false
-          for attempt in 1 2 3; do
-            rm -f "${observed}"
-            bunx wrangler r2 object put "${object_path}" \
-              --file "${desired}" \
-              --content-type "application/json" \
-              --jurisdiction eu \
-              --remote || true
-            if bunx wrangler r2 object get "${object_path}" \
-              --file "${observed}" \
-              --jurisdiction eu \
-              --remote &&
-              cmp --silent "${desired}" "${observed}"; then
-              pointer_verified=true
-              break
-            fi
-            sleep "${attempt}"
-          done
-          if [ "${pointer_verified}" != true ]; then
-            echo "Failed to publish and read back the exact learner guest-tool pointer." >&2
-            exit 1
-          fi
+          if-no-files-found: warn
+          retention-days: 14

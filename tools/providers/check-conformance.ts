@@ -239,37 +239,10 @@ if (
   countOccurrences(
     controlPlaneWorkflow,
     "single_operator_confirmation: ${{ inputs.single_operator_confirmation }}",
-  ) !== 2
+  ) !== 1
 ) {
   throw new Error(
-    "Control-plane wrapper must forward the sole-operator gate to providers and web",
-  );
-}
-
-const websiteDeployWorkflow = await readFile(
-  resolve(root, ".github/workflows/website-deploy.yml"),
-  "utf8",
-);
-if (
-  !websiteDeployWorkflow.includes(
-    "${{ runner.temp }}/intar-web-deploy-${{ github.run_id }}-standard/",
-  )
-) {
-  throw new Error(
-    "Website deployment must retain the exact-version helper runtime evidence",
-  );
-}
-const providerCapabilitiesJob = websiteDeployWorkflow
-  .split("\n  provider-capabilities:\n")[1]
-  ?.split("\n  deploy:\n")[0];
-if (
-  !providerCapabilitiesJob?.includes(pinnedSetupNodeAction) ||
-  !providerCapabilitiesJob.includes(
-    "node-version-file: apps/web/.node-version",
-  )
-) {
-  throw new Error(
-    "Pre-web provider capability probes must use the pinned Node runtime",
+    "Provider rollout must forward the sole-operator gate to provider deployment",
   );
 }
 

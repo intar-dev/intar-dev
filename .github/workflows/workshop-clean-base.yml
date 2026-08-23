@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       production_run_id:
-        description: Successful first-attempt protected web or multicloud run from this exact main SHA
+        description: Successful automatic Website or Guest tools run from this exact main SHA
         required: true
         type: string
       confirmation:
@@ -127,15 +127,15 @@ jobs:
             --arg id "${PRODUCTION_RUN_ID}" \
             --arg sha "${GITHUB_SHA}" '
               (.id | tostring) == $id and
-              .event == "workflow_dispatch" and
+              .event == "push" and
               .status == "completed" and
               .conclusion == "success" and
               .head_branch == "main" and
               .head_sha == $sha and
               .run_attempt == 1 and
               (
-                .path == ".github/workflows/website-deploy.yml" or
-                .path == ".github/workflows/control-plane-rollout.yml"
+                .path == ".github/workflows/website.yml" or
+                .path == ".github/workflows/guest-tools.yml"
               )
             ' <<<"${run_json}" >/dev/null
 

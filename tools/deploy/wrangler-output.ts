@@ -14,6 +14,10 @@ export interface WranglerVersionDeploy {
   deploymentId: string;
 }
 
+export interface WranglerDeploy {
+  versionId: string;
+}
+
 export function parseWranglerNdjson(contents: string): unknown[] {
   const lines = contents.split("\n").filter((line) => line.length > 0);
   if (lines.length === 0) throw new Error("Wrangler output must not be empty");
@@ -57,6 +61,23 @@ export function assertWranglerVersionDeploy(
   return { deploymentId: uuid(event.deployment_id, "version-deploy deployment_id") };
 }
 
+export function assertWranglerDeploy(
+  events: unknown,
+  expectedWorkerName: string,
+): WranglerDeploy {
+  const records = outputRecords(events);
+  rejectCommandFailures(records);
+  const event = oneEvent(records, "deploy");
+  assertOutputVersion(event);
+  if (text(event.worker_name, "deploy worker_name") !== expectedWorkerName) {
+    throw new Error("Wrangler deployed an unexpected Worker");
+  }
+  if (event.worker_name_overridden !== false) {
+    throw new Error("Wrangler unexpectedly overrode the Worker name");
+  }
+  return { versionId: uuid(event.version_id, "deploy version_id") };
+}
+
 async function main(): Promise<void> {
   const [command, outputPath, workerName] = process.argv.slice(2);
   if (!outputPath || !workerName) usage();
@@ -67,6 +88,12 @@ async function main(): Promise<void> {
   }
   if (command === "version-deploy") {
     process.stdout.write(`${JSON.stringify(assertWranglerVersionDeploy(events, workerName))}\n`);
+    return;
+  }
+  if (command === "deploy") {
+    process.stdout.write(
+      `${JSON.stringify(assertWranglerDeploy(events, workerName))}\n`,
+    );
     return;
   }
   usage();
@@ -117,7 +144,7 @@ function uuid(value: unknown, label: string): string {
 
 function usage(): never {
   throw new Error(
-    "usage: tools/deploy/wrangler-output.ts version-upload|version-deploy <wrangler-output.ndjson> <worker-name>",
+    "usage: tools/deploy/wrangler-output.ts deploy|version-upload|version-deploy <wrangler-output.ndjson> <worker-name>",
   );
 }
 

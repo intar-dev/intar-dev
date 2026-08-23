@@ -97,9 +97,8 @@ capabilities(): {
 }
 ```
 
-The web rollout is blocked until a temporary route-less remote probe calls both
-deployed services through Cloudflare service-binding RPC and validates that
-exact response.
+Provider capability probes belong to the provider workflows. They do not block
+an unrelated website deployment.
 
 ## Protected GitHub configuration
 
@@ -113,8 +112,8 @@ web/R2 deployment, and protected Flagship targeting:
 | `CLOUDFLARE_HETZNER_PROVIDER_API_TOKEN`   | Hetzner Worker deployment only                                     |
 | `CLOUDFLARE_GCP_PROVIDER_API_TOKEN`       | GCP Worker deployment only                                         |
 | `CLOUDFLARE_PROVIDER_PROBE_API_TOKEN`     | route-less capability probe only                                   |
-| `CLOUDFLARE_API_TOKEN`                    | D1 migrations, web/R2 deployment, and protected Flagship targeting |
-| `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | exact web-version activation and maintenance checks                |
+| `CLOUDFLARE_API_TOKEN`                    | D1, web, guest-tool R2, and protected Flagship deployment           |
+| `CONTROL_PLANE_MAINTENANCE_BYPASS_SECRET` | web runtime and maintenance checks                                 |
 | `HETZNER_PROVIDER_CREDENTIAL_KEK_V1`      | Hetzner Worker deployment only                                     |
 | `GCP_PROVIDER_CREDENTIAL_KEK_V1`          | GCP Worker deployment only                                         |
 | `GCP_CATALOG_API_KEY`                     | active GCP Worker deployment only; absent in explicit dormant mode |
@@ -126,22 +125,9 @@ not belong in GitHub; owners submit them through the web application and each
 provider Worker envelope-encrypts them.
 
 `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
-random bytes. The production web workflow first activates the exact new Worker
-in maintenance mode and drains old registration requests. It then applies the
-additive D1 column, backfills ciphertext, verifies every row again while fenced,
-opens the encrypted-only Worker, and only then removes every plaintext
-`clientSecret`. A pre-open failure restores the exact pre-fence Worker when the
-run started open; a retry that started in maintenance remains fenced on failure.
-After cleanup, do not roll back to a Worker that predates this cutover.
-
-If the counts-only proof finds one or more OIDC providers, the first run stops
-after the encrypted Worker opens and leaves plaintext intact. Complete a real
-authorization-code sign-in with an existing provider. Then rerun the same
-source SHA with `oidc_canary_confirmation` set to `OIDC CANARY PASSED`; only
-that run can remove plaintext. Set `oidc_canary_source_run_id` to the failed
-first Website production run. The continuation verifies that its canaried
-encrypted version was the exact version fenced by the cleanup run. Never use
-the confirmation for a discovery-only or synthetic check.
+random bytes. Normal web deployments bind this runtime secret but never run an
+OIDC backfill or cleanup. Use the separate protected
+`.github/workflows/oidc-secret-migration.yml` workflow for that lifecycle.
 
 The pinned Wrangler 4.125.0 and Miniflare 5.20260820.0-alpha runtime rejects
 `2026-08-23` as a future compatibility date. All Worker configs and the test
@@ -150,8 +136,7 @@ pool therefore use the newest accepted date, `2026-08-20`; CI rejects drift.
 Keep these protected runtime variables current:
 
 - `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEY_ID`;
-- `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only;
-- the existing production-review variables required by the web workflow.
+- `WORKSHOP_RUNTIME_BUNDLE_SIGNING_KEYS_JSON` containing public keys only.
 
 The production D1 name and UUID are explicit resource configuration in
 `apps/web/wrangler.jsonc`; they are never an environment-variable override. A
@@ -160,10 +145,11 @@ normal deployment keeps that identity stable.
 Provider KEKs are never passed to Astro build or web deployment jobs. The web
 deployment token is never passed to provider jobs.
 
-## 1. Validate the reviewed revision
+## 1. Validate the revision
 
-On the pull request, require Rust, Website, provider Worker, generated-contract,
-and browser checks to pass. The repository-level commands are:
+On a pull request, require the checks that match the changed parts of the
+repository. The website lane runs its web contracts, unit and Worker tests,
+build, and one Chromium smoke check. The repository-level commands are:
 
 ```sh
 bun install --frozen-lockfile
@@ -195,46 +181,32 @@ and metadata with the code that uses it. Never hand-edit those files, use a
 custom Drizzle migration, add a SQL trigger, run Wrangler's D1 migration
 commands, edit a migration ledger, or seed production with workstation SQL.
 
-The website deployment applies pending migrations through the checked-in
-binding, verifies the resulting production schema, and retains the migration
-log and verification result before web activation. Each migration must leave
-the currently active Worker functional for the short interval before the new
-version is activated. Review destructive or narrowing changes as a separate
-data-lifecycle operation rather than hiding them in an application deployment.
+The website deployment first proves that production is an exact prefix of the
+generated migration stream. When a migration is pending, it enables maintenance,
+waits 30 seconds for old requests to drain, applies the migration, and verifies
+the final schema before reopening. If activation fails after migration,
+maintenance stays enabled. Review destructive or narrowing changes as a
+separate data-lifecycle operation rather than hiding them in an application
+deployment.
 
-## 3. Deploy providers and web
+## 3. Deploy providers and web independently
 
-Provider mutation uses the same protected approval modes as the web workflow.
-Reviewed mode requires administrator bypass disabled, a required
-reviewer, and self-review prevention. The explicitly configured single-operator
-commissioning mode requires the exact confirmation, protected actor login and
-numeric ID, an unexpired window of at most seven days, and an administrator
-attestation no more than 15 minutes old. Both modes are restricted to a
-first-attempt exact-`main` run and a production deployment policy containing
-only `main`. The provider workflow checks the policy at authorization and again
-immediately before each provider mutation; the control-plane wrapper forwards
-the same single-operator confirmation to providers and web.
+Provider mutation keeps its protected reviewed or single-operator approval
+mode. The provider workflow validates that mode and its live capability
+contract before each provider mutation. It does not deploy the website.
 
-Before dispatching the control-plane rollout, record the reviewed source SHA,
-currently active `intar-dev` Worker version UUID, and current D1 UUID and
-binding. CI uploads an immutable version, proves its exact D1, `SESSION` KV, and
-Durable Object bindings, then activates that exact version UUID at 100 percent.
-A failed or ambiguous activation restores the exact previously active version
-before the job exits.
-
-Routes and crons require the separate trigger deployment command, and Durable
-Object lifecycle changes require a regular `wrangler deploy`; neither command
-is performed by exact web-version activation. Plan and review those changes as
-separate production mutations. A later scenario-bundle step can still fail
-after the new web version is already serving production, so inspect the
-activation evidence rather than inferring the live version from the overall job
-conclusion.
+A matching push to `main` starts `.github/workflows/website.yml` automatically.
+The run tests and builds the exact commit, runs one Chromium smoke check, and
+passes that tested artifact to the production job. The job applies pending D1
+migrations, runs one strict `wrangler deploy` for the complete Worker
+configuration at 100 percent, proves the active version and bindings, and then
+requires stable homepage, favicon, maintenance-probe, and health-API responses.
+It does not roll back after a failed activation or live check.
 
 Dispatch `.github/workflows/control-plane-rollout.yml` from the exact reviewed
 `main` SHA with:
 
 - provider confirmation `DEPLOY PROVIDER WORKERS`;
-- web confirmation `DEPLOY WORKSHOP CONTROL PLANE`;
 - the time-bounded sole-operator confirmation only when the protected
   environment is explicitly configured for that commissioning mode;
 - when GCP credentials are intentionally deferred, `gcp_dormant=true` and the
@@ -253,25 +225,21 @@ provider back to dormant mode cannot orphan existing resources. Inspection and
 rotation can recover cleanup visibility or authority but cannot establish a new
 connection or issue resources.
 
-The workflow:
+The provider workflow:
 
 1. validates both provider packages independently;
 2. deploys each provider with only its own token and secrets;
 3. calls both deployed `capabilities()` services through the remote probe;
-4. fails closed on any protocol mismatch;
-5. builds the Astro web artifact;
-6. verifies the permanent D1 and `SESSION` KV bindings in the built artifact;
-7. publishes the content-addressed workspace-agent and Kino bytes;
-8. applies pending D1 migrations and verifies the production schema;
-9. activates the exact immutable web version with automatic previous-version
-   restoration on activation failure;
-10. queues the exact Scenario source bundle.
+4. fails closed on any protocol mismatch.
 
-Retain the provider capability artifact, provider Worker versions, D1 migration
-and verification artifact, web activation artifact, guest tool hashes, D1 UUID,
-source SHA, and workflow run IDs. The executable order is therefore provider
-deployment and capability probing, ordered D1 migrations, then exact web-version
-activation.
+The web workflow does not rebuild providers, guest tools, or Scenario source
+bundles, and it does not run OIDC migration work. Matching guest-tool changes
+run `.github/workflows/guest-tools.yml`, which validates and publishes the
+content-addressed workspace-agent and Kino artifacts independently. Matching
+Scenario and image changes run `.github/workflows/images.yml`, which validates
+and publishes the exact source bundle. Retain the web workflow's D1 plan and
+verification, deployed Worker version, D1 UUID, source SHA, live-check evidence,
+and workflow run ID.
 
 ## 4. Operate the pilot organization
 
@@ -533,7 +501,7 @@ route IDs and browser traces for all seven applications
 live and final cost estimates with manual calculations
 zero-resource and zero-active-slot teardown evidence
 previous and activated web version UUIDs and D1 binding evidence
-automatic restoration evidence when an activation attempt fails
+homepage, favicon, maintenance-probe, and health-API evidence
 ```
 
 Successful CI, dormant GCP deployment, or capability probing alone is not GCP

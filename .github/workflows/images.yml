@@ -1,7 +1,39 @@
 name: Images
-run-name: "Image validate PR #${{ github.event.pull_request.number }}"
+run-name: "${{ github.event_name == 'pull_request' && format('Image validate PR #{0}', github.event.pull_request.number) || format('Image publish main @ {0}', github.sha) }}"
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/images.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "justfile"
+      - "crates/kino/**"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-builder/**"
+      - "crates/intar-contracts/**"
+      - "crates/intar-contracts-typegen/**"
+      - "crates/intar-image-*/**"
+      - "content/scenarios/base-images.hcl"
+      - "content/scenarios/build-tools.hcl"
+      - "builder.*.hcl"
+      - "content/courses.hcl"
+      - "content/scenarios/**"
+      - "apps/web/migrations/**"
+      - "apps/web/src/control-plane/auth.ts"
+      - "apps/web/src/control-plane/bridge-v6.ts"
+      - "apps/web/src/control-plane/host-runtime-do.ts"
+      - "apps/web/src/control-plane/image-registry.ts"
+      - "apps/web/src/generated/**"
+      - "apps/web/src/lib/build-scheduler*.ts"
+      - "apps/web/src/lib/desired-state*.ts"
+      - "apps/web/src/lib/host-runtime-wake.ts"
+      - "apps/web/src/lib/scenario-hosts.ts"
+      - "apps/web/src/db/schema.ts"
+      - "apps/web/src/pages/api/agent/hosts.ts"
   pull_request:
     paths:
       - ".github/workflows/images.yml"
@@ -36,8 +68,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: images-validation-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: "images-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   images:
@@ -95,3 +127,18 @@ jobs:
 
       - name: Render public image build input
         run: just render-images broken-nginx builder.sample.amd64.hcl
+
+      - name: Publish exact scenario source bundle
+        if: github.event_name == 'push'
+        env:
+          INTAR_IMAGE_PUBLISH_TOKEN: ${{ secrets.INTAR_IMAGE_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${INTAR_IMAGE_PUBLISH_TOKEN}"
+          revision="${GITHUB_SHA:0:12}"
+          just bundle-images \
+            broken-nginx \
+            builder.sample.amd64.hcl \
+            "${revision}" \
+            false \
+            "https://intar.dev/registry/v1/bundles"

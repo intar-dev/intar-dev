@@ -1,0 +1,273 @@
+name: Guest tools
+run-name: "${{ github.event_name == 'pull_request' && format('Guest tools validate PR #{0}', github.event.pull_request.number) || format('Guest tools publish main @ {0}', github.sha) }}"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/guest-tools.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-workspace-agent/**"
+      - "crates/kino/**"
+  pull_request:
+    paths:
+      - ".github/workflows/guest-tools.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/intar-kino-proto/**"
+      - "crates/intar-workspace-agent/**"
+      - "crates/kino/**"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: "guest-tools-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build guest tools
+    runs-on: namespace-profile-intar-dev
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup target add --toolchain 1.97.0 x86_64-unknown-linux-musl
+          rustup component add --toolchain 1.97.0 clippy
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2
+        with:
+          tool: cargo-zigbuild@0.23.0
+          fallback: none
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.16.0
+
+      - name: Set up Rust cache
+        uses: namespacelabs/nscloud-cache-action@c5f8dab7560444c4bf8dbc64f1b203431873c547 # v1
+        with:
+          cache: rust
+
+      - name: Test and build guest tools
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -euo pipefail
+          cargo test --locked -p intar-workspace-agent -p kino
+          cargo clippy --locked -p intar-workspace-agent -p kino \
+            --all-targets -- -D warnings
+          cargo zigbuild --locked --release -p intar-workspace-agent -p kino \
+            --target x86_64-unknown-linux-musl
+
+      - name: Prepare guest-tool artifact
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          mkdir -p "${guest_tools_dir}"
+          cp \
+            "target/x86_64-unknown-linux-musl/release/intar-workspace-agent" \
+            "${guest_tools_dir}/intar-workspace-agent"
+          cp \
+            "target/x86_64-unknown-linux-musl/release/kino" \
+            "${guest_tools_dir}/kino"
+          chmod 0555 \
+            "${guest_tools_dir}/intar-workspace-agent" \
+            "${guest_tools_dir}/kino"
+          agent_path="${guest_tools_dir}/intar-workspace-agent"
+          kino_path="${guest_tools_dir}/kino"
+          file "${agent_path}" | grep -E 'x86-64.*(static|statically linked)'
+          file "${kino_path}" | grep -E 'x86-64.*(static|statically linked)'
+          agent_sha="$(sha256sum "${agent_path}" | cut -d ' ' -f 1)"
+          agent_size="$(stat --format='%s' "${agent_path}")"
+          kino_sha="$(sha256sum "${kino_path}" | cut -d ' ' -f 1)"
+          kino_size="$(stat --format='%s' "${kino_path}")"
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" \
+            --arg workflow_path ".github/workflows/guest-tools.yml" \
+            --arg workflow_run_id "${GITHUB_RUN_ID}" \
+            --arg workflow_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event "${GITHUB_EVENT_NAME}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg agent_sha256 "${agent_sha}" \
+            --argjson agent_size_bytes "${agent_size}" \
+            --arg agent_object_key \
+              "workspace-agent/releases/${agent_sha}/intar-workspace-agent" \
+            --arg kino_sha256 "${kino_sha}" \
+            --argjson kino_size_bytes "${kino_size}" \
+            --arg kino_object_key \
+              "workspace-agent/kino/releases/${kino_sha}/kino" '
+              {
+                schema_version: 1,
+                repository: $repository,
+                source_sha: $source_sha,
+                workflow_path: $workflow_path,
+                workflow_run_id: $workflow_run_id,
+                workflow_run_attempt: $workflow_run_attempt,
+                event: $event,
+                ref: $ref,
+                architecture: "x86_64",
+                target: "x86_64-unknown-linux-musl",
+                tools: {
+                  "intar-workspace-agent": {
+                    sha256: $agent_sha256,
+                    size_bytes: $agent_size_bytes,
+                    r2_object_key: $agent_object_key
+                  },
+                  kino: {
+                    sha256: $kino_sha256,
+                    size_bytes: $kino_size_bytes,
+                    r2_object_key: $kino_object_key
+                  }
+                }
+              }
+            ' > "${guest_tools_dir}/manifest.json"
+          (
+            cd "${guest_tools_dir}"
+            sha256sum intar-workspace-agent kino > SHA256SUMS
+          )
+          chmod 0444 \
+            "${guest_tools_dir}/SHA256SUMS" \
+            "${guest_tools_dir}/manifest.json"
+
+      - name: Upload guest-tool artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: production-workshop-guest-tools-${{ github.sha }}
+          path: ${{ runner.temp }}/production-workshop-guest-tools/
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  publish:
+    name: Publish guest tools
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: namespace-profile-intar-dev
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: namespacelabs/nscloud-checkout-action@66f2dc6f6c42a8ac6c4e53473c4840006822831e # v9
+        with:
+          persist-credentials: false
+
+      - name: Download guest-tool artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: production-workshop-guest-tools-${{ github.sha }}
+          path: ${{ runner.temp }}/production-workshop-guest-tools
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: apps/web/.node-version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify guest-tool provenance
+        run: |
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          (
+            cd "${guest_tools_dir}"
+            sha256sum --check --strict SHA256SUMS
+          )
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${GITHUB_SHA}" '
+              .schema_version == 1 and
+              .repository == $repository and
+              .source_sha == $source_sha and
+              .workflow_path == ".github/workflows/guest-tools.yml" and
+              .workflow_run_id == env.GITHUB_RUN_ID and
+              .workflow_run_attempt == env.GITHUB_RUN_ATTEMPT and
+              .event == "push" and
+              .ref == "refs/heads/main" and
+              .architecture == "x86_64" and
+              .target == "x86_64-unknown-linux-musl"
+            ' "${guest_tools_dir}/manifest.json" >/dev/null
+
+      - name: Publish content-addressed guest tools
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          agent_sha="$(jq -er '.tools["intar-workspace-agent"].sha256' \
+            "${guest_tools_dir}/manifest.json")"
+          kino_sha="$(jq -er '.tools.kino.sha256' \
+            "${guest_tools_dir}/manifest.json")"
+          bunx wrangler r2 object put \
+            "intar-dev-vm-image-registry-20260709/workspace-agent/releases/${agent_sha}/intar-workspace-agent" \
+            --file "${guest_tools_dir}/intar-workspace-agent" \
+            --jurisdiction eu \
+            --remote
+          bunx wrangler r2 object put \
+            "intar-dev-vm-image-registry-20260709/workspace-agent/kino/releases/${kino_sha}/kino" \
+            --file "${guest_tools_dir}/kino" \
+            --jurisdiction eu \
+            --remote
+
+      - name: Publish current guest-tool manifest
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          guest_tools_dir="${RUNNER_TEMP}/production-workshop-guest-tools"
+          object_path="intar-dev-vm-image-registry-20260709/workspace-agent/releases/current.json"
+          desired="${RUNNER_TEMP}/workspace-agent-current.json"
+          observed="${RUNNER_TEMP}/workspace-agent-current-observed.json"
+          jq '{
+            schema_version: 2,
+            sha256: .tools["intar-workspace-agent"].sha256,
+            size_bytes: .tools["intar-workspace-agent"].size_bytes,
+            kino_sha256: .tools.kino.sha256,
+            kino_size_bytes: .tools.kino.size_bytes
+          }' "${guest_tools_dir}/manifest.json" > "${desired}"
+
+          pointer_verified=false
+          for attempt in 1 2 3; do
+            rm -f "${observed}"
+            bunx wrangler r2 object put "${object_path}" \
+              --file "${desired}" \
+              --content-type application/json \
+              --jurisdiction eu \
+              --remote || true
+            if bunx wrangler r2 object get "${object_path}" \
+              --file "${observed}" \
+              --jurisdiction eu \
+              --remote && cmp --silent "${desired}" "${observed}"; then
+              pointer_verified=true
+              break
+            fi
+            sleep "${attempt}"
+          done
+          test "${pointer_verified}" = true

@@ -74,16 +74,17 @@ Drizzle Kit's D1 HTTP driver and requires `CLOUDFLARE_ACCOUNT_ID`,
 `CLOUDFLARE_DATABASE_ID`, and either `CLOUDFLARE_D1_TOKEN` or
 `CLOUDFLARE_API_TOKEN`. Do not apply schema files with `wrangler d1 execute`,
 run Wrangler's D1 migration commands, or edit either migration ledger by hand.
-The production workflow builds the exact commit, applies pending Drizzle
-migrations, and then deploys the new Worker. A forward migration must leave the
-currently deployed Worker functional for the short interval before replacement.
+Pull requests run the web tests, build, and one Chromium smoke check. A matching
+push to `main` runs the same fixed lane and then deploys its tested artifact
+automatically. The deploy verifies the exact source revision and production
+bindings, applies pending Drizzle migrations, deploys the full Worker
+configuration at 100 percent, and checks the homepage, favicon, and D1-backed
+health API.
 
-Pull requests run the test/build and UI quality gates. Production is not
-automatic on merge: first dispatch `Website` against the exact `main` commit,
-then dispatch the protected `Website production` workflow only after that
-validation succeeds. The production workflow rebuilds the committed source; it
-never deploys an ignored local `dist/` artifact and does not repeat all
-validation gates.
+Maintenance mode is enabled only when a migration is pending. The workflow
+drains old requests before applying that migration. It does not roll back: a
+failed post-migration activation leaves maintenance enabled, and a failed live
+check leaves the deployed version active while the workflow reports failure.
 
 ## Organizations
 

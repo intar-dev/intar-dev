@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertWranglerDeploy,
   assertWranglerVersionDeploy,
   assertWranglerVersionUpload,
   parseWranglerNdjson,
@@ -49,6 +50,26 @@ describe("structured Wrangler deployment output", () => {
         "intar-dev",
       ),
     ).toEqual({ deploymentId });
+  });
+
+  it("extracts the version created by a full deployment", () => {
+    expect(
+      assertWranglerDeploy(
+        [
+          session,
+          {
+            type: "deploy",
+            version: 1,
+            worker_name: "intar-dev",
+            worker_name_overridden: false,
+            worker_tag: "worker-tag",
+            version_id: versionId,
+            targets: ["https://intar.dev"],
+          },
+        ],
+        "intar-dev",
+      ),
+    ).toEqual({ versionId });
   });
 
   it("rejects failed, duplicate, spoofed, and malformed upload events", () => {
@@ -108,6 +129,31 @@ describe("structured Wrangler deployment output", () => {
         "intar-dev",
       ),
     ).toThrow(/lowercase UUID/);
+  });
+
+  it("rejects failed, duplicate, and spoofed full deployment events", () => {
+    const deploy = {
+      type: "deploy",
+      version: 1,
+      worker_name: "intar-dev",
+      worker_name_overridden: false,
+      version_id: versionId,
+    };
+    expect(() =>
+      assertWranglerDeploy(
+        [deploy, { type: "command-failed", version: 1 }],
+        "intar-dev",
+      ),
+    ).toThrow(/failed command/);
+    expect(() => assertWranglerDeploy([deploy, deploy], "intar-dev")).toThrow(
+      /exactly one/,
+    );
+    expect(() =>
+      assertWranglerDeploy(
+        [{ ...deploy, worker_name_overridden: true }],
+        "intar-dev",
+      ),
+    ).toThrow(/overrode/);
   });
 
   it("parses a canonical session and command event without trusting session metadata", () => {
