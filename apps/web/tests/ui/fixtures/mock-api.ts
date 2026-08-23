@@ -321,34 +321,39 @@ export function createMockApiServer(initial: MockApiState): MockApiServer {
         await json(route, { session: sessionFor(server.state.sessionRole) });
         return;
       }
-      if (pathname === "/api/auth/admin/list-users" && method === "GET") {
+      if (pathname === "/api/admin/users" && method === "GET") {
         await json(route, {
           users: server.state.users,
-          total: server.state.users.length,
-          limit: 200,
-          offset: 0,
         });
         return;
       }
       if (
-        /^\/api\/admin\/users\/[^/]+\/(ban|role)$/.test(pathname) &&
+        /^\/api\/admin\/users\/[^/]+\/role$/.test(pathname) &&
         method === "POST"
       ) {
         const body = await requestBody(route);
         const userId = segment(
           pathname,
-          /^\/api\/admin\/users\/([^/]+)\/(?:ban|role)$/,
+          /^\/api\/admin\/users\/([^/]+)\/role$/,
         );
         const target = server.state.users.find((user) => user.id === userId);
         if (target) {
-          if (pathname.endsWith("/ban") && typeof body.banned === "boolean") {
-            target.banned = body.banned;
-          }
-          if (pathname.endsWith("/role") && typeof body.role === "string") {
+          if (typeof body.role === "string") {
             target.role = body.role;
           }
         }
         await json(route, { user: target ?? null });
+        return;
+      }
+      const deletedUserId = segment(pathname, /^\/api\/admin\/users\/([^/]+)$/);
+      if (deletedUserId && method === "DELETE") {
+        server.state.users = server.state.users.filter(
+          (entry) => entry.id !== deletedUserId,
+        );
+        server.state.betaUsers = server.state.betaUsers.filter(
+          (entry) => entry.userId !== deletedUserId,
+        );
+        await json(route, { deleted: true });
         return;
       }
       if (

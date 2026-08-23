@@ -135,6 +135,19 @@ test.describe("focused state accessibility", () => {
     ).toBeVisible();
   });
 
+  test("user deletion confirmation", async ({ page, ui }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+    await page.getByRole("tab", { name: "Users" }).click();
+    await page.getByRole("button", { name: "Delete" }).first().click();
+
+    const dialog = page.getByRole("dialog", { name: "Delete this user?" });
+    await expect(dialog).toContainText("anonymous user record");
+    await expect(
+      dialog.getByRole("button", { name: "Delete user" }),
+    ).toBeVisible();
+    await expectNoAxeViolations(page, testInfo);
+  });
+
   test("build details", async ({ page, ui }, testInfo) => {
     await ui.open({ ...routeCase("admin-builds"), theme: "dark" });
     await page.getByRole("button", { name: "Details" }).first().click();
@@ -279,7 +292,7 @@ test.describe("focused mobile state accessibility", () => {
   });
 });
 
-test.describe("small-screen invite access", () => {
+test.describe("small-screen access management", () => {
   test.use({ viewport: { width: 320, height: 844 }, hasTouch: true });
 
   test("keeps active invite actions on screen", async ({
@@ -301,6 +314,23 @@ test.describe("small-screen invite access", () => {
       expect(bounds).not.toBeNull();
       expect(bounds!.height).toBeGreaterThanOrEqual(44);
     }
+    await expectNoHorizontalOverflow(page);
+    await expectNoAxeViolations(page, testInfo);
+  });
+
+  test("keeps user deletion available without a ban control", async ({
+    page,
+    ui,
+  }, testInfo) => {
+    await ui.open({ ...routeCase("admin-people"), theme: "light" });
+    await page.getByRole("tab", { name: "Users" }).click();
+
+    const remove = page.getByRole("button", { name: "Delete" }).first();
+    await expect(remove).toBeVisible();
+    await expect(page.getByRole("button", { name: "Ban" })).toHaveCount(0);
+    const bounds = await remove.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.height).toBeGreaterThanOrEqual(44);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, testInfo);
   });

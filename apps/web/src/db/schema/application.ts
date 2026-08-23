@@ -278,7 +278,8 @@ export type AccessEventType =
   | "access.revocation_cleanup_failed"
   | "access.revocation_cleanup_stalled"
   | "access.revocation_cleanup_completed"
-  | "access.reinvite_allowed";
+  | "access.reinvite_allowed"
+  | "user.deleted";
 
 // Event rows contain identifiers and normalized reason codes only. They must
 // never contain raw invite codes, links, cookies, provider tokens, or IPs.

@@ -324,6 +324,7 @@ describe("auth policy", () => {
       directLink,
       genericJwt,
       adminCreateUser,
+      adminListUsers,
       adminSetPassword,
     ] =
       await Promise.all([
@@ -381,6 +382,9 @@ describe("auth policy", () => {
           }),
         ),
         auth.handler(
+          authGetRequest("/api/auth/admin/list-users", "missing-session"),
+        ),
+        auth.handler(
           authRequest("/api/auth/admin/set-user-password", {
             userId: "victim",
             newPassword: "correct-horse-battery-staple",
@@ -398,6 +402,7 @@ describe("auth policy", () => {
         "/delete-user",
         "/unlink-account",
         "/admin/create-user",
+        "/admin/list-users",
         "/admin/ban-user",
         "/admin/unban-user",
         "/admin/set-role",
@@ -428,6 +433,7 @@ describe("auth policy", () => {
       registerSso,
       genericJwt,
       adminCreateUser,
+      adminListUsers,
       adminSetPassword,
     ]) {
       expect(response.status).toBe(404);
@@ -855,8 +861,13 @@ describe("auth policy", () => {
       user: { id: userId },
     });
 
+    const stockUserList = await auth.handler(
+      authGetRequest("/api/auth/admin/list-users", cookie),
+    );
+    expect(stockUserList.status).toBe(404);
+    await expect(stockUserList.text()).resolves.toBe("Not Found");
+
     const denied = await Promise.all([
-      auth.handler(authGetRequest("/api/auth/admin/list-users", cookie)),
       auth.handler(authGetRequest("/api/auth/organization/list", cookie)),
       auth.handler(
         authGetRequest(

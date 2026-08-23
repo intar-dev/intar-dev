@@ -561,6 +561,27 @@ test("admin role changes use the app-owned user endpoint", async ({
   ).toBeVisible();
 });
 
+test("admin deletes a user instead of banning them", async ({ page, ui }) => {
+  await ui.open({ ...routeCase("admin-people"), theme: "dark" });
+  await page.getByRole("tab", { name: "Users" }).click();
+
+  await expect(page.getByRole("button", { name: "Ban" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Delete" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Delete this user?" });
+  await expect(dialog).toContainText("Mina Learner");
+  await expect(dialog).toContainText("anonymous user record");
+  const deleteRequest = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" &&
+      request.url().endsWith("/api/admin/users/user-learner"),
+  );
+  await dialog.getByRole("button", { name: "Delete user" }).click();
+  await deleteRequest;
+
+  await expect(page.getByText("Mina Learner", { exact: true })).toHaveCount(0);
+  expect(ui.server.requests).toContain("DELETE /api/admin/users/user-learner");
+});
+
 test("authoring editor validates with the browser WASM shell", async ({
   page,
   ui,

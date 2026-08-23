@@ -5,10 +5,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach, describe, expect, it } from "vitest";
 import { user } from "@/db/schema";
-import {
-  setPlatformUserBanned,
-  setPlatformUserRole,
-} from "@/lib/beta-admin-guard";
+import { setPlatformUserRole } from "@/lib/beta-admin-guard";
 import {
   ensureFixtureBetaAdmin,
   FIXTURE_BETA_ADMIN_ID,
@@ -55,30 +52,6 @@ describe("platform administrator mutation boundary", () => {
         role: "user",
       }),
     ).rejects.toMatchObject({ code: "last_active_admin" });
-  });
-
-  it("serializes concurrent bans and retains one reachable administrator", async () => {
-    const outcomes = await Promise.allSettled([
-      setPlatformUserBanned({
-        d1: env.DB,
-        targetUserId: FIXTURE_BETA_ADMIN_ID,
-        actorUserId: FIXTURE_BETA_ADMIN_ID,
-        banned: true,
-        now: 30_000,
-      }),
-      setPlatformUserBanned({
-        d1: env.DB,
-        targetUserId: SECOND_ADMIN_ID,
-        actorUserId: FIXTURE_BETA_ADMIN_ID,
-        banned: true,
-        now: 30_000,
-      }),
-    ]);
-
-    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(
-      1,
-    );
-    expect(await activeAdministratorIds()).toHaveLength(1);
   });
 
   it("rechecks the actor's live authority in the mutation statement", async () => {

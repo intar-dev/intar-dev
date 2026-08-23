@@ -1354,6 +1354,7 @@ function buildAuthInstance() {
       "/delete-user/callback",
       "/unlink-account",
       "/admin/create-user",
+      "/admin/list-users",
       "/admin/ban-user",
       "/admin/unban-user",
       "/admin/remove-user",

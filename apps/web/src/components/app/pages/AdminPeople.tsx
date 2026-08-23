@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { Ban, ShieldCheck, UserPlus, Users } from "lucide-react";
+import { ShieldCheck, Trash2, UserPlus, Users } from "lucide-react";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
   COLLECTION_PAGE_SIZE,
@@ -13,7 +13,6 @@ import { InlineFeedback } from "@/components/app/patterns/InlineFeedback";
 import { TableSkeleton } from "../patterns/Skeletons";
 import { EmptyState, ErrorState } from "../patterns/StateCard";
 import { formatRelativeTime } from "../lib/format";
-import { authClient, type AppAuthUser } from "@/lib/auth-client";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -78,8 +77,15 @@ export function AdminPeople() {
   );
 }
 
-interface AdminListedUser extends AppAuthUser {
-  username?: string | null;
+interface AdminListedUser {
+  id: string;
+  name: string;
+  email: string;
+  image: string | null;
+  username: string | null;
+  role: string | null;
+  banned: boolean | null;
+  createdAt: string;
 }
 
 function UsersPanel() {
@@ -87,46 +93,39 @@ function UsersPanel() {
   const [search, setSearch] = useState("");
   const [confirmation, setConfirmation] = useState<{
     entry: AdminListedUser;
-    kind: "role" | "ban";
+    kind: "role" | "delete";
     nextRole?: "user" | "admin";
-    nextBanned?: boolean;
   } | null>(null);
 
   const users = useQuery({
     queryKey: ["admin", "users"],
-    queryFn: async () => {
-      const result = await authClient.admin.listUsers({
-        query: {
-          limit: 200,
-          sortBy: "createdAt",
-          sortDirection: "desc",
-        },
-      });
-      if (result.error) {
-        throw new Error(result.error.message ?? "Failed to load users");
-      }
-      return result.data;
-    },
+    queryFn: () =>
+      adminJson<{ users: AdminListedUser[] }>("/api/admin/users", {
+        method: "GET",
+      }),
     staleTime: 5_000,
   });
 
-  const setBanned = useMutation({
-    mutationFn: async (params: { userId: string; banned: boolean }) => {
-      await mutatePlatformUser(params.userId, "ban", {
-        banned: params.banned,
-        reason: params.banned ? "Access revoked by admin" : null,
-      });
-    },
+  const deleteUser = useMutation({
+    mutationFn: (userId: string) =>
+      adminJson<void>(`/api/admin/users/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+      }),
     onSuccess: async () => {
       setConfirmation(null);
-      await queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["admin", "users"] }),
+        queryClient.invalidateQueries({ queryKey: ["admin", "beta-access"] }),
+      ]);
     },
   });
 
   const setRole = useMutation({
-    mutationFn: async (params: { userId: string; role: "user" | "admin" }) => {
-      await mutatePlatformUser(params.userId, "role", { role: params.role });
-    },
+    mutationFn: (params: { userId: string; role: "user" | "admin" }) =>
+      adminJson<void>(
+        `/api/admin/users/${encodeURIComponent(params.userId)}/role`,
+        { method: "POST", body: JSON.stringify({ role: params.role }) },
+      ),
     onSuccess: async () => {
       setConfirmation(null);
       await queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
@@ -150,7 +149,7 @@ function UsersPanel() {
     return <TableSkeleton />;
   }
 
-  const entries = (users.data?.users ?? []) as AdminListedUser[];
+  const entries = users.data.users;
   const needle = search.trim().toLowerCase();
   const filtered = needle
     ? entries.filter((entry) =>
@@ -162,14 +161,14 @@ function UsersPanel() {
         ].some((value) => value.toLowerCase().includes(needle)),
       )
     : entries;
-  const actionError = setBanned.error ?? setRole.error;
+  const actionError = setRole.error;
 
   return (
     <>
       <Section
         density="compact"
         title="Users"
-        description="Manage Better Auth roles and bans. Beta entitlement is controlled separately in the Beta access tab. Last active administrators are protected by the server."
+        description="Manage roles or permanently delete sign-in identities. Beta access is controlled separately. The last active administrator is protected."
         bodyClassName="space-y-4"
       >
         <FilterBar
@@ -244,7 +243,8 @@ function UsersPanel() {
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={setRole.isPending}
+                          className="min-h-11 sm:min-h-9"
+                          disabled={setRole.isPending || deleteUser.isPending}
                           onClick={() =>
                             setConfirmation({
                               entry,
@@ -259,18 +259,18 @@ function UsersPanel() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          className="text-muted-foreground hover:text-destructive"
-                          disabled={setBanned.isPending}
-                          onClick={() =>
+                          className="min-h-11 text-muted-foreground hover:text-destructive sm:min-h-9"
+                          disabled={setRole.isPending || deleteUser.isPending}
+                          onClick={() => {
+                            deleteUser.reset();
                             setConfirmation({
                               entry,
-                              kind: "ban",
-                              nextBanned: !entry.banned,
-                            })
-                          }
+                              kind: "delete",
+                            });
+                          }}
                         >
-                          <Ban className="size-3.5" />
-                          {entry.banned ? "Unban" : "Ban"}
+                          <Trash2 className="size-3.5" />
+                          Delete
                         </Button>
                       </div>
                     </div>
@@ -303,56 +303,62 @@ function UsersPanel() {
       <Dialog
         open={confirmation !== null}
         onOpenChange={(open) => {
-          if (!open && !setBanned.isPending && !setRole.isPending) {
+          if (!open && !deleteUser.isPending && !setRole.isPending) {
             setConfirmation(null);
+            deleteUser.reset();
           }
         }}
       >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {confirmation?.kind === "ban"
-                ? confirmation.nextBanned
-                  ? "Ban this user?"
-                  : "Restore this user?"
+              {confirmation?.kind === "delete"
+                ? "Delete this user?"
                 : confirmation?.nextRole === "admin"
                   ? "Grant admin access?"
                   : "Remove admin access?"}
             </DialogTitle>
             <DialogDescription>
-              {confirmation?.kind === "ban" && confirmation.nextBanned
-                ? "This revokes active sessions and blocks sign-in. Revoke beta entitlement separately if access must be removed across every boundary."
+              {confirmation?.kind === "delete"
+                ? "This permanently removes sign-in, sessions, memberships, beta access, OAuth grants, and personal SSH keys. Retained operational and security history remains linked to an anonymous user record."
                 : confirmation?.kind === "role"
                   ? "Role changes take effect immediately. The server will reject removal of the last active beta administrator."
-                  : "This restores Better Auth sign-in. Beta entitlement still applies independently."}
+                  : "Choose a user action."}
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border bg-muted/40 p-3">
             <p className="text-sm font-medium">{confirmation?.entry.name}</p>
             <p className="text-metadata">{confirmation?.entry.email}</p>
           </div>
+          {confirmation?.kind === "delete" && deleteUser.error ? (
+            <InlineFeedback tone="error">
+              {deleteUser.error instanceof Error
+                ? deleteUser.error.message
+                : "The user could not be deleted"}
+            </InlineFeedback>
+          ) : null}
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setConfirmation(null)}
-              disabled={setBanned.isPending || setRole.isPending}
+              onClick={() => {
+                setConfirmation(null);
+                deleteUser.reset();
+              }}
+              disabled={deleteUser.isPending || setRole.isPending}
             >
               Cancel
             </Button>
             <Button
               variant={
-                confirmation?.kind === "ban" && confirmation.nextBanned
+                confirmation?.kind === "delete"
                   ? "destructive"
                   : "default"
               }
-              disabled={setBanned.isPending || setRole.isPending}
+              disabled={deleteUser.isPending || setRole.isPending}
               onClick={() => {
                 if (!confirmation) return;
-                if (confirmation.kind === "ban") {
-                  setBanned.mutate({
-                    userId: confirmation.entry.id,
-                    banned: Boolean(confirmation.nextBanned),
-                  });
+                if (confirmation.kind === "delete") {
+                  deleteUser.mutate(confirmation.entry.id);
                 } else if (confirmation.nextRole) {
                   setRole.mutate({
                     userId: confirmation.entry.id,
@@ -361,9 +367,13 @@ function UsersPanel() {
                 }
               }}
             >
-              {setBanned.isPending || setRole.isPending
-                ? "Updating…"
-                : "Confirm change"}
+              {deleteUser.isPending
+                ? "Deleting…"
+                : setRole.isPending
+                  ? "Updating…"
+                  : confirmation?.kind === "delete"
+                    ? "Delete user"
+                    : "Confirm change"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -372,21 +382,13 @@ function UsersPanel() {
   );
 }
 
-async function mutatePlatformUser(
-  userId: string,
-  action: "ban" | "role",
-  body: Record<string, unknown>,
-): Promise<void> {
-  const response = await fetch(
-    `/api/admin/users/${encodeURIComponent(userId)}/${action}`,
-    {
-      method: "POST",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
+async function adminJson<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "content-type": "application/json", ...init.headers },
+  });
   const result = (await response.json().catch(() => null)) as {
     error?: unknown;
   } | null;
@@ -394,9 +396,10 @@ async function mutatePlatformUser(
     throw new Error(
       typeof result?.error === "string"
         ? result.error
-        : "Failed to update user",
+        : "User action failed",
     );
   }
+  return result as T;
 }
 
 interface AdminOrganizationRow {

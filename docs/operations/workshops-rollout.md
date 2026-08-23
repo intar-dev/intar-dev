@@ -138,6 +138,13 @@ The simplification cutover revokes every older pending or leased link and writes
 an `invite.revoked` audit event with reason
 `security_simplification_cutover`.
 
+The **Users** tab has no platform-ban control. **Delete** first completes beta
+revocation cleanup, then removes sign-in accounts, sessions, memberships, OAuth
+grants, and personal SSH keys. The profile is anonymized and hidden while an
+opaque tombstone keeps retained workshop and security history valid. Deletion
+rejects self-removal, the last active administrator, and a sole organization
+owner.
+
 `OIDC_SSO_CONFIG_ENCRYPTION_KEY_V1` is unpadded base64url for exactly 32
 random bytes. Normal web deployments bind this runtime secret but never run an
 OIDC backfill or cleanup. Use the separate protected
