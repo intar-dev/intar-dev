@@ -1,3 +1,9 @@
+import {
+  compactCatalogSearch,
+  normalizeCatalogSearch,
+  type CatalogSearch,
+} from "./learn/catalog-search";
+
 export type OrganizationDetailTab =
   | "overview"
   | "courses"
@@ -16,6 +22,12 @@ export interface OrganizationDetailSearch {
 
 export interface AdminPeopleSearch {
   tab?: AdminPeopleTab;
+}
+
+export interface ScenarioBriefingSearch extends CatalogSearch {
+  organizationId?: string;
+  step?: number;
+  steps?: number;
 }
 
 export const ORGANIZATION_DETAIL_TABS: readonly OrganizationDetailTab[] = [
@@ -67,11 +79,34 @@ export function isOrganizationDetailTab(
 
 export function validateScenarioBriefingSearch(
   search: Record<string, unknown>,
-): { organizationId?: string } {
-  return typeof search.organizationId === "string" &&
-    search.organizationId.trim()
-    ? { organizationId: search.organizationId.trim() }
-    : {};
+): ScenarioBriefingSearch {
+  const catalogSearch = compactCatalogSearch(normalizeCatalogSearch(search));
+  const organizationId =
+    typeof search.organizationId === "string" && search.organizationId.trim()
+      ? search.organizationId.trim()
+      : undefined;
+  const step = positiveInteger(search.step);
+  const steps = positiveInteger(search.steps);
+  const sequence =
+    step !== undefined && steps !== undefined && step <= steps
+      ? { step, steps }
+      : {};
+
+  return {
+    ...catalogSearch,
+    ...sequence,
+    ...(organizationId ? { organizationId } : {}),
+  };
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const number =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
 
 export function isAdminPeopleTab(value: unknown): value is AdminPeopleTab {

@@ -74,14 +74,14 @@ export function RunTimeline({
     <section aria-labelledby="run-timeline-heading" className="space-y-4">
       <header className="space-y-1">
         <p className="text-eyebrow">{run.scenarioName}</p>
-        <h1
+        <h2
           id="run-timeline-heading"
           ref={headingRef}
           tabIndex={-1}
           className="font-heading text-2xl font-semibold tracking-tight outline-none sm:text-3xl"
         >
           Run timeline
-        </h1>
+        </h2>
         {currentLifecycle ? (
           <p className="sr-only" role="status" aria-live="polite" aria-atomic>
             {currentLifecycle.title}. {currentLifecycle.detail}

@@ -305,10 +305,12 @@ export function OrganizationScenariosSection({
             onShowAllCourses={() => onCourseChange(undefined)}
             gridClassName="sm:grid-cols-2"
             resetKey="organization-courses"
-            renderScenario={(scenario) => (
+            renderScenario={(scenario, context) => (
               <OrganizationScenarioCard
                 scenario={scenario}
                 organizationId={detail.id}
+                courseKey={context.courseKey}
+                sequence={context.sequence ?? null}
               />
             )}
           />
@@ -535,15 +537,25 @@ export function OrganizationScenariosSection({
 function OrganizationScenarioCard({
   scenario,
   organizationId,
+  courseKey,
+  sequence,
 }: {
   scenario: ScenarioCatalogWireEntry;
   organizationId: string;
+  courseKey: string;
+  sequence: { position: number; total: number } | null;
 }) {
   return (
     <Link
       to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
-      search={{ organizationId }}
+      search={{
+        organizationId,
+        course: courseKey,
+        ...(sequence
+          ? { step: sequence.position, steps: sequence.total }
+          : {}),
+      }}
       preloadDelay={250}
       className="group rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
     >
@@ -554,8 +566,10 @@ function OrganizationScenarioCard({
               {scenario.title}
             </h4>
             <p className="mt-1 text-metadata">
-              {scenario.category || "Systems"} · ~{scenario.estimatedMinutes}{" "}
-              min
+              {sequence
+                ? `Step ${sequence.position} of ${sequence.total} · `
+                : ""}
+              {scenario.category || "Systems"} · ~{scenario.estimatedMinutes} min
             </p>
           </div>
           <Badge variant={scenario.organizationId ? "secondary" : "outline"}>

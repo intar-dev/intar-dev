@@ -41,6 +41,7 @@ export function FilterBar({
   searchPlaceholder = "Search…",
   searchLabel = "Search",
   filtersActive = false,
+  stackSearchOnMobile = false,
   onClear,
   children,
   end,
@@ -50,13 +51,19 @@ export function FilterBar({
   searchPlaceholder?: string;
   searchLabel?: string;
   filtersActive?: boolean;
+  stackSearchOnMobile?: boolean;
   onClear?: (() => void) | undefined;
   children?: ReactNode;
   end?: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <div className="relative min-w-56 flex-1 sm:max-w-xs">
+      <div
+        className={cn(
+          "relative min-w-56 flex-1 sm:max-w-xs",
+          stackSearchOnMobile && "max-sm:w-full max-sm:flex-none",
+        )}
+      >
         <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={search}

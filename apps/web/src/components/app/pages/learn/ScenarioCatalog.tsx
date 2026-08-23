@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ArrowRight,
   CircleDot,
+  RefreshCw,
   Search,
   ShieldCheck,
   SlidersHorizontal,
@@ -20,13 +21,23 @@ import { ScenarioCard } from "@/components/app/patterns/ScenarioCard";
 import { SCENARIO_DIFFICULTIES } from "@/components/app/patterns/MetaLine";
 import { useMyRuns } from "@/components/app/hooks/useMyRuns";
 import {
+  HttpResponseError,
+  isAccessResponseError,
+  retryHttpResponseError,
+} from "@/components/app/lib/http-response-error";
+import {
   CATALOG_SORT_OPTIONS,
   compactCatalogSearch,
   normalizeCatalogSearch,
   type CatalogSort,
   type NormalizedCatalogSearch,
 } from "./catalog-search";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -82,7 +93,8 @@ export function ScenarioCatalog() {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
+        throw new HttpResponseError(
+          response.status,
           body?.error ?? `Failed to load courses (${response.status})`,
         );
       }
@@ -90,6 +102,9 @@ export function ScenarioCatalog() {
       return (await response.json()) as ScenarioCatalogWireResponse;
     },
     staleTime: 10_000,
+    refetchOnWindowFocus: (query) =>
+      !isAccessResponseError(query.state.error, true),
+    retry: retryHttpResponseError,
   });
 
   const myAssignments = useQuery({
@@ -100,19 +115,43 @@ export function ScenarioCatalog() {
         credentials: "include",
       });
       if (!response.ok) {
-        return { assignments: [] } satisfies MyAssignmentsResponse;
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new HttpResponseError(
+          response.status,
+          body?.error ?? `Failed to load assignments (${response.status})`,
+        );
       }
       return (await response.json()) as MyAssignmentsResponse;
     },
     staleTime: 30_000,
+    refetchOnWindowFocus: (query) =>
+      !isAccessResponseError(query.state.error, true),
+    retry: retryHttpResponseError,
   });
 
   const myRuns = useMyRuns();
-  const activeRuns = (myRuns.data?.runs ?? []).filter((run) => run.active);
+  const courseAccessError = isAccessResponseError(courses.error);
+  const assignmentAccessError = isAccessResponseError(myAssignments.error);
+  const runsAccessError = isAccessResponseError(myRuns.error);
+  const activeRuns = runsAccessError
+    ? []
+    : (myRuns.data?.runs ?? []).filter((run) => run.active);
+  const courseLoadFailed = Boolean(
+    courses.error && (!courses.data || courseAccessError),
+  );
+  const supplementalLoadFailed =
+    !courseLoadFailed &&
+    Boolean(
+      (courses.error && courses.data) || myAssignments.error || myRuns.error,
+    );
 
-  const allCourses = courses.data?.courses ?? [];
+  const allCourses = courseAccessError ? [] : (courses.data?.courses ?? []);
   const allEntries = allCourses.flatMap((course) => course.scenarios);
-  const assignments = myAssignments.data?.assignments ?? [];
+  const assignments = assignmentAccessError
+    ? []
+    : (myAssignments.data?.assignments ?? []);
 
   const allTags = useMemo(
     () => [...new Set(allEntries.flatMap((scenario) => scenario.tags))].sort(),
@@ -312,14 +351,57 @@ export function ScenarioCatalog() {
 
   return (
     <PageShell width="default" density="comfortable">
-      {courses.error ? (
+      {courseLoadFailed ? (
         <Alert variant="destructive">
+          <RefreshCw aria-hidden="true" />
           <AlertTitle>Could not load courses</AlertTitle>
           <AlertDescription>
             {courses.error instanceof Error
               ? courses.error.message
-              : "Failed to load courses"}
+              : "Failed to load courses"}{" "}
+            Try again to restore the catalog.
           </AlertDescription>
+          <AlertAction>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void courses.refetch()}
+              disabled={courses.isFetching}
+            >
+              Retry
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
+
+      {supplementalLoadFailed ? (
+        <Alert>
+          <RefreshCw aria-hidden="true" />
+          <AlertTitle>Some course information is out of date</AlertTitle>
+          <AlertDescription>
+            You can keep browsing. Retry to refresh course updates, active work,
+            and assignments.
+          </AlertDescription>
+          <AlertAction>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (courses.error) void courses.refetch();
+                if (myAssignments.error) void myAssignments.refetch();
+                if (myRuns.error) void myRuns.refetch();
+              }}
+              disabled={
+                courses.isFetching ||
+                myAssignments.isFetching ||
+                myRuns.isFetching
+              }
+            >
+              Retry
+            </Button>
+          </AlertAction>
         </Alert>
       ) : null}
 
@@ -425,10 +507,16 @@ export function ScenarioCatalog() {
             searchPlaceholder="Search courses and scenarios…"
             searchLabel="Search courses and scenarios"
             filtersActive={filtersActive}
+            stackSearchOnMobile
             onClear={clearFilters}
             end={
               <>
-                <span className="text-metadata tabular-nums">
+                <span
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                  className="text-metadata tabular-nums"
+                >
                   {selectedSection
                     ? `${selectedSection.visibleScenarios.length} of ${selectedSection.accessibleScenarios.length} scenarios`
                     : `${catalogView.courses.length} of ${allCourses.length} courses`}
@@ -467,7 +555,7 @@ export function ScenarioCatalog() {
         </section>
       ) : null}
 
-      {courses.error ? null : courses.isLoading ? (
+      {courseLoadFailed ? null : courses.isLoading && !courses.data ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 9 }, (_, index) => (
             <Skeleton key={index} className="h-52 rounded-xl" />
@@ -477,7 +565,12 @@ export function ScenarioCatalog() {
         <EmptyState
           icon={<ShieldCheck />}
           title="No courses are available yet"
-          description="This catalog will fill once an admin enables a scenario with a briefing and at least one probe."
+          description="New courses will appear here when they are ready. You can still review earlier work in My runs."
+          action={
+            <Button variant="outline" render={<Link to="/runs" />}>
+              Open My runs
+            </Button>
+          }
         />
       ) : !searchState.course && !catalogView.visibleScenarioCount ? (
         <EmptyState
@@ -514,8 +607,24 @@ export function ScenarioCatalog() {
           }
           onClearFilters={clearFilters}
           resetKey={`${searchState.q}|${searchState.difficulty ?? ""}|${searchState.category ?? ""}|${searchState.tags.join(",")}|${searchState.sort}`}
-          renderScenario={(scenario) => (
-            <ScenarioCard scenario={scenario} headingLevel={4} />
+          renderScenario={(scenario, context) => (
+            <ScenarioCard
+              scenario={scenario}
+              headingLevel={4}
+              search={{
+                ...compactCatalogSearch({
+                  ...searchState,
+                  course: context.courseKey,
+                }),
+                ...(context.sequence
+                  ? {
+                      step: context.sequence.position,
+                      steps: context.sequence.total,
+                    }
+                  : {}),
+              }}
+              sequence={context.sequence}
+            />
           )}
         />
       )}

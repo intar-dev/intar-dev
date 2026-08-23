@@ -28,6 +28,16 @@ import {
   type CourseCatalogSectionView,
 } from "./course-catalog";
 
+export interface CourseScenarioRendererContext {
+  courseKey: string;
+  courseTitle: string;
+  /** Present only for authored courses, using the unfiltered curriculum order. */
+  sequence?: {
+    position: number;
+    total: number;
+  };
+}
+
 export function CourseCatalogBrowser({
   courses,
   selectedCourseKey,
@@ -45,7 +55,10 @@ export function CourseCatalogBrowser({
   onSelectCourse: (courseKey: string) => void;
   onShowAllCourses: () => void;
   onClearFilters?: (() => void) | undefined;
-  renderScenario: (scenario: ScenarioCatalogWireEntry) => ReactNode;
+  renderScenario: (
+    scenario: ScenarioCatalogWireEntry,
+    context: CourseScenarioRendererContext,
+  ) => ReactNode;
   gridClassName?: string;
   resetKey?: string | number | boolean | null;
 }) {
@@ -157,11 +170,13 @@ function CourseIndex({
         {courses.map((section) => {
           const key = courseCatalogKey(section.course);
           const headingId = courseHeadingId(section.course) + "-index";
+          const summaryId = headingId + "-summary";
           const scenarioCount = section.accessibleScenarios.length;
-          const progressPercent = Math.round(
-            (section.solvedCount / scenarioCount) * 100,
-          );
+          const progressPercent = scenarioCount
+            ? Math.round((section.solvedCount / scenarioCount) * 100)
+            : 0;
           const matchingCount = section.visibleScenarios.length;
+          const actionLabel = courseActionLabel(section);
 
           return (
             <li
@@ -178,16 +193,23 @@ function CourseIndex({
                 }}
                 type="button"
                 aria-labelledby={headingId}
+                aria-describedby={summaryId}
                 onClick={() => onSelectCourse(key)}
                 className="group grid w-full min-w-0 cursor-pointer gap-5 px-4 py-5 text-left transition-colors hover:bg-brand-subtle/45 focus-visible:bg-brand-subtle/45 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-inset focus-visible:ring-ring/35 sm:px-6 sm:py-6 @3xl/course:grid-cols-[minmax(0,1fr)_auto] @3xl/course:items-center"
               >
+                <span id={summaryId} className="sr-only">
+                  {section.course.description} {scenarioCount} {" "}
+                  {scenarioCount === 1 ? "scenario" : "scenarios"}, about {" "}
+                  {section.totalEstimatedMinutes} minutes total, {" "}
+                  {section.solvedCount} of {scenarioCount} solved.
+                </span>
                 <span className="min-w-0 space-y-2">
                   <span className="flex flex-wrap items-center justify-between gap-3">
                     <span className="text-eyebrow">
                       {courseEyebrow(section)}
                     </span>
                     <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-brand-text @3xl/course:hidden">
-                      View scenarios
+                      {actionLabel}
                       <ArrowRight className="size-4" aria-hidden />
                     </span>
                   </span>
@@ -223,7 +245,7 @@ function CourseIndex({
                       className="mt-2 block h-1.5 overflow-hidden rounded-full bg-muted"
                     >
                       <span
-                        className="block h-full rounded-full bg-brand-text transition-[width] motion-reduce:transition-none"
+                        className="block h-full rounded-full bg-brand-text"
                         style={{ width: progressPercent + "%" }}
                       />
                     </span>
@@ -249,7 +271,7 @@ function CourseIndex({
                     </span>
                   </span>
                   <span className="hidden items-center gap-2 whitespace-nowrap text-sm font-semibold text-brand-text @3xl/course:inline-flex">
-                    View scenarios
+                    {actionLabel}
                     <ArrowRight
                       className="size-4 transition-transform group-hover:translate-x-0.5"
                       aria-hidden
@@ -276,13 +298,26 @@ function CourseDetail({
   section: CourseCatalogSectionView;
   onShowAllCourses: () => void;
   onClearFilters?: (() => void) | undefined;
-  renderScenario: (scenario: ScenarioCatalogWireEntry) => ReactNode;
+  renderScenario: (
+    scenario: ScenarioCatalogWireEntry,
+    context: CourseScenarioRendererContext,
+  ) => ReactNode;
   gridClassName: string;
   resetKey: string;
 }) {
   const headingId = courseHeadingId(section.course);
   const heading = useRef<HTMLHeadingElement>(null);
   const scenarioCount = section.accessibleScenarios.length;
+  const courseKey = courseCatalogKey(section.course);
+  const sequenceByScenarioId =
+    section.course.kind === "authored"
+      ? new Map(
+          section.accessibleScenarios.map((scenario, index) => [
+            scenario.scenarioId,
+            index + 1,
+          ]),
+        )
+      : undefined;
 
   useEffect(() => {
     heading.current?.focus();
@@ -354,11 +389,29 @@ function CourseDetail({
         >
           {(visibleScenarios) => (
             <ScenarioGrid className={gridClassName}>
-              {visibleScenarios.map((scenario) => (
-                <Fragment key={scenario.scenarioId}>
-                  {renderScenario(scenario)}
-                </Fragment>
-              ))}
+              {visibleScenarios.map((scenario) => {
+                const position = sequenceByScenarioId?.get(
+                  scenario.scenarioId,
+                );
+                const context: CourseScenarioRendererContext = {
+                  courseKey,
+                  courseTitle: section.course.title,
+                  ...(position
+                    ? {
+                        sequence: {
+                          position,
+                          total: scenarioCount,
+                        },
+                      }
+                    : {}),
+                };
+
+                return (
+                  <Fragment key={scenario.scenarioId}>
+                    {renderScenario(scenario, context)}
+                  </Fragment>
+                );
+              })}
             </ScenarioGrid>
           )}
         </PaginatedCollection>
@@ -422,6 +475,21 @@ function courseScope(section: CourseCatalogSectionView) {
   return section.course.kind === "general-practice"
     ? "generated"
     : (section.course.organizationId ?? "public");
+}
+
+function courseActionLabel(section: CourseCatalogSectionView) {
+  const scenarios = section.accessibleScenarios;
+
+  if (
+    scenarios.length > 0 &&
+    scenarios.every((scenario) => scenario.progress.status === "completed")
+  ) {
+    return "Review course";
+  }
+  if (scenarios.some((scenario) => scenario.progress.status !== "new")) {
+    return "Open course";
+  }
+  return "View scenarios";
 }
 
 function CourseMetric({

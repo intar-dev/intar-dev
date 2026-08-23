@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ChevronsUpDown,
@@ -31,9 +31,10 @@ import { useTheme, type AppTheme } from "../theme";
 
 export function SidebarUserMenu() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { isMobile } = useSidebar();
   const { theme, setTheme } = useTheme();
-  const { data, refetch } = useSession();
+  const { data } = useSession();
   const user = data?.user ?? null;
   const username = user?.username ?? user?.email ?? "Account";
 
@@ -45,8 +46,8 @@ export function SidebarUserMenu() {
       }
       return result;
     },
-    onSuccess: async () => {
-      await refetch();
+    onSuccess: () => {
+      queryClient.clear();
       void navigate({ to: "/" });
     },
   });

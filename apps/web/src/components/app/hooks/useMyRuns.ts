@@ -4,6 +4,12 @@ import type {
   ScenarioRunReplayState,
 } from "@/lib/scenario-runs";
 import type { RunPhase } from "@/lib/run-state";
+import {
+  HttpResponseError,
+  isAccessResponseError,
+  pollingIntervalUnlessAccessError,
+  retryHttpResponseError,
+} from "@/components/app/lib/http-response-error";
 
 export interface MyRunEntry {
   runId: string;
@@ -52,7 +58,8 @@ export function useMyRuns(options?: { enabled?: boolean }) {
         const body = (await response.json().catch(() => null)) as {
           error?: string;
         } | null;
-        throw new Error(
+        throw new HttpResponseError(
+          response.status,
           body?.error ?? `Failed to load runs (${response.status})`,
         );
       }
@@ -60,12 +67,17 @@ export function useMyRuns(options?: { enabled?: boolean }) {
       return (await response.json()) as MyRunsResponse;
     },
     refetchInterval: (query) =>
-      query.state.data?.runs.some((run) => run.activity !== "settled")
-        ? 2_000
-        : false,
+      pollingIntervalUnlessAccessError(
+        query.state.error,
+        query.state.data?.runs.some((run) => run.activity !== "settled")
+          ? 2_000
+          : false,
+      ),
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: "always",
+    refetchOnWindowFocus: (query) =>
+      !isAccessResponseError(query.state.error, true),
     staleTime: 1_000,
+    retry: retryHttpResponseError,
     enabled: options?.enabled ?? true,
   });
 }

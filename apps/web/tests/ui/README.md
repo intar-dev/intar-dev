@@ -14,15 +14,15 @@ bundle.
   - `states.visual.spec.ts`: 46 focused run, workshop, organization, build,
     people, and authoring snapshots.
   - The visual baseline count is therefore exactly 162.
-- `bun run test:ui:a11y` runs 116 checks: axe on all 24 routes in both themes;
+- `bun run test:ui:a11y` runs 124 checks: axe on all 24 routes in both themes;
   high-risk empty, error, permission, dialog, operational-detail,
   remote-access, validation, and mobile-sheet states; and keyboard, focus,
   reduced-motion, coarse-pointer, overflow, 200%-text, and terminal-cell
   behavior.
-- `bun run test:ui:smoke` runs 17 workflow archetypes in Chromium, Firefox,
-  and WebKit, for 51 checks.
-- `bun run test:ui` runs the complete 339-test release gate with one worker in
-  CI.
+- `bun run test:ui:smoke` runs 24 workflow archetypes in Chromium, Firefox,
+  and WebKit, for 72 checks.
+- `bun run test:ui` runs the complete 368-test release gate, including 10 VM
+  lifecycle checks, with one worker in CI.
 
 Install the browser revisions pinned by `@playwright/test` and `bun.lock` with:
 

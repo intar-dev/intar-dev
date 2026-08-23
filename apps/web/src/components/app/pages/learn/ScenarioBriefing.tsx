@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ArrowRight, ChevronDown, History, Trash2, Trophy } from "lucide-react";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearch,
+} from "@tanstack/react-router";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  History,
+  RefreshCw,
+  Trash2,
+  Trophy,
+} from "lucide-react";
 import { Markdown } from "@/components/app/Markdown";
 import { PageShell } from "@/components/app/patterns/PageShell";
 import {
@@ -18,12 +31,24 @@ import { formatDurationMs, formatTimestamp } from "@/components/app/lib/format";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert";
 import { presentScenarioDetail, presentScenarioRun } from "@/lib/run-phase";
 import type { ScenarioDetail } from "@/lib/scenario-runs";
 import {
   requestScenarioStartWithCapacityWait,
   ScenarioStartCancelledError,
 } from "@/components/app/lib/scenario-start";
+import {
+  HttpResponseError,
+  isAccessResponseError,
+  pollingIntervalUnlessAccessError,
+  retryHttpResponseError,
+} from "@/components/app/lib/http-response-error";
 import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
@@ -38,6 +63,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { cn } from "@/lib/utils";
 
 type PresentedScenarioDetail = ReturnType<typeof presentScenarioDetail>;
 type FinishedRun = PresentedScenarioDetail["finishedRuns"][number];
@@ -55,11 +81,13 @@ export function ScenarioBriefing() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { scenarioId } = useParams({ from: "/app/courses/$scenarioId" });
-  const { organizationId } = useSearch({
+  const routeSearch = useSearch({
     from: "/app/courses/$scenarioId",
   });
+  const { organizationId, step, steps, ...catalogReturnSearch } = routeSearch;
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [waitingForCapacity, setWaitingForCapacity] = useState(false);
+  const [startNotice, setStartNotice] = useState<string | null>(null);
   const startAbortRef = useRef<AbortController | null>(null);
 
   useEffect(
@@ -74,11 +102,17 @@ export function ScenarioBriefing() {
     queryFn: () => fetchScenarioDetail(scenarioId, organizationId ?? null),
     staleTime: 10_000,
     refetchInterval: (query) =>
-      query.state.data?.scenario.hasActiveRun
-        ? 1_500
-        : query.state.data?.scenario.blockingRun
-          ? 5_000
-          : false,
+      pollingIntervalUnlessAccessError(
+        query.state.error,
+        query.state.data?.scenario.hasActiveRun
+          ? 1_500
+          : query.state.data?.scenario.blockingRun
+            ? 5_000
+            : false,
+      ),
+    refetchOnWindowFocus: (query) =>
+      !isAccessResponseError(query.state.error, true),
+    retry: retryHttpResponseError,
   });
 
   const startScenario = useMutation({
@@ -86,6 +120,7 @@ export function ScenarioBriefing() {
       const controller = new AbortController();
       startAbortRef.current = controller;
       setWaitingForCapacity(false);
+      setStartNotice(null);
       return requestScenarioStartWithCapacityWait(scenarioId, {
         signal: controller.signal,
         onCapacityWait: () => setWaitingForCapacity(true),
@@ -142,7 +177,10 @@ export function ScenarioBriefing() {
     },
   });
 
-  const scenarioData = scenarioQuery.data?.scenario ?? null;
+  const scenarioAccessError = isAccessResponseError(scenarioQuery.error, true);
+  const scenarioData = scenarioAccessError
+    ? null
+    : (scenarioQuery.data?.scenario ?? null);
   const finishedRuns = scenarioData?.finishedRuns ?? [];
   // A solve counts even when teardown later failed or the run was destroyed
   // afterwards — same semantics as the catalog's ScenarioProgress.
@@ -184,11 +222,12 @@ export function ScenarioBriefing() {
   const stopWaitingForCapacity = () => {
     startAbortRef.current?.abort();
     setWaitingForCapacity(false);
+    setStartNotice("Stopped waiting. You can try again when you are ready.");
   };
 
   return (
     <PageShell width="content" density="comfortable">
-      {scenarioQuery.error ? (
+      {scenarioQuery.error && !scenarioData ? (
         <ErrorState
           title="Could not load scenario"
           description={
@@ -213,25 +252,106 @@ export function ScenarioBriefing() {
         </div>
       ) : (
         <>
-          <ContentHeader
-            title={scenarioData.briefing.title}
-            badge={solved ? <Badge variant="success">Solved</Badge> : undefined}
-            summary={scenarioData.briefing.tagline}
-            meta={
-              <MetaLine
-                items={[
-                  scenarioData.briefing.category,
-                  <MetaDifficulty
-                    key="difficulty"
-                    difficulty={scenarioData.briefing.difficulty}
-                  />,
-                  `~${scenarioData.briefing.estimatedMinutes} min`,
-                  scenarioData.vmCount === 1
-                    ? "1 machine"
-                    : `${scenarioData.vmCount} machines`,
-                ]}
-              />
-            }
+          {scenarioQuery.error ? (
+            <Alert>
+              <RefreshCw aria-hidden="true" />
+              <AlertTitle>Run status may be out of date</AlertTitle>
+              <AlertDescription>
+                The last loaded briefing is still available. Retry to refresh
+                the current run state.
+              </AlertDescription>
+              <AlertAction>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void scenarioQuery.refetch()}
+                  disabled={scenarioQuery.isFetching}
+                >
+                  Retry
+                </Button>
+              </AlertAction>
+            </Alert>
+          ) : null}
+
+          <div className="space-y-4">
+            {organizationId ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="-ml-2"
+                render={
+                  <Link
+                    to="/organizations/$orgId"
+                    params={{ orgId: organizationId }}
+                    search={
+                      routeSearch.course
+                        ? { tab: "courses", course: routeSearch.course }
+                        : { tab: "courses" }
+                    }
+                  />
+                }
+              >
+                <ArrowLeft className="size-4" aria-hidden />
+                {routeSearch.course
+                  ? "Back to course"
+                  : "Back to organization courses"}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="-ml-2"
+                render={<Link to="/courses" search={catalogReturnSearch} />}
+              >
+                <ArrowLeft className="size-4" aria-hidden />
+                {routeSearch.course ? "Back to course" : "All courses"}
+              </Button>
+            )}
+
+            <ContentHeader
+              title={scenarioData.briefing.title}
+              badge={solved ? <Badge variant="success">Solved</Badge> : undefined}
+              summary={scenarioData.briefing.tagline}
+              meta={
+                <MetaLine
+                  items={[
+                    step && steps ? `Course step ${step} of ${steps}` : null,
+                    scenarioData.briefing.category,
+                    <MetaDifficulty
+                      key="difficulty"
+                      difficulty={scenarioData.briefing.difficulty}
+                    />,
+                    `~${scenarioData.briefing.estimatedMinutes} min`,
+                    scenarioData.vmCount === 1
+                      ? "1 machine"
+                      : `${scenarioData.vmCount} machines`,
+                  ]}
+                />
+              }
+            />
+          </div>
+
+          <ScenarioActionPanel
+            headingId="scenario-next-action-mobile"
+            scenario={scenarioData}
+            isPending={startScenario.isPending}
+            waitingForCapacity={waitingForCapacity}
+            error={startScenario.error}
+            notice={startNotice}
+            onPrimaryAction={handlePrimaryAction}
+            onStopWaiting={stopWaitingForCapacity}
+            className="lg:hidden"
+          />
+
+          <ScenarioProgressSummary
+            activeRun={scenarioData.activeRun}
+            finishedRunCount={finishedRuns.length}
+            solvedRunCount={succeededRuns.length}
+            bestSolveMs={bestSolveMs}
+            className="lg:hidden"
           />
 
           <div className="grid items-start gap-12 lg:grid-cols-[minmax(0,1fr)_21rem]">
@@ -270,6 +390,15 @@ export function ScenarioBriefing() {
                                   </code>
                                 ) : null}
                               </div>
+                              {objective.bodyMarkdown ? (
+                                <Markdown className="text-muted-foreground [&_code]:text-foreground">
+                                  {objective.bodyMarkdown}
+                                </Markdown>
+                              ) : objective.title?.trim() && objective.label ? (
+                                <p className="text-sm leading-6 text-muted-foreground">
+                                  {objective.label}
+                                </p>
+                              ) : null}
                               {objective.hintCount > 0 ? (
                                 <p className="text-metadata">
                                   {objective.hintCount} hint
@@ -328,139 +457,23 @@ export function ScenarioBriefing() {
               </details>
             </div>
 
-            <aside className="space-y-6 lg:sticky lg:top-24">
-              <section className="space-y-4 rounded-xl border border-brand-border bg-brand-subtle p-6">
-                <div>
-                  <p className="text-eyebrow text-brand-text">Next action</p>
-                  <h2 className="mt-2 text-section-title">
-                    {scenarioData.hasActiveRun
-                      ? "Continue the repair"
-                      : "Open a fresh sandbox"}
-                  </h2>
-                </div>
-                <Button
-                  size="lg"
-                  className="w-full"
-                  onClick={handlePrimaryAction}
-                  disabled={
-                    startScenario.isPending ||
-                    scenarioData.blockingRun !== null ||
-                    (scenarioData.hasActiveRun && !scenarioData.activeRunId)
-                  }
-                >
-                  {startScenario.isPending
-                    ? "Starting scenario…"
-                    : scenarioData.hasActiveRun
-                      ? "Resume run"
-                      : "Start scenario"}
-                  <ArrowRight className="size-4" />
-                </Button>
-                {scenarioData.blockingRun ? (
-                  <div className="space-y-3 border-t border-brand-border pt-4">
-                    <p className="text-sm leading-6 text-muted-foreground">
-                      An active run on{" "}
-                      <span className="font-semibold text-foreground">
-                        {scenarioData.blockingRun.title}
-                      </span>{" "}
-                      must end before another sandbox can start.
-                    </p>
-                    <Button
-                      variant="outline"
-                      className="w-full"
-                      onClick={() =>
-                        void navigate({
-                          to: "/runs/$runId",
-                          params: {
-                            runId: scenarioData.blockingRun?.runId ?? "",
-                          },
-                        })
-                      }
-                    >
-                      Go to active run
-                      <ArrowRight className="size-4" />
-                    </Button>
-                  </div>
-                ) : null}
-                {startScenario.error &&
-                !(
-                  startScenario.error instanceof ScenarioStartCancelledError
-                ) ? (
-                  <InlineFeedback tone="error">
-                    {startScenario.error instanceof Error
-                      ? startScenario.error.message
-                      : "The scenario could not be started."}
-                  </InlineFeedback>
-                ) : startScenario.isPending ? (
-                  <div className="space-y-2">
-                    <InlineFeedback tone="pending">
-                      {waitingForCapacity
-                        ? "VM capacity is temporarily busy. Retrying automatically for up to 60 seconds."
-                        : "Requesting VM capacity…"}
-                    </InlineFeedback>
-                    {waitingForCapacity ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="min-h-11 w-full"
-                        onClick={stopWaitingForCapacity}
-                      >
-                        Stop waiting
-                      </Button>
-                    ) : null}
-                  </div>
-                ) : null}
-              </section>
-
-              {scenarioData.activeRun ? (
-                <section className="space-y-2 border-y py-4">
-                  <p className="text-eyebrow">Live status</p>
-                  <p className="font-semibold">
-                    {scenarioData.activeRun.phaseTitle}
-                  </p>
-                  <p className="text-metadata">
-                    {scenarioData.activeRun.phaseDetail}
-                  </p>
-                  <p className="text-caption">
-                    Updated {formatTimestamp(scenarioData.activeRun.updatedAt)}
-                  </p>
-                </section>
-              ) : null}
-
-              {finishedRuns.length ? (
-                <dl className="grid grid-cols-2 gap-4 border-y py-4">
-                  <div>
-                    <dt className="text-eyebrow">Best time</dt>
-                    <dd className="mt-2 inline-flex items-center gap-2 font-semibold tabular-nums">
-                      {bestSolveMs !== null ? (
-                        <>
-                          <Trophy className="size-4 text-warning" />
-                          {formatDurationMs(bestSolveMs)}
-                        </>
-                      ) : (
-                        "—"
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-eyebrow">Attempts</dt>
-                    <dd>
-                      <span className="mt-2 block font-semibold tabular-nums">
-                        {finishedRuns.length}
-                      </span>
-                      <span className="block text-caption">
-                        {succeededRuns.length} solved
-                      </span>
-                    </dd>
-                  </div>
-                </dl>
-              ) : null}
-
-              {!finishedRuns.length && !scenarioData.activeRun ? (
-                <p className="border-y py-4 text-sm text-muted-foreground">
-                  The browser shell needs no local installation. Native SSH is
-                  also available after launch.
-                </p>
-              ) : null}
+            <aside className="hidden space-y-6 lg:sticky lg:top-24 lg:block">
+              <ScenarioActionPanel
+                headingId="scenario-next-action-desktop"
+                scenario={scenarioData}
+                isPending={startScenario.isPending}
+                waitingForCapacity={waitingForCapacity}
+                error={startScenario.error}
+                notice={startNotice}
+                onPrimaryAction={handlePrimaryAction}
+                onStopWaiting={stopWaitingForCapacity}
+              />
+              <ScenarioProgressSummary
+                activeRun={scenarioData.activeRun}
+                finishedRunCount={finishedRuns.length}
+                solvedRunCount={succeededRuns.length}
+                bestSolveMs={bestSolveMs}
+              />
             </aside>
           </div>
 
@@ -575,6 +588,179 @@ export function ScenarioBriefing() {
   );
 }
 
+function ScenarioActionPanel({
+  headingId,
+  scenario,
+  isPending,
+  waitingForCapacity,
+  error,
+  notice,
+  onPrimaryAction,
+  onStopWaiting,
+  className,
+}: {
+  headingId: string;
+  scenario: PresentedScenarioDetail;
+  isPending: boolean;
+  waitingForCapacity: boolean;
+  error: unknown;
+  notice: string | null;
+  onPrimaryAction: () => void;
+  onStopWaiting: () => void;
+  className?: string;
+}) {
+  return (
+    <section
+      className={cn(
+        "space-y-4 rounded-xl border border-brand-border bg-brand-subtle p-4 sm:p-6",
+        className,
+      )}
+      aria-labelledby={headingId}
+    >
+      <div>
+        <p className="text-eyebrow text-brand-text">Next action</p>
+        <h2 id={headingId} className="mt-2 text-section-title">
+          {scenario.hasActiveRun
+            ? "Continue the repair"
+            : "Open a fresh sandbox"}
+        </h2>
+      </div>
+      <Button
+        size="lg"
+        className="w-full"
+        onClick={onPrimaryAction}
+        disabled={
+          isPending ||
+          scenario.blockingRun !== null ||
+          (scenario.hasActiveRun && !scenario.activeRunId)
+        }
+      >
+        {isPending
+          ? "Starting scenario…"
+          : scenario.hasActiveRun
+            ? "Resume run"
+            : "Start scenario"}
+        <ArrowRight className="size-4" />
+      </Button>
+      {scenario.blockingRun ? (
+        <div className="space-y-3 border-t border-brand-border pt-4">
+          <p className="text-sm leading-6 text-muted-foreground">
+            An active run on{" "}
+            <span className="font-semibold text-foreground">
+              {scenario.blockingRun.title}
+            </span>{" "}
+            must end before another sandbox can start.
+          </p>
+          <Button
+            variant="outline"
+            className="w-full"
+            render={
+              <Link
+                to="/runs/$runId"
+                params={{ runId: scenario.blockingRun.runId }}
+              />
+            }
+          >
+            Go to active run
+            <ArrowRight className="size-4" />
+          </Button>
+        </div>
+      ) : error && !(error instanceof ScenarioStartCancelledError) ? (
+        <InlineFeedback tone="error">
+          {error instanceof Error
+            ? error.message
+            : "The scenario could not be started."}
+        </InlineFeedback>
+      ) : notice ? (
+        <p role="status" className="text-sm leading-6 text-muted-foreground">
+          {notice}
+        </p>
+      ) : isPending ? (
+        <div className="space-y-2">
+          <InlineFeedback tone="pending">
+            {waitingForCapacity
+              ? "VM capacity is temporarily busy. Retrying automatically for up to 60 seconds."
+              : "Requesting VM capacity…"}
+          </InlineFeedback>
+          {waitingForCapacity ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11 w-full"
+              onClick={onStopWaiting}
+            >
+              Stop waiting
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ScenarioProgressSummary({
+  activeRun,
+  finishedRunCount,
+  solvedRunCount,
+  bestSolveMs,
+  className,
+}: {
+  activeRun: PresentedScenarioDetail["activeRun"];
+  finishedRunCount: number;
+  solvedRunCount: number;
+  bestSolveMs: number | null;
+  className?: string;
+}) {
+  return (
+    <div className={cn("space-y-6", className)}>
+      {activeRun ? (
+        <section className="space-y-2 border-y py-4">
+          <p className="text-eyebrow">Live status</p>
+          <p className="font-semibold">{activeRun.phaseTitle}</p>
+          <p className="text-metadata">{activeRun.phaseDetail}</p>
+          <p className="text-caption">
+            Updated {formatTimestamp(activeRun.updatedAt)}
+          </p>
+        </section>
+      ) : null}
+
+      {finishedRunCount ? (
+        <dl className="grid grid-cols-2 gap-4 border-y py-4">
+          <div>
+            <dt className="text-eyebrow">Best time</dt>
+            <dd className="mt-2 inline-flex items-center gap-2 font-semibold tabular-nums">
+              {bestSolveMs !== null ? (
+                <>
+                  <Trophy className="size-4 text-warning" />
+                  {formatDurationMs(bestSolveMs)}
+                </>
+              ) : (
+                "—"
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-eyebrow">Attempts</dt>
+            <dd>
+              <span className="mt-2 block font-semibold tabular-nums">
+                {finishedRunCount}
+              </span>
+              <span className="block text-caption">{solvedRunCount} solved</span>
+            </dd>
+          </div>
+        </dl>
+      ) : null}
+
+      {!finishedRunCount && !activeRun ? (
+        <p className="border-y py-4 text-sm text-muted-foreground">
+          The browser shell needs no local installation. Native SSH is also
+          available after launch.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 async function fetchScenarioDetail(
   scenarioId: string,
   organizationId: string | null,
@@ -594,7 +780,8 @@ async function fetchScenarioDetail(
     const body = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(
+    throw new HttpResponseError(
+      response.status,
       body?.error ?? `Failed to load scenario (${response.status})`,
     );
   }

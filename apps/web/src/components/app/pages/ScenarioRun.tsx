@@ -723,6 +723,11 @@ export function ScenarioRun() {
     <div className="flex h-[calc(100dvh-var(--app-bar-h,3rem))] min-h-[28rem] flex-col gap-3 overflow-hidden px-[var(--workspace-inset)] py-3">
       {runDialogs}
       <div className="shrink-0 space-y-3 empty:hidden">{errorAlerts}</div>
+      {attemptData ? (
+        <p className="shrink-0 font-heading text-sm font-semibold text-balance lg:hidden">
+          {attemptData.title}
+        </p>
+      ) : null}
 
       {attemptData ? (
         <div

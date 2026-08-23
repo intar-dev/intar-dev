@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { CircleCheck } from "lucide-react";
+import { ArrowRight, CircleCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { formatDurationMs } from "@/components/app/lib/format";
 import { cn } from "@/lib/utils";
 import { MetaDifficulty, MetaLine, type ScenarioDifficulty } from "./MetaLine";
 import { StatusToken } from "./StatusToken";
 import type { ScenarioProgress } from "@/lib/scenario-runs";
+import type { ScenarioBriefingSearch } from "@/components/app/pages/tab-search";
 
 export interface ScenarioCardData {
   scenarioId: string;
@@ -27,17 +28,25 @@ export function ScenarioCard({
   footer,
   className,
   headingLevel = 3,
+  search,
+  sequence,
 }: {
   scenario: ScenarioCardData;
   footer?: ReactNode;
   className?: string;
   headingLevel?: 3 | 4;
+  search?: ScenarioBriefingSearch | undefined;
+  sequence?: {
+    position: number;
+    total: number;
+  } | undefined;
 }) {
   const Heading = headingLevel === 4 ? "h4" : "h3";
   return (
     <Link
       to="/courses/$scenarioId"
       params={{ scenarioId: scenario.scenarioId }}
+      search={search ?? {}}
       preloadDelay={250}
       className={cn(
         "group flex min-h-56 min-w-0 flex-col gap-6 rounded-xl border bg-card p-4 transition-[background-color,border-color,transform] hover:border-brand-border hover:bg-muted/35 active:translate-y-px motion-reduce:transition-none sm:p-6",
@@ -62,14 +71,26 @@ export function ScenarioCard({
       <MetaLine
         className="mt-auto border-t pt-3"
         items={[
+          sequence && `Step ${sequence.position} of ${sequence.total}`,
           <MetaDifficulty key="difficulty" difficulty={scenario.difficulty} />,
           `~${scenario.estimatedMinutes} min`,
           scenario.vmCount === 1 ? "1 VM" : `${scenario.vmCount} VMs`,
         ]}
       />
       {footer}
+      <span className="flex items-center gap-2 text-sm font-semibold text-brand-text">
+        {scenarioActionLabel(scenario.progress)}
+        <ArrowRight
+          className="size-4 transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
+          aria-hidden
+        />
+      </span>
     </Link>
   );
+}
+
+function scenarioActionLabel(progress: ScenarioProgress) {
+  return progress.status === "completed" ? "Review briefing" : "View briefing";
 }
 
 function ScenarioStatusBadge({ progress }: { progress: ScenarioProgress }) {
