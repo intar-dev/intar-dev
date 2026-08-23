@@ -66,7 +66,25 @@ test("beta invite fragment is scrubbed before the claim is inspected", async ({
   expect(ui.server.requests.join("\n")).not.toContain("intar_beta_");
 });
 
-test("admin sees a newly created beta link only once", async ({ page, ui }) => {
+test("admin can copy a new beta link again before closing it", async ({
+  page,
+  ui,
+}) => {
+  await page.addInitScript(() => {
+    const writes: string[] = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async (value: string) => {
+          writes.push(value);
+        },
+      },
+    });
+    Object.defineProperty(window, "__testClipboardWrites", {
+      configurable: true,
+      value: writes,
+    });
+  });
   await ui.open({ ...routeCase("admin-people"), theme: "light" });
   await page.getByRole("button", { name: "Create invite" }).click();
 
@@ -84,6 +102,25 @@ test("admin sees a newly created beta link only once", async ({ page, ui }) => {
   const linkInput = oneTimeDialog.getByLabel("Beta invite link");
   await expect(linkInput).toHaveValue(/\/join#invite=intar_beta_[A-Za-z0-9_-]+$/);
   const rawLink = await linkInput.inputValue();
+
+  await oneTimeDialog.getByRole("button", { name: "Copy link" }).click();
+  await expect(oneTimeDialog.getByRole("status")).toHaveText("Link copied.");
+  const copyAgainButton = oneTimeDialog.getByRole("button", {
+    name: "Copy again",
+  });
+  await expect(copyAgainButton).toBeVisible();
+  await copyAgainButton.click();
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __testClipboardWrites: string[];
+          }
+        ).__testClipboardWrites,
+    ),
+  ).toEqual([rawLink, rawLink]);
+
   await oneTimeDialog
     .getByRole("button", { name: "Close and forget link" })
     .click();

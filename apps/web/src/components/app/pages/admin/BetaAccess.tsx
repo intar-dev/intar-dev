@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban,
-  Check,
   Clipboard,
   KeyRound,
   RefreshCw,
@@ -685,8 +684,8 @@ function OneTimeInviteDialog({
               }
             }}
           >
-            {copied ? <Check /> : <Clipboard />}
-            {copied ? "Copied" : "Copy link"}
+            <Clipboard />
+            {copied ? "Copy again" : "Copy link"}
           </Button>
         </DialogFooter>
       </DialogContent>
