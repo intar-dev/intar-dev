@@ -453,6 +453,86 @@ fn derives_kino_config_from_vm_probes() {
 }
 
 #[test]
+fn derives_kino_config_with_heredoc_command_json_path_argv() {
+    #[derive(serde::Deserialize)]
+    struct ReparsedKinoConfig {
+        probe: std::collections::BTreeMap<String, ReparsedKinoProbe>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ReparsedKinoProbe {
+        kind: String,
+        #[serde(default)]
+        argv: Vec<String>,
+        #[serde(default)]
+        json_path: String,
+        expected: Option<bool>,
+    }
+
+    let script = "printf '%s\\n' '{\"sshServer\":{\"enabled\":true}}'\n";
+    let hcl = supported_hcl().replace(
+        r#"argv        = ["/usr/bin/env", "python3", "-c", "import json; print(json.dumps({'sshServer': {'enabled': True}}))"]"#,
+        r#"argv = [
+        "/bin/sh",
+        "-ec",
+        <<SCRIPT
+printf '%s\n' '{"sshServer":{"enabled":true}}'
+SCRIPT
+      ]"#,
+    );
+
+    let scenario = Scenario::parse(&hcl).unwrap();
+    scenario.validate_for_repo().unwrap();
+
+    let kino = scenario.derive_kino_config_for_vm("webserver").unwrap();
+    assert!(!kino.config_hcl.contains("TemplateExpr"));
+
+    let reparsed: ReparsedKinoConfig = hcl::from_str(&kino.config_hcl).unwrap();
+    let probe = reparsed.probe.get("ssh-server-enabled").unwrap();
+    assert_eq!(probe.kind, "command_json_path");
+    assert_eq!(probe.argv, vec!["/bin/sh", "-ec", script]);
+    assert_eq!(probe.json_path, "$.sshServer.enabled");
+    assert_eq!(probe.expected, Some(true));
+
+    let mut definition = std::collections::HashMap::new();
+    definition.insert(
+        "kind".to_string(),
+        serde_json::Value::String(probe.kind.clone()),
+    );
+    definition.insert(
+        "argv".to_string(),
+        serde_json::Value::Array(
+            probe
+                .argv
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    definition.insert(
+        "json_path".to_string(),
+        serde_json::Value::String(probe.json_path.clone()),
+    );
+    definition.insert(
+        "expected".to_string(),
+        serde_json::Value::Bool(probe.expected.unwrap()),
+    );
+
+    let validated = KinoProbeDefinition::from_definition(
+        "ssh-server-enabled",
+        &definition,
+        None,
+        None,
+        None,
+        Vec::new(),
+        ProbePhase::Scenario,
+    )
+    .unwrap();
+    validated.validate().unwrap();
+}
+
+#[test]
 fn errors_on_missing_probe_description() {
     let hcl = r#"
 scenario "missing-description" {

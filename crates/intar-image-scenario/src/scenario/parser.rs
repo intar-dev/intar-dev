@@ -811,6 +811,7 @@ pub(super) fn extract_string_array(expr: &hcl::Expression) -> Result<Vec<String>
 pub(super) fn expr_to_json(expr: &hcl::Expression) -> Result<serde_json::Value, ScenarioError> {
     match expr {
         hcl::Expression::String(value) => Ok(serde_json::Value::String(value.clone())),
+        hcl::Expression::TemplateExpr(_) => Ok(serde_json::Value::String(extract_string(expr)?)),
         hcl::Expression::Number(number) => {
             if let Some(integer) = number.as_i64() {
                 Ok(serde_json::Value::Number(integer.into()))
